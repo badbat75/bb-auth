@@ -1,0 +1,4 @@
+# Build artifacts — never lint generated docs or release output. Keeps the
+# markdownlint gate green regardless of what cargo / the build emits locally.
+target/
+dist/

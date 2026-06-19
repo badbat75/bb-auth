@@ -1,0 +1,15 @@
+// markdownlint config for bb-auth docs.
+// Docs contain ASCII diagrams, tables with long cells, and URLs: rules that
+// fight those are disabled. Run:  npx markdownlint-cli2 "**/*.md" "#target" "#dist"
+// (the "#"-prefixed args exclude build dirs so a local `cargo doc`/release
+// can't make the gate red).
+{
+  "default": true,
+
+  // 80-char wrap is impractical for tables, URLs, and ASCII art.
+  "MD013": false,
+
+  // Table pipe-alignment policing is too opinionated and conflicts with
+  // compact tables and long-cell tables (endpoints, config, etc.).
+  "MD060": false
+}

@@ -1,0 +1,7 @@
+# bb-auth access allowlist — one email per line. '#' starts a comment.
+# This is the REAL access gate (Cognito self-signup is open). Re-checked on every
+# /auth/validate, so removing a line + `systemctl reload bb-auth` (SIGHUP) denies
+# even existing sessions; a plain restart works too. Emails are matched
+# case-insensitively.
+you@example.com
+friend@example.com

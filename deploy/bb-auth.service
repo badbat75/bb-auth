@@ -1,0 +1,48 @@
+[Unit]
+Description=bb-auth (Cognito id_token -> session-cookie auth gate)
+Documentation=file:/opt/bb-auth/bb-auth
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=bb-auth
+Group=bb-auth
+EnvironmentFile=/opt/bb-auth/bb-auth.env
+ExecStart=/opt/bb-auth/bb-auth
+# `systemctl reload bb-auth` sends SIGHUP -> live allowlist reload (no restart,
+# no sessions dropped). The thread is best-effort; restart still works too.
+ExecReload=/bin/kill -HUP $MAINPID
+Restart=on-failure
+RestartSec=2
+
+# --- Hardening ---
+NoNewPrivileges=true
+ProtectSystem=strict
+ProtectHome=true
+PrivateTmp=true
+PrivateDevices=true
+ProtectClock=true
+ProtectHostname=true
+ProtectKernelTunables=true
+ProtectKernelModules=true
+ProtectKernelLogs=true
+ProtectControlGroups=true
+RestrictNamespaces=true
+RestrictRealtime=true
+RestrictSUIDSGID=true
+LockPersonality=true
+MemoryDenyWriteExecute=true
+# bind 127.0.0.1:4181 + outbound HTTPS to Cognito JWKS; AF_NETLINK/AF_UNIX for the resolver.
+RestrictAddressFamilies=AF_INET AF_INET6 AF_UNIX AF_NETLINK
+SystemCallFilter=@system-service
+SystemCallErrorNumber=EPERM
+SystemCallArchitectures=native
+CapabilityBoundingSet=
+AmbientCapabilities=
+# /opt/bb-auth is read-only to the service (config + binary live there).
+ReadOnlyPaths=/opt/bb-auth
+UMask=0077
+
+[Install]
+WantedBy=multi-user.target

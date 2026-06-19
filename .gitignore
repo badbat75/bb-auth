@@ -1,0 +1,17 @@
+# Rust build artifacts
+/target
+/dist
+
+# Deployment config & secrets — ONLY the *.example templates are tracked.
+#   deploy/bb-auth.env : the externalized, deployment-specific config (Cognito
+#                        pool/client, service & login URLs, install paths). The
+#                        real BB_AUTH_HMAC_KEY is generated on the host and lives
+#                        only there — never in git.
+#   allowed_emails     : the access list (real emails).
+*.env
+allowed_emails
+
+# OS / editor cruft
+.DS_Store
+Thumbs.db
+*.swp
