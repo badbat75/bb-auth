@@ -123,7 +123,8 @@ ever issuing a cookie:
    don't all fetch in parallel on a cold/stale cache.
 3. **Signature + standard claims** via `jsonwebtoken`:
    - `exp` validated (60 s leeway), `iss == BB_AUTH_COGNITO_ISSUER`,
-     `aud == BB_AUTH_CLIENT_ID`; `exp`/`aud`/`iss` are mandatory.
+     `aud` ∈ accepted audiences (`BB_AUTH_CLIENT_ID` plus any `BB_AUTH_AUDIENCES`);
+     `exp`/`aud`/`iss` are mandatory.
 4. **Cognito-specific claims:** `token_use == "id"` (rejects access tokens) and
    `email_verified` truthy (accepts JSON `true` or the string `"true"`).
 5. Returns the `email` claim, lowercased.
@@ -177,7 +178,8 @@ Required vars cause a fatal exit if missing.
 | `BB_AUTH_HMAC_KEY_ID` | no | `default` | Key id stamped into new `bb2` cookies. Must match `[A-Za-z0-9_-]+` (no `.`). Bump on rotation so older keys can still verify. |
 | `BB_AUTH_HMAC_ACCEPTED_KEYS` | no | empty | Comma-separated `id:key` entries accepted for verification during rotation (`key` = `openssl rand -base64 48`). Active key always verifies; this is for previous keys. |
 | `BB_AUTH_COGNITO_ISSUER` | yes | — | The Cognito user-pool issuer URL, `https://cognito-idp.<region>.amazonaws.com/<user-pool-id>`. Trailing `/` stripped. JWKS URL is derived from this. |
-| `BB_AUTH_CLIENT_ID` | yes | — | The public app client used by the login page; `id_token.aud` must equal this. |
+| `BB_AUTH_CLIENT_ID` | yes | — | The public app client used by the login page; always an accepted `id_token.aud`. |
+| `BB_AUTH_AUDIENCES` | no | empty | Comma-separated extra accepted `aud`s (Cognito app client ids), e.g. a separate social-login client. `BB_AUTH_CLIENT_ID` is always accepted; a token is valid if its `aud` matches any. Read at startup → needs `restart`, not `reload`. |
 | `BB_AUTH_ALLOWLIST_FILE` | yes | — | Path to the allowlist file. Loaded at startup. |
 | `BB_AUTH_LISTEN` | no | `127.0.0.1:4181` | Bind address. Loopback only — nginx fronts it. |
 | `BB_AUTH_COOKIE_NAME` | no | `bb_session` | |

@@ -75,7 +75,11 @@ struct Config {
     listen: String,
     hmac_keys: HmacKeys,
     issuer: String,
-    client_id: String,
+    // Accepted token audiences (Cognito app client ids). Always contains
+    // `BB_AUTH_CLIENT_ID`; `BB_AUTH_AUDIENCES` appends extras (e.g. a social-login
+    // client). A token is accepted if its `aud` matches any entry. [0] is the
+    // primary client_id.
+    audiences: Vec<String>,
     cookie_name: String,
     cookie_domain: Option<String>,
     session_ttl: u64,
@@ -156,11 +160,25 @@ impl Config {
         if !search_url.ends_with('/') {
             search_url.push('/');
         }
+
+        // `client_id` is always an accepted audience; `BB_AUTH_AUDIENCES`
+        // (comma-separated) appends extra app-client ids — a Cognito id_token is
+        // accepted if its `aud` matches ANY of them. Unset => only `client_id`
+        // (backward-compatible). Deduplicated, order-preserving.
+        let client_id = env_req("BB_AUTH_CLIENT_ID");
+        let mut audiences = vec![client_id.clone()];
+        for extra in env_or("BB_AUTH_AUDIENCES", "").split(',') {
+            let extra = extra.trim();
+            if !extra.is_empty() && !audiences.iter().any(|a| a == extra) {
+                audiences.push(extra.to_string());
+            }
+        }
+
         Config {
             listen: env_or("BB_AUTH_LISTEN", "127.0.0.1:4181"),
             hmac_keys: HmacKeys { by_id, active_id },
             issuer,
-            client_id: env_req("BB_AUTH_CLIENT_ID"),
+            audiences,
             cookie_name: env_or("BB_AUTH_COOKIE_NAME", "bb_session"),
             cookie_domain,
             session_ttl: env_or("BB_AUTH_SESSION_TTL_SECS", "2592000")
@@ -369,7 +387,8 @@ fn validate_id_token(token: &str, state: &State) -> Result<String, String> {
     let key = decoding_key(state, &kid).ok_or("unknown signing key (kid)")?;
 
     let mut v = Validation::new(Algorithm::RS256);
-    v.set_audience(&[&state.cfg.client_id]);
+    let aud: Vec<&str> = state.cfg.audiences.iter().map(String::as_str).collect();
+    v.set_audience(&aud);
     v.set_issuer(&[&state.cfg.issuer]);
     v.set_required_spec_claims(&["exp", "aud", "iss"]);
     v.validate_exp = true;
@@ -723,7 +742,9 @@ fn main() {
 
     eprintln!(
         "[bb-auth] listening on {listen} | issuer={} | aud={} | allowlist={} entries | workers={workers}",
-        state.cfg.issuer, state.cfg.client_id, allow_n
+        state.cfg.issuer,
+        state.cfg.audiences.join(","),
+        allow_n
     );
 
     let mut handles = Vec::new();
