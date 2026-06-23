@@ -80,6 +80,17 @@ struct Config {
     // client). A token is accepted if its `aud` matches any entry. [0] is the
     // primary client_id.
     audiences: Vec<String>,
+    // Relax the `email_verified` requirement, but ONLY for federated (social)
+    // logins — never for native Cognito users. Cognito often can't verify the
+    // email of a social sign-up (Google/Apple/etc.), so it stamps
+    // `email_verified=false` even though the IdP itself asserted the address.
+    // Off by default (strict). See `unverified_social_ok`.
+    allow_unverified_social: bool,
+    // Optional provider allowlist for the relaxation above (matched
+    // case-insensitively against the token's `identities[].providerName`).
+    // `None` = any federated provider; `Some([..])` = only these. Restrict this
+    // to IdPs that actually verify the email (e.g. Google, SignInWithApple).
+    social_providers: Option<Vec<String>>,
     cookie_name: String,
     cookie_domain: Option<String>,
     session_ttl: u64,
@@ -97,6 +108,15 @@ fn env_req(key: &str) -> String {
         eprintln!("[bb-auth] FATAL: missing required env var {key}");
         std::process::exit(1);
     })
+}
+
+/// Parse a boolean env var. Truthy: `1`/`true`/`yes`/`on` (case-insensitive);
+/// anything else (incl. unset) is false.
+fn env_flag(key: &str) -> bool {
+    matches!(
+        env_or(key, "").trim().to_ascii_lowercase().as_str(),
+        "1" | "true" | "yes" | "on"
+    )
 }
 
 impl Config {
@@ -174,11 +194,27 @@ impl Config {
             }
         }
 
+        // Social-login relaxation of `email_verified` (see Config fields).
+        let allow_unverified_social = env_flag("BB_AUTH_ALLOW_UNVERIFIED_SOCIAL");
+        let social_providers: Vec<String> = env_or("BB_AUTH_SOCIAL_PROVIDERS", "")
+            .split(',')
+            .map(str::trim)
+            .filter(|s| !s.is_empty())
+            .map(str::to_string)
+            .collect();
+        let social_providers = if social_providers.is_empty() {
+            None
+        } else {
+            Some(social_providers)
+        };
+
         Config {
             listen: env_or("BB_AUTH_LISTEN", "127.0.0.1:4181"),
             hmac_keys: HmacKeys { by_id, active_id },
             issuer,
             audiences,
+            allow_unverified_social,
+            social_providers,
             cookie_name: env_or("BB_AUTH_COOKIE_NAME", "bb_session"),
             cookie_domain,
             session_ttl: env_or("BB_AUTH_SESSION_TTL_SECS", "2592000")
@@ -367,6 +403,19 @@ struct Claims {
     #[serde(default)]
     email_verified: serde_json::Value,
     token_use: Option<String>,
+    // Present (non-empty) only for federated/social logins; absent for native
+    // Cognito users. Each entry names the upstream IdP via `providerName`. This
+    // is what lets the relaxation target social logins only.
+    #[serde(default)]
+    identities: Vec<Identity>,
+}
+
+/// One entry of the Cognito `identities` claim. Only `providerName` is needed
+/// (e.g. `Google`, `SignInWithApple`, `Facebook`); other fields are ignored.
+#[derive(Deserialize)]
+struct Identity {
+    #[serde(rename = "providerName")]
+    provider_name: Option<String>,
 }
 
 fn email_verified_true(v: &serde_json::Value) -> bool {
@@ -375,6 +424,38 @@ fn email_verified_true(v: &serde_json::Value) -> bool {
         serde_json::Value::String(s) => s.eq_ignore_ascii_case("true"),
         _ => false,
     }
+}
+
+/// Whether an `email_verified=false` token may still be accepted under the
+/// social-login relaxation. Requires the feature to be enabled AND the token to
+/// carry a federated `identities` entry from an accepted provider. A native
+/// Cognito user (no `identities`) is never relaxed: self-signup is open, so an
+/// unverified native email is attacker-controlled and must stay rejected.
+fn unverified_social_ok(
+    allow: bool,
+    providers: &Option<Vec<String>>,
+    identities: &[Identity],
+) -> bool {
+    if !allow || identities.is_empty() {
+        return false;
+    }
+    match providers {
+        None => true, // any federated provider
+        Some(allowed) => identities.iter().any(|id| {
+            id.provider_name
+                .as_deref()
+                .is_some_and(|p| allowed.iter().any(|a| a.eq_ignore_ascii_case(p)))
+        }),
+    }
+}
+
+/// Comma-joined `providerName`s of a token's federated identities, for logging.
+fn social_provider_names(identities: &[Identity]) -> String {
+    identities
+        .iter()
+        .map(|id| id.provider_name.as_deref().unwrap_or("?"))
+        .collect::<Vec<_>>()
+        .join(",")
 }
 
 /// Fully validate a Cognito id_token. Returns the (lowercased) verified email.
@@ -400,11 +481,23 @@ fn validate_id_token(token: &str, state: &State) -> Result<String, String> {
     if c.token_use.as_deref() != Some("id") {
         return Err("token_use is not 'id'".into());
     }
+    let email = c.email.ok_or("token has no email")?.to_ascii_lowercase();
     if !email_verified_true(&c.email_verified) {
-        return Err("email not verified".into());
+        // Strict by default. The only exception is a social login whose email
+        // Cognito couldn't verify itself — and only when explicitly enabled.
+        if !unverified_social_ok(
+            state.cfg.allow_unverified_social,
+            &state.cfg.social_providers,
+            &c.identities,
+        ) {
+            return Err("email not verified".into());
+        }
+        eprintln!(
+            "[bb-auth] accepting unverified email via social login [{}]: {email}",
+            social_provider_names(&c.identities)
+        );
     }
-    let email = c.email.ok_or("token has no email")?;
-    Ok(email.to_ascii_lowercase())
+    Ok(email)
 }
 
 // ---------------------------------------------------------------------------
@@ -746,6 +839,15 @@ fn main() {
         state.cfg.audiences.join(","),
         allow_n
     );
+    if state.cfg.allow_unverified_social {
+        let scope = match &state.cfg.social_providers {
+            Some(p) => p.join(","),
+            None => "any provider".to_string(),
+        };
+        eprintln!(
+            "[bb-auth] WARNING: accepting unverified emails for social logins [{scope}] (BB_AUTH_ALLOW_UNVERIFIED_SOCIAL)"
+        );
+    }
 
     let mut handles = Vec::new();
     for _ in 0..workers {
@@ -898,6 +1000,97 @@ mod tests {
         assert!(!email_verified_true(&serde_json::json!("false")));
         assert!(!email_verified_true(&serde_json::json!("1")));
         assert!(!email_verified_true(&serde_json::json!(null)));
+    }
+
+    fn idents(names: &[&str]) -> Vec<Identity> {
+        names
+            .iter()
+            .map(|n| Identity {
+                provider_name: Some((*n).to_string()),
+            })
+            .collect()
+    }
+
+    #[test]
+    fn unverified_social_off_by_default() {
+        // Feature disabled: never relax, even for a clear social identity.
+        assert!(!unverified_social_ok(false, &None, &idents(&["Google"])));
+    }
+
+    #[test]
+    fn unverified_social_native_user_never_relaxed() {
+        // No `identities` claim => native Cognito user => always strict.
+        assert!(!unverified_social_ok(true, &None, &[]));
+    }
+
+    #[test]
+    fn unverified_social_any_provider_when_unrestricted() {
+        assert!(unverified_social_ok(true, &None, &idents(&["Google"])));
+        assert!(unverified_social_ok(true, &None, &idents(&["Facebook"])));
+    }
+
+    #[test]
+    fn unverified_social_provider_allowlist_enforced() {
+        let allowed = Some(vec!["Google".to_string(), "SignInWithApple".to_string()]);
+        assert!(unverified_social_ok(true, &allowed, &idents(&["Google"])));
+        // Case-insensitive match against providerName.
+        assert!(unverified_social_ok(true, &allowed, &idents(&["google"])));
+        assert!(unverified_social_ok(
+            true,
+            &allowed,
+            &idents(&["SignInWithApple"])
+        ));
+        // A provider not on the list is rejected.
+        assert!(!unverified_social_ok(
+            true,
+            &allowed,
+            &idents(&["Facebook"])
+        ));
+        // Any matching entry in a multi-identity token suffices.
+        assert!(unverified_social_ok(
+            true,
+            &allowed,
+            &idents(&["Facebook", "Google"])
+        ));
+    }
+
+    #[test]
+    fn social_provider_names_joins() {
+        assert_eq!(
+            social_provider_names(&idents(&["Google", "Facebook"])),
+            "Google,Facebook"
+        );
+        assert_eq!(
+            social_provider_names(&[Identity {
+                provider_name: None
+            }]),
+            "?"
+        );
+    }
+
+    #[test]
+    fn claims_parse_identities_present_and_absent() {
+        // Federated token carries `identities`; native token omits it.
+        let social: Claims = serde_json::from_value(serde_json::json!({
+            "email": "u@x.com",
+            "email_verified": false,
+            "token_use": "id",
+            "identities": [{"providerName": "Google", "userId": "1", "primary": "true"}]
+        }))
+        .unwrap();
+        assert_eq!(social.identities.len(), 1);
+        assert_eq!(
+            social.identities[0].provider_name.as_deref(),
+            Some("Google")
+        );
+
+        let native: Claims = serde_json::from_value(serde_json::json!({
+            "email": "u@x.com",
+            "email_verified": true,
+            "token_use": "id"
+        }))
+        .unwrap();
+        assert!(native.identities.is_empty());
     }
 
     #[test]

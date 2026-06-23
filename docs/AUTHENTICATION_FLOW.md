@@ -99,7 +99,10 @@ Inside bb-auth (`handle_session`):
    - look up `kid` in the JWKS cache (refresh once per 60 s on a miss).
    - verify signature + `exp` (60 s leeway) + `iss` + `aud == client_id`;
      require `exp`/`aud`/`iss` present.
-   - require `token_use == "id"` and `email_verified` truthy.
+   - require `token_use == "id"` and `email_verified` truthy. Exception: if
+     `BB_AUTH_ALLOW_UNVERIFIED_SOCIAL` is on, an `email_verified=false` token is
+     accepted when it carries a federated `identities` entry (a social login),
+     optionally narrowed to `BB_AUTH_SOCIAL_PROVIDERS`. Native users stay strict.
    - extract and lowercase the `email` claim.
 3. **Allowlist check:** `email` must be in the in-memory allowlist set.
 4. **Build the cookie** (see `ARCHITECTURE.md` §7):

@@ -1,6 +1,6 @@
 [package]
 name = "bb-auth"
-version = "1.1.0"
+version = "1.1.1"
 edition = "2021"
 description = "Minimal, service-agnostic Cognito id_token → session-cookie auth gate (nginx auth_request)"
 license = "MIT"

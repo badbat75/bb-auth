@@ -127,6 +127,14 @@ ever issuing a cookie:
      `exp`/`aud`/`iss` are mandatory.
 4. **Cognito-specific claims:** `token_use == "id"` (rejects access tokens) and
    `email_verified` truthy (accepts JSON `true` or the string `"true"`).
+   - **Social-login exception** (off by default): when
+     `BB_AUTH_ALLOW_UNVERIFIED_SOCIAL` is enabled, a token with
+     `email_verified=false` is still accepted **iff** it carries a federated
+     `identities` entry (a social login — Cognito often can't verify a social
+     sign-up's email even though the IdP asserted it). `BB_AUTH_SOCIAL_PROVIDERS`
+     can narrow this to specific `providerName`s. **Native** Cognito users (no
+     `identities` claim) are never relaxed: self-signup is open, so an unverified
+     native email is attacker-controlled. See `unverified_social_ok`.
 5. Returns the `email` claim, lowercased.
 
 Failure on any step → the session request is rejected with `401` (token
@@ -180,6 +188,8 @@ Required vars cause a fatal exit if missing.
 | `BB_AUTH_COGNITO_ISSUER` | yes | — | The Cognito user-pool issuer URL, `https://cognito-idp.<region>.amazonaws.com/<user-pool-id>`. Trailing `/` stripped. JWKS URL is derived from this. |
 | `BB_AUTH_CLIENT_ID` | yes | — | The public app client used by the login page; always an accepted `id_token.aud`. |
 | `BB_AUTH_AUDIENCES` | no | empty | Comma-separated extra accepted `aud`s (Cognito app client ids), e.g. a separate social-login client. `BB_AUTH_CLIENT_ID` is always accepted; a token is valid if its `aud` matches any. Read at startup → needs `restart`, not `reload`. |
+| `BB_AUTH_ALLOW_UNVERIFIED_SOCIAL` | no | `false` | Truthy (`1`/`true`/`yes`/`on`) accepts `email_verified=false` tokens **only** for federated/social logins (those carrying an `identities` claim); native Cognito users stay strict. Off = strict for everyone. |
+| `BB_AUTH_SOCIAL_PROVIDERS` | no | empty → any | Comma-separated `providerName`s (case-insensitive, e.g. `Google,SignInWithApple`) the relaxation above applies to. Empty = any federated provider. No effect unless `BB_AUTH_ALLOW_UNVERIFIED_SOCIAL` is on. |
 | `BB_AUTH_ALLOWLIST_FILE` | yes | — | Path to the allowlist file. Loaded at startup. |
 | `BB_AUTH_LISTEN` | no | `127.0.0.1:4181` | Bind address. Loopback only — nginx fronts it. |
 | `BB_AUTH_COOKIE_NAME` | no | `bb_session` | |
@@ -273,6 +283,13 @@ resolver), `SystemCallFilter=@system-service`, empty `CapabilityBoundingSet`,
   design (to enable frictionless registration). Anyone can get an `id_token`, but
   only allowlisted emails get a session cookie, and the check is repeated on
   every `/auth/validate`.
+- **Why `email_verified` is mandatory for native users.** Self-signup being open,
+  if an unverified native email were accepted, anyone could register
+  `boss@company.com` without controlling it and inherit that email's allowlist
+  entry. `BB_AUTH_ALLOW_UNVERIFIED_SOCIAL` relaxes this **only** for federated
+  logins, where the email is asserted by the upstream IdP rather than self-claimed
+  — and is best narrowed (via `BB_AUTH_SOCIAL_PROVIDERS`) to IdPs that actually
+  verify the email (Google, Apple). Leaving it off keeps the strict invariant.
 - **`rd` is open-redirect-guarded:** must start with the canonical service URL
   or be a same-host absolute path (no `//`, no `/\` — browsers normalise the
   latter to a scheme-relative off-host redirect). Any control byte (incl. CR/LF)
