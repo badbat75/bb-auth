@@ -104,7 +104,8 @@ Inside bb-auth (`handle_session`):
      accepted when it carries a federated `identities` entry (a social login),
      optionally narrowed to `BB_AUTH_SOCIAL_PROVIDERS`. Native users stay strict.
    - extract and lowercase the `email` claim.
-3. **Allowlist check:** `email` must be in the in-memory allowlist set.
+3. **Users-table check:** `email` must be present in the in-memory users table
+   (`by_email`).
 4. **Build the cookie** (see `ARCHITECTURE.md` §7):
    `bb2.<keyid>.<exp>.<b64url(email)>.<b64url(HMAC_SHA256(prefix))>`, signed with
    the active key, `exp = now + TTL`.
@@ -121,32 +122,44 @@ Outcomes the user can see:
 |--------|--------|------------|
 | Missing/empty `id_token` | `400` | “Token mancante.” |
 | Token invalid/expired/claims wrong | `401` | “Il token di accesso non è valido o è scaduto.” |
-| Token valid but email not allowlisted | `403` | “Questo indirizzo email non è abilitato all’accesso.” |
+| Token valid but email not in the users table | `403` | “Questo indirizzo email non è abilitato all’accesso.” |
 | Success | `302 → rd` | (cookie set, back to the app) |
 
 ---
 
 ## Phase 4 — Authenticated request (cookie present)
 
-Every subsequent request to `app.example.com` re-enters the nginx gate:
+Every subsequent request to `app.example.com` re-enters the nginx gate. nginx
+forwards the original request path (`proxy_set_header X-Original-URI $uri;`) and,
+for programmatic clients, the `Authorization` header on the subrequest:
 
 ```text
  browser ──GET https://app.example.com/?...  Cookie: <cookie>=bb2...──▶ nginx
  nginx: auth_request → /internal/auth-gate → bb-auth GET /auth/validate
- bb-auth (handle_validate):
-   1. parse Cookie header, extract the session cookie
-   2. verify_session: split up to 5 parts; version==bb2 → key by id (version==bb1
-      legacy → try every accepted key); HMAC verify_slice (constant-time); exp>now
-   3. lowercased email from payload ──in allowlist?──▶ yes
-   └─ 204
+        (X-Original-URI: /...   [+ Authorization: Bearer … for API clients])
+ bb-auth (handle_validate), first credential that authorizes wins:
+   a. Authorization: Bearer bbk_…  → static API key: sha256(bearer) in by_key_hash,
+      unexpired, request path in the key's scope
+   b. Authorization: Bearer <id_token>  → validated as in Phase 3, email in users
+      table, request path in the user's scope
+   c. session cookie → verify_session: split up to 5 parts; version==bb2 → key by id
+      (bb1 legacy → try every accepted key); HMAC verify_slice (constant-time);
+      exp>now; then lowercased email in users table + request path in scope
+   └─ 204 if any of a/b/c authorizes, else 401
  nginx ──proxy to upstream app──▶ browser (the app's response)
 ```
 
-Three things are worth emphasizing:
+A few things are worth emphasizing:
 
-- **The allowlist is re-checked on every request**, not just at login. Removing
-  an email and reloading/restarting bb-auth revokes access immediately, even for
-  users with a still-unexpired, correctly-signed cookie.
+- **The users table is re-checked on every request**, not just at login. Removing
+  a user (or one of their API keys) and reloading/restarting bb-auth revokes access
+  immediately, even for a still-unexpired, correctly-signed cookie or API key.
+- **Bearer credentials fall through to the cookie**, so a stray `Authorization`
+  header never blocks a valid cookie. Static `bbk_` API keys (see
+  [`ARCHITECTURE.md`](./ARCHITECTURE.md) §12) let non-browser clients (e.g. MCP)
+  authenticate without the cookie flow; every credential is also confined to its
+  allowed path prefixes, and a restricted scope with `X-Original-URI` missing is
+  denied (`401`).
 - **Verification is stateless.** No server-side lookup is needed; any of the
   worker threads can validate any cookie, and a restart changes nothing about
   existing cookies (they are time-bound, not session-store-bound).
@@ -194,7 +207,7 @@ the gate only manages its own cookie.)
    │─POST /auth/session id_token=…&rd=…────────▶│             │
    │              │              │─JWKS (cache) │             │
    │              │              │  verify sig+claims          │
-   │              │              │  email ∈ allowlist          │
+   │              │              │  email ∈ users table        │
    │              │              │  build HMAC cookie          │
    │◀─────────────302 rd  Set-Cookie <cookie>─────────────────│
    │─GET / Cookie: <cookie>─────▶│              │             │

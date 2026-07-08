@@ -12,18 +12,21 @@
       6. final liveness ping, then clean up the remote staging directory
 
     Lockout-safe by construction:
-      - By default NOTHING is staged for allowed_emails, so deploy.sh keeps the
-        existing /opt/bb-auth/allowed_emails untouched. Use -AllowlistFile for a
-        first install or to replace the list.
+      - By default NOTHING is staged for users.json, so deploy.sh keeps the
+        existing /opt/bb-auth/users.json untouched (or auto-migrates a legacy
+        allowed_emails on first run). Use -UsersFile for a first install or to
+        replace the access file.
       - deploy.sh preserves an existing /opt/bb-auth/bb-auth.env, so the HMAC key
         (and therefore all existing session cookies) stays valid across redeploys.
 
 .PARAMETER Target
     SSH target as user@host, e.g. emiliano@rpi-01.bombicci.local.
 
-.PARAMETER AllowlistFile
-    Local allowlist file to stage instead of preserving the remote one. Required
-    for a first install (where /opt/bb-auth/allowed_emails does not exist yet).
+.PARAMETER UsersFile
+    Local users.json to stage instead of preserving the remote one. Required for a
+    first install (where neither /opt/bb-auth/users.json nor a legacy
+    /opt/bb-auth/allowed_emails exists yet). Validated as JSON before it replaces
+    the live file.
 
 .PARAMETER Build
     Cross-build the aarch64 binary in WSL before staging.
@@ -33,18 +36,18 @@
 
 .EXAMPLE
     ./scripts/deploy.ps1 emiliano@rpi-01.bombicci.local -Build
-    Cross-build in WSL, then redeploy to rpi-01 (allowlist + HMAC key kept).
+    Cross-build in WSL, then redeploy to rpi-01 (users.json + HMAC key kept).
 
 .EXAMPLE
-    ./scripts/deploy.ps1 emiliano@rpi-01.bombicci.local -AllowlistFile .\deploy\emails.txt
-    Deploy and replace the allowlist with the given file.
+    ./scripts/deploy.ps1 emiliano@rpi-01.bombicci.local -UsersFile .\deploy\users.json
+    Deploy and replace the access file (users.json) with the given file.
 #>
 [CmdletBinding()]
 param(
     [Parameter(Mandatory = $true, Position = 0)]
     [string]$Target,
 
-    [string]$AllowlistFile,
+    [string]$UsersFile,
 
     [switch]$Build,
 
@@ -90,8 +93,8 @@ if (-not (Test-Path -LiteralPath $BinPath)) {
 foreach ($f in @($ServiceUnit, $EnvPlaceholder, $DeploySh)) {
     if (-not (Test-Path -LiteralPath $f)) { throw "Missing required file: $f" }
 }
-if ($AllowlistFile -and -not (Test-Path -LiteralPath $AllowlistFile)) {
-    throw "AllowlistFile not found: $AllowlistFile"
+if ($UsersFile -and -not (Test-Path -LiteralPath $UsersFile)) {
+    throw "UsersFile not found: $UsersFile"
 }
 
 # --- 3. verify remote access -------------------------------------------------
@@ -137,14 +140,14 @@ $staged = @(
     @{ src = $EnvPlaceholder; dst = 'bb-auth.env' }
     @{ src = $DeploySh;       dst = 'deploy.sh' }
 )
-if ($AllowlistFile) { $staged += @{ src = $AllowlistFile; dst = 'allowed_emails' } }
+if ($UsersFile) { $staged += @{ src = $UsersFile; dst = 'users.json' } }
 
 foreach ($a in $staged) {
     scp -o BatchMode=yes $a.src "${Target}:~/$RemoteStage/$($a.dst)"
     Assert-Native "scp $($a.dst) -> $Target"
 }
-$allowlistMode = if ($AllowlistFile) { 'replaced' } else { 'preserved (none staged)' }
-Write-Host "    staged $($staged.Count) file(s); allowlist will be $allowlistMode"
+$usersMode = if ($UsersFile) { 'replaced' } else { 'preserved / migrated (none staged)' }
+Write-Host "    staged $($staged.Count) file(s); users.json will be $usersMode"
 
 # --- 5. run deploy.sh as root (installs + restarts + self-verifies) ----------
 Write-Host "==> running deploy.sh as root on $Target" -ForegroundColor Cyan

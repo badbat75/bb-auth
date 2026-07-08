@@ -6,10 +6,13 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 bb-auth is a single-binary **auth gate**: it accepts an AWS Cognito `id_token` that a
 browser-side login page already obtained, validates it (RS256 via JWKS), and issues an
-HMAC-signed session cookie that nginx enforces on every request via `auth_request`. It is
-service-agnostic — one binary fronts any web service, wired per-deployment through
-`BB_AUTH_*` env vars. The whole gate is **one Rust file**, [src/main.rs](src/main.rs)
-(~950 lines incl. tests); there is no module split by design — read it top to bottom.
+HMAC-signed session cookie that nginx enforces on every request via `auth_request`. It also
+accepts per-request bearer credentials — a Cognito `id_token` or a static `bbk_` API key —
+and enforces per-user / per-key path scopes. The access list is a JSON **users file**
+(`BB_AUTH_USERS_FILE`). It is service-agnostic — one binary fronts any web service, wired
+per-deployment through `BB_AUTH_*` env vars. The whole gate is **one Rust file**,
+[src/main.rs](src/main.rs) (~1760 lines incl. tests); there is no module split by design —
+read it top to bottom.
 
 The defining constraint vs. authorization-code OIDC proxies (oauth2-proxy): those drive the
 login themselves and *cannot* accept a token the browser already holds. bb-auth is built for
@@ -40,7 +43,7 @@ bash scripts/build.sh                 # target overridable via BB_AUTH_TARGET
 
 # Deploy from Windows over SSH (build in WSL + ship + remote self-verify)
 ./scripts/deploy.ps1 user@host -Build
-./scripts/deploy.ps1 user@host -AllowlistFile .\deploy\emails.txt   # first install / replace allowlist
+./scripts/deploy.ps1 user@host -UsersFile .\deploy\users.json   # first install / replace access file
 ```
 
 `docs/*.md` are linted with markdownlint (`.markdownlint.jsonc`).
@@ -49,7 +52,7 @@ bash scripts/build.sh                 # target overridable via BB_AUTH_TARGET
 
 | Method | Path | Caller | Behavior |
 |--------|------|--------|----------|
-| GET | `/auth/validate` | nginx `auth_request` only (loopback) | 204 if cookie valid **and** email allowlisted, else 401 |
+| GET | `/auth/validate` | nginx `auth_request` only (loopback) | 204 if a credential authorizes the request, else 401. Checked in order: `Authorization: Bearer bbk_…` (static API key, looked up by hash), `Authorization: Bearer <id_token>` (same `validate_id_token` as `/auth/session`), or the session cookie. Each must map to an allowlisted user **and** be in the request's path scope (`X-Original-URI`). Bearers are stateless (no cookie issued) and fall through to the cookie on failure; the reverse proxy must forward `Authorization` (and `X-Original-URI` for path scoping). |
 | POST | `/auth/session` | browser | validate posted `id_token`, set cookie, 302 → `rd` |
 | GET | `/auth/logout` | browser | clear cookie, 302 → login page |
 | GET | `/auth/healthz` | local | 200 `ok` |
@@ -61,10 +64,23 @@ bash scripts/build.sh                 # target overridable via BB_AUTH_TARGET
   the serialization or the signed-message string logs out **every** existing user. The keyid
   enables zero-downtime HMAC key rotation (active key signs, accepted keys still verify) — see
   README "Key rotation". `verify_session` / `make_session` and their tests pin this.
-- **The allowlist is the real access gate**, re-checked on *every* `/auth/validate` (not just
-  at login). It's an in-memory `RwLock<HashSet>` of lowercased emails, hot-reloaded on SIGHUP
-  (`systemctl reload bb-auth`) — a reload failure keeps the old set (never nuke the live list).
-  Removing an email + reload denies even still-valid cookies on the next request.
+- **The users file is the real access gate**, re-checked on *every* `/auth/validate` (not just
+  at login). `BB_AUTH_USERS_FILE` is JSON (`{ "users": [ { email, enabled_paths?, api_keys? } ] }`),
+  parsed into `RwLock<Users>` with two indices (`by_email`, `by_key_hash`), hot-reloaded on SIGHUP
+  (`systemctl reload bb-auth`) — a reload failure keeps the old table (never nuke the live one).
+  Removing a user *or* a single API key + reload denies even still-valid cookies/keys next request.
+  See `read_users`; keep it the access gate and keep the reload fail-soft.
+- **Static API keys (`bbk_` namespace) are self-contained grants tied to a user.** A bearer
+  starting `bbk_` is looked up by `sha256(bearer)` in `by_key_hash` — the raw key is never stored
+  (only `key_hash`), and the hash lookup **is** the verification (high-entropy keys make a preimage
+  infeasible, so no constant-time compare is needed). A key must be unexpired (`released` +
+  `duration`) and in its path scope. Mint with `tools/bb-apikey.py`. Don't index by anything the
+  client sends in the clear and don't store the raw key.
+- **Path scoping applies to every credential.** A user/key may restrict `enabled_paths` (prefixes;
+  `[]` / `["*"]` = all; a key with none inherits its user's scope), matched against the original
+  request path from `BB_AUTH_ORIGINAL_URI_HEADER` (default `X-Original-URI`, nginx must set it).
+  Fail-closed: a restricted scope with the header missing is denied, and a path with `..` is
+  rejected. See `PathScope::allows`.
 - **Sessions are stateless** — no server-side store. Any worker validates any cookie; a restart
   logs nobody out. Don't introduce per-session server state.
 - **Dependencies stay pure-Rust / `ring`-based** (`ureq`+rustls with bundled Mozilla roots,
@@ -77,10 +93,13 @@ bash scripts/build.sh                 # target overridable via BB_AUTH_TARGET
   **only** for federated logins (token carries an `identities` claim), optionally narrowed by
   `BB_AUTH_SOCIAL_PROVIDERS` — never for native Cognito users, since self-signup is open and an
   unverified native email is attacker-controlled. Off by default. See `unverified_social_ok`.
-- **`safe_rd` guards the post-login redirect** against open-redirect + response-splitting (only
-  the canonical service URL prefix or a same-host absolute path; rejects `//`, `/\`, and any
-  control byte incl. CR/LF). Any new use of request-supplied data in a header/redirect must stay
-  behind this guard.
+- **`safe_rd` guards the post-login redirect** against open-redirect + response-splitting (the
+  canonical service URL prefix, a same-host absolute path, or — when `BB_AUTH_RD_BASE_DOMAIN` is
+  set for cross-service SSO — an absolute **https** URL whose host is that base domain or a
+  subdomain of it; rejects `//`, `/\`, control bytes incl. CR/LF, non-https, userinfo `@`, and
+  suffix lookalikes like `evilbadbat75.com` / `badbat75.com.evil.com`). The subdomain match lives
+  in `rd_host_allowed` (host-only, leading-dot suffix). Any new use of request-supplied data in a
+  header/redirect must stay behind this guard.
 - **Release profile is size-optimized** (`opt-level="z"`, LTO, `panic="abort"`, stripped). Leave
   it that way unless asked.
 
@@ -91,7 +110,8 @@ bash scripts/build.sh                 # target overridable via BB_AUTH_TARGET
   and `docs/ARCHITECTURE.md` §8.
 - `scripts/deploy.sh` is the on-host installer (root, idempotent, self-verifying). It is
   **lockout-safe by construction**: it generates the HMAC key once and preserves it forever, and
-  preserves the live allowlist unless a new one is explicitly staged. Preserve this property when
-  editing the deploy path — a binary-only redeploy must never log anyone out.
+  preserves the live `users.json` unless a new one is explicitly staged (validating it as JSON
+  first; a legacy flat `allowed_emails` is auto-migrated to `users.json` on first run). Preserve
+  this property when editing the deploy path — a binary-only redeploy must never log anyone out.
 - bb-auth runs as a hardened, non-privileged systemd service ([deploy/bb-auth.service](deploy/bb-auth.service))
   on loopback behind a TLS-terminating reverse proxy; it speaks plain HTTP and holds no Cognito secret.

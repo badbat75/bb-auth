@@ -1,0 +1,41 @@
+{
+  "_comment": [
+    "bb-auth users file (JSON) — the REAL access gate (Cognito self-signup is open).",
+    "Re-checked on every /auth/validate, so removing a user + `systemctl reload bb-auth`",
+    "(SIGHUP) denies even existing sessions; a plain restart works too. Emails match",
+    "case-insensitively. Keys are addressed by `key_hash` = SHA-256 of the bbk_ bearer",
+    "(mint with tools/bb-apikey.py); the raw key is never stored here. `enabled_paths`",
+    "are request-path prefixes ([] or ['*'] = all paths); a key without them inherits",
+    "its user's scope. `duration`: <n>d / <n>h / 0 / never, counted from `released`.",
+    "Unknown fields (this _comment, per-key `notes`) are ignored, so use them freely."
+  ],
+  "users": [
+    { "email": "you@example.com" },
+
+    {
+      "email": "friend@example.com",
+      "enabled_paths": ["*"]
+    },
+
+    {
+      "email": "bot@example.com",
+      "enabled_paths": ["/mcp/"],
+      "api_keys": [
+        {
+          "id": "laptop",
+          "key_hash": "0000000000000000000000000000000000000000000000000000000000000000",
+          "released": "2026-07-08",
+          "duration": "365d",
+          "enabled_paths": ["/mcp/"],
+          "notes": "example only — replace key_hash with one from tools/bb-apikey.py"
+        },
+        {
+          "id": "ci",
+          "key_hash": "1111111111111111111111111111111111111111111111111111111111111111",
+          "released": "2026-07-08",
+          "duration": "never"
+        }
+      ]
+    }
+  ]
+}

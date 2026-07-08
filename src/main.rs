@@ -11,6 +11,14 @@
 //! Endpoints (all under /auth/, fronted by nginx on the protected service host):
 //!   GET  /auth/validate  — internal; nginx `auth_request`. 204 if the session
 //!                          cookie is valid AND its email is on the allowlist, else 401.
+//!                          Also accepts `Authorization: Bearer <cred>` for
+//!                          programmatic clients (e.g. MCP clients) that can't run
+//!                          the browser cookie flow: `<cred>` is either a raw Cognito
+//!                          id_token (validated exactly like /auth/session), or a
+//!                          static `bbk_` API key from the JSON users table (tied to a
+//!                          user, with its own expiry and allowed-path scope).
+//!                          Every credential is additionally checked against the
+//!                          requesting user's / key's allowed path prefixes.
 //!   POST /auth/session   — public; body `id_token=...&rd=...`. Validates the
 //!                          id_token fully, sets the session cookie, 302 → rd.
 //!   GET  /auth/logout    — public; clears the cookie, 302 → login page.
@@ -21,7 +29,7 @@
 //! access gate (Cognito self-signup is open) and is re-checked on every /validate,
 //! so removing an email + SIGHUP (or restart) denies even existing cookies.
 
-use std::collections::{HashMap, HashSet};
+use std::collections::HashMap;
 use std::io::Read;
 use std::sync::{Arc, Mutex, RwLock};
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
@@ -32,7 +40,7 @@ use hmac::{Hmac, Mac};
 use jsonwebtoken::jwk::JwkSet;
 use jsonwebtoken::{decode, decode_header, Algorithm, DecodingKey, Validation};
 use serde::Deserialize;
-use sha2::Sha256;
+use sha2::{Digest, Sha256};
 use tiny_http::{Header, Request, Response, Server, StatusCode};
 
 type HmacSha256 = Hmac<Sha256>;
@@ -40,6 +48,10 @@ type HmacSha256 = Hmac<Sha256>;
 const MAX_BODY: u64 = 64 * 1024; // id_tokens are ~1-3 KB; cap generously.
 const COOKIE_VERSION: &str = "bb2";
 const COOKIE_VERSION_LEGACY: &str = "bb1";
+
+/// Namespace prefix marking a static API-key bearer credential (vs a Cognito
+/// id_token JWT): `Authorization: Bearer bbk_<secret>`.
+const API_KEY_PREFIX: &str = "bbk_";
 
 // ---------------------------------------------------------------------------
 // Config
@@ -95,7 +107,17 @@ struct Config {
     cookie_domain: Option<String>,
     session_ttl: u64,
     search_url: String, // canonical service base (BB_AUTH_SEARCH_URL), e.g. https://app.example.com/
-    login_url: String,  // login page (BB_AUTH_LOGIN_URL), e.g. https://login.example.com/
+    // Optional parent domain (no leading dot, e.g. "example.com") enabling cross-
+    // service SSO: an absolute https `rd` whose host is this domain or a subdomain
+    // of it is accepted by `safe_rd`, so one login can redirect back to any sibling
+    // service behind the gate. `None` (unset) = only `search_url` + same-host paths.
+    // Pair with BB_AUTH_COOKIE_DOMAIN=.<domain> so the session cookie is shared.
+    rd_base_domain: Option<String>,
+    login_url: String, // login page (BB_AUTH_LOGIN_URL), e.g. https://login.example.com/
+    // Request header carrying the original request URI on the nginx `auth_request`
+    // subrequest (default `X-Original-URI`), used for per-user/per-key path scoping.
+    // nginx must set it: `proxy_set_header X-Original-URI $uri;` (normalised path).
+    original_uri_header: String,
     workers: usize,
 }
 
@@ -180,6 +202,16 @@ impl Config {
         if !search_url.ends_with('/') {
             search_url.push('/');
         }
+        // Cross-service SSO redirect scope. Accept ".example.com" or "example.com";
+        // normalise to a bare, lowercased "example.com". Empty => None.
+        let rd_base_domain = match env_or("BB_AUTH_RD_BASE_DOMAIN", "")
+            .trim()
+            .trim_start_matches('.')
+            .to_ascii_lowercase()
+        {
+            s if s.is_empty() => None,
+            s => Some(s),
+        };
 
         // `client_id` is always an accepted audience; `BB_AUTH_AUDIENCES`
         // (comma-separated) appends extra app-client ids — a Cognito id_token is
@@ -221,7 +253,9 @@ impl Config {
                 .parse()
                 .unwrap_or(2_592_000),
             search_url,
+            rd_base_domain,
             login_url: env_req("BB_AUTH_LOGIN_URL"),
+            original_uri_header: env_or("BB_AUTH_ORIGINAL_URI_HEADER", "X-Original-URI"),
             workers: env_or("BB_AUTH_WORKERS", "4").parse().unwrap_or(4).max(1),
         }
     }
@@ -238,9 +272,9 @@ struct JwksCache {
 
 struct State {
     cfg: Config,
-    allowlist: RwLock<HashSet<String>>, // lowercased emails
+    users: RwLock<Users>, // allowlisted emails + their static API keys, indexed
     #[cfg(unix)]
-    allowlist_path: String, // needed by the SIGHUP reload path
+    users_path: String, // needed by the SIGHUP reload path
     jwks: RwLock<JwksCache>,
     jwks_refresh: Mutex<()>, // serializes JWKS refreshers (double-checked locking)
 }
@@ -253,57 +287,292 @@ fn now() -> u64 {
 }
 
 // ---------------------------------------------------------------------------
-// Allowlist
+// Users table (JSON: allowlisted emails + their static API keys)
+//
+// One file (BB_AUTH_USERS_FILE) describes every user, each with an optional path
+// scope and zero or more static `bbk_` API keys. It replaces the old flat email
+// allowlist and stays the real access gate, hot-reloaded on SIGHUP:
+//
+//   { "users": [
+//       { "email": "bob@x.com",
+//         "enabled_paths": ["/mcp/"],           // user-level scope; omit/["*"] = all
+//         "api_keys": [
+//           { "id": "laptop", "key_hash": "<sha256 hex of the bbk_… bearer>",
+//             "released": "2026-07-08", "duration": "365d",
+//             "enabled_paths": ["/mcp/"] }       // omit => inherit the user scope
+//         ] },
+//       { "email": "alice@x.com" }               // plain user: cookie only, all paths
+//   ] }
+//
+// Keys are indexed by the SHA-256 (hex) of the whole bearer — the raw key is
+// never stored. High-entropy random keys make a plain (unsalted) hash + a
+// non-constant-time map lookup safe: finding a matching row requires a SHA-256
+// second preimage, so the lookup itself is the verification. `id` is a human
+// label (logs / revocation), not part of the credential.
 // ---------------------------------------------------------------------------
 
-/// Parse the allowlist file into a set of lowercased emails. Comments (`#`) and
-/// blank lines are ignored. Returns an error instead of exiting so a runtime
-/// SIGHUP reload can fail soft (keep the old set).
-fn read_allowlist(path: &str) -> Result<HashSet<String>, String> {
-    let content = std::fs::read_to_string(path).map_err(|e| format!("read {path}: {e}"))?;
-    Ok(content
-        .lines()
-        .map(str::trim)
-        .filter(|l| !l.is_empty() && !l.starts_with('#'))
-        .map(|l| l.to_ascii_lowercase())
-        .collect())
+/// Allowed request-path scope for a user or key.
+#[derive(Clone)]
+enum PathScope {
+    All,                   // no restriction (empty list or a "*" entry)
+    Prefixes(Vec<String>), // request path must start with one of these
 }
 
-/// Initial allowlist load: a missing/unreadable file is fatal (no safe default
-/// exists at startup); an empty file warns but is allowed.
-fn load_allowlist(path: &str) -> HashSet<String> {
-    match read_allowlist(path) {
-        Ok(s) => {
-            if s.is_empty() {
-                eprintln!("[bb-auth] WARNING: allowlist {path} is empty — nobody can sign in");
+impl PathScope {
+    /// Build a scope from a JSON `enabled_paths` list: empty (after trimming) or
+    /// containing `"*"` => `All`; otherwise the non-empty prefixes.
+    fn from_list(list: &[String]) -> PathScope {
+        let cleaned: Vec<String> = list
+            .iter()
+            .map(|s| s.trim().to_string())
+            .filter(|s| !s.is_empty())
+            .collect();
+        if cleaned.is_empty() || cleaned.iter().any(|p| p == "*") {
+            PathScope::All
+        } else {
+            PathScope::Prefixes(cleaned)
+        }
+    }
+
+    /// Whether `path` (the original request URI, query stripped) is in scope.
+    /// A missing path (`None`) is allowed only for `All`; a restricted scope with
+    /// no known path fails closed. `..` in a restricted path is rejected outright.
+    fn allows(&self, path: Option<&str>) -> bool {
+        match self {
+            PathScope::All => true,
+            PathScope::Prefixes(prefixes) => match path {
+                None => false,
+                Some(p) => !p.contains("..") && prefixes.iter().any(|pre| p.starts_with(pre)),
+            },
+        }
+    }
+}
+
+/// A resolved allowlisted user (keyed elsewhere by lowercased email).
+struct UserRecord {
+    paths: PathScope,
+}
+
+/// A resolved API key (keyed elsewhere by the bearer's SHA-256 hex).
+struct ApiKeyRecord {
+    email: String,        // owning user, for logging
+    key_id: String,       // label, for logging / revocation
+    expires: Option<u64>, // Unix seconds; None = never
+    paths: PathScope,
+}
+
+/// The two runtime indices built from the users file.
+struct Users {
+    by_email: HashMap<String, UserRecord>, // lowercased email -> user
+    by_key_hash: HashMap<String, ApiKeyRecord>, // sha256(bearer) hex -> key
+}
+
+// --- JSON wire format (only the fields we consume; extras are ignored) ---
+
+#[derive(Deserialize)]
+struct UsersFile {
+    #[serde(default)]
+    users: Vec<UserSpec>,
+}
+
+#[derive(Deserialize)]
+struct UserSpec {
+    email: String,
+    #[serde(default)]
+    enabled_paths: Vec<String>,
+    #[serde(default)]
+    api_keys: Vec<ApiKeySpec>,
+}
+
+#[derive(Deserialize)]
+struct ApiKeySpec {
+    #[serde(default)]
+    id: String,
+    #[serde(default)]
+    key_hash: String,
+    #[serde(default)]
+    released: String,
+    #[serde(default)]
+    duration: String,
+    // Absent => inherit the user's scope; present => this key's own scope.
+    #[serde(default)]
+    enabled_paths: Option<Vec<String>>,
+}
+
+/// SHA-256 of `s`, lowercase hex. Fingerprints an API key for storage/lookup.
+fn sha256_hex(s: &str) -> String {
+    use std::fmt::Write as _;
+    let digest = Sha256::digest(s.as_bytes());
+    let mut hex = String::with_capacity(digest.len() * 2);
+    for b in digest {
+        let _ = write!(hex, "{b:02x}");
+    }
+    hex
+}
+
+/// Days from 1970-01-01 to the civil date (proleptic Gregorian), Howard
+/// Hinnant's algorithm. `m` in 1..=12, `d` in 1..=31.
+fn days_from_civil(y: i64, m: i64, d: i64) -> i64 {
+    let y = if m <= 2 { y - 1 } else { y };
+    let era = (if y >= 0 { y } else { y - 399 }) / 400;
+    let yoe = y - era * 400; // [0, 399]
+    let mp = if m > 2 { m - 3 } else { m + 9 }; // Mar=0 ..= Feb=11
+    let doy = (153 * mp + 2) / 5 + d - 1; // [0, 365]
+    let doe = yoe * 365 + yoe / 4 - yoe / 100 + doy; // [0, 146096]
+    era * 146097 + doe - 719468
+}
+
+/// Parse a `YYYY-MM-DD` date to Unix seconds at 00:00 UTC. Rejects malformed
+/// dates and anything before the epoch.
+fn parse_date_epoch(s: &str) -> Option<u64> {
+    let mut it = s.split('-');
+    let y: i64 = it.next()?.parse().ok()?;
+    let m: i64 = it.next()?.parse().ok()?;
+    let d: i64 = it.next()?.parse().ok()?;
+    if it.next().is_some() {
+        return None;
+    }
+    if !(1..=12).contains(&m) || !(1..=31).contains(&d) {
+        return None;
+    }
+    let days = days_from_civil(y, m, d);
+    if days < 0 {
+        return None;
+    }
+    Some(days as u64 * 86_400)
+}
+
+/// A parsed validity window.
+enum Dur {
+    Never,
+    Secs(u64),
+}
+
+/// Parse a duration field: `0` / `never` / `-` (or empty) => `Never`; otherwise
+/// `<n>d` days, `<n>h` hours, or a bare `<n>` (days). `None` on a malformed value.
+fn parse_duration(s: &str) -> Option<Dur> {
+    let s = s.trim().to_ascii_lowercase();
+    if s.is_empty() || s == "0" || s == "never" || s == "-" {
+        return Some(Dur::Never);
+    }
+    let (num, mult) = if let Some(n) = s.strip_suffix('d') {
+        (n, 86_400u64)
+    } else if let Some(n) = s.strip_suffix('h') {
+        (n, 3_600u64)
+    } else {
+        (s.as_str(), 86_400u64)
+    };
+    let n: u64 = num.trim().parse().ok()?;
+    Some(Dur::Secs(n.checked_mul(mult)?))
+}
+
+/// Compute a key's expiry from its `released`/`duration` fields. `Some(None)` =
+/// never expires; `Some(Some(ts))` = Unix-seconds expiry; `None` = malformed
+/// (the caller skips the key).
+fn key_expiry(released: &str, duration: &str) -> Option<Option<u64>> {
+    match parse_duration(duration)? {
+        Dur::Never => Some(None),
+        Dur::Secs(secs) => Some(Some(parse_date_epoch(released)?.checked_add(secs)?)),
+    }
+}
+
+/// Parse the users JSON into the two runtime indices. Structurally-invalid JSON
+/// is a hard error (so a reload keeps the old table); an individual malformed key
+/// is warned about and skipped so one typo can't drop every user.
+fn read_users(path: &str) -> Result<Users, String> {
+    let content = std::fs::read_to_string(path).map_err(|e| format!("read {path}: {e}"))?;
+    let file: UsersFile =
+        serde_json::from_str(&content).map_err(|e| format!("parse {path}: {e}"))?;
+    let mut by_email = HashMap::new();
+    let mut by_key_hash = HashMap::new();
+    for u in &file.users {
+        let email = u.email.trim().to_ascii_lowercase();
+        if email.is_empty() {
+            eprintln!("[bb-auth] WARNING: users entry with empty email, skipping");
+            continue;
+        }
+        let user_paths = PathScope::from_list(&u.enabled_paths);
+        for k in &u.api_keys {
+            let hash = k.key_hash.trim().to_ascii_lowercase();
+            if hash.len() != 64 || !hash.bytes().all(|b| b.is_ascii_hexdigit()) {
+                eprintln!(
+                    "[bb-auth] WARNING: {email} key '{}': invalid key_hash, skipping",
+                    k.id
+                );
+                continue;
             }
-            s
+            let expires = match key_expiry(&k.released, &k.duration) {
+                Some(e) => e,
+                None => {
+                    eprintln!(
+                        "[bb-auth] WARNING: {email} key '{}': bad released/duration, skipping",
+                        k.id
+                    );
+                    continue;
+                }
+            };
+            let paths = match &k.enabled_paths {
+                Some(list) => PathScope::from_list(list),
+                None => user_paths.clone(),
+            };
+            let key_id = if k.id.trim().is_empty() {
+                "?".to_string()
+            } else {
+                k.id.trim().to_string()
+            };
+            by_key_hash.insert(
+                hash,
+                ApiKeyRecord {
+                    email: email.clone(),
+                    key_id,
+                    expires,
+                    paths,
+                },
+            );
+        }
+        by_email.insert(email, UserRecord { paths: user_paths });
+    }
+    Ok(Users {
+        by_email,
+        by_key_hash,
+    })
+}
+
+/// Initial users load: a missing/unreadable/invalid file is fatal (no safe
+/// default exists at startup); an empty user set warns but is allowed.
+fn load_users(path: &str) -> Users {
+    match read_users(path) {
+        Ok(u) => {
+            if u.by_email.is_empty() {
+                eprintln!("[bb-auth] WARNING: users file {path} has no users — nobody can sign in");
+            }
+            u
         }
         Err(e) => {
-            eprintln!("[bb-auth] FATAL: cannot read allowlist: {e}");
+            eprintln!("[bb-auth] FATAL: cannot read users file: {e}");
             std::process::exit(1);
         }
     }
 }
 
-/// Hot-reload the allowlist from disk (SIGHUP). On read failure, keep the
-/// current set and log — never nuke the live allowlist on a transient error.
+/// Hot-reload the users table from disk (SIGHUP). On read/parse failure, keep the
+/// current table and log — never nuke the live table on a transient error.
 #[cfg(unix)]
-fn reload_allowlist(state: &State) {
-    match read_allowlist(&state.allowlist_path) {
+fn reload_users(state: &State) {
+    match read_users(&state.users_path) {
         Ok(new) => {
-            let n = new.len();
-            *state.allowlist.write().unwrap() = new; // fail-safe: atomic swap
-            eprintln!("[bb-auth] allowlist reloaded (SIGHUP): {n} entries");
+            let (u, k) = (new.by_email.len(), new.by_key_hash.len());
+            *state.users.write().unwrap() = new; // fail-safe: atomic swap
+            eprintln!("[bb-auth] users reloaded (SIGHUP): {u} users, {k} api keys");
         }
-        Err(e) => eprintln!("[bb-auth] allowlist reload FAILED, keeping current set: {e}"),
+        Err(e) => eprintln!("[bb-auth] users reload FAILED, keeping current set: {e}"),
     }
 }
 
-/// Spawn the SIGHUP -> allowlist-reload thread. SIGHUP is POSIX-only, so this is
-/// a no-op on non-unix hosts (where the allowlist simply reloads across a restart).
+/// Spawn the SIGHUP -> users-reload thread. SIGHUP is POSIX-only, so this is a
+/// no-op on non-unix hosts (where the table simply reloads across a restart).
 #[cfg(unix)]
-fn spawn_allowlist_reload_handler(state: &Arc<State>) {
+fn spawn_users_reload_handler(state: &Arc<State>) {
     use signal_hook::consts::SIGHUP;
     use signal_hook::iterator::Signals;
 
@@ -317,13 +586,13 @@ fn spawn_allowlist_reload_handler(state: &Arc<State>) {
             }
         };
         for _ in signals.forever() {
-            reload_allowlist(&sig_state);
+            reload_users(&sig_state);
         }
     });
 }
 
 #[cfg(not(unix))]
-fn spawn_allowlist_reload_handler(_state: &Arc<State>) {}
+fn spawn_users_reload_handler(_state: &Arc<State>) {}
 
 // ---------------------------------------------------------------------------
 // JWKS
@@ -597,6 +866,18 @@ fn header_value<'a>(req: &'a Request, name: &str) -> Option<&'a str> {
         .map(|h| h.value.as_str())
 }
 
+/// Extract the token from an `Authorization` header value of the form
+/// `Bearer <token>`. The scheme is matched case-insensitively; the token is
+/// trimmed. Returns `None` if the value is not a non-empty bearer credential.
+fn parse_bearer(auth: &str) -> Option<&str> {
+    let (scheme, token) = auth.split_once(' ')?;
+    if !scheme.eq_ignore_ascii_case("Bearer") {
+        return None;
+    }
+    let token = token.trim();
+    (!token.is_empty()).then_some(token)
+}
+
 fn cookie_value<'a>(cookie_header: &'a str, name: &str) -> Option<&'a str> {
     for part in cookie_header.split(';') {
         let part = part.trim();
@@ -633,7 +914,7 @@ fn build_cookie(cfg: &Config, value: &str, max_age: i64) -> String {
 /// byte, including CR/LF, causes a fall-back to the search URL, so
 /// attacker-supplied bytes can never reach the `Location` header (no response
 /// splitting).
-fn safe_rd(rd: Option<&str>, search_url: &str) -> String {
+fn safe_rd(rd: Option<&str>, search_url: &str, rd_base_domain: Option<&str>) -> String {
     let r = match rd {
         Some(r) if !r.is_empty() => r,
         _ => return search_url.to_string(),
@@ -641,13 +922,50 @@ fn safe_rd(rd: Option<&str>, search_url: &str) -> String {
     if r.bytes().any(|b| b < 0x20 || b == 0x7f) {
         return search_url.to_string();
     }
+    // Absolute URL under the canonical service base — always allowed.
     if r.starts_with(search_url) {
         return r.to_string();
     }
+    // Cross-service SSO: an absolute https URL whose host is (a subdomain of) the
+    // configured base domain. Guarded strictly (https-only, host-suffix match,
+    // no userinfo/backslash) so it can't become an open redirect.
+    if let Some(base) = rd_base_domain {
+        if rd_host_allowed(r, base) {
+            return r.to_string();
+        }
+    }
+    // Same-host absolute path — resolve against the canonical service base.
     if r.starts_with('/') && !r.starts_with("//") && !r.starts_with("/\\") {
         return format!("{}{}", search_url.trim_end_matches('/'), r);
     }
     search_url.to_string()
+}
+
+/// True iff `url` is an absolute `https://` URL whose host equals `base_domain`
+/// or is a subdomain of it (`host == base` or `host` ends with `".<base>"`).
+/// Rejects any other scheme, userinfo (`@`), backslashes, and hosts that merely
+/// *contain* the base (`evilbadbat75.com`, `badbat75.com.evil.com`) — the leading
+/// dot in the suffix check is what prevents those. Port suffixes are tolerated.
+fn rd_host_allowed(url: &str, base_domain: &str) -> bool {
+    let rest = match url.strip_prefix("https://") {
+        Some(r) => r,
+        None => return false,
+    };
+    // Authority is everything up to the first '/', '?' or '#'.
+    let authority_end = rest.find(['/', '?', '#']).unwrap_or(rest.len());
+    let authority = &rest[..authority_end];
+    if authority.is_empty() || authority.contains('@') || authority.contains('\\') {
+        return false;
+    }
+    // Strip an optional ":port" (only when the part after ':' is all digits, so we
+    // don't mistake something else for a port).
+    let host = match authority.rsplit_once(':') {
+        Some((h, p)) if !p.is_empty() && p.bytes().all(|b| b.is_ascii_digit()) => h,
+        _ => authority,
+    };
+    let host = host.to_ascii_lowercase();
+    let base = base_domain.to_ascii_lowercase();
+    host == base || host.ends_with(&format!(".{base}"))
 }
 
 fn respond_empty(req: Request, status: u16) {
@@ -705,12 +1023,97 @@ fn html_escape(s: &str) -> String {
 // Handlers
 // ---------------------------------------------------------------------------
 
+/// The original request path nginx is guarding, from the configured header, with
+/// any query/fragment stripped. `None` if the header is absent.
+fn original_path(req: &Request, cfg: &Config) -> Option<String> {
+    header_value(req, &cfg.original_uri_header)
+        .map(|u| u.split(['?', '#']).next().unwrap_or("").to_string())
+}
+
+/// Resolve a `bbk_` API-key bearer against the users table: it must be known, not
+/// expired, and in path scope. Logs the reason on rejection.
+fn bearer_apikey_ok(state: &State, token: &str, path: Option<&str>) -> bool {
+    let users = state.users.read().unwrap();
+    let rec = match users.by_key_hash.get(&sha256_hex(token)) {
+        Some(r) => r,
+        None => {
+            eprintln!("[bb-auth] api key rejected: unknown");
+            return false;
+        }
+    };
+    if rec.expires.is_some_and(|e| now() >= e) {
+        eprintln!(
+            "[bb-auth] api key rejected: expired [{} {}]",
+            rec.email, rec.key_id
+        );
+        return false;
+    }
+    if !rec.paths.allows(path) {
+        eprintln!(
+            "[bb-auth] api key denied: path {} out of scope [{} {}]",
+            path.unwrap_or("<none>"),
+            rec.email,
+            rec.key_id
+        );
+        return false;
+    }
+    true
+}
+
+/// A user (email) is authorized if present in the table and the request path is in
+/// their scope. Shared by the id_token-bearer and cookie paths.
+fn user_path_ok(state: &State, email: &str, path: Option<&str>) -> bool {
+    let users = state.users.read().unwrap();
+    match users.by_email.get(email) {
+        Some(rec) if rec.paths.allows(path) => true,
+        Some(_) => {
+            eprintln!(
+                "[bb-auth] denied: path {} out of scope for {email}",
+                path.unwrap_or("<none>")
+            );
+            false
+        }
+        None => {
+            eprintln!("[bb-auth] denied: {email} not in users table");
+            false
+        }
+    }
+}
+
 fn handle_validate(req: Request, state: &State) {
     let cfg = &state.cfg;
+    // Original request path (for per-user / per-key path scoping), captured now as
+    // an owned value so the request can be consumed when we respond.
+    let path = original_path(&req, cfg);
+
+    // Bearer path: programmatic clients (e.g. MCP) present `Authorization: Bearer
+    // <cred>`. A `bbk_` credential is a static API key resolved against the users
+    // table; anything else is a raw Cognito id_token validated exactly like
+    // /auth/session, then matched to a user. Either way the request path must be in
+    // scope. A failed bearer falls through to the cookie check so a stray
+    // Authorization header never blocks an otherwise-valid cookie.
+    if let Some(token) = header_value(&req, "Authorization").and_then(parse_bearer) {
+        let granted = if token.starts_with(API_KEY_PREFIX) {
+            bearer_apikey_ok(state, token, path.as_deref())
+        } else {
+            match validate_id_token(token, state) {
+                Ok(email) => user_path_ok(state, &email, path.as_deref()),
+                Err(e) => {
+                    eprintln!("[bb-auth] bearer rejected: {e}");
+                    false
+                }
+            }
+        };
+        if granted {
+            respond_empty(req, 204);
+            return;
+        }
+    }
+
     let ok = header_value(&req, "Cookie")
         .and_then(|c| cookie_value(c, &cfg.cookie_name).map(str::to_string))
         .and_then(|v| verify_session(&v, &cfg.hmac_keys))
-        .map(|email| state.allowlist.read().unwrap().contains(&email))
+        .map(|email| user_path_ok(state, &email, path.as_deref()))
         .unwrap_or(false);
     respond_empty(req, if ok { 204 } else { 401 });
 }
@@ -753,7 +1156,7 @@ fn handle_session(mut req: Request, state: &State) {
         }
     };
 
-    if !state.allowlist.read().unwrap().contains(&email) {
+    if !state.users.read().unwrap().by_email.contains_key(&email) {
         eprintln!("[bb-auth] session denied (not allowlisted): {email}");
         respond_html(
             req,
@@ -765,7 +1168,11 @@ fn handle_session(mut req: Request, state: &State) {
         return;
     }
 
-    let rd = safe_rd(form.get("rd").map(String::as_str), &cfg.search_url);
+    let rd = safe_rd(
+        form.get("rd").map(String::as_str),
+        &cfg.search_url,
+        cfg.rd_base_domain.as_deref(),
+    );
     let cookie = build_cookie(
         cfg,
         &make_session(&email, cfg.session_ttl, &cfg.hmac_keys),
@@ -799,8 +1206,8 @@ fn handle_logout(req: Request, state: &State) {
 
 fn main() {
     let cfg = Config::from_env();
-    let allowlist_path = env_req("BB_AUTH_ALLOWLIST_FILE");
-    let allowlist = load_allowlist(&allowlist_path);
+    let users_path = env_req("BB_AUTH_USERS_FILE");
+    let users = load_users(&users_path);
 
     let initial = fetch_jwks(&cfg.issuer).unwrap_or_else(|e| {
         eprintln!("[bb-auth] FATAL: initial JWKS fetch failed: {e}");
@@ -809,13 +1216,14 @@ fn main() {
 
     let listen = cfg.listen.clone();
     let workers = cfg.workers;
-    let allow_n = allowlist.len();
+    let user_n = users.by_email.len();
+    let key_n = users.by_key_hash.len();
 
     let state = Arc::new(State {
         cfg,
-        allowlist: RwLock::new(allowlist),
+        users: RwLock::new(users),
         #[cfg(unix)]
-        allowlist_path,
+        users_path,
         jwks: RwLock::new(JwksCache {
             keys: initial,
             last_refresh: Instant::now(),
@@ -823,10 +1231,10 @@ fn main() {
         jwks_refresh: Mutex::new(()),
     });
 
-    // Hot-reload the allowlist on SIGHUP (systemctl reload bb-auth). Failures
-    // keep the current set; no one is logged out by a transient disk error.
+    // Hot-reload the users table on SIGHUP (systemctl reload bb-auth). Failures
+    // keep the current table; no one is logged out by a transient disk error.
     // POSIX-only; no-op on non-unix hosts.
-    spawn_allowlist_reload_handler(&state);
+    spawn_users_reload_handler(&state);
 
     let server = Arc::new(Server::http(&listen).unwrap_or_else(|e| {
         eprintln!("[bb-auth] FATAL: cannot bind {listen}: {e}");
@@ -834,10 +1242,9 @@ fn main() {
     }));
 
     eprintln!(
-        "[bb-auth] listening on {listen} | issuer={} | aud={} | allowlist={} entries | workers={workers}",
+        "[bb-auth] listening on {listen} | issuer={} | aud={} | users={user_n} | api_keys={key_n} | workers={workers}",
         state.cfg.issuer,
-        state.cfg.audiences.join(","),
-        allow_n
+        state.cfg.audiences.join(",")
     );
     if state.cfg.allow_unverified_social {
         let scope = match &state.cfg.social_providers {
@@ -1102,13 +1509,130 @@ mod tests {
     }
 
     #[test]
-    fn read_allowlist_parses() {
-        let tmp = std::env::temp_dir().join("bb-auth-allowlist-test.txt");
-        std::fs::write(&tmp, "# comment\n\n  \nFoo@Bar.com\n baz@qux.com\n").unwrap();
-        let s = read_allowlist(tmp.to_str().unwrap()).unwrap();
-        assert_eq!(s.len(), 2);
-        assert!(s.contains("foo@bar.com"));
-        assert!(s.contains("baz@qux.com"));
+    fn parse_bearer_extracts_token() {
+        assert_eq!(parse_bearer("Bearer abc.def.ghi"), Some("abc.def.ghi"));
+        assert_eq!(parse_bearer("bearer abc"), Some("abc")); // scheme case-insensitive
+        assert_eq!(parse_bearer("BEARER   abc  "), Some("abc")); // token trimmed
+        assert_eq!(parse_bearer("Basic abc"), None); // wrong scheme
+        assert_eq!(parse_bearer("Bearer"), None); // no token
+        assert_eq!(parse_bearer("Bearer "), None); // empty token
+        assert_eq!(parse_bearer("Bearertoken"), None); // needs a space separator
+        assert_eq!(parse_bearer(""), None);
+    }
+
+    #[test]
+    fn sha256_hex_known_vector() {
+        // canonical SHA-256("abc")
+        assert_eq!(
+            sha256_hex("abc"),
+            "ba7816bf8f01cfea414140de5dae2223b00361a396177a9cb410ff61f20015ad"
+        );
+    }
+
+    #[test]
+    fn parse_date_epoch_basic() {
+        assert_eq!(parse_date_epoch("1970-01-01"), Some(0));
+        assert_eq!(parse_date_epoch("1970-01-02"), Some(86_400));
+        assert_eq!(parse_date_epoch("1972-01-01"), Some(730 * 86_400)); // 1970+1971 = 365*2
+        assert!(parse_date_epoch("2026-07-08").is_some());
+        assert_eq!(parse_date_epoch("2026-13-01"), None); // bad month
+        assert_eq!(parse_date_epoch("2026-07-40"), None); // bad day
+        assert_eq!(parse_date_epoch("notadate"), None);
+        assert_eq!(parse_date_epoch("1969-12-31"), None); // before epoch
+    }
+
+    #[test]
+    fn parse_duration_variants() {
+        assert!(matches!(parse_duration("never"), Some(Dur::Never)));
+        assert!(matches!(parse_duration("0"), Some(Dur::Never)));
+        assert!(matches!(parse_duration("-"), Some(Dur::Never)));
+        assert!(matches!(parse_duration(""), Some(Dur::Never)));
+        assert!(matches!(parse_duration("365d"), Some(Dur::Secs(s)) if s == 365 * 86_400));
+        assert!(matches!(parse_duration("24h"), Some(Dur::Secs(s)) if s == 24 * 3_600));
+        assert!(matches!(parse_duration("7"), Some(Dur::Secs(s)) if s == 7 * 86_400)); // bare = days
+        assert!(parse_duration("abc").is_none());
+        assert!(parse_duration("10x").is_none());
+    }
+
+    #[test]
+    fn key_expiry_computes() {
+        assert_eq!(key_expiry("2026-01-01", "never"), Some(None));
+        assert_eq!(key_expiry("1970-01-01", "1d"), Some(Some(86_400)));
+        assert_eq!(key_expiry("1970-01-01", "0"), Some(None)); // 0 = never (date ignored)
+        assert_eq!(key_expiry("bad", "1d"), None); // bad date with finite duration
+        assert_eq!(key_expiry("2026-01-01", "xyz"), None); // bad duration
+    }
+
+    #[test]
+    fn path_scope_matching() {
+        let all = PathScope::from_list(&[]);
+        assert!(matches!(all, PathScope::All));
+        assert!(matches!(
+            PathScope::from_list(&["*".to_string()]),
+            PathScope::All
+        ));
+        // All allows anything, even without a known path
+        assert!(all.allows(None));
+        assert!(all.allows(Some("/whatever")));
+
+        let p = PathScope::from_list(&["/mcp/".to_string(), "/api/".to_string()]);
+        assert!(p.allows(Some("/mcp/foo")));
+        assert!(p.allows(Some("/api/x")));
+        assert!(!p.allows(Some("/other")));
+        assert!(!p.allows(None)); // restricted + missing path => fail closed
+        assert!(!p.allows(Some("/mcp/../secret"))); // path traversal rejected
+
+        // whitespace/empties are cleaned out; a "*" among prefixes means All
+        assert!(matches!(
+            PathScope::from_list(&["  ".to_string(), "/x".to_string(), "*".to_string()]),
+            PathScope::All
+        ));
+    }
+
+    #[test]
+    fn read_users_parses_json() {
+        let key = "bbk_secret";
+        let hash = sha256_hex(key);
+        let other = sha256_hex("bbk_two");
+        let json = format!(
+            r#"{{
+              "users": [
+                {{ "email": "Alice@Example.com" }},
+                {{ "email": "bob@x.com", "enabled_paths": ["/mcp/"],
+                   "api_keys": [
+                     {{ "id": "laptop", "key_hash": "{hash}", "released": "1970-01-01",
+                        "duration": "1d", "enabled_paths": ["/mcp/foo/"], "notes": "ignored" }},
+                     {{ "id": "nolimit", "key_hash": "{other}", "released": "2026-01-01",
+                        "duration": "never" }}
+                   ] }}
+              ]
+            }}"#
+        );
+        let tmp = std::env::temp_dir().join("bb-auth-users-test.json");
+        std::fs::write(&tmp, json).unwrap();
+        let u = read_users(tmp.to_str().unwrap()).unwrap();
+
+        assert!(u.by_email.contains_key("alice@example.com")); // lowercased
+        assert!(u.by_email.contains_key("bob@x.com"));
+        assert!(matches!(
+            u.by_email["alice@example.com"].paths,
+            PathScope::All
+        ));
+        assert_eq!(u.by_key_hash.len(), 2);
+
+        let rec = u.by_key_hash.get(&hash).unwrap();
+        assert_eq!(rec.email, "bob@x.com");
+        assert_eq!(rec.key_id, "laptop");
+        assert_eq!(rec.expires, Some(86_400)); // 1970-01-01 + 1d
+        assert!(rec.paths.allows(Some("/mcp/foo/bar")));
+        assert!(!rec.paths.allows(Some("/mcp/other"))); // key scope is narrower than user
+
+        // key with no enabled_paths inherits the user's ["/mcp/"] scope
+        let inherit = u.by_key_hash.get(&other).unwrap();
+        assert_eq!(inherit.expires, None);
+        assert!(inherit.paths.allows(Some("/mcp/anything")));
+        assert!(!inherit.paths.allows(Some("/nope")));
+
         let _ = std::fs::remove_file(&tmp);
     }
 
@@ -1116,29 +1640,110 @@ mod tests {
     fn safe_rd_allows_search_url_prefix_and_paths() {
         let s = "https://app.example.com/";
         assert_eq!(
-            safe_rd(Some("https://app.example.com/q?x=1"), s),
+            safe_rd(Some("https://app.example.com/q?x=1"), s, None),
             "https://app.example.com/q?x=1"
         );
         assert_eq!(
-            safe_rd(Some("/search?q=1"), s),
+            safe_rd(Some("/search?q=1"), s, None),
             "https://app.example.com/search?q=1"
         );
-        assert_eq!(safe_rd(None, s), s);
-        assert_eq!(safe_rd(Some(""), s), s);
+        assert_eq!(safe_rd(None, s, None), s);
+        assert_eq!(safe_rd(Some(""), s, None), s);
     }
 
     #[test]
     fn safe_rd_blocks_open_redirect_and_splitting() {
         let s = "https://app.example.com/";
         // scheme-relative + backslash variant (browsers normalise `/\` -> `//`)
-        assert_eq!(safe_rd(Some("//evil.com"), s), s);
-        assert_eq!(safe_rd(Some("/\\evil.com"), s), s);
+        assert_eq!(safe_rd(Some("//evil.com"), s, None), s);
+        assert_eq!(safe_rd(Some("/\\evil.com"), s, None), s);
         // response splitting via CRLF / control bytes
-        assert_eq!(safe_rd(Some("/\r\nSet-Cookie: x=1"), s), s);
-        assert_eq!(safe_rd(Some("/x\x00y"), s), s);
-        assert_eq!(safe_rd(Some("/q\x7f"), s), s);
+        assert_eq!(safe_rd(Some("/\r\nSet-Cookie: x=1"), s, None), s);
+        assert_eq!(safe_rd(Some("/x\x00y"), s, None), s);
+        assert_eq!(safe_rd(Some("/q\x7f"), s, None), s);
         // off-host absolute URL
-        assert_eq!(safe_rd(Some("https://evil.com/"), s), s);
+        assert_eq!(safe_rd(Some("https://evil.com/"), s, None), s);
+    }
+
+    #[test]
+    fn safe_rd_sso_allows_sibling_subdomains() {
+        let s = "https://search.badbat75.com/";
+        let base = Some("badbat75.com");
+        // sibling service under the same base domain
+        assert_eq!(
+            safe_rd(Some("https://mcp.badbat75.com/mcp/foo"), s, base),
+            "https://mcp.badbat75.com/mcp/foo"
+        );
+        // the canonical service itself (also allowed via the prefix rule)
+        assert_eq!(
+            safe_rd(Some("https://search.badbat75.com/q?x=1"), s, base),
+            "https://search.badbat75.com/q?x=1"
+        );
+        // the apex domain
+        assert_eq!(
+            safe_rd(Some("https://badbat75.com/"), s, base),
+            "https://badbat75.com/"
+        );
+        // relative paths still resolve against the canonical base
+        assert_eq!(
+            safe_rd(Some("/preferences"), s, base),
+            "https://search.badbat75.com/preferences"
+        );
+    }
+
+    #[test]
+    fn safe_rd_sso_rejects_lookalikes_and_tricks() {
+        let s = "https://search.badbat75.com/";
+        let base = Some("badbat75.com");
+        // suffix-without-dot lookalike
+        assert_eq!(safe_rd(Some("https://evilbadbat75.com/"), s, base), s);
+        // base as a left label of another domain
+        assert_eq!(safe_rd(Some("https://badbat75.com.evil.com/"), s, base), s);
+        // userinfo trick: real host is evil.com
+        assert_eq!(
+            safe_rd(Some("https://mcp.badbat75.com@evil.com/"), s, base),
+            s
+        );
+        // backslash in authority
+        assert_eq!(
+            safe_rd(Some("https://mcp.badbat75.com\\@evil.com/"), s, base),
+            s
+        );
+        // non-https scheme
+        assert_eq!(safe_rd(Some("http://mcp.badbat75.com/"), s, base), s);
+        // scheme-relative is still blocked even with a base configured
+        assert_eq!(safe_rd(Some("//mcp.badbat75.com/"), s, base), s);
+    }
+
+    #[test]
+    fn rd_host_allowed_matches_host_only() {
+        assert!(rd_host_allowed(
+            "https://mcp.badbat75.com/x",
+            "badbat75.com"
+        ));
+        assert!(rd_host_allowed("https://badbat75.com", "badbat75.com"));
+        assert!(rd_host_allowed(
+            "https://a.b.badbat75.com/x?y=1",
+            "badbat75.com"
+        ));
+        assert!(rd_host_allowed(
+            "https://mcp.badbat75.com:8443/x",
+            "badbat75.com"
+        ));
+        // path/query containing the base must NOT count
+        assert!(!rd_host_allowed(
+            "https://evil.com/.badbat75.com",
+            "badbat75.com"
+        ));
+        assert!(!rd_host_allowed(
+            "https://evil.com/?x=badbat75.com",
+            "badbat75.com"
+        ));
+        assert!(!rd_host_allowed("http://mcp.badbat75.com/", "badbat75.com"));
+        assert!(!rd_host_allowed(
+            "https://badbat75.com.evil.com/",
+            "badbat75.com"
+        ));
     }
 
     #[test]

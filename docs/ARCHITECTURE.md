@@ -66,13 +66,13 @@ in file order:
 | Section | Purpose |
 |---------|---------|
 | `Config` / `from_env` | All tunables from env vars; fatal-`exit`s on missing required values or a too-short HMAC key. |
-| `State` / `JwksCache` | Shared state behind `Arc`: config, a `RwLock<HashSet>` allowlist, a `RwLock` JWKS cache, and a `Mutex` serializing JWKS refreshes. |
-| `load_allowlist` / `read_allowlist` / `reload_allowlist` | Reads the allowlist file (one email/line, `#` comments), lowercased. `load_allowlist` aborts startup if unreadable (warns if empty); `reload_allowlist` swaps it live on `SIGHUP`, keeping the old set on error. |
+| `State` / `JwksCache` | Shared state behind `Arc`: config, a `RwLock<Users>` users table, a `RwLock` JWKS cache, and a `Mutex` serializing JWKS refreshes. |
+| `load_users` / `read_users` / `reload_users` | Parses the JSON users file (`BB_AUTH_USERS_FILE`) into two indices — allowlisted emails (`by_email`) and `bbk_` API keys (`by_key_hash`), each with a path scope; emails lowercased. `load_users` aborts startup if unreadable (warns if empty); `reload_users` swaps the table live on `SIGHUP`, keeping the old table on error. See §12. |
 | `fetch_jwks` / `refresh_jwks_if_due` / `decoding_key` | `GET {issuer}/.well-known/jwks.json` via `ureq`+rustls; cache keyed by `kid`, refreshed at most once per 60 s, deduped across workers by double-checked locking. |
 | `validate_id_token` | Full JWT validation (see §6). Returns the verified, lowercased email. |
 | `make_session` / `verify_session` | HMAC-SHA256 signed cookie (see §7). |
 | HTTP helpers | Header/cookie parsing, cookie building, open-redirect `safe_rd`, response builders. |
-| `handle_validate` / `handle_session` / `handle_logout` | The three real handlers (plus `/auth/healthz` inline). |
+| `handle_validate` / `handle_session` / `handle_logout` | The three real handlers (plus `/auth/healthz` inline). `/auth/validate` resolves a cookie or bearer credential and enforces the request-path scope (`bearer_apikey_ok` / `user_path_ok` / `original_path`). |
 | `main` | Build config/state, prime JWKS, spawn the worker thread pool, route requests. |
 
 ---
@@ -83,16 +83,17 @@ in file order:
   small and resident memory low, so it runs comfortably on constrained hosts.
 - **Thread pool:** `BB_AUTH_WORKERS` threads (default 4), each looping on
   `server.recv()` and dispatching on `(method, path)`. State is shared via
-  `Arc<State>`; the JWKS cache and the allowlist are each behind a `RwLock`, and a
+  `Arc<State>`; the JWKS cache and the users table are each behind a `RwLock`, and a
   `Mutex` serializes JWKS refreshers (double-checked locking — see §6).
 - **Stateless sessions:** there is **no server-side session store**. The session
   is fully carried by the HMAC cookie, so any worker can validate any request and
   a restart does not log anyone out (cookies are time-bound, not server-bound).
-- **Allowlist is hot-reloadable:** it lives in a `RwLock<HashSet>` and is re-read
+- **Users table is hot-reloadable:** it lives in a `RwLock<Users>` and is re-read
   from disk on `SIGHUP` (`systemctl reload bb-auth`) — edit + reload applies
-  changes live without dropping sessions. A restart still works too. The email is
-  re-checked on every `/auth/validate`, so a removed address is denied
-  immediately even for still-valid cookies.
+  changes live without dropping sessions. A restart still works too. Every
+  credential is re-checked against the table on every `/auth/validate`, so removing
+  a user (or one of their API keys) denies it immediately even for a still-valid
+  cookie or unexpired key.
 
 ---
 
@@ -100,7 +101,7 @@ in file order:
 
 | Method | Path | Caller | Behavior |
 |--------|------|--------|----------|
-| `GET` | `/auth/validate` | nginx only (`auth_request`) | `204` if the session cookie is signature-valid, unexpired, **and** its email is on the allowlist; otherwise `401`. |
+| `GET` | `/auth/validate` | nginx only (`auth_request`) | `204` if an accepted credential authorizes the request path, otherwise `401`. Accepts (in order) an `Authorization: Bearer bbk_…` static API key, an `Authorization: Bearer <id_token>`, or the session cookie; each is additionally checked against the caller's allowed path prefixes. See §12. |
 | `POST` | `/auth/session` | browser | Body `application/x-www-form-urlencoded`: `id_token=…&rd=…`. Fully validates the id_token; on success sets the session cookie and `302`s to `rd` (open-redirect guarded). |
 | `GET` | `/auth/logout` | browser | Sets an expired (Max-Age=0) cookie and `302` → login page. Cross-site requests (`Sec-Fetch-Site: cross-site`) are ignored (no cookie clear) to block CSRF-forced logout. |
 | `GET` | `/auth/healthz` | local | `200 ok`. Liveness probe. |
@@ -138,7 +139,7 @@ ever issuing a cookie:
 5. Returns the `email` claim, lowercased.
 
 Failure on any step → the session request is rejected with `401` (token
-invalid/expired) or `403` (email not on the allowlist).
+invalid/expired) or `403` (email not in the users table).
 
 ---
 
@@ -169,8 +170,8 @@ bb1.<exp>.<b64url(email)>.<b64url(HMAC_SHA256("bb1.<exp>.<b64url(email)>"))>    
 Because the cookie is self-contained and key addressed, **key rotation
 invalidates nobody**: the new key is added as verify-only, then flipped to
 active, then the old one is dropped after a TTL. See README "Key rotation".
-De-authorizing an email is separate from signatures: remove it from the
-allowlist and reload/restart — the next `/auth/validate` for that cookie returns
+De-authorizing an email is separate from signatures: remove the user from the
+users file and reload/restart — the next `/auth/validate` for that cookie returns
 `401` even though the cookie signature is still valid.
 
 ---
@@ -190,7 +191,8 @@ Required vars cause a fatal exit if missing.
 | `BB_AUTH_AUDIENCES` | no | empty | Comma-separated extra accepted `aud`s (Cognito app client ids), e.g. a separate social-login client. `BB_AUTH_CLIENT_ID` is always accepted; a token is valid if its `aud` matches any. Read at startup → needs `restart`, not `reload`. |
 | `BB_AUTH_ALLOW_UNVERIFIED_SOCIAL` | no | `false` | Truthy (`1`/`true`/`yes`/`on`) accepts `email_verified=false` tokens **only** for federated/social logins (those carrying an `identities` claim); native Cognito users stay strict. Off = strict for everyone. |
 | `BB_AUTH_SOCIAL_PROVIDERS` | no | empty → any | Comma-separated `providerName`s (case-insensitive, e.g. `Google,SignInWithApple`) the relaxation above applies to. Empty = any federated provider. No effect unless `BB_AUTH_ALLOW_UNVERIFIED_SOCIAL` is on. |
-| `BB_AUTH_ALLOWLIST_FILE` | yes | — | Path to the allowlist file. Loaded at startup. |
+| `BB_AUTH_USERS_FILE` | yes | — | Path to the JSON users file (allowlisted emails plus their `bbk_` API keys and path scopes; see §12). Loaded at startup, hot-reloaded on `SIGHUP`. |
+| `BB_AUTH_ORIGINAL_URI_HEADER` | no | `X-Original-URI` | Request header on the `auth_request` subrequest carrying the original request path, used for per-user/per-key path scoping. nginx must set it: `proxy_set_header X-Original-URI $uri;`. Query/fragment are stripped; a restricted scope with the header missing fails closed. |
 | `BB_AUTH_LISTEN` | no | `127.0.0.1:4181` | Bind address. Loopback only — nginx fronts it. |
 | `BB_AUTH_COOKIE_NAME` | no | `bb_session` | |
 | `BB_AUTH_COOKIE_DOMAIN` | no | empty → host-only | Set to a parent domain for cross-service SSO. |
@@ -233,7 +235,7 @@ target host's glibc.
 
 ## 10. Running it
 
-bb-auth is one binary plus two files (env + allowlist). Its operational contract:
+bb-auth is one binary plus two files (env + users file). Its operational contract:
 
 - **Runs as a non-privileged service** — a dedicated system user, no login, no home.
 - **Loopback only**, behind a TLS-terminating reverse proxy that performs the
@@ -241,7 +243,8 @@ bb-auth is one binary plus two files (env + allowlist). Its operational contract
 - **Env file** holds the config and the HMAC secret; keep it readable only by the
   service user (e.g. `0640 root:bb-auth`). The secret should be generated once and
   preserved across redeploys so existing cookies keep verifying.
-- **Allowlist file** holds the access list; editable + `SIGHUP` to apply live.
+- **Users file** holds the access list — allowlisted emails plus their `bbk_` API
+  keys and path scopes (JSON); editable + `SIGHUP` to apply live.
 
 A typical layout:
 
@@ -249,13 +252,13 @@ A typical layout:
 <install-dir>/
 ├── bb-auth          # binary (read-only to the service)
 ├── bb-auth.env      # config + HMAC key (service-user readable only)
-└── allowed_emails   # access allowlist
+└── users.json       # access list: emails + API keys + path scopes
 <systemd-unit-dir>/bb-auth.service
 ```
 
 `scripts/deploy.sh` is an example installer (idempotent): it creates the
-system user/group, installs the binary, allowlist (backing up the prior
-allowlist) and the staged `bb-auth.env`, **generates `BB_AUTH_HMAC_KEY` on first
+system user/group, installs the binary, users file (backing up the prior
+`users.json`) and the staged `bb-auth.env`, **generates `BB_AUTH_HMAC_KEY` on first
 run if empty and never overwrites it**, installs the systemd unit,
 `daemon-reload`s, enables + restarts, then probes `/auth/healthz`.
 
@@ -279,10 +282,11 @@ resolver), `SystemCallFilter=@system-service`, empty `CapabilityBoundingSet`,
 - **The id_token is the credential.** A Cognito-signed `id_token` is unforgeable;
   possession of one for an allowlisted, `email_verified` address is proof of
   identity. bb-auth holds no Cognito secret — it only reads public JWKS.
-- **The allowlist is the real access gate.** Cognito self-signup is open by
+- **The users file is the real access gate.** Cognito self-signup is open by
   design (to enable frictionless registration). Anyone can get an `id_token`, but
-  only allowlisted emails get a session cookie, and the check is repeated on
-  every `/auth/validate`.
+  only emails listed in the users file get a session cookie, and the check is
+  repeated on every `/auth/validate` (see §12) — as is each `bbk_` API key and the
+  request-path scope.
 - **Why `email_verified` is mandatory for native users.** Self-signup being open,
   if an unverified native email were accepted, anyone could register
   `boss@company.com` without controlling it and inherit that email's allowlist
@@ -302,3 +306,83 @@ resolver), `SystemCallFilter=@system-service`, empty `CapabilityBoundingSet`,
   sensitive.
 - **No TLS in-process:** bb-auth speaks plain HTTP on loopback; the reverse proxy
   terminates TLS. It binds `127.0.0.1` only and is not exposed directly.
+
+---
+
+## 12. Users file, API keys & path scoping
+
+Access is described by a single JSON file (`BB_AUTH_USERS_FILE`, installed as
+`/opt/bb-auth/users.json`). It lists every user — each with an optional request-path
+scope and zero or more static API keys — loaded at startup and hot-reloaded on
+`SIGHUP`. It replaces the old flat `allowed_emails` allowlist and stays the real
+access gate (`read_users` / `Users`):
+
+```json
+{ "users": [
+    { "email": "you@example.com" },
+    { "email": "bot@example.com", "enabled_paths": ["/mcp/"],
+      "api_keys": [
+        { "id": "laptop", "key_hash": "<sha256 hex of the bbk_… bearer>",
+          "released": "2026-07-08", "duration": "365d",
+          "enabled_paths": ["/mcp/"] }
+      ] }
+] }
+```
+
+At load time the file is parsed into two in-memory indices behind `RwLock<Users>`:
+`by_email` (lowercased email → `UserRecord`) and `by_key_hash` (`sha256(bearer)` hex
+→ `ApiKeyRecord`). Structurally-invalid JSON is a hard error, so a bad reload keeps
+the previous table; a single malformed key is warned about and skipped so one typo
+can't drop everyone.
+
+### Static API keys (`bbk_`)
+
+A programmatic client (e.g. an MCP client that can't run the browser cookie flow)
+authenticates with `Authorization: Bearer bbk_<secret>`. Keys are minted out of band
+(`tools/bb-apikey.py`) and only their **SHA-256 hex fingerprint** (`key_hash`) is
+stored — the raw `bbk_…` bearer is shown once and never persisted. `/auth/validate`
+looks a bearer up by `sha256(bearer)` in `by_key_hash`; the lookup itself is the
+verification (forging a matching preimage of a high-entropy random key is infeasible,
+so no constant-time compare is needed). A key is a self-contained grant tied to a
+user — its `email` / `id` are for logging and revocation, not a second allowlist step
+— and must be unexpired and in path scope.
+
+- **`key_hash`** — `sha256_hex("bbk_<secret>")`, 64 lowercase hex chars.
+- **`released` / `duration`** — expiry = `released` (`YYYY-MM-DD`) + `duration`, where
+  `duration` is `<n>d` (days), `<n>h` (hours), a bare `<n>` (days), or `0` / `never`
+  (never expires).
+
+### Path scoping
+
+Both users and keys carry an `enabled_paths` list. `[]` or `["*"]` means "all paths"
+(`PathScope::All`); otherwise the request path must **prefix-match** one of the
+entries (`PathScope::Prefixes`). On a key, omitting `enabled_paths` inherits the
+owning user's scope.
+
+`/auth/validate` reads the original request path from the
+`BB_AUTH_ORIGINAL_URI_HEADER` header (default `X-Original-URI`), query/fragment
+stripped, and checks it against the resolved scope. nginx must set it on the
+subrequest:
+
+```nginx
+proxy_set_header X-Original-URI $uri;   # normalised request path
+```
+
+A restricted scope with the header **missing fails closed** (`401`); a path
+containing `..` is rejected outright. An `All` scope ignores the path entirely, so
+users and keys with no restriction don't need the header.
+
+### Credential precedence at `/auth/validate`
+
+`handle_validate` tries credentials in this order, each additionally path-scoped:
+
+1. **`Authorization: Bearer bbk_…`** — static API key: looked up by hash, checked for
+   expiry and path scope (`bearer_apikey_ok`).
+2. **`Authorization: Bearer <id_token>`** — a Cognito id_token validated exactly as at
+   `/auth/session` (§6); its email must be in `by_email` and the path in the user's
+   scope (`user_path_ok`).
+3. **Session cookie** — verified as in §7, then the same `by_email` + path check.
+
+A failed bearer falls through to the cookie check, so a stray `Authorization` header
+never blocks an otherwise-valid cookie. Any authorized credential → `204`; otherwise
+`401`.
