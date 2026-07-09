@@ -39,7 +39,7 @@ nginx error_page 401 → 302  <login-page>/?rd=<original>
 
 | Method | Path             | Who        | Purpose                                            |
 |--------|------------------|------------|----------------------------------------------------|
-| GET    | `/auth/validate` | nginx only | `auth_request`: 204 if the session cookie, an `Authorization: Bearer <id_token>`, or a static `Authorization: Bearer bbk_…` API key authorizes the request (allowlisted user, in URL scope), else 401 |
+| GET    | `/auth/validate` | nginx only | `auth_request`: 204 + `X-Auth-Email` if the session cookie, an `Authorization: Bearer <id_token>`, or a static `Authorization: Bearer bbk_…` API key authorizes the request (allowlisted user, in URL scope), else 401 |
 | POST   | `/auth/session`  | browser    | validate posted `id_token`, set cookie, 302 → `rd` |
 | GET    | `/auth/logout`   | browser    | clear cookie, 302 → login page                     |
 | GET    | `/auth/healthz`  | local      | liveness                                           |
@@ -89,6 +89,38 @@ python tools/bb-apikey.py bob@badbat75.com --id laptop --duration 365d \
     --urls 'https://mcp.badbat75.com/mcp,https://mcp.badbat75.com/mcp/*'
 # → Authorization: Bearer bbk_…  (give to the client)   +   { "id": "laptop", "key_hash": … }
 ```
+
+## Passing the identity to the app
+
+All three credentials resolve to one thing: the email of a user in the users file.
+A `204` from `/auth/validate` carries it in **`X-Auth-Email`**, which nginx lifts out
+of the subrequest and injects into the request it proxies — that is how the app
+behind the gate learns who is calling. An API key resolves to its **owning user's**
+email: a key acts as its user.
+
+```nginx
+auth_request_set $bb_email $upstream_http_x_auth_email;
+proxy_set_header X-Auth-Email $bb_email;   # rename to whatever the app reads
+```
+
+`auth_request_set` belongs in the **gated location**, not in the gate's own location.
+The header name bb-auth emits is fixed; nginx renames it on the way through, so an app
+expecting `X-Forwarded-User` or `Remote-User` needs no change on this side.
+
+Two things make the header trustworthy, and both are required:
+
+- **nginx sets or clears it on every gated location.** `proxy_set_header` overwrites
+  whatever the client sent and nginx drops the header when the variable is empty — but
+  only for the names it lists. Explicitly clear any *other* name the app also trusts.
+- **The app is unreachable except through nginx** (loopback, unix socket, firewall).
+  An app reachable directly believes any header anybody sends it.
+
+The app should **not** try to read the identity itself. Usually there is nothing to
+read: the session cookie is not a JWT (it carries only the email, HMAC-signed) and an
+API key has no token at all, so decoding a claim would work for exactly one of the
+three credentials. It would not be safe either — Cognito self-signup is open, so a
+valid `id_token` proves *identity*, never *authorization*. What decides authorization
+is membership in the users file plus the URL scope, and only the gate checks those.
 
 ## URL scoping
 
@@ -299,6 +331,15 @@ The binary is service-agnostic. To front a service at `app.example.com`:
            # header, so the request is denied — the failure is closed, and loud.
            set $bb_url https://app.example.com$uri;
            auth_request /internal/auth-gate;
+
+           # Who the gate just authenticated. auth_request_set reads the subrequest's
+           # response header; proxy_set_header then overwrites whatever the client
+           # sent, and nginx omits the header entirely if the variable is empty.
+           auth_request_set $bb_email $upstream_http_x_auth_email;
+           proxy_set_header X-Auth-Email     $bb_email;
+           proxy_set_header X-Forwarded-User "";   # clear names we do NOT set
+           proxy_set_header Remote-User      "";
+
            error_page 401 = @bb_signin;
            proxy_pass http://127.0.0.1:8080;   # the upstream app
        }
@@ -324,6 +365,12 @@ The binary is service-agnostic. To front a service at `app.example.com`:
    subrequest gets its own `$uri` (`/internal/auth-gate`) but shares the parent's
    variables, so the real URL has to be captured in the gated location and read
    back in the gate.
+
+   `X-Auth-Email` is how the **app** learns who is calling — see
+   [Passing the identity to the app](#passing-the-identity-to-the-app). Rename it
+   there to whatever your app reads, and clear every other name it might trust:
+   `proxy_set_header` only overrides the names it lists, so an unlisted one travels
+   straight through from the client.
 2. **Cross-service SSO vs per-service login** — pure configuration:
    - *SSO (one login across a domain):* set `BB_AUTH_COOKIE_DOMAIN=.example.com`
      so the session cookie is shared, and list every sibling in

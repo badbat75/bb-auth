@@ -74,7 +74,7 @@ in file order:
 | `validate_id_token` | Full JWT validation (see §6). Returns the verified, lowercased email. |
 | `make_session` / `verify_session` | HMAC-SHA256 signed cookie (see §7). |
 | HTTP helpers | Header/cookie parsing, cookie building, open-redirect `safe_rd`, response builders. |
-| `handle_validate` / `handle_session` / `handle_logout` | The three real handlers (plus `/auth/healthz` inline). `/auth/validate` resolves a cookie or bearer credential and enforces the request-URL scope (`bearer_apikey_ok` / `user_scope_ok` / `original_url`). |
+| `handle_validate` / `handle_session` / `handle_logout` | The three real handlers (plus `/auth/healthz` inline). `/auth/validate` resolves a cookie or bearer credential to a user, enforces the request-URL scope, and returns the email in `X-Auth-Email` (`bearer_apikey_email` / `user_scope_email` / `original_url` / `respond_authorized`). |
 | `main` | Build config/state, prime JWKS, spawn the worker thread pool, route requests. |
 
 ---
@@ -103,7 +103,7 @@ in file order:
 
 | Method | Path | Caller | Behavior |
 |--------|------|--------|----------|
-| `GET` | `/auth/validate` | nginx only (`auth_request`) | `204` if an accepted credential authorizes the request URL, otherwise `401`. Accepts (in order) an `Authorization: Bearer bbk_…` static API key, an `Authorization: Bearer <id_token>`, or the session cookie; each is additionally checked against the caller's `authorized_urls`. See §12. |
+| `GET` | `/auth/validate` | nginx only (`auth_request`) | `204` + `X-Auth-Email: <authorized user>` if an accepted credential authorizes the request URL, otherwise `401`. Accepts (in order) an `Authorization: Bearer bbk_…` static API key, an `Authorization: Bearer <id_token>`, or the session cookie; each is additionally checked against the caller's `authorized_urls`. See §12. |
 | `POST` | `/auth/session` | browser | Body `application/x-www-form-urlencoded`: `id_token=…&rd=…`. Fully validates the id_token; on success sets the session cookie and `302`s to `rd` (open-redirect guarded). |
 | `GET` | `/auth/logout` | browser | Sets an expired (Max-Age=0) cookie and `302` → login page. Cross-site requests (`Sec-Fetch-Site: cross-site`) are ignored (no cookie clear) to block CSRF-forced logout. |
 | `GET` | `/auth/healthz` | local | `200 ok`. Liveness probe. |
@@ -465,12 +465,41 @@ literal bytes rather than a segment boundary — which also fails closed.
 `handle_validate` tries credentials in this order, each additionally URL-scoped:
 
 1. **`Authorization: Bearer bbk_…`** — static API key: looked up by hash, checked for
-   expiry and URL scope (`bearer_apikey_ok`).
+   expiry and URL scope (`bearer_apikey_email`).
 2. **`Authorization: Bearer <id_token>`** — a Cognito id_token validated exactly as at
    `/auth/session` (§6); its email must be in `by_email` and the URL in the user's
-   scope (`user_scope_ok`).
+   scope (`user_scope_email`).
 3. **Session cookie** — verified as in §7, then the same `by_email` + URL check.
 
 A failed bearer falls through to the cookie check, so a stray `Authorization` header
 never blocks an otherwise-valid cookie. Any authorized credential → `204`; otherwise
 `401`.
+
+### Identity propagation (`X-Auth-Email`)
+
+Whichever credential wins, it resolves to one value: the email of a user in the users
+file — for an API key, its *owning user's* email. `respond_authorized` returns it on the
+`204` in `X-Auth-Email`, and the gated nginx location lifts it into the proxied request:
+
+```nginx
+auth_request_set $bb_email $upstream_http_x_auth_email;
+proxy_set_header X-Auth-Email $bb_email;   # rename to whatever the app reads
+```
+
+The name bb-auth emits is a fixed constant (`IDENTITY_HEADER`): nginx renames it on the
+way through, so there is nothing to configure here. `proxy_set_header` overwrites what
+the client sent, and nginx omits the header when the variable is empty — but only for
+names it lists, so any *other* name the app trusts must be cleared explicitly. All of
+which is worth nothing unless the app is unreachable except through nginx.
+
+Emails are validated as printable ASCII when the users file is loaded
+(`header_safe_email`, warn-and-skip like an empty email — dropping a user is
+fail-closed). That is what lets `respond_authorized` build the header with no
+per-request check, and it is also the only place that covers the API-key path, whose
+email never passes through a token claim. A CR/LF in an email would otherwise be a
+response-splitting gadget.
+
+The app must not decode the credential itself. Two of the three carry no claim — the
+cookie is an HMAC blob holding only the email, an API key is an opaque secret — and a
+valid `id_token` proves identity, not authorization: self-signup is open, so
+authorization lives in the users file and only the gate consults it.

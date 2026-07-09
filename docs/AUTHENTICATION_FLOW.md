@@ -150,8 +150,9 @@ would be `/internal/auth-gate`. For programmatic clients it also forwards the
    c. session cookie → verify_session: split up to 5 parts; version==bb2 → key by id
       (bb1 legacy → try every accepted key); HMAC verify_slice (constant-time);
       exp>now; then lowercased email in users table + request URL in scope
-   └─ 204 if any of a/b/c authorizes, else 401
- nginx ──proxy to upstream app──▶ browser (the app's response)
+   └─ 204 + X-Auth-Email: <the authorized user> if any of a/b/c authorizes, else 401
+ nginx: auth_request_set $bb_email $upstream_http_x_auth_email
+ nginx ──proxy to upstream app (X-Auth-Email: …)──▶ browser (the app's response)
 ```
 
 A few things are worth emphasizing:
@@ -165,6 +166,12 @@ A few things are worth emphasizing:
   authenticate without the cookie flow; every credential is also confined to its
   `authorized_urls` patterns, and a restricted scope with `X-Original-URL` missing is
   denied (`401`).
+- **The gate names the user; the app trusts nginx for it.** A `204` carries the
+  authorized email in `X-Auth-Email`, the gated location lifts it with
+  `auth_request_set` and passes it upstream. An API key resolves to its *owning
+  user's* email. The app must not decode the credential itself: the cookie is not a
+  JWT and an API key carries no token, and a valid `id_token` proves identity, never
+  authorization. This holds only while the app is unreachable except through nginx.
 - **Verification is stateless.** No server-side lookup is needed; any of the
   worker threads can validate any cookie, and a restart changes nothing about
   existing cookies (they are time-bound, not session-store-bound).
@@ -218,6 +225,7 @@ the gate only manages its own cookie.)
    │─GET / Cookie: <cookie>─────▶│              │             │
    │              │─validate────▶│              │             │
    │              │◀──204────────│              │             │
+   │              │  X-Auth-Email│              │             │
    │◀── app response ────────────│              │             │
 ```
 

@@ -24,9 +24,9 @@ This file holds the **rules**: what must not break, why, and the symbol that pin
 The **mechanism** lives in rustdoc next to the code (`cargo doc --no-deps --open`) — the
 endpoint table and credential order on the crate root, the cookie wire format on
 `COOKIE_VERSION`, the users-file schema on `UsersFile`, the wildcard grammar on `glob_match`,
-the nginx snippet on `Config::original_url_header`. Don't copy one into the other; when they
-disagree, the code wins. Rustdoc must stay warning-free — a broken intra-doc link is the
-cheapest rot detector this repo has.
+the nginx snippets on `Config::original_url_header` and `IDENTITY_HEADER`. Don't copy one into
+the other; when they disagree, the code wins. Rustdoc must stay warning-free — a broken
+intra-doc link is the cheapest rot detector this repo has.
 
 Deep docs: [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md) (service internals) and
 [docs/AUTHENTICATION_FLOW.md](docs/AUTHENTICATION_FLOW.md) (the end-to-end
@@ -103,6 +103,20 @@ bash scripts/build.sh                 # target overridable via BB_AUTH_TARGET
   `server` level: the subrequest re-runs the server rewrite phase and would clobber it. A gated
   location that forgets it sends no header and is denied — fail-closed, which is why this is
   survivable. nginx must also forward `Authorization`, and set the header on `/auth/session` too.
+- **The gate names the user; nginx is what makes that trustworthy.** A `204` carries the
+  authorized email in `IDENTITY_HEADER` (`X-Auth-Email`, a fixed constant — nginx renames it
+  on the way through, so don't make it configurable). It is only safe because nginx sets or
+  clears it on **every** gated location (`proxy_set_header` overrides just the names it lists)
+  and the app is unreachable except through nginx. Emails must be printable ASCII, enforced
+  once at load (`header_safe_email`, warn+skip like an empty email — dropping a user is
+  fail-closed): a CR/LF would be a response-splitting gadget, and load time is the only point
+  that also covers the API-key path, whose email never passes through a token claim. That guard
+  is what lets `respond_authorized` call `h()` without a per-request check — `h()` panics on a
+  non-ASCII value. The emitted email is always a `by_email` key: the token/cookie paths return
+  the string that just matched one by exact lookup, so a case-insensitive lookup added later
+  would break the chain (the `debug_assert!` there exists to catch exactly that). Applications
+  must **not** decode the credential themselves — the cookie is not a JWT and a `bbk_` key has
+  no token, and a valid id_token proves identity, never authorization.
 - **Sessions are stateless** — no server-side store. Any worker validates any cookie; a restart
   logs nobody out. Don't introduce per-session server state.
 - **Dependencies stay pure-Rust / `ring`-based** (`ureq`+rustls with bundled Mozilla roots,

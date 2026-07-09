@@ -14,7 +14,7 @@
 //!
 //! | Method | Path | Caller | Behaviour |
 //! |--------|------|--------|-----------|
-//! | `GET`  | `/auth/validate` | nginx `auth_request`, loopback | 204 if a credential authorizes the request, else 401 |
+//! | `GET`  | `/auth/validate` | nginx `auth_request`, loopback | 204 + [`IDENTITY_HEADER`] if a credential authorizes the request, else 401 |
 //! | `POST` | `/auth/session`  | browser | validate the posted `id_token`, set the cookie, 302 → `rd` |
 //! | `GET`  | `/auth/logout`   | browser | clear the cookie, 302 → the login page |
 //! | `GET`  | `/auth/healthz`  | local   | 200 `ok` |
@@ -37,6 +37,20 @@
 //!
 //! Bearers are stateless — they issue no cookie — and a failed bearer falls through
 //! to the cookie check, so a stray `Authorization` header never blocks a valid cookie.
+//!
+//! # Identity propagation
+//!
+//! All three credentials resolve to the same thing: the email of a user in the users
+//! file. A `204` hands it back in [`IDENTITY_HEADER`], which nginx lifts out of the
+//! subrequest with `auth_request_set` and injects into the request it proxies — that
+//! is how the application learns who is calling.
+//!
+//! An application must not try to read the identity itself. There is usually nothing
+//! to read: the session cookie is not a JWT and carries only the email, and a `bbk_`
+//! key has no token at all, so decoding a claim would work for exactly one of the
+//! three credentials. It would not be safe either — self-signup means a valid
+//! id_token proves identity, never authorization. The header is trustworthy only in
+//! so far as the application is unreachable except through nginx.
 
 use std::collections::HashMap;
 use std::io::Read;
@@ -88,6 +102,35 @@ const COOKIE_VERSION_LEGACY: &str = "bb1";
 /// Namespace prefix marking a static API-key bearer credential (vs a Cognito
 /// id_token JWT): `Authorization: Bearer bbk_<secret>`.
 const API_KEY_PREFIX: &str = "bbk_";
+
+/// Response header naming the authenticated user on a `204` from `/auth/validate`.
+///
+/// nginx lifts it out of the `auth_request` subrequest and re-injects it into the
+/// request it proxies to the application:
+///
+/// ```text
+/// location / {
+///     set $bb_url https://app.example.com$uri;   # rewrite phase, before auth_request
+///     auth_request     /internal/auth-gate;
+///     auth_request_set $bb_email $upstream_http_x_auth_email;
+///
+///     proxy_set_header X-Auth-Email     $bb_email;   # whatever name the app reads
+///     proxy_set_header X-Forwarded-User "";          # clear the names we do NOT set
+///     proxy_set_header Remote-User      "";
+///     proxy_pass http://127.0.0.1:9000;
+/// }
+/// ```
+///
+/// `auth_request_set` belongs in the gated location, not in the gate's own location.
+/// The name the application reads is nginx's choice — it renames on the way through —
+/// so this end stays fixed and unconfigurable.
+///
+/// `proxy_set_header` overwrites whatever the client sent, and nginx omits the header
+/// entirely when the variable is empty, so an unauthenticated request can never smuggle
+/// one in. That only covers names nginx sets, hence the explicit clearing of any other
+/// name the application might also trust. And none of it means anything unless the
+/// application is unreachable except through nginx.
+const IDENTITY_HEADER: &str = "X-Auth-Email";
 
 // ---------------------------------------------------------------------------
 // Config
@@ -654,6 +697,17 @@ struct ApiKeySpec {
     enabled_paths: Option<serde_json::Value>,
 }
 
+/// Is `email` safe to emit verbatim as an HTTP header value?
+///
+/// Visible ASCII only — no control bytes (CR/LF above all), no space, nothing
+/// non-ASCII. Enforced once at load by [`read_users`], which is what lets
+/// [`respond_authorized`] build [`IDENTITY_HEADER`] with no per-request check. Load
+/// time is also the only place that covers the API-key path, whose email comes
+/// straight off [`ApiKeyRecord`] and never passes through a token claim.
+fn header_safe_email(email: &str) -> bool {
+    !email.is_empty() && email.bytes().all(|b| b.is_ascii_graphic())
+}
+
 /// SHA-256 of `s`, lowercase hex. Fingerprints an API key for storage/lookup.
 fn sha256_hex(s: &str) -> String {
     use std::fmt::Write as _;
@@ -739,6 +793,9 @@ fn key_expiry(released: &str, duration: &str) -> Option<Option<u64>> {
 /// Scope errors are deliberately fatal rather than skip-with-warning: a dropped
 /// scope entry silently changes who can reach what. `bb-auth --check-users` exists
 /// so a deploy can catch that before restarting the service.
+///
+/// Emails are additionally required to be [`header_safe_email`], since every one of
+/// them can end up in [`IDENTITY_HEADER`].
 fn read_users(path: &str) -> Result<Users, String> {
     let content = std::fs::read_to_string(path).map_err(|e| format!("read {path}: {e}"))?;
     let file: UsersFile =
@@ -749,6 +806,13 @@ fn read_users(path: &str) -> Result<Users, String> {
         let email = u.email.trim().to_ascii_lowercase();
         if email.is_empty() {
             eprintln!("[bb-auth] WARNING: users entry with empty email, skipping");
+            continue;
+        }
+        if !header_safe_email(&email) {
+            // Warn-and-skip like an empty email: dropping a user denies them, which is
+            // fail-closed. `{email:?}` escapes the very control bytes we are rejecting,
+            // so a crafted file cannot forge log lines on its way out.
+            eprintln!("[bb-auth] WARNING: users entry {email:?} is not printable ASCII, skipping");
             continue;
         }
         if u.enabled_paths.is_some() {
@@ -1285,6 +1349,22 @@ fn respond_empty(req: Request, status: u16) {
     let _ = req.respond(Response::empty(StatusCode(status)));
 }
 
+/// Respond `204` to an authorized `auth_request`, naming the user in [`IDENTITY_HEADER`].
+///
+/// `email` is always a key of [`Users::by_email`]: the API-key path reads it off the
+/// record, and the token and cookie paths return the very string that just matched a key
+/// by exact `HashMap` lookup. Every such key passed [`header_safe_email`] at load, so
+/// [`h`] cannot panic here. The assert pins that chain — it is what stands between a
+/// case-insensitive lookup added later and a panicking worker thread.
+fn respond_authorized(req: Request, email: &str) {
+    debug_assert!(
+        header_safe_email(email),
+        "identity must be header-safe: {email:?}"
+    );
+    let resp = Response::empty(StatusCode(204)).with_header(h(IDENTITY_HEADER, email));
+    let _ = req.respond(resp);
+}
+
 /// Respond `302 Location: …`, optionally setting or clearing the session cookie.
 /// `location` must already have passed [`safe_rd`].
 fn respond_redirect(req: Request, location: &str, set_cookie: Option<&str>) {
@@ -1350,13 +1430,16 @@ fn original_url(req: &Request, cfg: &Config) -> Option<String> {
 
 /// Resolve a `bbk_` API-key bearer against the users table: it must be known, not
 /// expired, and in URL scope. Logs the reason on rejection.
-fn bearer_apikey_ok(state: &State, token: &str, url: Option<&str>) -> bool {
+///
+/// Returns the owning user's email — a key *acts as* its user, so that is the identity
+/// the application downstream sees. It is also the only path with no token to decode.
+fn bearer_apikey_email(state: &State, token: &str, url: Option<&str>) -> Option<String> {
     let users = state.users.read().unwrap();
     let rec = match users.by_key_hash.get(&sha256_hex(token)) {
         Some(r) => r,
         None => {
             eprintln!("[bb-auth] api key rejected: unknown");
-            return false;
+            return None;
         }
     };
     if rec.expires.is_some_and(|e| now() >= e) {
@@ -1364,7 +1447,7 @@ fn bearer_apikey_ok(state: &State, token: &str, url: Option<&str>) -> bool {
             "[bb-auth] api key rejected: expired [{} {}]",
             rec.email, rec.key_id
         );
-        return false;
+        return None;
     }
     if !rec.scope.allows(url) {
         eprintln!(
@@ -1373,37 +1456,44 @@ fn bearer_apikey_ok(state: &State, token: &str, url: Option<&str>) -> bool {
             rec.email,
             rec.key_id
         );
-        return false;
+        return None;
     }
-    true
+    Some(rec.email.clone())
 }
 
 /// A user (email) is authorized if present in the table and the request URL is in
 /// their scope. Shared by the id_token-bearer and cookie paths.
-fn user_scope_ok(state: &State, email: &str, url: Option<&str>) -> bool {
+///
+/// Takes `email` by value and hands it back on success: a successful lookup proves it
+/// is byte-identical to the [`Users::by_email`] key (both sides are lowercased, and
+/// `HashMap::get` is exact-match), so the caller may emit it as the identity without
+/// re-reading the table or cloning the key.
+fn user_scope_email(state: &State, email: String, url: Option<&str>) -> Option<String> {
     let users = state.users.read().unwrap();
-    match users.by_email.get(email) {
-        Some(rec) if rec.scope.allows(url) => true,
+    match users.by_email.get(&email) {
+        Some(rec) if rec.scope.allows(url) => Some(email),
         Some(_) => {
             eprintln!(
                 "[bb-auth] denied: url {} out of scope for {email}",
                 url.unwrap_or("<none>")
             );
-            false
+            None
         }
         None => {
             eprintln!("[bb-auth] denied: {email} not in users table");
-            false
+            None
         }
     }
 }
 
-/// `GET /auth/validate` — the nginx `auth_request` endpoint. 204 if any credential
-/// authorizes this request, 401 otherwise. Never issues a cookie.
+/// `GET /auth/validate` — the nginx `auth_request` endpoint. 204 plus the authorized
+/// user in [`IDENTITY_HEADER`] if any credential authorizes this request, 401 otherwise.
+/// Never issues a cookie.
 ///
 /// Credentials are tried in the order documented on the crate: `bbk_` API key, raw
 /// id_token, then the session cookie. Each must resolve to a user in the table *and*
-/// put the request URL inside that credential's [`UrlScope`].
+/// put the request URL inside that credential's [`UrlScope`]. Whichever one wins, the
+/// identity handed back is that user's email — see [`respond_authorized`].
 fn handle_validate(req: Request, state: &State) {
     let cfg = &state.cfg;
     // Original request URL (for per-user / per-key URL scoping), captured now as an
@@ -1418,28 +1508,30 @@ fn handle_validate(req: Request, state: &State) {
     // Authorization header never blocks an otherwise-valid cookie.
     if let Some(token) = header_value(&req, "Authorization").and_then(parse_bearer) {
         let granted = if token.starts_with(API_KEY_PREFIX) {
-            bearer_apikey_ok(state, token, url.as_deref())
+            bearer_apikey_email(state, token, url.as_deref())
         } else {
             match validate_id_token(token, state) {
-                Ok(email) => user_scope_ok(state, &email, url.as_deref()),
+                Ok(email) => user_scope_email(state, email, url.as_deref()),
                 Err(e) => {
                     eprintln!("[bb-auth] bearer rejected: {e}");
-                    false
+                    None
                 }
             }
         };
-        if granted {
-            respond_empty(req, 204);
+        if let Some(email) = granted {
+            respond_authorized(req, &email);
             return;
         }
     }
 
-    let ok = header_value(&req, "Cookie")
+    let granted = header_value(&req, "Cookie")
         .and_then(|c| cookie_value(c, &cfg.cookie_name).map(str::to_string))
         .and_then(|v| verify_session(&v, &cfg.hmac_keys))
-        .map(|email| user_scope_ok(state, &email, url.as_deref()))
-        .unwrap_or(false);
-    respond_empty(req, if ok { 204 } else { 401 });
+        .and_then(|email| user_scope_email(state, email, url.as_deref()));
+    match granted {
+        Some(email) => respond_authorized(req, &email),
+        None => respond_empty(req, 401),
+    }
 }
 
 /// `POST /auth/session` — exchange a browser-obtained `id_token` for a session cookie,
@@ -2193,6 +2285,48 @@ mod tests {
         let err = users_err(&tmp);
         assert!(err.contains("bob@x.com"), "{err}");
         assert!(err.contains("<scheme>://<host>/<path>"), "{err}");
+        let _ = std::fs::remove_file(&tmp);
+    }
+
+    #[test]
+    fn header_safe_email_rejects_injection_and_non_ascii() {
+        assert!(header_safe_email("alice@example.com"));
+        assert!(header_safe_email("a+tag@sub.example.co.uk"));
+
+        assert!(!header_safe_email("")); // respond_authorized asserts on this
+        assert!(!header_safe_email("bad\r\nX-Admin: 1@x.com")); // response splitting
+        assert!(!header_safe_email("nul\0@x.com"));
+        assert!(!header_safe_email("has space@x.com"));
+        // to_ascii_lowercase() leaves these bytes intact, so the load-time guard is the
+        // only thing keeping them out of a header value.
+        assert!(!header_safe_email("béatrice@x.com"));
+    }
+
+    #[test]
+    fn read_users_skips_header_unsafe_email() {
+        // A CR in an email is a response-splitting gadget once it reaches
+        // IDENTITY_HEADER, so the entry is dropped — and with it every key it owns,
+        // which would otherwise resolve to an email that never passed the guard.
+        let hash = sha256_hex("bbk_evil");
+        let json = format!(
+            r#"{{ "users": [
+                {{ "email": "ok@x.com", "authorized_urls": ["https://x.com/*"] }},
+                {{ "email": "béatrice@x.com", "authorized_urls": ["https://x.com/*"] }},
+                {{ "email": "bad\r\nX-Admin: 1@x.com",
+                   "authorized_urls": ["https://x.com/*"],
+                   "api_keys": [ {{ "id": "k", "key_hash": "{hash}",
+                                    "released": "2026-01-01", "duration": "never" }} ] }}
+              ] }}"#
+        );
+        let tmp = users_tmp("unsafe-email", &json);
+        let u = read_users(tmp.to_str().unwrap()).unwrap();
+
+        assert!(u.by_email.contains_key("ok@x.com"));
+        assert_eq!(u.by_email.len(), 1, "both unsafe entries must be skipped");
+        assert!(
+            u.by_key_hash.is_empty(),
+            "a skipped user must not leave a live key behind"
+        );
         let _ = std::fs::remove_file(&tmp);
     }
 
