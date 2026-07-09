@@ -1,6 +1,6 @@
 [Unit]
 Description=bb-auth (Cognito id_token -> session-cookie auth gate)
-Documentation=file:/opt/bb-auth/bb-auth
+Documentation=file:/opt/bb-auth/bin/bb-auth
 After=network-online.target
 Wants=network-online.target
 
@@ -8,8 +8,8 @@ Wants=network-online.target
 Type=simple
 User=bb-auth
 Group=bb-auth
-EnvironmentFile=/opt/bb-auth/bb-auth.env
-ExecStart=/opt/bb-auth/bb-auth
+EnvironmentFile=/opt/bb-auth/etc/bb-auth.env
+ExecStart=/opt/bb-auth/bin/bb-auth
 # `systemctl reload bb-auth` sends SIGHUP -> live users-table reload (no restart,
 # no sessions dropped). The thread is best-effort; restart still works too.
 ExecReload=/bin/kill -HUP $MAINPID
@@ -40,7 +40,8 @@ SystemCallErrorNumber=EPERM
 SystemCallArchitectures=native
 CapabilityBoundingSet=
 AmbientCapabilities=
-# /opt/bb-auth is read-only to the service (config + binary live there).
+# The whole tree is read-only to the service: bin/ (binary), etc/ (config + HMAC
+# key), var/lib/ (users.json). bb-auth never writes — no StateDirectory needed.
 ReadOnlyPaths=/opt/bb-auth
 UMask=0077
 

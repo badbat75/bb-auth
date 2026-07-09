@@ -8,8 +8,11 @@
 #                        real BB_AUTH_HMAC_KEY is generated on the host and lives
 #                        only there — never in git.
 #   allowed_emails     : the access list (real emails).
+#   deploy/users.json  : the real access file (emails + API key hashes). Only
+#                        deploy/users.example.json is tracked.
 *.env
 allowed_emails
+/deploy/users.json
 
 # OS / editor cruft
 .DS_Store

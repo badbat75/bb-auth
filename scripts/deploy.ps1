@@ -11,22 +11,33 @@
       5. run deploy.sh on the remote as root (it installs, restarts, self-verifies)
       6. final liveness ping, then clean up the remote staging directory
 
+    On the target, bb-auth lives at /opt/bb-auth/{bin/bb-auth, etc/bb-auth.env,
+    var/lib/users.json}.
+
     Lockout-safe by construction:
       - By default NOTHING is staged for users.json, so deploy.sh keeps the
-        existing /opt/bb-auth/users.json untouched (or auto-migrates a legacy
-        allowed_emails on first run). Use -UsersFile for a first install or to
-        replace the access file.
-      - deploy.sh preserves an existing /opt/bb-auth/bb-auth.env, so the HMAC key
-        (and therefore all existing session cookies) stays valid across redeploys.
+        existing var/lib/users.json untouched. Use -UsersFile for a first install
+        or to replace the access file.
+      - deploy.sh preserves an existing etc/bb-auth.env (relocating a pre-2.0 flat
+        one first), so the HMAC key — and therefore every existing session cookie —
+        stays valid across redeploys.
+      - deploy.sh validates the users file that is about to go live with the real
+        parser and aborts BEFORE restarting if it is rejected.
+
+    Upgrading a pre-2.0 host: the first 2.0 deploy REQUIRES -UsersFile with an
+    access file migrated to the `authorized_urls` format. A plain redeploy would
+    preserve the old `enabled_paths` file, which 2.0 rejects — deploy.sh aborts
+    rather than boot-loop the service. nginx must also be updated to send the full
+    request URL (see README, "Putting a service behind the gate").
 
 .PARAMETER Target
     SSH target as user@host, e.g. emiliano@rpi-01.bombicci.local.
 
 .PARAMETER UsersFile
     Local users.json to stage instead of preserving the remote one. Required for a
-    first install (where neither /opt/bb-auth/users.json nor a legacy
-    /opt/bb-auth/allowed_emails exists yet). Validated as JSON before it replaces
-    the live file.
+    first install (and for the first 2.0 deploy on a pre-2.0 host). Validated as
+    JSON, then parsed by the freshly-installed binary, before it replaces the live
+    file. Check it locally first: cargo run -- --check-users .\deploy\users.json
 
 .PARAMETER Build
     Cross-build the aarch64 binary in WSL before staging.
@@ -146,7 +157,7 @@ foreach ($a in $staged) {
     scp -o BatchMode=yes $a.src "${Target}:~/$RemoteStage/$($a.dst)"
     Assert-Native "scp $($a.dst) -> $Target"
 }
-$usersMode = if ($UsersFile) { 'replaced' } else { 'preserved / migrated (none staged)' }
+$usersMode = if ($UsersFile) { 'replaced' } else { 'preserved (none staged)' }
 Write-Host "    staged $($staged.Count) file(s); users.json will be $usersMode"
 
 # --- 5. run deploy.sh as root (installs + restarts + self-verifies) ----------
@@ -156,7 +167,9 @@ Assert-Native "remote deploy.sh (one or more verification checks failed)"
 
 # --- 6. final liveness ping --------------------------------------------------
 Write-Host "==> final liveness check" -ForegroundColor Cyan
-$hz = ssh -o BatchMode=yes $Target 'L=$(sudo grep -E "^[[:space:]]*BB_AUTH_LISTEN=" /opt/bb-auth/bb-auth.env | tail -1 | cut -d= -f2-); curl -fsS --max-time 3 "http://${L:-127.0.0.1:4181}/auth/healthz"'
+# The env file moved to etc/ in 2.0; fall back to the flat path so this still works
+# if deploy.sh bailed before relocating it.
+$hz = ssh -o BatchMode=yes $Target 'E=/opt/bb-auth/etc/bb-auth.env; [ -f "$E" ] || E=/opt/bb-auth/bb-auth.env; L=$(sudo grep -E "^[[:space:]]*BB_AUTH_LISTEN=" "$E" | tail -1 | cut -d= -f2-); curl -fsS --max-time 3 "http://${L:-127.0.0.1:4181}/auth/healthz"'
 Assert-Native "post-deploy healthz"
 Write-Host "    healthz: $hz" -ForegroundColor Green
 

@@ -4,29 +4,54 @@
     "Re-checked on every /auth/validate, so removing a user + `systemctl reload bb-auth`",
     "(SIGHUP) denies even existing sessions; a plain restart works too. Emails match",
     "case-insensitively. Keys are addressed by `key_hash` = SHA-256 of the bbk_ bearer",
-    "(mint with tools/bb-apikey.py); the raw key is never stored here. `enabled_paths`",
-    "are request-path prefixes ([] or ['*'] = all paths); a key without them inherits",
-    "its user's scope. `duration`: <n>d / <n>h / 0 / never, counted from `released`.",
+    "(mint with tools/bb-apikey.py); the raw key is never stored here. `duration`:",
+    "<n>d / <n>h / 0 / never, counted from `released`.",
+    "",
+    "`authorized_urls` are full <scheme>://<host>/<path> patterns and they are the whole",
+    "grant: ACCESS IS ENUMERATED, NEVER ASSUMED. A user with no authorized_urls (or an",
+    "empty list) reaches nothing. To grant everything, say so: ['*://*/*'].",
+    "A key without the field inherits its user's scope.",
+    "",
+    "Wildcards, valid in every component: `*` = any run of characters but never `/` —",
+    "EXCEPT as the final character, where it swallows the rest of the URL, slashes",
+    "included; `&` = exactly one character, never `/`. So `/mcp/*` covers the whole /mcp",
+    "subtree while `/mcp*` would also match /mcp-admin — always put the `/` before the",
+    "`*`. And `/mcp/*` does NOT match a bare `/mcp`; list both if the client hits it.",
+    "",
+    "Validate a file before deploying it: `bb-auth --check-users FILE`.",
     "Unknown fields (this _comment, per-key `notes`) are ignored, so use them freely."
   ],
   "users": [
-    { "email": "you@example.com" },
+    {
+      "email": "you@example.com",
+      "authorized_urls": ["*://*/*"]
+    },
 
     {
       "email": "friend@example.com",
-      "enabled_paths": ["*"]
+      "authorized_urls": ["https://app.example.com/*"],
+      "notes": "browser login, confined to the app host"
+    },
+
+    {
+      "email": "suspended@example.com",
+      "authorized_urls": [],
+      "notes": "listed but reaches nothing — an empty list is a deliberate lockout"
     },
 
     {
       "email": "bot@example.com",
-      "enabled_paths": ["/mcp/"],
+      "authorized_urls": [
+        "https://mcp.example.com/mcp",
+        "https://mcp.example.com/mcp/*"
+      ],
       "api_keys": [
         {
           "id": "laptop",
           "key_hash": "0000000000000000000000000000000000000000000000000000000000000000",
           "released": "2026-07-08",
           "duration": "365d",
-          "enabled_paths": ["/mcp/"],
+          "authorized_urls": ["https://mcp.example.com/mcp/context7/*"],
           "notes": "example only — replace key_hash with one from tools/bb-apikey.py"
         },
         {

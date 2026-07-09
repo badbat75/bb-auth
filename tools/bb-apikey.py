@@ -10,21 +10,30 @@ minting a new one; there is no way to recover it.
 
 The key is used as:  Authorization: Bearer bbk_<secret>
 and validated by bb-auth per request against the owning user's / key's expiry and
-allowed-path scope. It is NOT a Cognito token and needs no AWS anything.
+authorized-URL scope. It is NOT a Cognito token and needs no AWS anything.
 
 Usage
-  bb-apikey.py <email> [--id LABEL] [--duration 365d] [--paths /mcp/,/foo/] [--released YYYY-MM-DD]
+  bb-apikey.py <email> [--id LABEL] [--duration 365d] [--urls URL,URL] [--released YYYY-MM-DD]
 
 Examples
-  # a key for bob, valid 1 year, scoped to /mcp/
-  python bb-apikey.py bob@badbat75.com --id laptop --duration 365d --paths /mcp/
+  # a key for bob, valid 1 year, confined to the /mcp subtree of one host
+  python bb-apikey.py bob@badbat75.com --id laptop --duration 365d \
+      --urls https://mcp.badbat75.com/mcp,https://mcp.badbat75.com/mcp/*
 
-  # a never-expiring, all-paths key (inherits the user's own scope)
+  # a never-expiring key that inherits the user's own scope
   python bb-apikey.py svc@badbat75.com --id ci --duration never
 
 duration: `<n>d` days, `<n>h` hours, bare `<n>` days, or `0`/`never` = no expiry.
-paths:    comma-separated path prefixes; omit to inherit the user's enabled_paths;
-          `*` (or omitting) means all paths.
+urls:     comma-separated <scheme>://<host>/<path> patterns; omit to inherit the
+          user's authorized_urls. To grant every URL, say so: `*://*/*`.
+          Wildcards work in every component: `*` matches any run of characters but
+          never `/` — except as the pattern's final character, where it swallows the
+          rest of the URL, slashes included; `&` matches exactly one non-`/` char.
+          So `/mcp/*` covers the whole subtree, while `/mcp*` would also match
+          `/mcp-admin`. Note `https://host/mcp/*` does NOT match a bare `/mcp` —
+          list both if the client hits the parent too (as in the example above).
+
+Validate the resulting users file with:  bb-auth --check-users <file>
 """
 
 import argparse
@@ -51,7 +60,8 @@ def main(argv=None):
     p.add_argument("email", help="owning user (must be a user in BB_AUTH_USERS_FILE)")
     p.add_argument("--id", default="key", help="human label for logs/revocation (default: key)")
     p.add_argument("--duration", default="365d", help="validity: 365d / 24h / 0 / never (default: 365d)")
-    p.add_argument("--paths", default="", help="comma-separated allowed path prefixes; omit to inherit the user scope")
+    p.add_argument("--urls", default="",
+                   help="comma-separated <scheme>://<host>/<path> patterns; omit to inherit the user scope")
     p.add_argument("--released", default=datetime.date.today().isoformat(),
                    help="issue date YYYY-MM-DD (default: today)")
     p.add_argument("--bytes", type=int, default=32, dest="nbytes",
@@ -68,9 +78,20 @@ def main(argv=None):
         "released": args.released,
         "duration": args.duration,
     }
-    paths = [s.strip() for s in args.paths.split(",") if s.strip()]
-    if paths:
-        entry["enabled_paths"] = paths
+    urls = [s.strip() for s in args.urls.split(",") if s.strip()]
+    if urls:
+        entry["authorized_urls"] = urls
+
+    # bb-auth rejects a malformed pattern outright (a fatal parse error), so flag the
+    # obvious mistakes here rather than at deploy time.
+    for u in urls:
+        if "://" not in u:
+            eprint(f"WARNING: '{u}' has no scheme; bb-auth needs <scheme>://<host>/<path>"
+                   + (" -- for every URL, use '*://*/*'" if u == "*" else ""))
+        elif "/" not in u.split("://", 1)[1]:
+            eprint(f"WARNING: '{u}' has no path; use '{u}/*' to cover the whole host")
+        elif u.endswith("*") and not u.endswith("/*"):
+            eprint(f"WARNING: '{u}' ends in '*' without a '/'; it also matches sibling names")
 
     eprint("=== give this to the client ONCE (not stored anywhere, cannot be recovered) ===")
     eprint(f"Authorization: Bearer {key}")

@@ -39,7 +39,7 @@ nginx error_page 401 → 302  <login-page>/?rd=<original>
 
 | Method | Path             | Who        | Purpose                                            |
 |--------|------------------|------------|----------------------------------------------------|
-| GET    | `/auth/validate` | nginx only | `auth_request`: 204 if the session cookie, an `Authorization: Bearer <id_token>`, or a static `Authorization: Bearer bbk_…` API key authorizes the request (allowlisted user, in path scope), else 401 |
+| GET    | `/auth/validate` | nginx only | `auth_request`: 204 if the session cookie, an `Authorization: Bearer <id_token>`, or a static `Authorization: Bearer bbk_…` API key authorizes the request (allowlisted user, in URL scope), else 401 |
 | POST   | `/auth/session`  | browser    | validate posted `id_token`, set cookie, 302 → `rd` |
 | GET    | `/auth/logout`   | browser    | clear cookie, 302 → login page                     |
 | GET    | `/auth/healthz`  | local      | liveness                                           |
@@ -80,53 +80,101 @@ Authorization: Bearer bbk_<secret>
 ```
 
 bb-auth looks it up by `sha256(bearer)` in the users file (only the hash is stored,
-never the raw key), checks it is not past its `duration`, and enforces its path
+never the raw key), checks it is not past its `duration`, and enforces its URL
 scope. Mint one with [`tools/bb-apikey.py`](tools/bb-apikey.py) — it prints the raw
 bearer **once** and a JSON entry to paste into the owning user's `api_keys`:
 
 ```bash
-python tools/bb-apikey.py bob@badbat75.com --id laptop --duration 365d --paths /mcp/
+python tools/bb-apikey.py bob@badbat75.com --id laptop --duration 365d \
+    --urls 'https://mcp.badbat75.com/mcp,https://mcp.badbat75.com/mcp/*'
 # → Authorization: Bearer bbk_…  (give to the client)   +   { "id": "laptop", "key_hash": … }
 ```
 
-**Path scoping.** Each user, and each key, may carry `enabled_paths` — request-path
-prefixes it is allowed to reach (`[]` or `["*"]` = all; a key with none inherits its
-user's scope). When set, bb-auth needs the original request path, so nginx must pass
-it on the subrequest: `proxy_set_header X-Original-URI $uri;`. A scoped credential
-with that header missing is denied (fail-closed), and a path containing `..` is
-rejected. See the [users file](#users-file) below.
+## URL scoping
+
+Each user, and each key, carries `authorized_urls` — a list of full
+`<scheme>://<host>/<path>` patterns it is allowed to reach. **Access is enumerated,
+never assumed:** a user with no `authorized_urls` (or an empty list) reaches nothing.
+Blanket access is spelled out, as `["*://*/*"]`. A key with no `authorized_urls`
+inherits its user's scope.
+
+Two wildcards, valid in **every** component — scheme, host and path:
+
+| | |
+|---|---|
+| `*` | any run of characters, but never `/` — **except** as the pattern's final character, where it swallows the rest of the URL, slashes included |
+| `&` | exactly one character, never `/` |
+
+The match is anchored at both ends. Because a non-final `*` cannot cross `/`, and
+`://` contains two of them, no wildcard ever leaks from one component into the next.
+
+```text
+https://app.example.com/path1/*           →  /path1/ , /path1/a , /path1/a/b/c.png     (not /path1)
+https://app.example.com/path1/*/          →  /path1/a/ , /path1/ab/                    (not /path1/a/b/)
+https://app.example.com/path1/*/images/*  →  /path1/a/images/x.png , …/images/sub/y.png
+https://app.example.com/v&/*              →  /v1/x , /v9/x                             (not /v10/x)
+*://app.example.com/mcp/*                 →  either scheme
+https://*.example.com/mcp/*               →  any subdomain (`*` crosses dots, so also a.b.example.com)
+*://*/*                                   →  everything: the only way to grant it
+```
+
+Put the `/` before the `*`: `…/mcp/*` covers the subtree, whereas `…/mcp*` would also
+match `/mcp-admin`. And `…/mcp/*` does **not** match a bare `/mcp` — list both if the
+client hits the parent too. The host and scheme match case-insensitively; the path
+does not. Ports never appear (nginx's `$host` omits them), so don't write one.
+
+Scoping needs the original request URL, so nginx must pass it on the subrequest —
+see [the nginx wiring](#putting-a-service-behind-the-gate). Since every credential is
+scoped, that header is **required**: a request without it is denied, as is any URL
+containing `..` (fail-closed on both counts).
 
 ## Users file
 
 The access gate is a single JSON file (`BB_AUTH_USERS_FILE`, installed as
-`/opt/bb-auth/users.json`; see [`deploy/users.example.json`](deploy/users.example.json)).
-It lists every allowlisted email and, optionally, per-user path scopes and static
+`/opt/bb-auth/var/lib/users.json`; see [`deploy/users.example.json`](deploy/users.example.json)).
+It lists every allowlisted email and, optionally, per-user URL scopes and static
 API keys:
 
 ```json
 { "users": [
-  { "email": "you@badbat75.com" },
-  { "email": "bot@badbat75.com", "enabled_paths": ["/mcp/"],
+  { "email": "you@badbat75.com", "authorized_urls": ["*://*/*"] },
+  { "email": "bot@badbat75.com",
+    "authorized_urls": ["https://mcp.badbat75.com/mcp", "https://mcp.badbat75.com/mcp/*"],
     "api_keys": [
       { "id": "laptop", "key_hash": "<sha256 hex of the bbk_ bearer>",
-        "released": "2026-07-08", "duration": "365d", "enabled_paths": ["/mcp/"] }
+        "released": "2026-07-08", "duration": "365d",
+        "authorized_urls": ["https://mcp.badbat75.com/mcp/*"] }
     ] }
 ] }
 ```
 
 - **`email`** (required) — matched case-insensitively; its presence is the allowlist.
-- **`enabled_paths`** — allowed request-path prefixes; omit / `[]` / `["*"]` = all.
+- **`authorized_urls`** — allowed URL patterns (see [URL scoping](#url-scoping)). Omitted or `[]` grants nothing; `["*://*/*"]` grants everything.
 - **`api_keys[]`** — static `bbk_` keys for that user (see [Programmatic access](#programmatic-access-bearer)):
   - **`key_hash`** — `sha256` of the bearer; the raw key is never stored (mint via `tools/bb-apikey.py`).
   - **`duration`** — `<n>d` / `<n>h` / `0` / `never`, counted from **`released`** (`YYYY-MM-DD`).
-  - **`id`** — human label for logs/revocation. **`enabled_paths`** — omit to inherit the user's scope.
+  - **`id`** — human label for logs/revocation. **`authorized_urls`** — omit to inherit the user's scope.
   - Unknown fields (e.g. `notes`) are ignored, so annotate freely.
+
+Check a file before shipping it — a bad pattern is a fatal startup error, and the
+deploy script runs this same check before it restarts anything:
+
+```bash
+bb-auth --check-users deploy/users.json     # exit 0 + a summary, or exit 1 + the error
+```
 
 It is the real access gate, re-checked on **every** `/validate`, hot-reloaded on
 SIGHUP (`systemctl reload bb-auth`) — remove a user or a single key + reload to
 de-authorize even a still-valid cookie. A reload that fails to parse keeps the live
 table (never nuked). Keys are indexed by their hash, so a lookup is a single map hit
 (and trivially a single indexed query if you ever move this to a database).
+
+> **Upgrading from 1.x.** `enabled_paths` is gone and its presence is rejected
+> outright: silently ignoring it would leave a user unscoped, which under the old
+> semantics failed *open*. Rewrite each entry as a full URL pattern — and note that a
+> 1.x user with **no** scope meant "all paths", so those users now need an explicit
+> `["*://*/*"]` or they will reach nothing. Update nginx to send `X-Original-URL` too;
+> the deploy script aborts before restarting rather than boot-loop the service.
 
 ## Session cookie
 
@@ -162,15 +210,26 @@ runtime) to keep the binary and resident memory small.
 
 ## Deploy
 
+On the target, bb-auth is laid out as:
+
+```text
+/opt/bb-auth/bin/bb-auth          # binary (root-owned, read-only to the service)
+/opt/bb-auth/etc/bb-auth.env      # config + HMAC key (0640, service-user readable)
+/opt/bb-auth/var/lib/users.json   # access list (0640, service-user readable)
+/etc/systemd/system/bb-auth.service
+```
+
 `scripts/deploy.sh` is the **on-host installer** (run as root, on the target):
 it installs the binary/unit + staged `bb-auth.env` (generating the HMAC key on
 first install, then preserving it forever), restarts the service, and runs a
 **post-deploy verification** — service active, `GET /auth/healthz == ok`,
 `GET /auth/validate` (no cookie) `== 401`, HMAC key present, users.json
 integrity, clean journal startup — exiting non-zero if any check fails. Staging a
-`users.json` is **optional**: if absent, the live one is preserved (or a legacy
-`allowed_emails` is auto-migrated to `users.json` on first run), so a binary-only
-redeploy can never lock anyone out.
+`users.json` is **optional**: if absent, the live one is preserved, so a
+binary-only redeploy can never lock anyone out. Before it restarts anything it
+validates the users file that is about to go live with the real parser
+(`bb-auth --check-users`) and aborts if it is rejected, leaving the previous
+binary serving.
 
 `scripts/deploy.ps1` (**run from Windows**) orchestrates the whole thing for a
 `user@host`:
@@ -205,22 +264,97 @@ keep it out of version control and off shared storage.
 
 The binary is service-agnostic. To front a service at `app.example.com`:
 
-1. **nginx** on the service host: add the `auth_request` wiring — an
-   `/internal/auth-gate` location proxying to bb-auth's `/auth/validate`, an
-   `error_page 401 → @bb_signin` that redirects to `<login-page>/?rd=…`, and
-   `/auth/session` + `/auth/logout` proxied to bb-auth.
+1. **nginx** on the service host: add the `auth_request` wiring.
+
+   ```nginx
+   # Reject requests for a Host we don't serve, so $host is always a real
+   # server_name. Without this, a spoofed Host: could widen a URL scope.
+   server { listen 443 ssl default_server; ssl_reject_handshake on; }
+
+   server {
+       listen 443 ssl;
+       server_name app.example.com;
+
+       # The gate. `internal` = unreachable from outside; only auth_request hits it.
+       location = /internal/auth-gate {
+           internal;
+           proxy_pass              http://127.0.0.1:4181/auth/validate;
+           proxy_pass_request_body off;
+           proxy_set_header        Content-Length "";
+           # The URL being guarded, captured by the gated location below. Do NOT
+           # write $uri here: inside an auth_request subrequest $uri is the
+           # subrequest's own URI, i.e. the literal /internal/auth-gate.
+           proxy_set_header        X-Original-URL $bb_url;
+           # Programmatic clients authenticate with a bearer on every request.
+           proxy_set_header        Authorization $http_authorization;
+       }
+
+       location / {
+           # Every gated location must set this before auth_request runs (rewrite
+           # phase precedes access phase); the subrequest inherits the variable.
+           # Hardcode the host: it is this server block, and a literal cannot be
+           # spoofed. $uri, never $request_uri: $uri is decoded and normalised, so
+           # /a/%2e%2e/b has already collapsed to the /b nginx will really serve,
+           # and the query string is gone. Forget the `set` and bb-auth sends no
+           # header, so the request is denied — the failure is closed, and loud.
+           set $bb_url https://app.example.com$uri;
+           auth_request /internal/auth-gate;
+           error_page 401 = @bb_signin;
+           proxy_pass http://127.0.0.1:8080;   # the upstream app
+       }
+
+       location @bb_signin {
+           return 302 https://login.example.com/?rd=$scheme://$host$request_uri;
+       }
+
+       location = /auth/session {
+           # Same header here: it tells bb-auth which host the login is happening
+           # on, so a relative `rd` resolves against the caller. This is a plain
+           # proxy_pass, not a subrequest, so $uri is the real one.
+           proxy_set_header X-Original-URL https://app.example.com$uri;
+           proxy_pass http://127.0.0.1:4181/auth/session;
+       }
+       location = /auth/logout  { proxy_pass http://127.0.0.1:4181/auth/logout;  }
+   }
+   ```
+
+   `X-Original-URL` is what [URL scoping](#url-scoping) matches against. It is
+   required — every credential is scoped, so a subrequest without it is denied.
+   The `set $bb_url …` / `$bb_url` split is not stylistic: an `auth_request`
+   subrequest gets its own `$uri` (`/internal/auth-gate`) but shares the parent's
+   variables, so the real URL has to be captured in the gated location and read
+   back in the gate.
 2. **Cross-service SSO vs per-service login** — pure configuration:
    - *SSO (one login across a domain):* set `BB_AUTH_COOKIE_DOMAIN=.example.com`
-     so the session cookie is shared, and `BB_AUTH_RD_BASE_DOMAIN=example.com` so
-     the `rd` open-redirect guard accepts any `*.example.com` sibling.
-   - *Per-service login:* run a separate bb-auth instance per service (its own
-     `BB_AUTH_SEARCH_URL` + host-only cookie).
+     so the session cookie is shared, and list every sibling in
+     `BB_AUTH_AUTHORIZED_HOSTS=example.com,*.example.com` so the `rd`
+     open-redirect guard accepts them.
+   - *Per-service login:* run a separate bb-auth instance per service, with a
+     host-only cookie and `BB_AUTH_AUTHORIZED_HOSTS=app.example.com`.
 3. **Login page**: it must POST the `id_token` to the *right* service's
    `/auth/session`. For multiple services, derive the target from the validated
    `rd` instead of a fixed base.
 
 Step 3 is the only per-service behaviour change; the SSO scope in step 2 is now
-just configuration (`BB_AUTH_COOKIE_DOMAIN` + `BB_AUTH_RD_BASE_DOMAIN`).
+just configuration (`BB_AUTH_COOKIE_DOMAIN` + `BB_AUTH_AUTHORIZED_HOSTS`).
+
+### Where the post-login redirect may land
+
+There is no canonical "service base URL" — one gate fronts several hosts, and which
+one is in play is decided by the caller. So `BB_AUTH_AUTHORIZED_HOSTS` is the sole
+authority on where `?rd=…` may send a freshly-logged-in browser:
+
+- a relative `rd` (`/preferences`) resolves against the **caller's** host, taken from
+  `X-Original-URL` on `/auth/session`;
+- an absolute `rd` must be `https://` on a host matching one of the patterns;
+- with no `rd` at all, the browser lands on the caller's root;
+- anything rejected — an off-host URL, a control byte, `//evil`, `/\evil`, userinfo
+  (`https://app.example.com@evil.com/`), a lookalike (`evilexample.com`) — falls back
+  to `BB_AUTH_LOGIN_URL`.
+
+Every candidate, including one resolved against the caller, goes through the same host
+gate, so even a misconfigured proxy cannot turn this into an open redirect. Note that
+`*.example.com` does **not** match the bare apex `example.com`: list it if you want it.
 
 ## Security notes
 
@@ -230,7 +364,7 @@ just configuration (`BB_AUTH_COOKIE_DOMAIN` + `BB_AUTH_RD_BASE_DOMAIN`).
   authorizes its user per request within its path scope. Revoke by removing the key
   (or the user) from the users file + reload. Keys bypass Cognito, so treat the raw
   bearer like a password and prefer scoping it to the paths it needs.
-- `rd` is open-redirect-guarded to the service host (or `*.BB_AUTH_RD_BASE_DOMAIN`).
+- `rd` is open-redirect-guarded to `BB_AUTH_AUTHORIZED_HOSTS`.
 - Login-CSRF (an attacker POSTing *their* token to log a victim into the
   attacker's account) is possible in theory but low-impact for a read gate;
   accepted. Revisit with a state/nonce if the gate ever fronts something sensitive.

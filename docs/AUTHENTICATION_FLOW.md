@@ -109,10 +109,12 @@ Inside bb-auth (`handle_session`):
 4. **Build the cookie** (see `ARCHITECTURE.md` §7):
    `bb2.<keyid>.<exp>.<b64url(email)>.<b64url(HMAC_SHA256(prefix))>`, signed with
    the active key, `exp = now + TTL`.
-5. **`safe_rd(rd)`:** the redirect target must start with the canonical
-   service URL, or be a same-host absolute path (no `//`, no `/\`); any control
-   byte (incl. CR/LF) is rejected. Otherwise default to the service URL. This
-   blocks open-redirect abuse and response splitting.
+5. **`safe_rd(rd)`:** the redirect target must resolve to an `https://` URL whose host
+   matches `BB_AUTH_AUTHORIZED_HOSTS`. An absolute path (no `//`, no `/\`) resolves
+   against the caller's own host, which nginx supplies via `X-Original-URL` on this
+   very request; with no `rd` at all the browser lands on that host's root. Any
+   control byte (incl. CR/LF) is rejected. Anything else falls back to the login page.
+   This blocks open-redirect abuse and response splitting.
 6. Respond `302` to `rd` with `Set-Cookie: <cookie>=…; HttpOnly; Secure;
    SameSite=Lax; Max-Age=2592000`.
 
@@ -129,22 +131,25 @@ Outcomes the user can see:
 
 ## Phase 4 — Authenticated request (cookie present)
 
-Every subsequent request to `app.example.com` re-enters the nginx gate. nginx
-forwards the original request path (`proxy_set_header X-Original-URI $uri;`) and,
-for programmatic clients, the `Authorization` header on the subrequest:
+Every subsequent request to `app.example.com` re-enters the nginx gate. The gated
+location captures the original request URL (`set $bb_url https://app.example.com$uri;`)
+and the gate forwards it as `X-Original-URL $bb_url` — `$uri` inside the subrequest
+would be `/internal/auth-gate`. For programmatic clients it also forwards the
+`Authorization` header:
 
 ```text
  browser ──GET https://app.example.com/?...  Cookie: <cookie>=bb2...──▶ nginx
  nginx: auth_request → /internal/auth-gate → bb-auth GET /auth/validate
-        (X-Original-URI: /...   [+ Authorization: Bearer … for API clients])
+        (X-Original-URL: https://app.example.com/...
+         [+ Authorization: Bearer … for API clients])
  bb-auth (handle_validate), first credential that authorizes wins:
    a. Authorization: Bearer bbk_…  → static API key: sha256(bearer) in by_key_hash,
-      unexpired, request path in the key's scope
+      unexpired, request URL in the key's scope
    b. Authorization: Bearer <id_token>  → validated as in Phase 3, email in users
-      table, request path in the user's scope
+      table, request URL in the user's scope
    c. session cookie → verify_session: split up to 5 parts; version==bb2 → key by id
       (bb1 legacy → try every accepted key); HMAC verify_slice (constant-time);
-      exp>now; then lowercased email in users table + request path in scope
+      exp>now; then lowercased email in users table + request URL in scope
    └─ 204 if any of a/b/c authorizes, else 401
  nginx ──proxy to upstream app──▶ browser (the app's response)
 ```
@@ -158,7 +163,7 @@ A few things are worth emphasizing:
   header never blocks a valid cookie. Static `bbk_` API keys (see
   [`ARCHITECTURE.md`](./ARCHITECTURE.md) §12) let non-browser clients (e.g. MCP)
   authenticate without the cookie flow; every credential is also confined to its
-  allowed path prefixes, and a restricted scope with `X-Original-URI` missing is
+  `authorized_urls` patterns, and a restricted scope with `X-Original-URL` missing is
   denied (`401`).
 - **Verification is stateless.** No server-side lookup is needed; any of the
   worker threads can validate any cookie, and a restart changes nothing about

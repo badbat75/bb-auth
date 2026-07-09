@@ -16,9 +16,9 @@
 //!                          the browser cookie flow: `<cred>` is either a raw Cognito
 //!                          id_token (validated exactly like /auth/session), or a
 //!                          static `bbk_` API key from the JSON users table (tied to a
-//!                          user, with its own expiry and allowed-path scope).
+//!                          user, with its own expiry and allowed-URL scope).
 //!                          Every credential is additionally checked against the
-//!                          requesting user's / key's allowed path prefixes.
+//!                          requesting user's / key's `authorized_urls` patterns.
 //!   POST /auth/session   — public; body `id_token=...&rd=...`. Validates the
 //!                          id_token fully, sets the session cookie, 302 → rd.
 //!   GET  /auth/logout    — public; clears the cookie, 302 → login page.
@@ -106,18 +106,23 @@ struct Config {
     cookie_name: String,
     cookie_domain: Option<String>,
     session_ttl: u64,
-    search_url: String, // canonical service base (BB_AUTH_SEARCH_URL), e.g. https://app.example.com/
-    // Optional parent domain (no leading dot, e.g. "example.com") enabling cross-
-    // service SSO: an absolute https `rd` whose host is this domain or a subdomain
-    // of it is accepted by `safe_rd`, so one login can redirect back to any sibling
-    // service behind the gate. `None` (unset) = only `search_url` + same-host paths.
-    // Pair with BB_AUTH_COOKIE_DOMAIN=.<domain> so the session cookie is shared.
-    rd_base_domain: Option<String>,
+    // Hosts a post-login `rd` may point at (BB_AUTH_AUTHORIZED_HOSTS), as glob patterns
+    // matched against the host alone, e.g. `badbat75.com,*.badbat75.com`. This is the
+    // *only* authority for `safe_rd`: there is no canonical service base URL, because
+    // one gate fronts several hosts and which one is in play is decided by the caller.
+    // Enumerate the apex explicitly — `*.x.com` does not match `x.com`. Pair with
+    // BB_AUTH_COOKIE_DOMAIN=.<domain> to share the session cookie across them.
+    authorized_hosts: Vec<UrlPattern>,
     login_url: String, // login page (BB_AUTH_LOGIN_URL), e.g. https://login.example.com/
-    // Request header carrying the original request URI on the nginx `auth_request`
-    // subrequest (default `X-Original-URI`), used for per-user/per-key path scoping.
-    // nginx must set it: `proxy_set_header X-Original-URI $uri;` (normalised path).
-    original_uri_header: String,
+    // Request header carrying the original request URL — scheme, host and normalised
+    // path — on the nginx `auth_request` subrequest AND on `/auth/session` (default
+    // `X-Original-URL`). It drives per-user/per-key URL scoping, and on `/auth/session`
+    // it tells bb-auth which host the login is happening on, so a relative `rd`
+    // resolves against the caller. nginx must set it, with the host hardcoded per
+    // server block so a spoofed `Host:` cannot widen a scope:
+    //   `proxy_set_header X-Original-URL https://app.example.com$uri;`
+    // `$uri` (not `$request_uri`): decoded, normalised, query-free.
+    original_url_header: String,
     workers: usize,
 }
 
@@ -198,20 +203,24 @@ impl Config {
             s if s.is_empty() => None,
             s => Some(s),
         };
-        let mut search_url = env_req("BB_AUTH_SEARCH_URL");
-        if !search_url.ends_with('/') {
-            search_url.push('/');
+        // The redirect scope: which hosts a post-login `rd` may land on. Required —
+        // there is no default, and an empty list would make every login bounce back to
+        // the login page.
+        let authorized_hosts: Vec<UrlPattern> = env_req("BB_AUTH_AUTHORIZED_HOSTS")
+            .split(',')
+            .map(str::trim)
+            .filter(|s| !s.is_empty())
+            .map(|h| {
+                compile_host_pattern(h).unwrap_or_else(|e| {
+                    eprintln!("[bb-auth] FATAL: BB_AUTH_AUTHORIZED_HOSTS: {e}");
+                    std::process::exit(1);
+                })
+            })
+            .collect();
+        if authorized_hosts.is_empty() {
+            eprintln!("[bb-auth] FATAL: BB_AUTH_AUTHORIZED_HOSTS is empty");
+            std::process::exit(1);
         }
-        // Cross-service SSO redirect scope. Accept ".example.com" or "example.com";
-        // normalise to a bare, lowercased "example.com". Empty => None.
-        let rd_base_domain = match env_or("BB_AUTH_RD_BASE_DOMAIN", "")
-            .trim()
-            .trim_start_matches('.')
-            .to_ascii_lowercase()
-        {
-            s if s.is_empty() => None,
-            s => Some(s),
-        };
 
         // `client_id` is always an accepted audience; `BB_AUTH_AUDIENCES`
         // (comma-separated) appends extra app-client ids — a Cognito id_token is
@@ -252,10 +261,9 @@ impl Config {
             session_ttl: env_or("BB_AUTH_SESSION_TTL_SECS", "2592000")
                 .parse()
                 .unwrap_or(2_592_000),
-            search_url,
-            rd_base_domain,
+            authorized_hosts,
             login_url: env_req("BB_AUTH_LOGIN_URL"),
-            original_uri_header: env_or("BB_AUTH_ORIGINAL_URI_HEADER", "X-Original-URI"),
+            original_url_header: env_or("BB_AUTH_ORIGINAL_URL_HEADER", "X-Original-URL"),
             workers: env_or("BB_AUTH_WORKERS", "4").parse().unwrap_or(4).max(1),
         }
     }
@@ -289,20 +297,27 @@ fn now() -> u64 {
 // ---------------------------------------------------------------------------
 // Users table (JSON: allowlisted emails + their static API keys)
 //
-// One file (BB_AUTH_USERS_FILE) describes every user, each with an optional path
+// One file (BB_AUTH_USERS_FILE) describes every user, each with an optional URL
 // scope and zero or more static `bbk_` API keys. It replaces the old flat email
 // allowlist and stays the real access gate, hot-reloaded on SIGHUP:
 //
 //   { "users": [
 //       { "email": "bob@x.com",
-//         "enabled_paths": ["/mcp/"],           // user-level scope; omit/["*"] = all
+//         "authorized_urls": ["https://mcp.x.com/mcp/*"],   // what bob may reach
 //         "api_keys": [
 //           { "id": "laptop", "key_hash": "<sha256 hex of the bbk_… bearer>",
 //             "released": "2026-07-08", "duration": "365d",
-//             "enabled_paths": ["/mcp/"] }       // omit => inherit the user scope
+//             "authorized_urls": ["https://mcp.x.com/mcp/*"] }  // omit => inherit user scope
 //         ] },
-//       { "email": "alice@x.com" }               // plain user: cookie only, all paths
+//       { "email": "alice@x.com", "authorized_urls": ["*://*/*"] }   // every URL
 //   ] }
+//
+// Access is enumerated, never assumed: a user with no `authorized_urls` reaches
+// nothing. "Everything" is the explicit pattern `*://*/*`.
+//
+// `enabled_paths` (the pre-2.0 path-prefix field) is REJECTED outright: silently
+// ignoring it would leave a user unscoped, which under the old semantics failed
+// open. See `read_users`.
 //
 // Keys are indexed by the SHA-256 (hex) of the whole bearer — the raw key is
 // never stored. High-entropy random keys make a plain (unsalted) hash + a
@@ -311,46 +326,189 @@ fn now() -> u64 {
 // label (logs / revocation), not part of the credential.
 // ---------------------------------------------------------------------------
 
-/// Allowed request-path scope for a user or key.
-#[derive(Clone)]
-enum PathScope {
-    All,                   // no restriction (empty list or a "*" entry)
-    Prefixes(Vec<String>), // request path must start with one of these
+/// Match `s` against a URL pattern with two wildcards:
+///
+/// * `*` — zero or more characters, never `/` — **except** as the pattern's final
+///   byte, where it swallows the rest of the input, slashes included.
+/// * `&` — exactly one character, never `/`.
+///
+/// Everything else is a literal byte. The match is anchored at both ends. Because
+/// a non-terminal `*` cannot cross `/`, and `://` holds two of them, no wildcard
+/// can ever leak across the scheme/host/path boundaries — so the same matcher
+/// serves all three components without special-casing them.
+///
+/// Bottom-up DP over `(pattern suffix, input suffix)`: O(n·m) time and O(m) space.
+/// A recursive star-backtracker would be exponential on patterns with many `*`.
+fn glob_match(pat: &[u8], s: &[u8]) -> bool {
+    let (n, m) = (pat.len(), s.len());
+    // `next[j]` = can pat[i+1..] match s[j..]; `cur[j]` = can pat[i..] match s[j..].
+    let mut next = vec![false; m + 1];
+    let mut cur = vec![false; m + 1];
+    next[m] = true; // empty pattern matches empty input
+
+    for i in (0..n).rev() {
+        let terminal_star = pat[i] == b'*' && i == n - 1;
+        for j in (0..=m).rev() {
+            cur[j] = if terminal_star {
+                true // devours the remainder, `/` included
+            } else if pat[i] == b'*' {
+                // zero characters, or one more non-slash character
+                next[j] || (j < m && s[j] != b'/' && cur[j + 1])
+            } else if pat[i] == b'&' {
+                j < m && s[j] != b'/' && next[j + 1]
+            } else {
+                j < m && s[j] == pat[i] && next[j + 1]
+            };
+        }
+        std::mem::swap(&mut cur, &mut next);
+    }
+    next[0]
 }
 
-impl PathScope {
-    /// Build a scope from a JSON `enabled_paths` list: empty (after trimming) or
-    /// containing `"*"` => `All`; otherwise the non-empty prefixes.
-    fn from_list(list: &[String]) -> PathScope {
-        let cleaned: Vec<String> = list
-            .iter()
-            .map(|s| s.trim().to_string())
-            .filter(|s| !s.is_empty())
-            .collect();
-        if cleaned.is_empty() || cleaned.iter().any(|p| p == "*") {
-            PathScope::All
-        } else {
-            PathScope::Prefixes(cleaned)
+/// The `scheme://host` prefix of an absolute URL, with no trailing slash. `None` if
+/// `url` is not absolute or carries an empty authority. Used to learn which host a
+/// login is happening on, so a relative `rd` can resolve against the caller.
+fn origin_of(url: &str) -> Option<String> {
+    let i = url.find("://")?;
+    let rest = &url[i + 3..];
+    let end = rest.find(['/', '?', '#']).unwrap_or(rest.len());
+    if end == 0 {
+        return None;
+    }
+    Some(url[..i + 3 + end].to_string())
+}
+
+/// Lowercase the authority (`scheme://host`) of a URL, leaving the path's case
+/// intact. Hosts and schemes are case-insensitive per RFC 3986; paths are not.
+fn lower_authority(url: &str) -> String {
+    let split = match url.find("://") {
+        Some(i) => match url[i + 3..].find('/') {
+            Some(j) => i + 3 + j, // first '/' after the authority
+            None => url.len(),
+        },
+        None => return url.to_string(),
+    };
+    let mut out = url[..split].to_ascii_lowercase();
+    out.push_str(&url[split..]);
+    out
+}
+
+/// A compiled `authorized_urls` entry: normalised pattern bytes.
+#[derive(Clone)]
+struct UrlPattern {
+    pat: Vec<u8>,
+}
+
+/// Validate and normalise one `authorized_urls` entry. A malformed pattern is an
+/// error rather than a silently-dead rule: skipping it would quietly narrow (or, if
+/// it was the only entry, blank out) a scope that someone believed they had written.
+fn compile_pattern(raw: &str) -> Result<UrlPattern, String> {
+    let e = |m: &str| Err(format!("authorized_urls entry '{raw}': {m}"));
+    let p = raw.trim();
+    if p.bytes().any(|b| b < 0x20 || b == 0x7f) {
+        return e("contains a control byte");
+    }
+    let sep = match p.find("://") {
+        Some(i) if i > 0 => i,
+        Some(_) => return e("empty scheme"),
+        None => return e("must be <scheme>://<host>/<path>; use '*://*/*' for every URL"),
+    };
+    let rest = &p[sep + 3..];
+    let slash = match rest.find('/') {
+        Some(j) => j,
+        None => return e("missing path (use '<scheme>://<host>/*' for the whole host)"),
+    };
+    if slash == 0 {
+        return e("empty host");
+    }
+    if rest[..slash].contains('@') {
+        return e("userinfo '@' is not allowed in the host");
+    }
+    if p.contains("..") {
+        return e("'..' is not allowed");
+    }
+    Ok(UrlPattern {
+        pat: lower_authority(p).into_bytes(),
+    })
+}
+
+/// Validate and normalise one `BB_AUTH_AUTHORIZED_HOSTS` entry: a host-only glob
+/// (`badbat75.com`, `*.badbat75.com`, `v&.badbat75.com`). No scheme, no path, no port
+/// — `rd_url_allowed` strips those from the candidate before matching.
+fn compile_host_pattern(raw: &str) -> Result<UrlPattern, String> {
+    let e = |m: &str| Err(format!("host pattern '{raw}': {m}"));
+    let h = raw.trim().to_ascii_lowercase();
+    if h.is_empty() {
+        return e("empty");
+    }
+    if h.bytes().any(|b| b < 0x20 || b == 0x7f) {
+        return e("contains a control byte");
+    }
+    if h.contains('/') || h.contains(':') {
+        return e("must be a bare host — no scheme, port or path");
+    }
+    if h.contains('@') || h.contains("..") {
+        return e("must not contain '@' or '..'");
+    }
+    Ok(UrlPattern {
+        pat: h.into_bytes(),
+    })
+}
+
+/// Allowed request-URL scope for a user or key: the patterns it may reach.
+///
+/// There is no "unrestricted" variant. An absent or empty `authorized_urls` grants
+/// **nothing** — access is enumerated, never assumed. Blanket access is spelled out
+/// as the pattern `*://*/*`, which an operator has to mean in order to write.
+#[derive(Clone)]
+struct UrlScope {
+    patterns: Vec<UrlPattern>, // request URL must match one of these; empty = deny all
+}
+
+impl UrlScope {
+    /// The empty scope: authorizes no URL at all. What an absent `authorized_urls`
+    /// resolves to.
+    fn deny_all() -> UrlScope {
+        UrlScope {
+            patterns: Vec::new(),
         }
     }
 
-    /// Whether `path` (the original request URI, query stripped) is in scope.
-    /// A missing path (`None`) is allowed only for `All`; a restricted scope with
-    /// no known path fails closed. `..` in a restricted path is rejected outright.
-    fn allows(&self, path: Option<&str>) -> bool {
-        match self {
-            PathScope::All => true,
-            PathScope::Prefixes(prefixes) => match path {
-                None => false,
-                Some(p) => !p.contains("..") && prefixes.iter().any(|pre| p.starts_with(pre)),
-            },
+    /// Compile a JSON `authorized_urls` list.
+    fn compile(list: &[String]) -> Result<UrlScope, String> {
+        let mut patterns = Vec::with_capacity(list.len());
+        for raw in list.iter().map(|s| s.trim()).filter(|s| !s.is_empty()) {
+            patterns.push(compile_pattern(raw)?);
+        }
+        Ok(UrlScope { patterns })
+    }
+
+    fn is_empty(&self) -> bool {
+        self.patterns.is_empty()
+    }
+
+    /// Whether `url` (the original request URL, query/fragment stripped, authority
+    /// lowercased) is in scope. A missing URL (`None`) is always a denial: every
+    /// credential is scoped, so the reverse proxy must always send the header. `..`
+    /// anywhere is rejected — nginx's `$uri` is already normalised, so this only
+    /// fires on a misconfigured proxy, and it fires closed.
+    fn allows(&self, url: Option<&str>) -> bool {
+        match url {
+            None => false,
+            Some(u) => {
+                !u.contains("..")
+                    && self
+                        .patterns
+                        .iter()
+                        .any(|p| glob_match(&p.pat, u.as_bytes()))
+            }
         }
     }
 }
 
 /// A resolved allowlisted user (keyed elsewhere by lowercased email).
 struct UserRecord {
-    paths: PathScope,
+    scope: UrlScope,
 }
 
 /// A resolved API key (keyed elsewhere by the bearer's SHA-256 hex).
@@ -358,7 +516,7 @@ struct ApiKeyRecord {
     email: String,        // owning user, for logging
     key_id: String,       // label, for logging / revocation
     expires: Option<u64>, // Unix seconds; None = never
-    paths: PathScope,
+    scope: UrlScope,
 }
 
 /// The two runtime indices built from the users file.
@@ -378,8 +536,12 @@ struct UsersFile {
 #[derive(Deserialize)]
 struct UserSpec {
     email: String,
+    // Absent => unrestricted; present (even empty) => this user's own scope.
     #[serde(default)]
-    enabled_paths: Vec<String>,
+    authorized_urls: Option<Vec<String>>,
+    // Pre-2.0 field. Its mere presence is fatal — see `read_users`.
+    #[serde(default)]
+    enabled_paths: Option<serde_json::Value>,
     #[serde(default)]
     api_keys: Vec<ApiKeySpec>,
 }
@@ -396,7 +558,9 @@ struct ApiKeySpec {
     duration: String,
     // Absent => inherit the user's scope; present => this key's own scope.
     #[serde(default)]
-    enabled_paths: Option<Vec<String>>,
+    authorized_urls: Option<Vec<String>>,
+    #[serde(default)]
+    enabled_paths: Option<serde_json::Value>,
 }
 
 /// SHA-256 of `s`, lowercase hex. Fingerprints an API key for storage/lookup.
@@ -476,9 +640,14 @@ fn key_expiry(released: &str, duration: &str) -> Option<Option<u64>> {
     }
 }
 
-/// Parse the users JSON into the two runtime indices. Structurally-invalid JSON
-/// is a hard error (so a reload keeps the old table); an individual malformed key
-/// is warned about and skipped so one typo can't drop every user.
+/// Parse the users JSON into the two runtime indices. Structurally-invalid JSON, a
+/// residual `enabled_paths`, or a malformed URL pattern are hard errors (so a SIGHUP
+/// reload keeps the old table); an individual malformed *key* is warned about and
+/// skipped so one bad `key_hash` can't drop every user.
+///
+/// Scope errors are deliberately fatal rather than skip-with-warning: a dropped
+/// scope entry silently changes who can reach what. `bb-auth --check-users` exists
+/// so a deploy can catch that before restarting the service.
 fn read_users(path: &str) -> Result<Users, String> {
     let content = std::fs::read_to_string(path).map_err(|e| format!("read {path}: {e}"))?;
     let file: UsersFile =
@@ -491,8 +660,29 @@ fn read_users(path: &str) -> Result<Users, String> {
             eprintln!("[bb-auth] WARNING: users entry with empty email, skipping");
             continue;
         }
-        let user_paths = PathScope::from_list(&u.enabled_paths);
+        if u.enabled_paths.is_some() {
+            return Err(format!(
+                "{email}: 'enabled_paths' is no longer supported; use 'authorized_urls' \
+                 with full <scheme>://<host>/<path> patterns"
+            ));
+        }
+        let user_scope = match &u.authorized_urls {
+            Some(list) => UrlScope::compile(list).map_err(|e| format!("{email}: {e}"))?,
+            None => UrlScope::deny_all(),
+        };
+        if user_scope.is_empty() {
+            eprintln!(
+                "[bb-auth] WARNING: {email} has no authorized_urls — every request from this \
+                 user is denied (use [\"*://*/*\"] to grant every URL)"
+            );
+        }
         for k in &u.api_keys {
+            if k.enabled_paths.is_some() {
+                return Err(format!(
+                    "{email} key '{}': 'enabled_paths' is no longer supported; use 'authorized_urls'",
+                    k.id
+                ));
+            }
             let hash = k.key_hash.trim().to_ascii_lowercase();
             if hash.len() != 64 || !hash.bytes().all(|b| b.is_ascii_hexdigit()) {
                 eprintln!(
@@ -511,9 +701,11 @@ fn read_users(path: &str) -> Result<Users, String> {
                     continue;
                 }
             };
-            let paths = match &k.enabled_paths {
-                Some(list) => PathScope::from_list(list),
-                None => user_paths.clone(),
+            let scope = match &k.authorized_urls {
+                Some(list) => {
+                    UrlScope::compile(list).map_err(|e| format!("{email} key '{}': {e}", k.id))?
+                }
+                None => user_scope.clone(),
             };
             let key_id = if k.id.trim().is_empty() {
                 "?".to_string()
@@ -526,11 +718,11 @@ fn read_users(path: &str) -> Result<Users, String> {
                     email: email.clone(),
                     key_id,
                     expires,
-                    paths,
+                    scope,
                 },
             );
         }
-        by_email.insert(email, UserRecord { paths: user_paths });
+        by_email.insert(email, UserRecord { scope: user_scope });
     }
     Ok(Users {
         by_email,
@@ -908,45 +1100,63 @@ fn build_cookie(cfg: &Config, value: &str, max_age: i64) -> String {
 /// Validate the post-login redirect target against open-redirect and
 /// response-splitting abuse.
 ///
-/// Allowed: an absolute URL under the canonical search URL, or a same-host
-/// absolute path. A leading `//evil` or `/\evil` is rejected (browsers
-/// normalise a leading `/\` to `//`, i.e. an off-host redirect). Any control
-/// byte, including CR/LF, causes a fall-back to the search URL, so
+/// There is no canonical service base URL — one gate fronts several hosts, and which
+/// one is in play is decided by the caller. So `caller_origin` (the `scheme://host` of
+/// the `/auth/session` request, learned from `BB_AUTH_ORIGINAL_URL_HEADER`) is what a
+/// relative `rd` resolves against, and `hosts` (`BB_AUTH_AUTHORIZED_HOSTS`) is the sole
+/// authority on where a redirect may land.
+///
+/// Every candidate — absolute, relative, or the no-`rd` default — goes through the
+/// same `rd_url_allowed` gate, so even a spoofed caller origin cannot produce an
+/// off-domain redirect. Anything rejected falls back to `login_url`. A leading `//evil`
+/// or `/\evil` is not treated as a path (browsers normalise `/\` to `//`, i.e. an
+/// off-host redirect). Any control byte, including CR/LF, is rejected outright, so
 /// attacker-supplied bytes can never reach the `Location` header (no response
 /// splitting).
-fn safe_rd(rd: Option<&str>, search_url: &str, rd_base_domain: Option<&str>) -> String {
-    let r = match rd {
-        Some(r) if !r.is_empty() => r,
-        _ => return search_url.to_string(),
-    };
-    if r.bytes().any(|b| b < 0x20 || b == 0x7f) {
-        return search_url.to_string();
-    }
-    // Absolute URL under the canonical service base — always allowed.
-    if r.starts_with(search_url) {
-        return r.to_string();
-    }
-    // Cross-service SSO: an absolute https URL whose host is (a subdomain of) the
-    // configured base domain. Guarded strictly (https-only, host-suffix match,
-    // no userinfo/backslash) so it can't become an open redirect.
-    if let Some(base) = rd_base_domain {
-        if rd_host_allowed(r, base) {
-            return r.to_string();
+fn safe_rd(
+    rd: Option<&str>,
+    caller_origin: Option<&str>,
+    hosts: &[UrlPattern],
+    login_url: &str,
+) -> String {
+    let fallback = || login_url.to_string();
+    let candidate = match rd {
+        // No `rd`: land on the root of whichever host the login happened on.
+        None | Some("") => match caller_origin {
+            Some(o) => format!("{o}/"),
+            None => return fallback(),
+        },
+        Some(r) => {
+            if r.bytes().any(|b| b < 0x20 || b == 0x7f) {
+                return fallback();
+            }
+            if r.starts_with('/') && !r.starts_with("//") && !r.starts_with("/\\") {
+                // Same-host absolute path — resolve against the caller.
+                match caller_origin {
+                    Some(o) => format!("{o}{r}"),
+                    None => return fallback(),
+                }
+            } else {
+                r.to_string()
+            }
         }
+    };
+    if rd_url_allowed(&candidate, hosts) {
+        candidate
+    } else {
+        fallback()
     }
-    // Same-host absolute path — resolve against the canonical service base.
-    if r.starts_with('/') && !r.starts_with("//") && !r.starts_with("/\\") {
-        return format!("{}{}", search_url.trim_end_matches('/'), r);
-    }
-    search_url.to_string()
 }
 
-/// True iff `url` is an absolute `https://` URL whose host equals `base_domain`
-/// or is a subdomain of it (`host == base` or `host` ends with `".<base>"`).
-/// Rejects any other scheme, userinfo (`@`), backslashes, and hosts that merely
-/// *contain* the base (`evilbadbat75.com`, `badbat75.com.evil.com`) — the leading
-/// dot in the suffix check is what prevents those. Port suffixes are tolerated.
-fn rd_host_allowed(url: &str, base_domain: &str) -> bool {
+/// True iff `url` is an absolute `https://` URL whose host matches one of `hosts`.
+/// Rejects any other scheme, userinfo (`@`) and backslashes. A `:port` suffix is
+/// tolerated on the candidate and stripped before matching (patterns are bare hosts).
+///
+/// Matching is the same glob as `authorized_urls`, so `*.badbat75.com` accepts
+/// `mcp.badbat75.com` but neither `evilbadbat75.com` nor `badbat75.com.evil.com` —
+/// the literal dot in the pattern is what rules those out. It does *not* accept the
+/// bare apex `badbat75.com`; list it explicitly if you want it.
+fn rd_url_allowed(url: &str, hosts: &[UrlPattern]) -> bool {
     let rest = match url.strip_prefix("https://") {
         Some(r) => r,
         None => return false,
@@ -964,8 +1174,7 @@ fn rd_host_allowed(url: &str, base_domain: &str) -> bool {
         _ => authority,
     };
     let host = host.to_ascii_lowercase();
-    let base = base_domain.to_ascii_lowercase();
-    host == base || host.ends_with(&format!(".{base}"))
+    hosts.iter().any(|p| glob_match(&p.pat, host.as_bytes()))
 }
 
 fn respond_empty(req: Request, status: u16) {
@@ -1023,16 +1232,17 @@ fn html_escape(s: &str) -> String {
 // Handlers
 // ---------------------------------------------------------------------------
 
-/// The original request path nginx is guarding, from the configured header, with
-/// any query/fragment stripped. `None` if the header is absent.
-fn original_path(req: &Request, cfg: &Config) -> Option<String> {
-    header_value(req, &cfg.original_uri_header)
-        .map(|u| u.split(['?', '#']).next().unwrap_or("").to_string())
+/// The original request URL nginx is guarding, from the configured header, with any
+/// query/fragment stripped and the authority lowercased. `None` if the header is
+/// absent (which a restricted scope treats as a denial).
+fn original_url(req: &Request, cfg: &Config) -> Option<String> {
+    header_value(req, &cfg.original_url_header)
+        .map(|u| lower_authority(u.split(['?', '#']).next().unwrap_or("")))
 }
 
 /// Resolve a `bbk_` API-key bearer against the users table: it must be known, not
-/// expired, and in path scope. Logs the reason on rejection.
-fn bearer_apikey_ok(state: &State, token: &str, path: Option<&str>) -> bool {
+/// expired, and in URL scope. Logs the reason on rejection.
+fn bearer_apikey_ok(state: &State, token: &str, url: Option<&str>) -> bool {
     let users = state.users.read().unwrap();
     let rec = match users.by_key_hash.get(&sha256_hex(token)) {
         Some(r) => r,
@@ -1048,10 +1258,10 @@ fn bearer_apikey_ok(state: &State, token: &str, path: Option<&str>) -> bool {
         );
         return false;
     }
-    if !rec.paths.allows(path) {
+    if !rec.scope.allows(url) {
         eprintln!(
-            "[bb-auth] api key denied: path {} out of scope [{} {}]",
-            path.unwrap_or("<none>"),
+            "[bb-auth] api key denied: url {} out of scope [{} {}]",
+            url.unwrap_or("<none>"),
             rec.email,
             rec.key_id
         );
@@ -1060,16 +1270,16 @@ fn bearer_apikey_ok(state: &State, token: &str, path: Option<&str>) -> bool {
     true
 }
 
-/// A user (email) is authorized if present in the table and the request path is in
+/// A user (email) is authorized if present in the table and the request URL is in
 /// their scope. Shared by the id_token-bearer and cookie paths.
-fn user_path_ok(state: &State, email: &str, path: Option<&str>) -> bool {
+fn user_scope_ok(state: &State, email: &str, url: Option<&str>) -> bool {
     let users = state.users.read().unwrap();
     match users.by_email.get(email) {
-        Some(rec) if rec.paths.allows(path) => true,
+        Some(rec) if rec.scope.allows(url) => true,
         Some(_) => {
             eprintln!(
-                "[bb-auth] denied: path {} out of scope for {email}",
-                path.unwrap_or("<none>")
+                "[bb-auth] denied: url {} out of scope for {email}",
+                url.unwrap_or("<none>")
             );
             false
         }
@@ -1082,22 +1292,22 @@ fn user_path_ok(state: &State, email: &str, path: Option<&str>) -> bool {
 
 fn handle_validate(req: Request, state: &State) {
     let cfg = &state.cfg;
-    // Original request path (for per-user / per-key path scoping), captured now as
-    // an owned value so the request can be consumed when we respond.
-    let path = original_path(&req, cfg);
+    // Original request URL (for per-user / per-key URL scoping), captured now as an
+    // owned value so the request can be consumed when we respond.
+    let url = original_url(&req, cfg);
 
     // Bearer path: programmatic clients (e.g. MCP) present `Authorization: Bearer
     // <cred>`. A `bbk_` credential is a static API key resolved against the users
     // table; anything else is a raw Cognito id_token validated exactly like
-    // /auth/session, then matched to a user. Either way the request path must be in
+    // /auth/session, then matched to a user. Either way the request URL must be in
     // scope. A failed bearer falls through to the cookie check so a stray
     // Authorization header never blocks an otherwise-valid cookie.
     if let Some(token) = header_value(&req, "Authorization").and_then(parse_bearer) {
         let granted = if token.starts_with(API_KEY_PREFIX) {
-            bearer_apikey_ok(state, token, path.as_deref())
+            bearer_apikey_ok(state, token, url.as_deref())
         } else {
             match validate_id_token(token, state) {
-                Ok(email) => user_path_ok(state, &email, path.as_deref()),
+                Ok(email) => user_scope_ok(state, &email, url.as_deref()),
                 Err(e) => {
                     eprintln!("[bb-auth] bearer rejected: {e}");
                     false
@@ -1113,7 +1323,7 @@ fn handle_validate(req: Request, state: &State) {
     let ok = header_value(&req, "Cookie")
         .and_then(|c| cookie_value(c, &cfg.cookie_name).map(str::to_string))
         .and_then(|v| verify_session(&v, &cfg.hmac_keys))
-        .map(|email| user_path_ok(state, &email, path.as_deref()))
+        .map(|email| user_scope_ok(state, &email, url.as_deref()))
         .unwrap_or(false);
     respond_empty(req, if ok { 204 } else { 401 });
 }
@@ -1168,10 +1378,16 @@ fn handle_session(mut req: Request, state: &State) {
         return;
     }
 
+    // Which host is this login happening on? nginx tells us, the same way it does on
+    // /auth/validate. A relative `rd` resolves against it; without it we can only fall
+    // back to the login page.
+    let caller_url = original_url(&req, cfg);
+    let caller_origin = caller_url.as_deref().and_then(origin_of);
     let rd = safe_rd(
         form.get("rd").map(String::as_str),
-        &cfg.search_url,
-        cfg.rd_base_domain.as_deref(),
+        caller_origin.as_deref(),
+        &cfg.authorized_hosts,
+        &cfg.login_url,
     );
     let cookie = build_cookie(
         cfg,
@@ -1204,7 +1420,44 @@ fn handle_logout(req: Request, state: &State) {
 // main
 // ---------------------------------------------------------------------------
 
+/// `bb-auth --check-users <file>`: parse a users file with the real parser and exit
+/// 0 (with a summary) or 1 (with the error). Reads no env and touches no network, so
+/// a deploy can validate the file that is *about* to go live — a rejected scope is a
+/// fatal startup error, and with `Restart=on-failure` that would be a boot loop.
+fn check_users(path: &str) -> ! {
+    match read_users(path) {
+        Ok(u) => {
+            println!(
+                "[bb-auth] {path}: OK — {} users, {} api keys",
+                u.by_email.len(),
+                u.by_key_hash.len()
+            );
+            std::process::exit(0);
+        }
+        Err(e) => {
+            eprintln!("[bb-auth] {path}: INVALID — {e}");
+            std::process::exit(1);
+        }
+    }
+}
+
 fn main() {
+    let args: Vec<String> = std::env::args().skip(1).collect();
+    match args.first().map(String::as_str) {
+        Some("--check-users") => match args.get(1) {
+            Some(p) => check_users(p),
+            None => {
+                eprintln!("usage: bb-auth --check-users <users.json>");
+                std::process::exit(2);
+            }
+        },
+        Some(other) => {
+            eprintln!("[bb-auth] unknown argument '{other}' (only --check-users is accepted)");
+            std::process::exit(2);
+        }
+        None => {}
+    }
+
     let cfg = Config::from_env();
     let users_path = env_req("BB_AUTH_USERS_FILE");
     let users = load_users(&users_path);
@@ -1563,187 +1816,392 @@ mod tests {
         assert_eq!(key_expiry("2026-01-01", "xyz"), None); // bad duration
     }
 
-    #[test]
-    fn path_scope_matching() {
-        let all = PathScope::from_list(&[]);
-        assert!(matches!(all, PathScope::All));
-        assert!(matches!(
-            PathScope::from_list(&["*".to_string()]),
-            PathScope::All
-        ));
-        // All allows anything, even without a known path
-        assert!(all.allows(None));
-        assert!(all.allows(Some("/whatever")));
-
-        let p = PathScope::from_list(&["/mcp/".to_string(), "/api/".to_string()]);
-        assert!(p.allows(Some("/mcp/foo")));
-        assert!(p.allows(Some("/api/x")));
-        assert!(!p.allows(Some("/other")));
-        assert!(!p.allows(None)); // restricted + missing path => fail closed
-        assert!(!p.allows(Some("/mcp/../secret"))); // path traversal rejected
-
-        // whitespace/empties are cleaned out; a "*" among prefixes means All
-        assert!(matches!(
-            PathScope::from_list(&["  ".to_string(), "/x".to_string(), "*".to_string()]),
-            PathScope::All
-        ));
+    /// Compile one pattern and match `url` against it.
+    fn m(pat: &str, url: &str) -> bool {
+        let p = compile_pattern(pat).expect("pattern compiles");
+        glob_match(&p.pat, url.as_bytes())
     }
 
     #[test]
-    fn read_users_parses_json() {
-        let key = "bbk_secret";
-        let hash = sha256_hex(key);
+    fn glob_terminal_star_includes_slash() {
+        // `https://pippo/path1/*` => everything under path1, at any depth …
+        assert!(m("https://pippo/path1/*", "https://pippo/path1/"));
+        assert!(m("https://pippo/path1/*", "https://pippo/path1/a"));
+        assert!(m("https://pippo/path1/*", "https://pippo/path1/a/b/c.png"));
+        // … but not the bare parent, and not a sibling
+        assert!(!m("https://pippo/path1/*", "https://pippo/path1"));
+        assert!(!m("https://pippo/path1/*", "https://pippo/path2/a"));
+        // the classic prefix footgun, now closed: /mcp/* does not match /mcpEVIL
+        assert!(!m("https://pippo/mcp/*", "https://pippo/mcpEVIL"));
+    }
+
+    #[test]
+    fn glob_nonterminal_star_no_slash() {
+        // `…/path1/*/` => exactly one level below path1, trailing slash required
+        assert!(m("https://pippo/path1/*/", "https://pippo/path1/a/"));
+        assert!(m("https://pippo/path1/*/", "https://pippo/path1/ab/"));
+        assert!(!m("https://pippo/path1/*/", "https://pippo/path1/a"));
+        assert!(!m("https://pippo/path1/*/", "https://pippo/path1/a/b/"));
+    }
+
+    #[test]
+    fn glob_middle_star_segment() {
+        // one wildcard level, then a fixed subtree, then anything
+        let p = "https://pippo/path1/*/images/*";
+        assert!(m(p, "https://pippo/path1/a/images/x.png"));
+        assert!(m(p, "https://pippo/path1/a/images/sub/y.png"));
+        assert!(!m(p, "https://pippo/path1/a/b/images/x.png")); // star can't cross '/'
+        assert!(!m(p, "https://pippo/path1/a/other/x.png"));
+    }
+
+    #[test]
+    fn glob_single_char_amp() {
+        assert!(m("https://pippo/v&/*", "https://pippo/v1/x"));
+        assert!(m("https://pippo/v&/*", "https://pippo/v9/x"));
+        assert!(!m("https://pippo/v&/*", "https://pippo/v10/x")); // one char, not two
+        assert!(!m("https://pippo/v&/*", "https://pippo/v/x")); // one char, not zero
+    }
+
+    #[test]
+    fn glob_wildcard_in_scheme_and_host() {
+        // scheme wildcard
+        assert!(m("*://mcp.x.com/mcp/*", "https://mcp.x.com/mcp/a"));
+        assert!(m("*://mcp.x.com/mcp/*", "http://mcp.x.com/mcp/a"));
+        // host wildcard: `*` stops at '/', so it can never spill into the path
+        assert!(m("https://*/mcp/*", "https://anything.x.com/mcp/a"));
+        assert!(!m("https://*/mcp/*", "https://x.com/other/a"));
+        // subdomain wildcard — note `*` crosses dots, so it also spans two labels
+        assert!(m("https://*.x.com/*", "https://mcp.x.com/a"));
+        assert!(m("https://*.x.com/*", "https://a.b.x.com/a"));
+        // suffix lookalikes do not match
+        assert!(!m("https://*.x.com/*", "https://evil-x.com/a"));
+        assert!(!m("https://*.x.com/*", "https://x.com.evil.net/a"));
+        // single-char host wildcard
+        assert!(m("https://v&.x.com/*", "https://v1.x.com/a"));
+        assert!(!m("https://v&.x.com/*", "https://v10.x.com/a"));
+    }
+
+    #[test]
+    fn glob_authority_case_insensitive_path_sensitive() {
+        let p = compile_pattern("HTTPS://MCP.X.COM/Mcp/*").unwrap();
+        // authority lowercased at compile time and at request time
+        assert!(glob_match(&p.pat, b"https://mcp.x.com/Mcp/a"));
+        // the path keeps its case on both sides
+        assert!(!glob_match(&p.pat, b"https://mcp.x.com/mcp/a"));
+        assert_eq!(
+            lower_authority("HTTPS://Host.COM/Path/A"),
+            "https://host.com/Path/A"
+        );
+        assert_eq!(lower_authority("HTTPS://Host.COM"), "https://host.com");
+    }
+
+    #[test]
+    fn compile_pattern_rejects_malformed() {
+        assert!(compile_pattern("mcp.x.com/mcp").is_err()); // no scheme
+        assert!(compile_pattern("https://mcp.x.com").is_err()); // no path
+        assert!(compile_pattern("https:///mcp").is_err()); // empty host
+        assert!(compile_pattern("://mcp.x.com/a").is_err()); // empty scheme
+        assert!(compile_pattern("https://u@mcp.x.com/a").is_err()); // userinfo
+        assert!(compile_pattern("https://mcp.x.com/../a").is_err()); // traversal
+        assert!(compile_pattern("https://mcp.x.com/a\rb").is_err()); // control byte
+        assert!(compile_pattern("https://mcp.x.com/*").is_ok());
+    }
+
+    #[test]
+    fn glob_many_stars_terminates() {
+        // The classic exponential case for a recursive star-backtracker: many stars,
+        // a long input, and a final byte that can never match. The DP is O(n*m).
+        let pat = format!("https://h/{}", "*a".repeat(24));
+        let url = format!("https://h/{}b", "a".repeat(400));
+        let p = compile_pattern(&pat).unwrap();
+        assert!(!glob_match(&p.pat, url.as_bytes())); // pattern ends in 'a', input in 'b'
+    }
+
+    #[test]
+    fn url_scope_empty_denies_everything() {
+        // No authorized_urls => no access. Both the absent field and an explicit `[]`.
+        for s in [UrlScope::deny_all(), UrlScope::compile(&[]).unwrap()] {
+            assert!(s.is_empty());
+            assert!(!s.allows(Some("https://x/a")));
+            assert!(!s.allows(None));
+        }
+        // whitespace-only entries are dropped, and drop to deny-all
+        assert!(UrlScope::compile(&["  ".to_string()]).unwrap().is_empty());
+    }
+
+    #[test]
+    fn url_scope_star_pattern_grants_everything() {
+        // Blanket access is spelled out, never implied.
+        let s = UrlScope::compile(&["*://*/*".to_string()]).unwrap();
+        assert!(s.allows(Some("https://anything.example.com/at/all")));
+        assert!(s.allows(Some("http://h/")));
+        assert!(s.allows(Some("https://h/a/b/c.png")));
+        assert!(!s.allows(None)); // the header is still mandatory
+        assert!(!s.allows(Some("https://h/../etc"))); // and `..` still denied
+
+        // A bare "*" is NOT a sentinel any more — it is a malformed pattern, and the
+        // error points at the spelling that works.
+        let err = match compile_pattern("*") {
+            Ok(_) => panic!("a bare '*' must not compile"),
+            Err(e) => e,
+        };
+        assert!(err.contains("*://*/*"), "{err}");
+    }
+
+    #[test]
+    fn url_scope_matching() {
+        let s = UrlScope::compile(&[
+            "https://mcp.x.com/mcp".to_string(),
+            "https://mcp.x.com/mcp/*".to_string(),
+        ])
+        .unwrap();
+        assert!(s.allows(Some("https://mcp.x.com/mcp")));
+        assert!(s.allows(Some("https://mcp.x.com/mcp/tools")));
+        assert!(!s.allows(Some("https://mcp.x.com/mcpEVIL")));
+        assert!(!s.allows(Some("https://search.x.com/mcp/tools"))); // wrong host
+        assert!(!s.allows(Some("http://mcp.x.com/mcp"))); // wrong scheme
+        assert!(!s.allows(None)); // restricted + missing header => fail closed
+        assert!(!s.allows(Some("https://mcp.x.com/mcp/../etc"))); // traversal rejected
+    }
+
+    /// Write `json` to a uniquely-named temp file so tests can run in parallel.
+    fn users_tmp(name: &str, json: &str) -> std::path::PathBuf {
+        let p = std::env::temp_dir().join(format!("bb-auth-users-{name}.json"));
+        std::fs::write(&p, json).unwrap();
+        p
+    }
+
+    /// `read_users(path).unwrap_err()` without forcing `Debug` onto `Users`.
+    fn users_err(path: &std::path::Path) -> String {
+        match read_users(path.to_str().unwrap()) {
+            Ok(_) => panic!("expected {} to be rejected", path.display()),
+            Err(e) => e,
+        }
+    }
+
+    #[test]
+    fn read_users_parses_authorized_urls() {
+        let hash = sha256_hex("bbk_secret");
         let other = sha256_hex("bbk_two");
         let json = format!(
             r#"{{
               "users": [
                 {{ "email": "Alice@Example.com" }},
-                {{ "email": "bob@x.com", "enabled_paths": ["/mcp/"],
+                {{ "email": "carol@x.com", "authorized_urls": ["*://*/*"] }},
+                {{ "email": "bob@x.com", "authorized_urls": ["https://mcp.x.com/mcp/*"],
                    "api_keys": [
                      {{ "id": "laptop", "key_hash": "{hash}", "released": "1970-01-01",
-                        "duration": "1d", "enabled_paths": ["/mcp/foo/"], "notes": "ignored" }},
+                        "duration": "1d",
+                        "authorized_urls": ["https://mcp.x.com/mcp/foo/*"], "notes": "ignored" }},
                      {{ "id": "nolimit", "key_hash": "{other}", "released": "2026-01-01",
                         "duration": "never" }}
                    ] }}
               ]
             }}"#
         );
-        let tmp = std::env::temp_dir().join("bb-auth-users-test.json");
-        std::fs::write(&tmp, json).unwrap();
+        let tmp = users_tmp("ok", &json);
         let u = read_users(tmp.to_str().unwrap()).unwrap();
 
         assert!(u.by_email.contains_key("alice@example.com")); // lowercased
         assert!(u.by_email.contains_key("bob@x.com"));
-        assert!(matches!(
-            u.by_email["alice@example.com"].paths,
-            PathScope::All
-        ));
+        // listed but with no authorized_urls => reaches nothing
+        assert!(u.by_email["alice@example.com"].scope.is_empty());
+        assert!(!u.by_email["alice@example.com"]
+            .scope
+            .allows(Some("https://anything/")));
+        // the explicit blanket grant
+        assert!(u.by_email["carol@x.com"]
+            .scope
+            .allows(Some("https://anything/at/all")));
         assert_eq!(u.by_key_hash.len(), 2);
 
         let rec = u.by_key_hash.get(&hash).unwrap();
         assert_eq!(rec.email, "bob@x.com");
         assert_eq!(rec.key_id, "laptop");
         assert_eq!(rec.expires, Some(86_400)); // 1970-01-01 + 1d
-        assert!(rec.paths.allows(Some("/mcp/foo/bar")));
-        assert!(!rec.paths.allows(Some("/mcp/other"))); // key scope is narrower than user
+        assert!(rec.scope.allows(Some("https://mcp.x.com/mcp/foo/bar")));
+        assert!(!rec.scope.allows(Some("https://mcp.x.com/mcp/other"))); // narrower than user
 
-        // key with no enabled_paths inherits the user's ["/mcp/"] scope
+        // key with no authorized_urls inherits the user's scope
         let inherit = u.by_key_hash.get(&other).unwrap();
         assert_eq!(inherit.expires, None);
-        assert!(inherit.paths.allows(Some("/mcp/anything")));
-        assert!(!inherit.paths.allows(Some("/nope")));
+        assert!(inherit.scope.allows(Some("https://mcp.x.com/mcp/anything")));
+        assert!(!inherit.scope.allows(Some("https://mcp.x.com/nope")));
 
         let _ = std::fs::remove_file(&tmp);
     }
 
     #[test]
-    fn safe_rd_allows_search_url_prefix_and_paths() {
-        let s = "https://app.example.com/";
+    fn read_users_rejects_enabled_paths() {
+        // A pre-2.0 file must fail loudly: silently ignoring the field would leave
+        // the user unscoped (fail-open).
+        let tmp = users_tmp(
+            "legacy",
+            r#"{ "users": [ { "email": "bob@x.com", "enabled_paths": ["/mcp/"] } ] }"#,
+        );
+        let err = users_err(&tmp);
+        assert!(err.contains("enabled_paths"), "{err}");
+        assert!(err.contains("authorized_urls"), "{err}");
+        let _ = std::fs::remove_file(&tmp);
+
+        // …including when it hides on a key rather than the user
+        let hash = sha256_hex("bbk_x");
+        let tmp = users_tmp(
+            "legacy-key",
+            &format!(
+                r#"{{ "users": [ {{ "email": "bob@x.com", "api_keys": [
+                     {{ "id": "k", "key_hash": "{hash}", "released": "2026-01-01",
+                        "duration": "never", "enabled_paths": ["/mcp/"] }} ] }} ] }}"#
+            ),
+        );
+        let err = users_err(&tmp);
+        assert!(err.contains("enabled_paths"), "{err}");
+        let _ = std::fs::remove_file(&tmp);
+    }
+
+    #[test]
+    fn read_users_rejects_malformed_url() {
+        let tmp = users_tmp(
+            "badurl",
+            r#"{ "users": [ { "email": "bob@x.com", "authorized_urls": ["/mcp/"] } ] }"#,
+        );
+        let err = users_err(&tmp);
+        assert!(err.contains("bob@x.com"), "{err}");
+        assert!(err.contains("<scheme>://<host>/<path>"), "{err}");
+        let _ = std::fs::remove_file(&tmp);
+    }
+
+    /// The usual deployment: the apex plus every subdomain, enumerated.
+    fn bb_hosts() -> Vec<UrlPattern> {
+        ["badbat75.com", "*.badbat75.com"]
+            .iter()
+            .map(|h| compile_host_pattern(h).unwrap())
+            .collect()
+    }
+    const LOGIN: &str = "https://login.badbat75.com/";
+    const CALLER: &str = "https://search.badbat75.com";
+
+    #[test]
+    fn origin_of_extracts_scheme_and_host() {
         assert_eq!(
-            safe_rd(Some("https://app.example.com/q?x=1"), s, None),
-            "https://app.example.com/q?x=1"
+            origin_of("https://app.example.com/auth/session").as_deref(),
+            Some("https://app.example.com")
         );
         assert_eq!(
-            safe_rd(Some("/search?q=1"), s, None),
-            "https://app.example.com/search?q=1"
+            origin_of("https://app.example.com").as_deref(),
+            Some("https://app.example.com")
         );
-        assert_eq!(safe_rd(None, s, None), s);
-        assert_eq!(safe_rd(Some(""), s, None), s);
+        assert_eq!(origin_of("/just/a/path"), None);
+        assert_eq!(origin_of("https:///nohost"), None);
+    }
+
+    #[test]
+    fn safe_rd_resolves_relative_against_the_caller() {
+        let h = bb_hosts();
+        // a relative rd lands on whichever host the login happened on …
+        assert_eq!(
+            safe_rd(Some("/preferences"), Some(CALLER), &h, LOGIN),
+            "https://search.badbat75.com/preferences"
+        );
+        assert_eq!(
+            safe_rd(Some("/q?x=1"), Some("https://mcp.badbat75.com"), &h, LOGIN),
+            "https://mcp.badbat75.com/q?x=1"
+        );
+        // … and with no rd at all, on that host's root
+        assert_eq!(
+            safe_rd(None, Some(CALLER), &h, LOGIN),
+            "https://search.badbat75.com/"
+        );
+        assert_eq!(
+            safe_rd(Some(""), Some(CALLER), &h, LOGIN),
+            "https://search.badbat75.com/"
+        );
+        // no caller origin (nginx didn't send the header) => the login page
+        assert_eq!(safe_rd(Some("/preferences"), None, &h, LOGIN), LOGIN);
+        assert_eq!(safe_rd(None, None, &h, LOGIN), LOGIN);
+    }
+
+    #[test]
+    fn safe_rd_allows_authorized_hosts() {
+        let h = bb_hosts();
+        for rd in [
+            "https://mcp.badbat75.com/mcp/foo",
+            "https://search.badbat75.com/q?x=1",
+            "https://badbat75.com/", // the apex, listed explicitly
+        ] {
+            assert_eq!(safe_rd(Some(rd), Some(CALLER), &h, LOGIN), rd, "rd={rd}");
+        }
     }
 
     #[test]
     fn safe_rd_blocks_open_redirect_and_splitting() {
-        let s = "https://app.example.com/";
+        let h = bb_hosts();
+        let f = |rd: &str| safe_rd(Some(rd), Some(CALLER), &h, LOGIN);
         // scheme-relative + backslash variant (browsers normalise `/\` -> `//`)
-        assert_eq!(safe_rd(Some("//evil.com"), s, None), s);
-        assert_eq!(safe_rd(Some("/\\evil.com"), s, None), s);
+        assert_eq!(f("//evil.com"), LOGIN);
+        assert_eq!(f("/\\evil.com"), LOGIN);
         // response splitting via CRLF / control bytes
-        assert_eq!(safe_rd(Some("/\r\nSet-Cookie: x=1"), s, None), s);
-        assert_eq!(safe_rd(Some("/x\x00y"), s, None), s);
-        assert_eq!(safe_rd(Some("/q\x7f"), s, None), s);
+        assert_eq!(f("/\r\nSet-Cookie: x=1"), LOGIN);
+        assert_eq!(f("/x\x00y"), LOGIN);
+        assert_eq!(f("/q\x7f"), LOGIN);
         // off-host absolute URL
-        assert_eq!(safe_rd(Some("https://evil.com/"), s, None), s);
+        assert_eq!(f("https://evil.com/"), LOGIN);
     }
 
     #[test]
-    fn safe_rd_sso_allows_sibling_subdomains() {
-        let s = "https://search.badbat75.com/";
-        let base = Some("badbat75.com");
-        // sibling service under the same base domain
+    fn safe_rd_rejects_lookalikes_and_tricks() {
+        let h = bb_hosts();
+        let f = |rd: &str| safe_rd(Some(rd), Some(CALLER), &h, LOGIN);
+        assert_eq!(f("https://evilbadbat75.com/"), LOGIN); // suffix without the dot
+        assert_eq!(f("https://badbat75.com.evil.com/"), LOGIN); // base as a left label
+        assert_eq!(f("https://mcp.badbat75.com@evil.com/"), LOGIN); // userinfo: real host is evil.com
+        assert_eq!(f("https://mcp.badbat75.com\\@evil.com/"), LOGIN); // backslash in authority
+        assert_eq!(f("http://mcp.badbat75.com/"), LOGIN); // non-https
+        assert_eq!(f("//mcp.badbat75.com/"), LOGIN); // scheme-relative
+
+        // A spoofed caller origin cannot smuggle a redirect either: the resolved
+        // candidate goes through the same host gate.
         assert_eq!(
-            safe_rd(Some("https://mcp.badbat75.com/mcp/foo"), s, base),
-            "https://mcp.badbat75.com/mcp/foo"
-        );
-        // the canonical service itself (also allowed via the prefix rule)
-        assert_eq!(
-            safe_rd(Some("https://search.badbat75.com/q?x=1"), s, base),
-            "https://search.badbat75.com/q?x=1"
-        );
-        // the apex domain
-        assert_eq!(
-            safe_rd(Some("https://badbat75.com/"), s, base),
-            "https://badbat75.com/"
-        );
-        // relative paths still resolve against the canonical base
-        assert_eq!(
-            safe_rd(Some("/preferences"), s, base),
-            "https://search.badbat75.com/preferences"
+            safe_rd(Some("/x"), Some("https://evil.com"), &h, LOGIN),
+            LOGIN
         );
     }
 
     #[test]
-    fn safe_rd_sso_rejects_lookalikes_and_tricks() {
-        let s = "https://search.badbat75.com/";
-        let base = Some("badbat75.com");
-        // suffix-without-dot lookalike
-        assert_eq!(safe_rd(Some("https://evilbadbat75.com/"), s, base), s);
-        // base as a left label of another domain
-        assert_eq!(safe_rd(Some("https://badbat75.com.evil.com/"), s, base), s);
-        // userinfo trick: real host is evil.com
-        assert_eq!(
-            safe_rd(Some("https://mcp.badbat75.com@evil.com/"), s, base),
-            s
-        );
-        // backslash in authority
-        assert_eq!(
-            safe_rd(Some("https://mcp.badbat75.com\\@evil.com/"), s, base),
-            s
-        );
-        // non-https scheme
-        assert_eq!(safe_rd(Some("http://mcp.badbat75.com/"), s, base), s);
-        // scheme-relative is still blocked even with a base configured
-        assert_eq!(safe_rd(Some("//mcp.badbat75.com/"), s, base), s);
+    fn rd_url_allowed_matches_host_only() {
+        let h = bb_hosts();
+        assert!(rd_url_allowed("https://mcp.badbat75.com/x", &h));
+        assert!(rd_url_allowed("https://badbat75.com", &h));
+        assert!(rd_url_allowed("https://a.b.badbat75.com/x?y=1", &h)); // `*` crosses dots
+        assert!(rd_url_allowed("https://mcp.badbat75.com:8443/x", &h)); // port stripped
+        assert!(rd_url_allowed("https://MCP.BadBat75.com/x", &h)); // case-insensitive
+                                                                   // path/query containing the base must NOT count
+        assert!(!rd_url_allowed("https://evil.com/.badbat75.com", &h));
+        assert!(!rd_url_allowed("https://evil.com/?x=badbat75.com", &h));
+        assert!(!rd_url_allowed("http://mcp.badbat75.com/", &h));
+        assert!(!rd_url_allowed("https://badbat75.com.evil.com/", &h));
+
+        // The apex is NOT implied by the wildcard — it has to be listed.
+        let only_sub = vec![compile_host_pattern("*.badbat75.com").unwrap()];
+        assert!(rd_url_allowed("https://mcp.badbat75.com/", &only_sub));
+        assert!(!rd_url_allowed("https://badbat75.com/", &only_sub));
     }
 
     #[test]
-    fn rd_host_allowed_matches_host_only() {
-        assert!(rd_host_allowed(
-            "https://mcp.badbat75.com/x",
-            "badbat75.com"
-        ));
-        assert!(rd_host_allowed("https://badbat75.com", "badbat75.com"));
-        assert!(rd_host_allowed(
-            "https://a.b.badbat75.com/x?y=1",
-            "badbat75.com"
-        ));
-        assert!(rd_host_allowed(
-            "https://mcp.badbat75.com:8443/x",
-            "badbat75.com"
-        ));
-        // path/query containing the base must NOT count
-        assert!(!rd_host_allowed(
-            "https://evil.com/.badbat75.com",
-            "badbat75.com"
-        ));
-        assert!(!rd_host_allowed(
-            "https://evil.com/?x=badbat75.com",
-            "badbat75.com"
-        ));
-        assert!(!rd_host_allowed("http://mcp.badbat75.com/", "badbat75.com"));
-        assert!(!rd_host_allowed(
-            "https://badbat75.com.evil.com/",
-            "badbat75.com"
-        ));
+    fn compile_host_pattern_rejects_non_hosts() {
+        assert!(compile_host_pattern("").is_err());
+        assert!(compile_host_pattern("https://x.com").is_err()); // scheme
+        assert!(compile_host_pattern("x.com/path").is_err()); // path
+        assert!(compile_host_pattern("x.com:8443").is_err()); // port
+        assert!(compile_host_pattern("u@x.com").is_err()); // userinfo
+        assert!(compile_host_pattern("a..b").is_err());
+        assert!(compile_host_pattern("*.badbat75.com").is_ok());
+        assert!(compile_host_pattern("v&.badbat75.com").is_ok());
+        // normalised to lowercase
+        assert_eq!(
+            compile_host_pattern("X.COM").unwrap().pat,
+            b"x.com".to_vec()
+        );
     }
 
     #[test]
