@@ -18,26 +18,20 @@
       - By default NOTHING is staged for users.json, so deploy.sh keeps the
         existing var/lib/users.json untouched. Use -UsersFile for a first install
         or to replace the access file.
-      - deploy.sh preserves an existing etc/bb-auth.env (relocating a pre-2.0 flat
-        one first), so the HMAC key — and therefore every existing session cookie —
-        stays valid across redeploys.
+      - deploy.sh preserves an existing etc/bb-auth.env and never edits it, so the
+        HMAC key — and therefore every existing session cookie — stays valid across
+        redeploys. It validates the env and aborts on a missing required var.
       - deploy.sh validates the users file that is about to go live with the real
         parser and aborts BEFORE restarting if it is rejected.
-
-    Upgrading a pre-2.0 host: the first 2.0 deploy REQUIRES -UsersFile with an
-    access file migrated to the `authorized_urls` format. A plain redeploy would
-    preserve the old `enabled_paths` file, which 2.0 rejects — deploy.sh aborts
-    rather than boot-loop the service. nginx must also be updated to send the full
-    request URL (see README, "Putting a service behind the gate").
 
 .PARAMETER Target
     SSH target as user@host, e.g. emiliano@rpi-01.bombicci.local.
 
 .PARAMETER UsersFile
     Local users.json to stage instead of preserving the remote one. Required for a
-    first install (and for the first 2.0 deploy on a pre-2.0 host). Validated as
-    JSON, then parsed by the freshly-installed binary, before it replaces the live
-    file. Check it locally first: cargo run -- --check-users .\deploy\users.json
+    first install. Validated as JSON, then parsed by the freshly-installed binary,
+    before it replaces the live file.
+    Check it locally first: cargo run -- --check-users .\deploy\users.json
 
 .PARAMETER Build
     Cross-build the aarch64 binary in WSL before staging.
@@ -167,9 +161,7 @@ Assert-Native "remote deploy.sh (one or more verification checks failed)"
 
 # --- 6. final liveness ping --------------------------------------------------
 Write-Host "==> final liveness check" -ForegroundColor Cyan
-# The env file moved to etc/ in 2.0; fall back to the flat path so this still works
-# if deploy.sh bailed before relocating it.
-$hz = ssh -o BatchMode=yes $Target 'E=/opt/bb-auth/etc/bb-auth.env; [ -f "$E" ] || E=/opt/bb-auth/bb-auth.env; L=$(sudo grep -E "^[[:space:]]*BB_AUTH_LISTEN=" "$E" | tail -1 | cut -d= -f2-); curl -fsS --max-time 3 "http://${L:-127.0.0.1:4181}/auth/healthz"'
+$hz = ssh -o BatchMode=yes $Target 'L=$(sudo grep -E "^[[:space:]]*BB_AUTH_LISTEN=" /opt/bb-auth/etc/bb-auth.env | tail -1 | cut -d= -f2-); curl -fsS --max-time 3 "http://${L:-127.0.0.1:4181}/auth/healthz"'
 Assert-Native "post-deploy healthz"
 Write-Host "    healthz: $hz" -ForegroundColor Green
 

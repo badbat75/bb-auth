@@ -286,10 +286,11 @@ the whole prefix stays read-only to it and no `StateDirectory` is needed despite
 system user/group, installs the binary, users file (backing up the prior
 `users.json`) and the staged `bb-auth.env`, **generates `BB_AUTH_HMAC_KEY` on first
 run if empty and never overwrites it**, installs the systemd unit,
-`daemon-reload`s, enables + restarts, then probes `/auth/healthz`. It relocates a
-pre-2.0 flat layout into the tree — env file first, so the HMAC key is preserved
-rather than regenerated — and validates the users file that is about to go live with
-`bb-auth --check-users`, aborting before the restart if it is rejected.
+`daemon-reload`s, enables + restarts, then probes `/auth/healthz`. It never edits a
+preserved `bb-auth.env`: instead it validates it (every required var present, and
+`BB_AUTH_USERS_FILE` pointing at the file this deploy installs) alongside the users
+file itself (`bb-auth --check-users`), aborting before the restart if either is
+rejected — so a bad config can never become a `Restart=on-failure` boot loop.
 
 ### systemd hardening
 

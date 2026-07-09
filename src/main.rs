@@ -1,33 +1,42 @@
-//! bb-auth — minimal, service-agnostic auth gate.
+//! bb-auth — a minimal, service-agnostic auth gate for nginx `auth_request`.
 //!
-//! It fronts any web service via nginx `auth_request` and is wired per-deployment
-//! entirely through the BB_AUTH_* env vars. Unlike authorization-code OIDC proxies
-//! (which drive the login themselves and cannot accept client-obtained tokens),
-//! bb-auth accepts a Cognito **id_token** that a browser-side login page obtained
-//! (USER_AUTH flow on the public client), validates it, and turns it into an
-//! HMAC-signed session cookie. This is what makes "auto-login right after
-//! registration, no second OTP" possible.
+//! Authorization-code OIDC proxies drive the login themselves and cannot accept a
+//! token the client already holds. bb-auth is built for the opposite: it takes a
+//! Cognito **id_token** that a browser-side login page already obtained (the
+//! `USER_AUTH` flow on a public app client), validates it, and exchanges it for an
+//! HMAC-signed session cookie. That is what makes "auto-login right after
+//! registration, with no second OTP" possible. Everything else is wired
+//! per-deployment through `BB_AUTH_*` env vars ([`Config::from_env`]).
 //!
-//! Endpoints (all under /auth/, fronted by nginx on the protected service host):
-//!   GET  /auth/validate  — internal; nginx `auth_request`. 204 if the session
-//!                          cookie is valid AND its email is on the allowlist, else 401.
-//!                          Also accepts `Authorization: Bearer <cred>` for
-//!                          programmatic clients (e.g. MCP clients) that can't run
-//!                          the browser cookie flow: `<cred>` is either a raw Cognito
-//!                          id_token (validated exactly like /auth/session), or a
-//!                          static `bbk_` API key from the JSON users table (tied to a
-//!                          user, with its own expiry and allowed-URL scope).
-//!                          Every credential is additionally checked against the
-//!                          requesting user's / key's `authorized_urls` patterns.
-//!   POST /auth/session   — public; body `id_token=...&rd=...`. Validates the
-//!                          id_token fully, sets the session cookie, 302 → rd.
-//!   GET  /auth/logout    — public; clears the cookie, 302 → login page.
-//!   GET  /auth/healthz   — 200 "ok".
+//! # Endpoints
 //!
-//! Security model: a valid Cognito-signed id_token is unforgeable, so possession
-//! of one for an allowlisted email is the credential. The allowlist is the real
-//! access gate (Cognito self-signup is open) and is re-checked on every /validate,
-//! so removing an email + SIGHUP (or restart) denies even existing cookies.
+//! All under `/auth/`, fronted by nginx on the protected host.
+//!
+//! | Method | Path | Caller | Behaviour |
+//! |--------|------|--------|-----------|
+//! | `GET`  | `/auth/validate` | nginx `auth_request`, loopback | 204 if a credential authorizes the request, else 401 |
+//! | `POST` | `/auth/session`  | browser | validate the posted `id_token`, set the cookie, 302 → `rd` |
+//! | `GET`  | `/auth/logout`   | browser | clear the cookie, 302 → the login page |
+//! | `GET`  | `/auth/healthz`  | local   | 200 `ok` |
+//!
+//! # Authorization model
+//!
+//! [`handle_validate`] accepts three credentials, tried in this order:
+//!
+//! 1. `Authorization: Bearer bbk_…` — a static API key, resolved by SHA-256 of the
+//!    bearer against the users file.
+//! 2. `Authorization: Bearer <id_token>` — a raw Cognito id_token, validated exactly
+//!    as on `/auth/session`. Lets programmatic clients (e.g. MCP) skip the cookie flow.
+//! 3. the session cookie.
+//!
+//! A Cognito-signed id_token is unforgeable, but holding one is **not** sufficient:
+//! Cognito self-signup is open, so every credential must additionally resolve to an
+//! entry in the users file ([`read_users`]) *and* the request URL must fall inside
+//! that entry's [`UrlScope`]. Both are re-checked on every request, so deleting a
+//! user or a single API key and reloading denies even a still-unexpired cookie.
+//!
+//! Bearers are stateless — they issue no cookie — and a failed bearer falls through
+//! to the cookie check, so a stray `Authorization` header never blocks a valid cookie.
 
 use std::collections::HashMap;
 use std::io::Read;
@@ -45,8 +54,35 @@ use tiny_http::{Header, Request, Response, Server, StatusCode};
 
 type HmacSha256 = Hmac<Sha256>;
 
-const MAX_BODY: u64 = 64 * 1024; // id_tokens are ~1-3 KB; cap generously.
+/// Cap on the `/auth/session` request body. Cognito id_tokens run 1–3 KB; the limit
+/// is generous and exists only to bound the memory a single request can claim.
+const MAX_BODY: u64 = 64 * 1024;
+
+/// Active session-cookie format tag, and the wire format it names:
+///
+/// ```text
+/// cookie = "bb2" "." keyid "." exp "." b64url(email) "." b64url(sig)
+/// sig    = HMAC_SHA256("bb2." keyid "." exp "." b64url(email), key[keyid])
+/// ```
+///
+/// The key id is stamped into the cookie so the signing key can roll over with zero
+/// downtime: during a rotation every accepted id still verifies, while only the
+/// active key signs new cookies.
+///
+/// This is a wire format with live clients. Changing the serialization — or the bytes
+/// that go into `sig` — invalidates every cookie in the wild and logs out every user.
+/// [`make_session`], [`verify_session`] and their tests pin it.
 const COOKIE_VERSION: &str = "bb2";
+
+/// Legacy, verify-only cookie format tag:
+///
+/// ```text
+/// cookie = "bb1" "." exp "." b64url(email) "." b64url(sig)
+/// sig    = HMAC_SHA256("bb1." exp "." b64url(email), key)
+/// ```
+///
+/// It carries no key id, so [`verify_session`] tries every accepted key. Kept so the
+/// `bb2` rollout logged nobody out; nothing mints `bb1` cookies any more.
 const COOKIE_VERSION_LEGACY: &str = "bb1";
 
 /// Namespace prefix marking a static API-key bearer credential (vs a Cognito
@@ -76,6 +112,8 @@ struct HmacKeys {
 }
 
 impl HmacKeys {
+    /// The key new cookies are signed with. Infallible: [`Config::from_env`] always
+    /// inserts the active key under `active_id`.
     fn active(&self) -> &[u8] {
         self.by_id
             .get(&self.active_id)
@@ -83,53 +121,83 @@ impl HmacKeys {
     }
 }
 
+/// Runtime configuration, read once from the environment at startup. Every field is
+/// a `BB_AUTH_*` env var; a missing required one is a fatal exit. Because it is read
+/// once, a config change needs `systemctl restart`, not `reload` (which only re-reads
+/// the users file).
 struct Config {
+    /// `BB_AUTH_LISTEN`, the loopback address the gate binds. Default `127.0.0.1:4181`.
     listen: String,
+    /// Session-cookie signing/verifying keys, from `BB_AUTH_HMAC_KEY{,_ID}` and
+    /// `BB_AUTH_HMAC_ACCEPTED_KEYS`.
     hmac_keys: HmacKeys,
+    /// `BB_AUTH_COGNITO_ISSUER`, with no trailing slash. The JWKS URL is derived from it.
     issuer: String,
-    // Accepted token audiences (Cognito app client ids). Always contains
-    // `BB_AUTH_CLIENT_ID`; `BB_AUTH_AUDIENCES` appends extras (e.g. a social-login
-    // client). A token is accepted if its `aud` matches any entry. [0] is the
-    // primary client_id.
+    /// Accepted token audiences (Cognito app client ids). Always contains
+    /// `BB_AUTH_CLIENT_ID` at index 0; `BB_AUTH_AUDIENCES` appends extras (e.g. a
+    /// separate social-login client). A token is accepted if its `aud` matches any entry.
     audiences: Vec<String>,
-    // Relax the `email_verified` requirement, but ONLY for federated (social)
-    // logins — never for native Cognito users. Cognito often can't verify the
-    // email of a social sign-up (Google/Apple/etc.), so it stamps
-    // `email_verified=false` even though the IdP itself asserted the address.
-    // Off by default (strict). See `unverified_social_ok`.
+    /// Relax the `email_verified` requirement, but ONLY for federated (social) logins —
+    /// never for native Cognito users. Cognito often cannot verify the email of a social
+    /// sign-up (Google/Apple/…), so it stamps `email_verified=false` even though the IdP
+    /// itself asserted the address. Off by default. See [`unverified_social_ok`].
     allow_unverified_social: bool,
-    // Optional provider allowlist for the relaxation above (matched
-    // case-insensitively against the token's `identities[].providerName`).
-    // `None` = any federated provider; `Some([..])` = only these. Restrict this
-    // to IdPs that actually verify the email (e.g. Google, SignInWithApple).
+    /// Optional provider allowlist narrowing [`Config::allow_unverified_social`], matched
+    /// case-insensitively against the token's `identities[].providerName`. `None` = any
+    /// federated provider. Restrict it to IdPs that actually verify the email.
     social_providers: Option<Vec<String>>,
+    /// `BB_AUTH_COOKIE_NAME`, the session cookie's name. Default `bb_session`.
     cookie_name: String,
+    /// `BB_AUTH_COOKIE_DOMAIN`. `None` = a host-only cookie (per-service login); a parent
+    /// domain (`.example.com`) shares one session across every service behind the gate.
     cookie_domain: Option<String>,
+    /// `BB_AUTH_SESSION_TTL_SECS`, the cookie's lifetime in seconds.
     session_ttl: u64,
-    // Hosts a post-login `rd` may point at (BB_AUTH_AUTHORIZED_HOSTS), as glob patterns
-    // matched against the host alone, e.g. `badbat75.com,*.badbat75.com`. This is the
-    // *only* authority for `safe_rd`: there is no canonical service base URL, because
-    // one gate fronts several hosts and which one is in play is decided by the caller.
-    // Enumerate the apex explicitly — `*.x.com` does not match `x.com`. Pair with
-    // BB_AUTH_COOKIE_DOMAIN=.<domain> to share the session cookie across them.
+    /// Hosts a post-login `rd` may land on (`BB_AUTH_AUTHORIZED_HOSTS`), as globs matched
+    /// against the host alone, e.g. `badbat75.com,*.badbat75.com`.
+    ///
+    /// This is the *only* authority for [`safe_rd`]. There is no canonical service base
+    /// URL: one gate fronts several hosts, and which one is in play is decided by the
+    /// caller. Enumerate the apex explicitly — `*.x.com` does not match `x.com`. Pair it
+    /// with `BB_AUTH_COOKIE_DOMAIN=.<domain>` to share the session cookie across siblings.
     authorized_hosts: Vec<UrlPattern>,
-    login_url: String, // login page (BB_AUTH_LOGIN_URL), e.g. https://login.example.com/
-    // Request header carrying the original request URL — scheme, host and normalised
-    // path — on the nginx `auth_request` subrequest AND on `/auth/session` (default
-    // `X-Original-URL`). It drives per-user/per-key URL scoping, and on `/auth/session`
-    // it tells bb-auth which host the login is happening on, so a relative `rd`
-    // resolves against the caller. nginx must set it, with the host hardcoded per
-    // server block so a spoofed `Host:` cannot widen a scope:
-    //   `proxy_set_header X-Original-URL https://app.example.com$uri;`
-    // `$uri` (not `$request_uri`): decoded, normalised, query-free.
+    /// `BB_AUTH_LOGIN_URL`, e.g. `https://login.example.com/`. Where a 401, a logout, and
+    /// every rejected `rd` land.
+    login_url: String,
+    /// Name of the request header carrying the original request URL — scheme, host and
+    /// normalised path. `BB_AUTH_ORIGINAL_URL_HEADER`, default `X-Original-URL`.
+    ///
+    /// It drives per-user/per-key URL scoping on `/auth/validate`, and on `/auth/session`
+    /// it tells bb-auth which host the login is happening on, so a relative `rd` resolves
+    /// against the caller. nginx must set it on both, with the host hardcoded per server
+    /// block so a spoofed `Host:` cannot widen a scope. Inside an `auth_request`
+    /// subrequest `$uri` is the subrequest's own URI, so the gated location has to stash
+    /// the real one first:
+    ///
+    /// ```text
+    /// location / {
+    ///     set $bb_url https://app.example.com$uri;   # rewrite phase, before auth_request
+    ///     auth_request /internal/auth-gate;
+    /// }
+    /// location = /internal/auth-gate {
+    ///     proxy_set_header X-Original-URL $bb_url;
+    /// }
+    /// ```
+    ///
+    /// `$uri`, never `$request_uri`: the latter is undecoded and carries the query
+    /// string, so `/app/%2e%2e/admin` would match an `/app/*` scope while nginx serves
+    /// `/admin`. A gated location that forgets the `set` sends no header and is denied.
     original_url_header: String,
+    /// `BB_AUTH_WORKERS`, the number of blocking request threads. At least 1.
     workers: usize,
 }
 
+/// Read an env var, falling back to `default` when unset.
 fn env_or(key: &str, default: &str) -> String {
     std::env::var(key).unwrap_or_else(|_| default.to_string())
 }
 
+/// Read a required env var, or exit(1). There is no safe default for any of these.
 fn env_req(key: &str) -> String {
     std::env::var(key).unwrap_or_else(|_| {
         eprintln!("[bb-auth] FATAL: missing required env var {key}");
@@ -147,6 +215,9 @@ fn env_flag(key: &str) -> bool {
 }
 
 impl Config {
+    /// Build the config from the `BB_AUTH_*` env vars, exiting on the first fatal
+    /// problem: a missing required var, a short HMAC key, a malformed key id, or an
+    /// empty/unparseable `BB_AUTH_AUTHORIZED_HOSTS`.
     fn from_env() -> Self {
         let active_key = env_req("BB_AUTH_HMAC_KEY").into_bytes();
         if active_key.len() < 32 {
@@ -273,20 +344,29 @@ impl Config {
 // State
 // ---------------------------------------------------------------------------
 
+/// Cognito's public signing keys, by `kid`, with the time of the last successful fetch.
 struct JwksCache {
     keys: HashMap<String, DecodingKey>,
     last_refresh: Instant,
 }
 
+/// Everything a worker thread needs. Shared immutably behind an [`Arc`]; the two
+/// mutable parts are the hot-reloadable users table and the JWKS cache.
 struct State {
     cfg: Config,
-    users: RwLock<Users>, // allowlisted emails + their static API keys, indexed
+    /// The access gate: allowlisted users and their API keys, both indexed. Swapped
+    /// wholesale on SIGHUP by `reload_users` (POSIX only, hence not linked here).
+    users: RwLock<Users>,
+    /// Path to re-read on SIGHUP. Only the POSIX reload path needs it.
     #[cfg(unix)]
-    users_path: String, // needed by the SIGHUP reload path
+    users_path: String,
     jwks: RwLock<JwksCache>,
-    jwks_refresh: Mutex<()>, // serializes JWKS refreshers (double-checked locking)
+    /// Serializes JWKS refreshers, so a `kid` miss under load triggers one fetch, not
+    /// one per worker. See [`refresh_jwks_if_due`].
+    jwks_refresh: Mutex<()>,
 }
 
+/// Current Unix time in seconds, saturating to 0 if the clock predates the epoch.
 fn now() -> u64 {
     SystemTime::now()
         .duration_since(UNIX_EPOCH)
@@ -295,35 +375,7 @@ fn now() -> u64 {
 }
 
 // ---------------------------------------------------------------------------
-// Users table (JSON: allowlisted emails + their static API keys)
-//
-// One file (BB_AUTH_USERS_FILE) describes every user, each with an optional URL
-// scope and zero or more static `bbk_` API keys. It replaces the old flat email
-// allowlist and stays the real access gate, hot-reloaded on SIGHUP:
-//
-//   { "users": [
-//       { "email": "bob@x.com",
-//         "authorized_urls": ["https://mcp.x.com/mcp/*"],   // what bob may reach
-//         "api_keys": [
-//           { "id": "laptop", "key_hash": "<sha256 hex of the bbk_… bearer>",
-//             "released": "2026-07-08", "duration": "365d",
-//             "authorized_urls": ["https://mcp.x.com/mcp/*"] }  // omit => inherit user scope
-//         ] },
-//       { "email": "alice@x.com", "authorized_urls": ["*://*/*"] }   // every URL
-//   ] }
-//
-// Access is enumerated, never assumed: a user with no `authorized_urls` reaches
-// nothing. "Everything" is the explicit pattern `*://*/*`.
-//
-// `enabled_paths` (the pre-2.0 path-prefix field) is REJECTED outright: silently
-// ignoring it would leave a user unscoped, which under the old semantics failed
-// open. See `read_users`.
-//
-// Keys are indexed by the SHA-256 (hex) of the whole bearer — the raw key is
-// never stored. High-entropy random keys make a plain (unsalted) hash + a
-// non-constant-time map lookup safe: finding a matching row requires a SHA-256
-// second preimage, so the lookup itself is the verification. `id` is a human
-// label (logs / revocation), not part of the credential.
+// Users table
 // ---------------------------------------------------------------------------
 
 /// Match `s` against a URL pattern with two wildcards:
@@ -483,6 +535,7 @@ impl UrlScope {
         Ok(UrlScope { patterns })
     }
 
+    /// Whether this scope authorizes nothing at all. Only used to warn at load time.
     fn is_empty(&self) -> bool {
         self.patterns.is_empty()
     }
@@ -506,59 +559,97 @@ impl UrlScope {
     }
 }
 
-/// A resolved allowlisted user (keyed elsewhere by lowercased email).
+/// A resolved allowlisted user, keyed by lowercased email in [`Users::by_email`].
 struct UserRecord {
     scope: UrlScope,
 }
 
-/// A resolved API key (keyed elsewhere by the bearer's SHA-256 hex).
+/// A resolved API key, keyed by the bearer's SHA-256 hex in [`Users::by_key_hash`].
 struct ApiKeyRecord {
-    email: String,        // owning user, for logging
-    key_id: String,       // label, for logging / revocation
-    expires: Option<u64>, // Unix seconds; None = never
+    /// Owning user, for logging.
+    email: String,
+    /// Human label, for logging and revocation. Not part of the credential.
+    key_id: String,
+    /// Unix seconds; `None` = never expires.
+    expires: Option<u64>,
+    /// The key's own scope, or the owner's if it declared none.
     scope: UrlScope,
 }
 
-/// The two runtime indices built from the users file.
+/// The two runtime indices built from the users file by [`read_users`].
 struct Users {
-    by_email: HashMap<String, UserRecord>, // lowercased email -> user
-    by_key_hash: HashMap<String, ApiKeyRecord>, // sha256(bearer) hex -> key
+    /// Lowercased email → user.
+    by_email: HashMap<String, UserRecord>,
+    /// `sha256(bearer)` hex → key. The raw key is never stored, and this lookup **is**
+    /// the verification: finding a matching row would require a SHA-256 second preimage,
+    /// so a high-entropy key needs neither a salt nor a constant-time compare.
+    by_key_hash: HashMap<String, ApiKeyRecord>,
 }
 
 // --- JSON wire format (only the fields we consume; extras are ignored) ---
 
+/// Root of the users file (`BB_AUTH_USERS_FILE`) — the real access gate, re-checked on
+/// every `/auth/validate` and hot-reloaded on SIGHUP.
+///
+/// ```json
+/// { "users": [
+///     { "email": "bob@x.com",
+///       "authorized_urls": ["https://mcp.x.com/mcp/*"],
+///       "api_keys": [
+///         { "id": "laptop", "key_hash": "<sha256 hex of the bbk_… bearer>",
+///           "released": "2026-07-08", "duration": "365d",
+///           "authorized_urls": ["https://mcp.x.com/mcp/*"] }
+///       ] },
+///     { "email": "alice@x.com", "authorized_urls": ["*://*/*"] }
+/// ] }
+/// ```
+///
+/// Access is enumerated, never assumed: a user with no `authorized_urls` reaches
+/// nothing. "Everything" is the explicit pattern `*://*/*`. Validate a file before
+/// shipping it with `bb-auth --check-users <file>` ([`check_users`]).
 #[derive(Deserialize)]
 struct UsersFile {
     #[serde(default)]
     users: Vec<UserSpec>,
 }
 
+/// One user entry. Extra fields are ignored, with one deliberate exception.
 #[derive(Deserialize)]
 struct UserSpec {
     email: String,
-    // Absent => unrestricted; present (even empty) => this user's own scope.
+    /// Absent **or** empty ⇒ this user reaches nothing ([`UrlScope::deny_all`]).
+    /// Blanket access is the explicit pattern `*://*/*`.
     #[serde(default)]
     authorized_urls: Option<Vec<String>>,
-    // Pre-2.0 field. Its mere presence is fatal — see `read_users`.
+    /// The pre-2.0 path-prefix field. Its mere presence is a fatal parse error rather
+    /// than an ignored extra: under the old semantics an unscoped user reached
+    /// everything, so silently dropping it would fail *open*. See [`read_users`].
     #[serde(default)]
     enabled_paths: Option<serde_json::Value>,
     #[serde(default)]
     api_keys: Vec<ApiKeySpec>,
 }
 
+/// One static API key belonging to a [`UserSpec`]. The `bbk_` bearer itself never
+/// appears here — only `key_hash`. Mint keys with `tools/bb-apikey.py`.
 #[derive(Deserialize)]
 struct ApiKeySpec {
     #[serde(default)]
     id: String,
+    /// Lowercase hex SHA-256 of the whole `bbk_…` bearer. A malformed value warns and
+    /// skips just this key.
     #[serde(default)]
     key_hash: String,
+    /// `YYYY-MM-DD` the key was issued; the base for `duration`.
     #[serde(default)]
     released: String,
+    /// `<n>d`, `<n>h`, a bare `<n>` (days), or `never`/`0`/`-`. See [`parse_duration`].
     #[serde(default)]
     duration: String,
-    // Absent => inherit the user's scope; present => this key's own scope.
+    /// Absent ⇒ inherit the owning user's scope; present (even empty) ⇒ this key's own.
     #[serde(default)]
     authorized_urls: Option<Vec<String>>,
+    /// Fatal if present, exactly as on [`UserSpec::enabled_paths`].
     #[serde(default)]
     enabled_paths: Option<serde_json::Value>,
 }
@@ -790,6 +881,9 @@ fn spawn_users_reload_handler(_state: &Arc<State>) {}
 // JWKS
 // ---------------------------------------------------------------------------
 
+/// Fetch and parse the issuer's JWKS, keyed by `kid`. Unusable individual keys are
+/// skipped with a warning; an empty result is an error. Outbound HTTPS only — bb-auth
+/// never sends anything to Cognito and holds no client secret.
 fn fetch_jwks(issuer: &str) -> Result<HashMap<String, DecodingKey>, String> {
     let url = format!("{issuer}/.well-known/jwks.json");
     let body = ureq::get(&url)
@@ -858,15 +952,19 @@ fn decoding_key(state: &State, kid: &str) -> Option<DecodingKey> {
 // id_token validation
 // ---------------------------------------------------------------------------
 
+/// The id_token claims bb-auth consumes. `exp`, `aud` and `iss` are enforced by
+/// `jsonwebtoken` before this is deserialized.
 #[derive(Deserialize)]
 struct Claims {
     email: Option<String>,
+    /// Cognito sends this as a bool or as the string `"true"`; see [`email_verified_true`].
     #[serde(default)]
     email_verified: serde_json::Value,
+    /// Must be `"id"` — an access_token must not be usable as a credential here.
     token_use: Option<String>,
-    // Present (non-empty) only for federated/social logins; absent for native
-    // Cognito users. Each entry names the upstream IdP via `providerName`. This
-    // is what lets the relaxation target social logins only.
+    /// Non-empty only for federated/social logins; absent for native Cognito users.
+    /// Each entry names the upstream IdP via `providerName`. This is what lets the
+    /// `email_verified` relaxation target social logins only.
     #[serde(default)]
     identities: Vec<Identity>,
 }
@@ -879,6 +977,8 @@ struct Identity {
     provider_name: Option<String>,
 }
 
+/// Whether the `email_verified` claim is truthy. Cognito types it as a bool, but some
+/// federated flows stringify it, so `"true"` counts. Anything else is false.
 fn email_verified_true(v: &serde_json::Value) -> bool {
     match v {
         serde_json::Value::Bool(b) => *b,
@@ -919,7 +1019,12 @@ fn social_provider_names(identities: &[Identity]) -> String {
         .join(",")
 }
 
-/// Fully validate a Cognito id_token. Returns the (lowercased) verified email.
+/// Fully validate a Cognito id_token, returning the lowercased verified email.
+///
+/// Enforces all of: `alg == RS256`, a known `kid`, the signature, `exp` (required,
+/// 60 s leeway), `iss`, `aud` against [`Config::audiences`], `token_use == "id"`, and a
+/// truthy `email_verified`. The single sanctioned exception to the last one is
+/// [`unverified_social_ok`].
 fn validate_id_token(token: &str, state: &State) -> Result<String, String> {
     let header = decode_header(token).map_err(|e| format!("bad token header: {e}"))?;
     if header.alg != Algorithm::RS256 {
@@ -962,20 +1067,10 @@ fn validate_id_token(token: &str, state: &State) -> Result<String, String> {
 }
 
 // ---------------------------------------------------------------------------
-// Session cookie (HMAC-signed)
-//
-// Active (signed) format — `bb2`:
-//   bb2.<keyid>.<exp>.<b64url(email)>.<b64url(HMAC_SHA256("bb2.<keyid>.<exp>.<b64url(email)>", key[keyid]))>
-// The key id is stamped in so the active signing key can roll over with zero
-// downtime: during rotation, accept multiple ids for verification while only the
-// active one signs new cookies.
-//
-// Legacy verify-only format — `bb1` (kept so the bb2 rollout doesn't log anyone
-// out; cookies signed before the migration still verify):
-//   bb1.<exp>.<b64url(email)>.<b64url(HMAC_SHA256("bb1.<exp>.<b64url(email)>"))>
-// Signed under the single old key; verified by trying every accepted key.
+// Session cookie (HMAC-signed) — wire format on COOKIE_VERSION{,_LEGACY}
 // ---------------------------------------------------------------------------
 
+/// HMAC-SHA256 of `msg` under `key`, base64url without padding.
 fn sign(key: &[u8], msg: &str) -> String {
     let mut mac = HmacSha256::new_from_slice(key).expect("HMAC accepts any key length");
     mac.update(msg.as_bytes());
@@ -1007,8 +1102,8 @@ fn finish_session(exp: u64, eb: &str) -> Option<String> {
     Some(email.to_ascii_lowercase())
 }
 
-/// Mint a `bb2` session cookie for `email`, valid for `ttl` seconds, signed with
-/// the active key.
+/// Mint a session cookie for `email`, valid for `ttl` seconds, signed with the active
+/// key in the [`COOKIE_VERSION`] format.
 fn make_session(email: &str, ttl: u64, keys: &HmacKeys) -> String {
     let exp = now() + ttl;
     let eb = URL_SAFE_NO_PAD.encode(email.as_bytes());
@@ -1017,8 +1112,9 @@ fn make_session(email: &str, ttl: u64, keys: &HmacKeys) -> String {
     format!("{msg}.{sig}")
 }
 
-/// Verify a session cookie: version (`bb2` active, `bb1` legacy), key id,
-/// signature (constant-time) and expiry. Returns the lowercased email it carries.
+/// Verify a session cookie — version, key id, signature (constant-time) and expiry —
+/// returning the lowercased email it carries. Accepts both [`COOKIE_VERSION`] and
+/// [`COOKIE_VERSION_LEGACY`]. `None` on anything that does not verify.
 fn verify_session(val: &str, keys: &HmacKeys) -> Option<String> {
     let parts: Vec<&str> = val.splitn(5, '.').collect();
     match parts.as_slice() {
@@ -1049,6 +1145,7 @@ fn verify_session(val: &str, keys: &HmacKeys) -> Option<String> {
 // HTTP helpers
 // ---------------------------------------------------------------------------
 
+/// First request header matching `name`, compared case-insensitively.
 fn header_value<'a>(req: &'a Request, name: &str) -> Option<&'a str> {
     // HeaderField::equiv requires a &'static str, so compare case-insensitively
     // against the field's string form (header names are ASCII).
@@ -1070,6 +1167,7 @@ fn parse_bearer(auth: &str) -> Option<&str> {
     (!token.is_empty()).then_some(token)
 }
 
+/// Pull one cookie's value out of a `Cookie:` header.
 fn cookie_value<'a>(cookie_header: &'a str, name: &str) -> Option<&'a str> {
     for part in cookie_header.split(';') {
         let part = part.trim();
@@ -1082,10 +1180,15 @@ fn cookie_value<'a>(cookie_header: &'a str, name: &str) -> Option<&'a str> {
     None
 }
 
+/// Build a response header. Panics only on a caller-side bug (non-ASCII name/value);
+/// every call site passes constants or already-sanitised values.
 fn h(k: &str, v: &str) -> Header {
     Header::from_bytes(k.as_bytes(), v.as_bytes()).expect("valid header")
 }
 
+/// Render a `Set-Cookie` value. `max_age = 0` expires the cookie (logout). Always
+/// `HttpOnly` + `Secure` + `SameSite=Lax`, so JS cannot read it and it still rides
+/// top-level navigations back to the service.
 fn build_cookie(cfg: &Config, value: &str, max_age: i64) -> String {
     let mut c = format!(
         "{}={}; Max-Age={}; Path=/; HttpOnly; Secure; SameSite=Lax",
@@ -1177,10 +1280,13 @@ fn rd_url_allowed(url: &str, hosts: &[UrlPattern]) -> bool {
     hosts.iter().any(|p| glob_match(&p.pat, host.as_bytes()))
 }
 
+/// Respond with a bare status code and no body — what `auth_request` consumes.
 fn respond_empty(req: Request, status: u16) {
     let _ = req.respond(Response::empty(StatusCode(status)));
 }
 
+/// Respond `302 Location: …`, optionally setting or clearing the session cookie.
+/// `location` must already have passed [`safe_rd`].
 fn respond_redirect(req: Request, location: &str, set_cookie: Option<&str>) {
     let mut resp = Response::empty(StatusCode(302)).with_header(h("Location", location));
     if let Some(sc) = set_cookie {
@@ -1189,6 +1295,8 @@ fn respond_redirect(req: Request, location: &str, set_cookie: Option<&str>) {
     let _ = req.respond(resp);
 }
 
+/// Respond with the minimal styled error page the browser sees on a failed
+/// `/auth/session`. Every interpolated value is escaped by [`html_escape`].
 fn respond_html(req: Request, status: u16, title: &str, msg: &str, login_url: &str) {
     // Escape everything we interpolate: today the inputs are constants / a
     // trusted env value, but there is no structural guarantee a future caller
@@ -1290,6 +1398,12 @@ fn user_scope_ok(state: &State, email: &str, url: Option<&str>) -> bool {
     }
 }
 
+/// `GET /auth/validate` — the nginx `auth_request` endpoint. 204 if any credential
+/// authorizes this request, 401 otherwise. Never issues a cookie.
+///
+/// Credentials are tried in the order documented on the crate: `bbk_` API key, raw
+/// id_token, then the session cookie. Each must resolve to a user in the table *and*
+/// put the request URL inside that credential's [`UrlScope`].
 fn handle_validate(req: Request, state: &State) {
     let cfg = &state.cfg;
     // Original request URL (for per-user / per-key URL scoping), captured now as an
@@ -1328,6 +1442,11 @@ fn handle_validate(req: Request, state: &State) {
     respond_empty(req, if ok { 204 } else { 401 });
 }
 
+/// `POST /auth/session` — exchange a browser-obtained `id_token` for a session cookie,
+/// then `302` to `rd`.
+///
+/// 400 on a missing token, 401 on an invalid one, 403 when the verified email is not in
+/// the users table. The redirect target is always laundered through [`safe_rd`].
 fn handle_session(mut req: Request, state: &State) {
     let cfg = &state.cfg;
 
@@ -1367,7 +1486,7 @@ fn handle_session(mut req: Request, state: &State) {
     };
 
     if !state.users.read().unwrap().by_email.contains_key(&email) {
-        eprintln!("[bb-auth] session denied (not allowlisted): {email}");
+        eprintln!("[bb-auth] session denied: {email} not in users table");
         respond_html(
             req,
             403,
@@ -1398,6 +1517,10 @@ fn handle_session(mut req: Request, state: &State) {
     respond_redirect(req, &rd, Some(&cookie));
 }
 
+/// `GET /auth/logout` — expire the session cookie and `302` to the login page.
+///
+/// Clears the bb-auth cookie only; the Cognito refresh token the login page may hold is
+/// out of scope. A cross-site navigation is ignored (CSRF logout).
 fn handle_logout(req: Request, state: &State) {
     let cfg = &state.cfg;
     // Block cross-site CSRF logout: a navigation triggered from another origin
@@ -1441,6 +1564,8 @@ fn check_users(path: &str) -> ! {
     }
 }
 
+/// Parse argv (only `--check-users`), build the config, load the users table, prime the
+/// JWKS, then serve forever on a fixed pool of blocking worker threads.
 fn main() {
     let args: Vec<String> = std::env::args().skip(1).collect();
     match args.first().map(String::as_str) {
