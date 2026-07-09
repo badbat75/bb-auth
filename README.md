@@ -39,9 +39,9 @@ nginx error_page 401 → 302  <login-page>/?rd=<original>
 
 | Method | Path             | Who        | Purpose                                            |
 |--------|------------------|------------|----------------------------------------------------|
-| GET    | `/auth/validate` | nginx only | `auth_request`: 204 + `X-Auth-Email` if the session cookie, an `Authorization: Bearer <id_token>`, or a static `Authorization: Bearer bbk_…` API key authorizes the request (allowlisted user, in URL scope), else 401 |
+| GET    | `/auth/validate` | nginx only | `auth_request`: 204 + `X-Auth-Email` if the session cookie, an `Authorization: Bearer <id_token>`, or a static `Authorization: Bearer bbk_…` API key authorizes the request (in a user's URL scope, or on a `public_auth` site), else 401 + `X-Auth-Login-URL` |
 | POST   | `/auth/session`  | browser    | validate posted `id_token`, set cookie, 302 → `rd` |
-| GET    | `/auth/logout`   | browser    | clear cookie, 302 → login page                     |
+| GET    | `/auth/logout`   | browser    | clear cookie, 302 → `rd` (guarded) or the login page |
 | GET    | `/auth/healthz`  | local      | liveness                                           |
 
 ## Programmatic access (Bearer)
@@ -62,7 +62,8 @@ Authorization: Bearer <cognito_id_token>
 ```
 
 Validated with the **same** checks as `/auth/session` (RS256 via JWKS, iss/aud/exp,
-`token_use=id`, `email_verified`), then the email must be a user in the users file.
+`token_use=id`, `email_verified`), then the email must be granted the URL — by the
+access file's roster, or by a `public_auth` site.
 No flag needed: a valid id_token for an allowlisted email is exactly the credential
 `/auth/session` already trusts to mint a 30-day cookie. Mint/refresh one with
 [`tools/bb-token.py`](tools/bb-token.py) (dependency-free Python 3 stdlib; runs the
@@ -79,9 +80,11 @@ curl -H "$(python tools/bb-token.py header)" https://mcp.badbat75.com/mcp/foo/
 Authorization: Bearer bbk_<secret>
 ```
 
-bb-auth looks it up by `sha256(bearer)` in the users file (only the hash is stored,
-never the raw key), checks it is not past its `duration`, and enforces its URL
-scope. Mint one with [`tools/bb-apikey.py`](tools/bb-apikey.py) — it prints the raw
+bb-auth looks it up by `sha256(bearer)` in the access file (only the hash is stored,
+never the raw key), checks its owner is not `denied`, checks it is not past its
+`duration`, and enforces its URL scope. A `public_auth` site does **not** rescue an
+unknown key — that grant is for identities Cognito vouches for, and an unknown key is
+nobody. Mint one with [`tools/bb-apikey.py`](tools/bb-apikey.py) — it prints the raw
 bearer **once** and a JSON entry to paste into the owning user's `api_keys`:
 
 ```bash
@@ -92,11 +95,12 @@ python tools/bb-apikey.py bob@badbat75.com --id laptop --duration 365d \
 
 ## Passing the identity to the app
 
-All three credentials resolve to one thing: the email of a user in the users file.
-A `204` from `/auth/validate` carries it in **`X-Auth-Email`**, which nginx lifts out
-of the subrequest and injects into the request it proxies — that is how the app
-behind the gate learns who is calling. An API key resolves to its **owning user's**
-email: a key acts as its user.
+All three credentials resolve to one thing: an email. A `204` from `/auth/validate`
+carries it in **`X-Auth-Email`**, which nginx lifts out of the subrequest and injects
+into the request it proxies — that is how the app behind the gate learns who is
+calling. An API key resolves to its **owning user's** email: a key acts as its user.
+On a [`public_auth` site](#sites-and-public_auth) the email may name someone with no
+entry anywhere — an *authenticated* identity that the app is expected to enroll.
 
 ```nginx
 auth_request_set $bb_email $upstream_http_x_auth_email;
@@ -120,7 +124,7 @@ read: the session cookie is not a JWT (it carries only the email, HMAC-signed) a
 API key has no token at all, so decoding a claim would work for exactly one of the
 three credentials. It would not be safe either — Cognito self-signup is open, so a
 valid `id_token` proves *identity*, never *authorization*. What decides authorization
-is membership in the users file plus the URL scope, and only the gate checks those.
+is the access file, and only the gate reads it.
 
 ## URL scoping
 
@@ -160,25 +164,37 @@ see [the nginx wiring](#putting-a-service-behind-the-gate). Since every credenti
 scoped, that header is **required**: a request without it is denied, as is any URL
 containing `..` (fail-closed on both counts).
 
-## Users file
+## Access file
 
 The access gate is a single JSON file (`BB_AUTH_USERS_FILE`, installed as
 `/opt/bb-auth/var/lib/users.json`; see [`deploy/users.example.json`](deploy/users.example.json)).
-It lists every allowlisted email and, optionally, per-user URL scopes and static
-API keys:
+Three sibling sections answer three different questions:
 
 ```json
-{ "users": [
-  { "email": "you@badbat75.com", "authorized_urls": ["*://*/*"] },
-  { "email": "bot@badbat75.com",
-    "authorized_urls": ["https://mcp.badbat75.com/mcp", "https://mcp.badbat75.com/mcp/*"],
-    "api_keys": [
-      { "id": "laptop", "key_hash": "<sha256 hex of the bbk_ bearer>",
-        "released": "2026-07-08", "duration": "365d",
-        "authorized_urls": ["https://mcp.badbat75.com/mcp/*"] }
-    ] }
+{ "sites": [
+    { "name": "signup", "urls": ["https://app.badbat75.com/welcome",
+                                 "https://app.badbat75.com/welcome/*"],
+      "public_auth": true }
+  ],
+  "denied": ["spammer@badbat75.com"],
+  "users": [
+    { "email": "you@badbat75.com", "authorized_urls": ["*://*/*"] },
+    { "email": "bot@badbat75.com",
+      "authorized_urls": ["https://mcp.badbat75.com/mcp", "https://mcp.badbat75.com/mcp/*"],
+      "api_keys": [
+        { "id": "laptop", "key_hash": "<sha256 hex of the bbk_ bearer>",
+          "released": "2026-07-08", "duration": "365d",
+          "authorized_urls": ["https://mcp.badbat75.com/mcp/*"] }
+      ] }
 ] }
 ```
+
+A request is authorized when its credential resolves to an identity and one of exactly
+**two grant sources** covers the request URL: the user's `authorized_urls`, or a
+`public_auth` site. Both are re-checked on every `/validate`. The one thing that takes
+access away is `denied`.
+
+### `users` — the roster
 
 - **`email`** (required) — matched case-insensitively; its presence is the allowlist.
 - **`authorized_urls`** — allowed URL patterns (see [URL scoping](#url-scoping)). Omitted or `[]` grants nothing; `["*://*/*"]` grants everything.
@@ -188,8 +204,101 @@ API keys:
   - **`id`** — human label for logs/revocation. **`authorized_urls`** — omit to inherit the user's scope.
   - Unknown fields (e.g. `notes`) are ignored, so annotate freely.
 
-Check a file before shipping it — a bad pattern is a fatal startup error, and the
-deploy script runs this same check before it restarts anything:
+### Sites and `public_auth`
+
+A site describes a **URL area**, never a person: no field of it may name a user. That
+line is what keeps `sites` from becoming a second, conflicting way to say what
+`authorized_urls` already says — and it is why a user removed from the roster cannot
+walk back in through a site.
+
+- **`urls`** — the same `<scheme>://<host>/<path>` patterns as `authorized_urls`. A malformed one is fatal.
+- **`public_auth`** — grant this area to **any** identity Cognito vouches for, enrolled in `users` or not. This is the point: it is how someone who has just registered reaches an onboarding area, with the app receiving their `X-Auth-Email` and enrolling them. `false` (the default) grants nothing and is indistinguishable from having no site at all — the field exists to carry future properties.
+- **`login_url`** — an absolute `https://` login page for this area, overriding `BB_AUTH_LOGIN_URL` (see [Per-site login page](#per-site-login-page)). Validated at load: printable ASCII, https, no userinfo `@`, no backslash — it ends up in a header and a redirect.
+- **`name`** — a label for the logs (`granted via site 'signup' (public_auth): …`), which is your only visibility into who is walking in un-enrolled.
+- Unknown fields are a **hard error** here, unlike everywhere else. The day `public_auth` gains a companion restriction, a typo in that companion must not be silently dropped, leaving `public_auth: true` standing alone — that would fail *open*.
+
+**First match wins**, in file order: the first site whose `urls` cover the request
+answers for it — for `public_auth` *and* for `login_url` — even if it grants nothing. Put
+specific sites before broad ones. A URL with no site is not denied — it is simply not
+open, and the roster decides as before.
+
+> Cognito self-signup is open, so `public_auth` means *anyone who can register*. It is
+> the right grant for an onboarding page and the wrong one for everything else. An
+> `id_token` behind it still proves a verified email (unless
+> `BB_AUTH_ALLOW_UNVERIFIED_SOCIAL` is on, which widens this further).
+
+### `denied` — the veto
+
+Lowercased emails refused on **every** credential and **both** grant sources, checked
+before anything else. It is not the same as deleting the user's row:
+
+- On a `public_auth` site the roster is never consulted, so for an un-enrolled identity this is the **only** denial that exists.
+- For an enrolled one it is a *suspension*, not a deletion: their scope and their API keys survive the lockout, so re-enabling is a one-line edit. (A user's `authorized_urls: []` locks them out of the roster grant — but **not** out of a `public_auth` site. That is what `denied` is for.)
+
+Like everything else it applies from the next request; a cookie or `id_token` already
+in flight is stateless and cannot be recalled mid-request.
+
+### Per-site login page
+
+bb-auth never redirects a gated request: it answers `401` and **nginx** decides where to
+send the browser. So the way a site names its own login page is a response header the
+gate sets on that `401`, which nginx lifts with `auth_request_set` — exactly as it
+already does for `X-Auth-Email`:
+
+```nginx
+# http{} level. An empty $bb_login means the gate named no login page — a stale
+# binary, or a location with no auth_request_set. Falling back to the global URL
+# here is what keeps @bb_signin from emitting a *relative* `Location: ?rd=…`,
+# which redirects the browser to the gated path it just came from: a loop.
+map $bb_login $bb_login_safe {
+    ""      https://login.example.com/;   # = BB_AUTH_LOGIN_URL
+    default $bb_login;
+}
+
+location /app1 {
+    set $bb_url https://app.example.com$uri;
+    auth_request     /internal/auth-gate;
+    auth_request_set $bb_login $upstream_http_x_auth_login_url;
+    error_page 401 = @bb_signin;
+    ...
+}
+location @bb_signin { return 302 $bb_login_safe?rd=$scheme://$host$request_uri; }
+```
+
+The header carries the site's `login_url`, or `BB_AUTH_LOGIN_URL` when it declares none.
+`auth_request_set` copies it into a request variable, which is what stops a later
+`proxy_pass` from clobbering `$upstream_http_*`; it reads the subrequest's headers even
+though the subrequest answered `401`, which is the whole reason this works. Without the
+`auth_request_set` line nothing breaks — the `map` yields the global URL, exactly as a
+hardcoded `@bb_signin` did before.
+
+The gate can name the login page here because a `401` happens **on** a gated URL, so the
+site resolves. Logout gets no such luck.
+
+### Logging out
+
+`GET /auth/logout` clears the bb-auth cookie and `302`s away. It clears *only* that
+cookie: any Cognito session the login page holds is out of scope, and a cross-site
+navigation is ignored (CSRF-forced logout).
+
+There is deliberately **no per-site logout landing page**. A logout happens at
+`/auth/logout`, which no site's `urls` cover, so the gate cannot tell which area you are
+leaving — there is nothing to resolve against. The one party that knows is whoever wrote
+the logout link, so they say it:
+
+```html
+<a href="/auth/logout?rd=/app1/goodbye">Sign out</a>
+```
+
+`rd` goes through the same [`safe_rd`](#where-the-post-login-redirect-may-land) guard as on `/auth/session`,
+so it opens no new redirect surface. With no `rd`, the browser lands on the login page. A
+relative `rd` needs `X-Original-URL` on that location too; if nginx omits it, the redirect
+falls back to the login page — fail-soft.
+
+### Validating and reloading
+
+Check a file before shipping it — a bad pattern or an unknown site field is a fatal
+startup error, and the deploy script runs this same check before it restarts anything:
 
 ```bash
 bb-auth --check-users deploy/users.json     # exit 0 + a summary, or exit 1 + the error
@@ -207,6 +316,9 @@ table (never nuked). Keys are indexed by their hash, so a lookup is a single map
 > 1.x user with **no** scope meant "all paths", so those users now need an explicit
 > `["*://*/*"]` or they will reach nothing. Update nginx to send `X-Original-URL` too;
 > the deploy script aborts before restarting rather than boot-loop the service.
+>
+> **Upgrading from 2.1.** Nothing to do: a file with no `sites` and no `denied`
+> behaves exactly as before.
 
 ## Session cookie
 
@@ -222,9 +334,9 @@ bb2.<keyid>.<exp>.<b64url(email)>.<b64url(HMAC_SHA256("bb2.<keyid>.<exp>.<b64url
 bb1.<exp>.<b64url(email)>.<b64url(HMAC_SHA256("bb1.<exp>.<b64url(email)>"))>                                 # legacy (verify-only)
 ```
 
-The users file is re-checked on every `/validate`, so de-authorizing someone is
-just an edit (remove the user, or a single API key) + `systemctl reload bb-auth`
-(SIGHUP). A restart works too.
+The access file is re-checked on every `/validate`, so de-authorizing someone is
+just an edit (remove the user or a single API key, or add them to `denied`) +
+`systemctl reload bb-auth` (SIGHUP). A restart works too.
 
 ## Build (cross-compile)
 
@@ -303,6 +415,14 @@ The binary is service-agnostic. To front a service at `app.example.com`:
    # server_name. Without this, a spoofed Host: could widen a URL scope.
    server { listen 443 ssl default_server; ssl_reject_handshake on; }
 
+   # Optional: let a site pick its own login page (see "Per-site login page").
+   # The default arm is what a location without auth_request_set, or an older
+   # bb-auth, falls back to — never leave $bb_login to reach `return 302` raw.
+   map $bb_login $bb_login_safe {
+       ""      https://login.example.com/;
+       default $bb_login;
+   }
+
    server {
        listen 443 ssl;
        server_name app.example.com;
@@ -340,12 +460,16 @@ The binary is service-agnostic. To front a service at `app.example.com`:
            proxy_set_header X-Forwarded-User "";   # clear names we do NOT set
            proxy_set_header Remote-User      "";
 
+           # Which login page this area uses. auth_request_set reads the 401's
+           # headers too, so the gate can name it per site.
+           auth_request_set $bb_login $upstream_http_x_auth_login_url;
+
            error_page 401 = @bb_signin;
            proxy_pass http://127.0.0.1:8080;   # the upstream app
        }
 
        location @bb_signin {
-           return 302 https://login.example.com/?rd=$scheme://$host$request_uri;
+           return 302 $bb_login_safe?rd=$scheme://$host$request_uri;
        }
 
        location = /auth/session {
@@ -355,7 +479,12 @@ The binary is service-agnostic. To front a service at `app.example.com`:
            proxy_set_header X-Original-URL https://app.example.com$uri;
            proxy_pass http://127.0.0.1:4181/auth/session;
        }
-       location = /auth/logout  { proxy_pass http://127.0.0.1:4181/auth/logout;  }
+       location = /auth/logout  {
+           # Only needed so a relative `?rd=` on the logout link resolves against
+           # this host; without it the logout falls back to the login page.
+           proxy_set_header X-Original-URL https://app.example.com$uri;
+           proxy_pass http://127.0.0.1:4181/auth/logout;
+       }
    }
    ```
 

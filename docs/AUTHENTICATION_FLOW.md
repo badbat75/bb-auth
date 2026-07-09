@@ -103,9 +103,14 @@ Inside bb-auth (`handle_session`):
      `BB_AUTH_ALLOW_UNVERIFIED_SOCIAL` is on, an `email_verified=false` token is
      accepted when it carries a federated `identities` entry (a social login),
      optionally narrowed to `BB_AUTH_SOCIAL_PROVIDERS`. Native users stay strict.
-   - extract and lowercase the `email` claim.
-3. **Users-table check:** `email` must be present in the in-memory users table
-   (`by_email`).
+   - extract and lowercase the `email` claim, and require it to be printable ASCII
+     (`header_safe_email`) — it will be handed to the app in `X-Auth-Email`, and on a
+     `public_auth` site no table has vetted it.
+3. **Access-table check:** `email` must not be in `denied`, and must be either present in
+   the roster (`by_email`) or able to go somewhere — i.e. some site grants `public_auth`.
+   The cookie is identity, not authorization: it grants nothing on its own, and every
+   request it accompanies is re-authorized. This `403` is a courtesy, so someone who is
+   not enrolled hears it at the login page instead of bouncing off a `401` later.
 4. **Build the cookie** (see `ARCHITECTURE.md` §7):
    `bb2.<keyid>.<exp>.<b64url(email)>.<b64url(HMAC_SHA256(prefix))>`, signed with
    the active key, `exp = now + TTL`.
@@ -122,9 +127,9 @@ Outcomes the user can see:
 
 | Result | Status | Page shown |
 |--------|--------|------------|
-| Missing/empty `id_token` | `400` | “Token mancante.” |
-| Token invalid/expired/claims wrong | `401` | “Il token di accesso non è valido o è scaduto.” |
-| Token valid but email not in the users table | `403` | “Questo indirizzo email non è abilitato all’accesso.” |
+| Missing/empty `id_token` | `400` | “Missing token.” |
+| Token invalid/expired/claims wrong | `401` | “The access token is invalid or has expired.” |
+| Token valid but the email is `denied`, or is unknown with no `public_auth` site to reach | `403` | “This email address is not allowed to sign in.” |
 | Success | `302 → rd` | (cookie set, back to the app) |
 
 ---
@@ -144,12 +149,14 @@ would be `/internal/auth-gate`. For programmatic clients it also forwards the
          [+ Authorization: Bearer … for API clients])
  bb-auth (handle_validate), first credential that authorizes wins:
    a. Authorization: Bearer bbk_…  → static API key: sha256(bearer) in by_key_hash,
-      unexpired, request URL in the key's scope
-   b. Authorization: Bearer <id_token>  → validated as in Phase 3, email in users
-      table, request URL in the user's scope
+      owner not denied, unexpired, request URL in the key's scope. No site applies.
+   b. Authorization: Bearer <id_token>  → validated as in Phase 3, then authorize()
    c. session cookie → verify_session: split up to 5 parts; version==bb2 → key by id
       (bb1 legacy → try every accepted key); HMAC verify_slice (constant-time);
-      exp>now; then lowercased email in users table + request URL in scope
+      exp>now; then the lowercased email it carries → authorize()
+   authorize(email, url): denied? → 401.  Else a site covering `url` with
+      public_auth → granted, roster not consulted.  Else roster: email in by_email
+      and url in that user's scope.
    └─ 204 + X-Auth-Email: <the authorized user> if any of a/b/c authorizes, else 401
  nginx: auth_request_set $bb_email $upstream_http_x_auth_email
  nginx ──proxy to upstream app (X-Auth-Email: …)──▶ browser (the app's response)
@@ -157,15 +164,21 @@ would be `/internal/auth-gate`. For programmatic clients it also forwards the
 
 A few things are worth emphasizing:
 
-- **The users table is re-checked on every request**, not just at login. Removing
-  a user (or one of their API keys) and reloading/restarting bb-auth revokes access
-  immediately, even for a still-unexpired, correctly-signed cookie or API key.
+- **The access table is re-checked on every request**, not just at login. Removing
+  a user (or one of their API keys), or adding them to `denied`, and reloading/restarting
+  bb-auth revokes access immediately, even for a still-unexpired, correctly-signed cookie
+  or API key. On a `public_auth` site the roster is never consulted, so there `denied` is
+  the only lever — removing the row changes nothing.
 - **Bearer credentials fall through to the cookie**, so a stray `Authorization`
   header never blocks a valid cookie. Static `bbk_` API keys (see
   [`ARCHITECTURE.md`](./ARCHITECTURE.md) §12) let non-browser clients (e.g. MCP)
   authenticate without the cookie flow; every credential is also confined to its
   `authorized_urls` patterns, and a restricted scope with `X-Original-URL` missing is
   denied (`401`).
+- **A `public_auth` site grants on identity alone.** Anyone Cognito vouches for reaches
+  it, enrolled or not — and since self-signup is open, that means anyone who can register.
+  It is how an onboarding area gets an `X-Auth-Email` for someone it is about to enroll.
+  An unknown `bbk_` key is not rescued by it: Cognito vouches for no key of ours.
 - **The gate names the user; the app trusts nginx for it.** A `204` carries the
   authorized email in `X-Auth-Email`, the gated location lifts it with
   `auth_request_set` and passes it upstream. An API key resolves to its *owning
@@ -183,16 +196,23 @@ A few things are worth emphasizing:
 ## Phase 5 — Logout
 
 ```text
- browser ──GET https://app.example.com/auth/logout──▶ bb-auth (handle_logout)
+ browser ──GET https://app.example.com/auth/logout[?rd=/app1/goodbye]──▶ bb-auth (handle_logout)
  bb-auth: if Sec-Fetch-Site is not "cross-site":
             Set-Cookie: <cookie>=; Max-Age=0; ...   (expire)
-          302 → BB_AUTH_LOGIN_URL (the login page)
+          302 → safe_rd(rd), or the login page when there is no rd
 ```
 
 Same-origin / same-site / direct navigations (a normal logout link click) clear
 the cookie. A cross-site navigation (`Sec-Fetch-Site: cross-site`, i.e. a CSRF
 logout) is ignored — the attacker cannot force the victim to log out. If the
 header is absent (legacy browsers) the cookie is still cleared.
+
+Where the browser lands is the logout link's choice, guarded by the same `safe_rd` used
+on `/auth/session`. There is no per-site landing page: `/auth/logout` is covered by no
+site's `urls`, so the gate cannot tell which area is being left — unlike a `401`, which
+happens on a gated URL and therefore can name that site's `login_url` in
+`X-Auth-Login-URL`. A relative `rd` needs `X-Original-URL` on this location too;
+without it the redirect falls back to the login page.
 
 This clears the bb-auth session cookie only. It does **not** revoke the Cognito
 refresh token the login page may still hold; the browser will need to re-enter

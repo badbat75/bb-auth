@@ -24,26 +24,36 @@
 //! [`handle_validate`] accepts three credentials, tried in this order:
 //!
 //! 1. `Authorization: Bearer bbk_…` — a static API key, resolved by SHA-256 of the
-//!    bearer against the users file.
+//!    bearer against the access file.
 //! 2. `Authorization: Bearer <id_token>` — a raw Cognito id_token, validated exactly
 //!    as on `/auth/session`. Lets programmatic clients (e.g. MCP) skip the cookie flow.
 //! 3. the session cookie.
 //!
-//! A Cognito-signed id_token is unforgeable, but holding one is **not** sufficient:
-//! Cognito self-signup is open, so every credential must additionally resolve to an
-//! entry in the users file ([`read_users`]) *and* the request URL must fall inside
-//! that entry's [`UrlScope`]. Both are re-checked on every request, so deleting a
-//! user or a single API key and reloading denies even a still-unexpired cookie.
+//! A Cognito-signed id_token is unforgeable, but holding one is **not** authorization:
+//! Cognito self-signup is open. A request is authorized when the credential resolves to
+//! an identity and *some* grant in the access file ([`read_access`]) covers the request
+//! URL. There are exactly two grant sources, and both are re-checked on every request:
+//!
+//! * **the roster** — an entry in `users`, whose [`UrlScope`] must cover the URL. This
+//!   is the only grant an API key can use. Deleting a user or a key and reloading denies
+//!   even a still-unexpired cookie.
+//! * **a `public_auth` site** — a URL area open to *any* identity Cognito vouches for,
+//!   enrolled or not ([`SiteRecord`]). Only the two Cognito-backed credentials reach it;
+//!   an unknown API key stays unknown.
+//!
+//! Sites only ever grant. The one thing that takes away is `denied`, a veto by email that
+//! outranks both sources on every credential ([`authorize`]).
 //!
 //! Bearers are stateless — they issue no cookie — and a failed bearer falls through
 //! to the cookie check, so a stray `Authorization` header never blocks a valid cookie.
 //!
 //! # Identity propagation
 //!
-//! All three credentials resolve to the same thing: the email of a user in the users
-//! file. A `204` hands it back in [`IDENTITY_HEADER`], which nginx lifts out of the
-//! subrequest with `auth_request_set` and injects into the request it proxies — that
-//! is how the application learns who is calling.
+//! All three credentials resolve to the same thing: an email. A `204` hands it back in
+//! [`IDENTITY_HEADER`], which nginx lifts out of the subrequest with `auth_request_set`
+//! and injects into the request it proxies — that is how the application learns who is
+//! calling. On a `public_auth` site that email may name someone with no entry anywhere:
+//! it is an *authenticated* identity, and enrolling it is the application's business.
 //!
 //! An application must not try to read the identity itself. There is usually nothing
 //! to read: the session cookie is not a JWT and carries only the email, and a `bbk_`
@@ -52,7 +62,7 @@
 //! id_token proves identity, never authorization. The header is trustworthy only in
 //! so far as the application is unreachable except through nginx.
 
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::io::Read;
 use std::sync::{Arc, Mutex, RwLock};
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
@@ -132,6 +142,40 @@ const API_KEY_PREFIX: &str = "bbk_";
 /// application is unreachable except through nginx.
 const IDENTITY_HEADER: &str = "X-Auth-Email";
 
+/// Response header naming the login page on a `401` from `/auth/validate` — the site's
+/// `login_url`, or `BB_AUTH_LOGIN_URL` when it declares none ([`login_url_for`]).
+///
+/// bb-auth never redirects a gated request itself: it answers `401` and nginx decides.
+/// This header is how nginx learns *which* login page, per site rather than per server
+/// block. The `auth_request_set` copies it into a request variable, which is what keeps a
+/// later `proxy_pass` from clobbering `$upstream_http_*`:
+///
+/// ```text
+/// map $bb_login $bb_login_safe {          # http{} level
+///     ""      https://login.example.com/; # = BB_AUTH_LOGIN_URL
+///     default $bb_login;
+/// }
+/// location /app1 {
+///     set $bb_url https://app.example.com$uri;
+///     auth_request     /internal/auth-gate;
+///     auth_request_set $bb_login $upstream_http_x_auth_login_url;
+///     error_page 401 = @bb_signin;
+///     …
+/// }
+/// location @bb_signin { return 302 $bb_login_safe?rd=$scheme://$host$request_uri; }
+/// ```
+///
+/// The `map` is load-bearing: an unset `$bb_login` — an older gate, or a location missing
+/// the `auth_request_set` — turns `return 302 $bb_login?rd=…` into a *relative*
+/// `Location: ?rd=…`, which sends the browser back to the gated path it just failed on.
+///
+/// The gate can name the login page here because a `401` happens *on* a gated URL, so the
+/// site resolves. `/auth/logout` has no such luck — see [`handle_logout`].
+///
+/// Emitting it is safe without a per-request check: every candidate passed
+/// [`compile_login_url`] at load, which requires printable ASCII.
+const LOGIN_URL_HEADER: &str = "X-Auth-Login-URL";
+
 // ---------------------------------------------------------------------------
 // Config
 // ---------------------------------------------------------------------------
@@ -204,8 +248,10 @@ struct Config {
     /// caller. Enumerate the apex explicitly — `*.x.com` does not match `x.com`. Pair it
     /// with `BB_AUTH_COOKIE_DOMAIN=.<domain>` to share the session cookie across siblings.
     authorized_hosts: Vec<UrlPattern>,
-    /// `BB_AUTH_LOGIN_URL`, e.g. `https://login.example.com/`. Where a 401, a logout, and
-    /// every rejected `rd` land.
+    /// `BB_AUTH_LOGIN_URL`, e.g. `https://login.example.com/`. Where a logout and every
+    /// rejected `rd` land, and what a `401` names in [`LOGIN_URL_HEADER`] — unless the
+    /// site that speaks for the URL overrides it ([`login_url_for`]). Validated by
+    /// [`compile_login_url`] at startup.
     login_url: String,
     /// Name of the request header carrying the original request URL — scheme, host and
     /// normalised path. `BB_AUTH_ORIGINAL_URL_HEADER`, default `X-Original-URL`.
@@ -376,7 +422,13 @@ impl Config {
                 .parse()
                 .unwrap_or(2_592_000),
             authorized_hosts,
-            login_url: env_req("BB_AUTH_LOGIN_URL"),
+            // The global fallback for every site that declares no `login_url`. Validated
+            // with the same parser, so nothing that reaches a header or a page can carry
+            // a CR/LF — including the value `safe_rd` falls back to.
+            login_url: compile_login_url(&env_req("BB_AUTH_LOGIN_URL")).unwrap_or_else(|e| {
+                eprintln!("[bb-auth] FATAL: BB_AUTH_LOGIN_URL: {e}");
+                std::process::exit(1);
+            }),
             original_url_header: env_or("BB_AUTH_ORIGINAL_URL_HEADER", "X-Original-URL"),
             workers: env_or("BB_AUTH_WORKERS", "4").parse().unwrap_or(4).max(1),
         }
@@ -394,15 +446,15 @@ struct JwksCache {
 }
 
 /// Everything a worker thread needs. Shared immutably behind an [`Arc`]; the two
-/// mutable parts are the hot-reloadable users table and the JWKS cache.
+/// mutable parts are the hot-reloadable access table and the JWKS cache.
 struct State {
     cfg: Config,
-    /// The access gate: allowlisted users and their API keys, both indexed. Swapped
-    /// wholesale on SIGHUP by `reload_users` (POSIX only, hence not linked here).
-    users: RwLock<Users>,
+    /// The access gate: sites, the denied veto, allowlisted users and their API keys.
+    /// Swapped wholesale on SIGHUP by `reload_access` (POSIX only, hence not linked here).
+    access: RwLock<Access>,
     /// Path to re-read on SIGHUP. Only the POSIX reload path needs it.
     #[cfg(unix)]
-    users_path: String,
+    access_path: String,
     jwks: RwLock<JwksCache>,
     /// Serializes JWKS refreshers, so a `kid` miss under load triggers one fetch, not
     /// one per worker. See [`refresh_jwks_if_due`].
@@ -418,7 +470,7 @@ fn now() -> u64 {
 }
 
 // ---------------------------------------------------------------------------
-// Users table
+// Access table
 // ---------------------------------------------------------------------------
 
 /// Match `s` against a URL pattern with two wildcards:
@@ -488,17 +540,17 @@ fn lower_authority(url: &str) -> String {
     out
 }
 
-/// A compiled `authorized_urls` entry: normalised pattern bytes.
+/// A compiled URL pattern (`authorized_urls`, or a site's `urls`): normalised bytes.
 #[derive(Clone)]
 struct UrlPattern {
     pat: Vec<u8>,
 }
 
-/// Validate and normalise one `authorized_urls` entry. A malformed pattern is an
-/// error rather than a silently-dead rule: skipping it would quietly narrow (or, if
-/// it was the only entry, blank out) a scope that someone believed they had written.
+/// Validate and normalise one URL pattern. A malformed pattern is an error rather than a
+/// silently-dead rule: skipping it would quietly narrow (or, if it was the only entry,
+/// blank out) a scope that someone believed they had written.
 fn compile_pattern(raw: &str) -> Result<UrlPattern, String> {
-    let e = |m: &str| Err(format!("authorized_urls entry '{raw}': {m}"));
+    let e = |m: &str| Err(format!("url pattern '{raw}': {m}"));
     let p = raw.trim();
     if p.bytes().any(|b| b < 0x20 || b == 0x7f) {
         return e("contains a control byte");
@@ -527,6 +579,43 @@ fn compile_pattern(raw: &str) -> Result<UrlPattern, String> {
     })
 }
 
+/// Validate a login URL — `BB_AUTH_LOGIN_URL` or a site's `login_url`. Both end up in a
+/// `Location:` header, in [`LOGIN_URL_HEADER`], and inside a page, so this is what makes
+/// those emissions safe with no per-use check: printable ASCII forbids CR/LF and spaces.
+///
+/// https-only, and no userinfo `@` or backslash in the authority — the same lookalike
+/// tricks [`rd_url_allowed`] rejects, since a login page is where a rejected `rd` lands.
+///
+/// It is **not** checked against `BB_AUTH_AUTHORIZED_HOSTS`, and cannot be: [`read_access`]
+/// reads no env, which is exactly what lets `bb-auth --check-users` validate a file with no
+/// config and no network. Moving the check to startup would turn an operator's typo into a
+/// fatal boot under `Restart=on-failure` that `--check-users` never saw coming.
+fn compile_login_url(raw: &str) -> Result<String, String> {
+    let e = |m: &str| Err(format!("login_url '{raw}': {m}"));
+    let u = raw.trim();
+    if u.is_empty() {
+        return e("empty");
+    }
+    if !u.bytes().all(|b| b.is_ascii_graphic()) {
+        return e("must be printable ASCII (no spaces, no control bytes)");
+    }
+    let rest = match u.strip_prefix("https://") {
+        Some(r) => r,
+        None => return e("must be an absolute https:// URL"),
+    };
+    let authority = rest.split(['/', '?', '#']).next().unwrap_or("");
+    if authority.is_empty() {
+        return e("empty host");
+    }
+    if authority.contains('@') {
+        return e("userinfo '@' is not allowed in the host");
+    }
+    if u.contains('\\') {
+        return e("backslash is not allowed");
+    }
+    Ok(u.to_string())
+}
+
 /// Validate and normalise one `BB_AUTH_AUTHORIZED_HOSTS` entry: a host-only glob
 /// (`badbat75.com`, `*.badbat75.com`, `v&.badbat75.com`). No scheme, no path, no port
 /// — `rd_url_allowed` strips those from the candidate before matching.
@@ -550,11 +639,16 @@ fn compile_host_pattern(raw: &str) -> Result<UrlPattern, String> {
     })
 }
 
-/// Allowed request-URL scope for a user or key: the patterns it may reach.
+/// A set of URL patterns, and the single matcher every URL check in bb-auth goes
+/// through: a user's `authorized_urls`, a key's, and a site's `urls`.
 ///
-/// There is no "unrestricted" variant. An absent or empty `authorized_urls` grants
-/// **nothing** — access is enumerated, never assumed. Blanket access is spelled out
-/// as the pattern `*://*/*`, which an operator has to mean in order to write.
+/// There is no "unrestricted" variant. An absent or empty list grants **nothing** —
+/// access is enumerated, never assumed. Blanket access is spelled out as the pattern
+/// `*://*/*`, which an operator has to mean in order to write.
+///
+/// Sharing one type is not tidiness: [`UrlScope::allows`] is where the missing-header
+/// and `..` denials live, and a second matcher that forgot either would be a bypass
+/// around the first.
 #[derive(Clone)]
 struct UrlScope {
     patterns: Vec<UrlPattern>, // request URL must match one of these; empty = deny all
@@ -602,14 +696,86 @@ impl UrlScope {
     }
 }
 
-/// A resolved allowlisted user, keyed by lowercased email in [`Users::by_email`].
+/// A resolved site: a URL area, plus the properties that hold for it.
+///
+/// A site record describes a **place**, never a person. No field of it may ever name a
+/// user — grants to named users live in exactly one place, `users[].authorized_urls`,
+/// and expressing the same user↔URL relation twice would mean a user removed from the
+/// roster could still walk in through a site. Everything here is a predicate over an
+/// anonymous identity, and may only modulate the grant this record itself makes.
+struct SiteRecord {
+    /// Human label, for logging. `"?"` when the file omits it.
+    name: String,
+    /// The URLs this record speaks for.
+    urls: UrlScope,
+    /// Grant the site to **any** identity Cognito vouches for, enrolled in `users` or
+    /// not. `false` (the default) grants nothing and is indistinguishable from having
+    /// no site at all — it exists to carry future properties.
+    public_auth: bool,
+    /// Login page for this area, overriding `BB_AUTH_LOGIN_URL`. `None` = use the global.
+    /// Reaches nginx through [`LOGIN_URL_HEADER`]; also names the fallback for a rejected
+    /// `rd` and the link on `/auth/session`'s error pages. See [`login_url_for`].
+    login_url: Option<String>,
+}
+
+/// The site table, in file order. **First match wins**: [`Sites::resolve`] hands back the
+/// first record whose `urls` cover the request, and that record is then the authority for
+/// it — a broad site listed first shadows a narrower one after it, so specific sites go
+/// first.
+///
+/// The ordering rule matters more than one boolean warrants, and that is the point: it is
+/// fixed now, while `public_auth` is the only property, rather than after a second field
+/// makes "which record answers?" expensive to change. The alternatives are worse.
+/// "Most specific wins" needs a specificity order over globs that does not exist
+/// (`https://x.com/*` vs `*://x.com/app1` — which?). "Merge every match" would OR the
+/// grants together, so a broad site silently opens a narrow one.
+///
+/// The table only ever **grants**. A URL with no site is not denied, it is simply not
+/// open, and the per-user scope decides as before. The only thing that takes access away
+/// is [`Access::denied`].
+struct Sites {
+    entries: Vec<SiteRecord>,
+}
+
+impl Sites {
+    /// The site that speaks for `url`, or `None`. Missing header and `..` fall out of
+    /// [`UrlScope::allows`], which is why sites reuse it rather than matching directly.
+    fn resolve(&self, url: Option<&str>) -> Option<&SiteRecord> {
+        self.entries.iter().find(|s| s.urls.allows(url))
+    }
+
+    /// Whether any site grants `public_auth`. `/auth/session` needs this to know whether
+    /// an un-enrolled identity has anywhere to go; nothing else may branch on it.
+    fn any_public_auth(&self) -> bool {
+        self.entries.iter().any(|s| s.public_auth)
+    }
+}
+
+/// The login page for `url`: the site that speaks for it, or `BB_AUTH_LOGIN_URL`.
+///
+/// First-match-wins applies here too — a broad site listed first answers with *its*
+/// `login_url` (or, declaring none, with the global) even when a narrower site after it
+/// declares one. Same rule, same fix: specific sites go first.
+///
+/// Every value returned passed [`compile_login_url`], so callers may put it in a header
+/// or a redirect without checking.
+fn login_url_for(access: &Access, cfg: &Config, url: Option<&str>) -> String {
+    access
+        .sites
+        .resolve(url)
+        .and_then(|s| s.login_url.as_deref())
+        .unwrap_or(&cfg.login_url)
+        .to_string()
+}
+
+/// A resolved allowlisted user, keyed by lowercased email in [`Access::by_email`].
 struct UserRecord {
     scope: UrlScope,
 }
 
-/// A resolved API key, keyed by the bearer's SHA-256 hex in [`Users::by_key_hash`].
+/// A resolved API key, keyed by the bearer's SHA-256 hex in [`Access::by_key_hash`].
 struct ApiKeyRecord {
-    /// Owning user, for logging.
+    /// Owning user, for logging and for the [`Access::denied`] veto.
     email: String,
     /// Human label, for logging and revocation. Not part of the credential.
     key_id: String,
@@ -619,8 +785,18 @@ struct ApiKeyRecord {
     scope: UrlScope,
 }
 
-/// The two runtime indices built from the users file by [`read_users`].
-struct Users {
+/// The runtime access table, built from the access file by [`read_access`].
+struct Access {
+    /// URL areas and their properties. Grants only; see [`Sites`].
+    sites: Sites,
+    /// Lowercased emails vetoed on **every** credential and every grant, checked before
+    /// anything else ([`authorize`], [`bearer_apikey_email`], [`handle_session`]).
+    ///
+    /// It is not redundant with deleting the user's row. On a `public_auth` site
+    /// `by_email` is never consulted, so for an un-enrolled identity this is the only
+    /// denial that exists. And for an enrolled one it is a suspension rather than a
+    /// deletion: the row, its scope and its keys survive, so re-enabling is one edit.
+    denied: HashSet<String>,
     /// Lowercased email → user.
     by_email: HashMap<String, UserRecord>,
     /// `sha256(bearer)` hex → key. The raw key is never stored, and this lookup **is**
@@ -631,11 +807,16 @@ struct Users {
 
 // --- JSON wire format (only the fields we consume; extras are ignored) ---
 
-/// Root of the users file (`BB_AUTH_USERS_FILE`) — the real access gate, re-checked on
-/// every `/auth/validate` and hot-reloaded on SIGHUP.
+/// Root of the access file — the real access gate, re-checked on every `/auth/validate`
+/// and hot-reloaded on SIGHUP.
 ///
 /// ```json
-/// { "users": [
+/// { "sites": [
+///     { "name": "app1", "urls": ["https://app.x.com/app1",
+///                                "https://app.x.com/app1/*"], "public_auth": true }
+///   ],
+///   "denied": ["spammer@x.com"],
+///   "users": [
 ///     { "email": "bob@x.com",
 ///       "authorized_urls": ["https://mcp.x.com/mcp/*"],
 ///       "api_keys": [
@@ -647,13 +828,52 @@ struct Users {
 /// ] }
 /// ```
 ///
-/// Access is enumerated, never assumed: a user with no `authorized_urls` reaches
-/// nothing. "Everything" is the explicit pattern `*://*/*`. Validate a file before
-/// shipping it with `bb-auth --check-users <file>` ([`check_users`]).
+/// The three sections are siblings and answer three different questions: `sites` describe
+/// URL areas, `denied` vetoes people, `users` is the roster. Access is enumerated, never
+/// assumed, from either of the two grant sources: a user with no `authorized_urls` reaches
+/// nothing, and a URL with no site is not open. "Everything" is the explicit pattern
+/// `*://*/*`. Validate a file before shipping it with `bb-auth --check-users <file>`
+/// ([`check_users`]).
+///
+/// The env var (`BB_AUTH_USERS_FILE`) and the CLI flag keep their pre-`sites` names: both
+/// are contracts with an operator-owned env file that a deploy never rewrites.
 #[derive(Deserialize)]
-struct UsersFile {
+struct AccessFile {
+    #[serde(default)]
+    sites: Vec<SiteSpec>,
+    /// Lowercased on load. See [`Access::denied`].
+    #[serde(default)]
+    denied: Vec<String>,
     #[serde(default)]
     users: Vec<UserSpec>,
+}
+
+/// One site entry. Compiles to a [`SiteRecord`].
+///
+/// Unlike every other spec here, **unknown fields are a hard error**. The others carry
+/// documentation (`_comment`, `notes`) and describe people, where an ignored typo denies
+/// at worst. A site's fields are grants and restrictions on a grant, so the day
+/// `public_auth` gains a `require_email_domain` companion, a typo in the companion would
+/// be silently dropped and leave `public_auth: true` standing naked — failing *open*.
+/// `bb-auth --check-users` catches it instead, before the restart. Same reasoning as
+/// [`UserSpec::enabled_paths`], applied ahead of the field that will need it.
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct SiteSpec {
+    /// For logs. Absent or empty ⇒ `"?"`.
+    #[serde(default)]
+    name: String,
+    /// Full `<scheme>://<host>/<path>` patterns, like `authorized_urls`. A malformed one
+    /// is fatal; an empty list makes the record match nothing.
+    #[serde(default)]
+    urls: Vec<String>,
+    /// See [`SiteRecord::public_auth`].
+    #[serde(default)]
+    public_auth: bool,
+    /// Absolute `https://` login page for this area. Absent ⇒ `BB_AUTH_LOGIN_URL`.
+    /// Malformed ⇒ fatal, like a URL pattern. See [`compile_login_url`].
+    #[serde(default)]
+    login_url: Option<String>,
 }
 
 /// One user entry. Extra fields are ignored, with one deliberate exception.
@@ -666,7 +886,7 @@ struct UserSpec {
     authorized_urls: Option<Vec<String>>,
     /// The pre-2.0 path-prefix field. Its mere presence is a fatal parse error rather
     /// than an ignored extra: under the old semantics an unscoped user reached
-    /// everything, so silently dropping it would fail *open*. See [`read_users`].
+    /// everything, so silently dropping it would fail *open*. See [`read_access`].
     #[serde(default)]
     enabled_paths: Option<serde_json::Value>,
     #[serde(default)]
@@ -700,10 +920,17 @@ struct ApiKeySpec {
 /// Is `email` safe to emit verbatim as an HTTP header value?
 ///
 /// Visible ASCII only — no control bytes (CR/LF above all), no space, nothing
-/// non-ASCII. Enforced once at load by [`read_users`], which is what lets
-/// [`respond_authorized`] build [`IDENTITY_HEADER`] with no per-request check. Load
-/// time is also the only place that covers the API-key path, whose email comes
-/// straight off [`ApiKeyRecord`] and never passes through a token claim.
+/// non-ASCII. This is what lets [`respond_authorized`] build [`IDENTITY_HEADER`] with no
+/// per-request check, and it is enforced at the **two** places an email can enter, which
+/// between them cover all three credentials:
+///
+/// * [`read_access`], at load, for every roster email — the only guard on the API-key
+///   path, whose email comes straight off [`ApiKeyRecord`] and never passes through a
+///   token claim.
+/// * [`validate_id_token`], for every email lifted out of a Cognito claim. A
+///   `public_auth` site emits identities that are in no table, so load time cannot see
+///   them; and because that is the only way an email reaches [`make_session`], the cookie
+///   inherits the property through the HMAC rather than needing its own check.
 fn header_safe_email(email: &str) -> bool {
     !email.is_empty() && email.bytes().all(|b| b.is_ascii_graphic())
 }
@@ -785,10 +1012,10 @@ fn key_expiry(released: &str, duration: &str) -> Option<Option<u64>> {
     }
 }
 
-/// Parse the users JSON into the two runtime indices. Structurally-invalid JSON, a
-/// residual `enabled_paths`, or a malformed URL pattern are hard errors (so a SIGHUP
-/// reload keeps the old table); an individual malformed *key* is warned about and
-/// skipped so one bad `key_hash` can't drop every user.
+/// Parse the access JSON into the runtime table. Structurally-invalid JSON, an unknown
+/// field on a [`SiteSpec`], a residual `enabled_paths`, or a malformed URL pattern are
+/// hard errors (so a SIGHUP reload keeps the old table); an individual malformed *key* is
+/// warned about and skipped so one bad `key_hash` can't drop every user.
 ///
 /// Scope errors are deliberately fatal rather than skip-with-warning: a dropped
 /// scope entry silently changes who can reach what. `bb-auth --check-users` exists
@@ -796,10 +1023,43 @@ fn key_expiry(released: &str, duration: &str) -> Option<Option<u64>> {
 ///
 /// Emails are additionally required to be [`header_safe_email`], since every one of
 /// them can end up in [`IDENTITY_HEADER`].
-fn read_users(path: &str) -> Result<Users, String> {
+fn read_access(path: &str) -> Result<Access, String> {
     let content = std::fs::read_to_string(path).map_err(|e| format!("read {path}: {e}"))?;
-    let file: UsersFile =
+    let file: AccessFile =
         serde_json::from_str(&content).map_err(|e| format!("parse {path}: {e}"))?;
+
+    // Sites, in file order — `Sites::resolve` is first-match-wins, so the order is part
+    // of the meaning. A malformed pattern is fatal, exactly as in a user's scope.
+    let mut entries = Vec::with_capacity(file.sites.len());
+    for s in &file.sites {
+        let name = match s.name.trim() {
+            "" => "?".to_string(),
+            n => n.to_string(),
+        };
+        let urls = UrlScope::compile(&s.urls).map_err(|e| format!("site '{name}': {e}"))?;
+        if urls.is_empty() {
+            eprintln!("[bb-auth] WARNING: site '{name}' has no urls — it matches nothing");
+        }
+        let login_url = match &s.login_url {
+            Some(u) => Some(compile_login_url(u).map_err(|e| format!("site '{name}': {e}"))?),
+            None => None,
+        };
+        entries.push(SiteRecord {
+            name,
+            urls,
+            public_auth: s.public_auth,
+            login_url,
+        });
+    }
+    let sites = Sites { entries };
+
+    let denied: HashSet<String> = file
+        .denied
+        .iter()
+        .map(|e| e.trim().to_ascii_lowercase())
+        .filter(|e| !e.is_empty())
+        .collect();
+
     let mut by_email = HashMap::new();
     let mut by_key_hash = HashMap::new();
     for u in &file.users {
@@ -829,6 +1089,12 @@ fn read_users(path: &str) -> Result<Users, String> {
             eprintln!(
                 "[bb-auth] WARNING: {email} has no authorized_urls — every request from this \
                  user is denied (use [\"*://*/*\"] to grant every URL)"
+            );
+        }
+        if denied.contains(&email) {
+            eprintln!(
+                "[bb-auth] WARNING: {email} is listed in users and in denied — denied wins, \
+                 on every credential and every site"
             );
         }
         for k in &u.api_keys {
@@ -879,47 +1145,55 @@ fn read_users(path: &str) -> Result<Users, String> {
         }
         by_email.insert(email, UserRecord { scope: user_scope });
     }
-    Ok(Users {
+    Ok(Access {
+        sites,
+        denied,
         by_email,
         by_key_hash,
     })
 }
 
-/// Initial users load: a missing/unreadable/invalid file is fatal (no safe
-/// default exists at startup); an empty user set warns but is allowed.
-fn load_users(path: &str) -> Users {
-    match read_users(path) {
-        Ok(u) => {
-            if u.by_email.is_empty() {
-                eprintln!("[bb-auth] WARNING: users file {path} has no users — nobody can sign in");
+/// Initial access load: a missing/unreadable/invalid file is fatal (no safe
+/// default exists at startup); a table that grants nobody anything warns but is allowed.
+fn load_access(path: &str) -> Access {
+    match read_access(path) {
+        Ok(a) => {
+            if a.by_email.is_empty() && !a.sites.any_public_auth() {
+                eprintln!(
+                    "[bb-auth] WARNING: access file {path} has no users and no public_auth site \
+                     — nobody can sign in"
+                );
             }
-            u
+            a
         }
         Err(e) => {
-            eprintln!("[bb-auth] FATAL: cannot read users file: {e}");
+            eprintln!("[bb-auth] FATAL: cannot read access file: {e}");
             std::process::exit(1);
         }
     }
 }
 
-/// Hot-reload the users table from disk (SIGHUP). On read/parse failure, keep the
+/// Hot-reload the access table from disk (SIGHUP). On read/parse failure, keep the
 /// current table and log — never nuke the live table on a transient error.
 #[cfg(unix)]
-fn reload_users(state: &State) {
-    match read_users(&state.users_path) {
+fn reload_access(state: &State) {
+    match read_access(&state.access_path) {
         Ok(new) => {
             let (u, k) = (new.by_email.len(), new.by_key_hash.len());
-            *state.users.write().unwrap() = new; // fail-safe: atomic swap
-            eprintln!("[bb-auth] users reloaded (SIGHUP): {u} users, {k} api keys");
+            let (s, d) = (new.sites.entries.len(), new.denied.len());
+            *state.access.write().unwrap() = new; // fail-safe: atomic swap
+            eprintln!(
+                "[bb-auth] access reloaded (SIGHUP): {u} users, {k} api keys, {s} sites, {d} denied"
+            );
         }
-        Err(e) => eprintln!("[bb-auth] users reload FAILED, keeping current set: {e}"),
+        Err(e) => eprintln!("[bb-auth] access reload FAILED, keeping current set: {e}"),
     }
 }
 
-/// Spawn the SIGHUP -> users-reload thread. SIGHUP is POSIX-only, so this is a
+/// Spawn the SIGHUP -> access-reload thread. SIGHUP is POSIX-only, so this is a
 /// no-op on non-unix hosts (where the table simply reloads across a restart).
 #[cfg(unix)]
-fn spawn_users_reload_handler(state: &Arc<State>) {
+fn spawn_access_reload_handler(state: &Arc<State>) {
     use signal_hook::consts::SIGHUP;
     use signal_hook::iterator::Signals;
 
@@ -933,13 +1207,13 @@ fn spawn_users_reload_handler(state: &Arc<State>) {
             }
         };
         for _ in signals.forever() {
-            reload_users(&sig_state);
+            reload_access(&sig_state);
         }
     });
 }
 
 #[cfg(not(unix))]
-fn spawn_users_reload_handler(_state: &Arc<State>) {}
+fn spawn_access_reload_handler(_state: &Arc<State>) {}
 
 // ---------------------------------------------------------------------------
 // JWKS
@@ -1086,9 +1360,9 @@ fn social_provider_names(identities: &[Identity]) -> String {
 /// Fully validate a Cognito id_token, returning the lowercased verified email.
 ///
 /// Enforces all of: `alg == RS256`, a known `kid`, the signature, `exp` (required,
-/// 60 s leeway), `iss`, `aud` against [`Config::audiences`], `token_use == "id"`, and a
-/// truthy `email_verified`. The single sanctioned exception to the last one is
-/// [`unverified_social_ok`].
+/// 60 s leeway), `iss`, `aud` against [`Config::audiences`], `token_use == "id"`,
+/// [`header_safe_email`], and a truthy `email_verified`. The single sanctioned exception
+/// to the last one is [`unverified_social_ok`].
 fn validate_id_token(token: &str, state: &State) -> Result<String, String> {
     let header = decode_header(token).map_err(|e| format!("bad token header: {e}"))?;
     if header.alg != Algorithm::RS256 {
@@ -1112,6 +1386,13 @@ fn validate_id_token(token: &str, state: &State) -> Result<String, String> {
         return Err("token_use is not 'id'".into());
     }
     let email = c.email.ok_or("token has no email")?.to_ascii_lowercase();
+    // A `public_auth` site emits identities that appear in no table, so `read_access`
+    // never sees this email. It goes into IDENTITY_HEADER and, via `make_session`, into
+    // the cookie — a CR/LF here would be a response-splitting gadget. `{email:?}` escapes
+    // the very bytes being rejected, so a crafted token cannot forge a log line either.
+    if !header_safe_email(&email) {
+        return Err(format!("token email is not printable ASCII: {email:?}"));
+    }
     if !email_verified_true(&c.email_verified) {
         // Strict by default. The only exception is a social login whose email
         // Cognito couldn't verify itself — and only when explicitly enabled.
@@ -1217,6 +1498,16 @@ fn header_value<'a>(req: &'a Request, name: &str) -> Option<&'a str> {
         .iter()
         .find(|h| h.field.as_str().as_str().eq_ignore_ascii_case(name))
         .map(|h| h.value.as_str())
+}
+
+/// The percent-decoded value of query parameter `name` in a request target such as
+/// `/auth/logout?rd=%2Fapp1`. `None` when there is no query or no such parameter.
+/// Decoding is `form_urlencoded`, the same parser `/auth/session` reads its body with.
+fn query_param(target: &str, name: &str) -> Option<String> {
+    let (_, query) = target.split_once('?')?;
+    form_urlencoded::parse(query.as_bytes())
+        .find(|(k, _)| k == name)
+        .map(|(_, v)| v.into_owned())
 }
 
 /// Extract the token from an `Authorization` header value of the form
@@ -1351,17 +1642,37 @@ fn respond_empty(req: Request, status: u16) {
 
 /// Respond `204` to an authorized `auth_request`, naming the user in [`IDENTITY_HEADER`].
 ///
-/// `email` is always a key of [`Users::by_email`]: the API-key path reads it off the
-/// record, and the token and cookie paths return the very string that just matched a key
-/// by exact `HashMap` lookup. Every such key passed [`header_safe_email`] at load, so
-/// [`h`] cannot panic here. The assert pins that chain — it is what stands between a
-/// case-insensitive lookup added later and a panicking worker thread.
+/// `email` always passed [`header_safe_email`], by one of two disjoint routes, so [`h`]
+/// cannot panic here:
+///
+/// * it is a key of [`Access::by_email`] — the API-key path reads it off the record, and
+///   the roster branch of [`authorize`] returns the very string that just matched a key by
+///   exact `HashMap` lookup. Every such key was checked by [`read_access`] at load.
+/// * or it came out of [`validate_id_token`], which checks it there — the only route for
+///   an identity granted by a `public_auth` site, which is in no table to have been
+///   checked at load. The cookie carries it back unchanged under the HMAC.
+///
+/// The assert pins both halves. It is what stands between a case-insensitive `by_email`
+/// lookup added later, or a fourth credential that skips `validate_id_token`, and a
+/// panicking worker thread.
 fn respond_authorized(req: Request, email: &str) {
     debug_assert!(
         header_safe_email(email),
         "identity must be header-safe: {email:?}"
     );
     let resp = Response::empty(StatusCode(204)).with_header(h(IDENTITY_HEADER, email));
+    let _ = req.respond(resp);
+}
+
+/// Respond `401` to a rejected `auth_request`, naming the login page in
+/// [`LOGIN_URL_HEADER`] so nginx can redirect there. `login_url` came from
+/// [`login_url_for`], hence passed [`compile_login_url`], hence cannot make [`h`] panic.
+fn respond_unauthorized(req: Request, login_url: &str) {
+    debug_assert!(
+        login_url.bytes().all(|b| b.is_ascii_graphic()),
+        "login url must be header-safe: {login_url:?}"
+    );
+    let resp = Response::empty(StatusCode(401)).with_header(h(LOGIN_URL_HEADER, login_url));
     let _ = req.respond(resp);
 }
 
@@ -1390,7 +1701,7 @@ fn respond_html(req: Request, status: u16, title: &str, msg: &str, login_url: &s
 <style>body{{font-family:-apple-system,Segoe UI,Roboto,sans-serif;background:#16161b;color:#e8e8ee;\
 display:flex;min-height:100vh;margin:0;align-items:center;justify-content:center;text-align:center}}\
 .c{{max-width:420px;padding:32px}}h1{{font-size:1.3rem}}a{{color:#5b78ff}}p{{color:#9a9aa8}}</style>\
-<div class=c><h1>{title}</h1><p>{msg}</p><p><a href=\"{login_url}\">&larr; Torna all'accesso</a></p></div>"
+<div class=c><h1>{title}</h1><p>{msg}</p><p><a href=\"{login_url}\">&larr; Back to sign-in</a></p></div>"
     );
     let resp = Response::from_string(body)
         .with_status_code(StatusCode(status))
@@ -1428,20 +1739,31 @@ fn original_url(req: &Request, cfg: &Config) -> Option<String> {
         .map(|u| lower_authority(u.split(['?', '#']).next().unwrap_or("")))
 }
 
-/// Resolve a `bbk_` API-key bearer against the users table: it must be known, not
-/// expired, and in URL scope. Logs the reason on rejection.
+/// Resolve a `bbk_` API-key bearer against the access table: its owner must not be
+/// vetoed, and the key must be known, unexpired, and in URL scope. Logs the reason on
+/// rejection.
 ///
 /// Returns the owning user's email — a key *acts as* its user, so that is the identity
 /// the application downstream sees. It is also the only path with no token to decode.
-fn bearer_apikey_email(state: &State, token: &str, url: Option<&str>) -> Option<String> {
-    let users = state.users.read().unwrap();
-    let rec = match users.by_key_hash.get(&sha256_hex(token)) {
+///
+/// A `public_auth` site does **not** rescue an unknown key. That grant is for identities
+/// Cognito vouches for, and Cognito vouches for no static key of ours: an unknown key is
+/// not an un-enrolled user, it is nobody, and there would be no email to hand back.
+fn bearer_apikey_email(access: &Access, token: &str, url: Option<&str>) -> Option<String> {
+    let rec = match access.by_key_hash.get(&sha256_hex(token)) {
         Some(r) => r,
         None => {
             eprintln!("[bb-auth] api key rejected: unknown");
             return None;
         }
     };
+    if access.denied.contains(&rec.email) {
+        eprintln!(
+            "[bb-auth] api key denied: owner is denied [{} {}]",
+            rec.email, rec.key_id
+        );
+        return None;
+    }
     if rec.expires.is_some_and(|e| now() >= e) {
         eprintln!(
             "[bb-auth] api key rejected: expired [{} {}]",
@@ -1461,16 +1783,37 @@ fn bearer_apikey_email(state: &State, token: &str, url: Option<&str>) -> Option<
     Some(rec.email.clone())
 }
 
-/// A user (email) is authorized if present in the table and the request URL is in
-/// their scope. Shared by the id_token-bearer and cookie paths.
+/// Turn an *authenticated* identity into an *authorized* one, or `None`. Shared by the
+/// id_token-bearer and cookie paths — the two credentials Cognito vouches for.
 ///
-/// Takes `email` by value and hands it back on success: a successful lookup proves it
-/// is byte-identical to the [`Users::by_email`] key (both sides are lowercased, and
-/// `HashMap::get` is exact-match), so the caller may emit it as the identity without
-/// re-reading the table or cloning the key.
-fn user_scope_email(state: &State, email: String, url: Option<&str>) -> Option<String> {
-    let users = state.users.read().unwrap();
-    match users.by_email.get(&email) {
+/// Three steps, in this order:
+///
+/// 1. [`Access::denied`] vetoes, ahead of every grant and on every credential.
+/// 2. If a site speaks for this URL and grants `public_auth`, the identity is enough —
+///    the roster is not consulted, which is the entire point: this is how someone who is
+///    not enrolled yet gets in. The first matching site answers even if it grants
+///    nothing; see [`Sites`].
+/// 3. Otherwise the roster decides, as it always has: listed, and the URL in scope.
+///
+/// Takes `email` by value and hands it back on success. On the roster branch that string
+/// is byte-identical to the [`Access::by_email`] key (both sides lowercased, `HashMap::get`
+/// is exact-match); on the `public_auth` branch it is whatever [`validate_id_token`]
+/// returned. [`respond_authorized`] relies on exactly that pair of facts.
+fn authorize(access: &Access, email: String, url: Option<&str>) -> Option<String> {
+    if access.denied.contains(&email) {
+        eprintln!("[bb-auth] denied: {email} is on the denied list");
+        return None;
+    }
+    if let Some(site) = access.sites.resolve(url) {
+        if site.public_auth {
+            eprintln!(
+                "[bb-auth] granted via site '{}' (public_auth): {email}",
+                site.name
+            );
+            return Some(email);
+        }
+    }
+    match access.by_email.get(&email) {
         Some(rec) if rec.scope.allows(url) => Some(email),
         Some(_) => {
             eprintln!(
@@ -1487,31 +1830,32 @@ fn user_scope_email(state: &State, email: String, url: Option<&str>) -> Option<S
 }
 
 /// `GET /auth/validate` — the nginx `auth_request` endpoint. 204 plus the authorized
-/// user in [`IDENTITY_HEADER`] if any credential authorizes this request, 401 otherwise.
-/// Never issues a cookie.
+/// user in [`IDENTITY_HEADER`] if any credential authorizes this request, else 401 plus
+/// this area's login page in [`LOGIN_URL_HEADER`]. Never issues a cookie, and never
+/// redirects: nginx turns the 401 into a redirect, which is why the header exists.
 ///
 /// Credentials are tried in the order documented on the crate: `bbk_` API key, raw
-/// id_token, then the session cookie. Each must resolve to a user in the table *and*
-/// put the request URL inside that credential's [`UrlScope`]. Whichever one wins, the
-/// identity handed back is that user's email — see [`respond_authorized`].
+/// id_token, then the session cookie. A key must resolve to a user in the roster and put
+/// the URL inside its [`UrlScope`]; the two Cognito credentials go through [`authorize`],
+/// which also honours `public_auth` sites and the `denied` veto. Whichever one wins, the
+/// identity handed back is an email — see [`respond_authorized`].
 fn handle_validate(req: Request, state: &State) {
     let cfg = &state.cfg;
-    // Original request URL (for per-user / per-key URL scoping), captured now as an
-    // owned value so the request can be consumed when we respond.
+    // Original request URL (for site resolution and per-user / per-key URL scoping),
+    // captured now as an owned value so the request can be consumed when we respond.
     let url = original_url(&req, cfg);
 
     // Bearer path: programmatic clients (e.g. MCP) present `Authorization: Bearer
-    // <cred>`. A `bbk_` credential is a static API key resolved against the users
+    // <cred>`. A `bbk_` credential is a static API key resolved against the access
     // table; anything else is a raw Cognito id_token validated exactly like
-    // /auth/session, then matched to a user. Either way the request URL must be in
-    // scope. A failed bearer falls through to the cookie check so a stray
-    // Authorization header never blocks an otherwise-valid cookie.
+    // /auth/session, then authorized like a cookie. A failed bearer falls through to the
+    // cookie check so a stray Authorization header never blocks an otherwise-valid cookie.
     if let Some(token) = header_value(&req, "Authorization").and_then(parse_bearer) {
         let granted = if token.starts_with(API_KEY_PREFIX) {
-            bearer_apikey_email(state, token, url.as_deref())
+            bearer_apikey_email(&state.access.read().unwrap(), token, url.as_deref())
         } else {
             match validate_id_token(token, state) {
-                Ok(email) => user_scope_email(state, email, url.as_deref()),
+                Ok(email) => authorize(&state.access.read().unwrap(), email, url.as_deref()),
                 Err(e) => {
                     eprintln!("[bb-auth] bearer rejected: {e}");
                     None
@@ -1527,20 +1871,40 @@ fn handle_validate(req: Request, state: &State) {
     let granted = header_value(&req, "Cookie")
         .and_then(|c| cookie_value(c, &cfg.cookie_name).map(str::to_string))
         .and_then(|v| verify_session(&v, &cfg.hmac_keys))
-        .and_then(|email| user_scope_email(state, email, url.as_deref()));
+        .and_then(|email| authorize(&state.access.read().unwrap(), email, url.as_deref()));
     match granted {
         Some(email) => respond_authorized(req, &email),
-        None => respond_empty(req, 401),
+        None => {
+            // Which login page nginx should send them to. Resolved from the site even
+            // though no site granted anything: `login_url` says where this area's users
+            // sign in, not who may enter.
+            let login = login_url_for(&state.access.read().unwrap(), cfg, url.as_deref());
+            respond_unauthorized(req, &login)
+        }
     }
 }
 
 /// `POST /auth/session` — exchange a browser-obtained `id_token` for a session cookie,
 /// then `302` to `rd`.
 ///
-/// 400 on a missing token, 401 on an invalid one, 403 when the verified email is not in
-/// the users table. The redirect target is always laundered through [`safe_rd`].
+/// 400 on a missing token, 401 on an invalid one, 403 when the verified email has nowhere
+/// it could possibly go. The redirect target is always laundered through [`safe_rd`].
+///
+/// The cookie is identity, not authorization: it grants nothing on its own, and every
+/// request it accompanies is re-authorized by [`handle_validate`]. So the 403 here is a
+/// courtesy — it tells someone at the login page that they are not enrolled, rather than
+/// letting them bounce off a 401 later. It has to soften once any `public_auth` site
+/// exists, because then an un-enrolled identity *does* have somewhere to go and refusing
+/// the cookie would make that site unreachable from a browser. Guessing at `rd` instead
+/// would be worse: it is the post-login destination, not the URL that triggered the login,
+/// and [`safe_rd`] may already have replaced it with the login page.
 fn handle_session(mut req: Request, state: &State) {
     let cfg = &state.cfg;
+
+    // Which host this login is happening on, and hence which site's login page an error
+    // page should link back to. nginx sets the header here too, not just on the gate.
+    let caller_url = original_url(&req, cfg);
+    let login = login_url_for(&state.access.read().unwrap(), cfg, caller_url.as_deref());
 
     let mut buf = Vec::new();
     if req
@@ -1549,7 +1913,7 @@ fn handle_session(mut req: Request, state: &State) {
         .read_to_end(&mut buf)
         .is_err()
     {
-        respond_html(req, 400, "Errore", "Richiesta non valida.", &cfg.login_url);
+        respond_html(req, 400, "Error", "Invalid request.", &login);
         return;
     }
     let form: HashMap<String, String> = form_urlencoded::parse(&buf).into_owned().collect();
@@ -1557,7 +1921,7 @@ fn handle_session(mut req: Request, state: &State) {
     let id_token = match form.get("id_token") {
         Some(t) if !t.is_empty() => t,
         _ => {
-            respond_html(req, 400, "Errore", "Token mancante.", &cfg.login_url);
+            respond_html(req, 400, "Error", "Missing token.", &login);
             return;
         }
     };
@@ -1569,36 +1933,50 @@ fn handle_session(mut req: Request, state: &State) {
             respond_html(
                 req,
                 401,
-                "Accesso non riuscito",
-                "Il token di accesso non è valido o è scaduto. Riprova.",
-                &cfg.login_url,
+                "Sign-in failed",
+                "The access token is invalid or has expired. Please try again.",
+                &login,
             );
             return;
         }
     };
 
-    if !state.users.read().unwrap().by_email.contains_key(&email) {
-        eprintln!("[bb-auth] session denied: {email} not in users table");
+    // Booleans, not a held guard: `respond_html` consumes `req`, and the lock has no
+    // business being alive while we write a response.
+    let (vetoed, enrolled, any_open) = {
+        let access = state.access.read().unwrap();
+        (
+            access.denied.contains(&email),
+            access.by_email.contains_key(&email),
+            access.sites.any_public_auth(),
+        )
+    };
+    if vetoed || !(enrolled || any_open) {
+        let why = if vetoed {
+            "denied"
+        } else {
+            "not in users table"
+        };
+        eprintln!("[bb-auth] session denied: {email} {why}");
         respond_html(
             req,
             403,
-            "Accesso non autorizzato",
-            "Questo indirizzo email non è abilitato all'accesso.",
-            &cfg.login_url,
+            "Access not authorized",
+            "This email address is not allowed to sign in.",
+            &login,
         );
         return;
     }
 
-    // Which host is this login happening on? nginx tells us, the same way it does on
+    // Which host is this login happening on? nginx told us above, the same way it does on
     // /auth/validate. A relative `rd` resolves against it; without it we can only fall
     // back to the login page.
-    let caller_url = original_url(&req, cfg);
     let caller_origin = caller_url.as_deref().and_then(origin_of);
     let rd = safe_rd(
         form.get("rd").map(String::as_str),
         caller_origin.as_deref(),
         &cfg.authorized_hosts,
-        &cfg.login_url,
+        &login,
     );
     let cookie = build_cookie(
         cfg,
@@ -1609,10 +1987,26 @@ fn handle_session(mut req: Request, state: &State) {
     respond_redirect(req, &rd, Some(&cookie));
 }
 
-/// `GET /auth/logout` — expire the session cookie and `302` to the login page.
+/// `GET /auth/logout[?rd=…]` — expire the session cookie and `302` away.
 ///
 /// Clears the bb-auth cookie only; the Cognito refresh token the login page may hold is
 /// out of scope. A cross-site navigation is ignored (CSRF logout).
+///
+/// **Where it lands is the caller's choice, not a site's.** A logout happens *at*
+/// `/auth/logout`, which no site's `urls` cover — the gate cannot tell which area you are
+/// leaving, so there is nothing for a per-site landing page to resolve against. (Contrast
+/// [`LOGIN_URL_HEADER`]: a `401` happens *on* a gated URL, so the site resolves.) The one
+/// party that does know is whoever wrote the logout link, so they say it:
+///
+/// ```html
+/// <a href="/auth/logout?rd=/app1/goodbye">Sign out</a>
+/// ```
+///
+/// `rd` goes through [`safe_rd`] exactly as on `/auth/session`, so it buys no new
+/// open-redirect surface. With no `rd` the browser lands on the login page — *not* on the
+/// caller's root, which is what `safe_rd` would default to and is the wrong end for a
+/// logout. A relative `rd` needs `BB_AUTH_ORIGINAL_URL_HEADER` on this location too; if
+/// nginx omits it the redirect falls back to the login page, which is fail-soft.
 fn handle_logout(req: Request, state: &State) {
     let cfg = &state.cfg;
     // Block cross-site CSRF logout: a navigation triggered from another origin
@@ -1628,25 +2022,55 @@ fn handle_logout(req: Request, state: &State) {
     } else {
         Some(build_cookie(cfg, "", 0))
     };
-    respond_redirect(req, &cfg.login_url, cookie.as_deref());
+
+    let caller_url = original_url(&req, cfg);
+    let login = login_url_for(&state.access.read().unwrap(), cfg, caller_url.as_deref());
+    let rd = query_param(req.url(), "rd").filter(|v| !v.is_empty());
+    let target = match rd {
+        Some(rd) => safe_rd(
+            Some(&rd),
+            caller_url.as_deref().and_then(origin_of).as_deref(),
+            &cfg.authorized_hosts,
+            &login,
+        ),
+        None => login,
+    };
+    respond_redirect(req, &target, cookie.as_deref());
 }
 
 // ---------------------------------------------------------------------------
 // main
 // ---------------------------------------------------------------------------
 
-/// `bb-auth --check-users <file>`: parse a users file with the real parser and exit
+/// `bb-auth --check-users <file>`: parse an access file with the real parser and exit
 /// 0 (with a summary) or 1 (with the error). Reads no env and touches no network, so
-/// a deploy can validate the file that is *about* to go live — a rejected scope is a
-/// fatal startup error, and with `Restart=on-failure` that would be a boot loop.
+/// a deploy can validate the file that is *about* to go live — a rejected scope, an
+/// unknown site field, or a residual `enabled_paths` is a fatal startup error, and with
+/// `Restart=on-failure` that would be a boot loop.
 fn check_users(path: &str) -> ! {
-    match read_users(path) {
-        Ok(u) => {
+    match read_access(path) {
+        Ok(a) => {
+            let open: Vec<&str> = a
+                .sites
+                .entries
+                .iter()
+                .filter(|s| s.public_auth)
+                .map(|s| s.name.as_str())
+                .collect();
             println!(
-                "[bb-auth] {path}: OK — {} users, {} api keys",
-                u.by_email.len(),
-                u.by_key_hash.len()
+                "[bb-auth] {path}: OK — {} users, {} api keys, {} sites, {} denied",
+                a.by_email.len(),
+                a.by_key_hash.len(),
+                a.sites.entries.len(),
+                a.denied.len()
             );
+            if !open.is_empty() {
+                println!(
+                    "[bb-auth] {path}: public_auth sites (any authenticated identity, enrolled \
+                     or not): {}",
+                    open.join(", ")
+                );
+            }
             std::process::exit(0);
         }
         Err(e) => {
@@ -1656,7 +2080,7 @@ fn check_users(path: &str) -> ! {
     }
 }
 
-/// Parse argv (only `--check-users`), build the config, load the users table, prime the
+/// Parse argv (only `--check-users`), build the config, load the access table, prime the
 /// JWKS, then serve forever on a fixed pool of blocking worker threads.
 fn main() {
     let args: Vec<String> = std::env::args().skip(1).collect();
@@ -1676,8 +2100,8 @@ fn main() {
     }
 
     let cfg = Config::from_env();
-    let users_path = env_req("BB_AUTH_USERS_FILE");
-    let users = load_users(&users_path);
+    let access_path = env_req("BB_AUTH_USERS_FILE");
+    let access = load_access(&access_path);
 
     let initial = fetch_jwks(&cfg.issuer).unwrap_or_else(|e| {
         eprintln!("[bb-auth] FATAL: initial JWKS fetch failed: {e}");
@@ -1686,14 +2110,23 @@ fn main() {
 
     let listen = cfg.listen.clone();
     let workers = cfg.workers;
-    let user_n = users.by_email.len();
-    let key_n = users.by_key_hash.len();
+    let user_n = access.by_email.len();
+    let key_n = access.by_key_hash.len();
+    let site_n = access.sites.entries.len();
+    let denied_n = access.denied.len();
+    let open_sites: Vec<String> = access
+        .sites
+        .entries
+        .iter()
+        .filter(|s| s.public_auth)
+        .map(|s| s.name.clone())
+        .collect();
 
     let state = Arc::new(State {
         cfg,
-        users: RwLock::new(users),
+        access: RwLock::new(access),
         #[cfg(unix)]
-        users_path,
+        access_path,
         jwks: RwLock::new(JwksCache {
             keys: initial,
             last_refresh: Instant::now(),
@@ -1701,10 +2134,10 @@ fn main() {
         jwks_refresh: Mutex::new(()),
     });
 
-    // Hot-reload the users table on SIGHUP (systemctl reload bb-auth). Failures
+    // Hot-reload the access table on SIGHUP (systemctl reload bb-auth). Failures
     // keep the current table; no one is logged out by a transient disk error.
     // POSIX-only; no-op on non-unix hosts.
-    spawn_users_reload_handler(&state);
+    spawn_access_reload_handler(&state);
 
     let server = Arc::new(Server::http(&listen).unwrap_or_else(|e| {
         eprintln!("[bb-auth] FATAL: cannot bind {listen}: {e}");
@@ -1712,10 +2145,18 @@ fn main() {
     }));
 
     eprintln!(
-        "[bb-auth] listening on {listen} | issuer={} | aud={} | users={user_n} | api_keys={key_n} | workers={workers}",
+        "[bb-auth] listening on {listen} | issuer={} | aud={} | users={user_n} | api_keys={key_n} | sites={site_n} | denied={denied_n} | workers={workers}",
         state.cfg.issuer,
         state.cfg.audiences.join(",")
     );
+    if !open_sites.is_empty() {
+        // Cognito self-signup is open, so this really is "anyone who can register".
+        eprintln!(
+            "[bb-auth] WARNING: public_auth sites reachable by ANY authenticated identity, \
+             enrolled or not [{}]",
+            open_sites.join(",")
+        );
+    }
     if state.cfg.allow_unverified_social {
         let scope = match &state.cfg.social_providers {
             Some(p) => p.join(","),
@@ -2188,16 +2629,32 @@ mod tests {
         p
     }
 
-    /// `read_users(path).unwrap_err()` without forcing `Debug` onto `Users`.
+    /// Parse `json` as an access file, through the real parser and a real temp file.
+    fn access_of(name: &str, json: &str) -> Access {
+        let tmp = users_tmp(name, json);
+        let a = read_access(tmp.to_str().unwrap()).unwrap();
+        let _ = std::fs::remove_file(&tmp);
+        a
+    }
+
+    /// `read_access(path).unwrap_err()` without forcing `Debug` onto `Access`.
     fn users_err(path: &std::path::Path) -> String {
-        match read_users(path.to_str().unwrap()) {
+        match read_access(path.to_str().unwrap()) {
             Ok(_) => panic!("expected {} to be rejected", path.display()),
             Err(e) => e,
         }
     }
 
+    /// The same, straight from a JSON literal.
+    fn access_err(name: &str, json: &str) -> String {
+        let tmp = users_tmp(name, json);
+        let e = users_err(&tmp);
+        let _ = std::fs::remove_file(&tmp);
+        e
+    }
+
     #[test]
-    fn read_users_parses_authorized_urls() {
+    fn read_access_parses_authorized_urls() {
         let hash = sha256_hex("bbk_secret");
         let other = sha256_hex("bbk_two");
         let json = format!(
@@ -2217,7 +2674,13 @@ mod tests {
             }}"#
         );
         let tmp = users_tmp("ok", &json);
-        let u = read_users(tmp.to_str().unwrap()).unwrap();
+        let u = read_access(tmp.to_str().unwrap()).unwrap();
+
+        // no `sites` / `denied` sections => today's behaviour, bit for bit
+        assert!(u.sites.entries.is_empty());
+        assert!(!u.sites.any_public_auth());
+        assert!(u.sites.resolve(Some("https://mcp.x.com/mcp")).is_none());
+        assert!(u.denied.is_empty());
 
         assert!(u.by_email.contains_key("alice@example.com")); // lowercased
         assert!(u.by_email.contains_key("bob@x.com"));
@@ -2249,7 +2712,7 @@ mod tests {
     }
 
     #[test]
-    fn read_users_rejects_enabled_paths() {
+    fn read_access_rejects_enabled_paths() {
         // A pre-2.0 file must fail loudly: silently ignoring the field would leave
         // the user unscoped (fail-open).
         let tmp = users_tmp(
@@ -2277,7 +2740,7 @@ mod tests {
     }
 
     #[test]
-    fn read_users_rejects_malformed_url() {
+    fn read_access_rejects_malformed_url() {
         let tmp = users_tmp(
             "badurl",
             r#"{ "users": [ { "email": "bob@x.com", "authorized_urls": ["/mcp/"] } ] }"#,
@@ -2303,7 +2766,7 @@ mod tests {
     }
 
     #[test]
-    fn read_users_skips_header_unsafe_email() {
+    fn read_access_skips_header_unsafe_email() {
         // A CR in an email is a response-splitting gadget once it reaches
         // IDENTITY_HEADER, so the entry is dropped — and with it every key it owns,
         // which would otherwise resolve to an email that never passed the guard.
@@ -2319,7 +2782,7 @@ mod tests {
               ] }}"#
         );
         let tmp = users_tmp("unsafe-email", &json);
-        let u = read_users(tmp.to_str().unwrap()).unwrap();
+        let u = read_access(tmp.to_str().unwrap()).unwrap();
 
         assert!(u.by_email.contains_key("ok@x.com"));
         assert_eq!(u.by_email.len(), 1, "both unsafe entries must be skipped");
@@ -2328,6 +2791,351 @@ mod tests {
             "a skipped user must not leave a live key behind"
         );
         let _ = std::fs::remove_file(&tmp);
+    }
+
+    /// A minimal `Config` — `login_url_for` reads only that one field, but a struct
+    /// literal must name them all, which is the point: a new field shows up here.
+    fn cfg_with_login(login_url: &str) -> Config {
+        Config {
+            listen: "127.0.0.1:0".into(),
+            hmac_keys: keys_one(),
+            issuer: "https://issuer.example".into(),
+            audiences: vec!["aud".into()],
+            allow_unverified_social: false,
+            social_providers: None,
+            cookie_name: "bb_session".into(),
+            cookie_domain: None,
+            session_ttl: 3600,
+            authorized_hosts: vec![compile_host_pattern("x.com").unwrap()],
+            login_url: compile_login_url(login_url).unwrap(),
+            original_url_header: "X-Original-URL".into(),
+            workers: 1,
+        }
+    }
+
+    // --- sites + denied -----------------------------------------------------
+
+    /// One `public_auth` site over /app1, one plain user confined to /other.
+    const SITES_JSON: &str = r#"{
+      "sites": [
+        { "name": "app1",
+          "urls": ["https://app.x.com/app1", "https://app.x.com/app1/*"],
+          "public_auth": true }
+      ],
+      "denied": ["  Spammer@X.com  ", ""],
+      "users": [
+        { "email": "bob@x.com", "authorized_urls": ["https://app.x.com/other/*"] },
+        { "email": "spammer@x.com", "authorized_urls": ["*://*/*"] }
+      ]
+    }"#;
+
+    #[test]
+    fn read_access_parses_sites_and_denied() {
+        let a = access_of("sites", SITES_JSON);
+
+        assert_eq!(a.sites.entries.len(), 1);
+        assert!(a.sites.any_public_auth());
+        let site = a.sites.resolve(Some("https://app.x.com/app1/x")).unwrap();
+        assert_eq!(site.name, "app1");
+        assert!(site.public_auth);
+        // bare /app1 needs its own pattern — a non-terminal `*` never crosses `/`
+        assert_eq!(
+            a.sites
+                .resolve(Some("https://app.x.com/app1"))
+                .unwrap()
+                .name,
+            "app1"
+        );
+        assert!(a.sites.resolve(Some("https://app.x.com/app2")).is_none());
+
+        // `denied` is trimmed + lowercased, and empties are dropped
+        assert!(a.denied.contains("spammer@x.com"));
+        assert_eq!(a.denied.len(), 1);
+    }
+
+    #[test]
+    fn public_auth_site_grants_an_unenrolled_identity() {
+        let a = access_of("sites-grant", SITES_JSON);
+        let app1 = Some("https://app.x.com/app1/thing");
+
+        // nobody's in the table, and that is the whole point
+        assert!(!a.by_email.contains_key("newcomer@x.com"));
+        assert_eq!(
+            authorize(&a, "newcomer@x.com".into(), app1).as_deref(),
+            Some("newcomer@x.com")
+        );
+        // …and the identity it hands back is header-safe, which respond_authorized asserts
+        assert!(header_safe_email("newcomer@x.com"));
+
+        // off the site, the roster decides as before
+        assert_eq!(
+            authorize(
+                &a,
+                "newcomer@x.com".into(),
+                Some("https://app.x.com/other/x")
+            ),
+            None
+        );
+        assert_eq!(
+            authorize(&a, "bob@x.com".into(), Some("https://app.x.com/other/x")).as_deref(),
+            Some("bob@x.com")
+        );
+        // an enrolled user out of their own scope still walks into the open site
+        assert_eq!(
+            authorize(&a, "bob@x.com".into(), app1).as_deref(),
+            Some("bob@x.com")
+        );
+    }
+
+    #[test]
+    fn denied_outranks_every_grant() {
+        let a = access_of("sites-denied", SITES_JSON);
+        // spammer is enrolled with `*://*/*` — the veto beats the roster …
+        assert_eq!(
+            authorize(
+                &a,
+                "spammer@x.com".into(),
+                Some("https://app.x.com/other/x")
+            ),
+            None
+        );
+        // … and it beats a public_auth site, which never consults the roster at all
+        assert_eq!(
+            authorize(&a, "spammer@x.com".into(), Some("https://app.x.com/app1")),
+            None
+        );
+    }
+
+    #[test]
+    fn public_auth_site_never_rescues_an_unknown_api_key() {
+        // A key is not an identity Cognito vouches for: unknown stays unknown, even on an
+        // open site. And a known key dies with its owner's veto.
+        let hash = sha256_hex("bbk_spam");
+        let json = format!(
+            r#"{{ "sites": [ {{ "name": "app1", "urls": ["https://app.x.com/app1/*"],
+                                "public_auth": true }} ],
+                  "denied": ["spammer@x.com"],
+                  "users": [ {{ "email": "spammer@x.com", "authorized_urls": ["*://*/*"],
+                     "api_keys": [ {{ "id": "k", "key_hash": "{hash}",
+                                      "released": "2026-01-01", "duration": "never" }} ] }} ] }}"#
+        );
+        let a = access_of("sites-apikey", &json);
+        let app1 = Some("https://app.x.com/app1/x");
+
+        assert_eq!(bearer_apikey_email(&a, "bbk_unknown", app1), None);
+        assert_eq!(bearer_apikey_email(&a, "bbk_spam", app1), None); // owner denied
+    }
+
+    #[test]
+    fn site_resolve_is_first_match_wins() {
+        // A broad site listed first answers for everything under it — including the
+        // narrower public_auth site after it, which therefore never opens. Order is
+        // meaning; specific sites go first.
+        let json = r#"{ "sites": [
+            { "name": "everything", "urls": ["https://app.x.com/*"] },
+            { "name": "app1", "urls": ["https://app.x.com/app1/*"], "public_auth": true }
+          ] }"#;
+        let a = access_of("sites-order", json);
+        assert_eq!(
+            a.sites
+                .resolve(Some("https://app.x.com/app1/x"))
+                .unwrap()
+                .name,
+            "everything"
+        );
+        assert_eq!(
+            authorize(
+                &a,
+                "newcomer@x.com".into(),
+                Some("https://app.x.com/app1/x")
+            ),
+            None
+        );
+
+        // reversed, app1 answers for itself and grants
+        let json = r#"{ "sites": [
+            { "name": "app1", "urls": ["https://app.x.com/app1/*"], "public_auth": true },
+            { "name": "everything", "urls": ["https://app.x.com/*"] }
+          ] }"#;
+        let a = access_of("sites-order2", json);
+        assert_eq!(
+            a.sites
+                .resolve(Some("https://app.x.com/app1/x"))
+                .unwrap()
+                .name,
+            "app1"
+        );
+        assert!(authorize(
+            &a,
+            "newcomer@x.com".into(),
+            Some("https://app.x.com/app1/x")
+        )
+        .is_some());
+        // and `everything` still answers — granting nothing — for the rest
+        assert_eq!(
+            a.sites.resolve(Some("https://app.x.com/z")).unwrap().name,
+            "everything"
+        );
+        assert_eq!(
+            authorize(&a, "newcomer@x.com".into(), Some("https://app.x.com/z")),
+            None
+        );
+    }
+
+    #[test]
+    fn site_resolve_rejects_traversal_and_a_missing_url() {
+        // Sites match through UrlScope::allows precisely so these two denials cannot be
+        // forgotten on this path: a `..` URL resolving to a public_auth site would be a
+        // traversal straight past every scope.
+        let a = access_of("sites-traversal", SITES_JSON);
+        assert!(a
+            .sites
+            .resolve(Some("https://app.x.com/app1/../admin"))
+            .is_none());
+        assert!(a.sites.resolve(None).is_none());
+        assert_eq!(
+            authorize(
+                &a,
+                "newcomer@x.com".into(),
+                Some("https://app.x.com/app1/../admin")
+            ),
+            None
+        );
+        assert_eq!(authorize(&a, "newcomer@x.com".into(), None), None);
+    }
+
+    #[test]
+    fn read_access_rejects_a_malformed_site_url() {
+        // Fatal, exactly like a user's scope: a dropped site pattern silently changes who
+        // reaches what.
+        let err = access_err(
+            "site-badurl",
+            r#"{ "sites": [ { "name": "app1", "urls": ["/app1/*"] } ] }"#,
+        );
+        assert!(err.contains("app1"), "{err}");
+        assert!(err.contains("<scheme>://<host>/<path>"), "{err}");
+    }
+
+    #[test]
+    fn read_access_rejects_an_unknown_site_field() {
+        // The day `public_auth` gains a `require_email_domain` companion, a typo in it
+        // must not silently leave `public_auth: true` standing alone.
+        let err = access_err(
+            "site-typo",
+            r#"{ "sites": [ { "name": "app1", "urls": ["https://app.x.com/app1/*"],
+                              "public_auth": true, "require_email_domains": "x.com" } ] }"#,
+        );
+        assert!(err.contains("require_email_domains"), "{err}");
+
+        // …while the sections that describe people keep ignoring extras
+        let a = access_of(
+            "user-extra",
+            r#"{ "_comment": "hi", "users": [ { "email": "b@x.com", "notes": "ok",
+                 "authorized_urls": ["https://x.com/*"] } ] }"#,
+        );
+        assert!(a.by_email.contains_key("b@x.com"));
+    }
+
+    #[test]
+    fn compile_login_url_rejects_unsafe_targets() {
+        assert!(compile_login_url("https://login.x.com/").is_ok());
+        assert_eq!(
+            compile_login_url("  https://login.x.com/?a=1  ").unwrap(),
+            "https://login.x.com/?a=1" // trimmed
+        );
+
+        assert!(compile_login_url("").is_err());
+        assert!(compile_login_url("http://login.x.com/").is_err()); // https only
+        assert!(compile_login_url("/relative").is_err());
+        assert!(compile_login_url("https://").is_err()); // empty host
+        assert!(compile_login_url("https:///nohost").is_err());
+        assert!(compile_login_url("https://user@evil.com/").is_err()); // userinfo
+        assert!(compile_login_url("https://login.x.com\\@evil.com/").is_err()); // backslash
+                                                                                // these are the reason the check exists: they reach a header and a redirect
+        assert!(compile_login_url("https://x.com/\r\nSet-Cookie: a=1").is_err());
+        assert!(compile_login_url("https://x.com/ b").is_err()); // space
+        assert!(compile_login_url("https://xé.com/").is_err()); // non-ascii => h() would panic
+    }
+
+    #[test]
+    fn login_url_falls_back_through_site_then_global() {
+        let json = r#"{ "sites": [
+            { "name": "app1", "urls": ["https://app.x.com/app1/*"], "public_auth": true,
+              "login_url": "https://signup.x.com/" },
+            { "name": "plain", "urls": ["https://app.x.com/plain/*"] }
+          ] }"#;
+        let a = access_of("sites-login", json);
+        let cfg = cfg_with_login("https://login.x.com/");
+
+        // the site that speaks for the URL names its own login page …
+        assert_eq!(
+            login_url_for(&a, &cfg, Some("https://app.x.com/app1/x")),
+            "https://signup.x.com/"
+        );
+        // … a site declaring none falls back to the global …
+        assert_eq!(
+            login_url_for(&a, &cfg, Some("https://app.x.com/plain/x")),
+            "https://login.x.com/"
+        );
+        // … and so does a URL no site covers, or no URL at all
+        assert_eq!(
+            login_url_for(&a, &cfg, Some("https://app.x.com/elsewhere")),
+            "https://login.x.com/"
+        );
+        assert_eq!(login_url_for(&a, &cfg, None), "https://login.x.com/");
+
+        // Every value is header-safe by construction — respond_unauthorized asserts it.
+        for u in ["https://app.x.com/app1/x", "https://app.x.com/elsewhere"] {
+            let l = login_url_for(&a, &cfg, Some(u));
+            assert!(l.bytes().all(|b| b.is_ascii_graphic()), "{l}");
+        }
+    }
+
+    #[test]
+    fn read_access_rejects_a_malformed_site_login_url() {
+        let err = access_err(
+            "site-badlogin",
+            r#"{ "sites": [ { "name": "app1", "urls": ["https://app.x.com/app1/*"],
+                              "login_url": "http://login.x.com/" } ] }"#,
+        );
+        assert!(err.contains("app1"), "{err}");
+        assert!(err.contains("https://"), "{err}");
+    }
+
+    #[test]
+    fn query_param_decodes_rd() {
+        assert_eq!(
+            query_param("/auth/logout?rd=%2Fapp1%2Fbye", "rd").as_deref(),
+            Some("/app1/bye")
+        );
+        assert_eq!(
+            query_param("/auth/logout?a=1&rd=https%3A%2F%2Fx.com%2Fz&b=2", "rd").as_deref(),
+            Some("https://x.com/z")
+        );
+        assert_eq!(query_param("/auth/logout?rd=", "rd").as_deref(), Some(""));
+        assert_eq!(query_param("/auth/logout?a=1", "rd"), None);
+        assert_eq!(query_param("/auth/logout", "rd"), None);
+    }
+
+    #[test]
+    fn a_site_that_grants_nothing_is_invisible() {
+        // public_auth:false == no site at all, today. It exists to carry future fields.
+        let a = access_of(
+            "site-inert",
+            r#"{ "sites": [ { "name": "app1", "urls": ["https://app.x.com/app1/*"] } ],
+                 "users": [ { "email": "b@x.com", "authorized_urls": ["https://app.x.com/app1/*"] } ] }"#,
+        );
+        assert!(!a.sites.any_public_auth());
+        assert_eq!(
+            authorize(
+                &a,
+                "newcomer@x.com".into(),
+                Some("https://app.x.com/app1/x")
+            ),
+            None
+        );
+        // the roster is untouched by the site's presence
+        assert!(authorize(&a, "b@x.com".into(), Some("https://app.x.com/app1/x")).is_some());
     }
 
     /// The usual deployment: the apex plus every subdomain, enumerated.

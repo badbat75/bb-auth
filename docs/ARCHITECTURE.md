@@ -66,15 +66,18 @@ in file order:
 | Section | Purpose |
 |---------|---------|
 | `Config` / `from_env` | All tunables from env vars; fatal-`exit`s on missing required values or a too-short HMAC key. |
-| `State` / `JwksCache` | Shared state behind `Arc`: config, a `RwLock<Users>` users table, a `RwLock` JWKS cache, and a `Mutex` serializing JWKS refreshes. |
-| `load_users` / `read_users` / `reload_users` | Parses the JSON users file (`BB_AUTH_USERS_FILE`) into two indices — allowlisted emails (`by_email`) and `bbk_` API keys (`by_key_hash`), each with a URL scope; emails lowercased. `load_users` aborts startup if unreadable (warns if empty); `reload_users` swaps the table live on `SIGHUP`, keeping the old table on error. See §12. |
-| `glob_match` / `compile_pattern` / `UrlScope` | The `authorized_urls` matcher: validates + normalises patterns at load, then matches a request URL against them with `*` / `&` wildcards. See §12. |
-| `check_users` | The `bb-auth --check-users <file>` mode: parse and exit `0`/`1`, no env and no network. Lets a deploy reject a users file before restarting onto it. |
+| `State` / `JwksCache` | Shared state behind `Arc`: config, a `RwLock<Access>` access table, a `RwLock` JWKS cache, and a `Mutex` serializing JWKS refreshes. |
+| `load_access` / `read_access` / `reload_access` | Parses the JSON access file (`BB_AUTH_USERS_FILE`) into the site list, the `denied` set, and two indices — allowlisted emails (`by_email`) and `bbk_` API keys (`by_key_hash`), each with a URL scope; emails lowercased. `load_access` aborts startup if unreadable (warns if nothing is granted); `reload_access` swaps the table live on `SIGHUP`, keeping the old table on error. See §12. |
+| `Sites` / `SiteRecord` / `login_url_for` | URL areas and the properties that hold for them, in file order. `Sites::resolve` is first-match-wins; `public_auth` grants the area to any authenticated identity, enrolled or not; `login_url` names its login page. Sites only grant. See §12. |
+| `compile_login_url` | Validates `BB_AUTH_LOGIN_URL` and every site's `login_url`: printable ASCII, absolute `https://`, no userinfo `@`, no backslash. What makes emitting them in `X-Auth-Login-URL`, a `Location:` and a page safe with no per-use check. |
+| `authorize` | The single authorization point for the two Cognito-backed credentials: `denied` veto → `public_auth` site → roster + URL scope. See §12. |
+| `glob_match` / `compile_pattern` / `UrlScope` | The one URL matcher — a user's `authorized_urls`, a key's, and a site's `urls` all go through it: validates + normalises patterns at load, then matches a request URL with `*` / `&` wildcards, denying a missing URL and any `..`. See §12. |
+| `check_users` | The `bb-auth --check-users <file>` mode: parse and exit `0`/`1`, no env and no network. Lets a deploy reject an access file before restarting onto it. |
 | `fetch_jwks` / `refresh_jwks_if_due` / `decoding_key` | `GET {issuer}/.well-known/jwks.json` via `ureq`+rustls; cache keyed by `kid`, refreshed at most once per 60 s, deduped across workers by double-checked locking. |
 | `validate_id_token` | Full JWT validation (see §6). Returns the verified, lowercased email. |
 | `make_session` / `verify_session` | HMAC-SHA256 signed cookie (see §7). |
 | HTTP helpers | Header/cookie parsing, cookie building, open-redirect `safe_rd`, response builders. |
-| `handle_validate` / `handle_session` / `handle_logout` | The three real handlers (plus `/auth/healthz` inline). `/auth/validate` resolves a cookie or bearer credential to a user, enforces the request-URL scope, and returns the email in `X-Auth-Email` (`bearer_apikey_email` / `user_scope_email` / `original_url` / `respond_authorized`). |
+| `handle_validate` / `handle_session` / `handle_logout` | The three real handlers (plus `/auth/healthz` inline). `/auth/validate` resolves a cookie or bearer credential to an identity, authorizes the request URL against it, and returns the email in `X-Auth-Email` (`bearer_apikey_email` / `authorize` / `original_url` / `respond_authorized`). |
 | `main` | Build config/state, prime JWKS, spawn the worker thread pool, route requests. |
 
 ---
@@ -90,7 +93,7 @@ in file order:
 - **Stateless sessions:** there is **no server-side session store**. The session
   is fully carried by the HMAC cookie, so any worker can validate any request and
   a restart does not log anyone out (cookies are time-bound, not server-bound).
-- **Users table is hot-reloadable:** it lives in a `RwLock<Users>` and is re-read
+- **Access table is hot-reloadable:** it lives in a `RwLock<Access>` and is re-read
   from disk on `SIGHUP` (`systemctl reload bb-auth`) — edit + reload applies
   changes live without dropping sessions. A restart still works too. Every
   credential is re-checked against the table on every `/auth/validate`, so removing
@@ -103,9 +106,9 @@ in file order:
 
 | Method | Path | Caller | Behavior |
 |--------|------|--------|----------|
-| `GET` | `/auth/validate` | nginx only (`auth_request`) | `204` + `X-Auth-Email: <authorized user>` if an accepted credential authorizes the request URL, otherwise `401`. Accepts (in order) an `Authorization: Bearer bbk_…` static API key, an `Authorization: Bearer <id_token>`, or the session cookie; each is additionally checked against the caller's `authorized_urls`. See §12. |
+| `GET` | `/auth/validate` | nginx only (`auth_request`) | `204` + `X-Auth-Email: <authorized user>` if an accepted credential authorizes the request URL, otherwise `401` + `X-Auth-Login-URL: <this area's login page>`. Accepts (in order) an `Authorization: Bearer bbk_…` static API key, an `Authorization: Bearer <id_token>`, or the session cookie; each is additionally checked against the caller's `authorized_urls`, or against a `public_auth` site. See §12. |
 | `POST` | `/auth/session` | browser | Body `application/x-www-form-urlencoded`: `id_token=…&rd=…`. Fully validates the id_token; on success sets the session cookie and `302`s to `rd` (open-redirect guarded). |
-| `GET` | `/auth/logout` | browser | Sets an expired (Max-Age=0) cookie and `302` → login page. Cross-site requests (`Sec-Fetch-Site: cross-site`) are ignored (no cookie clear) to block CSRF-forced logout. |
+| `GET` | `/auth/logout[?rd=…]` | browser | Sets an expired (Max-Age=0) cookie and `302` → `rd` (same `safe_rd` guard) or, with no `rd`, the login page. Cross-site requests (`Sec-Fetch-Site: cross-site`) are ignored (no cookie clear) to block CSRF-forced logout. |
 | `GET` | `/auth/healthz` | local | `200 ok`. Liveness probe. |
 
 `/auth/validate` is never exposed publicly; nginx reaches it over loopback
@@ -173,8 +176,9 @@ Because the cookie is self-contained and key addressed, **key rotation
 invalidates nobody**: the new key is added as verify-only, then flipped to
 active, then the old one is dropped after a TTL. See README "Key rotation".
 De-authorizing an email is separate from signatures: remove the user from the
-users file and reload/restart — the next `/auth/validate` for that cookie returns
-`401` even though the cookie signature is still valid.
+access file (or add them to `denied`) and reload/restart — the next `/auth/validate`
+for that cookie returns `401` even though the cookie signature is still valid. On a
+`public_auth` site the roster is not consulted, so there `denied` is the only lever.
 
 ---
 
@@ -193,7 +197,7 @@ Required vars cause a fatal exit if missing.
 | `BB_AUTH_AUDIENCES` | no | empty | Comma-separated extra accepted `aud`s (Cognito app client ids), e.g. a separate social-login client. `BB_AUTH_CLIENT_ID` is always accepted; a token is valid if its `aud` matches any. Read at startup → needs `restart`, not `reload`. |
 | `BB_AUTH_ALLOW_UNVERIFIED_SOCIAL` | no | `false` | Truthy (`1`/`true`/`yes`/`on`) accepts `email_verified=false` tokens **only** for federated/social logins (those carrying an `identities` claim); native Cognito users stay strict. Off = strict for everyone. |
 | `BB_AUTH_SOCIAL_PROVIDERS` | no | empty → any | Comma-separated `providerName`s (case-insensitive, e.g. `Google,SignInWithApple`) the relaxation above applies to. Empty = any federated provider. No effect unless `BB_AUTH_ALLOW_UNVERIFIED_SOCIAL` is on. |
-| `BB_AUTH_USERS_FILE` | yes | — | Path to the JSON users file (allowlisted emails plus their `bbk_` API keys and URL scopes; see §12). Loaded at startup, hot-reloaded on `SIGHUP`. |
+| `BB_AUTH_USERS_FILE` | yes | — | Path to the JSON access file (`sites`, `denied`, and the roster of emails with their `bbk_` API keys and URL scopes; see §12). Loaded at startup, hot-reloaded on `SIGHUP`. Named for the roster it used to hold only; the name is a contract with the operator-owned env file a deploy never rewrites. |
 | `BB_AUTH_ORIGINAL_URL_HEADER` | no | `X-Original-URL` | Request header carrying the original request URL (scheme + host + normalised path). Set by nginx on the `auth_request` subrequest (from a `$bb_url` captured in the gated location — **not** from `$uri`, see §12) **and** on `/auth/session` (there a plain `https://app.example.com$uri` is correct). Drives URL scoping, and on `/auth/session` tells bb-auth which host the login is on. Query/fragment are stripped; missing ⇒ fail closed. |
 | `BB_AUTH_LISTEN` | no | `127.0.0.1:4181` | Bind address. Loopback only — nginx fronts it. |
 | `BB_AUTH_COOKIE_NAME` | no | `bb_session` | |
@@ -340,15 +344,20 @@ resolver), `SystemCallFilter=@system-service`, empty `CapabilityBoundingSet`,
 
 ---
 
-## 12. Users file, API keys & URL scoping
+## 12. Access file, sites, API keys & URL scoping
 
 Access is described by a single JSON file (`BB_AUTH_USERS_FILE`, installed as
-`/opt/bb-auth/var/lib/users.json`). It lists every user — each with an optional URL
-scope and zero or more static API keys — loaded at startup and hot-reloaded on
-`SIGHUP`. It is the real access gate (`read_users` / `Users`):
+`/opt/bb-auth/var/lib/users.json`), loaded at startup and hot-reloaded on `SIGHUP`. It
+is the real access gate (`read_access` / `Access`), and has three sibling sections:
 
 ```json
-{ "users": [
+{ "sites": [
+    { "name": "signup", "urls": ["https://app.example.com/welcome",
+                                 "https://app.example.com/welcome/*"],
+      "public_auth": true }
+  ],
+  "denied": ["spammer@example.com"],
+  "users": [
     { "email": "you@example.com", "authorized_urls": ["*://*/*"] },
     { "email": "bot@example.com",
       "authorized_urls": ["https://mcp.example.com/mcp", "https://mcp.example.com/mcp/*"],
@@ -360,19 +369,120 @@ scope and zero or more static API keys — loaded at startup and hot-reloaded on
 ] }
 ```
 
-At load time the file is parsed into two in-memory indices behind `RwLock<Users>`:
-`by_email` (lowercased email → `UserRecord`) and `by_key_hash` (`sha256(bearer)` hex
-→ `ApiKeyRecord`). Structurally-invalid JSON is a hard error, so a bad reload keeps
-the previous table; a single malformed key is warned about and skipped so one typo
-can't drop everyone.
+The three answer three different questions. `sites` describe **URL areas**, `denied`
+vetoes **people**, `users` is the **roster**. A request is authorized when its
+credential resolves to an identity and one of exactly two grant sources covers the
+request URL — the user's `authorized_urls`, or a `public_auth` site — and the identity
+is not `denied`. Both grant sources are re-checked on every `/auth/validate`.
+
+At load the file is parsed behind `RwLock<Access>` into the site list (in file order),
+a `denied` set of lowercased emails, and two indices: `by_email` (lowercased email →
+`UserRecord`) and `by_key_hash` (`sha256(bearer)` hex → `ApiKeyRecord`).
+Structurally-invalid JSON is a hard error, so a bad reload keeps the previous table; a
+single malformed key is warned about and skipped so one typo can't drop everyone.
 
 Scope errors, by contrast, are **fatal**, not skipped: a dropped `authorized_urls`
 entry would silently narrow — or, if it was the only one, blank out — a grant someone
-believed they had written. So a malformed pattern, and any residual pre-2.0
-`enabled_paths` field, makes the whole load fail. At startup that is an exit; on
-`SIGHUP` the live table survives. `bb-auth --check-users <file>` runs exactly this
-parser and exits `0`/`1`, which is how `scripts/deploy.sh` refuses to restart the
+believed they had written. So a malformed pattern, an unknown field on a site, and any
+residual pre-2.0 `enabled_paths` field, make the whole load fail. At startup that is an
+exit; on `SIGHUP` the live table survives. `bb-auth --check-users <file>` runs exactly
+this parser and exits `0`/`1`, which is how `scripts/deploy.sh` refuses to restart the
 service onto a file that would not boot.
+
+### Sites (`public_auth`)
+
+A site record describes a **place, never a person**: no field of it may name a user.
+Grants to named users live in exactly one place, `users[].authorized_urls`; expressing
+the same user↔URL relation twice would mean someone removed from the roster could still
+walk in through a site. Everything a site carries is a predicate over an anonymous
+identity, and may only modulate the grant that record itself makes.
+
+`public_auth: true` opens the area to **any** identity Cognito vouches for, enrolled or
+not — an un-enrolled user gets a `204` and the app receives their `X-Auth-Email`, which
+is how an onboarding page enrolls them. Since Cognito self-signup is open, this means
+*anyone who can register*; it is the right grant for a signup area and the wrong one for
+everything else. It reaches only the two Cognito-backed credentials: an unknown `bbk_`
+key stays unknown, because Cognito vouches for no static key of ours and there would be
+no email to hand back. `public_auth: false` (the default) grants nothing and is
+indistinguishable from having no site — the field exists to carry future properties.
+
+`Sites::resolve` is **first match wins**, in file order: the first record whose `urls`
+cover the request answers for it, even if it grants nothing, so specific sites go before
+broad ones. The rule is fixed now, while `public_auth` is the only property, rather than
+after a second field makes "which record answers?" expensive to change. The alternatives
+are worse: "most specific wins" needs a specificity order over globs that does not exist
+(`https://x.com/*` vs `*://x.com/app1` — which?), and "merge every match" would OR the
+grants together, so a broad site would silently open a narrow one.
+
+The table only ever **grants**. A URL with no site is not denied, it is simply not open,
+and the per-user scope decides as before. Sites match through `UrlScope::allows` — the
+same matcher a user's scope uses — which is where the missing-header and `..` denials
+live; a second matcher that forgot either would be a bypass around the first.
+
+### Per-site login page, and why logout has none
+
+A site's `login_url` overrides `BB_AUTH_LOGIN_URL` for its area (`login_url_for`); it
+names the login page on `/auth/validate`'s `401`, the fallback for a rejected `rd`, and
+the link on `/auth/session`'s error pages. First-match-wins applies to it too.
+
+bb-auth never redirects a gated request — it answers `401` and nginx decides. So the site's
+login page reaches nginx as a **response header**, `X-Auth-Login-URL` (`LOGIN_URL_HEADER`),
+lifted by `auth_request_set` into a request variable (which is what stops a later
+`proxy_pass` from clobbering `$upstream_http_*`):
+
+```nginx
+map $bb_login $bb_login_safe {          # http{} level
+    ""      https://login.example.com/; # = BB_AUTH_LOGIN_URL
+    default $bb_login;
+}
+location /app1 {
+    set $bb_url https://app.example.com$uri;
+    auth_request     /internal/auth-gate;
+    auth_request_set $bb_login $upstream_http_x_auth_login_url;
+    error_page 401 = @bb_signin;
+}
+location @bb_signin { return 302 $bb_login_safe?rd=$scheme://$host$request_uri; }
+```
+
+`auth_request_set` reads the subrequest's response headers even when it answered `401`,
+which is what makes this work at all. The `map` is not decoration: an unset `$bb_login` —
+an older binary, or a gated location that omits the `auth_request_set` — would make
+`return 302 $bb_login?rd=…` emit a *relative* `Location: ?rd=…`, sending the browser back
+to the gated path it just failed on. A redirect loop. The default arm degrades to the
+global login page instead, i.e. to exactly what a hardcoded `@bb_signin` did before.
+
+Both the global and the per-site value pass `compile_login_url` at load — printable ASCII,
+absolute `https://`, no userinfo `@`, no backslash. That is what lets the gate emit them
+into a header, a `Location:` and a page with no per-use check; a CR/LF would otherwise be
+a response-splitting gadget, and `h()` panics on a non-ASCII header value. It is **not**
+checked against `BB_AUTH_AUTHORIZED_HOSTS`, and cannot be: `read_access` reads no env,
+which is precisely what lets `--check-users` validate a file with no config and no network.
+Moving that check to startup would turn an operator's typo into a fatal boot under
+`Restart=on-failure` that `--check-users` never saw.
+
+There is deliberately **no per-site logout landing page**. The gate can name a login page
+on a `401` because the `401` happens *on* a gated URL, so the site resolves. A logout
+happens at `/auth/logout`, which no site's `urls` cover — nothing resolves, and a
+`logout_url` field would be unreachable in practice. The party that knows which area you
+are leaving is whoever wrote the logout link, so `handle_logout` reads `?rd=` and puts it
+through the same `safe_rd` guard as `/auth/session`. With no `rd` the browser lands on the
+login page — not on the caller's root, which is what `safe_rd` defaults to and is the wrong
+end for a logout.
+
+### `denied` — the veto
+
+Lowercased emails refused ahead of every grant, on every credential: the id_token and
+cookie paths (`authorize`), the API-key path (its owner, `bearer_apikey_email`), and
+cookie issuance (`handle_session`). It is not redundant with deleting the user's row:
+
+- On a `public_auth` site `by_email` is never consulted, so for an un-enrolled identity
+  this is the **only** denial that exists.
+- For an enrolled one it is a *suspension* rather than a deletion: the row, its scope
+  and its keys survive, so re-enabling is one edit. Note that `authorized_urls: []`
+  suspends someone from the roster grant but **not** from a `public_auth` site.
+
+A veto that covered only some credentials would be worse than none, which is why it sits
+at the top of every path rather than inside the roster branch.
 
 ### Static API keys (`bbk_`)
 
@@ -464,12 +574,16 @@ literal bytes rather than a segment boundary — which also fails closed.
 
 `handle_validate` tries credentials in this order, each additionally URL-scoped:
 
-1. **`Authorization: Bearer bbk_…`** — static API key: looked up by hash, checked for
-   expiry and URL scope (`bearer_apikey_email`).
+1. **`Authorization: Bearer bbk_…`** — static API key: looked up by hash, its owner
+   checked against `denied`, then checked for expiry and URL scope
+   (`bearer_apikey_email`). No `public_auth` site applies.
 2. **`Authorization: Bearer <id_token>`** — a Cognito id_token validated exactly as at
-   `/auth/session` (§6); its email must be in `by_email` and the URL in the user's
-   scope (`user_scope_email`).
-3. **Session cookie** — verified as in §7, then the same `by_email` + URL check.
+   `/auth/session` (§6), then authorized like a cookie (`authorize`).
+3. **Session cookie** — verified as in §7, then the same `authorize`.
+
+`authorize` is three steps: `denied` vetoes; otherwise a `public_auth` site covering the
+URL is enough on its own, without consulting the roster; otherwise the roster decides
+(`by_email` plus that user's URL scope), as it always has.
 
 A failed bearer falls through to the cookie check, so a stray `Authorization` header
 never blocks an otherwise-valid cookie. Any authorized credential → `204`; otherwise
@@ -477,9 +591,11 @@ never blocks an otherwise-valid cookie. Any authorized credential → `204`; oth
 
 ### Identity propagation (`X-Auth-Email`)
 
-Whichever credential wins, it resolves to one value: the email of a user in the users
-file — for an API key, its *owning user's* email. `respond_authorized` returns it on the
-`204` in `X-Auth-Email`, and the gated nginx location lifts it into the proxied request:
+Whichever credential wins, it resolves to one value: an email — for an API key, its
+*owning user's*; on a `public_auth` site, possibly someone with no entry anywhere, which
+is exactly what an onboarding app needs in order to enroll them. `respond_authorized`
+returns it on the `204` in `X-Auth-Email`, and the gated nginx location lifts it into the
+proxied request:
 
 ```nginx
 auth_request_set $bb_email $upstream_http_x_auth_email;
@@ -492,14 +608,22 @@ the client sent, and nginx omits the header when the variable is empty — but o
 names it lists, so any *other* name the app trusts must be cleared explicitly. All of
 which is worth nothing unless the app is unreachable except through nginx.
 
-Emails are validated as printable ASCII when the users file is loaded
-(`header_safe_email`, warn-and-skip like an empty email — dropping a user is
-fail-closed). That is what lets `respond_authorized` build the header with no
-per-request check, and it is also the only place that covers the API-key path, whose
-email never passes through a token claim. A CR/LF in an email would otherwise be a
-response-splitting gadget.
+Emails are validated as printable ASCII (`header_safe_email`) at the **two** places one
+can enter, which between them cover all three credentials — a CR/LF in an email would
+otherwise be a response-splitting gadget:
+
+- **`read_access`, at load**, for every roster email (warn-and-skip like an empty email —
+  dropping a user is fail-closed). It is the only guard on the API-key path, whose email
+  never passes through a token claim.
+- **`validate_id_token`**, for every email lifted out of a Cognito claim. A `public_auth`
+  site emits identities that are in no table, so load time cannot see them; and since
+  that is the only way an email reaches `make_session`, the cookie inherits the property
+  through the HMAC rather than needing its own check.
+
+Together they are what lets `respond_authorized` build the header with no per-request
+check; its `debug_assert!` pins both halves.
 
 The app must not decode the credential itself. Two of the three carry no claim — the
 cookie is an HMAC blob holding only the email, an API key is an opaque secret — and a
 valid `id_token` proves identity, not authorization: self-signup is open, so
-authorization lives in the users file and only the gate consults it.
+authorization lives in the access file and only the gate consults it.

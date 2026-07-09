@@ -1,26 +1,70 @@
 {
   "_comment": [
-    "bb-auth users file (JSON) — the REAL access gate (Cognito self-signup is open).",
-    "Re-checked on every /auth/validate, so removing a user + `systemctl reload bb-auth`",
-    "(SIGHUP) denies even existing sessions; a plain restart works too. Emails match",
-    "case-insensitively. Keys are addressed by `key_hash` = SHA-256 of the bbk_ bearer",
-    "(mint with tools/bb-apikey.py); the raw key is never stored here. `duration`:",
-    "<n>d / <n>h / 0 / never, counted from `released`.",
+    "bb-auth access file (JSON) — the REAL access gate (Cognito self-signup is open).",
+    "Re-checked on every /auth/validate, so an edit + `systemctl reload bb-auth` (SIGHUP)",
+    "takes effect on the next request; a plain restart works too. Emails match",
+    "case-insensitively. Three sibling sections, three different questions:",
     "",
-    "`authorized_urls` are full <scheme>://<host>/<path> patterns and they are the whole",
-    "grant: ACCESS IS ENUMERATED, NEVER ASSUMED. A user with no authorized_urls (or an",
-    "empty list) reaches nothing. To grant everything, say so: ['*://*/*'].",
-    "A key without the field inherits its user's scope.",
+    "  sites   — URL areas and the properties that hold for them. A site describes a",
+    "            PLACE, never a person: no field of it may name a user.",
+    "  denied  — a veto by email. Outranks every grant, on every credential.",
+    "  users   — the roster: who is enrolled, what they may reach, and their API keys.",
     "",
-    "Wildcards, valid in every component: `*` = any run of characters but never `/` —",
+    "GRANTS. A request is authorized when the credential resolves to an identity and one",
+    "of exactly two sources covers the request URL: the user's `authorized_urls`, or a",
+    "site with `public_auth: true`. ACCESS IS ENUMERATED, NEVER ASSUMED — a user with no",
+    "authorized_urls (or an empty list) reaches nothing, and a URL with no site is not",
+    "open. To grant everything, say so: ['*://*/*'].",
+    "",
+    "SITES. `public_auth: true` opens a URL area to ANY identity Cognito vouches for,",
+    "enrolled or not — that is the point: it is how someone who has just registered",
+    "reaches an onboarding area. Since Cognito self-signup is open, this means anyone who",
+    "can register. The app still gets X-Auth-Email and can enroll them. `public_auth`",
+    "does not help an API key: an unknown bbk_ key is nobody, not a new user.",
+    "`login_url` (absolute https) overrides BB_AUTH_LOGIN_URL for this area: on a 401 the",
+    "gate names it in X-Auth-Login-URL and nginx redirects there (see README).",
+    "FIRST MATCH WINS, in file order: the first site whose urls cover the request answers",
+    "for it — for public_auth AND for login_url — even if it grants nothing. Put specific",
+    "sites before broad ones.",
+    "A site only ever GRANTS; the only thing that takes access away is `denied`.",
+    "Unknown fields inside a site are a hard error (a typo in a future restriction must",
+    "not fail open), so no `notes` in there — unlike users and keys, which ignore extras.",
+    "There is NO per-site logout landing page: a logout happens at /auth/logout, which no",
+    "site's urls cover, so there is nothing to resolve. The logout link says where to go:",
+    "  <a href=\"/auth/logout?rd=/app1/goodbye\">Sign out</a>   (rd is open-redirect guarded)",
+    "",
+    "DENIED. Not the same as deleting the user's row. On a public_auth site the roster is",
+    "never consulted, so for an un-enrolled identity this is the ONLY denial there is. And",
+    "for an enrolled one it is a suspension, not a deletion: scope and keys survive the",
+    "lockout, so re-enabling is one edit. NOTE it cannot revoke an id_token or a cookie",
+    "mid-flight — those are stateless — but the very next /auth/validate denies.",
+    "",
+    "KEYS are addressed by `key_hash` = SHA-256 of the bbk_ bearer (mint with",
+    "tools/bb-apikey.py); the raw key is never stored here. `duration`: <n>d / <n>h / 0 /",
+    "never, counted from `released`. A key without authorized_urls inherits its user's.",
+    "",
+    "WILDCARDS, valid in every URL component: `*` = any run of characters but never `/` —",
     "EXCEPT as the final character, where it swallows the rest of the URL, slashes",
-    "included; `&` = exactly one character, never `/`. So `/mcp/*` covers the whole /mcp",
-    "subtree while `/mcp*` would also match /mcp-admin — always put the `/` before the",
-    "`*`. And `/mcp/*` does NOT match a bare `/mcp`; list both if the client hits it.",
+    "included; `&` = exactly one character, never `/`. So `/app1/*` covers the whole /app1",
+    "subtree while `/app1*` would also match /app1-admin — always put the `/` before the",
+    "`*`. And `/app1/*` does NOT match a bare `/app1`: list both, as below.",
     "",
-    "Validate a file before deploying it: `bb-auth --check-users FILE`.",
-    "Unknown fields (this _comment, per-key `notes`) are ignored, so use them freely."
+    "Validate a file before deploying it: `bb-auth --check-users FILE`."
   ],
+  "sites": [
+    {
+      "name": "app1-onboarding",
+      "urls": [
+        "https://app.example.com/app1",
+        "https://app.example.com/app1/*"
+      ],
+      "public_auth": true,
+      "login_url": "https://signup.example.com/"
+    }
+  ],
+
+  "denied": ["spammer@example.com"],
+
   "users": [
     {
       "email": "you@example.com",
@@ -36,7 +80,7 @@
     {
       "email": "suspended@example.com",
       "authorized_urls": [],
-      "notes": "listed but reaches nothing — an empty list is a deliberate lockout"
+      "notes": "listed but reaches nothing — an empty list is a deliberate lockout. NOTE it does NOT keep them off a public_auth site; that is what `denied` is for."
     },
 
     {

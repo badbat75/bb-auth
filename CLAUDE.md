@@ -8,10 +8,12 @@ bb-auth is a single-binary **auth gate**: it accepts an AWS Cognito `id_token` t
 browser-side login page already obtained, validates it (RS256 via JWKS), and issues an
 HMAC-signed session cookie that nginx enforces on every request via `auth_request`. It also
 accepts per-request bearer credentials — a Cognito `id_token` or a static `bbk_` API key —
-and enforces per-user / per-key **URL scopes** (`authorized_urls`). The access list is a JSON
-**users file** (`BB_AUTH_USERS_FILE`). It is service-agnostic — one binary fronts any web
-service, wired per-deployment through `BB_AUTH_*` env vars. The whole gate is **one Rust
-file**, [src/main.rs](src/main.rs); there is no module split by design — read it top to bottom.
+and enforces per-user / per-key **URL scopes** (`authorized_urls`), plus **`sites`** that can
+open a URL area to any authenticated identity. The access list is a JSON **access file**
+(`BB_AUTH_USERS_FILE` — the var keeps its pre-`sites` name). It is service-agnostic — one
+binary fronts any web service, wired per-deployment through `BB_AUTH_*` env vars. The whole
+gate is **one Rust file**, [src/main.rs](src/main.rs); there is no module split by design —
+read it top to bottom.
 
 The defining constraint vs. authorization-code OIDC proxies (oauth2-proxy): those drive the
 login themselves and *cannot* accept a token the browser already holds. bb-auth is built for
@@ -23,7 +25,8 @@ auto-login with no second OTP) and POSTs the resulting `id_token` to `/auth/sess
 This file holds the **rules**: what must not break, why, and the symbol that pins each one.
 The **mechanism** lives in rustdoc next to the code (`cargo doc --no-deps --open`) — the
 endpoint table and credential order on the crate root, the cookie wire format on
-`COOKIE_VERSION`, the users-file schema on `UsersFile`, the wildcard grammar on `glob_match`,
+`COOKIE_VERSION`, the access-file schema on `AccessFile`, the site-resolution rule on `Sites`,
+the wildcard grammar on `glob_match`,
 the nginx snippets on `Config::original_url_header` and `IDENTITY_HEADER`. Don't copy one into
 the other; when they disagree, the code wins. Rustdoc must stay warning-free — a broken
 intra-doc link is the cheapest rot detector this repo has.
@@ -41,8 +44,8 @@ This repo is developed on Windows but the artifact is a Linux/aarch64 binary.
 cargo test
 cargo test session_roundtrip_bb2      # a single test by name
 
-# Validate a users file with the real parser (no env, no network). Same check the
-# deploy runs before it restarts the service.
+# Validate an access file with the real parser (no env, no network). Same check the
+# deploy runs before it restarts the service. Prints the public_auth sites, if any.
 cargo run -- --check-users .\deploy\users.example.json
 
 # Host build / typecheck (SIGHUP reload is cfg(unix), compiled out on Windows)
@@ -68,32 +71,59 @@ bash scripts/build.sh                 # target overridable via BB_AUTH_TARGET
   signed-message bytes logs out **every** existing user. `bb2` is active, `bb1` legacy verify-only;
   the keyid enables zero-downtime HMAC key rotation (README "Key rotation"). `make_session` /
   `verify_session` and their tests pin this.
-- **The users file is the real access gate**, re-checked on *every* `/auth/validate` (not just at
-  login). Parsed into `RwLock<Users>` with two indices, hot-reloaded on SIGHUP (`systemctl reload
-  bb-auth`) — a reload failure keeps the old table (never nuke the live one). Removing a user *or* a
-  single API key + reload denies even still-valid cookies/keys next request. See `read_users`; keep
-  it the access gate and keep the reload fail-soft.
-- **Scope errors are fatal; key errors are skipped.** A malformed `authorized_urls` pattern — or a
-  residual pre-2.0 `enabled_paths` field — makes `read_users` return `Err` (fatal at startup, old
-  table retained on SIGHUP). A bad `key_hash`/`duration` is still warn+skip. The asymmetry is
-  deliberate: skipping a scope entry silently changes who can reach what, and dropping *all* of a
-  user's entries would read as unrestricted. `bb-auth --check-users <file>` runs this same parser
+- **The access file is the real access gate**, re-checked on *every* `/auth/validate` (not just at
+  login). Parsed into `RwLock<Access>` — sites, `denied`, and two indices — hot-reloaded on SIGHUP
+  (`systemctl reload bb-auth`); a reload failure keeps the old table (never nuke the live one). See
+  `read_access`; keep it the access gate and keep the reload fail-soft. Its three sections answer
+  three questions: `sites` describe URL areas, `denied` vetoes people, `users` is the roster.
+- **Scope errors are fatal; key errors are skipped.** A malformed URL pattern (a user's, a key's, or
+  a site's), an unknown field on a `SiteSpec`, or a residual pre-2.0 `enabled_paths` field makes
+  `read_access` return `Err` (fatal at startup, old table retained on SIGHUP). A bad
+  `key_hash`/`duration` is still warn+skip. The asymmetry is deliberate: skipping a scope entry
+  silently changes who can reach what, and dropping *all* of a user's entries would read as
+  unrestricted. `deny_unknown_fields` on `SiteSpec` is the same reflex aimed forward — when
+  `public_auth` grows a companion restriction, a typo in it must not silently leave `public_auth:
+  true` standing alone, which fails *open*. `bb-auth --check-users <file>` runs this same parser
   and exits 0/1 — `scripts/deploy.sh` calls it on the file about to go live and aborts before
   restarting, so a rejected file can never become a `Restart=on-failure` boot loop.
+- **Two grant sources, one veto.** A request is authorized when the credential resolves to an
+  identity and either the user's `authorized_urls` or a `public_auth` site covers the URL
+  (`authorize`). `denied` outranks both, on **every** credential — the id_token and cookie paths,
+  the API-key path (its owner), and cookie issuance. A veto covering half the doors is worse than
+  none. `denied` is not redundant with deleting the row: on a `public_auth` site `by_email` is never
+  consulted, so for an un-enrolled identity it is the *only* denial there is; and for an enrolled one
+  it suspends without destroying their scope and keys. Corollary an operator must know: removing a
+  user does **not** keep them off a `public_auth` site, and neither does `authorized_urls: []`.
+- **A site describes a place, never a person.** No field of a `SiteRecord` may name a user — grants
+  to named users live in exactly one place, `users[].authorized_urls`. Expressing the same
+  user↔URL relation twice would mean someone removed from the roster could still walk in through a
+  site. Site fields are predicates over an anonymous identity, and may only modulate the grant that
+  record itself makes. `Sites::resolve` is **first-match-wins in file order** — fixed now, while
+  `public_auth` is the only property, because a second field makes "which record answers?" expensive
+  to change; the doc on `Sites` records why the alternatives lose. Sites only ever *grant*: a URL
+  with no site is not denied, just not open. They match through `UrlScope::allows`, which is where
+  the missing-header and `..` denials live — do not give them a second matcher.
+- **`public_auth` grants on identity alone**, to anyone Cognito vouches for, enrolled or not. Since
+  self-signup is open that means anyone who can register; it is the right grant for an onboarding
+  area and the wrong one for anything else. It reaches only the two Cognito-backed credentials — an
+  unknown `bbk_` key stays unknown, because Cognito vouches for no key of ours and there would be no
+  email to hand back. Note it multiplies with `BB_AUTH_ALLOW_UNVERIFIED_SOCIAL`.
 - **Static API keys (`bbk_` namespace) are self-contained grants tied to a user.** The raw key is
   never stored, and the `sha256(bearer)` lookup in `by_key_hash` **is** the verification. A key must
-  be unexpired and in its URL scope. Don't index by anything the client sends in the clear, and don't
-  store the raw key. Mint with `tools/bb-apikey.py`.
-- **Access is enumerated, never assumed.** There is **no "unrestricted" scope**: an absent or empty
-  `authorized_urls` grants *nothing* (`UrlScope::deny_all`), and blanket access is the explicit
-  pattern `*://*/*`. A key with no `authorized_urls` inherits its user's. Because every credential is
-  scoped, `BB_AUTH_ORIGINAL_URL_HEADER` is **mandatory** — a request without it is denied. See
+  have a non-denied owner, be unexpired, and be in its URL scope. Don't index by anything the client
+  sends in the clear, and don't store the raw key. Mint with `tools/bb-apikey.py`.
+- **Access is enumerated, never assumed** — from *either* grant source. There is **no "unrestricted"
+  scope**: an absent or empty `authorized_urls` grants *nothing* (`UrlScope::deny_all`), a URL with
+  no site is not open, and blanket access is the explicit pattern `*://*/*`. A key with no
+  `authorized_urls` inherits its user's. Because every credential is scoped,
+  `BB_AUTH_ORIGINAL_URL_HEADER` is **mandatory** — a request without it is denied. See
   `UrlScope::allows`.
-- **One matcher serves scheme, host and path.** A non-final `*` cannot cross `/`, and `://` holds two
-  of them — that single rule is what stops a wildcard leaking across component boundaries, so don't
-  split `glob_match` into three matchers. It is a bottom-up DP, **not** recursive backtracking (which
-  is exponential on many `*`); `glob_many_stars_terminates` pins that. A URL with `..` is rejected;
-  patterns are validated and authority-lowercased once at load (`compile_pattern`).
+- **One matcher serves scheme, host and path** — and users, keys and sites. A non-final `*` cannot
+  cross `/`, and `://` holds two of them — that single rule is what stops a wildcard leaking across
+  component boundaries, so don't split `glob_match` into three matchers. It is a bottom-up DP, **not**
+  recursive backtracking (which is exponential on many `*`); `glob_many_stars_terminates` pins that.
+  A URL with `..` is rejected; patterns are validated and authority-lowercased once at load
+  (`compile_pattern`).
 - **nginx builds `X-Original-URL`, and must not let `Host:` pick the scope.** Hardcode the host per
   server block (`$scheme://$host$uri` is only safe behind a `default_server` that rejects unknown
   Hosts), and use `$uri`, never `$request_uri` — the latter is undecoded and carries the query
@@ -107,16 +137,28 @@ bash scripts/build.sh                 # target overridable via BB_AUTH_TARGET
   authorized email in `IDENTITY_HEADER` (`X-Auth-Email`, a fixed constant — nginx renames it
   on the way through, so don't make it configurable). It is only safe because nginx sets or
   clears it on **every** gated location (`proxy_set_header` overrides just the names it lists)
-  and the app is unreachable except through nginx. Emails must be printable ASCII, enforced
-  once at load (`header_safe_email`, warn+skip like an empty email — dropping a user is
-  fail-closed): a CR/LF would be a response-splitting gadget, and load time is the only point
-  that also covers the API-key path, whose email never passes through a token claim. That guard
-  is what lets `respond_authorized` call `h()` without a per-request check — `h()` panics on a
-  non-ASCII value. The emitted email is always a `by_email` key: the token/cookie paths return
-  the string that just matched one by exact lookup, so a case-insensitive lookup added later
-  would break the chain (the `debug_assert!` there exists to catch exactly that). Applications
-  must **not** decode the credential themselves — the cookie is not a JWT and a `bbk_` key has
-  no token, and a valid id_token proves identity, never authorization.
+  and the app is unreachable except through nginx. Emails must be printable ASCII: a CR/LF would
+  be a response-splitting gadget, and `h()` panics on a non-ASCII value, so `respond_authorized`
+  emits without a per-request check. `header_safe_email` is therefore enforced at the **two**
+  points an email enters, which between them cover all three credentials — keep both:
+  - `read_access`, at load, for roster emails (warn+skip like an empty email — dropping a user is
+    fail-closed). The only guard on the API-key path, whose email never passes a token claim.
+  - `validate_id_token`, for emails lifted out of a claim. A `public_auth` site emits identities
+    that are in no table, so load time cannot see them; and since that is the only way an email
+    reaches `make_session`, the cookie inherits the property through the HMAC.
+
+  The `debug_assert!` in `respond_authorized` pins both halves — it catches a case-insensitive
+  `by_email` lookup added later (which would break the "returns the key it matched" chain) *and* a
+  fourth credential that skips `validate_id_token`. Applications must **not** decode the credential
+  themselves — the cookie is not a JWT and a `bbk_` key has no token, and a valid id_token proves
+  identity, never authorization. On a `public_auth` site the email may name someone in no table at
+  all; enrolling them is the application's business.
+- **`/auth/session` is not a gate.** It mints a cookie for any valid id_token whose email is not
+  `denied` and has somewhere to go (roster entry, or any `public_auth` site exists). The 403 there is
+  a courtesy so an un-enrolled user hears it at the login page instead of bouncing off a 401 later —
+  it must not tighten into an authorization check, and it must not try to guess the destination from
+  `rd` (which is the post-login target, not the URL that triggered the login, and `safe_rd` may have
+  already replaced it).
 - **Sessions are stateless** — no server-side store. Any worker validates any cookie; a restart
   logs nobody out. Don't introduce per-session server state.
 - **Dependencies stay pure-Rust / `ring`-based** (`ureq`+rustls with bundled Mozilla roots,
@@ -128,12 +170,29 @@ bash scripts/build.sh                 # target overridable via BB_AUTH_TARGET
   exception: `BB_AUTH_ALLOW_UNVERIFIED_SOCIAL` accepts `email_verified=false` **only** for federated
   logins, optionally narrowed by `BB_AUTH_SOCIAL_PROVIDERS` — never for native Cognito users, since
   self-signup is open and an unverified native email is attacker-controlled. Off by default. See
-  `validate_id_token` / `unverified_social_ok`.
+  `validate_id_token` / `unverified_social_ok`. It multiplies with `public_auth`: together they mean
+  "any social account, unverified email, no enrolment".
 - **There is no canonical service base URL.** One gate fronts several hosts and which one is in
   play is decided by the caller, so `/auth/session` learns it from `BB_AUTH_ORIGINAL_URL_HEADER`
   (`origin_of`) — nginx must set that header on the session location too, not just the auth-gate.
   `BB_AUTH_AUTHORIZED_HOSTS` (comma-separated host globs, required) is the *only* authority on
   redirect targets. Don't reintroduce a single base URL.
+- **The gate never redirects a gated request; nginx does.** A `401` carries this area's login page
+  in `LOGIN_URL_HEADER` (`X-Auth-Login-URL`) — the site's `login_url`, else `BB_AUTH_LOGIN_URL`
+  (`login_url_for`) — and nginx lifts it with `auth_request_set` into a request variable, which is
+  what stops a later `proxy_pass` clobbering `$upstream_http_*`. (`auth_request_set` does read a
+  `401` subrequest's headers — verified against nginx 1.26.) nginx must route it through a `map`
+  with the global URL as the default arm: an unset variable makes `return 302 $bb_login?rd=…` emit a
+  *relative* `Location: ?rd=…`, i.e. a redirect loop back onto the gated path. This works because a
+  `401` happens *on* a gated URL, so the site resolves. **A logout does not**: `/auth/logout` is inside no site's
+  `urls`, so there is no per-site logout landing page and adding one would be a field the gate can
+  never reach. The logout link supplies `?rd=` instead, through `safe_rd`; with no `rd` the browser
+  goes to the login page, *not* to `safe_rd`'s caller-root default. Both the global and every site's
+  `login_url` pass `compile_login_url` at load (printable ASCII, absolute https, no `@`, no `\`) —
+  that is what makes emitting them into a header, a `Location:` and a page safe with no per-use
+  check. It is deliberately **not** checked against `BB_AUTH_AUTHORIZED_HOSTS`: `read_access` reads
+  no env, which is what lets `--check-users` run with no config, and moving the check to startup
+  would turn a typo into a boot loop that `--check-users` never saw.
 - **`safe_rd` guards the post-login redirect** against open-redirect + response-splitting. **Every**
   candidate — relative, absolute, or the no-`rd` default — goes through the same `rd_url_allowed`
   gate, so a spoofed caller origin still can't escape. Rejected ⇒ fall back to `BB_AUTH_LOGIN_URL`.
