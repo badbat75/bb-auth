@@ -11,9 +11,19 @@ accepts per-request bearer credentials — a Cognito `id_token` or a static `bbk
 and enforces per-user / per-key **URL scopes** (`authorized_urls`), plus **`sites`** that can
 open a URL area to any authenticated identity. The access list is a JSON **access file**
 (`BB_AUTH_USERS_FILE` — the var keeps its pre-`sites` name). It is service-agnostic — one
-binary fronts any web service, wired per-deployment through `BB_AUTH_*` env vars. The whole
-gate is **one Rust file**, [src/main.rs](src/main.rs); there is no module split by design —
-read it top to bottom.
+binary fronts any web service, wired per-deployment through `BB_AUTH_*` env vars.
+
+One crate, three targets, and the split is load-bearing:
+
+- **[src/lib.rs](src/lib.rs)** (`bb_auth_core`) — **the access file**: its schema, its
+  parser, the URL matcher, and the grant model (`decide` / `decide_api_key`). Everything two
+  programs must agree on, byte for byte.
+- **[src/main.rs](src/main.rs)** — **the gate**, and everything the access file has no
+  opinion about: HTTP, the session cookie, id_token validation, the nginx contract. Still
+  **one file**, still read top to bottom.
+- **[src/bin/bb-auth-adm.rs](src/bin/bb-auth-adm.rs)** — the access-file admin CLI: CRUD over
+  `sites` / `denied` / `users` / `api_keys`, key minting, and `can EMAIL URL` (would this
+  credential get in?). It links the library, none of the gate.
 
 The defining constraint vs. authorization-code OIDC proxies (oauth2-proxy): those drive the
 login themselves and *cannot* accept a token the browser already holds. bb-auth is built for
@@ -24,12 +34,14 @@ auto-login with no second OTP) and POSTs the resulting `id_token` to `/auth/sess
 
 This file holds the **rules**: what must not break, why, and the symbol that pins each one.
 The **mechanism** lives in rustdoc next to the code (`cargo doc --no-deps --open`) — the
-endpoint table and credential order on the crate root, the cookie wire format on
+endpoint table and credential order on `bb-auth`'s crate root, the cookie wire format on
 `COOKIE_VERSION`, the access-file schema on `AccessFile`, the site-resolution rule on `Sites`,
-the wildcard grammar on `glob_match`,
+the wildcard grammar on `glob_match`, the grant model on `Decision`, the reason for the
+library split on `bb_auth_core`'s crate root,
 the nginx snippets on `Config::original_url_header` and `IDENTITY_HEADER`. Don't copy one into
 the other; when they disagree, the code wins. Rustdoc must stay warning-free — a broken
-intra-doc link is the cheapest rot detector this repo has.
+intra-doc link is the cheapest rot detector this repo has, and it now spans two crates
+(a gate doc pointing at a moved type must be re-pointed, not de-linked).
 
 Deep docs: [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md) (service internals) and
 [docs/AUTHENTICATION_FLOW.md](docs/AUTHENTICATION_FLOW.md) (the end-to-end
@@ -40,19 +52,28 @@ browser↔Cognito↔nginx sequence). Read those before changing the request flow
 This repo is developed on Windows but the artifact is a Linux/aarch64 binary.
 
 ```powershell
-# Tests — pure unit tests in src/main.rs, run on the host (no network needed)
+# Tests — pure unit tests in src/lib.rs (the access file) and src/main.rs (the gate),
+# run on the host, no network needed
 cargo test
 cargo test session_roundtrip_bb2      # a single test by name
 
 # Validate an access file with the real parser (no env, no network). Same check the
 # deploy runs before it restarts the service. Prints the public_auth sites, if any.
-cargo run -- --check-users .\deploy\users.example.json
+cargo run --bin bb-auth -- --check-users .\deploy\users.example.json
+
+# Administer an access file (CRUD; every write is validated with the gate's own parser).
+# `can` answers with the gate's own decision function — exit 0 = the request would pass.
+cargo run --bin bb-auth-adm -- --help
+cargo run --bin bb-auth-adm -- -f .\deploy\users.json show
+cargo run --bin bb-auth-adm -- -f .\deploy\users.json user add bob@x.com --url 'https://app.x.com/*'
+cargo run --bin bb-auth-adm -- -f .\deploy\users.json key add bob@x.com --id laptop --duration 365d
+cargo run --bin bb-auth-adm -- -f .\deploy\users.json can bob@x.com https://app.x.com/reports
 
 # Host build / typecheck (SIGHUP reload is cfg(unix), compiled out on Windows)
 cargo check
-cargo clippy
+cargo clippy --all-targets
 cargo fmt
-cargo doc --no-deps                   # must emit zero warnings
+cargo doc --no-deps                   # must emit zero warnings, across all three targets
 
 # Release cross-compile for the target — run in WSL/Linux, NOT on Windows.
 # Produces dist/bb-auth (aarch64) and prints the max GLIBC symbol required.
@@ -67,6 +88,25 @@ bash scripts/build.sh                 # target overridable via BB_AUTH_TARGET
 
 ## Invariants — do not break these
 
+- **The library is the access file, and nothing else.** `bb_auth_core` exists because two
+  programs must agree, byte for byte, on what an access file *means* — so there is exactly
+  one parser (`compile_access`), one matcher (`glob_match`), one grant model (`decide`,
+  `decide_api_key`), and both link it. That is the whole membership rule: a thing belongs
+  in the library iff the access file has an opinion about it. HTTP, the cookie, the JWT,
+  the env, the nginx contract are the **gate's**, and stay in `src/main.rs` — which is
+  still one file, read top to bottom. Do not move gate code into the library to "share" it
+  with the CLI; the CLI has no business with any of it. The two authorization functions in
+  `main.rs` (`authorize`, `bearer_apikey_email`) are thin wrappers that add the log line
+  and the wall clock to the library's decision — keep them thin, and keep the rule in the
+  library, or `bb-auth-adm can` starts answering a different question from the gate.
+- **`bb-auth-adm` must never write a file the gate would reject.** Every mutation is
+  serialized, re-parsed, and run through `compile_access` — the gate's own parser, on the
+  exact bytes about to land on disk — before the write. A rejected access file is a fatal
+  startup, and under `Restart=on-failure` that is a boot loop; this tool and
+  `--check-users` are the two places that can catch it in time. The write is atomic
+  (temp + rename) and **preserves mode and owner**: the live file is `root:bb-auth 0640`,
+  and a rewrite by root that left it `root:root` would lock the service out of its own
+  access list — the chown failing is therefore a hard abort, not a warning.
 - **The cookie is a versioned wire format with live clients.** Changing the serialization or the
   signed-message bytes logs out **every** existing user. `bb2` is active, `bb1` legacy verify-only;
   the keyid enables zero-downtime HMAC key rotation (README "Key rotation"). `make_session` /
@@ -111,7 +151,10 @@ bash scripts/build.sh                 # target overridable via BB_AUTH_TARGET
 - **Static API keys (`bbk_` namespace) are self-contained grants tied to a user.** The raw key is
   never stored, and the `sha256(bearer)` lookup in `by_key_hash` **is** the verification. A key must
   have a non-denied owner, be unexpired, and be in its URL scope. Don't index by anything the client
-  sends in the clear, and don't store the raw key. Mint with `tools/bb-apikey.py`.
+  sends in the clear, and don't store the raw key. Mint with `bb-auth-adm key add` (`mint_api_key`),
+  which prints the bearer on stdout **once, and only after the file carrying its hash is safely on
+  disk** — the other order hands out a credential that authorizes nothing if the write then fails,
+  and the raw key exists nowhere else to retry from. `key rotate` is the answer to a leak.
 - **Access is enumerated, never assumed** — from *either* grant source. There is **no "unrestricted"
   scope**: an absent or empty `authorized_urls` grants *nothing* (`UrlScope::deny_all`), a URL with
   no site is not open, and blanket access is the explicit pattern `*://*/*`. A key with no
@@ -208,11 +251,18 @@ bash scripts/build.sh                 # target overridable via BB_AUTH_TARGET
 - All config is env vars (`Config::from_env`); missing required vars are a fatal exit. The only
   secret is `BB_AUTH_HMAC_KEY` (≥32 bytes). Full reference: [deploy/bb-auth.env.example](deploy/bb-auth.env.example)
   and `docs/ARCHITECTURE.md` §8.
-- **Target layout is a tree**: `/opt/bb-auth/{bin/bb-auth, etc/bb-auth.env, var/lib/users.json}`,
-  unit at `/etc/systemd/system/bb-auth.service`. The service writes nothing, so the whole prefix is
-  `ReadOnlyPaths` and no `StateDirectory` is needed despite the `var/lib` name. It runs hardened and
-  non-privileged on loopback behind a TLS-terminating reverse proxy, speaks plain HTTP, and holds no
-  Cognito secret.
+- **Target layout is a tree**: `/opt/bb-auth/{bin/bb-auth, bin/bb-auth-adm, etc/bb-auth.env,
+  var/lib/users.json}`, unit at `/etc/systemd/system/bb-auth.service`. The service writes nothing,
+  so the whole prefix is `ReadOnlyPaths` and no `StateDirectory` is needed despite the `var/lib`
+  name — `bb-auth-adm` writes that file from *outside* the unit's namespace, as root, and the
+  hardening does not apply to it. It runs hardened and non-privileged on loopback behind a
+  TLS-terminating reverse proxy, speaks plain HTTP, and holds no Cognito secret.
+- **The live `users.json` is the copy that is current** — it is edited on the host (`sudo
+  bb-auth-adm …; systemctl reload bb-auth`) and a repo copy drifts from it within a week. So
+  `deploy.sh` preserves it unless one is explicitly staged, and `deploy.ps1 -UsersFile` **replaces**
+  it wholesale: never stage a stale file. `bb-auth-adm` is installed to the host precisely so the
+  edit can happen where the current file is. It is optional in the deploy (installed if staged), and
+  must stay that way: the gate never calls it, and an older `dist/` must still deploy.
 - `scripts/deploy.sh` is the on-host installer (root, idempotent, self-verifying). It is
   **lockout-safe by construction**: it generates the HMAC key once and preserves it forever, and
   preserves the live `users.json` unless a new one is explicitly staged. **The env file is

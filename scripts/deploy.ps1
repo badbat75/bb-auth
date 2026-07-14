@@ -66,6 +66,9 @@ $PSNativeCommandUseErrorActionPreference = $false
 
 $Repo           = (Resolve-Path (Join-Path $PSScriptRoot '..')).Path
 $BinPath        = Join-Path $Repo 'dist\bb-auth'
+# The access-file admin CLI. Shipped when it is there and skipped when it is not, so an
+# older dist/ still deploys: it is a tool for the operator, never a dependency of the gate.
+$AdmPath        = Join-Path $Repo 'dist\bb-auth-adm'
 $ServiceUnit    = Join-Path $Repo 'deploy\bb-auth.service'
 $EnvPlaceholder = Join-Path $Repo 'deploy\bb-auth.env'
 $DeploySh       = Join-Path $Repo 'scripts\deploy.sh'
@@ -145,6 +148,7 @@ $staged = @(
     @{ src = $EnvPlaceholder; dst = 'bb-auth.env' }
     @{ src = $DeploySh;       dst = 'deploy.sh' }
 )
+if (Test-Path -LiteralPath $AdmPath) { $staged += @{ src = $AdmPath; dst = 'bb-auth-adm' } }
 if ($UsersFile) { $staged += @{ src = $UsersFile; dst = 'users.json' } }
 
 foreach ($a in $staged) {

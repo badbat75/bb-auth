@@ -40,7 +40,7 @@
     "mid-flight — those are stateless — but the very next /auth/validate denies.",
     "",
     "KEYS are addressed by `key_hash` = SHA-256 of the bbk_ bearer (mint with",
-    "tools/bb-apikey.py); the raw key is never stored here. `duration`: <n>d / <n>h / 0 /",
+    "bb-auth-adm key add); the raw key is never stored here. `duration`: <n>d / <n>h / 0 /",
     "never, counted from `released`. A key without authorized_urls inherits its user's.",
     "",
     "WILDCARDS, valid in every URL component: `*` = any run of characters but never `/` —",
@@ -96,7 +96,7 @@
           "released": "2026-07-08",
           "duration": "365d",
           "authorized_urls": ["https://mcp.example.com/mcp/context7/*"],
-          "notes": "example only — replace key_hash with one from tools/bb-apikey.py"
+          "notes": "example only — mint a real one with: bb-auth-adm key add bot@example.com --id laptop"
         },
         {
           "id": "ci",

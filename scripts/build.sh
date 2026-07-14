@@ -34,12 +34,15 @@ rustup target add "$TARGET" >/dev/null 2>&1 || true
 
 ( cd "$BUILD_DIR" && cargo build --release --target "$TARGET" )
 
-BIN="$BUILD_DIR/target/$TARGET/release/bb-auth"
 mkdir -p "$CRATE_DIR/dist"
-cp "$BIN" "$CRATE_DIR/dist/bb-auth"
+# Two binaries out of one crate: the gate, and the access-file admin CLI. bb-auth-adm is
+# shipped alongside it because the file it edits lives on the host — see scripts/deploy.sh.
+for b in bb-auth bb-auth-adm; do
+  cp "$BUILD_DIR/target/$TARGET/release/$b" "$CRATE_DIR/dist/$b"
+done
 [ -f "$BUILD_DIR/Cargo.lock" ] && cp "$BUILD_DIR/Cargo.lock" "$CRATE_DIR/Cargo.lock" || true
 
-echo "[build] OK -> $CRATE_DIR/dist/bb-auth"
+echo "[build] OK -> $CRATE_DIR/dist/{bb-auth,bb-auth-adm}"
 file "$CRATE_DIR/dist/bb-auth" || true
 printf '[build] max GLIBC required: '
 "$OBJDUMP" -T "$CRATE_DIR/dist/bb-auth" 2>/dev/null \

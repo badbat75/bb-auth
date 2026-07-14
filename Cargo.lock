@@ -22,12 +22,14 @@ checksum = "72b3254f16251a8381aa12e40e3c4d2f0199f8c6508fbecb9d91f575e0fbb8c6"
 
 [[package]]
 name = "bb-auth"
-version = "2.2.0"
+version = "2.3.0"
 dependencies = [
  "base64",
  "form_urlencoded",
+ "getrandom",
  "hmac",
  "jsonwebtoken",
+ "libc",
  "serde",
  "serde_json",
  "sha2",

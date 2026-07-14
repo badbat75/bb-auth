@@ -59,19 +59,25 @@ Three actors outside bb-auth itself:
 
 ## 3. Code structure
 
-The service is a **single Rust file**, `src/main.rs` (~850 lines). No module
-split — the whole gate is small enough to read top to bottom. Logical sections,
-in file order:
+One crate, three targets. The split has exactly one seam, and it is the **access file**:
+its schema, its parser, its matcher and its grant model are the one thing two programs
+must agree on byte for byte, so they live in a library both link. Everything else about
+the gate is the gate's, and stays in one file.
+
+| Target | What it is |
+|--------|------------|
+| `src/lib.rs` (`bb_auth_core`) | **The access file.** Schema (`AccessFile`), parser (`compile_access`), URL matcher (`glob_match` / `UrlScope`), the site table (`Sites`), the grant model (`decide`, `decide_api_key`), key minting (`mint_api_key`). Reads no env, opens no socket, holds no HTTP. |
+| `src/main.rs` (`bb-auth`) | **The gate**, still a single file read top to bottom: HTTP, config, the session cookie, id_token validation, the nginx contract. |
+| `src/bin/bb-auth-adm.rs` (`bb-auth-adm`) | **The access-file admin CLI.** CRUD over `sites` / `denied` / `users` / `api_keys`, key minting and rotation, and `can EMAIL URL` — which calls the library's `decide`, so it answers the question the gate will answer. Every write is validated with `compile_access` first, so it cannot save a file the gate would reject. See §12. |
+
+Inside `src/main.rs`, in file order:
 
 | Section | Purpose |
 |---------|---------|
 | `Config` / `from_env` | All tunables from env vars; fatal-`exit`s on missing required values or a too-short HMAC key. |
 | `State` / `JwksCache` | Shared state behind `Arc`: config, a `RwLock<Access>` access table, a `RwLock` JWKS cache, and a `Mutex` serializing JWKS refreshes. |
-| `load_access` / `read_access` / `reload_access` | Parses the JSON access file (`BB_AUTH_USERS_FILE`) into the site list, the `denied` set, and two indices — allowlisted emails (`by_email`) and `bbk_` API keys (`by_key_hash`), each with a URL scope; emails lowercased. `load_access` aborts startup if unreadable (warns if nothing is granted); `reload_access` swaps the table live on `SIGHUP`, keeping the old table on error. See §12. |
-| `Sites` / `SiteRecord` / `login_url_for` | URL areas and the properties that hold for them, in file order. `Sites::resolve` is first-match-wins; `public_auth` grants the area to any authenticated identity, enrolled or not; `login_url` names its login page. Sites only grant. See §12. |
-| `compile_login_url` | Validates `BB_AUTH_LOGIN_URL` and every site's `login_url`: printable ASCII, absolute `https://`, no userinfo `@`, no backslash. What makes emitting them in `X-Auth-Login-URL`, a `Location:` and a page safe with no per-use check. |
-| `authorize` | The single authorization point for the two Cognito-backed credentials: `denied` veto → `public_auth` site → roster + URL scope. See §12. |
-| `glob_match` / `compile_pattern` / `UrlScope` | The one URL matcher — a user's `authorized_urls`, a key's, and a site's `urls` all go through it: validates + normalises patterns at load, then matches a request URL with `*` / `&` wildcards, denying a missing URL and any `..`. See §12. |
+| `load_access` / `reload_access` | Wrap the library's `read_access`, which parses the JSON access file (`BB_AUTH_USERS_FILE`) into the site list, the `denied` set, and two indices — allowlisted emails (`by_email`) and `bbk_` API keys (`by_key_hash`), each with a URL scope; emails lowercased. `load_access` aborts startup if unreadable (warns if nothing is granted); `reload_access` swaps the table live on `SIGHUP`, keeping the old table on error. See §12. |
+| `authorize` / `bearer_apikey_email` | Thin wrappers over the library's `decide` / `decide_api_key`: they add the log line naming the reason, and the wall clock a key's expiry is measured against. The rule itself is in the library — that is what lets `bb-auth-adm can` be truthful. See §12. |
 | `check_users` | The `bb-auth --check-users <file>` mode: parse and exit `0`/`1`, no env and no network. Lets a deploy reject an access file before restarting onto it. |
 | `fetch_jwks` / `refresh_jwks_if_due` / `decoding_key` | `GET {issuer}/.well-known/jwks.json` via `ureq`+rustls; cache keyed by `kid`, refreshed at most once per 60 s, deduped across workers by double-checked locking. |
 | `validate_id_token` | Full JWT validation (see §6). Returns the verified, lowercased email. |
@@ -79,6 +85,17 @@ in file order:
 | HTTP helpers | Header/cookie parsing, cookie building, open-redirect `safe_rd`, response builders. |
 | `handle_validate` / `handle_session` / `handle_logout` | The three real handlers (plus `/auth/healthz` inline). `/auth/validate` resolves a cookie or bearer credential to an identity, authorizes the request URL against it, and returns the email in `X-Auth-Email` (`bearer_apikey_email` / `authorize` / `original_url` / `respond_authorized`). |
 | `main` | Build config/state, prime JWKS, spawn the worker thread pool, route requests. |
+
+And in `src/lib.rs`:
+
+| Section | Purpose |
+|---------|---------|
+| `glob_match` / `compile_pattern` / `UrlScope` | The one URL matcher — a user's `authorized_urls`, a key's, and a site's `urls` all go through it: validates + normalises patterns at load, then matches a request URL with `*` / `&` wildcards, denying a missing URL and any `..`. See §12. |
+| `Sites` / `SiteRecord` / `login_url_for` | URL areas and the properties that hold for them, in file order. `Sites::resolve` is first-match-wins; `public_auth` grants the area to any authenticated identity, enrolled or not; `login_url` names its login page. Sites only grant. See §12. |
+| `compile_login_url` | Validates `BB_AUTH_LOGIN_URL` and every site's `login_url`: printable ASCII, absolute `https://`, no userinfo `@`, no backslash. What makes emitting them in `X-Auth-Login-URL`, a `Location:` and a page safe with no per-use check. |
+| `decide` / `decide_api_key` | The grant model as a value (`Decision` / `KeyDecision`): `denied` veto → `public_auth` site → roster + URL scope; and for a key, owner → expiry → scope. The single authorization point, shared by the gate and the CLI. See §12. |
+| `AccessFile` / `compile_access` / `read_access` | The document model (what `bb-auth-adm` edits, `notes` and `_comment` round-tripping untouched) and the parser that turns it into the runtime table. |
+| `mint_api_key` | 256 bits from the OS CSPRNG, `bbk_` + base64url; returns the bearer and the `sha256` the file stores. |
 
 ---
 
@@ -488,7 +505,7 @@ at the top of every path rather than inside the roster branch.
 
 A programmatic client (e.g. an MCP client that can't run the browser cookie flow)
 authenticates with `Authorization: Bearer bbk_<secret>`. Keys are minted out of band
-(`tools/bb-apikey.py`) and only their **SHA-256 hex fingerprint** (`key_hash`) is
+(`bb-auth-adm key add`) and only their **SHA-256 hex fingerprint** (`key_hash`) is
 stored — the raw `bbk_…` bearer is shown once and never persisted. `/auth/validate`
 looks a bearer up by `sha256(bearer)` in `by_key_hash`; the lookup itself is the
 verification (forging a matching preimage of a high-entropy random key is infeasible,

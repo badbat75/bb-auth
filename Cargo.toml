@@ -1,13 +1,27 @@
 [package]
 name = "bb-auth"
-version = "2.2.0"
+version = "2.3.0"
 edition = "2021"
 description = "Minimal, service-agnostic Cognito id_token → session-cookie auth gate (nginx auth_request)"
 license = "MIT"
 
+# The access file — schema, parser, URL matcher, grant model. The ONE thing the gate and
+# the admin CLI must agree on, so there is one implementation of it and both link this.
+# Everything else about the gate stays in src/main.rs. Named `bb_auth_core` rather than
+# `bb_auth` because a lib and a bin with the same name collide in `cargo doc`.
+[lib]
+name = "bb_auth_core"
+path = "src/lib.rs"
+
 [[bin]]
 name = "bb-auth"
 path = "src/main.rs"
+
+# The access-file admin CLI: CRUD over sites / denied / users / api_keys, validated with
+# the gate's own parser before it writes. Links the lib, none of the gate.
+[[bin]]
+name = "bb-auth-adm"
+path = "src/bin/bb-auth-adm.rs"
 
 [dependencies]
 # Tiny blocking, threaded HTTP server — pure Rust, no async runtime (low resident memory).
@@ -23,11 +37,20 @@ serde_json = "1"
 hmac = "0.12"
 sha2 = "0.10"
 base64 = "0.22"
+# CSPRNG for minting `bbk_` API keys (bb-auth-adm). The OS entropy source, nothing more —
+# already in the tree under `ring`, and it pulls in no crypto stack of its own.
+getrandom = "0.2"
 # x-www-form-urlencoded body + query parsing (small, standalone).
 form_urlencoded = "1"
 # SIGHUP handling for live users-table reload. Pure Rust + libc FFI — no system
 # OpenSSL, keeps the aarch64 cross-compile clean.
 signal-hook = { version = "0.3", features = ["iterator"] }
+
+# `chown` when bb-auth-adm rewrites the access file: the live one is root:bb-auth 0640, and
+# a rewrite that left it root:root would lock the service out of its own access list. Plain
+# libc FFI, already in the tree under signal-hook — no crypto, no OpenSSL, no runtime.
+[target.'cfg(unix)'.dependencies]
+libc = "0.2"
 
 [profile.release]
 opt-level = "z"   # optimize for size — tiny binary, fast enough for a gate

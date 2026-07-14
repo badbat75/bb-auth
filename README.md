@@ -84,14 +84,18 @@ bb-auth looks it up by `sha256(bearer)` in the access file (only the hash is sto
 never the raw key), checks its owner is not `denied`, checks it is not past its
 `duration`, and enforces its URL scope. A `public_auth` site does **not** rescue an
 unknown key — that grant is for identities Cognito vouches for, and an unknown key is
-nobody. Mint one with [`tools/bb-apikey.py`](tools/bb-apikey.py) — it prints the raw
-bearer **once** and a JSON entry to paste into the owning user's `api_keys`:
+nobody. Mint one with `bb-auth-adm`, which writes the entry into the file itself and
+prints the raw bearer **once**, on stdout, after the file is safely saved:
 
 ```bash
-python tools/bb-apikey.py bob@badbat75.com --id laptop --duration 365d \
-    --urls 'https://mcp.badbat75.com/mcp,https://mcp.badbat75.com/mcp/*'
-# → Authorization: Bearer bbk_…  (give to the client)   +   { "id": "laptop", "key_hash": … }
+bb-auth-adm -f users.json key add bob@badbat75.com --id laptop --duration 365d \
+    --url 'https://ai.badbat75.com/mcp,https://ai.badbat75.com/mcp/*'
+# → stdout: bbk_…                   (the bearer — give it to the client, it is not recoverable)
+# → the file now holds only its sha256
+bb-auth-adm -f users.json key rotate bob@badbat75.com laptop   # a leak? new secret, same grant
 ```
+
+See [Editing it — `bb-auth-adm`](#editing-it--bb-auth-adm) for the rest of the tool.
 
 ## Passing the identity to the app
 
@@ -199,7 +203,7 @@ access away is `denied`.
 - **`email`** (required) — matched case-insensitively; its presence is the allowlist.
 - **`authorized_urls`** — allowed URL patterns (see [URL scoping](#url-scoping)). Omitted or `[]` grants nothing; `["*://*/*"]` grants everything.
 - **`api_keys[]`** — static `bbk_` keys for that user (see [Programmatic access](#programmatic-access-bearer)):
-  - **`key_hash`** — `sha256` of the bearer; the raw key is never stored (mint via `tools/bb-apikey.py`).
+  - **`key_hash`** — `sha256` of the bearer; the raw key is never stored (mint via `bb-auth-adm key add`).
   - **`duration`** — `<n>d` / `<n>h` / `0` / `never`, counted from **`released`** (`YYYY-MM-DD`).
   - **`id`** — human label for logs/revocation. **`authorized_urls`** — omit to inherit the user's scope.
   - Unknown fields (e.g. `notes`) are ignored, so annotate freely.
@@ -295,6 +299,44 @@ so it opens no new redirect surface. With no `rd`, the browser lands on the logi
 relative `rd` needs `X-Original-URL` on that location too; if nginx omits it, the redirect
 falls back to the login page — fail-soft.
 
+### Editing it — `bb-auth-adm`
+
+The file is JSON and you can edit it by hand; `bb-auth-adm` is the way not to. It does
+CRUD over every section, and it links the gate's own parser, so **it cannot save a file
+the gate would refuse** — which matters, because a refused file is a fatal startup, and
+under `Restart=on-failure` that is a boot loop.
+
+```bash
+bb-auth-adm -f users.json show                 # the file as the gate resolves it
+bb-auth-adm -f users.json user add bob@x.com --url 'https://app.x.com/reports/*'
+bb-auth-adm -f users.json user set bob@x.com --add-url 'https://app.x.com/reports'
+bb-auth-adm -f users.json key add bob@x.com --id laptop --duration 365d
+bb-auth-adm -f users.json site add onboarding --url 'https://app.x.com/welcome/*' --public-auth
+bb-auth-adm -f users.json deny add spammer@x.com
+bb-auth-adm -f users.json check                # the gate's parser, then lint
+```
+
+It talks back. Adding a user with no `--url` says so ("they reach NOTHING"); adding a
+`public_auth` site says what that means; removing a user reminds you that a `public_auth`
+site does not consult the roster, so deleting them is not a lockout — `deny` is. `check`
+also finds what parses fine and still doesn't mean what it says: a duplicate email (the
+last one silently wins), an expired key, a site listed after a broader one that already
+answers for its URLs, so it never speaks.
+
+And it answers the question you actually have, with the gate's own decision function —
+exit 0 iff the request would pass:
+
+```bash
+bb-auth-adm -f users.json can bob@x.com https://app.x.com/reports/q3
+# AUTHORIZED — bob@x.com is enrolled and https://app.x.com/reports/q3 is in their authorized_urls
+bb-auth-adm -f users.json can bob@x.com https://app.x.com/admin --key laptop
+# DENIED — https://app.x.com/admin is outside the key's scope (...)
+```
+
+Edit the **live** file (`sudo bb-auth-adm -f /opt/bb-auth/var/lib/users.json …`, the tool
+is deployed alongside the gate): it is the copy that is current, and the write preserves
+its `root:bb-auth 0640` ownership. Then reload — see below.
+
 ### Validating and reloading
 
 Check a file before shipping it — a bad pattern or an unknown site field is a fatal
@@ -306,9 +348,10 @@ bb-auth --check-users deploy/users.json     # exit 0 + a summary, or exit 1 + th
 
 It is the real access gate, re-checked on **every** `/validate`, hot-reloaded on
 SIGHUP (`systemctl reload bb-auth`) — remove a user or a single key + reload to
-de-authorize even a still-valid cookie. A reload that fails to parse keeps the live
-table (never nuked). Keys are indexed by their hash, so a lookup is a single map hit
-(and trivially a single indexed query if you ever move this to a database).
+de-authorize even a still-valid cookie. **An edit is not live until the reload.** A reload
+that fails to parse keeps the live table (never nuked). Keys are indexed by their hash, so
+a lookup is a single map hit (and trivially a single indexed query if you ever move this
+to a database).
 
 > **Upgrading from 1.x.** `enabled_paths` is gone and its presence is rejected
 > outright: silently ignoring it would leave a user unscoped, which under the old

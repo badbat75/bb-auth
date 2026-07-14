@@ -5,12 +5,19 @@
 #
 # <staging_dir> must contain: bb-auth (the target binary), bb-auth.service,
 # bb-auth.env (deployment config — see deploy/bb-auth.env.example). It MAY also
-# contain users.json (the JSON access file — see deploy/users.example.json); see below.
+# contain users.json (the JSON access file — see deploy/users.example.json) and
+# bb-auth-adm (the access-file admin CLI); see below.
 #
 # Layout under DEST (default /opt/bb-auth):
 #   bin/bb-auth          the binary
+#   bin/bb-auth-adm      the access-file admin CLI (optional; installed if staged)
 #   etc/bb-auth.env      config + HMAC key (0640, service-user readable)
 #   var/lib/users.json   the access list (0640, service-user readable)
+#
+# bb-auth-adm edits var/lib/users.json in place — `sudo bb-auth-adm user add …`, then
+# `systemctl reload bb-auth`. It is why the live file is the one worth editing: it is the
+# only copy that is current. It validates with the gate's own parser before writing, and
+# preserves the file's root:bb-auth 0640 ownership, which a plain redirect would not.
 #
 # bb-auth.env: on first install the staged file is installed and, if its
 # BB_AUTH_HMAC_KEY is empty, a fresh >=32-byte key is generated in place. On
@@ -68,6 +75,14 @@ STAGED_USERS_MD5="$(md5sum "$SRC_DIR/users.json" 2>/dev/null | cut -d' ' -f1 || 
 # Non-destructive: the unit may still point at the old flat binary, and the running
 # process holds its own inode either way. Nothing restarts until the checks pass.
 install -o root -g root -m 0755 "$SRC_DIR/bb-auth" "$BIN_DEST"
+
+# The admin CLI, if this deploy carries one. Optional by design — the gate never calls it,
+# so an older dist/ (or a build that skipped it) must still deploy. root-only (0755, but
+# users.json is 0640 root:bb-auth, so editing it needs sudo anyway).
+if [ -f "$SRC_DIR/bb-auth-adm" ]; then
+  install -o root -g root -m 0755 "$SRC_DIR/bb-auth-adm" "$BIN_DIR/bb-auth-adm"
+  echo "[deploy] installed bb-auth-adm -> $BIN_DIR/bb-auth-adm"
+fi
 
 # --- users file: validate BEFORE it can brick the service ---------------------
 validate_users_json() { # $1 = path; 0 = valid (or uncheckable), 1 = invalid JSON
