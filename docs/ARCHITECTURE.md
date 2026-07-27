@@ -77,13 +77,13 @@ Inside `src/main.rs`, in file order:
 | `Config` / `from_env` | All tunables from env vars; fatal-`exit`s on missing required values or a too-short HMAC key. |
 | `State` / `JwksCache` | Shared state behind `Arc`: config, a `RwLock<Access>` access table, a `RwLock` JWKS cache, and a `Mutex` serializing JWKS refreshes. |
 | `load_access` / `reload_access` | Wrap the library's `read_access`, which parses the JSON access file (`BB_AUTH_USERS_FILE`) into the site list, the `denied` set, and two indices — allowlisted emails (`by_email`) and `bbk_` API keys (`by_key_hash`), each with a URL scope; emails lowercased. `load_access` aborts startup if unreadable (warns if nothing is granted); `reload_access` swaps the table live on `SIGHUP`, keeping the old table on error. See §12. |
-| `authorize` / `bearer_apikey_email` | Thin wrappers over the library's `decide` / `decide_api_key`: they add the log line naming the reason, and the wall clock a key's expiry is measured against. The rule itself is in the library — that is what lets `bb-auth-adm can` be truthful. See §12. |
+| `authorize` / `bearer_apikey_email` | Thin wrappers over the library's `decide` / `decide_api_key`: they add the log line naming the reason, and the wall clock a key's expiry is measured against. The rule itself is in the library — that is what lets `bb-auth-adm can` be truthful. `authorize_identity` re-attaches the name claims after the decision, which is made on the email alone. See §12. |
 | `check_users` | The `bb-auth --check-users <file>` mode: parse and exit `0`/`1`, no env and no network. Lets a deploy reject an access file before restarting onto it. |
 | `fetch_jwks` / `refresh_jwks_if_due` / `decoding_key` | `GET {issuer}/.well-known/jwks.json` via `ureq`+rustls; cache keyed by `kid`, refreshed at most once per 60 s, deduped across workers by double-checked locking. |
-| `validate_id_token` | Full JWT validation (see §6). Returns the verified, lowercased email. |
+| `validate_id_token` | Full JWT validation (see §6). Returns a `UserIdentity`: the verified, lowercased email plus the optional `given_name` / `family_name` claims (`clean_name`). |
 | `make_session` / `verify_session` | HMAC-SHA256 signed cookie (see §7). |
-| HTTP helpers | Header/cookie parsing, cookie building, open-redirect `safe_rd`, response builders. |
-| `handle_validate` / `handle_session` / `handle_logout` | The three real handlers (plus `/auth/healthz` inline). `/auth/validate` resolves a cookie or bearer credential to an identity, authorizes the request URL against it, and returns the email in `X-Auth-Email` (`bearer_apikey_email` / `authorize` / `original_url` / `respond_authorized`). |
+| HTTP helpers | Header/cookie parsing, cookie building, open-redirect `safe_rd`, `pct_encode`, response builders. |
+| `handle_validate` / `handle_session` / `handle_logout` | The three real handlers (plus `/auth/healthz` inline). `/auth/validate` resolves a cookie or bearer credential to an identity, authorizes the request URL against it, and returns the email in `X-Auth-Email` — plus the names in `X-Auth-Given-Name` / `X-Auth-Family-Name` when the credential carried them (`bearer_apikey_email` / `authorize` / `authorize_identity` / `original_url` / `respond_authorized`). |
 | `main` | Build config/state, prime JWKS, spawn the worker thread pool, route requests. |
 
 And in `src/lib.rs`:
@@ -123,7 +123,7 @@ And in `src/lib.rs`:
 
 | Method | Path | Caller | Behavior |
 |--------|------|--------|----------|
-| `GET` | `/auth/validate` | nginx only (`auth_request`) | `204` + `X-Auth-Email: <authorized user>` if an accepted credential authorizes the request URL, otherwise `401` + `X-Auth-Login-URL: <this area's login page>`. Accepts (in order) an `Authorization: Bearer bbk_…` static API key, an `Authorization: Bearer <id_token>`, or the session cookie; each is additionally checked against the caller's `authorized_urls`, or against a `public_auth` site. See §12. |
+| `GET` | `/auth/validate` | nginx only (`auth_request`) | `204` + `X-Auth-Email: <authorized user>` if an accepted credential authorizes the request URL, otherwise `401` + `X-Auth-Login-URL: <this area's login page>`. A `204` also carries `X-Auth-Given-Name` / `X-Auth-Family-Name` when the credential knows them (percent-encoded; omitted otherwise). Accepts (in order) an `Authorization: Bearer bbk_…` static API key, an `Authorization: Bearer <id_token>`, or the session cookie; each is additionally checked against the caller's `authorized_urls`, or against a `public_auth` site. See §12. |
 | `POST` | `/auth/session` | browser | Body `application/x-www-form-urlencoded`: `id_token=…&rd=…`. Fully validates the id_token; on success sets the session cookie and `302`s to `rd` (open-redirect guarded). |
 | `GET` | `/auth/logout[?rd=…]` | browser | Sets an expired (Max-Age=0) cookie and `302` → `rd` (same `safe_rd` guard) or, with no `rd`, the login page. Cross-site requests (`Sec-Fetch-Site: cross-site`) are ignored (no cookie clear) to block CSRF-forced logout. |
 | `GET` | `/auth/healthz` | local | `200 ok`. Liveness probe. |
@@ -158,7 +158,13 @@ ever issuing a cookie:
      can narrow this to specific `providerName`s. **Native** Cognito users (no
      `identities` claim) are never relaxed: self-signup is open, so an unverified
      native email is attacker-controlled. See `unverified_social_ok`.
-5. Returns the `email` claim, lowercased.
+5. Returns the `email` claim, lowercased, together with the `given_name` /
+   `family_name` claims when present — trimmed, ≤ 256 raw UTF-8 bytes, free of
+   control characters, and **not** lowercased (`clean_name`). Anything else about them
+   (missing, empty, over-long, or not even a string) drops that one name and nothing
+   else: they are not an identity, they authorize nothing, and a badly mapped IdP
+   attribute must never cost someone their login. They are also unaffected by the
+   social-login exception above — a name is self-asserted on every token.
 
 Failure on any step → the session request is rejected with `401` (token
 invalid/expired) or `403` (email not in the users table).
@@ -167,20 +173,31 @@ invalid/expired) or `403` (email not in the users table).
 
 ## 7. Session cookie
 
-Two formats are accepted; both carry an `exp`, the base64url-encoded email, and a
-base64url HMAC-SHA256 tag:
+One format, carrying an `exp`, the base64url-encoded email, the two base64url-encoded
+name claims, and a base64url HMAC-SHA256 tag:
 
 ```text
-bb2.<keyid>.<exp>.<b64url(email)>.<b64url(HMAC_SHA256("bb2.<keyid>.<exp>.<b64url(email)>", key[keyid]))>   # active (signed)
-bb1.<exp>.<b64url(email)>.<b64url(HMAC_SHA256("bb1.<exp>.<b64url(email)>"))>                                 # legacy (verify-only)
+bb3.<keyid>.<exp>.<b64url(email)>.<b64url(given_name)>.<b64url(family_name)>.<b64url(sig)>
+sig = HMAC_SHA256("bb3.<keyid>.<exp>.<b64url(email)>.<b64url(given_name)>.<b64url(family_name)>", key[keyid])
 ```
 
-- **`bb2`** — active format. The **key id** (`<keyid>`) is stamped in so the
-  signing key can roll over with zero downtime: the verifier looks up the key by
-  id in the accepted set (`BB_AUTH_HMAC_KEY` active + `BB_AUTH_HMAC_ACCEPTED_KEYS`).
-- **`bb1`** — legacy single-key format from before the key-id scheme. It carries
-  no key id, so verification tries every accepted key. Kept so the `bb1` → `bb2`
-  rollout did not log anyone out.
+- **`bb3`** — the **only** accepted format, since v2.4. The **key id** (`<keyid>`) is
+  stamped in so the signing key can roll over with zero downtime: the verifier looks up
+  the key by id in the accepted set (`BB_AUTH_HMAC_KEY` active +
+  `BB_AUTH_HMAC_ACCEPTED_KEYS`).
+- **No verify-only arm.** The earlier `bb1` and `bb2` formats are not distinguished from
+  junk. A version bump therefore logs every live session out, once, and the holder walks
+  back through the login page — a re-authentication against a Cognito session the browser
+  still has, not a re-enrolment. That was chosen over keeping an arm, its tests and its
+  reasoning alive for every format that ever shipped. Consequence to plan around: **the
+  2.4 upgrade signs everyone out.** Key *rotation* is the mechanism that must not do
+  that, and it still doesn't.
+- **Names** — raw UTF-8 under the base64, so the cookie is binary-safe where a header is
+  not; percent-encoded only on emission (§12). A name the token did not assert is the
+  **empty segment**: seven fields, always. They are inside the signed bytes, so a name
+  cannot be swapped or forged, and a segment that does not decode fails the whole cookie
+  (fail-closed — we could not have minted it). Capped at 256 bytes each, which keeps the
+  cookie ≲ 1 KB against the browsers' ~4 KB.
 - **`exp`** — Unix epoch seconds, `now + session_ttl`; rejected when `exp <= now`.
 - **HMAC-SHA256** over the cookie prefix up to (but not including) the signature.
   Verification is constant-time (`Mac::verify_slice`).
@@ -207,7 +224,7 @@ Required vars cause a fatal exit if missing.
 | Variable | Required | Default | Notes |
 |----------|:--------:|---------|-------|
 | `BB_AUTH_HMAC_KEY` | yes | — | Active session-signing secret. **≥ 32 bytes.** Generated once at deploy time; the only secret in the system. |
-| `BB_AUTH_HMAC_KEY_ID` | no | `default` | Key id stamped into new `bb2` cookies. Must match `[A-Za-z0-9_-]+` (no `.`). Bump on rotation so older keys can still verify. |
+| `BB_AUTH_HMAC_KEY_ID` | no | `default` | Key id stamped into new cookies. Must match `[A-Za-z0-9_-]+` (no `.`). Bump on rotation so older keys can still verify. |
 | `BB_AUTH_HMAC_ACCEPTED_KEYS` | no | empty | Comma-separated `id:key` entries accepted for verification during rotation (`key` = `openssl rand -base64 48`). Active key always verifies; this is for previous keys. |
 | `BB_AUTH_COGNITO_ISSUER` | yes | — | The Cognito user-pool issuer URL, `https://cognito-idp.<region>.amazonaws.com/<user-pool-id>`. Trailing `/` stripped. JWKS URL is derived from this. |
 | `BB_AUTH_CLIENT_ID` | yes | — | The public app client used by the login page; always an accepted `id_token.aud`. |
@@ -641,6 +658,40 @@ Together they are what lets `respond_authorized` build the header with no per-re
 check; its `debug_assert!` pins both halves.
 
 The app must not decode the credential itself. Two of the three carry no claim — the
-cookie is an HMAC blob holding only the email, an API key is an opaque secret — and a
-valid `id_token` proves identity, not authorization: self-signup is open, so
-authorization lives in the access file and only the gate consults it.
+cookie is an HMAC blob holding the email and the two names below, an API key is an opaque
+secret — and a valid `id_token` proves identity, not authorization: self-signup is open,
+so authorization lives in the access file and only the gate consults it.
+
+### Display names (`X-Auth-Given-Name` / `X-Auth-Family-Name`)
+
+A `204` can carry two more fixed headers, so an app has a display name without inventing
+one from the email's local part:
+
+```nginx
+auth_request_set $bb_given  $upstream_http_x_auth_given_name;
+auth_request_set $bb_family $upstream_http_x_auth_family_name;
+proxy_set_header X-Auth-Given-Name  $bb_given;
+proxy_set_header X-Auth-Family-Name $bb_family;
+```
+
+- **Percent-encoded UTF-8** (RFC 3986, `pct_encode`): every byte outside
+  `[A-Za-z0-9-._~]` becomes `%XX`, so `Niccolò` → `Niccol%C3%B2` and a space → `%20`.
+  Not the form-urlencoded variant: `+` is a literal plus.
+- **The encoder is the safety argument, not a validator.** `pct_encode`'s output is
+  printable ASCII for *any* input, control bytes included, so unlike an email a name
+  needs no `header_safe_email` and no per-request check — which matters because a name
+  legitimately contains spaces and accents that `header_safe_email` would reject. The
+  second `debug_assert!` in `respond_authorized` is what would catch a later change
+  emitting a name raw.
+- **Absent ⇒ omitted, never empty**, since nginx cannot represent the difference: an
+  empty variable drops the header. That covers a token without the claim and every API
+  key — the one credential with no token to read a name from.
+- **Additive and opt-in per location.** A gated location that lifts only `$bb_email` sees
+  exactly what it saw before; an app must treat both headers as optional. But the
+  empty-variable rule is also the *clear*: an app that trusts these behind a location
+  that does not set them would read whatever the client sent.
+- **Self-asserted.** Any Cognito user edits their own profile, verified email or not, so
+  these are display hints and must never be an authorization input. Nothing in the access
+  file mentions names, and `authorize_identity` keeps them out of the decision — which is
+  what keeps `bb-auth-adm can` answering the gate's question.
+- **Never logged.** The log line already carries the email; a name is PII it does not need.

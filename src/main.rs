@@ -14,7 +14,7 @@
 //!
 //! | Method | Path | Caller | Behaviour |
 //! |--------|------|--------|-----------|
-//! | `GET`  | `/auth/validate` | nginx `auth_request`, loopback | 204 + [`IDENTITY_HEADER`] if a credential authorizes the request, else 401 |
+//! | `GET`  | `/auth/validate` | nginx `auth_request`, loopback | 204 + [`IDENTITY_HEADER`] (+ [`GIVEN_NAME_HEADER`] / [`FAMILY_NAME_HEADER`] when the credential carries them) if a credential authorizes the request, else 401 |
 //! | `POST` | `/auth/session`  | browser | validate the posted `id_token`, set the cookie, 302 → `rd` |
 //! | `GET`  | `/auth/logout`   | browser | clear the cookie, 302 → the login page |
 //! | `GET`  | `/auth/healthz`  | local   | 200 `ok` |
@@ -55,12 +55,20 @@
 //! calling. On a `public_auth` site that email may name someone with no entry anywhere:
 //! it is an *authenticated* identity, and enrolling it is the application's business.
 //!
+//! The two Cognito-backed credentials can also carry the token's `given_name` and
+//! `family_name` in [`GIVEN_NAME_HEADER`] / [`FAMILY_NAME_HEADER`], percent-encoded, so an
+//! application has a display name without parsing one out of the email. They are optional:
+//! a token that asserts no such claim, and every API key, omit the header rather than send
+//! it empty. And they are *self-asserted* — any Cognito user edits their own profile — so
+//! they are display hints, never an authorization input. The identity is, and stays, the
+//! email.
+//!
 //! An application must not try to read the identity itself. There is usually nothing
-//! to read: the session cookie is not a JWT and carries only the email, and a `bbk_`
-//! key has no token at all, so decoding a claim would work for exactly one of the
-//! three credentials. It would not be safe either — self-signup means a valid
-//! id_token proves identity, never authorization. The header is trustworthy only in
-//! so far as the application is unreachable except through nginx.
+//! to read: the session cookie is not a JWT (it carries the email and those two names,
+//! nothing else), and a `bbk_` key has no token at all, so decoding a claim would work
+//! for exactly one of the three credentials. It would not be safe either — self-signup
+//! means a valid id_token proves identity, never authorization. The headers are
+//! trustworthy only in so far as the application is unreachable except through nginx.
 
 use std::collections::HashMap;
 use std::io::Read;
@@ -93,32 +101,45 @@ type HmacSha256 = Hmac<Sha256>;
 /// is generous and exists only to bound the memory a single request can claim.
 const MAX_BODY: u64 = 64 * 1024;
 
+/// Cap on a name claim captured into the session cookie, in raw UTF-8 bytes.
+///
+/// Cognito allows a profile attribute up to 2048 bytes; a *name* beyond this one is not
+/// one. Over-long names are dropped rather than truncated ([`clean_name`]) — a mangled
+/// name is worse than none, and the header is simply omitted. The bound is also what
+/// keeps a [`COOKIE_VERSION`] cookie well under the ~4 KB browsers allow: two names at
+/// this cap add at most ~690 bytes of base64.
+const MAX_NAME_BYTES: usize = 256;
+
 /// Active session-cookie format tag, and the wire format it names:
 ///
 /// ```text
-/// cookie = "bb2" "." keyid "." exp "." b64url(email) "." b64url(sig)
-/// sig    = HMAC_SHA256("bb2." keyid "." exp "." b64url(email), key[keyid])
+/// cookie = "bb3" "." keyid "." exp "." b64url(email) "." b64url(given_name) "." b64url(family_name) "." b64url(sig)
+/// sig    = HMAC_SHA256("bb3." keyid "." exp "." b64url(email) "." b64url(given_name) "." b64url(family_name), key[keyid])
 /// ```
 ///
-/// The key id is stamped into the cookie so the signing key can roll over with zero
-/// downtime: during a rotation every accepted id still verifies, while only the
-/// active key signs new cookies.
+/// The field count is fixed at seven: an absent name is the **empty segment** (base64url
+/// of the empty string is empty), never an omitted field. Neither the base64url alphabet
+/// nor a key id ([`valid_keyid`]) contains `.`, so splitting on it is unambiguous; extra
+/// dots fold into the signature element, which then fails to verify. The version tag is
+/// inside the signed bytes, so no cookie can be replayed as another format.
 ///
-/// This is a wire format with live clients. Changing the serialization — or the bytes
-/// that go into `sig` — invalidates every cookie in the wild and logs out every user.
-/// [`make_session`], [`verify_session`] and their tests pin it.
-const COOKIE_VERSION: &str = "bb2";
-
-/// Legacy, verify-only cookie format tag:
+/// Names are stored as raw UTF-8 and are **not** lowercased — they are display values, and
+/// the case is theirs. They are percent-encoded only on the way out ([`GIVEN_NAME_HEADER`]).
 ///
-/// ```text
-/// cookie = "bb1" "." exp "." b64url(email) "." b64url(sig)
-/// sig    = HMAC_SHA256("bb1." exp "." b64url(email), key)
-/// ```
+/// The key id is stamped into the cookie so the signing *key* can roll over with zero
+/// downtime: during a rotation every accepted id still verifies, while only the active key
+/// signs new cookies. That is the mechanism that must never log anyone out, and it is
+/// untouched by a format change.
 ///
-/// It carries no key id, so [`verify_session`] tries every accepted key. Kept so the
-/// `bb2` rollout logged nobody out; nothing mints `bb1` cookies any more.
-const COOKIE_VERSION_LEGACY: &str = "bb1";
+/// **This is the only format [`verify_session`] accepts.** The `bb1` and `bb2` arms it used
+/// to carry are gone: a version bump costs each user one trip through the login page — the
+/// browser still holds its Cognito session, so it is a re-authentication, not a re-enrolment
+/// — and that was judged cheaper than keeping a verify-only arm, its tests and its
+/// reasoning alive for every format that ever existed. So changing the serialization, or
+/// the bytes that go into `sig`, does log out every live session: bump the tag, expect the
+/// re-auth, and do not schedule it in the middle of something. [`make_session`],
+/// [`verify_session`] and their tests pin the format.
+const COOKIE_VERSION: &str = "bb3";
 
 /// Response header naming the authenticated user on a `204` from `/auth/validate`.
 ///
@@ -129,11 +150,15 @@ const COOKIE_VERSION_LEGACY: &str = "bb1";
 /// location / {
 ///     set $bb_url https://app.example.com$uri;   # rewrite phase, before auth_request
 ///     auth_request     /internal/auth-gate;
-///     auth_request_set $bb_email $upstream_http_x_auth_email;
+///     auth_request_set $bb_email  $upstream_http_x_auth_email;
+///     auth_request_set $bb_given  $upstream_http_x_auth_given_name;   # optional …
+///     auth_request_set $bb_family $upstream_http_x_auth_family_name;  # … see below
 ///
-///     proxy_set_header X-Auth-Email     $bb_email;   # whatever name the app reads
-///     proxy_set_header X-Forwarded-User "";          # clear the names we do NOT set
-///     proxy_set_header Remote-User      "";
+///     proxy_set_header X-Auth-Email       $bb_email;   # whatever name the app reads
+///     proxy_set_header X-Auth-Given-Name  $bb_given;   # only where the app wants them
+///     proxy_set_header X-Auth-Family-Name $bb_family;
+///     proxy_set_header X-Forwarded-User   "";          # clear the names we do NOT set
+///     proxy_set_header Remote-User        "";
 ///     proxy_pass http://127.0.0.1:9000;
 /// }
 /// ```
@@ -147,7 +172,37 @@ const COOKIE_VERSION_LEGACY: &str = "bb1";
 /// one in. That only covers names nginx sets, hence the explicit clearing of any other
 /// name the application might also trust. And none of it means anything unless the
 /// application is unreachable except through nginx.
+///
+/// The two name lines are optional and additive: a location that lifts only `$bb_email`
+/// keeps seeing exactly what it saw before. But the empty-variable rule is also the
+/// *clear* — an application that trusts [`GIVEN_NAME_HEADER`] behind a location that does
+/// not `proxy_set_header` it would be reading whatever the client sent, so set the pair or
+/// clear it explicitly, like `X-Forwarded-User` above.
 const IDENTITY_HEADER: &str = "X-Auth-Email";
+
+/// Response header carrying the token's OIDC `given_name` on a `204`, when one is known.
+///
+/// The value is **percent-encoded UTF-8 per RFC 3986**: every byte outside the unreserved
+/// set `[A-Za-z0-9-._~]` becomes `%XX`, so a space is `%20` and `Niccolò` is `Niccol%C3%B2`.
+/// Any standard URI-decoder reads it back; note this is *not* the `application/x-www-form-
+/// urlencoded` variant, so a `+` means a literal plus (`%2B` never appears for a space).
+/// [`pct_encode`]'s output is printable ASCII for **any** input, and that construction — not
+/// a validator — is what lets [`respond_authorized`] hand a name to [`h`] with no
+/// per-request check, the way [`header_safe_email`] does for the email.
+///
+/// **An absent claim omits the header entirely**, never sends it empty. That covers an
+/// id_token that carries no such claim, and every API key ([`bearer_apikey_email`] — no
+/// token to read one from). nginx carries the distinction through unchanged: an unset
+/// `$bb_given` drops the header there too.
+///
+/// These names are **self-asserted profile attributes** — any Cognito user, verified email
+/// or not, writes their own — so they are display hints and nothing may key on them. The
+/// identity is, and stays, [`IDENTITY_HEADER`]. The nginx wiring is on that constant.
+const GIVEN_NAME_HEADER: &str = "X-Auth-Given-Name";
+
+/// Response header carrying the token's OIDC `family_name` on a `204`, when one is known.
+/// Encoding, omission and trust are all as [`GIVEN_NAME_HEADER`].
+const FAMILY_NAME_HEADER: &str = "X-Auth-Family-Name";
 
 /// Response header naming the login page on a `401` from `/auth/validate` — the site's
 /// `login_url`, or `BB_AUTH_LOGIN_URL` when it declares none ([`login_url_for`]).
@@ -187,7 +242,7 @@ const LOGIN_URL_HEADER: &str = "X-Auth-Login-URL";
 // Config
 // ---------------------------------------------------------------------------
 
-/// A cookie key id must not contain '.', otherwise `splitn(5, '.')` on a cookie
+/// A cookie key id must not contain '.', otherwise `splitn(7, '.')` on a cookie
 /// would be ambiguous. Allow `[A-Za-z0-9_-]+`.
 fn valid_keyid(id: &str) -> bool {
     !id.is_empty()
@@ -623,6 +678,31 @@ fn decoding_key(state: &State, kid: &str) -> Option<DecodingKey> {
 // id_token validation
 // ---------------------------------------------------------------------------
 
+/// What a token-backed credential resolves to: the authorized email, plus the optional
+/// OIDC name claims that ride along to [`respond_authorized`] and into the session cookie.
+///
+/// The email is the identity — it is what every grant decision is made about, and the only
+/// field the access file has an opinion on. The names are decoration: optional,
+/// self-asserted, and never an input to [`authorize`]. Keeping them out of the decision is
+/// what keeps `bb-auth-adm can` answering the same question the gate does.
+#[derive(Debug, PartialEq, Eq)]
+struct UserIdentity {
+    email: String,
+    given_name: Option<String>,
+    family_name: Option<String>,
+}
+
+impl UserIdentity {
+    /// An identity with no names — the API-key path, which has no token to read them from.
+    fn email_only(email: String) -> Self {
+        UserIdentity {
+            email,
+            given_name: None,
+            family_name: None,
+        }
+    }
+}
+
 /// The id_token claims bb-auth consumes. `exp`, `aud` and `iss` are enforced by
 /// `jsonwebtoken` before this is deserialized.
 #[derive(Deserialize)]
@@ -633,6 +713,16 @@ struct Claims {
     email_verified: serde_json::Value,
     /// Must be `"id"` — an access_token must not be usable as a credential here.
     token_use: Option<String>,
+    /// OIDC profile names, propagated to the application in [`GIVEN_NAME_HEADER`] /
+    /// [`FAMILY_NAME_HEADER`]. Typed as a raw JSON value, not `Option<String>`, for the
+    /// same reason as `email_verified` above: a federated IdP whose attribute mapping
+    /// emits a non-string here must cost the user their *name*, never their login — a
+    /// type error would otherwise fail `decode` and reject the whole token. See
+    /// [`clean_name`].
+    #[serde(default)]
+    given_name: serde_json::Value,
+    #[serde(default)]
+    family_name: serde_json::Value,
     /// Non-empty only for federated/social logins; absent for native Cognito users.
     /// Each entry names the upstream IdP via `providerName`. This is what lets the
     /// `email_verified` relaxation target social logins only.
@@ -690,13 +780,38 @@ fn social_provider_names(identities: &[Identity]) -> String {
         .join(",")
 }
 
-/// Fully validate a Cognito id_token, returning the lowercased verified email.
+/// Capture hygiene for a name claim — the one point a name enters bb-auth, exactly as
+/// [`header_safe_email`] in [`validate_id_token`] is for an email out of a claim. The
+/// cookie then inherits whatever this returns, under the HMAC.
+///
+/// `None` — the header is simply omitted — when the claim is not a string, is empty after
+/// trimming, exceeds [`MAX_NAME_BYTES`] raw UTF-8 bytes, or contains a control character.
+/// Over-long names are dropped, not truncated: a mangled name is worse than none. Never
+/// lowercased, unlike the email — a name's case belongs to its owner.
+///
+/// Emission safety does **not** rest on this: [`pct_encode`] makes any bytes header-safe,
+/// including the control characters rejected here. This bounds quality and cookie size.
+fn clean_name(v: &serde_json::Value) -> Option<String> {
+    let t = v.as_str()?.trim();
+    if t.is_empty() || t.len() > MAX_NAME_BYTES || t.chars().any(char::is_control) {
+        return None;
+    }
+    Some(t.to_string())
+}
+
+/// Fully validate a Cognito id_token, returning the verified identity: the lowercased
+/// email, plus whatever `given_name` / `family_name` the token asserts ([`clean_name`]).
 ///
 /// Enforces all of: `alg == RS256`, a known `kid`, the signature, `exp` (required,
 /// 60 s leeway), `iss`, `aud` against [`Config::audiences`], `token_use == "id"`,
 /// [`header_safe_email`], and a truthy `email_verified`. The single sanctioned exception
 /// to the last one is [`unverified_social_ok`].
-fn validate_id_token(token: &str, state: &State) -> Result<String, String> {
+///
+/// The names are subject to none of that. They are not an identity and authorize nothing,
+/// they need no `header_safe_email` (the encoder at emission is what makes them safe), and
+/// `BB_AUTH_ALLOW_UNVERIFIED_SOCIAL` does not change their standing — a name is
+/// self-asserted on *every* token, whatever the email's verification status.
+fn validate_id_token(token: &str, state: &State) -> Result<UserIdentity, String> {
     let header = decode_header(token).map_err(|e| format!("bad token header: {e}"))?;
     if header.alg != Algorithm::RS256 {
         return Err(format!("unexpected alg {:?}", header.alg));
@@ -741,11 +856,15 @@ fn validate_id_token(token: &str, state: &State) -> Result<String, String> {
             social_provider_names(&c.identities)
         );
     }
-    Ok(email)
+    Ok(UserIdentity {
+        email,
+        given_name: clean_name(&c.given_name),
+        family_name: clean_name(&c.family_name),
+    })
 }
 
 // ---------------------------------------------------------------------------
-// Session cookie (HMAC-signed) — wire format on COOKIE_VERSION{,_LEGACY}
+// Session cookie (HMAC-signed) — wire format on COOKIE_VERSION
 // ---------------------------------------------------------------------------
 
 /// HMAC-SHA256 of `msg` under `key`, base64url without padding.
@@ -771,7 +890,7 @@ fn sig_matches(key: &[u8], msg: &str, sig_b64: &str) -> bool {
     mac.verify_slice(&expected).is_ok() // constant-time
 }
 
-/// Common cookie tail: enforce expiry and decode + lower-case the email payload.
+/// Cookie payload tail: enforce expiry and decode + lower-case the email segment.
 fn finish_session(exp: u64, eb: &str) -> Option<String> {
     if exp <= now() {
         return None;
@@ -780,40 +899,58 @@ fn finish_session(exp: u64, eb: &str) -> Option<String> {
     Some(email.to_ascii_lowercase())
 }
 
-/// Mint a session cookie for `email`, valid for `ttl` seconds, signed with the active
-/// key in the [`COOKIE_VERSION`] format.
-fn make_session(email: &str, ttl: u64, keys: &HmacKeys) -> String {
+/// Decode one name segment of a [`COOKIE_VERSION`] cookie.
+///
+/// An empty segment is `Some(None)`: the token carried no such claim, which is normal. The
+/// outer `None` means the segment does not decode — invalid base64url, or bytes that are
+/// not UTF-8 — and that fails the **whole cookie**. A signature that verifies over bytes
+/// we could not have minted is either a bug here or a compromised key, and both call for
+/// fail-closed, the same posture [`finish_session`] takes on the email.
+fn decode_name_segment(seg: &str) -> Option<Option<String>> {
+    if seg.is_empty() {
+        return Some(None);
+    }
+    let name = String::from_utf8(URL_SAFE_NO_PAD.decode(seg).ok()?).ok()?;
+    Some(Some(name))
+}
+
+/// Mint a session cookie for `ident`, valid for `ttl` seconds, signed with the active
+/// key in the [`COOKIE_VERSION`] format. A name the identity does not have becomes the
+/// empty segment, so the field count never varies.
+fn make_session(ident: &UserIdentity, ttl: u64, keys: &HmacKeys) -> String {
     let exp = now() + ttl;
-    let eb = URL_SAFE_NO_PAD.encode(email.as_bytes());
-    let msg = format!("{COOKIE_VERSION}.{}.{exp}.{eb}", keys.active_id);
+    let b64 = |s: &str| URL_SAFE_NO_PAD.encode(s.as_bytes());
+    let eb = b64(&ident.email);
+    let gb = ident.given_name.as_deref().map(b64).unwrap_or_default();
+    let fb = ident.family_name.as_deref().map(b64).unwrap_or_default();
+    let msg = format!("{COOKIE_VERSION}.{}.{exp}.{eb}.{gb}.{fb}", keys.active_id);
     let sig = sign(keys.active(), &msg);
     format!("{msg}.{sig}")
 }
 
 /// Verify a session cookie — version, key id, signature (constant-time) and expiry —
-/// returning the lowercased email it carries. Accepts both [`COOKIE_VERSION`] and
-/// [`COOKIE_VERSION_LEGACY`]. `None` on anything that does not verify.
-fn verify_session(val: &str, keys: &HmacKeys) -> Option<String> {
-    let parts: Vec<&str> = val.splitn(5, '.').collect();
+/// returning the identity it carries, with the email lowercased. `None` on anything that
+/// does not verify.
+///
+/// [`COOKIE_VERSION`] is the **only** format accepted: a cookie in any older one is not
+/// distinguished from junk, and its holder is sent back through the login page. See that
+/// constant for why no verify-only arm is kept.
+fn verify_session(val: &str, keys: &HmacKeys) -> Option<UserIdentity> {
+    let parts: Vec<&str> = val.splitn(7, '.').collect();
     match parts.as_slice() {
-        [v, keyid, exp_s, eb, sig] if *v == COOKIE_VERSION => {
+        [v, keyid, exp_s, eb, gb, fb, sig] if *v == COOKIE_VERSION => {
             let key = keys.by_id.get(*keyid)?;
             let exp: u64 = exp_s.parse().ok()?;
-            let msg = format!("{v}.{keyid}.{exp_s}.{eb}");
+            let msg = format!("{v}.{keyid}.{exp_s}.{eb}.{gb}.{fb}");
             if !sig_matches(key, &msg, sig) {
                 return None;
             }
-            finish_session(exp, eb)
-        }
-        [v, exp_s, eb, sig] if *v == COOKIE_VERSION_LEGACY => {
-            let exp: u64 = exp_s.parse().ok()?;
-            let msg = format!("{v}.{exp_s}.{eb}");
-            // Legacy: try every accepted key (all are ours; an attacker has none,
-            // so the timing leak about which key matched is harmless).
-            if !keys.by_id.values().any(|k| sig_matches(k, &msg, sig)) {
-                return None;
-            }
-            finish_session(exp, eb)
+            let email = finish_session(exp, eb)?;
+            Some(UserIdentity {
+                email,
+                given_name: decode_name_segment(gb)?,
+                family_name: decode_name_segment(fb)?,
+            })
         }
         _ => None,
     }
@@ -872,6 +1009,37 @@ fn cookie_value<'a>(cookie_header: &'a str, name: &str) -> Option<&'a str> {
 /// every call site passes constants or already-sanitised values.
 fn h(k: &str, v: &str) -> Header {
     Header::from_bytes(k.as_bytes(), v.as_bytes()).expect("valid header")
+}
+
+/// Percent-encode `s` per RFC 3986: every byte outside the unreserved set
+/// `[A-Za-z0-9-._~]` becomes `%XX` with uppercase hex. That includes the space (`%20`,
+/// *not* `+`) and every byte of a multibyte UTF-8 character, so `Niccolò` comes out as
+/// `Niccol%C3%B2` and `%` itself as `%25`.
+///
+/// The output is printable ASCII for **any** input, control bytes and all. That
+/// construction is what lets [`respond_authorized`] pass a name straight to [`h`] — which
+/// panics on a non-ASCII value, in a process built with `panic = "abort"` — without
+/// validating anything per request. See [`GIVEN_NAME_HEADER`].
+///
+/// Hand-rolled on purpose: this is the whole of RFC 3986's encoding rule, and a crate for
+/// it would be a dependency to audit and cross-compile for no gain. `form_urlencoded` is
+/// already in the tree but is the wrong grammar — it emits `+` for a space.
+fn pct_encode(s: &str) -> String {
+    const HEX: &[u8; 16] = b"0123456789ABCDEF";
+    let mut out = String::with_capacity(s.len());
+    for b in s.bytes() {
+        match b {
+            b'A'..=b'Z' | b'a'..=b'z' | b'0'..=b'9' | b'-' | b'.' | b'_' | b'~' => {
+                out.push(b as char)
+            }
+            _ => {
+                out.push('%');
+                out.push(HEX[(b >> 4) as usize] as char);
+                out.push(HEX[(b & 0x0f) as usize] as char);
+            }
+        }
+    }
+    out
 }
 
 /// Render a `Set-Cookie` value. `max_age = 0` expires the cookie (logout). Always
@@ -973,9 +1141,11 @@ fn respond_empty(req: Request, status: u16) {
     let _ = req.respond(Response::empty(StatusCode(status)));
 }
 
-/// Respond `204` to an authorized `auth_request`, naming the user in [`IDENTITY_HEADER`].
+/// Respond `204` to an authorized `auth_request`, naming the user in [`IDENTITY_HEADER`]
+/// and, when the credential carried them, their names in [`GIVEN_NAME_HEADER`] /
+/// [`FAMILY_NAME_HEADER`].
 ///
-/// `email` always passed [`header_safe_email`], by one of two disjoint routes, so [`h`]
+/// The email always passed [`header_safe_email`], by one of two disjoint routes, so [`h`]
 /// cannot panic here:
 ///
 /// * it is a key of [`Access::by_email`] — the API-key path reads it off the record, and
@@ -985,15 +1155,37 @@ fn respond_empty(req: Request, status: u16) {
 ///   an identity granted by a `public_auth` site, which is in no table to have been
 ///   checked at load. The cookie carries it back unchanged under the HMAC.
 ///
-/// The assert pins both halves. It is what stands between a case-insensitive `by_email`
-/// lookup added later, or a fourth credential that skips `validate_id_token`, and a
-/// panicking worker thread.
-fn respond_authorized(req: Request, email: &str) {
+/// The first assert pins both halves. It is what stands between a case-insensitive
+/// `by_email` lookup added later, or a fourth credential that skips `validate_id_token`,
+/// and a panicking worker thread.
+///
+/// The names need no such argument: [`pct_encode`] emits printable ASCII whatever it is
+/// handed, so their safety is a property of the encoder, not of where they came from. The
+/// second assert pins *that* — it is what would catch a later change emitting a raw name.
+/// `Some("")` cannot occur ([`clean_name`] rejects it) and would send a header
+/// present-and-empty, which the contract with nginx does not allow.
+fn respond_authorized(req: Request, ident: &UserIdentity) {
     debug_assert!(
-        header_safe_email(email),
-        "identity must be header-safe: {email:?}"
+        header_safe_email(&ident.email),
+        "identity must be header-safe: {:?}",
+        ident.email
     );
-    let resp = Response::empty(StatusCode(204)).with_header(h(IDENTITY_HEADER, email));
+    let mut resp = Response::empty(StatusCode(204)).with_header(h(IDENTITY_HEADER, &ident.email));
+    // An absent name omits its header entirely: nginx reads an empty variable as "no
+    // header", so present-and-empty would be a distinction the application cannot make.
+    for (name, value) in [
+        (GIVEN_NAME_HEADER, ident.given_name.as_deref()),
+        (FAMILY_NAME_HEADER, ident.family_name.as_deref()),
+    ] {
+        if let Some(v) = value {
+            let enc = pct_encode(v);
+            debug_assert!(
+                !enc.is_empty() && enc.bytes().all(|b| b.is_ascii_graphic()),
+                "encoded name must be non-empty printable ASCII: {enc:?}"
+            );
+            resp = resp.with_header(h(name, &enc));
+        }
+    }
     let _ = req.respond(resp);
 }
 
@@ -1082,7 +1274,9 @@ fn original_url(req: &Request, cfg: &Config) -> Option<String> {
 /// wall-clock [`now`] the decision is measured against.
 ///
 /// Returns the owning user's email — a key *acts as* its user, so that is the identity
-/// the application downstream sees. It is also the only path with no token to decode.
+/// the application downstream sees. It is also the only path with no token to decode, and
+/// so the only one that can never carry a name: [`GIVEN_NAME_HEADER`] and
+/// [`FAMILY_NAME_HEADER`] are omitted for every API key.
 ///
 /// A `public_auth` site does **not** rescue an unknown key. That grant is for identities
 /// Cognito vouches for, and Cognito vouches for no static key of ours: an unknown key is
@@ -1158,6 +1352,30 @@ fn authorize(access: &Access, email: String, url: Option<&str>) -> Option<String
     }
 }
 
+/// [`authorize`] for a token-backed credential: the grant decision sees only the email,
+/// and the names ride back untouched on success.
+///
+/// Splitting it this way is deliberate. The access file has no opinion about names, so
+/// nothing about them may reach [`decide`] — if a name could ever change the answer,
+/// `bb-auth-adm can` would stop answering the same question as the gate. This wrapper is
+/// re-assembly, not policy.
+fn authorize_identity(
+    access: &Access,
+    ident: UserIdentity,
+    url: Option<&str>,
+) -> Option<UserIdentity> {
+    let UserIdentity {
+        email,
+        given_name,
+        family_name,
+    } = ident;
+    authorize(access, email, url).map(|email| UserIdentity {
+        email,
+        given_name,
+        family_name,
+    })
+}
+
 /// `GET /auth/validate` — the nginx `auth_request` endpoint. 204 plus the authorized
 /// user in [`IDENTITY_HEADER`] if any credential authorizes this request, else 401 plus
 /// this area's login page in [`LOGIN_URL_HEADER`]. Never issues a cookie, and never
@@ -1167,7 +1385,8 @@ fn authorize(access: &Access, email: String, url: Option<&str>) -> Option<String
 /// id_token, then the session cookie. A key must resolve to a user in the roster and put
 /// the URL inside its [`UrlScope`](bb_auth_core::UrlScope); the two Cognito credentials go through [`authorize`],
 /// which also honours `public_auth` sites and the `denied` veto. Whichever one wins, the
-/// identity handed back is an email — see [`respond_authorized`].
+/// identity handed back is an email — plus, for the two token-backed credentials, whatever
+/// names came with it. See [`respond_authorized`].
 fn handle_validate(req: Request, state: &State) {
     let cfg = &state.cfg;
     // Original request URL (for site resolution and per-user / per-key URL scoping),
@@ -1181,18 +1400,22 @@ fn handle_validate(req: Request, state: &State) {
     // cookie check so a stray Authorization header never blocks an otherwise-valid cookie.
     if let Some(token) = header_value(&req, "Authorization").and_then(parse_bearer) {
         let granted = if token.starts_with(API_KEY_PREFIX) {
+            // A key acts as its user and carries no token, so no names come with it.
             bearer_apikey_email(&state.access.read().unwrap(), token, url.as_deref())
+                .map(UserIdentity::email_only)
         } else {
             match validate_id_token(token, state) {
-                Ok(email) => authorize(&state.access.read().unwrap(), email, url.as_deref()),
+                Ok(ident) => {
+                    authorize_identity(&state.access.read().unwrap(), ident, url.as_deref())
+                }
                 Err(e) => {
                     eprintln!("[bb-auth] bearer rejected: {e}");
                     None
                 }
             }
         };
-        if let Some(email) = granted {
-            respond_authorized(req, &email);
+        if let Some(ident) = granted {
+            respond_authorized(req, &ident);
             return;
         }
     }
@@ -1200,9 +1423,9 @@ fn handle_validate(req: Request, state: &State) {
     let granted = header_value(&req, "Cookie")
         .and_then(|c| cookie_value(c, &cfg.cookie_name).map(str::to_string))
         .and_then(|v| verify_session(&v, &cfg.hmac_keys))
-        .and_then(|email| authorize(&state.access.read().unwrap(), email, url.as_deref()));
+        .and_then(|ident| authorize_identity(&state.access.read().unwrap(), ident, url.as_deref()));
     match granted {
-        Some(email) => respond_authorized(req, &email),
+        Some(ident) => respond_authorized(req, &ident),
         None => {
             // Which login page nginx should send them to. Resolved from the site even
             // though no site granted anything: `login_url` says where this area's users
@@ -1222,6 +1445,11 @@ fn handle_validate(req: Request, state: &State) {
 ///
 /// 400 on a missing token, 401 on an invalid one, 403 when the verified email has nowhere
 /// it could possibly go. The redirect target is always laundered through [`safe_rd`].
+///
+/// This is also the only moment a name claim is readable: the cookie carries whatever the
+/// token asserted ([`make_session`]), which is what lets a later `/auth/validate` name the
+/// person with no token in hand. The log line stays email-only — a name is PII the log
+/// does not need.
 ///
 /// The cookie is identity, not authorization: it grants nothing on its own, and every
 /// request it accompanies is re-authorized by [`handle_validate`]. So the 403 here is a
@@ -1263,8 +1491,8 @@ fn handle_session(mut req: Request, state: &State) {
         }
     };
 
-    let email = match validate_id_token(id_token, state) {
-        Ok(e) => e,
+    let ident = match validate_id_token(id_token, state) {
+        Ok(i) => i,
         Err(e) => {
             eprintln!("[bb-auth] session rejected: {e}");
             respond_html(
@@ -1283,8 +1511,8 @@ fn handle_session(mut req: Request, state: &State) {
     let (vetoed, enrolled, any_open) = {
         let access = state.access.read().unwrap();
         (
-            access.denied.contains(&email),
-            access.by_email.contains_key(&email),
+            access.denied.contains(&ident.email),
+            access.by_email.contains_key(&ident.email),
             access.sites.any_public_auth(),
         )
     };
@@ -1294,7 +1522,9 @@ fn handle_session(mut req: Request, state: &State) {
         } else {
             "not in users table"
         };
-        eprintln!("[bb-auth] session denied: {email} {why}");
+        // Names are never logged: they are PII the log line does not need, and the email
+        // already identifies it.
+        eprintln!("[bb-auth] session denied: {} {why}", ident.email);
         respond_html(
             req,
             403,
@@ -1317,10 +1547,10 @@ fn handle_session(mut req: Request, state: &State) {
     );
     let cookie = build_cookie(
         cfg,
-        &make_session(&email, cfg.session_ttl, &cfg.hmac_keys),
+        &make_session(&ident, cfg.session_ttl, &cfg.hmac_keys),
         cfg.session_ttl as i64,
     );
-    eprintln!("[bb-auth] session granted: {email} -> {rd}");
+    eprintln!("[bb-auth] session granted: {} -> {rd}", ident.email);
     respond_redirect(req, &rd, Some(&cookie));
 }
 
@@ -1564,18 +1794,97 @@ mod tests {
         }
     }
 
+    /// An identity with no names — what every legacy cookie and every API key resolves to.
+    fn ident(email: &str) -> UserIdentity {
+        UserIdentity::email_only(email.to_string())
+    }
+    /// An identity carrying both names.
+    fn ident_full(email: &str, given: &str, family: &str) -> UserIdentity {
+        UserIdentity {
+            email: email.to_string(),
+            given_name: Some(given.to_string()),
+            family_name: Some(family.to_string()),
+        }
+    }
+
     #[test]
-    fn session_roundtrip_bb2() {
+    fn session_roundtrip_bb3() {
         let k = keys_one();
-        let c = make_session("Foo@Bar.com", 3600, &k);
-        assert!(c.starts_with("bb2.k1."));
-        assert_eq!(verify_session(&c, &k), Some("foo@bar.com".to_string()));
+        // Non-ASCII and an apostrophe: the cookie is binary-safe (base64) where the header
+        // is not, so this is the roundtrip that has to survive untouched.
+        let c = make_session(
+            &ident_full("Foo@Bar.com", "Niccolò", "de' Medici"),
+            3600,
+            &k,
+        );
+        assert!(c.starts_with("bb3.k1."));
+        // The email lowercases; the names do not — their case is the user's.
+        assert_eq!(
+            verify_session(&c, &k),
+            Some(ident_full("foo@bar.com", "Niccolò", "de' Medici"))
+        );
+    }
+
+    #[test]
+    fn session_roundtrip_bb3_no_names() {
+        let k = keys_one();
+        let c = make_session(&ident("a@b.com"), 3600, &k);
+        // Absent names are empty segments, not missing fields: the count never varies.
+        assert_eq!(c.split('.').count(), 7, "field count is fixed: {c}");
+        assert_eq!(verify_session(&c, &k), Some(ident("a@b.com")));
+    }
+
+    #[test]
+    fn session_bb3_one_name_pins_segment_order() {
+        let k = keys_one();
+        let one = UserIdentity {
+            email: "a@b.com".to_string(),
+            given_name: Some("Ada".to_string()),
+            family_name: None,
+        };
+        let c = make_session(&one, 3600, &k);
+        // given comes first: were the segments swapped, this would come back as a surname.
+        assert_eq!(verify_session(&c, &k), Some(one));
+    }
+
+    #[test]
+    fn session_bb3_names_are_signed() {
+        let k = keys_one();
+        let c = make_session(&ident_full("a@b.com", "Ada", "Byron"), 3600, &k);
+        let p: Vec<&str> = c.split('.').collect();
+        // Swap the two name segments, keep the signature: the names are inside the signed
+        // bytes, so this must not verify.
+        let swapped = format!(
+            "{}.{}.{}.{}.{}.{}.{}",
+            p[0], p[1], p[2], p[3], p[5], p[4], p[6]
+        );
+        assert_eq!(verify_session(&swapped, &k), None);
+        // And substituting one for another valid name is no better.
+        let other = URL_SAFE_NO_PAD.encode("Eve");
+        let forged = format!(
+            "{}.{}.{}.{}.{other}.{}.{}",
+            p[0], p[1], p[2], p[3], p[5], p[6]
+        );
+        assert_eq!(verify_session(&forged, &k), None);
+    }
+
+    #[test]
+    fn session_bb3_bad_name_segment_fails_closed() {
+        let k = keys_one();
+        // A *validly signed* cookie whose name segment is not base64. We could never have
+        // minted it, so it is a bug or a compromised key — either way, reject the cookie
+        // rather than the name.
+        let exp = now() + 3600;
+        let eb = URL_SAFE_NO_PAD.encode(b"a@b.com");
+        let msg = format!("bb3.k1.{exp}.{eb}.!!!.");
+        let sig = sign(&k.by_id["k1"], &msg);
+        assert_eq!(verify_session(&format!("{msg}.{sig}"), &k), None);
     }
 
     #[test]
     fn session_tampered_sig_rejected() {
         let k = keys_one();
-        let mut c = make_session("a@b.com", 3600, &k);
+        let mut c = make_session(&ident("a@b.com"), 3600, &k);
         let last = c.len() - 1;
         let alt = if c.as_bytes()[last] == b'A' { 'B' } else { 'A' };
         c.replace_range(last.., &alt.to_string());
@@ -1585,7 +1894,7 @@ mod tests {
     #[test]
     fn session_expired_rejected() {
         let k = keys_one();
-        let c = make_session("a@b.com", 0, &k); // exp == now
+        let c = make_session(&ident("a@b.com"), 0, &k); // exp == now
         assert_eq!(verify_session(&c, &k), None);
     }
 
@@ -1594,7 +1903,7 @@ mod tests {
         let k = keys_one(); // only k1
         let exp = now() + 3600;
         let eb = URL_SAFE_NO_PAD.encode(b"a@b.com");
-        let msg = format!("bb2.k9.{exp}.{eb}");
+        let msg = format!("bb3.k9.{exp}.{eb}..");
         let sig = sign(&k.by_id["k1"], &msg);
         let c = format!("{msg}.{sig}");
         assert_eq!(verify_session(&c, &k), None);
@@ -1605,33 +1914,36 @@ mod tests {
         let k = keys_two(); // k1 active, k2 accepted
         let exp = now() + 3600;
         let eb = URL_SAFE_NO_PAD.encode(b"x@y.com");
-        let msg = format!("bb2.k2.{exp}.{eb}");
+        let gb = URL_SAFE_NO_PAD.encode("Ada");
+        let msg = format!("bb3.k2.{exp}.{eb}.{gb}.");
         let sig = sign(&k.by_id["k2"], &msg);
         let c = format!("{msg}.{sig}");
-        assert_eq!(verify_session(&c, &k), Some("x@y.com".to_string()));
+        assert_eq!(
+            verify_session(&c, &k),
+            Some(UserIdentity {
+                email: "x@y.com".to_string(),
+                given_name: Some("Ada".to_string()),
+                family_name: None,
+            })
+        );
     }
 
     #[test]
-    fn legacy_bb1_verifies_against_active_key() {
+    fn pre_bb3_cookies_are_rejected() {
+        // The deliberate cost of dropping the verify-only arms: a cookie in an older
+        // format, correctly signed with a live key, no longer verifies. Its holder goes
+        // through the login page once. This is the contract, so it is pinned.
         let k = keys_one();
         let exp = now() + 3600;
         let eb = URL_SAFE_NO_PAD.encode(b"old@a.com");
-        let msg = format!("bb1.{exp}.{eb}");
-        let sig = sign(&k.by_id["k1"], &msg);
-        let c = format!("{msg}.{sig}");
-        assert_eq!(verify_session(&c, &k), Some("old@a.com".to_string()));
-    }
-
-    #[test]
-    fn legacy_bb1_rejected_when_no_key_matches() {
-        let k = keys_one();
-        let exp = now() + 3600;
-        let eb = URL_SAFE_NO_PAD.encode(b"old@a.com");
-        let msg = format!("bb1.{exp}.{eb}");
-        let foreign = vec![0x99u8; 32];
-        let sig = sign(&foreign, &msg);
-        let c = format!("{msg}.{sig}");
-        assert_eq!(verify_session(&c, &k), None);
+        for msg in [
+            format!("bb2.k1.{exp}.{eb}"), // v2.0–2.3
+            format!("bb1.{exp}.{eb}"),    // pre-2.0
+        ] {
+            let sig = sign(&k.by_id["k1"], &msg);
+            let c = format!("{msg}.{sig}");
+            assert_eq!(verify_session(&c, &k), None, "should reject: {c}");
+        }
     }
 
     #[test]
@@ -1645,9 +1957,99 @@ mod tests {
             "zzz.a.b.c",
             "bb1.notanum.aaa.sig",
             "bb2.k1.99999.!!!.AAAA",
+            // bb3 shapes
+            "bb3",
+            "bb3.k1.x.y",
+            "bb3.k1.99999.!!!..AAAA", // six fields — the bb2 arm's shape, wrong tag
+            "bb3.k1.9.aa.bb.cc.dd.ee", // eight — the extra folds into sig, which then fails
+            "bb2.k1.9.aa.bb.cc.dd",   // bb2 tag wearing bb3's shape: no arm matches
         ] {
             assert_eq!(verify_session(bad, &k), None, "should reject: {bad:?}");
         }
+    }
+
+    #[test]
+    fn pct_encode_unreserved_untouched() {
+        // RFC 3986's unreserved set passes through byte for byte, which is what keeps a
+        // plain "Rossi" readable in a log.
+        assert_eq!(pct_encode("AZaz09-._~Rossi"), "AZaz09-._~Rossi".to_string());
+    }
+
+    #[test]
+    fn pct_encode_space_utf8_and_symbols() {
+        assert_eq!(pct_encode("Mary Jane"), "Mary%20Jane"); // %20, never '+'
+        assert_eq!(pct_encode("Niccolò"), "Niccol%C3%B2"); // per UTF-8 byte
+        assert_eq!(pct_encode("%"), "%25"); // the escape escapes itself
+        assert_eq!(pct_encode("+"), "%2B"); // so '+' can only mean a literal plus
+        assert_eq!(pct_encode("de' Medici"), "de%27%20Medici");
+        assert_eq!(pct_encode("a\r\nb"), "a%0D%0Ab"); // no response splitting
+        assert_eq!(pct_encode(""), "");
+    }
+
+    #[test]
+    fn pct_encode_output_always_ascii_graphic() {
+        // The property `respond_authorized` leans on instead of a per-request check: for
+        // *any* input — control bytes, DEL, multibyte — the output is printable ASCII, so
+        // `h()` cannot panic.
+        let mut s: String = (0u8..=0x7f).map(|b| b as char).collect();
+        s.push_str("Niccolò Ægir 日本語 🙂");
+        let enc = pct_encode(&s);
+        assert!(
+            enc.bytes().all(|b| b.is_ascii_graphic()),
+            "not header-safe: {enc:?}"
+        );
+    }
+
+    #[test]
+    fn clean_name_hygiene() {
+        use serde_json::json;
+        // captured, trimmed, case and UTF-8 preserved
+        assert_eq!(
+            clean_name(&json!("  Niccolò  ")).as_deref(),
+            Some("Niccolò")
+        );
+        assert_eq!(
+            clean_name(&json!("de' Medici")).as_deref(),
+            Some("de' Medici")
+        );
+        // nothing worth a header
+        assert_eq!(clean_name(&json!("")), None);
+        assert_eq!(clean_name(&json!("   ")), None);
+        assert_eq!(clean_name(&json!("Ada\rByron")), None); // control char
+                                                            // dropped, not truncated, at the byte cap
+        let max = "x".repeat(MAX_NAME_BYTES);
+        assert_eq!(clean_name(&json!(max)).as_deref(), Some(max.as_str()));
+        assert_eq!(clean_name(&json!("x".repeat(MAX_NAME_BYTES + 1))), None);
+        // a non-string claim costs the name, never the token
+        for v in [
+            json!(42),
+            json!(true),
+            json!(null),
+            json!(["Ada"]),
+            json!({}),
+        ] {
+            assert_eq!(clean_name(&v), None, "should ignore: {v}");
+        }
+    }
+
+    #[test]
+    fn claims_parse_names_present_absent_and_mistyped() {
+        let parse = |s: &str| serde_json::from_str::<Claims>(s).expect("claims must parse");
+
+        let c = parse(r#"{"email":"a@b.com","given_name":"Ada","family_name":"Byron"}"#);
+        assert_eq!(clean_name(&c.given_name).as_deref(), Some("Ada"));
+        assert_eq!(clean_name(&c.family_name).as_deref(), Some("Byron"));
+
+        let c = parse(r#"{"email":"a@b.com"}"#);
+        assert_eq!(clean_name(&c.given_name), None);
+        assert_eq!(clean_name(&c.family_name), None);
+
+        // The reason these are `Value` and not `Option<String>`: a badly mapped IdP
+        // attribute must cost the user their name, not their login. `parse` not panicking
+        // *is* the assertion.
+        let c = parse(r#"{"email":"a@b.com","given_name":42,"family_name":["Byron"]}"#);
+        assert_eq!(clean_name(&c.given_name), None);
+        assert_eq!(clean_name(&c.family_name), None);
     }
 
     #[test]
@@ -1754,8 +2156,8 @@ mod tests {
 
     #[test]
     fn cookie_value_parses_named() {
-        let h = "a=1; bb_session=bb2.k1.1.aaa.bbb; c=2";
-        assert_eq!(cookie_value(h, "bb_session"), Some("bb2.k1.1.aaa.bbb"));
+        let h = "a=1; bb_session=bb3.k1.1.aaa...bbb; c=2";
+        assert_eq!(cookie_value(h, "bb_session"), Some("bb3.k1.1.aaa...bbb"));
         assert_eq!(cookie_value("bb_session_extra=x", "bb_session"), None);
         assert_eq!(cookie_value("", "bb_session"), None);
     }
@@ -1963,6 +2365,47 @@ mod tests {
         );
         assert_eq!(authorize(&a, "newcomer@x.com".to_string(), other), None);
         assert_eq!(authorize(&a, "bob@x.com".to_string(), None), None);
+    }
+
+    #[test]
+    fn authorize_identity_passes_names_through_untouched() {
+        // The names must survive the grant decision without influencing it: the access
+        // file has no opinion about them, and `bb-auth-adm can` has to keep answering the
+        // same question the gate does.
+        let a = access_of(
+            "authorize-identity",
+            r#"{ "sites": [ { "name": "app1", "urls": ["https://app.x.com/app1/*"],
+                              "public_auth": true } ],
+                 "denied": ["spammer@x.com"],
+                 "users": [ { "email": "bob@x.com",
+                              "authorized_urls": ["https://app.x.com/other/*"] } ] }"#,
+        );
+        let other = Some("https://app.x.com/other/x");
+        let app1 = Some("https://app.x.com/app1/x");
+
+        // the roster branch …
+        assert_eq!(
+            authorize_identity(&a, ident_full("bob@x.com", "Bob", "Rossi"), other),
+            Some(ident_full("bob@x.com", "Bob", "Rossi"))
+        );
+        // … and the public_auth branch, where the identity is in no table at all
+        assert_eq!(
+            authorize_identity(&a, ident_full("new@x.com", "Niccolò", "de' Medici"), app1),
+            Some(ident_full("new@x.com", "Niccolò", "de' Medici"))
+        );
+        // a name never rescues a denial
+        assert_eq!(
+            authorize_identity(&a, ident_full("spammer@x.com", "S", "P"), app1),
+            None
+        );
+        assert_eq!(
+            authorize_identity(&a, ident_full("new@x.com", "N", "X"), other),
+            None
+        );
+        assert_eq!(
+            authorize_identity(&a, ident_full("bob@x.com", "B", "R"), None),
+            None
+        );
     }
 
     #[test]

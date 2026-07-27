@@ -39,7 +39,7 @@ nginx error_page 401 → 302  <login-page>/?rd=<original>
 
 | Method | Path             | Who        | Purpose                                            |
 |--------|------------------|------------|----------------------------------------------------|
-| GET    | `/auth/validate` | nginx only | `auth_request`: 204 + `X-Auth-Email` if the session cookie, an `Authorization: Bearer <id_token>`, or a static `Authorization: Bearer bbk_…` API key authorizes the request (in a user's URL scope, or on a `public_auth` site), else 401 + `X-Auth-Login-URL` |
+| GET    | `/auth/validate` | nginx only | `auth_request`: 204 + `X-Auth-Email` (+ `X-Auth-Given-Name` / `X-Auth-Family-Name` when known) if the session cookie, an `Authorization: Bearer <id_token>`, or a static `Authorization: Bearer bbk_…` API key authorizes the request (in a user's URL scope, or on a `public_auth` site), else 401 + `X-Auth-Login-URL` |
 | POST   | `/auth/session`  | browser    | validate posted `id_token`, set cookie, 302 → `rd` |
 | GET    | `/auth/logout`   | browser    | clear cookie, 302 → `rd` (guarded) or the login page |
 | GET    | `/auth/healthz`  | local      | liveness                                           |
@@ -124,11 +124,40 @@ Two things make the header trustworthy, and both are required:
   An app reachable directly believes any header anybody sends it.
 
 The app should **not** try to read the identity itself. Usually there is nothing to
-read: the session cookie is not a JWT (it carries only the email, HMAC-signed) and an
-API key has no token at all, so decoding a claim would work for exactly one of the
-three credentials. It would not be safe either — Cognito self-signup is open, so a
-valid `id_token` proves *identity*, never *authorization*. What decides authorization
-is the access file, and only the gate reads it.
+read: the session cookie is not a JWT (it carries the email and the two names below,
+HMAC-signed) and an API key has no token at all, so decoding a claim would work for
+exactly one of the three credentials. It would not be safe either — Cognito self-signup
+is open, so a valid `id_token` proves *identity*, never *authorization*. What decides
+authorization is the access file, and only the gate reads it.
+
+### Display name (optional)
+
+So an app need not guess a name out of the email's local part, a `204` can also carry
+the token's OIDC name claims:
+
+```text
+X-Auth-Given-Name:  Niccol%C3%B2
+X-Auth-Family-Name: de%27%20Medici
+```
+
+```nginx
+auth_request_set $bb_given  $upstream_http_x_auth_given_name;
+auth_request_set $bb_family $upstream_http_x_auth_family_name;
+proxy_set_header X-Auth-Given-Name  $bb_given;
+proxy_set_header X-Auth-Family-Name $bb_family;
+```
+
+- **Percent-encoded UTF-8** (RFC 3986), because HTTP header values are not UTF-8: every
+  byte outside `[A-Za-z0-9-._~]` is `%XX`, so a space is `%20` and `Niccolò` is
+  `Niccol%C3%B2`. Decode with any standard URI-decoder — note this is *not* the
+  form-urlencoded variant, so a `+` is a literal plus, never a space.
+- **Absent ⇒ the header is omitted entirely**, never sent empty. That happens when the
+  token carries no such claim and on **every API key** (a key has no token to read a
+  name from). nginx passes that through: an unset variable drops the header too.
+- **Additive.** Adding the four lines above is per gated location; leave them out and
+  nothing changes. An app must treat both headers as optional.
+- **These names are self-asserted.** Any Cognito user edits their own profile, so treat
+  them as display hints and never as an authorization input. The identity is the email.
 
 ## URL scoping
 
@@ -362,20 +391,36 @@ to a database).
 >
 > **Upgrading from 2.1.** Nothing to do: a file with no `sites` and no `denied`
 > behaves exactly as before.
+>
+> **Upgrading to 2.4.** The access file is unchanged, but the cookie format moved to
+> `bb3` and older cookies are no longer accepted, so **every signed-in user is logged
+> out once** and signs in again (their Cognito session usually makes that a click).
+> Nothing to prepare; just don't deploy it in the middle of something. The two new name
+> headers are opt-in per nginx location — see
+> [Display name](#display-name-optional).
 
 ## Session cookie
 
-`<cookie> = bb2.<keyid>.<exp>.<b64url(email)>.<b64url(HMAC_SHA256(...))>` — HttpOnly,
-Secure, SameSite=Lax, host-only on the service host, ~30 days. The key id is
+HttpOnly, Secure, SameSite=Lax, host-only on the service host, ~30 days. The key id is
 stamped in so the signing key can roll over with zero downtime (see "Key
 rotation" below). Stateless: no server-side session store — any worker can
-validate any cookie and a restart logs nobody out. Cookies signed under the
-previous single-key scheme are still honoured:
+validate any cookie and a restart logs nobody out.
 
 ```text
-bb2.<keyid>.<exp>.<b64url(email)>.<b64url(HMAC_SHA256("bb2.<keyid>.<exp>.<b64url(email)>", key[keyid]))>   # active
-bb1.<exp>.<b64url(email)>.<b64url(HMAC_SHA256("bb1.<exp>.<b64url(email)>"))>                                 # legacy (verify-only)
+bb3.<keyid>.<exp>.<b64url(email)>.<b64url(given_name)>.<b64url(family_name)>.<b64url(sig)>
+sig = HMAC_SHA256("bb3.<keyid>.<exp>.<b64url(email)>.<b64url(given_name)>.<b64url(family_name)>", key[keyid])
 ```
+
+Seven fields always: a name the token did not assert is the **empty segment**, not a
+missing field. Names are stored as raw UTF-8 and percent-encoded only when emitted as a
+header.
+
+`bb3` is the **only** format accepted — there is no verify-only arm for the older `bb1`
+and `bb2`. A format bump therefore costs every user one trip through the login page,
+which is a re-authentication (the browser still holds its Cognito session), not a
+re-enrolment. That was judged cheaper than carrying every format bb-auth ever had, but
+it means **the 2.4 upgrade logs everyone out once** — don't deploy it mid-something.
+Key *rotation* is the separate mechanism that must never do that, and doesn't.
 
 The access file is re-checked on every `/validate`, so de-authorizing someone is
 just an edit (remove the user or a single API key, or add them to `denied`) +
@@ -503,6 +548,13 @@ The binary is service-agnostic. To front a service at `app.example.com`:
            proxy_set_header X-Forwarded-User "";   # clear names we do NOT set
            proxy_set_header Remote-User      "";
 
+           # Optional: the token's names, for a display name. Omit both pairs if
+           # the app has no use for them.
+           auth_request_set $bb_given  $upstream_http_x_auth_given_name;
+           auth_request_set $bb_family $upstream_http_x_auth_family_name;
+           proxy_set_header X-Auth-Given-Name  $bb_given;
+           proxy_set_header X-Auth-Family-Name $bb_family;
+
            # Which login page this area uses. auth_request_set reads the 401's
            # headers too, so the gate can name it per site.
            auth_request_set $bb_login $upstream_http_x_auth_login_url;
@@ -592,7 +644,7 @@ gate, so even a misconfigured proxy cannot turn this into an open redirect. Note
 
 The cookie is HMAC-signed under `BB_AUTH_HMAC_KEY`, addressed by
 `BB_AUTH_HMAC_KEY_ID`. Rotation is **zero-downtime** because the key id is
-stamped into every `bb2` cookie and multiple keys can be accepted for
+stamped into every cookie and multiple keys can be accepted for
 verification at once. 3-step runbook (k1 → k2):
 
 1. Generate the new key and publish it as verify-only, then reload:
@@ -614,6 +666,7 @@ verification at once. 3-step runbook (k1 → k2):
 3. After ~30 d (one TTL), every surviving cookie is k2-signed. Drop k1 from
    `BB_AUTH_HMAC_ACCEPTED_KEYS` and reload.
 
-Nobody is logged out at any step. The old `bb1` (single-key) cookies are also
-still accepted — they verify against any key in the set — so the original
-migration from `bb1` to `bb2` invalidated nobody.
+Nobody is logged out at any step — that is the point of rotating by id rather than by
+swapping the secret. A **cookie-format** bump is the other axis and behaves the
+opposite way: only [the current format](#session-cookie) is accepted, so it does log
+everyone out once. Don't conflate the two.

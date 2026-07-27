@@ -55,7 +55,7 @@ This repo is developed on Windows but the artifact is a Linux/aarch64 binary.
 # Tests — pure unit tests in src/lib.rs (the access file) and src/main.rs (the gate),
 # run on the host, no network needed
 cargo test
-cargo test session_roundtrip_bb2      # a single test by name
+cargo test session_roundtrip_bb3      # a single test by name
 
 # Validate an access file with the real parser (no env, no network). Same check the
 # deploy runs before it restarts the service. Prints the public_auth sites, if any.
@@ -107,10 +107,16 @@ bash scripts/build.sh                 # target overridable via BB_AUTH_TARGET
   (temp + rename) and **preserves mode and owner**: the live file is `root:bb-auth 0640`,
   and a rewrite by root that left it `root:root` would lock the service out of its own
   access list — the chown failing is therefore a hard abort, not a warning.
-- **The cookie is a versioned wire format with live clients.** Changing the serialization or the
-  signed-message bytes logs out **every** existing user. `bb2` is active, `bb1` legacy verify-only;
-  the keyid enables zero-downtime HMAC key rotation (README "Key rotation"). `make_session` /
-  `verify_session` and their tests pin this.
+- **The cookie is a versioned wire format, and exactly one version is accepted.** `bb3` is it;
+  there is deliberately no verify-only arm for `bb1`/`bb2` any more. So changing the
+  serialization or the signed-message bytes logs out **every** existing user — that is the
+  accepted price, because a re-auth is one trip through the login page against a Cognito session
+  the browser still holds, and carrying an arm per historical format is not worth it. Bump the tag
+  when the bytes change (never reuse one), say so in the README's upgrade note, and don't ship it
+  mid-something. What must *never* log anyone out is HMAC **key rotation**, which is a separate
+  axis: the keyid in the cookie is what makes it zero-downtime (README "Key rotation").
+  `make_session` / `verify_session` and their tests pin the format, and
+  `pre_bb3_cookies_are_rejected` pins the absence of the legacy arms.
 - **The access file is the real access gate**, re-checked on *every* `/auth/validate` (not just at
   login). Parsed into `RwLock<Access>` — sites, `denied`, and two indices — hot-reloaded on SIGHUP
   (`systemctl reload bb-auth`); a reload failure keeps the old table (never nuke the live one). See
@@ -196,6 +202,19 @@ bash scripts/build.sh                 # target overridable via BB_AUTH_TARGET
   themselves — the cookie is not a JWT and a `bbk_` key has no token, and a valid id_token proves
   identity, never authorization. On a `public_auth` site the email may name someone in no table at
   all; enrolling them is the application's business.
+- **The names are decoration, and the encoder is what makes them safe.** A `204` may also carry the
+  token's `given_name`/`family_name` in `GIVEN_NAME_HEADER`/`FAMILY_NAME_HEADER` (fixed constants,
+  same reasoning as `IDENTITY_HEADER`). They are **not** identities: they authorize nothing, no
+  field of the access file mentions them, and `authorize_identity` keeps them out of `decide` —
+  otherwise `bb-auth-adm can` would stop answering the gate's question. Being self-asserted (any
+  Cognito user edits their own profile, `email_verified` or not), nothing downstream may key on
+  them. Three rules to keep: values go out **percent-encoded** (`pct_encode`, RFC 3986) and that
+  construction — printable ASCII for *any* input — is the whole safety argument, so a name needs no
+  `header_safe_email` (which would reject the spaces and accents real names have) and must never be
+  emitted raw; an absent claim **omits the header** rather than sending it empty, because nginx
+  cannot tell those apart; and names are **never logged** — the line already has the email. Capture
+  hygiene (`clean_name`) is about quality and cookie size, not safety: a bad name costs the name,
+  never the login, which is why the claims deserialize as `serde_json::Value`.
 - **`/auth/session` is not a gate.** It mints a cookie for any valid id_token whose email is not
   `denied` and has somewhere to go (roster entry, or any `public_auth` site exists). The 403 there is
   a courtesy so an un-enrolled user hears it at the login page instead of bouncing off a 401 later —
@@ -270,5 +289,7 @@ bash scripts/build.sh                 # target overridable via BB_AUTH_TARGET
   than fixing it: a missing required var, or a `BB_AUTH_USERS_FILE` that doesn't point at the file
   this deploy installs, aborts **before** the restart. Both matter — a fatal startup under
   `Restart=on-failure` is a boot loop, and a mismatched path means `--check-users` vouched for a
-  file nothing loads. Any redeploy must never log anyone out; a rejected users file must never
-  reach a restart.
+  file nothing loads. A redeploy must never log anyone out *by accident* — that is what preserving
+  the HMAC key buys, and it stays non-negotiable; the one sanctioned exception is a deliberate
+  cookie-format bump, which does log everyone out and belongs in the release's upgrade note. A
+  rejected users file must never reach a restart.
