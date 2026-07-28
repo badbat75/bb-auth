@@ -14,7 +14,7 @@
 //!
 //! | Method | Path | Caller | Behaviour |
 //! |--------|------|--------|-----------|
-//! | `GET`  | `/auth/validate` | nginx `auth_request`, loopback | 204 + [`IDENTITY_HEADER`] (+ [`GIVEN_NAME_HEADER`] / [`FAMILY_NAME_HEADER`] when the credential carries them) if a credential authorizes the request, else 401 |
+//! | `GET`  | `/auth/validate` | nginx `auth_request`, loopback | 204 + [`IDENTITY_HEADER`] (+ one header per configured [`ProfileClaim`] the credential carries) if a credential authorizes the request, else 401 |
 //! | `POST` | `/auth/session`  | browser | validate the posted `id_token`, set the cookie, 302 → `rd` |
 //! | `GET`  | `/auth/logout`   | browser | clear the cookie, 302 → the login page |
 //! | `GET`  | `/auth/healthz`  | local   | 200 `ok` |
@@ -55,22 +55,22 @@
 //! calling. On a `public_auth` site that email may name someone with no entry anywhere:
 //! it is an *authenticated* identity, and enrolling it is the application's business.
 //!
-//! The two Cognito-backed credentials can also carry the token's `given_name` and
-//! `family_name` in [`GIVEN_NAME_HEADER`] / [`FAMILY_NAME_HEADER`], percent-encoded, so an
-//! application has a display name without parsing one out of the email. They are optional:
-//! a token that asserts no such claim, and every API key, omit the header rather than send
-//! it empty. And they are *self-asserted* — any Cognito user edits their own profile — so
-//! they are display hints, never an authorization input. The identity is, and stays, the
-//! email.
+//! The two Cognito-backed credentials can also carry **profile claims** — whichever OIDC
+//! claims `BB_AUTH_PROFILE_CLAIMS` names, each in a header derived from its own name
+//! ([`ProfileClaim`]), percent-encoded — so an application has a display name without
+//! parsing one out of the email. Off by default, and always optional: a token that asserts
+//! no such claim, and every API key, omit the header rather than send it empty. They are
+//! *self-asserted* — any Cognito user edits their own profile — so they are display hints,
+//! never an authorization input. The identity is, and stays, the email.
 //!
 //! An application must not try to read the identity itself. There is usually nothing
-//! to read: the session cookie is not a JWT (it carries the email and those two names,
-//! nothing else), and a `bbk_` key has no token at all, so decoding a claim would work
-//! for exactly one of the three credentials. It would not be safe either — self-signup
-//! means a valid id_token proves identity, never authorization. The headers are
+//! to read: the session cookie is not a JWT (it carries the email and the profile claims
+//! captured at login, nothing else), and a `bbk_` key has no token at all, so decoding a
+//! claim would work for exactly one of the three credentials. It would not be safe either —
+//! self-signup means a valid id_token proves identity, never authorization. The headers are
 //! trustworthy only in so far as the application is unreachable except through nginx.
 
-use std::collections::HashMap;
+use std::collections::{BTreeMap, HashMap};
 use std::io::Read;
 use std::sync::{Arc, Mutex, RwLock};
 use std::time::{Duration, Instant};
@@ -101,45 +101,63 @@ type HmacSha256 = Hmac<Sha256>;
 /// is generous and exists only to bound the memory a single request can claim.
 const MAX_BODY: u64 = 64 * 1024;
 
-/// Cap on a name claim captured into the session cookie, in raw UTF-8 bytes.
+/// Cap on one profile-claim value captured into the session cookie, in raw UTF-8 bytes.
 ///
-/// Cognito allows a profile attribute up to 2048 bytes; a *name* beyond this one is not
-/// one. Over-long names are dropped rather than truncated ([`clean_name`]) — a mangled
-/// name is worse than none, and the header is simply omitted. The bound is also what
-/// keeps a [`COOKIE_VERSION`] cookie well under the ~4 KB browsers allow: two names at
-/// this cap add at most ~690 bytes of base64.
-const MAX_NAME_BYTES: usize = 256;
+/// Cognito allows a profile attribute up to 2048 bytes; a display value beyond this one is
+/// not one. Over-long values are dropped rather than truncated ([`clean_claim`]) — a
+/// mangled name is worse than none, and the header is simply omitted.
+///
+/// It is also the per-claim term in the cookie-size budget. A claim costs at most
+/// `4/3 × (2 × MAX_CLAIM_VALUE_BYTES + len(name) + 6)` bytes of base64 — the factor two
+/// because JSON escaping can double a value — so ≈ 700 bytes each, against the ~4 KB a
+/// browser will store. [`worst_case_cookie_bytes`] does that arithmetic at startup and
+/// warns; configuring more than a handful of claims is what makes it matter.
+const MAX_CLAIM_VALUE_BYTES: usize = 256;
 
 /// Active session-cookie format tag, and the wire format it names:
 ///
 /// ```text
-/// cookie = "bb3" "." keyid "." exp "." b64url(email) "." b64url(given_name) "." b64url(family_name) "." b64url(sig)
-/// sig    = HMAC_SHA256("bb3." keyid "." exp "." b64url(email) "." b64url(given_name) "." b64url(family_name), key[keyid])
+/// cookie = "bb4" "." keyid "." exp "." b64url(email) "." b64url(claims_json) "." b64url(sig)
+/// sig    = HMAC_SHA256("bb4." keyid "." exp "." b64url(email) "." b64url(claims_json), key[keyid])
 /// ```
 ///
-/// The field count is fixed at seven: an absent name is the **empty segment** (base64url
-/// of the empty string is empty), never an omitted field. Neither the base64url alphabet
-/// nor a key id ([`valid_keyid`]) contains `.`, so splitting on it is unambiguous; extra
-/// dots fold into the signature element, which then fails to verify. The version tag is
-/// inside the signed bytes, so no cookie can be replayed as another format.
+/// The field count is fixed at six. Neither the base64url alphabet nor a key id
+/// ([`valid_keyid`]) contains `.`, so splitting on it is unambiguous; extra dots fold into
+/// the signature element, which then fails to verify. The version tag is inside the signed
+/// bytes, so no cookie can be replayed as another format.
 ///
-/// Names are stored as raw UTF-8 and are **not** lowercased — they are display values, and
-/// the case is theirs. They are percent-encoded only on the way out ([`GIVEN_NAME_HEADER`]).
+/// `claims_json` is a JSON object of the profile claims the token asserted — claim name to
+/// value, e.g. `{"family_name":"Byron","given_name":"Ada"}` — serialized from a
+/// `BTreeMap`, hence with sorted keys. **No claims is the empty segment**, never `"{}"`.
+/// Values are raw UTF-8 and are **not** lowercased: they are display values and the case is
+/// theirs. They are percent-encoded only on the way out ([`ProfileClaim`]).
+///
+/// The blob is **self-describing** — it names its own claims — and that is the point.
+/// `BB_AUTH_PROFILE_CLAIMS` is config, a cookie lives up to a month, and positional
+/// segments would let an edit to that list silently reinterpret a live cookie's values
+/// under someone else's claim name. It also means changing the list is *not* a format
+/// change: old cookies keep verifying, claims dropped from the config stop being emitted
+/// ([`profile_headers`]), and claims added to it simply appear at the next login.
+///
+/// Verification signs and checks the segment **as received** and only then parses it —
+/// nothing is ever re-serialized for comparison, so no canonicalization question arises.
+/// Keep it that way. (The `BTreeMap` ordering makes minting deterministic; the signature
+/// does not depend on it.)
 ///
 /// The key id is stamped into the cookie so the signing *key* can roll over with zero
 /// downtime: during a rotation every accepted id still verifies, while only the active key
 /// signs new cookies. That is the mechanism that must never log anyone out, and it is
 /// untouched by a format change.
 ///
-/// **This is the only format [`verify_session`] accepts.** The `bb1` and `bb2` arms it used
-/// to carry are gone: a version bump costs each user one trip through the login page — the
-/// browser still holds its Cognito session, so it is a re-authentication, not a re-enrolment
-/// — and that was judged cheaper than keeping a verify-only arm, its tests and its
-/// reasoning alive for every format that ever existed. So changing the serialization, or
-/// the bytes that go into `sig`, does log out every live session: bump the tag, expect the
-/// re-auth, and do not schedule it in the middle of something. [`make_session`],
+/// **This is the only format [`verify_session`] accepts.** The `bb1`, `bb2` and `bb3` arms
+/// it used to carry are gone: a version bump costs each user one trip through the login
+/// page — the browser still holds its Cognito session, so it is a re-authentication, not a
+/// re-enrolment — and that was judged cheaper than keeping a verify-only arm, its tests and
+/// its reasoning alive for every format that ever existed. So changing the serialization,
+/// or the bytes that go into `sig`, does log out every live session: bump the tag, expect
+/// the re-auth, and do not schedule it in the middle of something. [`make_session`],
 /// [`verify_session`] and their tests pin the format.
-const COOKIE_VERSION: &str = "bb3";
+const COOKIE_VERSION: &str = "bb4";
 
 /// Response header naming the authenticated user on a `204` from `/auth/validate`.
 ///
@@ -173,36 +191,15 @@ const COOKIE_VERSION: &str = "bb3";
 /// name the application might also trust. And none of it means anything unless the
 /// application is unreachable except through nginx.
 ///
-/// The two name lines are optional and additive: a location that lifts only `$bb_email`
-/// keeps seeing exactly what it saw before. But the empty-variable rule is also the
-/// *clear* — an application that trusts [`GIVEN_NAME_HEADER`] behind a location that does
-/// not `proxy_set_header` it would be reading whatever the client sent, so set the pair or
-/// clear it explicitly, like `X-Forwarded-User` above.
+/// The two name lines are the derived headers of the example config
+/// `BB_AUTH_PROFILE_CLAIMS=given_name,family_name`; a different claim list means different
+/// variables, mechanically named ([`ProfileClaim`] — `custom:department` would be
+/// `$upstream_http_x_auth_custom_department`). They are optional and additive: a location
+/// that lifts only `$bb_email` keeps seeing exactly what it saw before. But the
+/// empty-variable rule is also the *clear* — an application that trusts a profile header
+/// behind a location that does not `proxy_set_header` it would be reading whatever the
+/// client sent, so set them or clear them explicitly, like `X-Forwarded-User` above.
 const IDENTITY_HEADER: &str = "X-Auth-Email";
-
-/// Response header carrying the token's OIDC `given_name` on a `204`, when one is known.
-///
-/// The value is **percent-encoded UTF-8 per RFC 3986**: every byte outside the unreserved
-/// set `[A-Za-z0-9-._~]` becomes `%XX`, so a space is `%20` and `Niccolò` is `Niccol%C3%B2`.
-/// Any standard URI-decoder reads it back; note this is *not* the `application/x-www-form-
-/// urlencoded` variant, so a `+` means a literal plus (`%2B` never appears for a space).
-/// [`pct_encode`]'s output is printable ASCII for **any** input, and that construction — not
-/// a validator — is what lets [`respond_authorized`] hand a name to [`h`] with no
-/// per-request check, the way [`header_safe_email`] does for the email.
-///
-/// **An absent claim omits the header entirely**, never sends it empty. That covers an
-/// id_token that carries no such claim, and every API key ([`bearer_apikey_email`] — no
-/// token to read one from). nginx carries the distinction through unchanged: an unset
-/// `$bb_given` drops the header there too.
-///
-/// These names are **self-asserted profile attributes** — any Cognito user, verified email
-/// or not, writes their own — so they are display hints and nothing may key on them. The
-/// identity is, and stays, [`IDENTITY_HEADER`]. The nginx wiring is on that constant.
-const GIVEN_NAME_HEADER: &str = "X-Auth-Given-Name";
-
-/// Response header carrying the token's OIDC `family_name` on a `204`, when one is known.
-/// Encoding, omission and trust are all as [`GIVEN_NAME_HEADER`].
-const FAMILY_NAME_HEADER: &str = "X-Auth-Family-Name";
 
 /// Response header naming the login page on a `401` from `/auth/validate` — the site's
 /// `login_url`, or `BB_AUTH_LOGIN_URL` when it declares none ([`login_url_for`]).
@@ -242,7 +239,7 @@ const LOGIN_URL_HEADER: &str = "X-Auth-Login-URL";
 // Config
 // ---------------------------------------------------------------------------
 
-/// A cookie key id must not contain '.', otherwise `splitn(7, '.')` on a cookie
+/// A cookie key id must not contain '.', otherwise `splitn(6, '.')` on a cookie
 /// would be ambiguous. Allow `[A-Za-z0-9_-]+`.
 fn valid_keyid(id: &str) -> bool {
     !id.is_empty()
@@ -268,6 +265,156 @@ impl HmacKeys {
             .get(&self.active_id)
             .expect("active HMAC key present")
     }
+}
+
+/// One configured OIDC profile claim, and the response header derived from its name.
+///
+/// The **set** is configuration (`BB_AUTH_PROFILE_CLAIMS`, comma-separated, empty by
+/// default); the **derivation** is code, and fixed. That split is the whole point: an
+/// operator names a claim, never a header, so the two can never disagree and no header
+/// name is attacker- or typo-reachable.
+///
+/// Derivation: map `_` and `:` to `-`, title-case each `-`-separated token, prefix
+/// `X-Auth-`. So `given_name` → `X-Auth-Given-Name` and `family_name` →
+/// `X-Auth-Family-Name` — the two v2.4 hard-coded — while `nickname` → `X-Auth-Nickname`
+/// and `custom:department` → `X-Auth-Custom-Department`. Because [`compile_profile_claims`]
+/// admits only `[A-Za-z0-9_:-]`, a derived header is always `[A-Za-z0-9-]+` — a valid
+/// header token by construction, so [`h`] cannot panic on the name.
+///
+/// The **value** is emitted **percent-encoded UTF-8 per RFC 3986**: every byte outside the
+/// unreserved set `[A-Za-z0-9-._~]` becomes `%XX`, so a space is `%20` and `Niccolò` is
+/// `Niccol%C3%B2`. Any standard URI-decoder reads it back; note this is *not* the
+/// `application/x-www-form-urlencoded` variant, so a `+` means a literal plus (`%2B` never
+/// appears for a space). [`pct_encode`]'s output is printable ASCII for **any** input, and
+/// that construction — not a validator — is what lets [`respond_authorized`] hand a value
+/// to [`h`] with no per-request check, the way [`header_safe_email`] does for the email.
+///
+/// **An absent claim omits its header entirely**, never sends it empty. That covers a token
+/// that carries no such claim, a cookie minted before the claim was configured, and every
+/// API key ([`bearer_apikey_email`] — no token to read one from). nginx carries the
+/// distinction through unchanged: an unset `$upstream_http_*` drops the header there too.
+///
+/// These are **self-asserted profile attributes** — any Cognito user, verified email or
+/// not, writes their own — so they are display hints and nothing may key on them. They
+/// authorize nothing, no field of the access file mentions them, and they are never logged.
+/// The identity is, and stays, [`IDENTITY_HEADER`]. The nginx wiring is on that constant.
+struct ProfileClaim {
+    /// The OIDC claim name, exactly as it appears in the id_token.
+    claim: String,
+    /// The response header derived from it. See the type doc.
+    header: String,
+}
+
+/// Claim names bb-auth consumes itself, and so cannot propagate.
+///
+/// [`Claims`] deserializes these into typed fields, and `#[serde(flatten)]` never sees a
+/// key a typed field already took — so configuring one of them would propagate nothing,
+/// silently and forever. Rejecting them at startup turns that into a fatal typo instead.
+const RESERVED_CLAIMS: [&str; 4] = ["email", "email_verified", "token_use", "identities"];
+
+/// Whether `s` is a syntactically valid profile-claim name: non-empty and
+/// `[A-Za-z0-9_:-]` only.
+///
+/// Shared by [`compile_profile_claims`] (config) and [`decode_claims_segment`] (a cookie's
+/// claim blob), so a cookie can never carry a key that no config could have produced.
+fn claim_name_ok(s: &str) -> bool {
+    !s.is_empty()
+        && s.bytes()
+            .all(|b| b.is_ascii_alphanumeric() || b == b'_' || b == b':' || b == b'-')
+}
+
+/// Derive a claim's response header. See [`ProfileClaim`] for the rule and why it is code
+/// rather than config. Assumes `claim` passed [`compile_profile_claims`]'s checks.
+fn derive_profile_header(claim: &str) -> String {
+    let normalized = claim.replace([':', '_'], "-");
+    let mut out = String::from("X-Auth-");
+    for (i, token) in normalized.split('-').enumerate() {
+        if i > 0 {
+            out.push('-');
+        }
+        let mut chars = token.chars();
+        if let Some(first) = chars.next() {
+            out.push(first.to_ascii_uppercase());
+            out.extend(chars.map(|c| c.to_ascii_lowercase()));
+        }
+    }
+    out
+}
+
+/// Compile `BB_AUTH_PROFILE_CLAIMS` — a comma-separated list of OIDC claim names — into
+/// the claims to capture and the headers to emit. Empty (the default) means none: profile
+/// propagation is opt-in.
+///
+/// Pure and fallible so it can be tested; [`Config::from_env`] turns an `Err` into the
+/// usual fatal exit. Every rejection is a startup failure rather than a skipped entry,
+/// because a silently dropped claim is a header an application waits for forever.
+///
+/// Rejects, naming the entry: a name outside `[A-Za-z0-9_:-]`; an empty token around a
+/// separator (`:dept`, `dept:`, `a--b`), which would derive a header with an empty
+/// component; a claim in [`RESERVED_CLAIMS`]; and a derived header that collides
+/// case-insensitively with [`IDENTITY_HEADER`], [`LOGIN_URL_HEADER`] or another entry's
+/// (which also catches a repeated claim, and spellings that differ only in case or
+/// separator, e.g. `given_name` and `given-name`).
+fn compile_profile_claims(spec: &str) -> Result<Vec<ProfileClaim>, String> {
+    let mut out: Vec<ProfileClaim> = Vec::new();
+    for claim in spec.split(',').map(str::trim).filter(|s| !s.is_empty()) {
+        if !claim_name_ok(claim) {
+            return Err(format!(
+                "claim '{claim}' must be non-empty and contain only [A-Za-z0-9_:-]"
+            ));
+        }
+        if claim.replace([':', '_'], "-").split('-').any(str::is_empty) {
+            return Err(format!(
+                "claim '{claim}' has an empty part around a '_', ':' or '-'"
+            ));
+        }
+        if RESERVED_CLAIMS.contains(&claim) {
+            return Err(format!(
+                "claim '{claim}' is consumed by the gate itself and cannot be propagated"
+            ));
+        }
+        let header = derive_profile_header(claim);
+        for reserved in [IDENTITY_HEADER, LOGIN_URL_HEADER] {
+            if header.eq_ignore_ascii_case(reserved) {
+                return Err(format!(
+                    "claim '{claim}' derives '{header}', which is reserved"
+                ));
+            }
+        }
+        if let Some(prev) = out.iter().find(|p| p.header.eq_ignore_ascii_case(&header)) {
+            return Err(format!(
+                "claims '{}' and '{claim}' both derive '{header}'",
+                prev.claim
+            ));
+        }
+        out.push(ProfileClaim {
+            claim: claim.to_string(),
+            header,
+        });
+    }
+    Ok(out)
+}
+
+/// Upper bound on the session cookie's size, in bytes, for a given claim set — what the
+/// startup warning is measured against.
+///
+/// A browser stores about 4 KB per cookie and drops the rest **silently**, which would show
+/// up as a login loop rather than an error, so the arithmetic is worth doing at startup.
+/// Per claim: its name, its value at [`MAX_CLAIM_VALUE_BYTES`] and doubled (JSON escaping
+/// can escape every byte), plus the six bytes of JSON syntax around them — then base64.
+/// Real names are nowhere near the cap; this bounds the pathological case.
+fn worst_case_cookie_bytes(claims: &[ProfileClaim]) -> usize {
+    // Everything outside the claims segment: the tag, a key id, an expiry, a base64
+    // email and a base64 signature, with their dots. Generous and constant.
+    const FIXED: usize = 256;
+    if claims.is_empty() {
+        return FIXED;
+    }
+    let json = 2 + claims
+        .iter()
+        .map(|c| c.claim.len() + 2 * MAX_CLAIM_VALUE_BYTES + 6)
+        .sum::<usize>();
+    FIXED + json.div_ceil(3) * 4
 }
 
 /// Runtime configuration, read once from the environment at startup. Every field is
@@ -339,6 +486,15 @@ struct Config {
     /// string, so `/app/%2e%2e/admin` would match an `/app/*` scope while nginx serves
     /// `/admin`. A gated location that forgets the `set` sends no header and is denied.
     original_url_header: String,
+    /// OIDC profile claims to capture from an id_token and hand to the application, from
+    /// `BB_AUTH_PROFILE_CLAIMS` (comma-separated claim names). Empty by default — profile
+    /// propagation is opt-in; `given_name,family_name` reproduces v2.4's two headers.
+    ///
+    /// Order is the operator's, and is the order the headers come out in. Since this is
+    /// read at startup, changing it needs a restart — and it is *not* a cookie-format
+    /// change: a claim dropped here stops being emitted from cookies that still carry it,
+    /// and one added here appears at the holder's next login ([`COOKIE_VERSION`]).
+    profile_claims: Vec<ProfileClaim>,
     /// `BB_AUTH_WORKERS`, the number of blocking request threads. At least 1.
     workers: usize,
 }
@@ -471,6 +627,15 @@ impl Config {
             Some(social_providers)
         };
 
+        // Which OIDC profile claims to propagate. Unset or empty = none; every rejection
+        // is fatal, because a claim silently dropped here is a header the application
+        // waits for forever.
+        let profile_claims = compile_profile_claims(&env_or("BB_AUTH_PROFILE_CLAIMS", ""))
+            .unwrap_or_else(|e| {
+                eprintln!("[bb-auth] FATAL: BB_AUTH_PROFILE_CLAIMS: {e}");
+                std::process::exit(1);
+            });
+
         Config {
             listen: env_or("BB_AUTH_LISTEN", "127.0.0.1:4181"),
             hmac_keys: HmacKeys { by_id, active_id },
@@ -492,6 +657,7 @@ impl Config {
                 std::process::exit(1);
             }),
             original_url_header: env_or("BB_AUTH_ORIGINAL_URL_HEADER", "X-Original-URL"),
+            profile_claims,
             workers: env_or("BB_AUTH_WORKERS", "4").parse().unwrap_or(4).max(1),
         }
     }
@@ -678,27 +844,31 @@ fn decoding_key(state: &State, kid: &str) -> Option<DecodingKey> {
 // id_token validation
 // ---------------------------------------------------------------------------
 
-/// What a token-backed credential resolves to: the authorized email, plus the optional
-/// OIDC name claims that ride along to [`respond_authorized`] and into the session cookie.
+/// What a token-backed credential resolves to: the authorized email, plus whichever
+/// configured profile claims the token asserted — they ride along to
+/// [`respond_authorized`] and into the session cookie.
 ///
 /// The email is the identity — it is what every grant decision is made about, and the only
-/// field the access file has an opinion on. The names are decoration: optional,
+/// field the access file has an opinion on. The claims are decoration: optional,
 /// self-asserted, and never an input to [`authorize`]. Keeping them out of the decision is
 /// what keeps `bb-auth-adm can` answering the same question the gate does.
+///
+/// The map is keyed by claim name, not by header, and holds only claims that were
+/// configured *when it was built* — a cookie outlives a config change, so
+/// [`profile_headers`] decides what to emit against the current [`Config`], never this.
+/// `BTreeMap` for a deterministic serialization ([`COOKIE_VERSION`]) and free equality.
 #[derive(Debug, PartialEq, Eq)]
 struct UserIdentity {
     email: String,
-    given_name: Option<String>,
-    family_name: Option<String>,
+    claims: BTreeMap<String, String>,
 }
 
 impl UserIdentity {
-    /// An identity with no names — the API-key path, which has no token to read them from.
+    /// An identity with no claims — the API-key path, which has no token to read any from.
     fn email_only(email: String) -> Self {
         UserIdentity {
             email,
-            given_name: None,
-            family_name: None,
+            claims: BTreeMap::new(),
         }
     }
 }
@@ -713,16 +883,20 @@ struct Claims {
     email_verified: serde_json::Value,
     /// Must be `"id"` — an access_token must not be usable as a credential here.
     token_use: Option<String>,
-    /// OIDC profile names, propagated to the application in [`GIVEN_NAME_HEADER`] /
-    /// [`FAMILY_NAME_HEADER`]. Typed as a raw JSON value, not `Option<String>`, for the
-    /// same reason as `email_verified` above: a federated IdP whose attribute mapping
-    /// emits a non-string here must cost the user their *name*, never their login — a
-    /// type error would otherwise fail `decode` and reject the whole token. See
-    /// [`clean_name`].
-    #[serde(default)]
-    given_name: serde_json::Value,
-    #[serde(default)]
-    family_name: serde_json::Value,
+    /// Every other claim in the token, by name — where the configured profile claims are
+    /// looked up ([`Config::profile_claims`]).
+    ///
+    /// Values stay raw `serde_json::Value`s, not `String`s, for the same reason
+    /// `email_verified` above does: a federated IdP whose attribute mapping emits a
+    /// non-string must cost the user that *claim*, never their login — a type error here
+    /// would fail `decode` and reject the whole token. [`clean_claim`] drops what it
+    /// cannot use.
+    ///
+    /// `flatten` collects only what no typed field above already took, which is exactly
+    /// why those four names are in [`RESERVED_CLAIMS`]: configuring one would look up a
+    /// key that can never be here.
+    #[serde(flatten)]
+    extra: serde_json::Map<String, serde_json::Value>,
     /// Non-empty only for federated/social logins; absent for native Cognito users.
     /// Each entry names the upstream IdP via `providerName`. This is what lets the
     /// `email_verified` relaxation target social logins only.
@@ -780,37 +954,46 @@ fn social_provider_names(identities: &[Identity]) -> String {
         .join(",")
 }
 
-/// Capture hygiene for a name claim — the one point a name enters bb-auth, exactly as
-/// [`header_safe_email`] in [`validate_id_token`] is for an email out of a claim. The
-/// cookie then inherits whatever this returns, under the HMAC.
+/// Whether a profile-claim value is one bb-auth would keep: non-empty, at most
+/// [`MAX_CLAIM_VALUE_BYTES`] raw UTF-8 bytes, no control character, and already trimmed.
 ///
-/// `None` — the header is simply omitted — when the claim is not a string, is empty after
-/// trimming, exceeds [`MAX_NAME_BYTES`] raw UTF-8 bytes, or contains a control character.
-/// Over-long names are dropped, not truncated: a mangled name is worse than none. Never
-/// lowercased, unlike the email — a name's case belongs to its owner.
+/// Shared by [`clean_claim`] (capture, where the trim test is vacuous) and
+/// [`decode_claims_segment`] (a cookie's claim blob, where it is not): a value that
+/// verifies but could not have been minted fails the cookie.
+fn claim_value_ok(v: &str) -> bool {
+    !v.is_empty()
+        && v.len() <= MAX_CLAIM_VALUE_BYTES
+        && !v.chars().any(char::is_control)
+        && v.trim() == v
+}
+
+/// Capture hygiene for a profile claim — the one point a claim value enters bb-auth,
+/// exactly as [`header_safe_email`] in [`validate_id_token`] is for an email out of a
+/// claim. The cookie then inherits whatever this returns, under the HMAC.
+///
+/// `None` — the header is simply omitted — when the claim is not a string or fails
+/// [`claim_value_ok`]. Over-long values are dropped, not truncated: a mangled name is worse
+/// than none. Never lowercased, unlike the email — a name's case belongs to its owner.
 ///
 /// Emission safety does **not** rest on this: [`pct_encode`] makes any bytes header-safe,
 /// including the control characters rejected here. This bounds quality and cookie size.
-fn clean_name(v: &serde_json::Value) -> Option<String> {
+fn clean_claim(v: &serde_json::Value) -> Option<String> {
     let t = v.as_str()?.trim();
-    if t.is_empty() || t.len() > MAX_NAME_BYTES || t.chars().any(char::is_control) {
-        return None;
-    }
-    Some(t.to_string())
+    claim_value_ok(t).then(|| t.to_string())
 }
 
 /// Fully validate a Cognito id_token, returning the verified identity: the lowercased
-/// email, plus whatever `given_name` / `family_name` the token asserts ([`clean_name`]).
+/// email, plus whichever [`Config::profile_claims`] the token asserts ([`clean_claim`]).
 ///
 /// Enforces all of: `alg == RS256`, a known `kid`, the signature, `exp` (required,
 /// 60 s leeway), `iss`, `aud` against [`Config::audiences`], `token_use == "id"`,
 /// [`header_safe_email`], and a truthy `email_verified`. The single sanctioned exception
 /// to the last one is [`unverified_social_ok`].
 ///
-/// The names are subject to none of that. They are not an identity and authorize nothing,
-/// they need no `header_safe_email` (the encoder at emission is what makes them safe), and
-/// `BB_AUTH_ALLOW_UNVERIFIED_SOCIAL` does not change their standing — a name is
-/// self-asserted on *every* token, whatever the email's verification status.
+/// The profile claims are subject to none of that. They are not an identity and authorize
+/// nothing, they need no `header_safe_email` (the encoder at emission is what makes them
+/// safe), and `BB_AUTH_ALLOW_UNVERIFIED_SOCIAL` does not change their standing — a profile
+/// attribute is self-asserted on *every* token, whatever the email's verification status.
 fn validate_id_token(token: &str, state: &State) -> Result<UserIdentity, String> {
     let header = decode_header(token).map_err(|e| format!("bad token header: {e}"))?;
     if header.alg != Algorithm::RS256 {
@@ -856,11 +1039,15 @@ fn validate_id_token(token: &str, state: &State) -> Result<UserIdentity, String>
             social_provider_names(&c.identities)
         );
     }
-    Ok(UserIdentity {
-        email,
-        given_name: clean_name(&c.given_name),
-        family_name: clean_name(&c.family_name),
-    })
+    // Whatever the operator asked for, and only that: an unconfigured claim is never
+    // looked at, let alone carried.
+    let mut claims = BTreeMap::new();
+    for pc in &state.cfg.profile_claims {
+        if let Some(v) = c.extra.get(&pc.claim).and_then(clean_claim) {
+            claims.insert(pc.claim.clone(), v);
+        }
+    }
+    Ok(UserIdentity { email, claims })
 }
 
 // ---------------------------------------------------------------------------
@@ -899,31 +1086,49 @@ fn finish_session(exp: u64, eb: &str) -> Option<String> {
     Some(email.to_ascii_lowercase())
 }
 
-/// Decode one name segment of a [`COOKIE_VERSION`] cookie.
+/// Decode the profile-claims segment of a [`COOKIE_VERSION`] cookie.
 ///
-/// An empty segment is `Some(None)`: the token carried no such claim, which is normal. The
-/// outer `None` means the segment does not decode — invalid base64url, or bytes that are
-/// not UTF-8 — and that fails the **whole cookie**. A signature that verifies over bytes
-/// we could not have minted is either a bug here or a compromised key, and both call for
-/// fail-closed, the same posture [`finish_session`] takes on the email.
-fn decode_name_segment(seg: &str) -> Option<Option<String>> {
+/// An empty segment is an empty map: the credential carried no claim, which is the default
+/// case. Anything else must be a JSON object of strings that this gate could itself have
+/// minted — every key passing [`claim_name_ok`] and every value [`claim_value_ok`], and
+/// never the object `{}` (which we encode as the empty segment). `None` on any other
+/// shape, on invalid base64url, or on bytes that are not UTF-8, and that fails the **whole
+/// cookie**. A signature that verifies over bytes we could not have minted is either a bug
+/// here or a compromised key, and both call for fail-closed — the same posture
+/// [`finish_session`] takes on the email.
+///
+/// What it deliberately does *not* check is the current configuration: a cookie legitimately
+/// outlives an edit to `BB_AUTH_PROFILE_CLAIMS` and may carry a claim no longer listed.
+/// Filtering to the live config is emission's job ([`profile_headers`]), not verification's.
+fn decode_claims_segment(seg: &str) -> Option<BTreeMap<String, String>> {
     if seg.is_empty() {
-        return Some(None);
+        return Some(BTreeMap::new());
     }
-    let name = String::from_utf8(URL_SAFE_NO_PAD.decode(seg).ok()?).ok()?;
-    Some(Some(name))
+    let raw = URL_SAFE_NO_PAD.decode(seg).ok()?;
+    // Any non-object, or a value that is not a string, fails here.
+    let claims: BTreeMap<String, String> = serde_json::from_slice(&raw).ok()?;
+    if claims.is_empty() {
+        return None;
+    }
+    claims
+        .iter()
+        .all(|(k, v)| claim_name_ok(k) && claim_value_ok(v))
+        .then_some(claims)
 }
 
 /// Mint a session cookie for `ident`, valid for `ttl` seconds, signed with the active
-/// key in the [`COOKIE_VERSION`] format. A name the identity does not have becomes the
+/// key in the [`COOKIE_VERSION`] format. An identity with no profile claims gets the
 /// empty segment, so the field count never varies.
 fn make_session(ident: &UserIdentity, ttl: u64, keys: &HmacKeys) -> String {
     let exp = now() + ttl;
     let b64 = |s: &str| URL_SAFE_NO_PAD.encode(s.as_bytes());
     let eb = b64(&ident.email);
-    let gb = ident.given_name.as_deref().map(b64).unwrap_or_default();
-    let fb = ident.family_name.as_deref().map(b64).unwrap_or_default();
-    let msg = format!("{COOKIE_VERSION}.{}.{exp}.{eb}.{gb}.{fb}", keys.active_id);
+    let cb = if ident.claims.is_empty() {
+        String::new()
+    } else {
+        b64(&serde_json::to_string(&ident.claims).expect("a map of strings serializes"))
+    };
+    let msg = format!("{COOKIE_VERSION}.{}.{exp}.{eb}.{cb}", keys.active_id);
     let sig = sign(keys.active(), &msg);
     format!("{msg}.{sig}")
 }
@@ -932,24 +1137,24 @@ fn make_session(ident: &UserIdentity, ttl: u64, keys: &HmacKeys) -> String {
 /// returning the identity it carries, with the email lowercased. `None` on anything that
 /// does not verify.
 ///
-/// [`COOKIE_VERSION`] is the **only** format accepted: a cookie in any older one is not
-/// distinguished from junk, and its holder is sent back through the login page. See that
-/// constant for why no verify-only arm is kept.
+/// The signature is checked over the segments **as received**, before the claims blob is
+/// parsed; nothing is re-serialized to compare. [`COOKIE_VERSION`] is the **only** format
+/// accepted: a cookie in any older one is not distinguished from junk, and its holder is
+/// sent back through the login page. See that constant for why no verify-only arm is kept.
 fn verify_session(val: &str, keys: &HmacKeys) -> Option<UserIdentity> {
-    let parts: Vec<&str> = val.splitn(7, '.').collect();
+    let parts: Vec<&str> = val.splitn(6, '.').collect();
     match parts.as_slice() {
-        [v, keyid, exp_s, eb, gb, fb, sig] if *v == COOKIE_VERSION => {
+        [v, keyid, exp_s, eb, cb, sig] if *v == COOKIE_VERSION => {
             let key = keys.by_id.get(*keyid)?;
             let exp: u64 = exp_s.parse().ok()?;
-            let msg = format!("{v}.{keyid}.{exp_s}.{eb}.{gb}.{fb}");
+            let msg = format!("{v}.{keyid}.{exp_s}.{eb}.{cb}");
             if !sig_matches(key, &msg, sig) {
                 return None;
             }
             let email = finish_session(exp, eb)?;
             Some(UserIdentity {
                 email,
-                given_name: decode_name_segment(gb)?,
-                family_name: decode_name_segment(fb)?,
+                claims: decode_claims_segment(cb)?,
             })
         }
         _ => None,
@@ -1017,9 +1222,9 @@ fn h(k: &str, v: &str) -> Header {
 /// `Niccol%C3%B2` and `%` itself as `%25`.
 ///
 /// The output is printable ASCII for **any** input, control bytes and all. That
-/// construction is what lets [`respond_authorized`] pass a name straight to [`h`] — which
-/// panics on a non-ASCII value, in a process built with `panic = "abort"` — without
-/// validating anything per request. See [`GIVEN_NAME_HEADER`].
+/// construction is what lets [`respond_authorized`] pass a claim value straight to [`h`] —
+/// which panics on a non-ASCII value, in a process built with `panic = "abort"` — without
+/// validating anything per request. See [`ProfileClaim`].
 ///
 /// Hand-rolled on purpose: this is the whole of RFC 3986's encoding rule, and a crate for
 /// it would be a dependency to audit and cross-compile for no gain. `form_urlencoded` is
@@ -1141,9 +1346,34 @@ fn respond_empty(req: Request, status: u16) {
     let _ = req.respond(Response::empty(StatusCode(status)));
 }
 
+/// The profile headers a `204` should carry: one per configured [`ProfileClaim`] the
+/// identity actually has, value percent-encoded, in configuration order.
+///
+/// **The live configuration is the authority, not the credential.** A cookie outlives an
+/// edit to `BB_AUTH_PROFILE_CLAIMS`, so it may carry a claim that has since been removed —
+/// which emits nothing — or lack one that has since been added, which omits that header
+/// until its holder next signs in. Emitting a header for a claim nobody configured would
+/// hand the application a value no current config accounts for.
+///
+/// An absent claim omits its header entirely: nginx reads an empty variable as "no header",
+/// so present-and-empty would be a distinction the application cannot make. That is why
+/// this returns only what it found, and why an empty value cannot reach it
+/// ([`claim_value_ok`] rejects one at both capture and cookie-verification).
+fn profile_headers<'a>(claims: &'a [ProfileClaim], ident: &UserIdentity) -> Vec<(&'a str, String)> {
+    claims
+        .iter()
+        .filter_map(|pc| {
+            ident
+                .claims
+                .get(&pc.claim)
+                .map(|v| (pc.header.as_str(), pct_encode(v)))
+        })
+        .collect()
+}
+
 /// Respond `204` to an authorized `auth_request`, naming the user in [`IDENTITY_HEADER`]
-/// and, when the credential carried them, their names in [`GIVEN_NAME_HEADER`] /
-/// [`FAMILY_NAME_HEADER`].
+/// and, for each configured [`ProfileClaim`] the credential carried, its value in the
+/// header derived from that claim ([`profile_headers`]).
 ///
 /// The email always passed [`header_safe_email`], by one of two disjoint routes, so [`h`]
 /// cannot panic here:
@@ -1159,32 +1389,26 @@ fn respond_empty(req: Request, status: u16) {
 /// `by_email` lookup added later, or a fourth credential that skips `validate_id_token`,
 /// and a panicking worker thread.
 ///
-/// The names need no such argument: [`pct_encode`] emits printable ASCII whatever it is
-/// handed, so their safety is a property of the encoder, not of where they came from. The
-/// second assert pins *that* — it is what would catch a later change emitting a raw name.
-/// `Some("")` cannot occur ([`clean_name`] rejects it) and would send a header
-/// present-and-empty, which the contract with nginx does not allow.
-fn respond_authorized(req: Request, ident: &UserIdentity) {
+/// The profile claims need no such argument: their header names are derived from an
+/// `[A-Za-z0-9_:-]` claim name and their values go through [`pct_encode`], which emits
+/// printable ASCII whatever it is handed — so safety is a property of the construction, not
+/// of where the value came from. The second assert pins *that*: it is what would catch a
+/// later change emitting a raw value, or a header name that stopped being a token.
+fn respond_authorized(req: Request, ident: &UserIdentity, claims: &[ProfileClaim]) {
     debug_assert!(
         header_safe_email(&ident.email),
         "identity must be header-safe: {:?}",
         ident.email
     );
     let mut resp = Response::empty(StatusCode(204)).with_header(h(IDENTITY_HEADER, &ident.email));
-    // An absent name omits its header entirely: nginx reads an empty variable as "no
-    // header", so present-and-empty would be a distinction the application cannot make.
-    for (name, value) in [
-        (GIVEN_NAME_HEADER, ident.given_name.as_deref()),
-        (FAMILY_NAME_HEADER, ident.family_name.as_deref()),
-    ] {
-        if let Some(v) = value {
-            let enc = pct_encode(v);
-            debug_assert!(
-                !enc.is_empty() && enc.bytes().all(|b| b.is_ascii_graphic()),
-                "encoded name must be non-empty printable ASCII: {enc:?}"
-            );
-            resp = resp.with_header(h(name, &enc));
-        }
+    for (name, enc) in profile_headers(claims, ident) {
+        debug_assert!(
+            !enc.is_empty()
+                && enc.bytes().all(|b| b.is_ascii_graphic())
+                && name.bytes().all(|b| b.is_ascii_graphic()),
+            "encoded claim must be non-empty printable ASCII: {name:?}: {enc:?}"
+        );
+        resp = resp.with_header(h(name, &enc));
     }
     let _ = req.respond(resp);
 }
@@ -1275,8 +1499,8 @@ fn original_url(req: &Request, cfg: &Config) -> Option<String> {
 ///
 /// Returns the owning user's email — a key *acts as* its user, so that is the identity
 /// the application downstream sees. It is also the only path with no token to decode, and
-/// so the only one that can never carry a name: [`GIVEN_NAME_HEADER`] and
-/// [`FAMILY_NAME_HEADER`] are omitted for every API key.
+/// so the only one that can never carry a profile claim: every [`ProfileClaim`] header is
+/// omitted for every API key, whatever the configuration.
 ///
 /// A `public_auth` site does **not** rescue an unknown key. That grant is for identities
 /// Cognito vouches for, and Cognito vouches for no static key of ours: an unknown key is
@@ -1353,27 +1577,19 @@ fn authorize(access: &Access, email: String, url: Option<&str>) -> Option<String
 }
 
 /// [`authorize`] for a token-backed credential: the grant decision sees only the email,
-/// and the names ride back untouched on success.
+/// and the profile claims ride back untouched on success.
 ///
-/// Splitting it this way is deliberate. The access file has no opinion about names, so
-/// nothing about them may reach [`decide`] — if a name could ever change the answer,
-/// `bb-auth-adm can` would stop answering the same question as the gate. This wrapper is
-/// re-assembly, not policy.
+/// Splitting it this way is deliberate. The access file has no opinion about profile
+/// claims, so nothing about them may reach [`decide`] — if one could ever change the
+/// answer, `bb-auth-adm can` would stop answering the same question as the gate. This
+/// wrapper is re-assembly, not policy.
 fn authorize_identity(
     access: &Access,
     ident: UserIdentity,
     url: Option<&str>,
 ) -> Option<UserIdentity> {
-    let UserIdentity {
-        email,
-        given_name,
-        family_name,
-    } = ident;
-    authorize(access, email, url).map(|email| UserIdentity {
-        email,
-        given_name,
-        family_name,
-    })
+    let UserIdentity { email, claims } = ident;
+    authorize(access, email, url).map(|email| UserIdentity { email, claims })
 }
 
 /// `GET /auth/validate` — the nginx `auth_request` endpoint. 204 plus the authorized
@@ -1386,7 +1602,7 @@ fn authorize_identity(
 /// the URL inside its [`UrlScope`](bb_auth_core::UrlScope); the two Cognito credentials go through [`authorize`],
 /// which also honours `public_auth` sites and the `denied` veto. Whichever one wins, the
 /// identity handed back is an email — plus, for the two token-backed credentials, whatever
-/// names came with it. See [`respond_authorized`].
+/// configured profile claims came with it. See [`respond_authorized`].
 fn handle_validate(req: Request, state: &State) {
     let cfg = &state.cfg;
     // Original request URL (for site resolution and per-user / per-key URL scoping),
@@ -1400,7 +1616,7 @@ fn handle_validate(req: Request, state: &State) {
     // cookie check so a stray Authorization header never blocks an otherwise-valid cookie.
     if let Some(token) = header_value(&req, "Authorization").and_then(parse_bearer) {
         let granted = if token.starts_with(API_KEY_PREFIX) {
-            // A key acts as its user and carries no token, so no names come with it.
+            // A key acts as its user and carries no token, so no claims come with it.
             bearer_apikey_email(&state.access.read().unwrap(), token, url.as_deref())
                 .map(UserIdentity::email_only)
         } else {
@@ -1415,7 +1631,7 @@ fn handle_validate(req: Request, state: &State) {
             }
         };
         if let Some(ident) = granted {
-            respond_authorized(req, &ident);
+            respond_authorized(req, &ident, &cfg.profile_claims);
             return;
         }
     }
@@ -1425,7 +1641,7 @@ fn handle_validate(req: Request, state: &State) {
         .and_then(|v| verify_session(&v, &cfg.hmac_keys))
         .and_then(|ident| authorize_identity(&state.access.read().unwrap(), ident, url.as_deref()));
     match granted {
-        Some(ident) => respond_authorized(req, &ident),
+        Some(ident) => respond_authorized(req, &ident, &cfg.profile_claims),
         None => {
             // Which login page nginx should send them to. Resolved from the site even
             // though no site granted anything: `login_url` says where this area's users
@@ -1446,10 +1662,10 @@ fn handle_validate(req: Request, state: &State) {
 /// 400 on a missing token, 401 on an invalid one, 403 when the verified email has nowhere
 /// it could possibly go. The redirect target is always laundered through [`safe_rd`].
 ///
-/// This is also the only moment a name claim is readable: the cookie carries whatever the
-/// token asserted ([`make_session`]), which is what lets a later `/auth/validate` name the
-/// person with no token in hand. The log line stays email-only — a name is PII the log
-/// does not need.
+/// This is also the only moment a profile claim is readable: the cookie carries whatever
+/// the token asserted and the config asked for ([`make_session`]), which is what lets a
+/// later `/auth/validate` name the person with no token in hand. The log line stays
+/// email-only — a name is PII the log does not need.
 ///
 /// The cookie is identity, not authorization: it grants nothing on its own, and every
 /// request it accompanies is re-authorized by [`handle_validate`]. So the 403 here is a
@@ -1522,8 +1738,8 @@ fn handle_session(mut req: Request, state: &State) {
         } else {
             "not in users table"
         };
-        // Names are never logged: they are PII the log line does not need, and the email
-        // already identifies it.
+        // Profile claims are never logged: they are PII the log line does not need, and
+        // the email already identifies it.
         eprintln!("[bb-auth] session denied: {} {why}", ident.email);
         respond_html(
             req,
@@ -1715,11 +1931,34 @@ fn main() {
         std::process::exit(1);
     }));
 
+    // Claim *names* are configuration, so they belong in the banner; claim *values* are
+    // PII and are never logged, here or anywhere.
+    let claim_names = if state.cfg.profile_claims.is_empty() {
+        "(none)".to_string()
+    } else {
+        state
+            .cfg
+            .profile_claims
+            .iter()
+            .map(|c| c.claim.as_str())
+            .collect::<Vec<_>>()
+            .join(",")
+    };
     eprintln!(
-        "[bb-auth] listening on {listen} | issuer={} | aud={} | users={user_n} | api_keys={key_n} | sites={site_n} | denied={denied_n} | workers={workers}",
+        "[bb-auth] listening on {listen} | issuer={} | aud={} | users={user_n} | api_keys={key_n} | sites={site_n} | denied={denied_n} | claims={claim_names} | workers={workers}",
         state.cfg.issuer,
         state.cfg.audiences.join(",")
     );
+    // A browser silently drops a cookie over ~4 KB, which would look like a login loop
+    // rather than an error. Warn while it is still a config question.
+    let worst = worst_case_cookie_bytes(&state.cfg.profile_claims);
+    if worst > 3072 {
+        eprintln!(
+            "[bb-auth] WARNING: {} profile claims can mint a session cookie of up to ~{worst} bytes, \
+             near the ~4 KB a browser will store (BB_AUTH_PROFILE_CLAIMS)",
+            state.cfg.profile_claims.len()
+        );
+    }
     if !open_sites.is_empty() {
         // Cognito self-signup is open, so this really is "anyone who can register".
         eprintln!(
@@ -1794,21 +2033,141 @@ mod tests {
         }
     }
 
-    /// An identity with no names — what every legacy cookie and every API key resolves to.
+    /// An identity with no claims — what every API key resolves to, and every login under
+    /// the default (empty) `BB_AUTH_PROFILE_CLAIMS`.
     fn ident(email: &str) -> UserIdentity {
         UserIdentity::email_only(email.to_string())
     }
-    /// An identity carrying both names.
-    fn ident_full(email: &str, given: &str, family: &str) -> UserIdentity {
+    /// An identity carrying an arbitrary claim set.
+    fn ident_claims(email: &str, claims: &[(&str, &str)]) -> UserIdentity {
         UserIdentity {
             email: email.to_string(),
-            given_name: Some(given.to_string()),
-            family_name: Some(family.to_string()),
+            claims: claims
+                .iter()
+                .map(|(k, v)| (k.to_string(), v.to_string()))
+                .collect(),
+        }
+    }
+    /// An identity carrying the two claims v2.4 hard-coded.
+    fn ident_full(email: &str, given: &str, family: &str) -> UserIdentity {
+        ident_claims(email, &[("given_name", given), ("family_name", family)])
+    }
+    /// The claim set an operator writes to reproduce v2.4's behaviour.
+    fn claims_cfg() -> Vec<ProfileClaim> {
+        compile_profile_claims("given_name,family_name").unwrap()
+    }
+
+    #[test]
+    fn compile_profile_claims_default_is_empty() {
+        // Profile propagation is opt-in: unset and empty both mean "emit nothing".
+        for spec in ["", "   ", ",", " , ,"] {
+            assert!(
+                compile_profile_claims(spec).unwrap().is_empty(),
+                "should be empty: {spec:?}"
+            );
         }
     }
 
     #[test]
-    fn session_roundtrip_bb3() {
+    fn compile_profile_claims_derives_v24_headers_exactly() {
+        // The 2.4 compatibility pin: this spec, and only this spec, must reproduce the two
+        // headers that used to be constants — byte for byte, in this order.
+        let c = claims_cfg();
+        let got: Vec<(&str, &str)> = c
+            .iter()
+            .map(|p| (p.claim.as_str(), p.header.as_str()))
+            .collect();
+        assert_eq!(
+            got,
+            vec![
+                ("given_name", "X-Auth-Given-Name"),
+                ("family_name", "X-Auth-Family-Name"),
+            ]
+        );
+    }
+
+    #[test]
+    fn compile_profile_claims_derivation_and_trimming() {
+        let c =
+            compile_profile_claims(" nickname , custom:department ,phone_number,ZoneInfo").unwrap();
+        let got: Vec<(&str, &str)> = c
+            .iter()
+            .map(|p| (p.claim.as_str(), p.header.as_str()))
+            .collect();
+        assert_eq!(
+            got,
+            vec![
+                // Entries are trimmed, and the claim keeps its own spelling — only the
+                // header is normalised.
+                ("nickname", "X-Auth-Nickname"),
+                ("custom:department", "X-Auth-Custom-Department"),
+                ("phone_number", "X-Auth-Phone-Number"),
+                ("ZoneInfo", "X-Auth-Zoneinfo"),
+            ]
+        );
+    }
+
+    #[test]
+    fn compile_profile_claims_rejects_bad_names() {
+        for spec in [
+            "full name",  // space
+            "naïve",      // non-ASCII
+            "a.b",        // a dot would be ambiguous in a header token
+            "given/name", // slash
+            ":dept",      // empty leading part …
+            "dept:",      // … trailing …
+            "a--b",       // … and interior: all would derive an empty component
+        ] {
+            assert!(
+                compile_profile_claims(spec).is_err(),
+                "should reject: {spec:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn compile_profile_claims_rejects_claims_the_gate_consumes() {
+        // `Claims` takes these into typed fields, so `flatten` never sees them: configuring
+        // one would propagate nothing, silently and forever. Fatal instead.
+        for claim in RESERVED_CLAIMS {
+            assert!(
+                compile_profile_claims(claim).is_err(),
+                "should reject: {claim}"
+            );
+        }
+    }
+
+    #[test]
+    fn compile_profile_claims_rejects_header_collisions() {
+        // Reserved headers the gate emits itself.
+        assert!(compile_profile_claims("login_url").is_err()); // -> X-Auth-Login-Url
+        assert!(compile_profile_claims("login-URL").is_err());
+        // A repeated claim, and spellings that differ only in case or separator, all derive
+        // the same header — one value would silently win.
+        assert!(compile_profile_claims("nickname,nickname").is_err());
+        assert!(compile_profile_claims("given_name,given-name").is_err());
+        assert!(compile_profile_claims("nickname,NickName").is_err());
+        // Distinct headers are fine.
+        assert_eq!(compile_profile_claims("nickname,locale").unwrap().len(), 2);
+    }
+
+    #[test]
+    fn worst_case_cookie_bytes_grows_and_trips_the_warning() {
+        let none = worst_case_cookie_bytes(&[]);
+        let two = worst_case_cookie_bytes(&claims_cfg());
+        assert!(two > none, "a claim must cost something");
+        // The threshold `main` warns at. A couple of claims is comfortable; a handful of
+        // max-length ones is not, which is the whole point of warning.
+        assert!(two <= 3072, "the v2.4 pair must not warn: {two}");
+        let many = compile_profile_claims("a,b,c,d,e,f,g,h").unwrap();
+        assert!(
+            worst_case_cookie_bytes(&many) > 3072,
+            "eight claims must warn"
+        );
+    }
+
+    #[test]
+    fn session_roundtrip_bb4() {
         let k = keys_one();
         // Non-ASCII and an apostrophe: the cookie is binary-safe (base64) where the header
         // is not, so this is the roundtrip that has to survive untouched.
@@ -1817,8 +2176,8 @@ mod tests {
             3600,
             &k,
         );
-        assert!(c.starts_with("bb3.k1."));
-        // The email lowercases; the names do not — their case is the user's.
+        assert!(c.starts_with("bb4.k1."));
+        // The email lowercases; the claim values do not — their case is the user's.
         assert_eq!(
             verify_session(&c, &k),
             Some(ident_full("foo@bar.com", "Niccolò", "de' Medici"))
@@ -1826,59 +2185,76 @@ mod tests {
     }
 
     #[test]
-    fn session_roundtrip_bb3_no_names() {
+    fn session_roundtrip_bb4_no_claims() {
         let k = keys_one();
         let c = make_session(&ident("a@b.com"), 3600, &k);
-        // Absent names are empty segments, not missing fields: the count never varies.
-        assert_eq!(c.split('.').count(), 7, "field count is fixed: {c}");
+        // No claims is the empty segment, not a missing field and not "{}": the count
+        // never varies, and the default config costs no cookie bytes.
+        assert_eq!(c.split('.').count(), 6, "field count is fixed: {c}");
+        assert_eq!(
+            c.split('.').nth(4),
+            Some(""),
+            "empty segment, never {{}}: {c}"
+        );
         assert_eq!(verify_session(&c, &k), Some(ident("a@b.com")));
     }
 
     #[test]
-    fn session_bb3_one_name_pins_segment_order() {
+    fn session_roundtrip_bb4_json_special_chars() {
+        // The blob is JSON now, so a value containing a quote or a backslash goes through
+        // escaping and must come back byte-identical.
         let k = keys_one();
-        let one = UserIdentity {
-            email: "a@b.com".to_string(),
-            given_name: Some("Ada".to_string()),
-            family_name: None,
-        };
-        let c = make_session(&one, 3600, &k);
-        // given comes first: were the segments swapped, this would come back as a surname.
-        assert_eq!(verify_session(&c, &k), Some(one));
+        let id = ident_claims("a@b.com", &[("nickname", r#"a"b\c/d"#)]);
+        let c = make_session(&id, 3600, &k);
+        assert_eq!(verify_session(&c, &k), Some(id));
     }
 
     #[test]
-    fn session_bb3_names_are_signed() {
+    fn session_bb4_claims_are_signed() {
         let k = keys_one();
         let c = make_session(&ident_full("a@b.com", "Ada", "Byron"), 3600, &k);
         let p: Vec<&str> = c.split('.').collect();
-        // Swap the two name segments, keep the signature: the names are inside the signed
-        // bytes, so this must not verify.
-        let swapped = format!(
-            "{}.{}.{}.{}.{}.{}.{}",
-            p[0], p[1], p[2], p[3], p[5], p[4], p[6]
-        );
-        assert_eq!(verify_session(&swapped, &k), None);
-        // And substituting one for another valid name is no better.
-        let other = URL_SAFE_NO_PAD.encode("Eve");
-        let forged = format!(
-            "{}.{}.{}.{}.{other}.{}.{}",
-            p[0], p[1], p[2], p[3], p[5], p[6]
-        );
-        assert_eq!(verify_session(&forged, &k), None);
+        // Substitute a well-formed claims blob, keep the signature: the blob is inside the
+        // signed bytes, so this must not verify.
+        let forged = URL_SAFE_NO_PAD.encode(r#"{"given_name":"Eve"}"#);
+        let cookie = format!("{}.{}.{}.{}.{forged}.{}", p[0], p[1], p[2], p[3], p[5]);
+        assert_eq!(verify_session(&cookie, &k), None);
+        // Dropping the blob entirely is no better.
+        let stripped = format!("{}.{}.{}.{}..{}", p[0], p[1], p[2], p[3], p[5]);
+        assert_eq!(verify_session(&stripped, &k), None);
     }
 
     #[test]
-    fn session_bb3_bad_name_segment_fails_closed() {
+    fn session_bb4_bad_claims_segment_fails_closed() {
         let k = keys_one();
-        // A *validly signed* cookie whose name segment is not base64. We could never have
-        // minted it, so it is a bug or a compromised key — either way, reject the cookie
-        // rather than the name.
         let exp = now() + 3600;
         let eb = URL_SAFE_NO_PAD.encode(b"a@b.com");
-        let msg = format!("bb3.k1.{exp}.{eb}.!!!.");
-        let sig = sign(&k.by_id["k1"], &msg);
-        assert_eq!(verify_session(&format!("{msg}.{sig}"), &k), None);
+        let b64 = |s: &str| URL_SAFE_NO_PAD.encode(s.as_bytes());
+        let over = "x".repeat(MAX_CLAIM_VALUE_BYTES + 1);
+        // Every one of these is *correctly signed*. We could never have minted it, so it is
+        // a bug or a compromised key — either way reject the cookie, not just the claim.
+        for seg in [
+            "!!!".to_string(),                    // not base64url
+            URL_SAFE_NO_PAD.encode([0xff, 0xfe]), // not UTF-8
+            b64("[]"),                            // not an object
+            b64("\"x\""),                         // ditto
+            b64("{}"),                            // we mint the empty segment
+            b64(r#"{"a":1}"#),                    // value not a string
+            b64(r#"{"a":null}"#),                 // ditto
+            b64(r#"{"a":""}"#),                   // would emit an empty header
+            b64(&format!(r#"{{"a":"{over}"}}"#)), // over the value cap
+            b64(r#"{"a":"one\ntwo"}"#),           // control character
+            b64(r#"{"a":" Ada"}"#),               // not trim-stable
+            b64(r#"{"bad key!":"Ada"}"#),         // key no config could produce
+        ] {
+            let msg = format!("bb4.k1.{exp}.{eb}.{seg}");
+            let sig = sign(&k.by_id["k1"], &msg);
+            assert_eq!(
+                verify_session(&format!("{msg}.{sig}"), &k),
+                None,
+                "should reject: {seg}"
+            );
+        }
     }
 
     #[test]
@@ -1903,7 +2279,7 @@ mod tests {
         let k = keys_one(); // only k1
         let exp = now() + 3600;
         let eb = URL_SAFE_NO_PAD.encode(b"a@b.com");
-        let msg = format!("bb3.k9.{exp}.{eb}..");
+        let msg = format!("bb4.k9.{exp}.{eb}.");
         let sig = sign(&k.by_id["k1"], &msg);
         let c = format!("{msg}.{sig}");
         assert_eq!(verify_session(&c, &k), None);
@@ -1914,31 +2290,29 @@ mod tests {
         let k = keys_two(); // k1 active, k2 accepted
         let exp = now() + 3600;
         let eb = URL_SAFE_NO_PAD.encode(b"x@y.com");
-        let gb = URL_SAFE_NO_PAD.encode("Ada");
-        let msg = format!("bb3.k2.{exp}.{eb}.{gb}.");
+        let cb = URL_SAFE_NO_PAD.encode(r#"{"given_name":"Ada"}"#);
+        let msg = format!("bb4.k2.{exp}.{eb}.{cb}");
         let sig = sign(&k.by_id["k2"], &msg);
         let c = format!("{msg}.{sig}");
         assert_eq!(
             verify_session(&c, &k),
-            Some(UserIdentity {
-                email: "x@y.com".to_string(),
-                given_name: Some("Ada".to_string()),
-                family_name: None,
-            })
+            Some(ident_claims("x@y.com", &[("given_name", "Ada")]))
         );
     }
 
     #[test]
-    fn pre_bb3_cookies_are_rejected() {
+    fn pre_bb4_cookies_are_rejected() {
         // The deliberate cost of dropping the verify-only arms: a cookie in an older
         // format, correctly signed with a live key, no longer verifies. Its holder goes
         // through the login page once. This is the contract, so it is pinned.
         let k = keys_one();
         let exp = now() + 3600;
         let eb = URL_SAFE_NO_PAD.encode(b"old@a.com");
+        let gb = URL_SAFE_NO_PAD.encode("Ada");
         for msg in [
-            format!("bb2.k1.{exp}.{eb}"), // v2.0–2.3
-            format!("bb1.{exp}.{eb}"),    // pre-2.0
+            format!("bb3.k1.{exp}.{eb}.{gb}."), // v2.4
+            format!("bb2.k1.{exp}.{eb}"),       // v2.0–2.3
+            format!("bb1.{exp}.{eb}"),          // pre-2.0
         ] {
             let sig = sign(&k.by_id["k1"], &msg);
             let c = format!("{msg}.{sig}");
@@ -1957,15 +2331,50 @@ mod tests {
             "zzz.a.b.c",
             "bb1.notanum.aaa.sig",
             "bb2.k1.99999.!!!.AAAA",
-            // bb3 shapes
-            "bb3",
-            "bb3.k1.x.y",
-            "bb3.k1.99999.!!!..AAAA", // six fields — the bb2 arm's shape, wrong tag
-            "bb3.k1.9.aa.bb.cc.dd.ee", // eight — the extra folds into sig, which then fails
-            "bb2.k1.9.aa.bb.cc.dd",   // bb2 tag wearing bb3's shape: no arm matches
+            // bb4 shapes
+            "bb4",
+            "bb4.k1.x.y",
+            "bb4.k1.99999.!!!.AAAA", // five fields — one short
+            "bb4.k1.9.aa.bb.cc.dd",  // seven — the extra folds into sig, which then fails
+            "bb3.k1.9.aa.bb.cc",     // bb3 tag wearing bb4's shape: no arm matches
+            "bb3.k1.9.aa.bb.cc.dd",  // bb3's own shape: the arm is gone
         ] {
             assert_eq!(verify_session(bad, &k), None, "should reject: {bad:?}");
         }
+    }
+
+    #[test]
+    fn profile_headers_follow_the_live_config() {
+        let cfg = claims_cfg();
+        // A cookie minted under a wider config: `nickname` is no longer configured, so it
+        // emits nothing — the live config is the authority, not the credential.
+        let stale = ident_claims(
+            "a@b.com",
+            &[("given_name", "Ada"), ("nickname", "The Countess")],
+        );
+        assert_eq!(
+            profile_headers(&cfg, &stale),
+            vec![("X-Auth-Given-Name", "Ada".to_string())]
+        );
+        // A configured claim the identity lacks omits its header rather than sending it
+        // empty; order follows the config, not the map.
+        assert_eq!(
+            profile_headers(&cfg, &ident_full("a@b.com", "Ada", "Byron")),
+            vec![
+                ("X-Auth-Given-Name", "Ada".to_string()),
+                ("X-Auth-Family-Name", "Byron".to_string()),
+            ]
+        );
+        // No config, nothing emitted, whatever the identity carries.
+        assert!(profile_headers(&[], &stale).is_empty());
+        // And the value goes out percent-encoded.
+        assert_eq!(
+            profile_headers(&cfg, &ident_full("a@b.com", "Niccolò", "de' Medici")),
+            vec![
+                ("X-Auth-Given-Name", "Niccol%C3%B2".to_string()),
+                ("X-Auth-Family-Name", "de%27%20Medici".to_string()),
+            ]
+        );
     }
 
     #[test]
@@ -2001,26 +2410,29 @@ mod tests {
     }
 
     #[test]
-    fn clean_name_hygiene() {
+    fn clean_claim_hygiene() {
         use serde_json::json;
         // captured, trimmed, case and UTF-8 preserved
         assert_eq!(
-            clean_name(&json!("  Niccolò  ")).as_deref(),
+            clean_claim(&json!("  Niccolò  ")).as_deref(),
             Some("Niccolò")
         );
         assert_eq!(
-            clean_name(&json!("de' Medici")).as_deref(),
+            clean_claim(&json!("de' Medici")).as_deref(),
             Some("de' Medici")
         );
         // nothing worth a header
-        assert_eq!(clean_name(&json!("")), None);
-        assert_eq!(clean_name(&json!("   ")), None);
-        assert_eq!(clean_name(&json!("Ada\rByron")), None); // control char
-                                                            // dropped, not truncated, at the byte cap
-        let max = "x".repeat(MAX_NAME_BYTES);
-        assert_eq!(clean_name(&json!(max)).as_deref(), Some(max.as_str()));
-        assert_eq!(clean_name(&json!("x".repeat(MAX_NAME_BYTES + 1))), None);
-        // a non-string claim costs the name, never the token
+        assert_eq!(clean_claim(&json!("")), None);
+        assert_eq!(clean_claim(&json!("   ")), None);
+        assert_eq!(clean_claim(&json!("Ada\rByron")), None); // control char
+                                                             // dropped, not truncated, at the byte cap
+        let max = "x".repeat(MAX_CLAIM_VALUE_BYTES);
+        assert_eq!(clean_claim(&json!(max)).as_deref(), Some(max.as_str()));
+        assert_eq!(
+            clean_claim(&json!("x".repeat(MAX_CLAIM_VALUE_BYTES + 1))),
+            None
+        );
+        // a non-string claim costs the claim, never the token
         for v in [
             json!(42),
             json!(true),
@@ -2028,28 +2440,63 @@ mod tests {
             json!(["Ada"]),
             json!({}),
         ] {
-            assert_eq!(clean_name(&v), None, "should ignore: {v}");
+            assert_eq!(clean_claim(&v), None, "should ignore: {v}");
         }
     }
 
     #[test]
-    fn claims_parse_names_present_absent_and_mistyped() {
+    fn claim_value_ok_is_what_a_cookie_may_carry() {
+        // The predicate verification shares with capture — where the trim test, vacuous on
+        // capture, is what rejects a value we could not have minted.
+        assert!(claim_value_ok("Ada"));
+        assert!(claim_value_ok("de' Medici"));
+        assert!(!claim_value_ok(""));
+        assert!(!claim_value_ok(" Ada"));
+        assert!(!claim_value_ok("Ada "));
+        assert!(!claim_value_ok("Ada\nByron"));
+        assert!(claim_value_ok(&"x".repeat(MAX_CLAIM_VALUE_BYTES)));
+        assert!(!claim_value_ok(&"x".repeat(MAX_CLAIM_VALUE_BYTES + 1)));
+    }
+
+    #[test]
+    fn claims_parse_profile_claims_present_absent_and_mistyped() {
         let parse = |s: &str| serde_json::from_str::<Claims>(s).expect("claims must parse");
 
         let c = parse(r#"{"email":"a@b.com","given_name":"Ada","family_name":"Byron"}"#);
-        assert_eq!(clean_name(&c.given_name).as_deref(), Some("Ada"));
-        assert_eq!(clean_name(&c.family_name).as_deref(), Some("Byron"));
+        assert_eq!(
+            c.extra.get("given_name").and_then(clean_claim).as_deref(),
+            Some("Ada")
+        );
+        assert_eq!(
+            c.extra.get("family_name").and_then(clean_claim).as_deref(),
+            Some("Byron")
+        );
 
         let c = parse(r#"{"email":"a@b.com"}"#);
-        assert_eq!(clean_name(&c.given_name), None);
-        assert_eq!(clean_name(&c.family_name), None);
+        assert!(c.extra.get("given_name").is_none());
 
-        // The reason these are `Value` and not `Option<String>`: a badly mapped IdP
-        // attribute must cost the user their name, not their login. `parse` not panicking
-        // *is* the assertion.
+        // The reason `extra` holds `Value`s and not `String`s: a badly mapped IdP attribute
+        // must cost the user that claim, not their login. `parse` not panicking *is* the
+        // assertion.
         let c = parse(r#"{"email":"a@b.com","given_name":42,"family_name":["Byron"]}"#);
-        assert_eq!(clean_name(&c.given_name), None);
-        assert_eq!(clean_name(&c.family_name), None);
+        assert_eq!(c.extra.get("given_name").and_then(clean_claim), None);
+        assert_eq!(c.extra.get("family_name").and_then(clean_claim), None);
+    }
+
+    #[test]
+    fn claims_the_gate_consumes_never_reach_extra() {
+        // Why `RESERVED_CLAIMS` exists: `flatten` never sees a key a typed field took, so
+        // configuring one of these would look up a claim that can never be there.
+        let c = serde_json::from_str::<Claims>(
+            r#"{"email":"a@b.com","email_verified":true,"token_use":"id","identities":[]}"#,
+        )
+        .expect("claims must parse");
+        for reserved in RESERVED_CLAIMS {
+            assert!(
+                c.extra.get(reserved).is_none(),
+                "{reserved} must not be in extra"
+            );
+        }
     }
 
     #[test]
@@ -2156,8 +2603,8 @@ mod tests {
 
     #[test]
     fn cookie_value_parses_named() {
-        let h = "a=1; bb_session=bb3.k1.1.aaa...bbb; c=2";
-        assert_eq!(cookie_value(h, "bb_session"), Some("bb3.k1.1.aaa...bbb"));
+        let h = "a=1; bb_session=bb4.k1.1.aaa...bbb; c=2";
+        assert_eq!(cookie_value(h, "bb_session"), Some("bb4.k1.1.aaa...bbb"));
         assert_eq!(cookie_value("bb_session_extra=x", "bb_session"), None);
         assert_eq!(cookie_value("", "bb_session"), None);
     }
@@ -2368,10 +2815,10 @@ mod tests {
     }
 
     #[test]
-    fn authorize_identity_passes_names_through_untouched() {
-        // The names must survive the grant decision without influencing it: the access
-        // file has no opinion about them, and `bb-auth-adm can` has to keep answering the
-        // same question the gate does.
+    fn authorize_identity_passes_claims_through_untouched() {
+        // The profile claims must survive the grant decision without influencing it: the
+        // access file has no opinion about them, and `bb-auth-adm can` has to keep
+        // answering the same question the gate does.
         let a = access_of(
             "authorize-identity",
             r#"{ "sites": [ { "name": "app1", "urls": ["https://app.x.com/app1/*"],
@@ -2393,7 +2840,7 @@ mod tests {
             authorize_identity(&a, ident_full("new@x.com", "Niccolò", "de' Medici"), app1),
             Some(ident_full("new@x.com", "Niccolò", "de' Medici"))
         );
-        // a name never rescues a denial
+        // a claim never rescues a denial
         assert_eq!(
             authorize_identity(&a, ident_full("spammer@x.com", "S", "P"), app1),
             None

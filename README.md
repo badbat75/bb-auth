@@ -39,7 +39,7 @@ nginx error_page 401 → 302  <login-page>/?rd=<original>
 
 | Method | Path             | Who        | Purpose                                            |
 |--------|------------------|------------|----------------------------------------------------|
-| GET    | `/auth/validate` | nginx only | `auth_request`: 204 + `X-Auth-Email` (+ `X-Auth-Given-Name` / `X-Auth-Family-Name` when known) if the session cookie, an `Authorization: Bearer <id_token>`, or a static `Authorization: Bearer bbk_…` API key authorizes the request (in a user's URL scope, or on a `public_auth` site), else 401 + `X-Auth-Login-URL` |
+| GET    | `/auth/validate` | nginx only | `auth_request`: 204 + `X-Auth-Email` (+ one header per configured profile claim, when known) if the session cookie, an `Authorization: Bearer <id_token>`, or a static `Authorization: Bearer bbk_…` API key authorizes the request (in a user's URL scope, or on a `public_auth` site), else 401 + `X-Auth-Login-URL` |
 | POST   | `/auth/session`  | browser    | validate posted `id_token`, set cookie, 302 → `rd` |
 | GET    | `/auth/logout`   | browser    | clear cookie, 302 → `rd` (guarded) or the login page |
 | GET    | `/auth/healthz`  | local      | liveness                                           |
@@ -124,16 +124,23 @@ Two things make the header trustworthy, and both are required:
   An app reachable directly believes any header anybody sends it.
 
 The app should **not** try to read the identity itself. Usually there is nothing to
-read: the session cookie is not a JWT (it carries the email and the two names below,
-HMAC-signed) and an API key has no token at all, so decoding a claim would work for
-exactly one of the three credentials. It would not be safe either — Cognito self-signup
-is open, so a valid `id_token` proves *identity*, never *authorization*. What decides
-authorization is the access file, and only the gate reads it.
+read: the session cookie is not a JWT (it carries the email and the profile claims
+below, HMAC-signed) and an API key has no token at all, so decoding a claim would work
+for exactly one of the three credentials. It would not be safe either — Cognito
+self-signup is open, so a valid `id_token` proves *identity*, never *authorization*.
+What decides authorization is the access file, and only the gate reads it.
 
-### Display name (optional)
+### Profile claims (optional)
 
-So an app need not guess a name out of the email's local part, a `204` can also carry
-the token's OIDC name claims:
+So an app need not guess a display name out of the email's local part, a `204` can also
+carry OIDC profile claims from the token. **Which** claims is configuration:
+
+```bash
+BB_AUTH_PROFILE_CLAIMS=given_name,family_name
+```
+
+Empty by default — set it and the gate emits, on every `204` where the credential
+carried them:
 
 ```text
 X-Auth-Given-Name:  Niccol%C3%B2
@@ -147,16 +154,31 @@ proxy_set_header X-Auth-Given-Name  $bb_given;
 proxy_set_header X-Auth-Family-Name $bb_family;
 ```
 
+- **The header name is derived from the claim name**, never configured separately: `_`
+  and `:` become `-`, each part is title-cased, and the whole is prefixed `X-Auth-`. So
+  `given_name` → `X-Auth-Given-Name`, `nickname` → `X-Auth-Nickname`,
+  `custom:department` → `X-Auth-Custom-Department` (nginx variable
+  `$upstream_http_x_auth_custom_department`). A claim name may contain only
+  `[A-Za-z0-9_:-]`; anything else, a claim the gate consumes itself (`email`,
+  `email_verified`, `token_use`, `identities`), or two entries deriving the same header
+  is a **fatal startup error**, not a skipped entry.
 - **Percent-encoded UTF-8** (RFC 3986), because HTTP header values are not UTF-8: every
   byte outside `[A-Za-z0-9-._~]` is `%XX`, so a space is `%20` and `Niccolò` is
   `Niccol%C3%B2`. Decode with any standard URI-decoder — note this is *not* the
   form-urlencoded variant, so a `+` is a literal plus, never a space.
 - **Absent ⇒ the header is omitted entirely**, never sent empty. That happens when the
-  token carries no such claim and on **every API key** (a key has no token to read a
-  name from). nginx passes that through: an unset variable drops the header too.
+  token carries no such claim and on **every API key** (a key has no token to read one
+  from). nginx passes that through: an unset variable drops the header too.
 - **Additive.** Adding the four lines above is per gated location; leave them out and
-  nothing changes. An app must treat both headers as optional.
-- **These names are self-asserted.** Any Cognito user edits their own profile, so treat
+  nothing changes. An app must treat every profile header as optional.
+- **Read at startup, so changing the list needs `systemctl restart`** — not `reload`,
+  which only re-reads the access file. It is *not* a cookie-format change: an existing
+  cookie keeps working, a claim removed from the list stops being emitted even from
+  cookies that still carry it, and one added appears at each user's next sign-in.
+- **A value is capped at 256 bytes** and dropped, not truncated, beyond that. Keep the
+  list short: the claims ride in the session cookie, and a browser silently drops a
+  cookie over ~4 KB. The gate warns at startup if the configured set could get close.
+- **These claims are self-asserted.** Any Cognito user edits their own profile, so treat
   them as display hints and never as an authorization input. The identity is the email.
 
 ## URL scoping
@@ -397,7 +419,17 @@ to a database).
 > out once** and signs in again (their Cognito session usually makes that a click).
 > Nothing to prepare; just don't deploy it in the middle of something. The two new name
 > headers are opt-in per nginx location — see
-> [Display name](#display-name-optional).
+> [Profile claims](#profile-claims-optional).
+>
+> **Upgrading to 2.5.** The access file is again unchanged, and again the cookie format
+> moved — to `bb4`, so **every signed-in user is logged out once**. Two things to know
+> before deploying. First, the name headers are no longer emitted by default: which OIDC
+> claims propagate is now `BB_AUTH_PROFILE_CLAIMS`, empty unless set, so a 2.4
+> deployment that wants its two headers back must add
+> `BB_AUTH_PROFILE_CLAIMS=given_name,family_name` to the env file (which the deploy never
+> edits) — the headers are byte-identical, nginx needs no change. Second, that variable
+> is read at startup, so later edits to it need a `restart`, not a `reload`. See
+> [Profile claims](#profile-claims-optional).
 
 ## Session cookie
 
@@ -407,19 +439,26 @@ rotation" below). Stateless: no server-side session store — any worker can
 validate any cookie and a restart logs nobody out.
 
 ```text
-bb3.<keyid>.<exp>.<b64url(email)>.<b64url(given_name)>.<b64url(family_name)>.<b64url(sig)>
-sig = HMAC_SHA256("bb3.<keyid>.<exp>.<b64url(email)>.<b64url(given_name)>.<b64url(family_name)>", key[keyid])
+bb4.<keyid>.<exp>.<b64url(email)>.<b64url(claims_json)>.<b64url(sig)>
+sig = HMAC_SHA256("bb4.<keyid>.<exp>.<b64url(email)>.<b64url(claims_json)>", key[keyid])
 ```
 
-Seven fields always: a name the token did not assert is the **empty segment**, not a
-missing field. Names are stored as raw UTF-8 and percent-encoded only when emitted as a
-header.
+Six fields always. `claims_json` is a JSON object of the profile claims the token
+asserted — `{"family_name":"Byron","given_name":"Ada"}` — with **no claims written as the
+empty segment**, never as `{}`. Values are stored as raw UTF-8 and percent-encoded only
+when emitted as a header.
 
-`bb3` is the **only** format accepted — there is no verify-only arm for the older `bb1`
-and `bb2`. A format bump therefore costs every user one trip through the login page,
-which is a re-authentication (the browser still holds its Cognito session), not a
+The blob names its own claims rather than relying on position, which is what makes
+`BB_AUTH_PROFILE_CLAIMS` safe to edit: a cookie lives up to a month, and positional
+segments would let a change to that list reinterpret a live cookie's values under
+someone else's claim name. Editing the list is therefore *not* a format change — no one
+is logged out by it.
+
+`bb4` is the **only** format accepted — there is no verify-only arm for the older `bb1`,
+`bb2` and `bb3`. A format bump therefore costs every user one trip through the login
+page, which is a re-authentication (the browser still holds its Cognito session), not a
 re-enrolment. That was judged cheaper than carrying every format bb-auth ever had, but
-it means **the 2.4 upgrade logs everyone out once** — don't deploy it mid-something.
+it means **the 2.5 upgrade logs everyone out once** — don't deploy it mid-something.
 Key *rotation* is the separate mechanism that must never do that, and doesn't.
 
 The access file is re-checked on every `/validate`, so de-authorizing someone is
@@ -548,8 +587,9 @@ The binary is service-agnostic. To front a service at `app.example.com`:
            proxy_set_header X-Forwarded-User "";   # clear names we do NOT set
            proxy_set_header Remote-User      "";
 
-           # Optional: the token's names, for a display name. Omit both pairs if
-           # the app has no use for them.
+           # Optional: profile claims, for a display name. These two are what
+           # BB_AUTH_PROFILE_CLAIMS=given_name,family_name emits; omit both pairs
+           # if the app has no use for them.
            auth_request_set $bb_given  $upstream_http_x_auth_given_name;
            auth_request_set $bb_family $upstream_http_x_auth_family_name;
            proxy_set_header X-Auth-Given-Name  $bb_given;

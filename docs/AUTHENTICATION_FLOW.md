@@ -106,19 +106,21 @@ Inside bb-auth (`handle_session`):
    - extract and lowercase the `email` claim, and require it to be printable ASCII
      (`header_safe_email`) — it will be handed to the app in `X-Auth-Email`, and on a
      `public_auth` site no table has vetted it.
-   - capture `given_name` / `family_name` if present (`clean_name`: trimmed, ≤ 256 bytes,
-     no control characters, case preserved). A name that fails any of that is dropped on
-     its own; it never costs the token.
+   - capture each `BB_AUTH_PROFILE_CLAIMS` claim the token asserts (`clean_claim`:
+     trimmed, ≤ 256 bytes, no control characters, case preserved). A value that fails any
+     of that is dropped on its own; it never costs the token. Unconfigured claims — the
+     default, since the list is empty unless set — are not even looked at.
 3. **Access-table check:** `email` must not be in `denied`, and must be either present in
    the roster (`by_email`) or able to go somewhere — i.e. some site grants `public_auth`.
    The cookie is identity, not authorization: it grants nothing on its own, and every
    request it accompanies is re-authorized. This `403` is a courtesy, so someone who is
    not enrolled hears it at the login page instead of bouncing off a `401` later.
 4. **Build the cookie** (see `ARCHITECTURE.md` §7):
-   `bb3.<keyid>.<exp>.<b64url(email)>.<b64url(given)>.<b64url(family)>.<b64url(HMAC_SHA256(prefix))>`,
-   signed with the active key, `exp = now + TTL`. A name the token did not assert is the
-   empty segment. This is the only moment the claims are readable, which is why the cookie
-   carries them: on a later request there is no token to consult.
+   `bb4.<keyid>.<exp>.<b64url(email)>.<b64url(claims_json)>.<b64url(HMAC_SHA256(prefix))>`,
+   signed with the active key, `exp = now + TTL`. `claims_json` is a JSON object naming
+   each captured claim; no claims at all is the empty segment, never `{}`. This is the
+   only moment the claims are readable, which is why the cookie carries them: on a later
+   request there is no token to consult.
 5. **`safe_rd(rd)`:** the redirect target must resolve to an `https://` URL whose host
    matches `BB_AUTH_AUTHORIZED_HOSTS`. An absolute path (no `//`, no `/\`) resolves
    against the caller's own host, which nginx supplies via `X-Original-URL` on this
@@ -148,25 +150,25 @@ would be `/internal/auth-gate`. For programmatic clients it also forwards the
 `Authorization` header:
 
 ```text
- browser ──GET https://app.example.com/?...  Cookie: <cookie>=bb3...──▶ nginx
+ browser ──GET https://app.example.com/?...  Cookie: <cookie>=bb4...──▶ nginx
  nginx: auth_request → /internal/auth-gate → bb-auth GET /auth/validate
         (X-Original-URL: https://app.example.com/...
          [+ Authorization: Bearer … for API clients])
  bb-auth (handle_validate), first credential that authorizes wins:
    a. Authorization: Bearer bbk_…  → static API key: sha256(bearer) in by_key_hash,
       owner not denied, unexpired, request URL in the key's scope. No site applies.
-      Email only — no token, so no names.
+      Email only — no token, so no profile claims.
    b. Authorization: Bearer <id_token>  → validated as in Phase 3, then authorize()
-   c. session cookie → verify_session: split up to 7 parts; version==bb3 → key by id;
+   c. session cookie → verify_session: split up to 6 parts; version==bb4 → key by id;
       HMAC verify_slice (constant-time); exp>now; then the lowercased email and the
-      two name segments it carries → authorize()   (bb1/bb2 are not accepted)
+      claims blob it carries → authorize()   (bb1/bb2/bb3 are not accepted)
    authorize(email, url): denied? → 401.  Else a site covering `url` with
       public_auth → granted, roster not consulted.  Else roster: email in by_email
-      and url in that user's scope.  The names take no part in this.
+      and url in that user's scope.  The profile claims take no part in this.
    └─ 204 + X-Auth-Email: <the authorized user> if any of a/b/c authorizes, else 401
-      (+ X-Auth-Given-Name / X-Auth-Family-Name, percent-encoded, when known)
- nginx: auth_request_set $bb_email $upstream_http_x_auth_email   [+ $bb_given/$bb_family]
- nginx ──proxy to upstream app (X-Auth-Email: … [+ the names])──▶ browser (the app's response)
+      (+ one header per configured profile claim, percent-encoded, when known)
+ nginx: auth_request_set $bb_email $upstream_http_x_auth_email   [+ one per claim]
+ nginx ──proxy to upstream app (X-Auth-Email: … [+ the claims])──▶ browser (the app's response)
 ```
 
 A few things are worth emphasizing:
@@ -192,11 +194,13 @@ A few things are worth emphasizing:
   user's* email. The app must not decode the credential itself: the cookie is not a
   JWT and an API key carries no token, and a valid `id_token` proves identity, never
   authorization. This holds only while the app is unreachable except through nginx.
-- **It can also name them, optionally.** `X-Auth-Given-Name` / `X-Auth-Family-Name` carry
-  the token's name claims, percent-encoded (RFC 3986), when the credential has them — so
-  never for an API key, and not for a token that asserts none, in which case the header is
-  omitted rather than sent empty. Lifting them is per gated location and additive. They are
-  self-asserted profile attributes: a display hint, never an authorization input.
+- **It can also name them, optionally.** `BB_AUTH_PROFILE_CLAIMS` lists OIDC claims to
+  carry, each in a header derived from its own name (`given_name` → `X-Auth-Given-Name`),
+  percent-encoded (RFC 3986), when the credential has them — so never for an API key, and
+  not for a token that asserts none, in which case the header is omitted rather than sent
+  empty. The list is empty by default; lifting a header is per gated location and
+  additive. They are self-asserted profile attributes: a display hint, never an
+  authorization input.
 - **Verification is stateless.** No server-side lookup is needed; any of the
   worker threads can validate any cookie, and a restart changes nothing about
   existing cookies (they are time-bound, not session-store-bound).

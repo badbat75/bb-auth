@@ -37,7 +37,7 @@ The **mechanism** lives in rustdoc next to the code (`cargo doc --no-deps --open
 endpoint table and credential order on `bb-auth`'s crate root, the cookie wire format on
 `COOKIE_VERSION`, the access-file schema on `AccessFile`, the site-resolution rule on `Sites`,
 the wildcard grammar on `glob_match`, the grant model on `Decision`, the reason for the
-library split on `bb_auth_core`'s crate root,
+library split on `bb_auth_core`'s crate root, the claim→header derivation on `ProfileClaim`,
 the nginx snippets on `Config::original_url_header` and `IDENTITY_HEADER`. Don't copy one into
 the other; when they disagree, the code wins. Rustdoc must stay warning-free — a broken
 intra-doc link is the cheapest rot detector this repo has, and it now spans two crates
@@ -55,7 +55,7 @@ This repo is developed on Windows but the artifact is a Linux/aarch64 binary.
 # Tests — pure unit tests in src/lib.rs (the access file) and src/main.rs (the gate),
 # run on the host, no network needed
 cargo test
-cargo test session_roundtrip_bb3      # a single test by name
+cargo test session_roundtrip_bb4      # a single test by name
 
 # Validate an access file with the real parser (no env, no network). Same check the
 # deploy runs before it restarts the service. Prints the public_auth sites, if any.
@@ -107,8 +107,8 @@ bash scripts/build.sh                 # target overridable via BB_AUTH_TARGET
   (temp + rename) and **preserves mode and owner**: the live file is `root:bb-auth 0640`,
   and a rewrite by root that left it `root:root` would lock the service out of its own
   access list — the chown failing is therefore a hard abort, not a warning.
-- **The cookie is a versioned wire format, and exactly one version is accepted.** `bb3` is it;
-  there is deliberately no verify-only arm for `bb1`/`bb2` any more. So changing the
+- **The cookie is a versioned wire format, and exactly one version is accepted.** `bb4` is it;
+  there is deliberately no verify-only arm for `bb1`/`bb2`/`bb3` any more. So changing the
   serialization or the signed-message bytes logs out **every** existing user — that is the
   accepted price, because a re-auth is one trip through the login page against a Cognito session
   the browser still holds, and carrying an arm per historical format is not worth it. Bump the tag
@@ -116,7 +116,12 @@ bash scripts/build.sh                 # target overridable via BB_AUTH_TARGET
   mid-something. What must *never* log anyone out is HMAC **key rotation**, which is a separate
   axis: the keyid in the cookie is what makes it zero-downtime (README "Key rotation").
   `make_session` / `verify_session` and their tests pin the format, and
-  `pre_bb3_cookies_are_rejected` pins the absence of the legacy arms.
+  `pre_bb4_cookies_are_rejected` pins the absence of the legacy arms. The claims segment is a
+  **self-describing JSON object**, and that is what keeps `BB_AUTH_PROFILE_CLAIMS` off this
+  axis: positional segments would let a config edit reinterpret a live cookie's values under
+  another claim's name, so editing the list must stay a no-logout change. Verify checks the
+  signature over the segment **as received** and only then parses it — never parse and
+  re-serialize to compare.
 - **The access file is the real access gate**, re-checked on *every* `/auth/validate` (not just at
   login). Parsed into `RwLock<Access>` — sites, `denied`, and two indices — hot-reloaded on SIGHUP
   (`systemctl reload bb-auth`); a reload failure keeps the old table (never nuke the live one). See
@@ -202,19 +207,34 @@ bash scripts/build.sh                 # target overridable via BB_AUTH_TARGET
   themselves — the cookie is not a JWT and a `bbk_` key has no token, and a valid id_token proves
   identity, never authorization. On a `public_auth` site the email may name someone in no table at
   all; enrolling them is the application's business.
-- **The names are decoration, and the encoder is what makes them safe.** A `204` may also carry the
-  token's `given_name`/`family_name` in `GIVEN_NAME_HEADER`/`FAMILY_NAME_HEADER` (fixed constants,
-  same reasoning as `IDENTITY_HEADER`). They are **not** identities: they authorize nothing, no
-  field of the access file mentions them, and `authorize_identity` keeps them out of `decide` —
-  otherwise `bb-auth-adm can` would stop answering the gate's question. Being self-asserted (any
-  Cognito user edits their own profile, `email_verified` or not), nothing downstream may key on
-  them. Three rules to keep: values go out **percent-encoded** (`pct_encode`, RFC 3986) and that
-  construction — printable ASCII for *any* input — is the whole safety argument, so a name needs no
-  `header_safe_email` (which would reject the spaces and accents real names have) and must never be
-  emitted raw; an absent claim **omits the header** rather than sending it empty, because nginx
-  cannot tell those apart; and names are **never logged** — the line already has the email. Capture
-  hygiene (`clean_name`) is about quality and cookie size, not safety: a bad name costs the name,
-  never the login, which is why the claims deserialize as `serde_json::Value`.
+- **The profile claims are decoration, and the encoder is what makes them safe.** A `204` may also
+  carry OIDC claims from the token — `BB_AUTH_PROFILE_CLAIMS`, empty by default. They are **not**
+  identities: they authorize nothing, no field of the access file mentions them, and
+  `authorize_identity` keeps them out of `decide` — otherwise `bb-auth-adm can` would stop
+  answering the gate's question. Being self-asserted (any Cognito user edits their own profile,
+  `email_verified` or not), nothing downstream may key on them. Three rules to keep: values go out
+  **percent-encoded** (`pct_encode`, RFC 3986) and that construction — printable ASCII for *any*
+  input — is the whole safety argument, so a value needs no `header_safe_email` (which would reject
+  the spaces and accents real names have) and must never be emitted raw; an absent claim **omits the
+  header** rather than sending it empty, because nginx cannot tell those apart; and values are
+  **never logged** — the line already has the email (claim *names* are config, and the startup
+  banner may list them). Capture hygiene (`clean_claim`) is about quality and cookie size, not
+  safety: a bad value costs that claim, never the login, which is why `Claims::extra` holds
+  `serde_json::Value`s.
+- **The set of claims is config; the header name is code.** An operator names a *claim*, never a
+  header: `derive_profile_header` maps it (`given_name` → `X-Auth-Given-Name`,
+  `custom:department` → `X-Auth-Custom-Department`), so the two can never disagree and no header
+  name is typo-reachable. Since a claim name is restricted to `[A-Za-z0-9_:-]`, a derived header is
+  always a valid token — that, not a check, is why `h()` cannot panic on it. Keep three things.
+  `compile_profile_claims` is **fatal on every bad entry** (bad charset, empty part around a
+  separator, a header collision with `IDENTITY_HEADER`/`LOGIN_URL_HEADER` or another entry) —
+  a silently skipped claim is a header an application waits for forever; the same reflex as a
+  fatal scope error. It must keep rejecting `RESERVED_CLAIMS` (`email`, `email_verified`,
+  `token_use`, `identities`), because `Claims` takes those into typed fields and
+  `#[serde(flatten)]` never sees a key a typed field took — configuring one would propagate
+  nothing, forever. And emission is **config-authoritative** (`profile_headers`): a cookie
+  outlives an edit to the list, so what it carries is filtered against the *live* config, never
+  emitted because the credential happened to have it.
 - **`/auth/session` is not a gate.** It mints a cookie for any valid id_token whose email is not
   `denied` and has somewhere to go (roster entry, or any `public_auth` site exists). The 403 there is
   a courtesy so an un-enrolled user hears it at the login page instead of bouncing off a 401 later —
