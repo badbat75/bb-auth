@@ -1,6 +1,6 @@
 [package]
 name = "bb-auth"
-version = "2.5.0"
+version = "2.6.0"
 edition = "2021"
 description = "Minimal, service-agnostic Cognito id_token → session-cookie auth gate (nginx auth_request)"
 license = "MIT"
@@ -17,8 +17,8 @@ path = "src/lib.rs"
 name = "bb-auth"
 path = "src/main.rs"
 
-# The access-file admin CLI: CRUD over sites / denied / users / api_keys, validated with
-# the gate's own parser before it writes. Links the lib, none of the gate.
+# The access-file admin CLI: CRUD over url_groups / sites / denied / users / api_keys,
+# validated with the gate's own parser before it writes. Links the lib, none of the gate.
 [[bin]]
 name = "bb-auth-adm"
 path = "src/bin/bb-auth-adm.rs"

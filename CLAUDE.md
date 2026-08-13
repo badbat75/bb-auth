@@ -22,8 +22,8 @@ One crate, three targets, and the split is load-bearing:
   opinion about: HTTP, the session cookie, id_token validation, the nginx contract. Still
   **one file**, still read top to bottom.
 - **[src/bin/bb-auth-adm.rs](src/bin/bb-auth-adm.rs)** — the access-file admin CLI: CRUD over
-  `sites` / `denied` / `users` / `api_keys`, key minting, and `can EMAIL URL` (would this
-  credential get in?). It links the library, none of the gate.
+  `url_groups` / `sites` / `denied` / `users` / `api_keys`, key minting, and `can EMAIL URL`
+  (would this credential get in?). It links the library, none of the gate.
 
 The defining constraint vs. authorization-code OIDC proxies (oauth2-proxy): those drive the
 login themselves and *cannot* accept a token the browser already holds. bb-auth is built for
@@ -36,7 +36,8 @@ This file holds the **rules**: what must not break, why, and the symbol that pin
 The **mechanism** lives in rustdoc next to the code (`cargo doc --no-deps --open`) — the
 endpoint table and credential order on `bb-auth`'s crate root, the cookie wire format on
 `COOKIE_VERSION`, the access-file schema on `AccessFile`, the site-resolution rule on `Sites`,
-the wildcard grammar on `glob_match`, the grant model on `Decision`, the reason for the
+the wildcard grammar on `glob_match`, the `@name` group grammar on `UrlGroups`, the grant
+model on `Decision`, the reason for the
 library split on `bb_auth_core`'s crate root, the claim→header derivation on `ProfileClaim`,
 the nginx snippets on `Config::original_url_header` and `IDENTITY_HEADER`. Don't copy one into
 the other; when they disagree, the code wins. Rustdoc must stay warning-free — a broken
@@ -125,11 +126,18 @@ bash scripts/build.sh                 # target overridable via BB_AUTH_TARGET
 - **The access file is the real access gate**, re-checked on *every* `/auth/validate` (not just at
   login). Parsed into `RwLock<Access>` — sites, `denied`, and two indices — hot-reloaded on SIGHUP
   (`systemctl reload bb-auth`); a reload failure keeps the old table (never nuke the live one). See
-  `read_access`; keep it the access gate and keep the reload fail-soft. Its three sections answer
-  three questions: `sites` describe URL areas, `denied` vetoes people, `users` is the roster.
+  `read_access`; keep it the access gate and keep the reload fail-soft. Its four sections answer
+  four questions: `url_groups` names a reusable set of URLs, `sites` describe URL areas, `denied`
+  vetoes people, `users` is the roster.
 - **Scope errors are fatal; key errors are skipped.** A malformed URL pattern (a user's, a key's, or
   a site's), an unknown field on a `SiteSpec`, or a residual pre-2.0 `enabled_paths` field makes
-  `read_access` return `Err` (fatal at startup, old table retained on SIGHUP). A bad
+  `read_access` return `Err` (fatal at startup, old table retained on SIGHUP). So does anything
+  wrong about a **`@group` reference** — an unknown one (the message names the referrer), a bad
+  group name, a group entry that references another group (groups are flat, so there is no cycle
+  to detect), or a malformed pattern in a group **nothing references**: a group that only breaks
+  when someone first uses it is a trap `--check-users` never saw. Groups are pure abbreviation and
+  expand **once, in `compile_access`** (`UrlScope::compile_with_groups`), so `Access`, `decide` and
+  every consumer stay flat and know nothing about them — keep the expansion there. A bad
   `key_hash`/`duration` is still warn+skip. The asymmetry is deliberate: skipping a scope entry
   silently changes who can reach what, and dropping *all* of a user's entries would read as
   unrestricted. `deny_unknown_fields` on `SiteSpec` is the same reflex aimed forward — when

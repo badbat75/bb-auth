@@ -68,7 +68,7 @@ the gate is the gate's, and stays in one file.
 |--------|------------|
 | `src/lib.rs` (`bb_auth_core`) | **The access file.** Schema (`AccessFile`), parser (`compile_access`), URL matcher (`glob_match` / `UrlScope`), the site table (`Sites`), the grant model (`decide`, `decide_api_key`), key minting (`mint_api_key`). Reads no env, opens no socket, holds no HTTP. |
 | `src/main.rs` (`bb-auth`) | **The gate**, still a single file read top to bottom: HTTP, config, the session cookie, id_token validation, the nginx contract. |
-| `src/bin/bb-auth-adm.rs` (`bb-auth-adm`) | **The access-file admin CLI.** CRUD over `sites` / `denied` / `users` / `api_keys`, key minting and rotation, and `can EMAIL URL` — which calls the library's `decide`, so it answers the question the gate will answer. Every write is validated with `compile_access` first, so it cannot save a file the gate would reject. See §12. |
+| `src/bin/bb-auth-adm.rs` (`bb-auth-adm`) | **The access-file admin CLI.** CRUD over `url_groups` / `sites` / `denied` / `users` / `api_keys`, key minting and rotation, and `can EMAIL URL` — which calls the library's `decide`, so it answers the question the gate will answer. Every write is validated with `compile_access` first, so it cannot save a file the gate would reject. See §12. |
 
 Inside `src/main.rs`, in file order:
 
@@ -393,10 +393,13 @@ resolver), `SystemCallFilter=@system-service`, empty `CapabilityBoundingSet`,
 
 Access is described by a single JSON file (`BB_AUTH_USERS_FILE`, installed as
 `/opt/bb-auth/var/lib/users.json`), loaded at startup and hot-reloaded on `SIGHUP`. It
-is the real access gate (`read_access` / `Access`), and has three sibling sections:
+is the real access gate (`read_access` / `Access`), and has four sibling sections:
 
 ```json
-{ "sites": [
+{ "url_groups": {
+    "mcp": ["https://mcp.example.com/mcp", "https://mcp.example.com/mcp/*"]
+  },
+  "sites": [
     { "name": "signup", "urls": ["https://app.example.com/welcome",
                                  "https://app.example.com/welcome/*"],
       "public_auth": true }
@@ -405,20 +408,21 @@ is the real access gate (`read_access` / `Access`), and has three sibling sectio
   "users": [
     { "email": "you@example.com", "authorized_urls": ["*://*/*"] },
     { "email": "bot@example.com",
-      "authorized_urls": ["https://mcp.example.com/mcp", "https://mcp.example.com/mcp/*"],
+      "authorized_urls": ["@mcp"],
       "api_keys": [
         { "id": "laptop", "key_hash": "<sha256 hex of the bbk_… bearer>",
           "released": "2026-07-08", "duration": "365d",
-          "authorized_urls": ["https://mcp.example.com/mcp/*"] }
+          "authorized_urls": ["@mcp"] }
       ] }
 ] }
 ```
 
-The three answer three different questions. `sites` describe **URL areas**, `denied`
-vetoes **people**, `users` is the **roster**. A request is authorized when its
-credential resolves to an identity and one of exactly two grant sources covers the
-request URL — the user's `authorized_urls`, or a `public_auth` site — and the identity
-is not `denied`. Both grant sources are re-checked on every `/auth/validate`.
+The four answer four different questions. `url_groups` names a **reusable set of URLs**,
+`sites` describe **URL areas**, `denied` vetoes **people**, `users` is the **roster**. A
+request is authorized when its credential resolves to an identity and one of exactly two
+grant sources covers the request URL — the user's `authorized_urls`, or a `public_auth`
+site — and the identity is not `denied`. Both grant sources are re-checked on every
+`/auth/validate`.
 
 At load the file is parsed behind `RwLock<Access>` into the site list (in file order),
 a `denied` set of lowercased emails, and two indices: `by_email` (lowercased email →
@@ -428,11 +432,34 @@ single malformed key is warned about and skipped so one typo can't drop everyone
 
 Scope errors, by contrast, are **fatal**, not skipped: a dropped `authorized_urls`
 entry would silently narrow — or, if it was the only one, blank out — a grant someone
-believed they had written. So a malformed pattern, an unknown field on a site, and any
-residual pre-2.0 `enabled_paths` field, make the whole load fail. At startup that is an
-exit; on `SIGHUP` the live table survives. `bb-auth --check-users <file>` runs exactly
-this parser and exits `0`/`1`, which is how `scripts/deploy.sh` refuses to restart the
-service onto a file that would not boot.
+believed they had written. So a malformed pattern, an unknown field on a site, a bad
+`url_groups` name or reference, and any residual pre-2.0 `enabled_paths` field, make the
+whole load fail. At startup that is an exit; on `SIGHUP` the live table survives.
+`bb-auth --check-users <file>` runs exactly this parser and exits `0`/`1`, which is how
+`scripts/deploy.sh` refuses to restart the service onto a file that would not boot.
+
+### URL groups (`url_groups`)
+
+A group is **abbreviation, never a grant**: `"mcp": [...]` authorizes nobody until some
+URL list names it. All three lists that carry patterns — a user's `authorized_urls`, a
+key's, a site's `urls` — accept the entry `"@mcp"`, and `compile_access` splices in that
+group's compiled patterns (`UrlScope::compile_with_groups`). Expansion happens **once, at
+load**, so `Access`, `decide` and the gate never see a reference: the runtime table is as
+flat as it was before groups existed, and a key that inherits its owner's scope inherits
+patterns, not a reference to re-resolve.
+
+Names are `[A-Za-z0-9_-]+` and match exactly. Three things are fatal, all for the same
+reason a malformed pattern is — a silently skipped entry changes who reaches what: a bad
+name, a group entry that is itself a reference (groups are flat by construction, so there
+is no recursion or cycle to detect), and an unknown `@name`, whose message names the
+referrer (`bob@x.com: unknown url group '@mcp'`). Every group's patterns are validated
+even when nothing references them, so a broken group cannot lie in wait for the edit that
+first uses it. An empty group is legal and warns.
+
+An **older** gate preserves the section on a rewrite (unknown top-level keys round-trip
+through `AccessFile::extra`) but cannot read a reference: `@mcp` fails `compile_pattern`
+and the load fails outright. Fail-closed, and the reason to deploy the binary before a
+file that uses groups.
 
 ### Sites (`public_auth`)
 
@@ -554,7 +581,8 @@ assumed**: there is no "unrestricted" scope. Omitting the field, or `[]`, author
 *nothing* — a listed user with no patterns reaches no URL at all, which makes an empty
 list a usable way to suspend someone. Blanket access is the explicit pattern `*://*/*`,
 something an operator has to mean in order to write. On a key, omitting the field
-inherits the owning user's scope.
+inherits the owning user's scope. An entry may also be `"@name"`, a reference to a
+[url group](#url-groups-url_groups) expanded at load.
 
 Two wildcards, legal in every component:
 

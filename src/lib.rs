@@ -15,14 +15,15 @@
 //!
 //! # What is in an access file
 //!
-//! Three sibling sections answering three different questions ([`AccessFile`]):
-//! `sites` describe URL areas ([`Sites`]), `denied` vetoes people, `users` is the roster.
+//! Four sibling sections answering four different questions ([`AccessFile`]):
+//! `url_groups` names a reusable set of URLs ([`UrlGroups`]), `sites` describe URL areas
+//! ([`Sites`]), `denied` vetoes people, `users` is the roster.
 //! Access is **enumerated, never assumed**: an absent or empty `authorized_urls` grants
 //! nothing, and a URL no site covers is not open. There are exactly two grant sources —
 //! the roster's [`UrlScope`] and a `public_auth` [`SiteRecord`] — and one veto that
 //! outranks both, on every credential. [`decide`] is that rule.
 
-use std::collections::{HashMap, HashSet};
+use std::collections::{BTreeMap, HashMap, HashSet};
 
 use base64::engine::general_purpose::URL_SAFE_NO_PAD;
 use base64::Engine;
@@ -217,6 +218,28 @@ pub fn compile_host_pattern(raw: &str) -> Result<UrlPattern, String> {
     })
 }
 
+/// Compiled [`AccessFile::url_groups`]: a group name → the patterns it stands for.
+///
+/// A group is abbreviation, nothing more. Any URL-pattern list — a user's or a key's
+/// `authorized_urls`, a site's `urls` — may name one with `@name`, and
+/// [`UrlScope::compile_with_groups`] splices that group's patterns in at load. Nothing
+/// downstream of [`compile_access`] ever sees a reference: [`Access`], [`decide`] and the
+/// gate work on flat patterns exactly as they did before groups existed.
+///
+/// A [`BTreeMap`] because group order carries no meaning — sorted is the one order that
+/// survives a round-trip through `bb-auth-adm` unchanged.
+pub type UrlGroups = BTreeMap<String, Vec<UrlPattern>>;
+
+/// The group a URL-pattern list entry references (`"@mcp"` ⇒ `Some("mcp")`), or `None`
+/// for a plain pattern.
+///
+/// The one place the `@` sigil is spelled out. `bb-auth-adm` calls it to find who
+/// references what, so the tool and the gate cannot come to disagree about which entries
+/// are references — the same reason there is one matcher and one parser.
+pub fn group_ref(entry: &str) -> Option<&str> {
+    entry.trim().strip_prefix('@')
+}
+
 /// A set of URL patterns, and the single matcher every URL check in bb-auth goes
 /// through: a user's `authorized_urls`, a key's, and a site's `urls`.
 ///
@@ -241,11 +264,35 @@ impl UrlScope {
         }
     }
 
-    /// Compile a JSON `authorized_urls` list.
+    /// Compile a JSON `authorized_urls` list with no [`UrlGroups`] in scope — so every
+    /// `@name` entry in it is, correctly, an unknown group. [`compile_access`] always
+    /// goes through [`UrlScope::compile_with_groups`]; this is for callers that have a
+    /// list and no file, such as `bb-auth-adm`'s site-shadowing lint.
     pub fn compile(list: &[String]) -> Result<UrlScope, String> {
+        UrlScope::compile_with_groups(list, &UrlGroups::new())
+    }
+
+    /// Compile a URL-pattern list, expanding `@name` entries against `groups`.
+    ///
+    /// The expansion is a splice: a reference contributes that group's already-compiled
+    /// patterns and nothing else, so the result is as flat as a list that never mentioned
+    /// a group, and the three lists that can carry a reference (a user's scope, a key's,
+    /// a site's `urls`) all reach it through here.
+    ///
+    /// An unknown reference is an **error**, never a dropped entry — the same reflex as a
+    /// malformed pattern, because a silently skipped entry changes who can reach what.
+    /// The message names only the group; the caller prefixes the referrer, which is what
+    /// makes it say `bob@x.com: unknown url group '@mcp'`.
+    pub fn compile_with_groups(list: &[String], groups: &UrlGroups) -> Result<UrlScope, String> {
         let mut patterns = Vec::with_capacity(list.len());
         for raw in list.iter().map(|s| s.trim()).filter(|s| !s.is_empty()) {
-            patterns.push(compile_pattern(raw)?);
+            match group_ref(raw) {
+                Some(name) => match groups.get(name) {
+                    Some(g) => patterns.extend(g.iter().cloned()),
+                    None => return Err(format!("unknown url group '@{name}'")),
+                },
+                None => patterns.push(compile_pattern(raw)?),
+            }
         }
         Ok(UrlScope { patterns })
     }
@@ -504,29 +551,31 @@ pub fn decide_api_key<'a>(
 /// and hot-reloaded on SIGHUP.
 ///
 /// ```json
-/// { "sites": [
+/// { "url_groups": { "mcp": ["https://mcp.x.com/mcp", "https://mcp.x.com/mcp/*"] },
+///   "sites": [
 ///     { "name": "app1", "urls": ["https://app.x.com/app1",
 ///                                "https://app.x.com/app1/*"], "public_auth": true }
 ///   ],
 ///   "denied": ["spammer@x.com"],
 ///   "users": [
 ///     { "email": "bob@x.com",
-///       "authorized_urls": ["https://mcp.x.com/mcp/*"],
+///       "authorized_urls": ["@mcp"],
 ///       "api_keys": [
 ///         { "id": "laptop", "key_hash": "<sha256 hex of the bbk_… bearer>",
 ///           "released": "2026-07-08", "duration": "365d",
-///           "authorized_urls": ["https://mcp.x.com/mcp/*"] }
+///           "authorized_urls": ["@mcp"] }
 ///       ] },
 ///     { "email": "alice@x.com", "authorized_urls": ["*://*/*"] }
 /// ] }
 /// ```
 ///
-/// The three sections are siblings and answer three different questions: `sites` describe
-/// URL areas, `denied` vetoes people, `users` is the roster. Access is enumerated, never
-/// assumed, from either of the two grant sources: a user with no `authorized_urls` reaches
-/// nothing, and a URL with no site is not open. "Everything" is the explicit pattern
-/// `*://*/*`. Validate a file before shipping it with `bb-auth --check-users <file>`, or
-/// `bb-auth-adm check` — the same parser, [`read_access`].
+/// The four sections are siblings and answer four different questions: `url_groups` names
+/// a reusable set of URLs, `sites` describe URL areas, `denied` vetoes people, `users` is
+/// the roster. Access is enumerated, never assumed, from either of the two grant sources:
+/// a user with no `authorized_urls` reaches nothing, and a URL with no site is not open.
+/// "Everything" is the explicit pattern `*://*/*`. Validate a file before shipping it with
+/// `bb-auth --check-users <file>`, or `bb-auth-adm check` — the same parser,
+/// [`read_access`].
 ///
 /// This type is also the **document model** `bb-auth-adm` edits, hence [`Serialize`] and
 /// the `extra` maps: the sections that describe people carry operator documentation
@@ -538,6 +587,23 @@ pub fn decide_api_key<'a>(
 /// are contracts with an operator-owned env file that a deploy never rewrites.
 #[derive(Deserialize, Serialize, Default)]
 pub struct AccessFile {
+    /// Named URL-pattern groups: `"mcp": ["https://mcp.x.com/mcp/*"]`. Any URL-pattern
+    /// list — a user's or a key's `authorized_urls`, a site's `urls` — names one as
+    /// `"@mcp"`, and [`compile_access`] splices its patterns in at load ([`UrlGroups`]).
+    ///
+    /// Deliberately shallow, and deliberately strict: a name is `[A-Za-z0-9_-]+` matched
+    /// exactly (case-sensitive), a group may not reference another group, an unknown
+    /// reference is fatal, and every group's patterns are validated even when nothing
+    /// references them. All of it is the same reflex as a malformed pattern — an entry
+    /// that silently vanished would change who can reach what. Duplicate JSON keys are
+    /// serde's last-wins, as everywhere else in this file.
+    ///
+    /// First, so a document reads its definitions before their uses. An **older** binary
+    /// preserves the section (it lands in `extra`) but does not understand it: each
+    /// `@name` entry fails [`compile_pattern`], which is a fatal load rather than a
+    /// partial grant. Fail-closed — and the reason to deploy the binary before the file.
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    pub url_groups: BTreeMap<String, Vec<String>>,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub sites: Vec<SiteSpec>,
     /// Lowercased on load. See [`Access::denied`].
@@ -783,10 +849,52 @@ pub fn read_access(path: &str) -> Result<Access, String> {
     compile_access(&read_access_file(path)?)
 }
 
+/// Compile the `url_groups` section: validate every name and every pattern, once, up
+/// front. Errors are prefixed `url_groups '<name>': …`.
+///
+/// Unreferenced groups are compiled too, and a bad one is just as fatal — a group that
+/// only breaks the day someone first references it is a trap laid for a future edit, and
+/// the whole point of `--check-users` is that the file is checked before it is live.
+///
+/// Groups are flat by construction: an entry that is itself a reference is rejected here,
+/// so [`UrlScope::compile_with_groups`] can splice with no recursion, no cycle detection
+/// and no order dependence between definitions.
+fn compile_url_groups(raw: &BTreeMap<String, Vec<String>>) -> Result<UrlGroups, String> {
+    let mut out = UrlGroups::new();
+    for (name, list) in raw {
+        if name.is_empty()
+            || !name
+                .bytes()
+                .all(|b| b.is_ascii_alphanumeric() || b == b'_' || b == b'-')
+        {
+            return Err(format!(
+                "url_groups '{name}': a group name must be non-empty and [A-Za-z0-9_-]"
+            ));
+        }
+        let mut patterns = Vec::with_capacity(list.len());
+        for entry in list.iter().map(|s| s.trim()).filter(|s| !s.is_empty()) {
+            if let Some(g) = group_ref(entry) {
+                return Err(format!(
+                    "url_groups '{name}': '@{g}' — a group cannot reference another group"
+                ));
+            }
+            patterns.push(compile_pattern(entry).map_err(|e| format!("url_groups '{name}': {e}"))?);
+        }
+        if patterns.is_empty() {
+            eprintln!(
+                "[bb-auth] WARNING: url group '{name}' has no urls — a reference to it grants \
+                 nothing"
+            );
+        }
+        out.insert(name.clone(), patterns);
+    }
+    Ok(out)
+}
+
 /// Compile a parsed access file into the runtime table. An unknown field on a [`SiteSpec`],
-/// a residual `enabled_paths`, or a malformed URL pattern are hard errors (so a SIGHUP
-/// reload keeps the old table); an individual malformed *key* is warned about and skipped
-/// so one bad `key_hash` can't drop every user.
+/// a residual `enabled_paths`, a malformed URL pattern or a dangling `@group` reference are
+/// hard errors (so a SIGHUP reload keeps the old table); an individual malformed *key* is
+/// warned about and skipped so one bad `key_hash` can't drop every user.
 ///
 /// Scope errors are deliberately fatal rather than skip-with-warning: a dropped
 /// scope entry silently changes who can reach what. `bb-auth --check-users` exists
@@ -796,6 +904,10 @@ pub fn read_access(path: &str) -> Result<Access, String> {
 /// Emails are additionally required to be [`header_safe_email`], since every one of
 /// them can end up in `X-Auth-Email`.
 pub fn compile_access(file: &AccessFile) -> Result<Access, String> {
+    // Expanded here and nowhere else: every scope below is flat by the time it is stored,
+    // so `decide` and the gate never learn that groups exist.
+    let groups = compile_url_groups(&file.url_groups)?;
+
     // Sites, in file order — `Sites::resolve` is first-match-wins, so the order is part
     // of the meaning. A malformed pattern is fatal, exactly as in a user's scope.
     let mut entries = Vec::with_capacity(file.sites.len());
@@ -804,7 +916,8 @@ pub fn compile_access(file: &AccessFile) -> Result<Access, String> {
             "" => "?".to_string(),
             n => n.to_string(),
         };
-        let urls = UrlScope::compile(&s.urls).map_err(|e| format!("site '{name}': {e}"))?;
+        let urls = UrlScope::compile_with_groups(&s.urls, &groups)
+            .map_err(|e| format!("site '{name}': {e}"))?;
         if urls.is_empty() {
             eprintln!("[bb-auth] WARNING: site '{name}' has no urls — it matches nothing");
         }
@@ -850,7 +963,9 @@ pub fn compile_access(file: &AccessFile) -> Result<Access, String> {
             ));
         }
         let user_scope = match &u.authorized_urls {
-            Some(list) => UrlScope::compile(list).map_err(|e| format!("{email}: {e}"))?,
+            Some(list) => {
+                UrlScope::compile_with_groups(list, &groups).map_err(|e| format!("{email}: {e}"))?
+            }
             None => UrlScope::deny_all(),
         };
         if user_scope.is_empty() {
@@ -891,9 +1006,10 @@ pub fn compile_access(file: &AccessFile) -> Result<Access, String> {
                 }
             };
             let scope = match &k.authorized_urls {
-                Some(list) => {
-                    UrlScope::compile(list).map_err(|e| format!("{email} key '{}': {e}", k.id))?
-                }
+                Some(list) => UrlScope::compile_with_groups(list, &groups)
+                    .map_err(|e| format!("{email} key '{}': {e}", k.id))?,
+                // The owner's scope, already expanded — a key inherits patterns, never a
+                // reference to re-resolve.
                 None => user_scope.clone(),
             };
             let key_id = if k.id.trim().is_empty() {
@@ -1637,6 +1753,221 @@ mod tests {
             let l = login_url_for(&a, global, Some(u));
             assert!(l.bytes().all(|b| b.is_ascii_graphic()), "{l}");
         }
+    }
+
+    // --- url groups ---------------------------------------------------------
+
+    #[test]
+    fn url_groups_expand_in_user_scope() {
+        let a = access_of(
+            "groups-user",
+            r#"{ "url_groups": { "mcp": ["https://mcp.x.com/mcp", "https://mcp.x.com/mcp/*"] },
+                 "users": [ { "email": "bob@x.com",
+                              "authorized_urls": ["@mcp", "https://other.x.com/*"] } ] }"#,
+        );
+        let s = &a.by_email["bob@x.com"].scope;
+        assert!(s.allows(Some("https://mcp.x.com/mcp")));
+        assert!(s.allows(Some("https://mcp.x.com/mcp/tools")));
+        assert!(s.allows(Some("https://other.x.com/a"))); // the plain entry beside it
+        assert!(!s.allows(Some("https://mcp.x.com/elsewhere")));
+        assert_eq!(
+            decide(&a, "bob@x.com", Some("https://mcp.x.com/mcp/tools")),
+            Decision::RosterGrant
+        );
+        assert_eq!(
+            decide(&a, "bob@x.com", Some("https://mcp.x.com/elsewhere")),
+            Decision::OutOfScope
+        );
+    }
+
+    #[test]
+    fn url_groups_expand_in_a_key_scope_and_in_what_it_inherits() {
+        let own = sha256_hex("bbk_own");
+        let inherited = sha256_hex("bbk_inherit");
+        let a = access_of(
+            "groups-key",
+            &format!(
+                r#"{{ "url_groups": {{ "mcp": ["https://mcp.x.com/mcp/*"],
+                                       "admin": ["https://mcp.x.com/admin/*"] }},
+                      "users": [ {{ "email": "bob@x.com", "authorized_urls": ["@mcp"],
+                        "api_keys": [
+                          {{ "id": "own", "key_hash": "{own}", "released": "2026-01-01",
+                             "duration": "never", "authorized_urls": ["@admin"] }},
+                          {{ "id": "inherit", "key_hash": "{inherited}",
+                             "released": "2026-01-01", "duration": "never" }}
+                        ] }} ] }}"#
+            ),
+        );
+        // its own list expands independently of the owner's
+        let k = &a.by_key_hash[&own].scope;
+        assert!(k.allows(Some("https://mcp.x.com/admin/x")));
+        assert!(!k.allows(Some("https://mcp.x.com/mcp/x")));
+        // and a key with no list inherits the owner's *expanded* scope
+        let i = &a.by_key_hash[&inherited].scope;
+        assert!(i.allows(Some("https://mcp.x.com/mcp/x")));
+        assert!(!i.allows(Some("https://mcp.x.com/admin/x")));
+        assert!(decide_api_key(&a, &inherited, Some("https://mcp.x.com/mcp/x"), now()).granted());
+    }
+
+    #[test]
+    fn url_groups_expand_in_a_site() {
+        let a = access_of(
+            "groups-site",
+            r#"{ "url_groups": { "onboarding": ["https://app.x.com/welcome",
+                                                "https://app.x.com/welcome/*"] },
+                 "sites": [ { "name": "signup", "urls": ["@onboarding"],
+                              "public_auth": true } ] }"#,
+        );
+        // an un-enrolled identity walks in, exactly as with the patterns spelled out
+        assert_eq!(
+            decide(
+                &a,
+                "newcomer@x.com",
+                Some("https://app.x.com/welcome/step1")
+            ),
+            Decision::SiteGrant("signup".into())
+        );
+        assert_eq!(
+            decide(&a, "newcomer@x.com", Some("https://app.x.com/welcome")),
+            Decision::SiteGrant("signup".into())
+        );
+        assert_eq!(
+            decide(&a, "newcomer@x.com", Some("https://app.x.com/elsewhere")),
+            Decision::NotEnrolled
+        );
+    }
+
+    #[test]
+    fn url_groups_unknown_reference_is_fatal_and_names_the_referrer() {
+        // Fatal like a malformed pattern: a dropped entry silently changes who reaches
+        // what, and the message has to say which list to go and fix.
+        let err = access_err(
+            "groups-unknown-user",
+            r#"{ "users": [ { "email": "bob@x.com", "authorized_urls": ["@mcp"] } ] }"#,
+        );
+        assert!(err.contains("bob@x.com"), "{err}");
+        assert!(err.contains("unknown url group '@mcp'"), "{err}");
+
+        let err = access_err(
+            "groups-unknown-site",
+            r#"{ "sites": [ { "name": "mpa", "urls": ["@x"] } ] }"#,
+        );
+        assert!(err.contains("site 'mpa'"), "{err}");
+        assert!(err.contains("unknown url group '@x'"), "{err}");
+
+        let hash = sha256_hex("bbk_g");
+        let err = access_err(
+            "groups-unknown-key",
+            &format!(
+                r#"{{ "users": [ {{ "email": "bob@x.com", "api_keys": [
+                     {{ "id": "laptop", "key_hash": "{hash}", "released": "2026-01-01",
+                        "duration": "never", "authorized_urls": ["@mcp"] }} ] }} ] }}"#
+            ),
+        );
+        assert!(err.contains("bob@x.com key 'laptop'"), "{err}");
+        assert!(err.contains("unknown url group '@mcp'"), "{err}");
+    }
+
+    #[test]
+    fn url_groups_nested_reference_is_fatal() {
+        // Flat by construction: no recursion, no cycles, no order between definitions.
+        let err = access_err(
+            "groups-nested",
+            r#"{ "url_groups": { "a": ["https://x.com/*"], "b": ["@a"] } }"#,
+        );
+        assert!(err.contains("url_groups 'b'"), "{err}");
+        assert!(err.contains("cannot reference another group"), "{err}");
+    }
+
+    #[test]
+    fn url_groups_bad_name_is_fatal() {
+        for json in [
+            r#"{ "url_groups": { "bad name": ["https://x.com/*"] } }"#,
+            r#"{ "url_groups": { "": ["https://x.com/*"] } }"#,
+            r#"{ "url_groups": { "mcp/x": ["https://x.com/*"] } }"#,
+        ] {
+            let err = access_err("groups-badname", json);
+            assert!(err.contains("url_groups"), "{err}");
+            assert!(err.contains("[A-Za-z0-9_-]"), "{err}");
+        }
+        assert!(compile_access(
+            &serde_json::from_str(r#"{ "url_groups": { "mcp-v2_1": ["https://x.com/*"] } }"#)
+                .unwrap()
+        )
+        .is_ok());
+    }
+
+    #[test]
+    fn url_groups_are_validated_even_when_unreferenced() {
+        // A group that only breaks the day someone first references it is a trap laid
+        // for a future edit — `--check-users` has to see it now.
+        let err = access_err(
+            "groups-unreferenced-bad",
+            r#"{ "url_groups": { "mcp": ["/mcp/"] },
+                 "users": [ { "email": "b@x.com", "authorized_urls": ["*://*/*"] } ] }"#,
+        );
+        assert!(err.contains("url_groups 'mcp'"), "{err}");
+        assert!(err.contains("<scheme>://<host>/<path>"), "{err}");
+    }
+
+    #[test]
+    fn url_groups_empty_group_grants_nothing() {
+        let a = access_of(
+            "groups-empty",
+            r#"{ "url_groups": { "todo": [] },
+                 "users": [ { "email": "b@x.com", "authorized_urls": ["@todo"] } ] }"#,
+        );
+        assert!(a.by_email["b@x.com"].scope.is_empty());
+        assert_eq!(
+            decide(&a, "b@x.com", Some("https://x.com/a")),
+            Decision::OutOfScope
+        );
+    }
+
+    #[test]
+    fn url_groups_absent_changes_nothing() {
+        // The regression that matters: a file that mentions no group compiles, decides
+        // and serializes exactly as it did before groups existed.
+        let a = access_of("groups-absent", SITES_JSON);
+        assert_eq!(
+            decide(&a, "bob@x.com", Some("https://app.x.com/other/x")),
+            Decision::RosterGrant
+        );
+        assert_eq!(
+            decide(&a, "newcomer@x.com", Some("https://app.x.com/app1")),
+            Decision::SiteGrant("app1".into())
+        );
+
+        let doc: AccessFile = serde_json::from_str(SITES_JSON).unwrap();
+        assert!(doc.url_groups.is_empty());
+        let out = serde_json::to_string(&doc).unwrap();
+        assert!(!out.contains("url_groups"), "{out}");
+    }
+
+    #[test]
+    fn url_groups_round_trip_through_the_document_model() {
+        let json = r#"{ "url_groups": { "mcp": ["https://mcp.x.com/mcp/*"],
+                                        "admin": ["https://x.com/admin/*"] },
+                        "users": [ { "email": "bob@x.com", "authorized_urls": ["@mcp"] } ] }"#;
+        let doc: AccessFile = serde_json::from_str(json).unwrap();
+        assert_eq!(
+            doc.url_groups["mcp"],
+            vec!["https://mcp.x.com/mcp/*".to_string()]
+        );
+
+        let out = serde_json::to_string(&doc).unwrap();
+        // definitions before uses, and sorted: a BTreeMap has no order to lose
+        assert!(out.starts_with(r#"{"url_groups":{"admin":"#), "{out}");
+        // a reference is stored as written — nothing expands it on the way to disk
+        assert!(out.contains(r#""authorized_urls":["@mcp"]"#), "{out}");
+        let back: AccessFile = serde_json::from_str(&out).unwrap();
+        assert_eq!(back.url_groups, doc.url_groups);
+        assert!(compile_access(&back).is_ok());
+
+        // What an older binary makes of the same file: it keeps the section (unknown
+        // top-level keys land in `extra`) and refuses to load, because a reference is
+        // not a URL pattern. Fail-closed, never a partial grant.
+        assert!(compile_pattern("@mcp").is_err());
     }
 
     // --- the document model (what bb-auth-adm edits) -------------------------

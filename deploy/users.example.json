@@ -3,12 +3,23 @@
     "bb-auth access file (JSON) — the REAL access gate (Cognito self-signup is open).",
     "Re-checked on every /auth/validate, so an edit + `systemctl reload bb-auth` (SIGHUP)",
     "takes effect on the next request; a plain restart works too. Emails match",
-    "case-insensitively. Three sibling sections, three different questions:",
+    "case-insensitively. Four sibling sections, four different questions:",
     "",
+    "  url_groups — named sets of URL patterns, written '@name' in any urls list below.",
     "  sites   — URL areas and the properties that hold for them. A site describes a",
     "            PLACE, never a person: no field of it may name a user.",
     "  denied  — a veto by email. Outranks every grant, on every credential.",
     "  users   — the roster: who is enrolled, what they may reach, and their API keys.",
+    "",
+    "URL GROUPS are abbreviation, never a grant: defining one authorizes nobody until a",
+    "user's authorized_urls, a key's, or a site's urls names it as '@name'. The entry is",
+    "replaced by the group's patterns when the file is loaded, so nothing else changes.",
+    "A name is [A-Za-z0-9_-] and matches exactly (case-sensitive); a group cannot contain",
+    "a reference to another group; an unknown '@name' is a FATAL load error, like a",
+    "malformed pattern — a silently dropped entry would change who reaches what. Every",
+    "group is validated even when nothing references it. NOTE a bb-auth older than 2.6",
+    "does not understand '@name' and refuses to load such a file (it fails closed, so",
+    "deploy the binary before the file). Edit them with: bb-auth-adm url-group add|set|rm.",
     "",
     "GRANTS. A request is authorized when the credential resolves to an identity and one",
     "of exactly two sources covers the request URL: the user's `authorized_urls`, or a",
@@ -51,6 +62,13 @@
     "",
     "Validate a file before deploying it: `bb-auth --check-users FILE`."
   ],
+  "url_groups": {
+    "mcp": [
+      "https://mcp.example.com/mcp",
+      "https://mcp.example.com/mcp/*"
+    ]
+  },
+
   "sites": [
     {
       "name": "app1-onboarding",
@@ -85,10 +103,8 @@
 
     {
       "email": "bot@example.com",
-      "authorized_urls": [
-        "https://mcp.example.com/mcp",
-        "https://mcp.example.com/mcp/*"
-      ],
+      "authorized_urls": ["@mcp"],
+      "notes": "'@mcp' is the url group above — the same two patterns, named once",
       "api_keys": [
         {
           "id": "laptop",

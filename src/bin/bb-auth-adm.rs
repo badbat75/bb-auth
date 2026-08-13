@@ -1,9 +1,9 @@
 //! bb-auth-adm — edit a bb-auth **access file** (`BB_AUTH_USERS_FILE`, a.k.a. users.json).
 //!
-//! CRUD over every section of the file the gate actually enforces — `sites`, `denied`,
-//! `users` and their `api_keys` — plus the two things an operator otherwise has to do by
-//! hand and by eye: minting a `bbk_` key, and answering "would this credential reach that
-//! URL?".
+//! CRUD over every section of the file the gate actually enforces — `url_groups`, `sites`,
+//! `denied`, `users` and their `api_keys` — plus the two things an operator otherwise has
+//! to do by hand and by eye: minting a `bbk_` key, and answering "would this credential
+//! reach that URL?".
 //!
 //! It shares [`bb_auth_core`] with the gate, and that is the whole design:
 //!
@@ -34,9 +34,9 @@
 use std::process::ExitCode;
 
 use bb_auth_core::{
-    compile_access, decide, decide_api_key, format_date, key_expiry, lower_authority, mint_api_key,
-    now, read_access_file, Access, AccessFile, ApiKeySpec, Decision, KeyDecision, SiteSpec,
-    UrlScope, UserSpec,
+    compile_access, decide, decide_api_key, format_date, group_ref, key_expiry, lower_authority,
+    mint_api_key, now, read_access_file, Access, AccessFile, ApiKeySpec, Decision, KeyDecision,
+    SiteSpec, UrlScope, UserSpec,
 };
 
 const USAGE: &str = "\
@@ -78,6 +78,12 @@ sites                           URL areas. FIRST MATCH WINS: specific sites go f
   site mv NAME --at N           reorder (0 = first). Order is meaning.
   site rm NAME
 
+url groups                      named pattern sets, written '@NAME' in any urls list
+  url-group list
+  url-group add NAME --url U...
+  url-group set NAME [--url U]... [--add-url U]... [--rm-url U]... [--no-urls]
+  url-group rm NAME             refused while anything still references it
+
 denied                          a veto by email. Outranks EVERY grant, on every credential
   deny list
   deny add EMAIL...
@@ -85,6 +91,7 @@ denied                          a veto by email. Outranks EVERY grant, on every 
 
 --url takes a <scheme>://<host>/<path> glob; repeat it, or comma-separate. `*` never
 crosses '/' unless it is the pattern's last character; blanket access is '*://*/*'.
+An entry '@NAME' stands for the url group NAME — in a user's urls, a key's or a site's.
 Access is enumerated, never assumed: no authorized_urls means no access at all.
 
 An edit takes effect when the gate re-reads the file: systemctl reload bb-auth.
@@ -164,6 +171,11 @@ fn run() -> Result<ExitCode, String> {
         ["site", "set", name] => cmd_site_set(ctx, name),
         ["site", "mv", name] => cmd_site_mv(ctx, name),
         ["site", "rm", name] => cmd_site_rm(ctx, name),
+
+        ["url-group", "list"] => cmd_url_group_list(ctx),
+        ["url-group", "add", name] => cmd_url_group_add(ctx, name),
+        ["url-group", "set", name] => cmd_url_group_set(ctx, name),
+        ["url-group", "rm", name] => cmd_url_group_rm(ctx, name),
 
         ["deny", "list"] => cmd_deny_list(ctx),
         ["deny", "add", rest @ ..] if !rest.is_empty() => cmd_deny_add(ctx, rest),
@@ -566,6 +578,21 @@ fn cmd_show(ctx: Ctx) -> Result<ExitCode, String> {
     ctx.flags.finish()?;
     let (doc, _) = load(&ctx)?;
 
+    // Definitions before uses, and the lists below print '@name' as stored: what the
+    // file says is what an operator has to be able to read back.
+    if doc.url_groups.is_empty() {
+        println!("url groups: none");
+    } else {
+        println!("url groups (name one as '@NAME' in any urls list):");
+        for (name, urls) in &doc.url_groups {
+            println!("  @{name}  ({} urls)", urls.len());
+            for u in urls {
+                println!("       {u}");
+            }
+        }
+    }
+
+    println!();
     if doc.sites.is_empty() {
         println!("sites: none — every grant comes from the roster below");
     } else {
@@ -707,6 +734,14 @@ fn cmd_check(ctx: Ctx) -> Result<ExitCode, String> {
                 )),
                 _ => {}
             }
+        }
+    }
+    for name in doc.url_groups.keys() {
+        if refs_to(&doc, name).is_empty() {
+            lints.push(format!(
+                "url group '@{name}' is defined but nothing references it — it grants nobody \
+                 anything until some urls list names it"
+            ));
         }
     }
     for (i, s) in doc.sites.iter().enumerate() {
@@ -1326,6 +1361,142 @@ fn cmd_site_rm(ctx: Ctx, name: &str) -> Result<ExitCode, String> {
             name_of(&s)
         );
     }
+    save(&ctx, &doc)?;
+    Ok(ExitCode::SUCCESS)
+}
+
+// ---------------------------------------------------------------------------
+// url groups
+// ---------------------------------------------------------------------------
+
+/// Everything that names `@name`: users by email, keys as `email/id`, sites as
+/// `site 'NAME'`.
+///
+/// [`group_ref`] is what decides whether an entry is a reference, so this cannot drift
+/// from what the gate expands. The gate would refuse a
+/// file with a dangling reference anyway — [`save`] compiles before it writes — and this
+/// is what turns that refusal into a list of places to go and fix.
+fn refs_to(doc: &AccessFile, name: &str) -> Vec<String> {
+    let names = |urls: &[String]| urls.iter().any(|u| group_ref(u) == Some(name));
+    let mut out = Vec::new();
+    for s in &doc.sites {
+        if names(&s.urls) {
+            out.push(format!("site '{}'", name_of(s)));
+        }
+    }
+    for u in &doc.users {
+        if u.authorized_urls.as_deref().is_some_and(names) {
+            out.push(norm_email(&u.email));
+        }
+        for k in &u.api_keys {
+            if k.authorized_urls.as_deref().is_some_and(names) {
+                out.push(format!("{}/{}", norm_email(&u.email), k.id.trim()));
+            }
+        }
+    }
+    out
+}
+
+fn cmd_url_group_list(ctx: Ctx) -> Result<ExitCode, String> {
+    ctx.flags.finish()?;
+    let (doc, _) = load(&ctx)?;
+    for (name, urls) in &doc.url_groups {
+        let refs = refs_to(&doc, name);
+        let by = if refs.is_empty() {
+            "referenced by NOTHING".to_string()
+        } else {
+            format!("referenced by {}", refs.join(", "))
+        };
+        println!("@{name}  ({} urls, {by})", urls.len());
+        for u in urls {
+            println!("     {u}");
+        }
+    }
+    Ok(ExitCode::SUCCESS)
+}
+
+/// `url-group add` — a group is abbreviation, not a grant: defining one authorizes nobody
+/// until some urls list names it.
+fn cmd_url_group_add(mut ctx: Ctx, name: &str) -> Result<ExitCode, String> {
+    let urls = ctx.flags.take_many("url")?;
+    ctx.flags.finish()?;
+    let (mut doc, _) = load(&ctx)?;
+
+    let name = name.trim().to_string();
+    if name.is_empty() {
+        return Err("a url group needs a name".into());
+    }
+    if doc.url_groups.contains_key(&name) {
+        return Err(format!(
+            "url group '@{name}' already exists (edit it: url-group set {name})"
+        ));
+    }
+    if urls.is_empty() {
+        eprintln!(
+            "[bb-auth-adm] WARNING: url group '@{name}' has no --url — a reference to it grants \
+             nothing"
+        );
+    }
+    doc.url_groups.insert(name, urls);
+    save(&ctx, &doc)?;
+    Ok(ExitCode::SUCCESS)
+}
+
+/// `url-group set` — the same url edits as `user set`. There is deliberately no rename: a
+/// reference names a group by its exact spelling, so renaming one would be a silent
+/// re-pointing of every list that used it. Add the new name, move the references, drop
+/// the old one — three steps the gate re-validates one by one.
+fn cmd_url_group_set(mut ctx: Ctx, name: &str) -> Result<ExitCode, String> {
+    let set = ctx.flags.take_many("url")?;
+    let add = ctx.flags.take_many("add-url")?;
+    let rm = ctx.flags.take_many("rm-url")?;
+    let clear = ctx.flags.take_flag("no-urls")?;
+    ctx.flags.finish()?;
+    let (mut doc, _) = load(&ctx)?;
+
+    let name = name.trim().to_string();
+    let changed = {
+        let entry = doc
+            .url_groups
+            .get_mut(&name)
+            .ok_or_else(|| format!("no url group '@{name}'"))?;
+        // A group's patterns are a plain Vec — there is no "inherit" to fall back to, so
+        // --no-urls empties the group rather than deleting it (that is `url-group rm`).
+        let mut urls = Some(std::mem::take(entry));
+        let changed = edit_urls(&mut urls, set, add, rm, clear);
+        *entry = urls.unwrap_or_default();
+        changed
+    };
+    if !changed {
+        return Err("nothing to change (see --help)".into());
+    }
+    if doc.url_groups[&name].is_empty() {
+        eprintln!(
+            "[bb-auth-adm] WARNING: url group '@{name}' now has no urls — every list that \
+             references it loses those patterns"
+        );
+    }
+    save(&ctx, &doc)?;
+    Ok(ExitCode::SUCCESS)
+}
+
+fn cmd_url_group_rm(ctx: Ctx, name: &str) -> Result<ExitCode, String> {
+    ctx.flags.finish()?;
+    let (mut doc, _) = load(&ctx)?;
+
+    let name = name.trim().to_string();
+    if !doc.url_groups.contains_key(&name) {
+        return Err(format!("no url group '@{name}'"));
+    }
+    let refs = refs_to(&doc, &name);
+    if !refs.is_empty() {
+        return Err(format!(
+            "url group '@{name}' is still referenced by {} — the gate would reject the file. \
+             Change those lists first, then remove the group.",
+            refs.join(", ")
+        ));
+    }
+    doc.url_groups.remove(&name);
     save(&ctx, &doc)?;
     Ok(ExitCode::SUCCESS)
 }

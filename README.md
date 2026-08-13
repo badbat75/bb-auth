@@ -187,7 +187,9 @@ Each user, and each key, carries `authorized_urls` — a list of full
 `<scheme>://<host>/<path>` patterns it is allowed to reach. **Access is enumerated,
 never assumed:** a user with no `authorized_urls` (or an empty list) reaches nothing.
 Blanket access is spelled out, as `["*://*/*"]`. A key with no `authorized_urls`
-inherits its user's scope.
+inherits its user's scope. An entry may also be `"@name"`, which stands for a
+[url group](#url_groups--one-name-for-a-set-of-patterns) defined once at the top of the
+file.
 
 Two wildcards, valid in **every** component — scheme, host and path:
 
@@ -223,10 +225,13 @@ containing `..` (fail-closed on both counts).
 
 The access gate is a single JSON file (`BB_AUTH_USERS_FILE`, installed as
 `/opt/bb-auth/var/lib/users.json`; see [`deploy/users.example.json`](deploy/users.example.json)).
-Three sibling sections answer three different questions:
+Four sibling sections answer four different questions:
 
 ```json
-{ "sites": [
+{ "url_groups": {
+    "mcp": ["https://mcp.badbat75.com/mcp", "https://mcp.badbat75.com/mcp/*"]
+  },
+  "sites": [
     { "name": "signup", "urls": ["https://app.badbat75.com/welcome",
                                  "https://app.badbat75.com/welcome/*"],
       "public_auth": true }
@@ -235,11 +240,11 @@ Three sibling sections answer three different questions:
   "users": [
     { "email": "you@badbat75.com", "authorized_urls": ["*://*/*"] },
     { "email": "bot@badbat75.com",
-      "authorized_urls": ["https://mcp.badbat75.com/mcp", "https://mcp.badbat75.com/mcp/*"],
+      "authorized_urls": ["@mcp"],
       "api_keys": [
         { "id": "laptop", "key_hash": "<sha256 hex of the bbk_ bearer>",
           "released": "2026-07-08", "duration": "365d",
-          "authorized_urls": ["https://mcp.badbat75.com/mcp/*"] }
+          "authorized_urls": ["@mcp"] }
       ] }
 ] }
 ```
@@ -248,6 +253,18 @@ A request is authorized when its credential resolves to an identity and one of e
 **two grant sources** covers the request URL: the user's `authorized_urls`, or a
 `public_auth` site. Both are re-checked on every `/validate`. The one thing that takes
 access away is `denied`.
+
+### `url_groups` — one name for a set of patterns
+
+A group is **abbreviation, never a grant**: defining one authorizes nobody until some
+URL list names it. Any of the three — a user's `authorized_urls`, a key's, a site's
+`urls` — may carry the entry `"@mcp"`, which is replaced by that group's patterns when
+the file is loaded, so everything downstream sees the same flat list it always did.
+
+- **name** — `[A-Za-z0-9_-]+`, matched exactly (case-sensitive).
+- Groups are **flat**: a group may not reference another group.
+- An **unknown** `@name` is fatal, like a malformed pattern — a silently dropped entry would change who reaches what. Every group is validated even when nothing references it.
+- `bb-auth-adm url-group add|set|list|rm` edits them; `rm` refuses while anything still references the group.
 
 ### `users` — the roster
 
@@ -363,6 +380,8 @@ bb-auth-adm -f users.json user add bob@x.com --url 'https://app.x.com/reports/*'
 bb-auth-adm -f users.json user set bob@x.com --add-url 'https://app.x.com/reports'
 bb-auth-adm -f users.json key add bob@x.com --id laptop --duration 365d
 bb-auth-adm -f users.json site add onboarding --url 'https://app.x.com/welcome/*' --public-auth
+bb-auth-adm -f users.json url-group add mcp --url 'https://mcp.x.com/mcp,https://mcp.x.com/mcp/*'
+bb-auth-adm -f users.json user set bob@x.com --add-url '@mcp'
 bb-auth-adm -f users.json deny add spammer@x.com
 bb-auth-adm -f users.json check                # the gate's parser, then lint
 ```
@@ -372,7 +391,8 @@ It talks back. Adding a user with no `--url` says so ("they reach NOTHING"); add
 site does not consult the roster, so deleting them is not a lockout — `deny` is. `check`
 also finds what parses fine and still doesn't mean what it says: a duplicate email (the
 last one silently wins), an expired key, a site listed after a broader one that already
-answers for its URLs, so it never speaks.
+answers for its URLs, so it never speaks, a url group nothing references. And it refuses
+to remove a url group while some list still names it.
 
 And it answers the question you actually have, with the gate's own decision function —
 exit 0 iff the request would pass:
@@ -430,6 +450,13 @@ to a database).
 > edits) — the headers are byte-identical, nginx needs no change. Second, that variable
 > is read at startup, so later edits to it need a `restart`, not a `reload`. See
 > [Profile claims](#profile-claims-optional).
+>
+> **Upgrading to 2.6.** Nobody is logged out: the cookie is unchanged, and so is every
+> access file that does not use the new `url_groups` section. The one ordering rule is
+> **deploy the binary before an access file that uses `@groups`** — a 2.5 gate does not
+> know what `"@mcp"` is, fails the load outright and keeps its previous table (fail-closed;
+> there is no partial grant to worry about). `bb-auth --check-users` on the old binary
+> tells you the same thing before a restart does.
 
 ## Session cookie
 
