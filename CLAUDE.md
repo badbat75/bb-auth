@@ -13,18 +13,26 @@ open a URL area to any authenticated identity. The access list is a JSON **acces
 (`BB_AUTH_USERS_FILE` — the var keeps its pre-`sites` name). It is service-agnostic — one
 binary fronts any web service, wired per-deployment through `BB_AUTH_*` env vars.
 
-One crate, three targets, and the split is load-bearing:
+One crate, four targets, and the split is load-bearing:
 
 - **[src/lib.rs](src/lib.rs)** (`bb_auth_core`) — **the access file**: its schema, its
   parser, the URL matcher, the grant model (`decide` / `decide_api_key`), and how one is
   *edited and written* (`open_access_file`, `AccessWrite`, the document mutations).
   Everything two programs must agree on, byte for byte.
-- **[src/main.rs](src/main.rs)** — **the gate**, and everything the access file has no
+- **[src/bin/bb-auth.rs](src/bin/bb-auth.rs)** — **the gate**, and everything the access file has no
   opinion about: HTTP, the session cookie, id_token validation, the nginx contract. Still
   **one file**, still read top to bottom.
 - **[src/bin/bb-auth-adm.rs](src/bin/bb-auth-adm.rs)** — the access-file admin CLI: CRUD over
   `url_groups` / `sites` / `denied` / `users` / `api_keys`, key minting, and `can EMAIL URL`
   (would this credential get in?). It links the library, none of the gate.
+- **[src/bin/bb-auth-web.rs](src/bin/bb-auth-web.rs)** — the access-file admin GUI
+  (server-rendered, `maud`, no JavaScript; **read-only** until a later phase wires the
+  library's mutations up). It links the library, none of the gate, and is **just another app
+  bb-auth fronts**: loopback only, gated by nginx `auth_request`, identity read from the
+  `X-Auth-Email` nginx injects and from nowhere else — a missing header is a 401, not an
+  anonymous visitor. `BB_AUTH_WEB_ADMINS` is its own allowlist on top of that, required and
+  never empty, because a `public_auth` site covering its URL would otherwise open the admin
+  surface to any Cognito account.
 
 The defining constraint vs. authorization-code OIDC proxies (oauth2-proxy): those drive the
 login themselves and *cannot* accept a token the browser already holds. bb-auth is built for
@@ -54,7 +62,7 @@ browser↔Cognito↔nginx sequence). Read those before changing the request flow
 This repo is developed on Windows but the artifact is a Linux/aarch64 binary.
 
 ```powershell
-# Tests — pure unit tests in src/lib.rs (the access file) and src/main.rs (the gate),
+# Tests — pure unit tests in src/lib.rs (the access file) and src/bin/bb-auth.rs (the gate),
 # run on the host, no network needed
 cargo test
 cargo test session_roundtrip_bb4      # a single test by name
@@ -75,7 +83,7 @@ cargo run --bin bb-auth-adm -- -f .\deploy\users.json can bob@x.com https://app.
 cargo check
 cargo clippy --all-targets
 cargo fmt
-cargo doc --no-deps                   # must emit zero warnings, across all three targets
+cargo doc --no-deps                   # must emit zero warnings, across all four targets
 
 # Release cross-compile for the target — run in WSL/Linux, NOT on Windows.
 # Produces dist/bb-auth (aarch64) and prints the max GLIBC symbol required.
@@ -100,10 +108,10 @@ bash scripts/build.sh                 # target overridable via BB_AUTH_TARGET
   beside them) — because `bb-auth-adm` today and the web admin next must agree on that byte
   for byte: the same argument that created the library. What stays in a tool is what has an
   operator: flags, warnings, and the wording of a verdict. HTTP, the cookie, the JWT,
-  the env, the nginx contract are the **gate's**, and stay in `src/main.rs` — which is
+  the env, the nginx contract are the **gate's**, and stay in `src/bin/bb-auth.rs` — which is
   still one file, read top to bottom. Do not move gate code into the library to "share" it
   with the CLI; the CLI has no business with any of it. The two authorization functions in
-  `main.rs` (`authorize`, `bearer_apikey_email`) are thin wrappers that add the log line
+  `bb-auth.rs` (`authorize`, `bearer_apikey_email`) are thin wrappers that add the log line
   and the wall clock to the library's decision — keep them thin, and keep the rule in the
   library, or `bb-auth-adm can` starts answering a different question from the gate.
 - **`bb-auth-adm` must never write a file the gate would reject.** Every mutation is

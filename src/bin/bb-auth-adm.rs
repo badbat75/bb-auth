@@ -40,12 +40,11 @@ use std::process::ExitCode;
 
 use bb_auth_core::{
     add_api_key, add_denied, add_site, add_url_group, add_user, decide, decide_api_key,
-    edit_url_list, edit_urls, format_date, key_expiry, key_mut, lower_authority, move_site,
-    norm_email, now, open_access_file, remove_api_key, remove_denied, remove_site,
-    remove_url_group, remove_user, rename_site, rename_user, render_access_file, rotate_api_key,
-    site_name, site_pos, url_group_mut, url_group_refs, user_mut, user_pos, Access, AccessFile,
-    AccessWrite, ApiKeySpec, Decision, KeyDecision, SealedKey, SiteSpec, UrlScope, UserSpec,
-    Written,
+    edit_url_list, edit_urls, format_date, key_expiry, key_mut, move_site, norm_email, now,
+    open_access_file, remove_api_key, remove_denied, remove_site, remove_url_group, remove_user,
+    rename_site, rename_user, render_access_file, request_url, rotate_api_key, site_name, site_pos,
+    url_group_mut, url_group_refs, user_mut, user_pos, Access, AccessFile, AccessWrite, ApiKeySpec,
+    Decision, KeyDecision, SealedKey, SiteSpec, UrlScope, UserSpec, Written,
 };
 
 const USAGE: &str = "\
@@ -402,13 +401,6 @@ fn cmd_init(ctx: Ctx) -> Result<ExitCode, String> {
 // ---------------------------------------------------------------------------
 // Rendering the document
 // ---------------------------------------------------------------------------
-
-/// The URL as the gate will see it on `/auth/validate`: query and fragment stripped (nginx
-/// sends `$uri`), authority lowercased. Comparing anything else would be answering a
-/// different question from the one the gate answers.
-fn request_url(url: &str) -> String {
-    lower_authority(url.split(['?', '#']).next().unwrap_or(""))
-}
 
 /// A key's expiry, rendered: `never`, a date, or `EXPIRED`.
 fn expiry_str(k: &ApiKeySpec) -> String {

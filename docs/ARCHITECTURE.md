@@ -59,7 +59,7 @@ Three actors outside bb-auth itself:
 
 ## 3. Code structure
 
-One crate, three targets. The split has exactly one seam, and it is the **access file**:
+One crate, four targets. The split has exactly one seam, and it is the **access file**:
 its schema, its parser, its matcher and its grant model are the one thing two programs
 must agree on byte for byte, so they live in a library both link. Everything else about
 the gate is the gate's, and stays in one file.
@@ -67,10 +67,11 @@ the gate is the gate's, and stays in one file.
 | Target | What it is |
 |--------|------------|
 | `src/lib.rs` (`bb_auth_core`) | **The access file.** Schema (`AccessFile`), parser (`compile_access`), URL matcher (`glob_match` / `UrlScope`), the site table (`Sites`), the grant model (`decide`, `decide_api_key`), key minting (`mint_api_key`), and how a file is edited and written (`open_access_file`, `AccessWrite`, the document mutations). Reads no env, opens no socket, holds no HTTP, prints nothing. |
-| `src/main.rs` (`bb-auth`) | **The gate**, still a single file read top to bottom: HTTP, config, the session cookie, id_token validation, the nginx contract. |
+| `src/bin/bb-auth.rs` (`bb-auth`) | **The gate**, still a single file read top to bottom: HTTP, config, the session cookie, id_token validation, the nginx contract. |
 | `src/bin/bb-auth-adm.rs` (`bb-auth-adm`) | **The access-file admin CLI.** CRUD over `url_groups` / `sites` / `denied` / `users` / `api_keys`, key minting and rotation, and `can EMAIL URL` — which calls the library's `decide`, so it answers the question the gate will answer. Every edit and every write is a library call (`AccessWrite`), so it cannot save a file the gate would reject; what is left here is flags, warnings and the wording of a verdict. See §12. |
+| `src/bin/bb-auth-web.rs` (`bb-auth-web`) | **The access-file admin GUI**, read-only for now: server-rendered (`maud`, no JavaScript) over the library, loopback behind nginx `auth_request`, identity from the `X-Auth-Email` nginx injects plus its own required `BB_AUTH_WEB_ADMINS` allowlist. Links the library, none of the gate. |
 
-Inside `src/main.rs`, in file order:
+Inside `src/bin/bb-auth.rs`, in file order:
 
 | Section | Purpose |
 |---------|---------|

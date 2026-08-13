@@ -7,7 +7,7 @@ license = "MIT"
 
 # The access file — schema, parser, URL matcher, grant model. The ONE thing the gate and
 # the admin CLI must agree on, so there is one implementation of it and both link this.
-# Everything else about the gate stays in src/main.rs. Named `bb_auth_core` rather than
+# Everything else about the gate stays in src/bin/bb-auth.rs. Named `bb_auth_core` rather than
 # `bb_auth` because a lib and a bin with the same name collide in `cargo doc`.
 [lib]
 name = "bb_auth_core"
@@ -15,13 +15,20 @@ path = "src/lib.rs"
 
 [[bin]]
 name = "bb-auth"
-path = "src/main.rs"
+path = "src/bin/bb-auth.rs"
 
 # The access-file admin CLI: CRUD over url_groups / sites / denied / users / api_keys,
 # validated with the gate's own parser before it writes. Links the lib, none of the gate.
 [[bin]]
 name = "bb-auth-adm"
 path = "src/bin/bb-auth-adm.rs"
+
+# The access-file admin GUI: the same file, server-rendered, read-only for now. Loopback
+# only, behind the gate's own auth_request — it is just another app bb-auth fronts. Links
+# the lib, none of the gate.
+[[bin]]
+name = "bb-auth-web"
+path = "src/bin/bb-auth-web.rs"
 
 [dependencies]
 # Tiny blocking, threaded HTTP server — pure Rust, no async runtime (low resident memory).
@@ -45,6 +52,14 @@ form_urlencoded = "1"
 # SIGHUP handling for live users-table reload. Pure Rust + libc FFI — no system
 # OpenSSL, keeps the aarch64 cross-compile clean.
 signal-hook = { version = "0.3", features = ["iterator"] }
+# HTML templating for bb-auth-web, compile-time and pure Rust (a proc macro over
+# proc-macro2/quote/syn — no runtime, no C, nothing to cross-compile). It is here for its
+# ESCAPING BY CONSTRUCTION: every interpolated value is escaped on the way into the page,
+# so an access file full of hostile-looking emails and URL patterns cannot produce markup.
+# Same shape of argument as the gate's `pct_encode` — safety is a property of the encoder,
+# not of a per-value check somebody has to remember. Default features only: the web-
+# framework integrations (actix/axum/rocket/…) stay off, so this pulls in no server stack.
+maud = "0.27"
 
 # `chown` when bb-auth-adm rewrites the access file: the live one is root:bb-auth 0640, and
 # a rewrite that left it root:root would lock the service out of its own access list. Plain

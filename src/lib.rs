@@ -1209,6 +1209,18 @@ pub fn norm_email(e: &str) -> String {
     e.trim().to_ascii_lowercase()
 }
 
+/// The URL as the gate will see it on `/auth/validate`: query and fragment stripped (nginx
+/// sends `$uri`), authority lowercased. Comparing anything else would be answering a
+/// different question from the one the gate answers.
+///
+/// Here rather than in a tool for that reason: it is a statement about *which* URL an
+/// access file's patterns are matched against, so every program that asks "would this get
+/// in?" — `bb-auth-adm can`, the web admin's tester — has to normalise it identically, the
+/// same way they all share one matcher and one [`decide`].
+pub fn request_url(url: &str) -> String {
+    lower_authority(url.split(['?', '#']).next().unwrap_or(""))
+}
+
 /// The roster position of `email`, matched as [`norm_email`] matches.
 pub fn user_pos(doc: &AccessFile, email: &str) -> Option<usize> {
     let want = norm_email(email);

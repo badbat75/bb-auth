@@ -408,6 +408,40 @@ Edit the **live** file (`sudo bb-auth-adm -f /opt/bb-auth/var/lib/users.json …
 is deployed alongside the gate): it is the copy that is current, and the write preserves
 its `root:bb-auth 0640` ownership. Then reload — see below.
 
+### `bb-auth-web` (preview)
+
+The same file in a browser: a server-rendered admin GUI, no JavaScript. It shows the
+roster, each url group and who references it, the sites **numbered in file order** (the
+number is the meaning — first match wins), the `denied` veto, every key's expiry, and a
+`can` tester answered by the gate's own decision function.
+
+**It is read-only in this phase** — every route is a `GET`, nothing here writes the file.
+Keep using `bb-auth-adm` for edits; the write phase comes later.
+
+It is *just another app bb-auth fronts*: it binds loopback, and nginx gates its URL with
+`auth_request` like any other, injecting the authorized email as `X-Auth-Email` (the
+contract in "Passing the identity to the app"). It validates no token and holds no
+secret — which is exactly why it must never be reachable except through nginx. A request
+with no identity header answers `401` and says so, rather than serving anyone.
+
+| Var | Required | Default | Meaning |
+|-----|----------|---------|---------|
+| `BB_AUTH_USERS_FILE` | yes | — | the access file to render (the gate's own variable name) |
+| `BB_AUTH_WEB_ADMINS` | yes | — | comma-separated emails allowed in. **Empty is fatal**, never "everyone" |
+| `BB_AUTH_WEB_LISTEN` | no | `127.0.0.1:8091` | bind address. Keep it on loopback |
+| `BB_AUTH_WEB_BASE_PATH` | no | *(empty)* | the URL prefix nginx mounts it at, e.g. `/admin` |
+| `BB_AUTH_WEB_DEFAULT_LANG` | no | `en` | `en` or `it`; a `?lang=` choice is remembered in a cookie |
+
+`BB_AUTH_WEB_ADMINS` is deliberate defense in depth, not a second copy of the roster: a
+`public_auth` site covering the GUI's URL would otherwise hand the admin surface to any
+Cognito account, and self-signup is open.
+
+The file is read fresh on **every request** — no cache, no reload signal. An edit made
+over SSH with `bb-auth-adm` a second ago is on the next page load, and a file the gate
+would refuse renders as the parser's own error message instead of taking the GUI down.
+
+Full deploy wiring comes with the write phase.
+
 ### Validating and reloading
 
 Check a file before shipping it — a bad pattern or an unknown site field is a fatal
