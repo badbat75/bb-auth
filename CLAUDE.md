@@ -83,6 +83,10 @@ cargo run --bin bb-auth-adm -- -f .\deploy\users.json user add bob@x.com --url '
 cargo run --bin bb-auth-adm -- -f .\deploy\users.json key add bob@x.com --id laptop --duration 365d
 cargo run --bin bb-auth-adm -- -f .\deploy\users.json can bob@x.com https://app.x.com/reports
 
+# Browser E2E suite for bb-auth-web (Node + system Edge/Chrome; self-contained — builds,
+# starts and kills its own server on a temp copy of the fixture; see e2e/README.md)
+node e2e/run.js
+
 # Host build / typecheck (SIGHUP reload is cfg(unix), compiled out on Windows)
 cargo check
 cargo clippy --all-targets

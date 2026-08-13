@@ -14,6 +14,10 @@
 allowed_emails
 /deploy/users.json
 
+# Browser E2E suite (e2e/) — installed deps and per-run artifacts, never tracked
+/e2e/node_modules
+/e2e/artifacts
+
 # OS / editor cruft
 .DS_Store
 Thumbs.db

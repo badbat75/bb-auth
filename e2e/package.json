@@ -1,0 +1,13 @@
+{
+  "name": "bb-auth-web-e2e",
+  "private": true,
+  "description": "Browser E2E suite for bb-auth-web. Not a cargo target — run with `node run.js`.",
+  "license": "UNLICENSED",
+  "type": "commonjs",
+  "scripts": {
+    "test": "node run.js"
+  },
+  "dependencies": {
+    "playwright": "^1.62.1"
+  }
+}
