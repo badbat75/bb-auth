@@ -1283,7 +1283,7 @@ fn cmd_deny_add(ctx: Ctx, emails: &[&str]) -> Result<ExitCode, String> {
         if e.is_empty() {
             continue;
         }
-        if !add_denied(&mut doc, &e) {
+        if !add_denied(&mut doc, &e)? {
             eprintln!("[bb-auth-adm] {e} is already denied");
             continue;
         }

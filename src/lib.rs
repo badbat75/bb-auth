@@ -732,6 +732,41 @@ pub fn header_safe_email(email: &str) -> bool {
     !email.is_empty() && email.bytes().all(|b| b.is_ascii_graphic())
 }
 
+/// Does `email` have the shape of an address Cognito could ever vouch for?
+///
+/// Deliberately pragmatic, not RFC 5322: [`header_safe_email`] first (printable ASCII, so
+/// no whitespace and no control bytes), then exactly one `@`, a non-empty local part of
+/// anything printable, and a domain of `[A-Za-z0-9-]` labels (no label starting or ending
+/// with `-`) joined by `.` — with **at least one dot**, because a Cognito email always
+/// carries a TLD. That rejects `not an email` and `bob@example,com` while accepting any
+/// address Cognito would ever emit.
+///
+/// This is an **edit-path** check ([`add_user`], [`rename_user`], [`add_denied`]) and only
+/// there — [`compile_access`] must never learn it, because a live file that loads today
+/// has to keep loading (a fatal startup under `Restart=on-failure` is a boot loop). A
+/// malformed roster email is fail-closed anyway — it matches no Cognito claim — but a
+/// typo'd one is a dead row discovered only when the human it was meant for cannot get
+/// in, so the two editors refuse to *create* one.
+pub fn well_formed_email(email: &str) -> bool {
+    if !header_safe_email(email) {
+        return false;
+    }
+    let Some((local, domain)) = email.split_once('@') else {
+        return false;
+    };
+    !local.is_empty()
+        && !domain.contains('@')
+        && domain.contains('.')
+        && domain.split('.').all(|label| {
+            !label.is_empty()
+                && label
+                    .bytes()
+                    .all(|b| b.is_ascii_alphanumeric() || b == b'-')
+                && !label.starts_with('-')
+                && !label.ends_with('-')
+        })
+}
+
 /// SHA-256 of `s`, lowercase hex. Fingerprints an API key for storage/lookup.
 pub fn sha256_hex(s: &str) -> String {
     use std::fmt::Write as _;
@@ -1357,12 +1392,28 @@ pub fn edit_url_list(
 
 // --- document mutations ----------------------------------------------------
 
-/// Enrol `user`, whose email is normalised on the way in. Refuses a second row for an
+/// The refusal every mutation that lets a **new** email into the file makes, in one
+/// sentence. Only new values: an address already in the file is never re-checked, so a
+/// legacy row does not block the edits around it.
+fn check_new_email(email: &str) -> Result<(), String> {
+    if well_formed_email(email) {
+        return Ok(());
+    }
+    Err(format!(
+        "'{email}' does not look like an email address (LOCAL@DOMAIN with a dotted domain, \
+         like bob@example.com) — it could never match a Cognito identity"
+    ))
+}
+
+/// Enrol `user`, whose email is normalised on the way in and must look like an email
+/// ([`well_formed_email`]) — a typo here is a dead row that fails closed and is found only
+/// by the human it locks out. Refuses a second row for an
 /// address that is already on the roster: the gate builds a `HashMap`, so a duplicate is
 /// not an error there — the last row silently wins, and the one an operator is reading may
 /// not be the one in force.
 pub fn add_user(doc: &mut AccessFile, mut user: UserSpec) -> Result<(), String> {
     user.email = norm_email(&user.email);
+    check_new_email(&user.email)?;
     if user_pos(doc, &user.email).is_some() {
         return Err(format!(
             "{} is already in users (edit them: user set {})",
@@ -1373,14 +1424,20 @@ pub fn add_user(doc: &mut AccessFile, mut user: UserSpec) -> Result<(), String> 
     Ok(())
 }
 
-/// Give `email`'s row a new address.
+/// Give `email`'s row a new address, which must look like one ([`well_formed_email`]).
 ///
 /// The collision is checked before the row is even located: "that address is taken" is the
-/// more useful complaint of the two, and it is the one an operator hears today.
+/// more useful complaint of the two, and it is the one an operator hears today. Both checks
+/// run only when the address actually changes — a rename to itself (which is how an editor
+/// saves an unrelated field) must not trip over a legacy row whose address would be refused
+/// today.
 pub fn rename_user(doc: &mut AccessFile, email: &str, new_email: &str) -> Result<(), String> {
     let new = norm_email(new_email);
-    if new != norm_email(email) && user_pos(doc, &new).is_some() {
-        return Err(format!("{new} is already in users"));
+    if new != norm_email(email) {
+        check_new_email(&new)?;
+        if user_pos(doc, &new).is_some() {
+            return Err(format!("{new} is already in users"));
+        }
     }
     user_mut(doc, email)?.email = new;
     Ok(())
@@ -1567,18 +1624,23 @@ pub fn remove_url_group(doc: &mut AccessFile, name: &str) -> Result<Vec<String>,
     Ok(doc.url_groups.remove(&name).unwrap_or_default())
 }
 
-/// Veto `email`, normalised. `false` = it was already there (or empty), and nothing changed.
+/// Veto `email`, normalised. `Ok(false)` = it was already there, and nothing changed;
+/// `Err` = it does not look like an email ([`well_formed_email`]) — a malformed veto is
+/// worse than a malformed roster row, because it fails *open*: it vetoes nobody while
+/// reading as if it did. The already-there check comes first, so a legacy entry can be
+/// named without tripping the shape check.
 ///
 /// Not the same as deleting the user's row: on a `public_auth` site the roster is never
 /// consulted, so for an un-enrolled identity this is the only denial there is — and for an
 /// enrolled one it is a suspension, since their scope and keys survive it.
-pub fn add_denied(doc: &mut AccessFile, email: &str) -> bool {
+pub fn add_denied(doc: &mut AccessFile, email: &str) -> Result<bool, String> {
     let e = norm_email(email);
-    if e.is_empty() || doc.denied.iter().any(|d| norm_email(d) == e) {
-        return false;
+    if doc.denied.iter().any(|d| norm_email(d) == e) {
+        return Ok(false);
     }
+    check_new_email(&e)?;
     doc.denied.push(e);
-    true
+    Ok(true)
 }
 
 /// Lift the veto on every listed email, returning how many rows went.
@@ -3026,14 +3088,14 @@ mod tests {
     #[test]
     fn denied_edits_normalize_the_email() {
         let mut doc = doc_of(EDIT_JSON);
-        assert!(add_denied(&mut doc, "  NEW@X.com  "));
+        assert!(add_denied(&mut doc, "  NEW@X.com  ").unwrap());
         assert_eq!(
             doc.denied,
             vec!["spammer@x.com".to_string(), "new@x.com".to_string()]
         );
         // already vetoed, in any spelling — and an empty entry is not a veto
-        assert!(!add_denied(&mut doc, "New@x.com"));
-        assert!(!add_denied(&mut doc, "   "));
+        assert!(!add_denied(&mut doc, "New@x.com").unwrap());
+        assert!(add_denied(&mut doc, "   ").is_err());
         assert_eq!(doc.denied.len(), 2);
 
         assert_eq!(
@@ -3042,5 +3104,75 @@ mod tests {
         );
         assert_eq!(remove_denied(&mut doc, &["nobody@x.com".into()]), 0);
         assert_eq!(doc.denied, vec!["spammer@x.com".to_string()]);
+    }
+
+    #[test]
+    fn well_formed_email_accepts_cognito_shapes_and_rejects_typos() {
+        for good in [
+            "bob@example.com",
+            "a+tag@sub.example.co.uk",
+            "n.o'brien@x.com",
+            "UPPER@X.COM",
+            "a!#$%&'*/=?^_`{|}~-b@x-1.example.com",
+        ] {
+            assert!(well_formed_email(good), "{good:?} must be accepted");
+        }
+        for bad in [
+            "",
+            "not an email",         // whitespace, no @
+            "bob",                  // no @
+            "bob@",                 // empty domain
+            "@example.com",         // empty local part
+            "bob@example,com",      // the classic comma typo: one label, no dot
+            "bob@example",          // no TLD — Cognito always emits one
+            "bob@example.com.",     // trailing dot = empty label
+            "bob@.example.com",     // leading dot = empty label
+            "bob@exa mple.com",     // whitespace
+            "bob@@example.com",     // two @
+            "a@b@example.com",      // two @
+            "bob@-bad.example.com", // label starting with '-'
+            "bob@bad-.example.com", // label ending with '-'
+            "bob@exam_ple.com",     // '_' is local-part vocabulary, not a domain's
+            "béatrice@x.com",       // non-ASCII: header_safe_email already forbids it
+            "bad\r\nX: 1@x.com",
+        ] {
+            assert!(!well_formed_email(bad), "{bad:?} must be rejected");
+        }
+    }
+
+    #[test]
+    fn mutations_refuse_a_malformed_new_email_but_never_a_legacy_row() {
+        let mut doc = doc_of(EDIT_JSON);
+
+        // The three doors an email enters through, all refused in the same sentence.
+        let err = err_of(add_user(
+            &mut doc,
+            UserSpec {
+                email: "not an email".into(),
+                ..Default::default()
+            },
+        ));
+        assert!(err.contains("'not an email'"), "{err}");
+        assert!(err.contains("does not look like an email address"), "{err}");
+        assert_eq!(doc.users.len(), 1, "nothing was enrolled");
+
+        let err = err_of(rename_user(&mut doc, "bob@x.com", "bob@example,com"));
+        assert!(err.contains("'bob@example,com'"), "{err}");
+        assert_eq!(doc.users[0].email, "Bob@X.com", "the row is untouched");
+
+        let err = err_of(add_denied(&mut doc, "spam mer"));
+        assert!(err.contains("does not look like an email address"), "{err}");
+        assert_eq!(doc.denied, vec!["spammer@x.com".to_string()]);
+
+        // A legacy row whose address would be refused today is not a hostage: a rename to
+        // itself (how an editor saves an unrelated field) and a re-deny both still answer.
+        doc.users[0].email = "legacy row".into();
+        rename_user(&mut doc, "legacy row", " Legacy ROW ").unwrap();
+        assert_eq!(doc.users[0].email, "legacy row");
+        doc.denied.push("legacy veto".into());
+        assert!(
+            !add_denied(&mut doc, "legacy veto").unwrap(),
+            "already there, not an error"
+        );
     }
 }

@@ -86,7 +86,10 @@
 //! handed out for a file that never landed. It never reaches a log line or a URL. A
 //! re-submitted mint form cannot double-mint either, and pleasantly it is the `rev` rule
 //! that stops it: the first write changed the file, so the second `POST` carries a stale
-//! fingerprint and is refused.
+//! fingerprint and is refused. That refusal gets a page of its own
+//! ([`page_mint_conflict`]): the generic `409` would blame another writer and advise
+//! redoing the change — which here would mint a second key — where the truth is that the
+//! key was created and a lost bearer's remedy is `key rotate`.
 //!
 //! Destructive actions (`user rm`, `key rm`, `key rotate`, `site rm`, `url-group rm`,
 //! `deny rm`) are a `GET` confirmation page whose `POST` does the deed — the no-JavaScript
@@ -404,7 +407,12 @@ enum K {
     // --- whole-request refusals ---
     ConflictTitle,
     ConflictBody,
+    ConflictRecover,
     ConflictBack,
+    MintConflictTitle,
+    MintConflictBody,
+    MintConflictLost,
+    MintConflictRotate,
     CsrfTitle,
     CsrfBody,
     NotAllowedTitle,
@@ -738,7 +746,40 @@ fn t(lang: Lang, key: K) -> &'static str {
              form — un bb-auth-adm via SSH, o un'altra scheda. Qui non è stato scritto \
              nulla: ricarica la pagina e rifai la modifica su ciò che il file dice adesso.",
         ),
+        K::ConflictRecover => m(
+            lang,
+            "What you typed is not lost: the browser's Back button returns to the form as \
+             you filled it in — copy the values from there onto the freshly reloaded form.",
+            "Ciò che avevi digitato non è perso: il pulsante Indietro del browser riporta \
+             alla form così come l'avevi compilata — copia da lì i valori sulla form appena \
+             ricaricata.",
+        ),
         K::ConflictBack => m(lang, "reload the page", "ricarica la pagina"),
+        K::MintConflictTitle => m(
+            lang,
+            "This key was already created",
+            "Questa chiave è già stata creata",
+        ),
+        K::MintConflictBody => m(
+            lang,
+            "The file already carries a key with this id for this user — most likely this \
+             page is a reload of the one that showed the bearer, re-submitting the mint \
+             form. Nothing was written now: the key exists exactly once.",
+            "Il file contiene già una chiave con questo id per questo utente — con ogni \
+             probabilità questa pagina è il ricaricamento di quella che mostrava il bearer, \
+             e ha reinviato la form di creazione. Adesso non è stato scritto nulla: la \
+             chiave esiste una volta sola.",
+        ),
+        K::MintConflictLost => m(
+            lang,
+            "The bearer was shown once, when the key was created, and cannot be recovered — \
+             the file keeps only its hash. If it was not copied then, rotate the key: same \
+             row, same scope, a new secret.",
+            "Il bearer è stato mostrato una sola volta, alla creazione della chiave, e non \
+             può essere recuperato — il file ne conserva solo l'hash. Se allora non è stato \
+             copiato, rigenera la chiave: stessa riga, stesso scope, un nuovo segreto.",
+        ),
+        K::MintConflictRotate => m(lang, "rotate this key", "rigenera questa chiave"),
         K::CsrfTitle => m(lang, "Request refused", "Richiesta rifiutata"),
         K::CsrfBody => m(
             lang,
@@ -2485,7 +2526,9 @@ fn page_minted(v: &View, owner: &str, id: &str, bearer: &str) -> Markup {
 }
 
 /// The `409`: the file moved under the form. Nothing was written, and the way out is a
-/// fresh read of what the file says now.
+/// fresh read of what the file says now — with a pointer at the browser's Back button,
+/// which (this GUI being JavaScript-free, so nothing disturbs the bfcache) still holds
+/// the form exactly as it was filled in.
 fn page_conflict(v: &View) -> Markup {
     // A `POST`-only route has no form to reload, so it goes back to its section.
     let back = match &v.at {
@@ -2496,7 +2539,34 @@ fn page_conflict(v: &View) -> Markup {
         h1 { (v.t(K::ConflictTitle)) }
         div class="panel" {
             p { (v.t(K::ConflictBody)) }
+            p { (v.t(K::ConflictRecover)) }
             p { a href=(v.href(&back)) { "← " (v.t(K::ConflictBack)) } }
+        }
+    }
+}
+
+/// The mint route's own `409`: the `rev` is stale **and** the requested key now exists —
+/// which is what a reload of the reveal page looks like from here, the reveal being the
+/// direct `POST` response ([`page_minted`]). The generic [`page_conflict`] would be wrong
+/// twice on this path: the "someone else" who moved the file was this administrator's own
+/// submit, and "make the change again" would mint a second key. What an administrator who
+/// lost the bearer needs instead is a rotation, so the link to it is here — and there is
+/// deliberately no Back-button hint, because the typed input is not worth recovering.
+fn page_mint_conflict(v: &View, owner: &str, id: &str) -> Markup {
+    let owner = norm_email(owner);
+    html! {
+        h1 { (v.t(K::MintConflictTitle)) }
+        div class="panel" {
+            p { code { (owner) } " · api_keys · " code { (id) } }
+            p { (v.t(K::MintConflictBody)) }
+            p { (v.t(K::MintConflictLost)) }
+            p {
+                a href=(v.href(&Route::KeyRotate(owner.clone(), id.to_string()))) {
+                    (v.t(K::MintConflictRotate))
+                }
+                " · "
+                a href=(v.href(&Route::User(owner.clone()))) { "← " (v.t(K::Back)) }
+            }
         }
     }
 }
@@ -2596,6 +2666,23 @@ fn mutate(v: &View, form: &Form) -> Outcome {
         }
     };
     if form.get("rev").trim() != sha256_hex(&raw) {
+        // On the mint route, a stale rev is usually this administrator's own write: the
+        // reveal page is the direct POST response (a bearer cannot survive a redirect), so
+        // reloading it re-submits the mint. If the requested key now exists, say what
+        // actually happened — the generic page's advice, "make the change again", would
+        // mint a second key. A stale rev with no such key is a genuine concurrent edit,
+        // and keeps the generic answer.
+        if let Route::KeyAdd(owner) = &v.at {
+            let id = form.get("id").trim();
+            let minted = |d: &AccessFile| {
+                user_pos(d, owner)
+                    .is_some_and(|i| d.users[i].api_keys.iter().any(|k| k.id.trim() == id))
+            };
+            if !id.is_empty() && serde_json::from_str::<AccessFile>(&raw).is_ok_and(|d| minted(&d))
+            {
+                return Outcome::Page(409, title, page_mint_conflict(v, owner, id));
+            }
+        }
         return Outcome::Page(409, title, page_conflict(v));
     }
 
@@ -2950,7 +3037,7 @@ fn mutate(v: &View, form: &Form) -> Outcome {
                 if email.is_empty() {
                     return Err(v.t(K::EmailRequired).to_string());
                 }
-                if !add_denied(&mut doc, &email) {
+                if !add_denied(&mut doc, &email)? {
                     return Err(v.t(K::AlreadyDenied).to_string());
                 }
                 commit(v, &doc, "deny add", &email)?;
@@ -4037,6 +4124,8 @@ mod tests {
         let (status, html) = got.page();
         assert_eq!(status, 409);
         assert!(html.contains("The file changed"), "{html}");
+        // The typed input is one Back-button press away, and the page says so.
+        assert!(html.contains("Back button"), "{html}");
         assert_eq!(read(&path), before, "nothing may be written on a conflict");
         // A form with no rev at all is the same refusal, not a bypass.
         let got = post(&cfg, Route::UserAdd, &[("email", "new@x.com")]);
@@ -4152,6 +4241,102 @@ mod tests {
         );
         assert_eq!(replay.page().0, 409);
         assert_eq!(read(&path), on_disk, "the replay wrote nothing");
+        cleanup(&path);
+    }
+
+    #[test]
+    fn a_reloaded_reveal_page_gets_the_mint_conflict_not_the_generic_409() {
+        let path = scratch("m-mint-reload", SAMPLE);
+        let cfg = cfg_for(&path, "");
+        let stale = rev_of(&path);
+        let fields = [
+            ("rev", stale.as_str()),
+            ("id", "ci"),
+            ("duration", "365d"),
+            ("scope", "inherit"),
+        ];
+        let first = post(&cfg, Route::KeyAdd("bob@x.com".to_string()), &fields);
+        assert_eq!(first.page().0, 200, "the mint itself succeeds");
+        let on_disk = read(&path);
+
+        // The reveal page is the direct POST response, so reloading it re-submits these
+        // exact bytes. The rev is stale — the mint's own write moved the file — and the
+        // key exists, so the answer is the mint's own 409, not "someone else wrote".
+        let replay = post(&cfg, Route::KeyAdd("bob@x.com".to_string()), &fields);
+        let (status, html) = replay.page();
+        assert_eq!(status, 409);
+        assert!(html.contains("This key was already created"), "{html}");
+        assert!(
+            !html.contains("The file changed"),
+            "the generic advice would mint a second key: {html}"
+        );
+        // A lost bearer's remedy is rotation, and the link is on the page.
+        assert!(html.contains("/users/bob%40x.com/keys/ci/rotate"), "{html}");
+        assert!(!html.contains("bbk_"), "no bearer on a replay: {html}");
+        assert_eq!(read(&path), on_disk, "the replay wrote nothing");
+        let doc = bb_auth_core::read_access_file(&path).unwrap();
+        let ci = doc.users[0].api_keys.iter().filter(|k| k.id.trim() == "ci");
+        assert_eq!(ci.count(), 1, "still exactly one key with this id");
+
+        // A stale rev whose key does NOT exist is a genuine concurrent edit, and keeps
+        // the generic page — nothing was created, redoing the change is the right advice.
+        let other = post(
+            &cfg,
+            Route::KeyAdd("bob@x.com".to_string()),
+            &[
+                ("rev", &stale),
+                ("id", "other"),
+                ("duration", "365d"),
+                ("scope", "inherit"),
+            ],
+        );
+        let (status, html) = other.page();
+        assert_eq!(status, 409);
+        assert!(html.contains("The file changed"), "{html}");
+        assert_eq!(read(&path), on_disk);
+        cleanup(&path);
+    }
+
+    #[test]
+    fn a_malformed_email_is_refused_on_the_form_it_came_from() {
+        let path = scratch("m-bademail", SAMPLE);
+        let cfg = cfg_for(&path, "");
+        let before = read(&path);
+        let got = post(
+            &cfg,
+            Route::UserAdd,
+            &[
+                ("rev", &rev_of(&path)),
+                ("email", "not an email"),
+                ("urls", "*://*/*"),
+            ],
+        );
+        let (status, html) = got.page();
+        assert_eq!(status, 400);
+        // The library's refusal, verbatim, above the field that caused it.
+        assert!(
+            html.contains("does not look like an email address"),
+            "{html}"
+        );
+        assert!(
+            html.contains("value=\"not an email\""),
+            "the typed value is still in the field: {html}"
+        );
+        assert_eq!(read(&path), before, "a refusal writes nothing");
+
+        // The same door guards denied — a malformed veto would fail open.
+        let got = post(
+            &cfg,
+            Route::DenyAdd,
+            &[("rev", &rev_of(&path)), ("email", "bob@example,com")],
+        );
+        let (status, html) = got.page();
+        assert_eq!(status, 400);
+        assert!(
+            html.contains("does not look like an email address"),
+            "{html}"
+        );
+        assert_eq!(read(&path), before);
         cleanup(&path);
     }
 
