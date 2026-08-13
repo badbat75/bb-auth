@@ -26,13 +26,17 @@ One crate, four targets, and the split is load-bearing:
   `url_groups` / `sites` / `denied` / `users` / `api_keys`, key minting, and `can EMAIL URL`
   (would this credential get in?). It links the library, none of the gate.
 - **[src/bin/bb-auth-web.rs](src/bin/bb-auth-web.rs)** — the access-file admin GUI
-  (server-rendered, `maud`, no JavaScript; **read-only** until a later phase wires the
-  library's mutations up). It links the library, none of the gate, and is **just another app
-  bb-auth fronts**: loopback only, gated by nginx `auth_request`, identity read from the
-  `X-Auth-Email` nginx injects and from nowhere else — a missing header is a 401, not an
-  anonymous visitor. `BB_AUTH_WEB_ADMINS` is its own allowlist on top of that, required and
-  never empty, because a `public_auth` site covering its URL would otherwise open the admin
-  surface to any Cognito account.
+  (server-rendered, `maud`, no JavaScript): the same CRUD as the CLI, made **only** through
+  the library's editing core, with the deploy phase still to come. A `GET` never mutates;
+  every mutation is a `POST` guarded by a strict same-origin check (`Sec-Fetch-Site`, else
+  `Origin`'s host vs `Host`'s — never the scheme, it speaks plain HTTP behind nginx) and by a
+  hidden `rev` = sha256 of the file's exact bytes as the form was rendered, so a lost update
+  against a `bb-auth-adm` over SSH is a 409 instead of a silent clobber. It links the library,
+  none of the gate, and is **just another app bb-auth fronts**: loopback only, gated by nginx
+  `auth_request`, identity read from the `X-Auth-Email` nginx injects and from nowhere else —
+  a missing header is a 401, not an anonymous visitor. `BB_AUTH_WEB_ADMINS` is its own
+  allowlist on top of that, required and never empty, because a `public_auth` site covering
+  its URL would otherwise open the admin surface to any Cognito account.
 
 The defining constraint vs. authorization-code OIDC proxies (oauth2-proxy): those drive the
 login themselves and *cannot* accept a token the browser already holds. bb-auth is built for

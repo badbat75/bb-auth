@@ -23,9 +23,10 @@ path = "src/bin/bb-auth.rs"
 name = "bb-auth-adm"
 path = "src/bin/bb-auth-adm.rs"
 
-# The access-file admin GUI: the same file, server-rendered, read-only for now. Loopback
-# only, behind the gate's own auth_request — it is just another app bb-auth fronts. Links
-# the lib, none of the gate.
+# The access-file admin GUI: the same file, server-rendered, read and write. Every edit goes
+# through the library's AccessWrite, exactly as bb-auth-adm's does. Loopback only, behind the
+# gate's own auth_request — it is just another app bb-auth fronts. Links the lib, none of the
+# gate.
 [[bin]]
 name = "bb-auth-web"
 path = "src/bin/bb-auth-web.rs"

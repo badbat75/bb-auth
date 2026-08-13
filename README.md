@@ -415,8 +415,19 @@ roster, each url group and who references it, the sites **numbered in file order
 number is the meaning — first match wins), the `denied` veto, every key's expiry, and a
 `can` tester answered by the gate's own decision function.
 
-**It is read-only in this phase** — every route is a `GET`, nothing here writes the file.
-Keep using `bb-auth-adm` for edits; the write phase comes later.
+It **edits** the file too — the same CRUD as `bb-auth-adm`, made through the same library
+code, so it cannot save a file the gate would reject. Three rules make that safe with no
+JavaScript and no server-side session: a `GET` never mutates; every `POST` must be
+same-origin (`Sec-Fetch-Site`, else `Origin`'s host against `Host`'s — hosts, not schemes,
+since this speaks plain HTTP behind nginx); and every form carries a hidden `rev`, the
+sha256 of the file's exact bytes when the form was rendered. If the file moved in between —
+a `bb-auth-adm` over SSH, another tab — the `POST` answers `409` and writes nothing, instead
+of quietly discarding someone's edit. A successful mutation redirects (so a reload cannot
+repeat it), except minting a key, which shows the `bbk_` bearer once, on the spot, after the
+file carrying its hash is on disk. Destructive actions go through a confirmation page. An
+edit is live at the next `systemctl reload bb-auth`, as always.
+
+Still to come: the deploy phase (unit, nginx snippet, a place in the ship script).
 
 It is *just another app bb-auth fronts*: it binds loopback, and nginx gates its URL with
 `auth_request` like any other, injecting the authorized email as `X-Auth-Email` (the
@@ -436,11 +447,13 @@ with no identity header answers `401` and says so, rather than serving anyone.
 `public_auth` site covering the GUI's URL would otherwise hand the admin surface to any
 Cognito account, and self-signup is open.
 
-The file is read fresh on **every request** — no cache, no reload signal. An edit made
-over SSH with `bb-auth-adm` a second ago is on the next page load, and a file the gate
-would refuse renders as the parser's own error message instead of taking the GUI down.
+The file is read fresh on **every request** — no cache, no reload signal, and no
+server-side session. An edit made over SSH with `bb-auth-adm` a second ago is on the next
+page load, and a file the gate would refuse renders as the parser's own error message
+instead of taking the GUI down. The `rev` field is what makes that safe for writing as
+well: what a form needs to know about the file travels in the form.
 
-Full deploy wiring comes with the write phase.
+Full deploy wiring comes with the deploy phase.
 
 ### Validating and reloading
 
