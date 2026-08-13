@@ -13,6 +13,12 @@
 //! access file has no opinion about — HTTP, the session cookie, id_token validation,
 //! the nginx contract — in its own single file, and `bb-auth-adm` links nothing of it.
 //!
+//! The same argument reaches one step further than the meaning of a file: **how an access
+//! file is edited and written** ([`AccessWrite`], [`open_access_file`], and the document
+//! mutations beside them) is also something more than one program has to get right byte
+//! for byte — `bb-auth-adm` today, a web admin next. Validate-before-write, atomic
+//! replace, mode and owner preserved: one implementation, here.
+//!
 //! # What is in an access file
 //!
 //! Four sibling sections answering four different questions ([`AccessFile`]):
@@ -647,6 +653,16 @@ pub struct SiteSpec {
     pub login_url: Option<String>,
 }
 
+/// A site's name as everything that speaks of one spells it: trimmed, and `"?"` when the
+/// file leaves it out. [`compile_access`] stamps it into [`SiteRecord::name`] for the
+/// gate's logs, and every tool that lists or reports a site says the same thing.
+pub fn site_name(s: &SiteSpec) -> String {
+    match s.name.trim() {
+        "" => "?".to_string(),
+        n => n.to_string(),
+    }
+}
+
 /// One user entry. Extra fields are ignored (and preserved on a rewrite), with one
 /// deliberate exception.
 #[derive(Deserialize, Serialize, Default)]
@@ -912,10 +928,7 @@ pub fn compile_access(file: &AccessFile) -> Result<Access, String> {
     // of the meaning. A malformed pattern is fatal, exactly as in a user's scope.
     let mut entries = Vec::with_capacity(file.sites.len());
     for s in &file.sites {
-        let name = match s.name.trim() {
-            "" => "?".to_string(),
-            n => n.to_string(),
-        };
+        let name = site_name(s);
         let urls = UrlScope::compile_with_groups(&s.urls, &groups)
             .map_err(|e| format!("site '{name}': {e}"))?;
         if urls.is_empty() {
@@ -1035,6 +1048,533 @@ pub fn compile_access(file: &AccessFile) -> Result<Access, String> {
         by_email,
         by_key_hash,
     })
+}
+
+// ---------------------------------------------------------------------------
+// Editing an access file
+// ---------------------------------------------------------------------------
+//
+// The membership rule, one step further than the sections above. Those are what an access
+// file *means*; this is how one is edited and written — and it is here for the same reason
+// the parser is: two programs must agree on it byte for byte. `bb-auth-adm` today, a web
+// admin next. The write order (render → re-parse → compile → replace, atomically, with the
+// mode and owner of the file being replaced) is not something either of them may re-invent,
+// and neither is what a mutation refuses to do.
+//
+// Nothing here prints, and nothing here reads a flag or an env var: an operator-facing
+// string belongs to whichever program has an operator. What comes back is a
+// `Result<_, String>` naming the refusal — its wording is the refusal itself, so every
+// caller reports the same reason, and the caller decides where to put it.
+
+/// Open an access file for editing: the document to mutate, and the table the gate would
+/// build from it as it stands.
+///
+/// A file the gate would reject is refused here too — an edit must start from a file that
+/// works, or a tool would cheerfully fix one problem while carrying a fatal one to the
+/// disk. Both halves come back because compiling is also what *emits* the parser's warnings
+/// ("this user reaches nothing"), and an operator should hear each of those once, not once
+/// per look.
+pub fn open_access_file(path: &str) -> Result<(AccessFile, Access), String> {
+    let doc = read_access_file(path)?;
+    let access = compile_access(&doc)
+        .map_err(|e| format!("{path}: the gate would reject this file as it stands: {e}"))?;
+    Ok((doc, access))
+}
+
+/// Serialize a document to the exact bytes an access file is written as: pretty JSON plus
+/// one trailing newline. The error is serde's own, unadorned.
+pub fn render_access_file(doc: &AccessFile) -> Result<String, String> {
+    let mut json = serde_json::to_string_pretty(doc).map_err(|e| e.to_string())?;
+    json.push('\n');
+    Ok(json)
+}
+
+/// An edited document, rendered to the exact bytes it would be written as, and already
+/// compiled with the gate's own parser.
+///
+/// This type *is* the write order, made unskippable. The only way to obtain one is
+/// [`AccessWrite::prepare`], which compiles; the only thing [`AccessWrite::commit`] puts on
+/// disk is the byte string that was compiled; and `write_atomically` is private to this
+/// crate so there is no other door. Nothing can slip in between the check and the write,
+/// and no tool can write an access file that was not checked — a file the gate refuses at
+/// startup is a boot loop under `Restart=on-failure`, and an editor is one of the only two
+/// places (with `bb-auth --check-users`) that can catch it in time.
+pub struct AccessWrite {
+    json: String,
+    access: Access,
+}
+
+impl AccessWrite {
+    /// Render `doc`, then re-parse and compile the rendered text. `Err` means these bytes
+    /// must not reach the disk, and says why.
+    ///
+    /// The round-trip through serde is not paranoia: what is checked has to be the byte
+    /// string that lands on disk, not the document it came from.
+    pub fn prepare(doc: &AccessFile) -> Result<AccessWrite, String> {
+        let json = render_access_file(doc).map_err(|e| format!("cannot serialize: {e}"))?;
+        let reparsed: AccessFile =
+            serde_json::from_str(&json).map_err(|e| format!("serialized to invalid JSON: {e}"))?;
+        let access = compile_access(&reparsed).map_err(|e| format!("refusing to write: {e}"))?;
+        Ok(AccessWrite { json, access })
+    }
+
+    /// The bytes: what a dry run prints, and exactly what [`AccessWrite::commit`] writes.
+    pub fn json(&self) -> &str {
+        &self.json
+    }
+
+    /// The table the gate will build from those bytes — where a caller reads the counts it
+    /// reports back ("N users, N api keys, …").
+    pub fn access(&self) -> &Access {
+        &self.access
+    }
+
+    /// Replace `path` with these bytes. The file must already exist: its mode and owner are
+    /// what the replacement inherits.
+    pub fn commit(&self, path: &str) -> Result<Written, String> {
+        write_atomically(path, &self.json)
+    }
+}
+
+/// What a completed write hands back — and the proof that there *was* one, which is what
+/// [`SealedKey::reveal`] asks for.
+pub struct Written {
+    /// The copy of the file that was replaced, kept one step back. The gate is stateless,
+    /// but a roster is not reconstructible.
+    pub backup: std::path::PathBuf,
+}
+
+/// Write `content` over `path`: a temp file in the same directory, then a rename.
+///
+/// Private on purpose: [`AccessWrite::commit`] is the only way in, so nothing can write an
+/// access file the gate has not already accepted.
+///
+/// Mode and owner are copied from the file being replaced, and that is not cosmetic. The
+/// live access file is `root:bb-auth 0640`; a rewrite by root that left it `root:root`
+/// would be unreadable to the service, and the gate would die on its next start — a lockout
+/// dressed up as a successful edit. So a failed `chown` aborts the write rather than warning
+/// about it: nothing is renamed, and the old file stays intact.
+fn write_atomically(path: &str, content: &str) -> Result<Written, String> {
+    let p = std::path::Path::new(path);
+    let dir = p.parent().filter(|d| !d.as_os_str().is_empty());
+    // One temp name, whoever is writing: two editors racing would then contend for the same
+    // temp file rather than each renaming its own over the other's work.
+    let tmp = match dir {
+        Some(d) => d.join(format!(
+            ".{}.bb-auth-adm.tmp",
+            p.file_name().unwrap_or_default().to_string_lossy()
+        )),
+        None => std::path::PathBuf::from(format!(".{path}.bb-auth-adm.tmp")),
+    };
+
+    let meta = std::fs::metadata(p).map_err(|e| format!("stat {path}: {e}"))?;
+    // Keep one step back. The gate is stateless, but a roster is not reconstructible.
+    let bak = format!("{path}.bak");
+    std::fs::copy(p, &bak).map_err(|e| format!("backup {bak}: {e}"))?;
+
+    std::fs::write(&tmp, content).map_err(|e| format!("write {}: {e}", tmp.display()))?;
+    let restore = |e: String| {
+        let _ = std::fs::remove_file(&tmp);
+        e
+    };
+    std::fs::set_permissions(&tmp, meta.permissions())
+        .map_err(|e| restore(format!("chmod {}: {e}", tmp.display())))?;
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::MetadataExt;
+        let (uid, gid) = (meta.uid(), meta.gid());
+        let c = std::ffi::CString::new(tmp.to_string_lossy().as_bytes())
+            .map_err(|e| restore(format!("path: {e}")))?;
+        // SAFETY: a NUL-terminated path we just created, and two ids read off the file we
+        // are replacing.
+        if unsafe { libc::chown(c.as_ptr(), uid, gid) } != 0 {
+            return Err(restore(format!(
+                "cannot restore owner {uid}:{gid} on {} ({}) — not writing, the old file is \
+                 untouched. Re-run as root.",
+                tmp.display(),
+                std::io::Error::last_os_error()
+            )));
+        }
+    }
+    std::fs::rename(&tmp, p).map_err(|e| restore(format!("rename onto {path}: {e}")))?;
+    Ok(Written {
+        backup: std::path::PathBuf::from(bak),
+    })
+}
+
+// --- lookups over the document ---------------------------------------------
+
+/// Emails are matched the way the gate matches them: trimmed and lowercased.
+pub fn norm_email(e: &str) -> String {
+    e.trim().to_ascii_lowercase()
+}
+
+/// The roster position of `email`, matched as [`norm_email`] matches.
+pub fn user_pos(doc: &AccessFile, email: &str) -> Option<usize> {
+    let want = norm_email(email);
+    doc.users.iter().position(|u| norm_email(&u.email) == want)
+}
+
+/// The roster row for `email`, to edit in place.
+pub fn user_mut<'a>(doc: &'a mut AccessFile, email: &str) -> Result<&'a mut UserSpec, String> {
+    match user_pos(doc, email) {
+        Some(i) => Ok(&mut doc.users[i]),
+        None => Err(format!(
+            "no user '{}' (add them with: user add {})",
+            email.trim(),
+            email.trim()
+        )),
+    }
+}
+
+/// One of `email`'s API keys, by its `id` (trimmed, case-sensitive — an id is a label, not
+/// an address).
+pub fn key_mut<'a>(
+    doc: &'a mut AccessFile,
+    email: &str,
+    id: &str,
+) -> Result<&'a mut ApiKeySpec, String> {
+    let owner = norm_email(email);
+    let u = user_mut(doc, email)?;
+    match u.api_keys.iter().position(|k| k.id.trim() == id.trim()) {
+        Some(i) => Ok(&mut u.api_keys[i]),
+        None => Err(format!("{owner}: no api key '{id}'")),
+    }
+}
+
+/// The position of the site named `name`. A position, not a reference, because site order
+/// is meaning ([`Sites`]) and every caller ends up needing the index.
+pub fn site_pos(doc: &AccessFile, name: &str) -> Option<usize> {
+    doc.sites.iter().position(|s| s.name.trim() == name.trim())
+}
+
+/// A url group's pattern list, to edit in place.
+pub fn url_group_mut<'a>(
+    doc: &'a mut AccessFile,
+    name: &str,
+) -> Result<&'a mut Vec<String>, String> {
+    let name = name.trim();
+    doc.url_groups
+        .get_mut(name)
+        .ok_or_else(|| format!("no url group '@{name}'"))
+}
+
+/// Everything that names `@name`: users by email, keys as `email/id`, sites as
+/// `site 'NAME'`.
+///
+/// [`group_ref`] is what decides whether an entry is a reference, so this cannot drift from
+/// what [`compile_access`] expands. The gate would refuse a file with a dangling reference
+/// anyway — [`AccessWrite::prepare`] compiles before anything is written — and this is what
+/// turns that refusal into a list of places to go and fix.
+pub fn url_group_refs(doc: &AccessFile, name: &str) -> Vec<String> {
+    let names = |urls: &[String]| urls.iter().any(|u| group_ref(u) == Some(name));
+    let mut out = Vec::new();
+    for s in &doc.sites {
+        if names(&s.urls) {
+            out.push(format!("site '{}'", site_name(s)));
+        }
+    }
+    for u in &doc.users {
+        if u.authorized_urls.as_deref().is_some_and(names) {
+            out.push(norm_email(&u.email));
+        }
+        for k in &u.api_keys {
+            if k.authorized_urls.as_deref().is_some_and(names) {
+                out.push(format!("{}/{}", norm_email(&u.email), k.id.trim()));
+            }
+        }
+    }
+    out
+}
+
+/// Apply the standard scope edits to an `authorized_urls` field: a full replacement
+/// (`set`), then `add` (deduplicated) and `rm`. Returns `true` if anything changed.
+///
+/// `None` means "absent". For a user that is deny-all; for a key it means "inherit the
+/// owner's" — two different things, so `clear` says which one the caller wants an emptied
+/// list to collapse to.
+pub fn edit_urls(
+    urls: &mut Option<Vec<String>>,
+    set: Vec<String>,
+    add: Vec<String>,
+    rm: Vec<String>,
+    clear: bool,
+) -> bool {
+    let mut changed = false;
+    if clear {
+        *urls = None;
+        changed = true;
+    }
+    if !set.is_empty() {
+        *urls = Some(set);
+        changed = true;
+    }
+    if !add.is_empty() {
+        let list = urls.get_or_insert_with(Vec::new);
+        for u in add {
+            if !list.iter().any(|x| x == &u) {
+                list.push(u);
+                changed = true;
+            }
+        }
+    }
+    if !rm.is_empty() {
+        if let Some(list) = urls.as_mut() {
+            let before = list.len();
+            list.retain(|x| !rm.iter().any(|r| r == x));
+            changed |= list.len() != before;
+        }
+    }
+    changed
+}
+
+/// [`edit_urls`] over a plain list — a site's `urls`, a url group's patterns. There is no
+/// "inherit" to fall back to in either, so a cleared list is empty, never absent.
+pub fn edit_url_list(
+    urls: &mut Vec<String>,
+    set: Vec<String>,
+    add: Vec<String>,
+    rm: Vec<String>,
+    clear: bool,
+) -> bool {
+    let mut opt = Some(std::mem::take(urls));
+    let changed = edit_urls(&mut opt, set, add, rm, clear);
+    *urls = opt.unwrap_or_default();
+    changed
+}
+
+// --- document mutations ----------------------------------------------------
+
+/// Enrol `user`, whose email is normalised on the way in. Refuses a second row for an
+/// address that is already on the roster: the gate builds a `HashMap`, so a duplicate is
+/// not an error there — the last row silently wins, and the one an operator is reading may
+/// not be the one in force.
+pub fn add_user(doc: &mut AccessFile, mut user: UserSpec) -> Result<(), String> {
+    user.email = norm_email(&user.email);
+    if user_pos(doc, &user.email).is_some() {
+        return Err(format!(
+            "{} is already in users (edit them: user set {})",
+            user.email, user.email
+        ));
+    }
+    doc.users.push(user);
+    Ok(())
+}
+
+/// Give `email`'s row a new address.
+///
+/// The collision is checked before the row is even located: "that address is taken" is the
+/// more useful complaint of the two, and it is the one an operator hears today.
+pub fn rename_user(doc: &mut AccessFile, email: &str, new_email: &str) -> Result<(), String> {
+    let new = norm_email(new_email);
+    if new != norm_email(email) && user_pos(doc, &new).is_some() {
+        return Err(format!("{new} is already in users"));
+    }
+    user_mut(doc, email)?.email = new;
+    Ok(())
+}
+
+/// Drop `email`'s row, and with it every key it owned — a key is a grant *tied to a user*,
+/// and an orphan would be a credential with nobody to answer for it. The removed row comes
+/// back so a caller can say what went with it.
+///
+/// Removing a user does **not** keep them off a `public_auth` site: there the roster is
+/// never consulted. That is what [`Access::denied`] is for.
+pub fn remove_user(doc: &mut AccessFile, email: &str) -> Result<UserSpec, String> {
+    let i = user_pos(doc, email).ok_or_else(|| format!("no user '{}'", norm_email(email)))?;
+    Ok(doc.users.remove(i))
+}
+
+/// A freshly minted `bbk_` bearer, sealed until the file that carries its hash is on disk.
+///
+/// The order is the whole point, and this type is what keeps it: the bearer comes out of
+/// [`SealedKey::reveal`] and nowhere else, and `reveal` asks for the [`Written`] receipt of
+/// a completed write. Handing it over any earlier would hand out a credential that
+/// authorizes nothing if the write then failed — and the raw key exists nowhere to retry
+/// from, since the file keeps only `sha256(bearer)` and that lookup *is* the verification.
+///
+/// No `Debug`, no `Clone`, no `Display`: a bearer leaves through `reveal` or not at all.
+#[must_use = "a minted key nobody reveals is a key its owner never gets"]
+pub struct SealedKey {
+    bearer: String,
+}
+
+impl SealedKey {
+    /// The raw bearer — to be shown to its owner **once**, and stored nowhere.
+    ///
+    /// The receipt is not read; being able to produce one is the point. A caller that has
+    /// no [`Written`] — a dry run, or a write that failed — has no bearer to hand out, and
+    /// that is exactly right: nothing on disk has ever heard of this key.
+    pub fn reveal(self, _receipt: &Written) -> String {
+        self.bearer
+    }
+}
+
+/// Mint a `bbk_` bearer and file its hash on `email`'s row as `key`.
+///
+/// `key.key_hash` is overwritten with [`mint_api_key`]'s — the caller supplies the label,
+/// the window and the scope, never the secret. The bearer comes back sealed; see
+/// [`SealedKey`] for why it cannot be had before the write.
+///
+/// Refuses a second key with the same id: an id is what names a key in a log and in
+/// `key rotate`, so two of them make a revocation ambiguous.
+pub fn add_api_key(
+    doc: &mut AccessFile,
+    email: &str,
+    mut key: ApiKeySpec,
+) -> Result<SealedKey, String> {
+    let id = key.id.trim().to_string();
+    let owner = norm_email(email);
+    let u = user_mut(doc, email)?;
+    if u.api_keys.iter().any(|k| k.id.trim() == id) {
+        return Err(format!(
+            "{owner} already has a key '{id}' (replace its secret: key rotate {owner} {id})"
+        ));
+    }
+    let (bearer, hash) = mint_api_key()?;
+    key.id = id;
+    key.key_hash = hash;
+    u.api_keys.push(key);
+    Ok(SealedKey { bearer })
+}
+
+/// Same row, same scope, new secret, re-dated to today — the answer to a leaked key. The
+/// old bearer stops working the moment the gate reloads.
+pub fn rotate_api_key(doc: &mut AccessFile, email: &str, id: &str) -> Result<SealedKey, String> {
+    let k = key_mut(doc, email, id)?;
+    let (bearer, hash) = mint_api_key()?;
+    k.key_hash = hash;
+    k.released = format_date(now());
+    Ok(SealedKey { bearer })
+}
+
+/// Revoke one key by id, handing back the row that went.
+pub fn remove_api_key(doc: &mut AccessFile, email: &str, id: &str) -> Result<ApiKeySpec, String> {
+    let owner = norm_email(email);
+    let u = user_mut(doc, email)?;
+    let i = u
+        .api_keys
+        .iter()
+        .position(|k| k.id.trim() == id.trim())
+        .ok_or_else(|| format!("{owner}: no api key '{id}'"))?;
+    Ok(u.api_keys.remove(i))
+}
+
+/// Insert a site at `at` (`None` = last, out of range = last), and hand back where it
+/// landed. A name is required and must be free: it is how every other command addresses
+/// the record.
+///
+/// A site describes a **place**, never a person — there is no argument here that names a
+/// user, and there never may be one ([`SiteRecord`]).
+pub fn add_site(
+    doc: &mut AccessFile,
+    mut site: SiteSpec,
+    at: Option<usize>,
+) -> Result<usize, String> {
+    site.name = site.name.trim().to_string();
+    if site.name.is_empty() {
+        return Err("a site needs a name".into());
+    }
+    if site_pos(doc, &site.name).is_some() {
+        return Err(format!(
+            "site '{}' already exists (edit it: site set {})",
+            site.name, site.name
+        ));
+    }
+    let at = at.unwrap_or(doc.sites.len()).min(doc.sites.len());
+    doc.sites.insert(at, site);
+    Ok(at)
+}
+
+/// Rename a site, refusing a name another record already answers to.
+pub fn rename_site(doc: &mut AccessFile, name: &str, new_name: &str) -> Result<(), String> {
+    let i = site_pos(doc, name).ok_or_else(|| format!("no site '{}'", name.trim()))?;
+    let new = new_name.trim().to_string();
+    if site_pos(doc, &new).is_some_and(|j| j != i) {
+        return Err(format!("site '{new}' already exists"));
+    }
+    doc.sites[i].name = new;
+    Ok(())
+}
+
+/// Move the site at `from` to position `to`; a position that does not exist is a no-op.
+///
+/// Order is meaning: [`Sites::resolve`] is first-match-wins, so this changes which record
+/// answers for a URL — and therefore who gets in, and which login page a `401` names.
+pub fn move_site(doc: &mut AccessFile, from: usize, to: usize) {
+    if from >= doc.sites.len() || to >= doc.sites.len() {
+        return;
+    }
+    let s = doc.sites.remove(from);
+    doc.sites.insert(to, s);
+}
+
+/// Drop a site, handing back the record that went — a `public_auth` one takes an unenrolled
+/// identity's only way in with it.
+pub fn remove_site(doc: &mut AccessFile, name: &str) -> Result<SiteSpec, String> {
+    let i = site_pos(doc, name).ok_or_else(|| format!("no site '{}'", name.trim()))?;
+    Ok(doc.sites.remove(i))
+}
+
+/// Define a url group. A group is abbreviation, not a grant: defining one authorizes nobody
+/// until some urls list names it `@name`.
+///
+/// There is deliberately no rename: a reference names a group by its exact spelling, so
+/// renaming one would silently re-point every list that used it. Add the new name, move the
+/// references, drop the old one — three edits the gate re-validates one by one.
+pub fn add_url_group(doc: &mut AccessFile, name: &str, urls: Vec<String>) -> Result<(), String> {
+    let name = name.trim().to_string();
+    if name.is_empty() {
+        return Err("a url group needs a name".into());
+    }
+    if doc.url_groups.contains_key(&name) {
+        return Err(format!(
+            "url group '@{name}' already exists (edit it: url-group set {name})"
+        ));
+    }
+    doc.url_groups.insert(name, urls);
+    Ok(())
+}
+
+/// Drop a url group, refusing while anything still references it — the gate would reject
+/// the resulting file ([`UrlScope::compile_with_groups`]), and the refusal here says which
+/// lists to fix instead of leaving a write to fail.
+pub fn remove_url_group(doc: &mut AccessFile, name: &str) -> Result<Vec<String>, String> {
+    let name = name.trim().to_string();
+    if !doc.url_groups.contains_key(&name) {
+        return Err(format!("no url group '@{name}'"));
+    }
+    let refs = url_group_refs(doc, &name);
+    if !refs.is_empty() {
+        return Err(format!(
+            "url group '@{name}' is still referenced by {} — the gate would reject the file. \
+             Change those lists first, then remove the group.",
+            refs.join(", ")
+        ));
+    }
+    Ok(doc.url_groups.remove(&name).unwrap_or_default())
+}
+
+/// Veto `email`, normalised. `false` = it was already there (or empty), and nothing changed.
+///
+/// Not the same as deleting the user's row: on a `public_auth` site the roster is never
+/// consulted, so for an un-enrolled identity this is the only denial there is — and for an
+/// enrolled one it is a suspension, since their scope and keys survive it.
+pub fn add_denied(doc: &mut AccessFile, email: &str) -> bool {
+    let e = norm_email(email);
+    if e.is_empty() || doc.denied.iter().any(|d| norm_email(d) == e) {
+        return false;
+    }
+    doc.denied.push(e);
+    true
+}
+
+/// Lift the veto on every listed email, returning how many rows went.
+pub fn remove_denied(doc: &mut AccessFile, emails: &[String]) -> usize {
+    let want: Vec<String> = emails.iter().map(|e| norm_email(e)).collect();
+    let before = doc.denied.len();
+    doc.denied.retain(|d| !want.contains(&norm_email(d)));
+    before - doc.denied.len()
 }
 
 // ---------------------------------------------------------------------------
@@ -2032,5 +2572,463 @@ mod tests {
             Ok(_) => panic!("a malformed scope must not compile"),
             Err(e) => assert!(e.contains("bob@x.com"), "{e}"),
         }
+    }
+
+    // --- editing an access file ---------------------------------------------
+
+    /// One user, one key, one group, two sites — every shape an edit can reach, with the
+    /// trimming and casing an operator's hand leaves behind.
+    const EDIT_JSON: &str = r#"{
+      "_comment": "hands off",
+      "url_groups": { "mcp": ["https://mcp.x.com/mcp/*"] },
+      "sites": [
+        { "name": "app1", "urls": ["https://app.x.com/app1/*"], "public_auth": true },
+        { "name": " spaced ", "urls": ["https://app.x.com/two/*"] }
+      ],
+      "denied": ["spammer@x.com"],
+      "users": [
+        { "email": "Bob@X.com", "authorized_urls": ["@mcp"],
+          "api_keys": [ { "id": " laptop ", "key_hash": "aa", "released": "2026-01-01",
+                          "duration": "365d" } ] }
+      ]
+    }"#;
+
+    /// The document model straight from JSON — the edits that never touch a file.
+    fn doc_of(json: &str) -> AccessFile {
+        serde_json::from_str(json).unwrap()
+    }
+
+    /// `unwrap_err` for the mutations whose success value has no `Debug`. None of the specs
+    /// derive one, and [`Access`] deliberately does not either.
+    fn err_of<T>(r: Result<T, String>) -> String {
+        match r {
+            Ok(_) => panic!("expected a refusal"),
+            Err(e) => e,
+        }
+    }
+
+    #[test]
+    fn the_lookups_trim_and_lowercase_like_the_gate() {
+        let mut doc = doc_of(EDIT_JSON);
+        assert_eq!(norm_email("  Bob@X.com "), "bob@x.com");
+        assert_eq!(user_pos(&doc, " BOB@x.com "), Some(0));
+        assert_eq!(user_pos(&doc, "nobody@x.com"), None);
+        // the lookup normalises; the row keeps whatever spelling the file gave it
+        assert_eq!(user_mut(&mut doc, "BOB@X.com").unwrap().email, "Bob@X.com");
+        assert!(err_of(user_mut(&mut doc, " ghost@x.com ")).contains("no user 'ghost@x.com'"));
+
+        // a key id is a label, not an address: trimmed, but matched case-sensitively
+        assert_eq!(
+            key_mut(&mut doc, "bob@x.com", " laptop ")
+                .unwrap()
+                .id
+                .trim(),
+            "laptop"
+        );
+        assert!(key_mut(&mut doc, "bob@x.com", "LAPTOP").is_err());
+        assert!(
+            err_of(key_mut(&mut doc, "BOB@x.com", "nope")).contains("bob@x.com: no api key 'nope'")
+        );
+
+        assert_eq!(site_pos(&doc, "spaced"), Some(1));
+        assert_eq!(site_name(&doc.sites[1]), "spaced");
+        assert_eq!(site_name(&SiteSpec::default()), "?");
+        assert_eq!(url_group_mut(&mut doc, " mcp ").unwrap().len(), 1);
+        assert!(err_of(url_group_mut(&mut doc, "nope")).contains("no url group '@nope'"));
+    }
+
+    #[test]
+    fn edit_urls_sets_adds_deduplicates_removes_and_clears() {
+        let a = || "https://x.com/a/*".to_string();
+        let b = || "https://x.com/b/*".to_string();
+        let no: Vec<String> = Vec::new();
+
+        // a full replacement wins over what was there
+        let mut urls = Some(vec![a()]);
+        assert!(edit_urls(
+            &mut urls,
+            vec![b()],
+            no.clone(),
+            no.clone(),
+            false
+        ));
+        assert_eq!(urls, Some(vec![b()]));
+        // add appends, and says so — or says nothing changed, which is what "no-op" means
+        assert!(edit_urls(
+            &mut urls,
+            no.clone(),
+            vec![a()],
+            no.clone(),
+            false
+        ));
+        assert_eq!(urls, Some(vec![b(), a()]));
+        assert!(!edit_urls(
+            &mut urls,
+            no.clone(),
+            vec![a()],
+            no.clone(),
+            false
+        ));
+        assert!(!edit_urls(
+            &mut urls,
+            no.clone(),
+            no.clone(),
+            vec!["https://x.com/z/*".to_string()],
+            false
+        ));
+        assert!(edit_urls(
+            &mut urls,
+            no.clone(),
+            no.clone(),
+            vec![b()],
+            false
+        ));
+        assert_eq!(urls, Some(vec![a()]));
+
+        // cleared is *absent*: deny-all for a user, "inherit the owner's" for a key
+        assert!(edit_urls(
+            &mut urls,
+            no.clone(),
+            no.clone(),
+            no.clone(),
+            true
+        ));
+        assert_eq!(urls, None);
+        assert!(edit_urls(
+            &mut urls,
+            no.clone(),
+            vec![a()],
+            no.clone(),
+            true
+        ));
+        assert_eq!(urls, Some(vec![a()]));
+
+        // a plain list has no absent state to fall back to, so cleared is empty
+        let mut list = vec![a()];
+        assert!(edit_url_list(
+            &mut list,
+            no.clone(),
+            no.clone(),
+            no.clone(),
+            true
+        ));
+        assert!(list.is_empty());
+        assert!(edit_url_list(&mut list, vec![b()], no.clone(), no, false));
+        assert_eq!(list, vec![b()]);
+    }
+
+    #[test]
+    fn open_access_file_refuses_a_file_the_gate_would_reject() {
+        // An edit has to start from a file that works, or a tool would cheerfully fix one
+        // problem while carrying a fatal one to the disk.
+        let path = users_tmp(
+            "edit-open-bad",
+            r#"{ "users": [ { "email": "b@x.com", "authorized_urls": ["@nope"] } ] }"#,
+        );
+        let err = err_of(open_access_file(path.to_str().unwrap()));
+        assert!(
+            err.contains("the gate would reject this file as it stands"),
+            "{err}"
+        );
+        assert!(err.contains("unknown url group '@nope'"), "{err}");
+        let _ = std::fs::remove_file(&path);
+    }
+
+    #[test]
+    fn access_write_refuses_a_document_the_gate_would_reject() {
+        let path = users_tmp("edit-reject", EDIT_JSON);
+        let p = path.to_str().unwrap().to_string();
+        let before = std::fs::read_to_string(&path).unwrap();
+
+        let (mut doc, _) = open_access_file(&p).unwrap();
+        doc.users[0].authorized_urls = Some(vec!["@nope".into()]);
+        let err = err_of(AccessWrite::prepare(&doc));
+        assert!(err.starts_with("refusing to write:"), "{err}");
+        assert!(err.contains("unknown url group '@nope'"), "{err}");
+
+        // The check is ahead of the disk in every sense: the file is byte-for-byte what it
+        // was, and not even a backup was taken.
+        assert_eq!(std::fs::read_to_string(&path).unwrap(), before);
+        assert!(!std::path::Path::new(&format!("{p}.bak")).exists());
+        let _ = std::fs::remove_file(&path);
+    }
+
+    #[test]
+    fn access_write_commits_exactly_the_bytes_it_compiled() {
+        let path = users_tmp("edit-commit", EDIT_JSON);
+        let p = path.to_str().unwrap().to_string();
+        let before = std::fs::read_to_string(&path).unwrap();
+
+        let (mut doc, _) = open_access_file(&p).unwrap();
+        add_user(
+            &mut doc,
+            UserSpec {
+                email: "  Carol@X.com  ".into(),
+                authorized_urls: Some(vec!["https://x.com/c/*".into()]),
+                ..Default::default()
+            },
+        )
+        .unwrap();
+
+        let write = AccessWrite::prepare(&doc).unwrap();
+        assert_eq!(write.access().by_email.len(), 2); // the counts a caller reports
+        let written = write.commit(&p).unwrap();
+
+        // what landed is the byte string that was compiled, newline-terminated
+        let on_disk = std::fs::read_to_string(&path).unwrap();
+        assert_eq!(on_disk, write.json());
+        assert!(on_disk.ends_with("}\n"));
+        // it parses back to the same document — the operator's `_comment` included — and
+        // re-rendering it is a fixed point, so a show/save round-trip changes no bytes
+        let back: AccessFile = serde_json::from_str(&on_disk).unwrap();
+        assert_eq!(back.extra["_comment"], "hands off");
+        assert_eq!(render_access_file(&back).unwrap(), on_disk);
+        assert!(compile_access(&back)
+            .unwrap()
+            .by_email
+            .contains_key("carol@x.com"));
+        // and the file it replaced is one step back
+        assert_eq!(std::fs::read_to_string(&written.backup).unwrap(), before);
+
+        let _ = std::fs::remove_file(&path);
+        let _ = std::fs::remove_file(&written.backup);
+    }
+
+    #[test]
+    fn add_api_key_seals_the_bearer_until_the_file_carries_its_hash() {
+        let path = users_tmp(
+            "edit-mint",
+            r#"{ "users": [ { "email": "bob@x.com", "authorized_urls": ["https://x.com/*"] } ] }"#,
+        );
+        let p = path.to_str().unwrap().to_string();
+        let (mut doc, _) = open_access_file(&p).unwrap();
+
+        let sealed = add_api_key(
+            &mut doc,
+            " BOB@x.com ",
+            ApiKeySpec {
+                id: " laptop ".into(),
+                released: "2026-01-01".into(),
+                duration: "365d".into(),
+                ..Default::default()
+            },
+        )
+        .unwrap();
+        // the document carries the hash; the bearer is still in nobody's hands
+        let hash = doc.users[0].api_keys[0].key_hash.clone();
+        assert_eq!(hash.len(), 64);
+        assert_eq!(doc.users[0].api_keys[0].id, "laptop");
+
+        // a second key with that id is refused, and mints nothing
+        let err = err_of(add_api_key(
+            &mut doc,
+            "bob@x.com",
+            ApiKeySpec {
+                id: "laptop".into(),
+                ..Default::default()
+            },
+        ));
+        assert!(
+            err.contains("bob@x.com already has a key 'laptop'"),
+            "{err}"
+        );
+        assert_eq!(doc.users[0].api_keys.len(), 1);
+
+        // Only a completed write opens it — `reveal` takes the receipt, so there is no
+        // order in which a caller holds the bearer and the file does not hold its hash.
+        let written = AccessWrite::prepare(&doc).unwrap().commit(&p).unwrap();
+        let bearer = sealed.reveal(&written);
+        assert!(bearer.starts_with(API_KEY_PREFIX));
+        assert_eq!(sha256_hex(&bearer), hash);
+        // and the gate, reading what was written, grants that very bearer
+        let access = read_access(&p).unwrap();
+        assert!(decide_api_key(&access, &hash, Some("https://x.com/a"), 0).granted());
+
+        let _ = std::fs::remove_file(&path);
+        let _ = std::fs::remove_file(&written.backup);
+    }
+
+    #[test]
+    fn rotate_api_key_replaces_the_hash_and_redates_the_row() {
+        let mut doc = doc_of(EDIT_JSON);
+        let before = doc.users[0].api_keys[0].key_hash.clone();
+        let _sealed = rotate_api_key(&mut doc, "BOB@X.com", " laptop ").unwrap();
+
+        let k = &doc.users[0].api_keys[0];
+        assert_ne!(k.key_hash, before);
+        assert_eq!(k.key_hash.len(), 64);
+        assert_eq!(k.released, format_date(now())); // the window restarts today
+        assert_eq!(k.duration, "365d"); // same row, same window, same scope
+        assert_eq!(k.id.trim(), "laptop");
+        assert!(rotate_api_key(&mut doc, "bob@x.com", "nope").is_err());
+        assert!(rotate_api_key(&mut doc, "ghost@x.com", "laptop").is_err());
+    }
+
+    #[test]
+    fn add_user_and_add_site_refuse_a_duplicate() {
+        let mut doc = doc_of(EDIT_JSON);
+        // The gate builds a HashMap, so a duplicate is not an error there — the last row
+        // silently wins, and the one an operator is reading may not be the one in force.
+        let err = err_of(add_user(
+            &mut doc,
+            UserSpec {
+                email: "  BOB@x.com ".into(),
+                ..Default::default()
+            },
+        ));
+        assert!(err.contains("bob@x.com is already in users"), "{err}");
+        assert_eq!(doc.users.len(), 1);
+        add_user(
+            &mut doc,
+            UserSpec {
+                email: " Carol@X.com ".into(),
+                ..Default::default()
+            },
+        )
+        .unwrap();
+        assert_eq!(doc.users[1].email, "carol@x.com"); // normalised on the way in
+
+        let named = |n: &str| SiteSpec {
+            name: n.into(),
+            ..Default::default()
+        };
+        assert!(err_of(add_site(&mut doc, named("  "), None)).contains("a site needs a name"));
+        assert!(err_of(add_site(&mut doc, named(" app1 "), None))
+            .contains("site 'app1' already exists"));
+        // a position: `None` is last, out of range is last, and the name is trimmed
+        assert_eq!(add_site(&mut doc, named(" first "), Some(0)).unwrap(), 0);
+        assert_eq!(doc.sites[0].name, "first");
+        assert_eq!(add_site(&mut doc, named("last"), Some(99)).unwrap(), 3);
+        assert_eq!(site_pos(&doc, "last"), Some(3));
+    }
+
+    #[test]
+    fn rename_user_refuses_a_collision_before_it_looks_for_the_row() {
+        let mut doc = doc_of(EDIT_JSON);
+        add_user(
+            &mut doc,
+            UserSpec {
+                email: "carol@x.com".into(),
+                ..Default::default()
+            },
+        )
+        .unwrap();
+        // "that address is taken" is the more useful of the two complaints, so it comes
+        // first — even when the row being renamed does not exist either.
+        let err = err_of(rename_user(&mut doc, "ghost@x.com", "Carol@X.com"));
+        assert!(err.contains("carol@x.com is already in users"), "{err}");
+        assert!(err_of(rename_user(&mut doc, "ghost@x.com", "ghost2@x.com"))
+            .contains("no user 'ghost@x.com'"));
+
+        rename_user(&mut doc, "BOB@x.com", "  Bobby@X.com ").unwrap();
+        assert_eq!(doc.users[0].email, "bobby@x.com");
+        assert_eq!(doc.users[0].api_keys.len(), 1); // the row keeps its keys and its scope
+        rename_user(&mut doc, "bobby@x.com", "bobby@x.com").unwrap(); // to itself: allowed
+    }
+
+    #[test]
+    fn remove_user_hands_back_the_row_and_the_keys_that_went_with_it() {
+        let mut doc = doc_of(EDIT_JSON);
+        let u = remove_user(&mut doc, " BOB@X.com ").unwrap();
+        // a key is a grant tied to a user; an orphan would answer to nobody
+        assert_eq!(u.api_keys.len(), 1);
+        assert!(doc.users.is_empty());
+        assert!(err_of(remove_user(&mut doc, "bob@x.com")).contains("no user 'bob@x.com'"));
+        // …and the removal is not a lockout: that site is public_auth, so `denied` is the
+        // only thing that would keep them out of it.
+        assert!(compile_access(&doc).unwrap().sites.any_public_auth());
+    }
+
+    #[test]
+    fn remove_site_and_remove_api_key_hand_back_what_went() {
+        let mut doc = doc_of(EDIT_JSON);
+        let s = remove_site(&mut doc, " app1 ").unwrap();
+        assert!(s.public_auth); // the caller has to be able to say what it opened
+        assert_eq!(doc.sites.len(), 1);
+        assert!(err_of(remove_site(&mut doc, "app1")).contains("no site 'app1'"));
+
+        let k = remove_api_key(&mut doc, "BOB@X.com", " laptop ").unwrap();
+        assert_eq!(k.id.trim(), "laptop");
+        assert!(doc.users[0].api_keys.is_empty());
+        assert!(err_of(remove_api_key(&mut doc, "bob@x.com", "laptop"))
+            .contains("bob@x.com: no api key 'laptop'"));
+    }
+
+    #[test]
+    fn remove_url_group_refuses_while_something_references_it() {
+        let mut doc = doc_of(EDIT_JSON);
+        assert_eq!(url_group_refs(&doc, "mcp"), vec!["bob@x.com".to_string()]);
+        let err = err_of(remove_url_group(&mut doc, " mcp "));
+        assert!(err.contains("still referenced by bob@x.com"), "{err}");
+        assert!(doc.url_groups.contains_key("mcp"));
+
+        // the scanner names sites and keys too — a refusal is only useful if it says where
+        doc.sites[0].urls.push("@mcp".into());
+        doc.users[0].api_keys[0].authorized_urls = Some(vec!["@mcp".into()]);
+        assert_eq!(
+            url_group_refs(&doc, "mcp"),
+            vec![
+                "site 'app1'".to_string(),
+                "bob@x.com".to_string(),
+                "bob@x.com/laptop".to_string()
+            ]
+        );
+
+        // once nothing names it, it goes — and its patterns come back
+        doc.sites[0].urls.pop();
+        doc.users[0].api_keys[0].authorized_urls = None;
+        doc.users[0].authorized_urls = Some(vec!["https://x.com/*".into()]);
+        assert_eq!(
+            remove_url_group(&mut doc, "mcp").unwrap(),
+            vec!["https://mcp.x.com/mcp/*".to_string()]
+        );
+        assert!(err_of(remove_url_group(&mut doc, "mcp")).contains("no url group '@mcp'"));
+
+        // adding one back is refused while the name is taken, and needs a name at all
+        add_url_group(&mut doc, " mcp ", vec!["https://mcp.x.com/mcp/*".into()]).unwrap();
+        assert!(err_of(add_url_group(&mut doc, "mcp", vec![])).contains("already exists"));
+        assert!(err_of(add_url_group(&mut doc, "  ", vec![])).contains("a url group needs a name"));
+    }
+
+    #[test]
+    fn move_site_reorders_and_ignores_a_position_that_does_not_exist() {
+        // Order is meaning: first match wins, so a move changes who answers for a URL.
+        let mut doc = doc_of(
+            r#"{ "sites": [
+                   { "name": "app1", "urls": ["https://app.x.com/app1/*"], "public_auth": true },
+                   { "name": "broad", "urls": ["https://app.x.com/*"] } ] }"#,
+        );
+        let at = Some("https://app.x.com/app1/x");
+        assert!(decide(&compile_access(&doc).unwrap(), "new@x.com", at).granted());
+
+        move_site(&mut doc, 1, 0); // the broad record now answers, and it grants nothing
+        assert_eq!(site_name(&doc.sites[0]), "broad");
+        assert!(!decide(&compile_access(&doc).unwrap(), "new@x.com", at).granted());
+
+        // a position that does not exist is a no-op, never a panic and never a reshuffle
+        move_site(&mut doc, 9, 0);
+        move_site(&mut doc, 0, 9);
+        assert_eq!(site_name(&doc.sites[0]), "broad");
+    }
+
+    #[test]
+    fn denied_edits_normalize_the_email() {
+        let mut doc = doc_of(EDIT_JSON);
+        assert!(add_denied(&mut doc, "  NEW@X.com  "));
+        assert_eq!(
+            doc.denied,
+            vec!["spammer@x.com".to_string(), "new@x.com".to_string()]
+        );
+        // already vetoed, in any spelling — and an empty entry is not a veto
+        assert!(!add_denied(&mut doc, "New@x.com"));
+        assert!(!add_denied(&mut doc, "   "));
+        assert_eq!(doc.denied.len(), 2);
+
+        assert_eq!(
+            remove_denied(&mut doc, &["NEW@x.com".into(), "nobody@x.com".into()]),
+            1
+        );
+        assert_eq!(remove_denied(&mut doc, &["nobody@x.com".into()]), 0);
+        assert_eq!(doc.denied, vec!["spammer@x.com".to_string()]);
     }
 }

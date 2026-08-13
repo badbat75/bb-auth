@@ -16,8 +16,9 @@ binary fronts any web service, wired per-deployment through `BB_AUTH_*` env vars
 One crate, three targets, and the split is load-bearing:
 
 - **[src/lib.rs](src/lib.rs)** (`bb_auth_core`) — **the access file**: its schema, its
-  parser, the URL matcher, and the grant model (`decide` / `decide_api_key`). Everything two
-  programs must agree on, byte for byte.
+  parser, the URL matcher, the grant model (`decide` / `decide_api_key`), and how one is
+  *edited and written* (`open_access_file`, `AccessWrite`, the document mutations).
+  Everything two programs must agree on, byte for byte.
 - **[src/main.rs](src/main.rs)** — **the gate**, and everything the access file has no
   opinion about: HTTP, the session cookie, id_token validation, the nginx contract. Still
   **one file**, still read top to bottom.
@@ -93,7 +94,12 @@ bash scripts/build.sh                 # target overridable via BB_AUTH_TARGET
   programs must agree, byte for byte, on what an access file *means* — so there is exactly
   one parser (`compile_access`), one matcher (`glob_match`), one grant model (`decide`,
   `decide_api_key`), and both link it. That is the whole membership rule: a thing belongs
-  in the library iff the access file has an opinion about it. HTTP, the cookie, the JWT,
+  in the library iff the access file has an opinion about it. The rule reaches **how a file
+  is edited and written**, too — validate-before-write on the exact bytes, atomic replace,
+  mode and owner preserved (`open_access_file`, `AccessWrite`, and the document mutations
+  beside them) — because `bb-auth-adm` today and the web admin next must agree on that byte
+  for byte: the same argument that created the library. What stays in a tool is what has an
+  operator: flags, warnings, and the wording of a verdict. HTTP, the cookie, the JWT,
   the env, the nginx contract are the **gate's**, and stay in `src/main.rs` — which is
   still one file, read top to bottom. Do not move gate code into the library to "share" it
   with the CLI; the CLI has no business with any of it. The two authorization functions in
@@ -102,7 +108,9 @@ bash scripts/build.sh                 # target overridable via BB_AUTH_TARGET
   library, or `bb-auth-adm can` starts answering a different question from the gate.
 - **`bb-auth-adm` must never write a file the gate would reject.** Every mutation is
   serialized, re-parsed, and run through `compile_access` — the gate's own parser, on the
-  exact bytes about to land on disk — before the write. A rejected access file is a fatal
+  exact bytes about to land on disk — before the write. `AccessWrite` is that order made
+  unskippable and is the only door: `prepare` compiles, `commit` writes what it compiled,
+  and `write_atomically` is private to the library. A rejected access file is a fatal
   startup, and under `Restart=on-failure` that is a boot loop; this tool and
   `--check-users` are the two places that can catch it in time. The write is atomic
   (temp + rename) and **preserves mode and owner**: the live file is `root:bb-auth 0640`,
@@ -170,10 +178,13 @@ bash scripts/build.sh                 # target overridable via BB_AUTH_TARGET
 - **Static API keys (`bbk_` namespace) are self-contained grants tied to a user.** The raw key is
   never stored, and the `sha256(bearer)` lookup in `by_key_hash` **is** the verification. A key must
   have a non-denied owner, be unexpired, and be in its URL scope. Don't index by anything the client
-  sends in the clear, and don't store the raw key. Mint with `bb-auth-adm key add` (`mint_api_key`),
-  which prints the bearer on stdout **once, and only after the file carrying its hash is safely on
-  disk** — the other order hands out a credential that authorizes nothing if the write then fails,
-  and the raw key exists nowhere else to retry from. `key rotate` is the answer to a leak.
+  sends in the clear, and don't store the raw key. Mint with `bb-auth-adm key add`
+  (`add_api_key` → `mint_api_key`), which prints the bearer on stdout **once, and only after the
+  file carrying its hash is safely on disk** — the other order hands out a credential that
+  authorizes nothing if the write then fails, and the raw key exists nowhere else to retry from.
+  That order is the API's, not the caller's: a mint returns a `SealedKey`, and `reveal` takes the
+  `Written` receipt of a completed write, so a dry run has no bearer to leak. `key rotate` is the
+  answer to a leak.
 - **Access is enumerated, never assumed** — from *either* grant source. There is **no "unrestricted"
   scope**: an absent or empty `authorized_urls` grants *nothing* (`UrlScope::deny_all`), a URL with
   no site is not open, and blanket access is the explicit pattern `*://*/*`. A key with no

@@ -66,9 +66,9 @@ the gate is the gate's, and stays in one file.
 
 | Target | What it is |
 |--------|------------|
-| `src/lib.rs` (`bb_auth_core`) | **The access file.** Schema (`AccessFile`), parser (`compile_access`), URL matcher (`glob_match` / `UrlScope`), the site table (`Sites`), the grant model (`decide`, `decide_api_key`), key minting (`mint_api_key`). Reads no env, opens no socket, holds no HTTP. |
+| `src/lib.rs` (`bb_auth_core`) | **The access file.** Schema (`AccessFile`), parser (`compile_access`), URL matcher (`glob_match` / `UrlScope`), the site table (`Sites`), the grant model (`decide`, `decide_api_key`), key minting (`mint_api_key`), and how a file is edited and written (`open_access_file`, `AccessWrite`, the document mutations). Reads no env, opens no socket, holds no HTTP, prints nothing. |
 | `src/main.rs` (`bb-auth`) | **The gate**, still a single file read top to bottom: HTTP, config, the session cookie, id_token validation, the nginx contract. |
-| `src/bin/bb-auth-adm.rs` (`bb-auth-adm`) | **The access-file admin CLI.** CRUD over `url_groups` / `sites` / `denied` / `users` / `api_keys`, key minting and rotation, and `can EMAIL URL` — which calls the library's `decide`, so it answers the question the gate will answer. Every write is validated with `compile_access` first, so it cannot save a file the gate would reject. See §12. |
+| `src/bin/bb-auth-adm.rs` (`bb-auth-adm`) | **The access-file admin CLI.** CRUD over `url_groups` / `sites` / `denied` / `users` / `api_keys`, key minting and rotation, and `can EMAIL URL` — which calls the library's `decide`, so it answers the question the gate will answer. Every edit and every write is a library call (`AccessWrite`), so it cannot save a file the gate would reject; what is left here is flags, warnings and the wording of a verdict. See §12. |
 
 Inside `src/main.rs`, in file order:
 
@@ -96,6 +96,7 @@ And in `src/lib.rs`:
 | `decide` / `decide_api_key` | The grant model as a value (`Decision` / `KeyDecision`): `denied` veto → `public_auth` site → roster + URL scope; and for a key, owner → expiry → scope. The single authorization point, shared by the gate and the CLI. See §12. |
 | `AccessFile` / `compile_access` / `read_access` | The document model (what `bb-auth-adm` edits, `notes` and `_comment` round-tripping untouched) and the parser that turns it into the runtime table. |
 | `mint_api_key` | 256 bits from the OS CSPRNG, `bbk_` + base64url; returns the bearer and the `sha256` the file stores. |
+| `open_access_file` / `AccessWrite` / the document mutations | **Editing an access file** — here rather than in a tool because `bb-auth-adm` and the coming web admin must do it identically. Open (refusing a file the gate would reject), the lookups and mutations behind every CRUD command (`add_user`, `add_api_key`, `add_site`, `move_site`, `remove_url_group`, `add_denied`, `edit_urls`, …), and the write: render → re-parse → `compile_access` → atomic temp+rename, preserving mode and owner. `AccessWrite::prepare` is the only way to obtain bytes and `commit` writes exactly those, with `write_atomically` private, so the check cannot be skipped; a minted bearer comes back as a `SealedKey` that only opens against the `Written` receipt of a completed write. |
 
 ---
 

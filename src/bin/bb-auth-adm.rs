@@ -7,15 +7,20 @@
 //!
 //! It shares [`bb_auth_core`] with the gate, and that is the whole design:
 //!
-//! * **It cannot write a file the gate would reject.** Every mutation is serialized,
-//!   re-parsed, and compiled with [`compile_access`] — the same parser `bb-auth
-//!   --check-users` and the running gate use — *before* anything reaches the disk. A file
-//!   the gate refuses at startup is a boot loop under `Restart=on-failure`, so the only
-//!   safe place to catch it is here.
+//! * **It cannot write a file the gate would reject.** Every mutation goes through
+//!   [`AccessWrite`], which serializes, re-parses and compiles with the same parser
+//!   `bb-auth --check-users` and the running gate use — *before* anything reaches the disk.
+//!   A file the gate refuses at startup is a boot loop under `Restart=on-failure`, so the
+//!   only safe place to catch it is here.
 //! * **It cannot disagree with the gate about who may reach what.** `can` calls
 //!   [`decide`] / [`decide_api_key`], the very functions `/auth/validate` calls.
 //! * **It does not eat what it does not understand.** `_comment` and `notes` round-trip
 //!   untouched; a site's unknown field is still a hard error, exactly as in the gate.
+//!
+//! Every document edit below is a call into the library too — the lookups, the duplicate
+//! refusals, the mint, the write. What is left here is what a *command-line* program owes
+//! its operator: flags, warnings, and the exact words of a verdict. The library owns the
+//! rest so the coming web admin makes the same edits through the same code.
 //!
 //! The write is atomic (temp file + rename) and preserves the file's mode and owner, which
 //! matters more than it sounds: the live file is `root:bb-auth 0640`, and a rewrite that
@@ -34,9 +39,13 @@
 use std::process::ExitCode;
 
 use bb_auth_core::{
-    compile_access, decide, decide_api_key, format_date, group_ref, key_expiry, lower_authority,
-    mint_api_key, now, read_access_file, Access, AccessFile, ApiKeySpec, Decision, KeyDecision,
-    SiteSpec, UrlScope, UserSpec,
+    add_api_key, add_denied, add_site, add_url_group, add_user, decide, decide_api_key,
+    edit_url_list, edit_urls, format_date, key_expiry, key_mut, lower_authority, move_site,
+    norm_email, now, open_access_file, remove_api_key, remove_denied, remove_site,
+    remove_url_group, remove_user, rename_site, rename_user, render_access_file, rotate_api_key,
+    site_name, site_pos, url_group_mut, url_group_refs, user_mut, user_pos, Access, AccessFile,
+    AccessWrite, ApiKeySpec, Decision, KeyDecision, SealedKey, SiteSpec, UrlScope, UserSpec,
+    Written,
 };
 
 const USAGE: &str = "\
@@ -315,48 +324,33 @@ impl Flags {
 // Load / save
 // ---------------------------------------------------------------------------
 
-/// Load the document, and the table the gate would build from it.
-///
-/// A file the gate would reject is refused here too: an edit must start from a file that
-/// works, or the tool would cheerfully fix one problem while carrying a fatal one to the
-/// disk. Both halves come back because compiling is also what *prints* the parser's
-/// warnings ("this user reaches nothing"), and an operator should hear each of those once,
-/// not once per look.
+/// The document, and the table the gate would build from it — [`open_access_file`] with
+/// the path this invocation is working on.
 fn load(ctx: &Ctx) -> Result<(AccessFile, Access), String> {
-    let doc = read_access_file(&ctx.path)?;
-    let access = compile_access(&doc).map_err(|e| {
-        format!(
-            "{}: the gate would reject this file as it stands: {e}",
-            ctx.path
-        )
-    })?;
-    Ok((doc, access))
+    open_access_file(&ctx.path)
 }
 
-/// Serialize, re-parse, compile with the gate's parser, and only then write — atomically,
-/// preserving the file's mode and owner.
+/// Check the edit with the gate's own parser and write it — or, under `--dry-run`, print
+/// the bytes and write nothing.
 ///
-/// The round-trip is not paranoia: what is compiled is the exact byte string that is about
-/// to land on disk, so nothing can slip in between the check and the write. `compile_access`
-/// is the same function the gate runs at startup and on SIGHUP, so a file this accepts is a
-/// file the gate accepts — which is what keeps a bad edit from becoming a `Restart=on-failure`
-/// boot loop.
-fn save(ctx: &Ctx, doc: &AccessFile) -> Result<(), String> {
-    let mut json =
-        serde_json::to_string_pretty(doc).map_err(|e| format!("cannot serialize: {e}"))?;
-    json.push('\n');
-
-    let reparsed: AccessFile =
-        serde_json::from_str(&json).map_err(|e| format!("serialized to invalid JSON: {e}"))?;
-    let access = compile_access(&reparsed).map_err(|e| format!("refusing to write: {e}"))?;
+/// `Ok(None)` means nothing was written. That is also what denies a freshly minted bearer
+/// its way out: [`SealedKey::reveal`] wants the receipt of a real write, and a dry run has
+/// none to give it.
+fn save(ctx: &Ctx, doc: &AccessFile) -> Result<Option<Written>, String> {
+    let pending = AccessWrite::prepare(doc)?;
 
     if ctx.dry_run {
-        print!("{json}");
+        print!("{}", pending.json());
         eprintln!("[bb-auth-adm] --dry-run: {} NOT written", ctx.path);
-        return Ok(());
+        return Ok(None);
     }
 
-    write_atomically(&ctx.path, &json)?;
+    let written = pending.commit(&ctx.path)?;
+    eprintln!(
+        "[bb-auth-adm] previous file kept at {}",
+        written.backup.display()
+    );
+    let access = pending.access();
     eprintln!(
         "[bb-auth-adm] wrote {} — {} users, {} api keys, {} sites, {} denied",
         ctx.path,
@@ -366,59 +360,7 @@ fn save(ctx: &Ctx, doc: &AccessFile) -> Result<(), String> {
         access.denied.len()
     );
     eprintln!("[bb-auth-adm] the gate re-reads it on: systemctl reload bb-auth");
-    Ok(())
-}
-
-/// Write `content` to `path` atomically: a temp file in the same directory, then a rename.
-///
-/// Mode and owner are copied from the file being replaced, and that is not cosmetic. The
-/// live access file is `root:bb-auth 0640`; a rewrite by root that left it `root:root`
-/// would be unreadable to the service, and the gate would die on its next start — a
-/// lockout dressed up as a successful edit. If the owner cannot be restored, nothing is
-/// renamed: the old file stays, intact.
-fn write_atomically(path: &str, content: &str) -> Result<(), String> {
-    let p = std::path::Path::new(path);
-    let dir = p.parent().filter(|d| !d.as_os_str().is_empty());
-    let tmp = match dir {
-        Some(d) => d.join(format!(
-            ".{}.bb-auth-adm.tmp",
-            p.file_name().unwrap_or_default().to_string_lossy()
-        )),
-        None => std::path::PathBuf::from(format!(".{path}.bb-auth-adm.tmp")),
-    };
-
-    let meta = std::fs::metadata(p).map_err(|e| format!("stat {path}: {e}"))?;
-    // Keep one step back. The gate is stateless, but a roster is not reconstructible.
-    let bak = format!("{path}.bak");
-    std::fs::copy(p, &bak).map_err(|e| format!("backup {bak}: {e}"))?;
-
-    std::fs::write(&tmp, content).map_err(|e| format!("write {}: {e}", tmp.display()))?;
-    let restore = |e: String| {
-        let _ = std::fs::remove_file(&tmp);
-        e
-    };
-    std::fs::set_permissions(&tmp, meta.permissions())
-        .map_err(|e| restore(format!("chmod {}: {e}", tmp.display())))?;
-    #[cfg(unix)]
-    {
-        use std::os::unix::fs::MetadataExt;
-        let (uid, gid) = (meta.uid(), meta.gid());
-        let c = std::ffi::CString::new(tmp.to_string_lossy().as_bytes())
-            .map_err(|e| restore(format!("path: {e}")))?;
-        // SAFETY: a NUL-terminated path we just created, and two ids read off the file we
-        // are replacing.
-        if unsafe { libc::chown(c.as_ptr(), uid, gid) } != 0 {
-            return Err(restore(format!(
-                "cannot restore owner {uid}:{gid} on {} ({}) — not writing, the old file is \
-                 untouched. Re-run as root.",
-                tmp.display(),
-                std::io::Error::last_os_error()
-            )));
-        }
-    }
-    std::fs::rename(&tmp, p).map_err(|e| restore(format!("rename onto {path}: {e}")))?;
-    eprintln!("[bb-auth-adm] previous file kept at {bak}");
-    Ok(())
+    Ok(Some(written))
 }
 
 /// `init` — a new, empty access file: `{"users": []}`, which is a valid file that grants
@@ -437,7 +379,7 @@ fn cmd_init(ctx: Ctx) -> Result<ExitCode, String> {
         ));
     }
     let doc = AccessFile::default();
-    let json = serde_json::to_string_pretty(&doc).map_err(|e| e.to_string())? + "\n";
+    let json = render_access_file(&doc)?;
     if ctx.dry_run {
         print!("{json}");
         eprintln!("[bb-auth-adm] --dry-run: {} NOT created", ctx.path);
@@ -458,86 +400,8 @@ fn cmd_init(ctx: Ctx) -> Result<ExitCode, String> {
 }
 
 // ---------------------------------------------------------------------------
-// Lookups over the document
+// Rendering the document
 // ---------------------------------------------------------------------------
-
-/// Emails are matched the way the gate matches them: trimmed and lowercased.
-fn norm_email(e: &str) -> String {
-    e.trim().to_ascii_lowercase()
-}
-
-fn user_pos(doc: &AccessFile, email: &str) -> Option<usize> {
-    let want = norm_email(email);
-    doc.users.iter().position(|u| norm_email(&u.email) == want)
-}
-
-fn user_mut<'a>(doc: &'a mut AccessFile, email: &str) -> Result<&'a mut UserSpec, String> {
-    match user_pos(doc, email) {
-        Some(i) => Ok(&mut doc.users[i]),
-        None => Err(format!(
-            "no user '{}' (add them with: user add {})",
-            email.trim(),
-            email.trim()
-        )),
-    }
-}
-
-fn key_mut<'a>(
-    doc: &'a mut AccessFile,
-    email: &str,
-    id: &str,
-) -> Result<&'a mut ApiKeySpec, String> {
-    let u = user_mut(doc, email)?;
-    match u.api_keys.iter().position(|k| k.id.trim() == id.trim()) {
-        Some(i) => Ok(&mut u.api_keys[i]),
-        None => Err(format!("{}: no api key '{id}'", norm_email(email))),
-    }
-}
-
-fn site_pos(doc: &AccessFile, name: &str) -> Option<usize> {
-    doc.sites.iter().position(|s| s.name.trim() == name.trim())
-}
-
-/// Apply the standard scope edits to a `authorized_urls` field: a full `--url` replacement,
-/// then `--add-url` / `--rm-url`. Returns `true` if anything changed.
-///
-/// `None` means "absent". For a user that is deny-all; for a key it means "inherit the
-/// owner's" — two different things, so the caller says which one an empty result should
-/// collapse to.
-fn edit_urls(
-    urls: &mut Option<Vec<String>>,
-    set: Vec<String>,
-    add: Vec<String>,
-    rm: Vec<String>,
-    clear: bool,
-) -> bool {
-    let mut changed = false;
-    if clear {
-        *urls = None;
-        changed = true;
-    }
-    if !set.is_empty() {
-        *urls = Some(set);
-        changed = true;
-    }
-    if !add.is_empty() {
-        let list = urls.get_or_insert_with(Vec::new);
-        for u in add {
-            if !list.iter().any(|x| x == &u) {
-                list.push(u);
-                changed = true;
-            }
-        }
-    }
-    if !rm.is_empty() {
-        if let Some(list) = urls.as_mut() {
-            let before = list.len();
-            list.retain(|x| !rm.iter().any(|r| r == x));
-            changed |= list.len() != before;
-        }
-    }
-    changed
-}
 
 /// The URL as the gate will see it on `/auth/validate`: query and fragment stripped (nginx
 /// sends `$uri`), authority lowercased. Comparing anything else would be answering a
@@ -603,7 +467,7 @@ fn cmd_show(ctx: Ctx) -> Result<ExitCode, String> {
             } else {
                 "public_auth: no — grants nothing today"
             };
-            println!("  {}. {}  [{open}]", i, name_of(s));
+            println!("  {}. {}  [{open}]", i, site_name(s));
             if let Some(l) = &s.login_url {
                 println!("       login_url: {l}");
             }
@@ -659,13 +523,6 @@ fn print_user(u: &UserSpec, doc: &AccessFile) {
             "          urls: {}",
             urls_of(&k.authorized_urls, "inherits the user's")
         );
-    }
-}
-
-fn name_of(s: &SiteSpec) -> String {
-    match s.name.trim() {
-        "" => "?".to_string(),
-        n => n.to_string(),
     }
 }
 
@@ -737,7 +594,7 @@ fn cmd_check(ctx: Ctx) -> Result<ExitCode, String> {
         }
     }
     for name in doc.url_groups.keys() {
-        if refs_to(&doc, name).is_empty() {
+        if url_group_refs(&doc, name).is_empty() {
             lints.push(format!(
                 "url group '@{name}' is defined but nothing references it — it grants nobody \
                  anything until some urls list names it"
@@ -749,10 +606,10 @@ fn cmd_check(ctx: Ctx) -> Result<ExitCode, String> {
             lints.push(format!(
                 "site '{}' is listed after '{}', which already answers for its urls — first \
                  match wins, so '{}' never speaks. Move it earlier: site mv {} --at {j}",
-                name_of(s),
-                name_of(&doc.sites[j]),
-                name_of(s),
-                name_of(s),
+                site_name(s),
+                site_name(&doc.sites[j]),
+                site_name(s),
+                site_name(s),
             ));
         }
     }
@@ -900,12 +757,18 @@ fn cmd_user_add(mut ctx: Ctx, email: &str) -> Result<ExitCode, String> {
     let (mut doc, _) = load(&ctx)?;
 
     let email = norm_email(email);
-    if user_pos(&doc, &email).is_some() {
-        return Err(format!(
-            "{email} is already in users (edit them: user set {email})"
-        ));
+    let no_urls = urls.is_empty();
+    let mut u = UserSpec {
+        email: email.clone(),
+        authorized_urls: if no_urls { None } else { Some(urls) },
+        ..Default::default()
+    };
+    if let Some(n) = note {
+        u.extra.insert("notes".into(), n.into());
     }
-    if urls.is_empty() {
+    add_user(&mut doc, u)?;
+
+    if no_urls {
         eprintln!(
             "[bb-auth-adm] WARNING: {email} has no --url, so they reach NOTHING. Access is \
              enumerated, never assumed; grant everything with --url '*://*/*'."
@@ -914,16 +777,6 @@ fn cmd_user_add(mut ctx: Ctx, email: &str) -> Result<ExitCode, String> {
     if doc.denied.iter().any(|d| norm_email(d) == email) {
         eprintln!("[bb-auth-adm] WARNING: {email} is on the denied list — the veto wins anyway");
     }
-
-    let mut u = UserSpec {
-        email: email.clone(),
-        authorized_urls: if urls.is_empty() { None } else { Some(urls) },
-        ..Default::default()
-    };
-    if let Some(n) = note {
-        u.extra.insert("notes".into(), n.into());
-    }
-    doc.users.push(u);
     save(&ctx, &doc)?;
     Ok(ExitCode::SUCCESS)
 }
@@ -938,19 +791,13 @@ fn cmd_user_set(mut ctx: Ctx, email: &str) -> Result<ExitCode, String> {
     ctx.flags.finish()?;
     let (mut doc, _) = load(&ctx)?;
 
-    // Renaming has to see the whole roster, so resolve the collision before borrowing.
-    if let Some(new) = &new_email {
-        let new = norm_email(new);
-        if new != norm_email(email) && user_pos(&doc, &new).is_some() {
-            return Err(format!("{new} is already in users"));
-        }
-    }
-    let u = user_mut(&mut doc, email)?;
+    // The rename goes first, and the row is then addressed by the name it now has.
     let mut changed = false;
-    if let Some(new) = new_email {
-        u.email = norm_email(&new);
+    if let Some(new) = &new_email {
+        rename_user(&mut doc, email, new)?;
         changed = true;
     }
+    let u = user_mut(&mut doc, new_email.as_deref().unwrap_or(email))?;
     changed |= edit_urls(&mut u.authorized_urls, set, add, rm, clear);
     if let Some(n) = note {
         u.extra.insert("notes".into(), n.into());
@@ -972,9 +819,7 @@ fn cmd_user_set(mut ctx: Ctx, email: &str) -> Result<ExitCode, String> {
 fn cmd_user_rm(ctx: Ctx, email: &str) -> Result<ExitCode, String> {
     ctx.flags.finish()?;
     let (mut doc, access) = load(&ctx)?;
-    let i = user_pos(&doc, email).ok_or_else(|| format!("no user '{}'", norm_email(email)))?;
-
-    let u = doc.users.remove(i);
+    let u = remove_user(&mut doc, email)?;
     let email = norm_email(&u.email);
     if !u.api_keys.is_empty() {
         eprintln!(
@@ -1022,18 +867,22 @@ fn cmd_key_list(mut ctx: Ctx) -> Result<ExitCode, String> {
     Ok(ExitCode::SUCCESS)
 }
 
-/// Hand the freshly minted bearer to its owner — **after** the file that carries its hash
-/// is safely on disk. The other order would print a credential that authorizes nothing if
-/// the write then failed, and the raw key exists nowhere else to try again with.
+/// Hand the freshly minted bearer to its owner — which `written` is what makes possible:
+/// a [`SealedKey`] only opens against the receipt of a completed write, so there is no
+/// order in which this prints a credential the file never got.
 ///
 /// It goes to **stdout**, alone, so it can be piped into a secret store; everything a human
 /// reads is on stderr. It is not recoverable: the file keeps the hash, and the hash *is* the
 /// verification.
-fn hand_over(raw: &str, what: &str, dry_run: bool) {
-    if dry_run {
-        eprintln!("[bb-auth-adm] --dry-run: nothing was written, so this key is void");
-        return;
-    }
+fn hand_over(key: SealedKey, what: &str, written: Option<&Written>) {
+    let receipt = match written {
+        Some(w) => w,
+        None => {
+            eprintln!("[bb-auth-adm] --dry-run: nothing was written, so this key is void");
+            return;
+        }
+    };
+    let raw = key.reveal(receipt);
     eprintln!("=== {what} — not stored anywhere, and it cannot be recovered ===");
     eprintln!("Authorization: Bearer {raw}");
     eprintln!("===");
@@ -1071,39 +920,37 @@ fn cmd_key_add(mut ctx: Ctx, email: &str) -> Result<ExitCode, String> {
     if doc.denied.iter().any(|d| norm_email(d) == email) {
         eprintln!("[bb-auth-adm] WARNING: {email} is denied — every key of theirs is rejected");
     }
-    let (raw, hash) = mint_api_key()?;
-    {
-        let u = user_mut(&mut doc, &email)?;
-        if u.api_keys.iter().any(|k| k.id.trim() == id) {
-            return Err(format!(
-                "{email} already has a key '{id}' (replace its secret: key rotate {email} {id})"
-            ));
-        }
-        let inherits = urls.is_empty();
-        if inherits && u.authorized_urls.as_ref().is_none_or(|l| l.is_empty()) {
-            eprintln!(
-                "[bb-auth-adm] WARNING: with no --url the key inherits {email}'s scope, which is \
-                 empty — it will reach nothing. Give it --url, or give the user one."
-            );
-        }
-        let mut k = ApiKeySpec {
-            id: id.clone(),
-            key_hash: hash,
-            released,
-            duration,
-            authorized_urls: if inherits { None } else { Some(urls) },
-            ..Default::default()
-        };
-        if let Some(n) = note {
-            k.extra.insert("notes".into(), n.into());
-        }
-        u.api_keys.push(k);
+    let inherits = urls.is_empty();
+    let mut k = ApiKeySpec {
+        id: id.clone(),
+        released,
+        duration,
+        authorized_urls: if inherits { None } else { Some(urls) },
+        ..Default::default()
+    };
+    if let Some(n) = note {
+        k.extra.insert("notes".into(), n.into());
     }
-    save(&ctx, &doc)?;
+    // The mint is in here, and the bearer comes back sealed until the write below.
+    let sealed = add_api_key(&mut doc, &email, k)?;
+
+    let owner_reaches_nothing = user_pos(&doc, &email).is_some_and(|i| {
+        doc.users[i]
+            .authorized_urls
+            .as_ref()
+            .is_none_or(|l| l.is_empty())
+    });
+    if inherits && owner_reaches_nothing {
+        eprintln!(
+            "[bb-auth-adm] WARNING: with no --url the key inherits {email}'s scope, which is \
+             empty — it will reach nothing. Give it --url, or give the user one."
+        );
+    }
+    let written = save(&ctx, &doc)?;
     hand_over(
-        &raw,
+        sealed,
         &format!("the bearer for '{id}' — give it to the client ONCE"),
-        ctx.dry_run,
+        written.as_ref(),
     );
     Ok(ExitCode::SUCCESS)
 }
@@ -1152,17 +999,12 @@ fn cmd_key_set(mut ctx: Ctx, email: &str, id: &str) -> Result<ExitCode, String> 
 fn cmd_key_rotate(ctx: Ctx, email: &str, id: &str) -> Result<ExitCode, String> {
     ctx.flags.finish()?;
     let (mut doc, _) = load(&ctx)?;
-    let (raw, hash) = mint_api_key()?;
-    {
-        let k = key_mut(&mut doc, email, id)?;
-        k.key_hash = hash;
-        k.released = format_date(now());
-    }
-    save(&ctx, &doc)?;
+    let sealed = rotate_api_key(&mut doc, email, id)?;
+    let written = save(&ctx, &doc)?;
     hand_over(
-        &raw,
+        sealed,
         &format!("the NEW bearer for '{id}' — the old one dies at the next reload"),
-        ctx.dry_run,
+        written.as_ref(),
     );
     Ok(ExitCode::SUCCESS)
 }
@@ -1170,13 +1012,7 @@ fn cmd_key_rotate(ctx: Ctx, email: &str, id: &str) -> Result<ExitCode, String> {
 fn cmd_key_rm(ctx: Ctx, email: &str, id: &str) -> Result<ExitCode, String> {
     ctx.flags.finish()?;
     let (mut doc, _) = load(&ctx)?;
-    let u = user_mut(&mut doc, email)?;
-    let i = u
-        .api_keys
-        .iter()
-        .position(|k| k.id.trim() == id.trim())
-        .ok_or_else(|| format!("{}: no api key '{id}'", norm_email(email)))?;
-    u.api_keys.remove(i);
+    remove_api_key(&mut doc, email, id)?;
     save(&ctx, &doc)?;
     Ok(ExitCode::SUCCESS)
 }
@@ -1191,7 +1027,7 @@ fn cmd_site_list(ctx: Ctx) -> Result<ExitCode, String> {
     for (i, s) in doc.sites.iter().enumerate() {
         println!(
             "{i}. {}  public_auth={}{}",
-            name_of(s),
+            site_name(s),
             if s.public_auth { "YES" } else { "no" },
             match &s.login_url {
                 Some(l) => format!("  login_url={l}"),
@@ -1216,16 +1052,24 @@ fn cmd_site_add(mut ctx: Ctx, name: &str) -> Result<ExitCode, String> {
     ctx.flags.finish()?;
     let (mut doc, _) = load(&ctx)?;
 
+    let at = match at {
+        Some(n) => Some(
+            n.parse::<usize>()
+                .map_err(|_| format!("--at: '{n}' is not a position"))?,
+        ),
+        None => None,
+    };
     let name = name.trim().to_string();
-    if name.is_empty() {
-        return Err("a site needs a name".into());
-    }
-    if site_pos(&doc, &name).is_some() {
-        return Err(format!(
-            "site '{name}' already exists (edit it: site set {name})"
-        ));
-    }
-    if urls.is_empty() {
+    let no_urls = urls.is_empty();
+    let site = SiteSpec {
+        name: name.clone(),
+        urls,
+        public_auth,
+        login_url,
+    };
+    let at = add_site(&mut doc, site, at)?;
+
+    if no_urls {
         eprintln!("[bb-auth-adm] WARNING: site '{name}' has no --url — it matches nothing");
     }
     if public_auth {
@@ -1236,28 +1080,12 @@ fn cmd_site_add(mut ctx: Ctx, name: &str) -> Result<ExitCode, String> {
              else."
         );
     }
-
-    let site = SiteSpec {
-        name: name.clone(),
-        urls,
-        public_auth,
-        login_url,
-    };
-    let at = match at {
-        Some(n) => n
-            .parse::<usize>()
-            .map_err(|_| format!("--at: '{n}' is not a position"))?
-            .min(doc.sites.len()),
-        None => doc.sites.len(),
-    };
-    doc.sites.insert(at, site);
-
     if let Some(j) = shadowed_by(&doc.sites, at) {
         eprintln!(
             "[bb-auth-adm] WARNING: site '{}' is listed first and already answers for these \
              urls — first match wins, so '{name}' will never speak. Put it earlier: \
              site mv {name} --at {j}",
-            name_of(&doc.sites[j])
+            site_name(&doc.sites[j])
         );
     }
     save(&ctx, &doc)?;
@@ -1279,23 +1107,16 @@ fn cmd_site_set(mut ctx: Ctx, name: &str) -> Result<ExitCode, String> {
     if public_auth && no_public_auth {
         return Err("--public-auth and --no-public-auth contradict each other".into());
     }
-    let i = site_pos(&doc, name).ok_or_else(|| format!("no site '{}'", name.trim()))?;
-    if let Some(n) = &new_name {
-        if site_pos(&doc, n).is_some_and(|j| j != i) {
-            return Err(format!("site '{}' already exists", n.trim()));
-        }
-    }
-    let s = &mut doc.sites[i];
+    // The rename goes first, and the record is then addressed by the name it now has.
     let mut changed = false;
-    if let Some(n) = new_name {
-        s.name = n.trim().to_string();
+    if let Some(n) = &new_name {
+        rename_site(&mut doc, name, n)?;
         changed = true;
     }
-    // `urls` is a plain Vec here (a site with no urls matches nothing — there is no
-    // "inherit" to fall back to), so run the same edits over an Option and unwrap.
-    let mut urls = Some(std::mem::take(&mut s.urls));
-    changed |= edit_urls(&mut urls, set, add, rm, false);
-    s.urls = urls.unwrap_or_default();
+    let i = site_pos(&doc, new_name.as_deref().unwrap_or(name))
+        .ok_or_else(|| format!("no site '{}'", name.trim()))?;
+    let s = &mut doc.sites[i];
+    changed |= edit_url_list(&mut s.urls, set, add, rm, false);
     if public_auth || no_public_auth {
         s.public_auth = public_auth;
         changed = true;
@@ -1315,7 +1136,7 @@ fn cmd_site_set(mut ctx: Ctx, name: &str) -> Result<ExitCode, String> {
         eprintln!(
             "[bb-auth-adm] WARNING: '{}' is public_auth — ANY authenticated identity reaches it, \
              enrolled or not",
-            name_of(s)
+            site_name(s)
         );
     }
     save(&ctx, &doc)?;
@@ -1324,6 +1145,8 @@ fn cmd_site_set(mut ctx: Ctx, name: &str) -> Result<ExitCode, String> {
 
 /// `site mv` — order is meaning: [`Sites::resolve`](bb_auth_core::Sites::resolve) is
 /// first-match-wins, so moving a record changes who answers for a URL — and so who gets in.
+/// `--at` names a position, so its bounds are this command's business; the move itself is
+/// [`move_site`].
 fn cmd_site_mv(mut ctx: Ctx, name: &str) -> Result<ExitCode, String> {
     let at = ctx
         .flags
@@ -1343,8 +1166,7 @@ fn cmd_site_mv(mut ctx: Ctx, name: &str) -> Result<ExitCode, String> {
             doc.sites.len().saturating_sub(1)
         ));
     }
-    let s = doc.sites.remove(i);
-    doc.sites.insert(at, s);
+    move_site(&mut doc, i, at);
     save(&ctx, &doc)?;
     Ok(ExitCode::SUCCESS)
 }
@@ -1352,13 +1174,12 @@ fn cmd_site_mv(mut ctx: Ctx, name: &str) -> Result<ExitCode, String> {
 fn cmd_site_rm(ctx: Ctx, name: &str) -> Result<ExitCode, String> {
     ctx.flags.finish()?;
     let (mut doc, _) = load(&ctx)?;
-    let i = site_pos(&doc, name).ok_or_else(|| format!("no site '{}'", name.trim()))?;
-    let s = doc.sites.remove(i);
+    let s = remove_site(&mut doc, name)?;
     if s.public_auth {
         eprintln!(
             "[bb-auth-adm] '{}' was public_auth — the identities it let in with no roster entry \
              now reach nothing",
-            name_of(&s)
+            site_name(&s)
         );
     }
     save(&ctx, &doc)?;
@@ -1369,39 +1190,11 @@ fn cmd_site_rm(ctx: Ctx, name: &str) -> Result<ExitCode, String> {
 // url groups
 // ---------------------------------------------------------------------------
 
-/// Everything that names `@name`: users by email, keys as `email/id`, sites as
-/// `site 'NAME'`.
-///
-/// [`group_ref`] is what decides whether an entry is a reference, so this cannot drift
-/// from what the gate expands. The gate would refuse a
-/// file with a dangling reference anyway — [`save`] compiles before it writes — and this
-/// is what turns that refusal into a list of places to go and fix.
-fn refs_to(doc: &AccessFile, name: &str) -> Vec<String> {
-    let names = |urls: &[String]| urls.iter().any(|u| group_ref(u) == Some(name));
-    let mut out = Vec::new();
-    for s in &doc.sites {
-        if names(&s.urls) {
-            out.push(format!("site '{}'", name_of(s)));
-        }
-    }
-    for u in &doc.users {
-        if u.authorized_urls.as_deref().is_some_and(names) {
-            out.push(norm_email(&u.email));
-        }
-        for k in &u.api_keys {
-            if k.authorized_urls.as_deref().is_some_and(names) {
-                out.push(format!("{}/{}", norm_email(&u.email), k.id.trim()));
-            }
-        }
-    }
-    out
-}
-
 fn cmd_url_group_list(ctx: Ctx) -> Result<ExitCode, String> {
     ctx.flags.finish()?;
     let (doc, _) = load(&ctx)?;
     for (name, urls) in &doc.url_groups {
-        let refs = refs_to(&doc, name);
+        let refs = url_group_refs(&doc, name);
         let by = if refs.is_empty() {
             "referenced by NOTHING".to_string()
         } else {
@@ -1423,21 +1216,14 @@ fn cmd_url_group_add(mut ctx: Ctx, name: &str) -> Result<ExitCode, String> {
     let (mut doc, _) = load(&ctx)?;
 
     let name = name.trim().to_string();
-    if name.is_empty() {
-        return Err("a url group needs a name".into());
-    }
-    if doc.url_groups.contains_key(&name) {
-        return Err(format!(
-            "url group '@{name}' already exists (edit it: url-group set {name})"
-        ));
-    }
-    if urls.is_empty() {
+    let no_urls = urls.is_empty();
+    add_url_group(&mut doc, &name, urls)?;
+    if no_urls {
         eprintln!(
             "[bb-auth-adm] WARNING: url group '@{name}' has no --url — a reference to it grants \
              nothing"
         );
     }
-    doc.url_groups.insert(name, urls);
     save(&ctx, &doc)?;
     Ok(ExitCode::SUCCESS)
 }
@@ -1455,18 +1241,8 @@ fn cmd_url_group_set(mut ctx: Ctx, name: &str) -> Result<ExitCode, String> {
     let (mut doc, _) = load(&ctx)?;
 
     let name = name.trim().to_string();
-    let changed = {
-        let entry = doc
-            .url_groups
-            .get_mut(&name)
-            .ok_or_else(|| format!("no url group '@{name}'"))?;
-        // A group's patterns are a plain Vec — there is no "inherit" to fall back to, so
-        // --no-urls empties the group rather than deleting it (that is `url-group rm`).
-        let mut urls = Some(std::mem::take(entry));
-        let changed = edit_urls(&mut urls, set, add, rm, clear);
-        *entry = urls.unwrap_or_default();
-        changed
-    };
+    // --no-urls empties the group rather than deleting it (that is `url-group rm`).
+    let changed = edit_url_list(url_group_mut(&mut doc, &name)?, set, add, rm, clear);
     if !changed {
         return Err("nothing to change (see --help)".into());
     }
@@ -1484,19 +1260,7 @@ fn cmd_url_group_rm(ctx: Ctx, name: &str) -> Result<ExitCode, String> {
     ctx.flags.finish()?;
     let (mut doc, _) = load(&ctx)?;
 
-    let name = name.trim().to_string();
-    if !doc.url_groups.contains_key(&name) {
-        return Err(format!("no url group '@{name}'"));
-    }
-    let refs = refs_to(&doc, &name);
-    if !refs.is_empty() {
-        return Err(format!(
-            "url group '@{name}' is still referenced by {} — the gate would reject the file. \
-             Change those lists first, then remove the group.",
-            refs.join(", ")
-        ));
-    }
-    doc.url_groups.remove(&name);
+    remove_url_group(&mut doc, name)?;
     save(&ctx, &doc)?;
     Ok(ExitCode::SUCCESS)
 }
@@ -1527,11 +1291,10 @@ fn cmd_deny_add(ctx: Ctx, emails: &[&str]) -> Result<ExitCode, String> {
         if e.is_empty() {
             continue;
         }
-        if doc.denied.iter().any(|d| norm_email(d) == e) {
+        if !add_denied(&mut doc, &e) {
             eprintln!("[bb-auth-adm] {e} is already denied");
             continue;
         }
-        doc.denied.push(e.clone());
         changed = true;
         if user_pos(&doc, &e).is_some() {
             eprintln!(
@@ -1550,10 +1313,8 @@ fn cmd_deny_add(ctx: Ctx, emails: &[&str]) -> Result<ExitCode, String> {
 fn cmd_deny_rm(ctx: Ctx, emails: &[&str]) -> Result<ExitCode, String> {
     ctx.flags.finish()?;
     let (mut doc, _) = load(&ctx)?;
-    let before = doc.denied.len();
     let want: Vec<String> = emails.iter().map(|e| norm_email(e)).collect();
-    doc.denied.retain(|d| !want.contains(&norm_email(d)));
-    if doc.denied.len() == before {
+    if remove_denied(&mut doc, &want) == 0 {
         return Err(format!("none of {} were denied", want.join(", ")));
     }
     save(&ctx, &doc)?;
