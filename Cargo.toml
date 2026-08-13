@@ -1,6 +1,6 @@
 [package]
 name = "bb-auth"
-version = "2.6.0"
+version = "3.0.0"
 edition = "2021"
 description = "Minimal, service-agnostic Cognito id_token → session-cookie auth gate (nginx auth_request)"
 license = "MIT"
@@ -26,7 +26,7 @@ path = "src/bin/bb-auth-adm.rs"
 # The access-file admin GUI: the same file, server-rendered, read and write. Every edit goes
 # through the library's AccessWrite, exactly as bb-auth-adm's does. Loopback only, behind the
 # gate's own auth_request — it is just another app bb-auth fronts. Links the lib, none of the
-# gate.
+# gate. Deployed as its own hardened unit (deploy/bb-auth-web.service), optional like the CLI.
 [[bin]]
 name = "bb-auth-web"
 path = "src/bin/bb-auth-web.rs"

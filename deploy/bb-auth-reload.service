@@ -1,0 +1,17 @@
+[Unit]
+Description=Reload bb-auth after the access file changed
+Documentation=man:systemd.path(5)
+# Triggered by bb-auth-reload.path (the default Unit= for a .path unit is the .service of
+# the same name). Nothing else should start it, but starting it by hand is exactly a
+# `systemctl reload bb-auth`, so there is nothing to guard against.
+
+[Service]
+Type=oneshot
+# SIGHUP to the gate: it re-parses the access file into the live table, keeping the old
+# one if the new file does not compile. No restart, no session dropped.
+#
+# If the gate happens to be stopped this exits non-zero and the unit lands in `failed`,
+# which is honest: it says a change was not applied. It clears with `systemctl
+# reset-failed bb-auth-reload.service`, and the next start of the gate reads the file
+# anyway.
+ExecStart=/usr/bin/systemctl reload bb-auth.service

@@ -1,0 +1,67 @@
+[Unit]
+Description=bb-auth-web (access-file admin GUI, behind bb-auth's own auth_request)
+Documentation=file:/opt/bb-auth/bin/bb-auth-web
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=bb-auth-web
+Group=bb-auth-web
+# Membership in the GATE's group, and it is load-bearing twice over. The access file is
+# bb-auth-web:bb-auth 0640, so the gate reads it through this group; and the library's
+# writer chowns its temp file back to the replaced file's uid:gid before renaming it into
+# place — an unprivileged process may only chgrp to a group it is a member of, so without
+# this every save would abort with EPERM and nothing would ever be written.
+SupplementaryGroups=bb-auth
+EnvironmentFile=/opt/bb-auth/etc/bb-auth-web.env
+ExecStart=/opt/bb-auth/bin/bb-auth-web
+# No ExecReload: there is no table to reload. The access file is read fresh on every
+# request, and the config is read once at startup like the gate's — an env edit is a
+# `systemctl restart bb-auth-web`. What DOES need a signal is the gate, after this
+# service rewrites the file; bb-auth-reload.path is what sends it.
+Restart=on-failure
+RestartSec=2
+
+# --- Hardening ---
+# Mirrors bb-auth.service, with two deliberate differences: this one writes (see
+# ReadWritePaths below), and it makes no outbound connection at all — no JWKS, no
+# Cognito, no network beyond the loopback socket it binds.
+NoNewPrivileges=true
+ProtectSystem=strict
+ProtectHome=true
+PrivateTmp=true
+PrivateDevices=true
+ProtectClock=true
+ProtectHostname=true
+ProtectKernelTunables=true
+ProtectKernelModules=true
+ProtectKernelLogs=true
+ProtectControlGroups=true
+RestrictNamespaces=true
+RestrictRealtime=true
+RestrictSUIDSGID=true
+LockPersonality=true
+MemoryDenyWriteExecute=true
+# bind 127.0.0.1:8091; AF_NETLINK/AF_UNIX for the resolver, in case BB_AUTH_WEB_LISTEN
+# is written as a name rather than a literal address.
+RestrictAddressFamilies=AF_INET AF_INET6 AF_UNIX AF_NETLINK
+# @system-service contains @chown (and copy_file_range/sendfile), which the writer needs:
+# it copies the file one step back to users.json.bak, writes a temp file beside it,
+# restores mode and owner, and renames. A narrower set would turn every save into an
+# EPERM that looks exactly like a permissions bug.
+SystemCallFilter=@system-service
+SystemCallErrorNumber=EPERM
+SystemCallArchitectures=native
+CapabilityBoundingSet=
+AmbientCapabilities=
+# ProtectSystem=strict already mounts the whole hierarchy read-only, so bin/ and etc/
+# need no ReadOnlyPaths= line of their own — this is the one hole punched in it. It has
+# to be the DIRECTORY, not the file: the write is a temp file created beside the access
+# file and renamed onto it (that is what makes it atomic), plus the .bak copy, so both
+# creating and renaming inside var/lib must be allowed.
+ReadWritePaths=/opt/bb-auth/var/lib
+UMask=0077
+
+[Install]
+WantedBy=multi-user.target

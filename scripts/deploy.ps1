@@ -14,6 +14,15 @@
     On the target, bb-auth lives at /opt/bb-auth/{bin/bb-auth, etc/bb-auth.env,
     var/lib/users.json}.
 
+    The two admin tools travel the same way, and both are optional: dist/bb-auth-adm
+    and dist/bb-auth-web are staged when they are there and skipped when they are not,
+    so an older dist/ still deploys. Staging bb-auth-web pulls its unit, its env and
+    the bb-auth-reload.path watcher along with it — and hands the access file over to
+    the bb-auth-web user on the host (see deploy.sh). Its env is deploy/bb-auth-web.env
+    if you keep one, else the tracked template; either way the remote copy is installed
+    once and never edited, so the first GUI deploy stops at the preflight until
+    BB_AUTH_WEB_ADMINS is filled in on the host.
+
     Lockout-safe by construction:
       - By default NOTHING is staged for users.json, so deploy.sh keeps the
         existing var/lib/users.json untouched. Use -UsersFile for a first install
@@ -69,6 +78,18 @@ $BinPath        = Join-Path $Repo 'dist\bb-auth'
 # The access-file admin CLI. Shipped when it is there and skipped when it is not, so an
 # older dist/ still deploys: it is a tool for the operator, never a dependency of the gate.
 $AdmPath        = Join-Path $Repo 'dist\bb-auth-adm'
+# The admin GUI. Same rule as the CLI — shipped when it is there — but it does not travel
+# alone: it needs its unit, its env and the reload watcher, and deploy.sh treats a staged
+# binary without them as a fatal staging error rather than installing a service that
+# cannot start.
+$WebPath        = Join-Path $Repo 'dist\bb-auth-web'
+$WebUnit        = Join-Path $Repo 'deploy\bb-auth-web.service'
+$ReloadPathUnit = Join-Path $Repo 'deploy\bb-auth-reload.path'
+$ReloadSvcUnit  = Join-Path $Repo 'deploy\bb-auth-reload.service'
+# Operator-owned like the gate's: a real deploy\bb-auth-web.env if you keep one (it is
+# gitignored, as *.env is), otherwise the tracked template. It carries no secret.
+$WebEnvReal     = Join-Path $Repo 'deploy\bb-auth-web.env'
+$WebEnvTemplate = Join-Path $Repo 'deploy\bb-auth-web.env.example'
 $ServiceUnit    = Join-Path $Repo 'deploy\bb-auth.service'
 $EnvPlaceholder = Join-Path $Repo 'deploy\bb-auth.env'
 $DeploySh       = Join-Path $Repo 'scripts\deploy.sh'
@@ -103,6 +124,16 @@ foreach ($f in @($ServiceUnit, $EnvPlaceholder, $DeploySh)) {
 }
 if ($UsersFile -and -not (Test-Path -LiteralPath $UsersFile)) {
     throw "UsersFile not found: $UsersFile"
+}
+# Resolve the GUI's companions now, so a missing one is a local error with a name on it
+# rather than a fatal abort halfway through the remote deploy.
+$WebEnv = $null
+if (Test-Path -LiteralPath $WebPath) {
+    foreach ($f in @($WebUnit, $ReloadPathUnit, $ReloadSvcUnit)) {
+        if (-not (Test-Path -LiteralPath $f)) { throw "Missing required file: $f" }
+    }
+    $WebEnv = if (Test-Path -LiteralPath $WebEnvReal) { $WebEnvReal } else { $WebEnvTemplate }
+    if (-not (Test-Path -LiteralPath $WebEnv)) { throw "Missing required file: $WebEnvTemplate" }
 }
 
 # --- 3. verify remote access -------------------------------------------------
@@ -149,6 +180,13 @@ $staged = @(
     @{ src = $DeploySh;       dst = 'deploy.sh' }
 )
 if (Test-Path -LiteralPath $AdmPath) { $staged += @{ src = $AdmPath; dst = 'bb-auth-adm' } }
+if (Test-Path -LiteralPath $WebPath) {
+    $staged += @{ src = $WebPath;        dst = 'bb-auth-web' }
+    $staged += @{ src = $WebUnit;        dst = 'bb-auth-web.service' }
+    $staged += @{ src = $WebEnv;         dst = 'bb-auth-web.env' }
+    $staged += @{ src = $ReloadPathUnit; dst = 'bb-auth-reload.path' }
+    $staged += @{ src = $ReloadSvcUnit;  dst = 'bb-auth-reload.service' }
+}
 if ($UsersFile) { $staged += @{ src = $UsersFile; dst = 'users.json' } }
 
 foreach ($a in $staged) {
@@ -157,6 +195,9 @@ foreach ($a in $staged) {
 }
 $usersMode = if ($UsersFile) { 'replaced' } else { 'preserved (none staged)' }
 Write-Host "    staged $($staged.Count) file(s); users.json will be $usersMode"
+if (Test-Path -LiteralPath $WebPath) {
+    Write-Host "    bb-auth-web included (env from $(Split-Path -Leaf $WebEnv))"
+}
 
 # --- 5. run deploy.sh as root (installs + restarts + self-verifies) ----------
 Write-Host "==> running deploy.sh as root on $Target" -ForegroundColor Cyan

@@ -408,7 +408,7 @@ Edit the **live** file (`sudo bb-auth-adm -f /opt/bb-auth/var/lib/users.json …
 is deployed alongside the gate): it is the copy that is current, and the write preserves
 its `root:bb-auth 0640` ownership. Then reload — see below.
 
-### `bb-auth-web` (preview)
+### Editing it in a browser — `bb-auth-web`
 
 The same file in a browser: a server-rendered admin GUI, no JavaScript. It shows the
 roster, each url group and who references it, the sites **numbered in file order** (the
@@ -425,9 +425,8 @@ a `bb-auth-adm` over SSH, another tab — the `POST` answers `409` and writes no
 of quietly discarding someone's edit. A successful mutation redirects (so a reload cannot
 repeat it), except minting a key, which shows the `bbk_` bearer once, on the spot, after the
 file carrying its hash is on disk. Destructive actions go through a confirmation page. An
-edit is live at the next `systemctl reload bb-auth`, as always.
-
-Still to come: the deploy phase (unit, nginx snippet, a place in the ship script).
+edit is live at the next `systemctl reload bb-auth` — which, once this is deployed, is
+sent for you (see "Making an edit live" below).
 
 It is *just another app bb-auth fronts*: it binds loopback, and nginx gates its URL with
 `auth_request` like any other, injecting the authorized email as `X-Auth-Email` (the
@@ -453,7 +452,73 @@ page load, and a file the gate would refuse renders as the parser's own error me
 instead of taking the GUI down. The `rev` field is what makes that safe for writing as
 well: what a form needs to know about the file travels in the form.
 
-Full deploy wiring comes with the deploy phase.
+#### Deploying it
+
+Optional, exactly like `bb-auth-adm`: `scripts/build.sh` produces `dist/bb-auth-web`,
+`deploy.ps1` stages it when it is there, and `deploy.sh` installs it — with its unit, its
+env and the reload watcher — only if it was staged. A `dist/` without it deploys precisely
+as it always did, down to the ownership of the access file.
+
+```text
+/opt/bb-auth/bin/bb-auth-web        # binary (root-owned, executed by bb-auth-web)
+/opt/bb-auth/etc/bb-auth-web.env    # its config — operator-owned, installed once
+/etc/systemd/system/bb-auth-web.service
+/etc/systemd/system/bb-auth-reload.{path,service}
+```
+
+The unit mirrors the gate's hardening (`NoNewPrivileges`, `ProtectSystem=strict`,
+`PrivateTmp`, empty `CapabilityBoundingSet`, `SystemCallFilter=@system-service`, …) with
+the two differences the job forces: it runs as its own user `bb-auth-web`, and it *writes*,
+so `ReadWritePaths=/opt/bb-auth/var/lib` punches one hole in the read-only tree. The hole
+is the **directory**, not the file, because the replacement is a temp file renamed into
+place — that is what makes it atomic, and renaming needs the directory.
+
+Its env is operator-owned like the gate's: installed once, then never edited by a redeploy,
+and *validated* before anything restarts (`BB_AUTH_WEB_ADMINS` non-empty, and
+`BB_AUTH_USERS_FILE` naming the file the gate actually loads). A missing required var is a
+fatal startup and under `Restart=on-failure` a boot loop, so the deploy aborts first. The
+practical consequence: **the first deploy that carries the GUI stops at that check**, having
+installed `/opt/bb-auth/etc/bb-auth-web.env` from the template. Fill in
+`BB_AUTH_WEB_ADMINS` on the host and re-run. (Keep a filled-in `deploy/bb-auth-web.env`
+locally — gitignored — and it is staged instead, and the first deploy goes straight
+through.)
+
+#### Who owns the access file
+
+Installing the GUI hands the access file over, once and idempotently:
+
+| | before | with `bb-auth-web` installed |
+|---|---|---|
+| `var/lib/` | `root:root 0755` | `bb-auth-web:bb-auth 0750` |
+| `users.json` | `root:bb-auth 0640` | `bb-auth-web:bb-auth 0640` |
+
+The gate reads it through the `bb-auth` group exactly as before — **its unit does not
+change**. The GUI needs to own it because the writer restores the replaced file's mode and
+owner before renaming, and an unprivileged process may only `chown` to the uid it already
+owns and to a group it is a member of (hence `SupplementaryGroups=bb-auth` in the unit);
+own it, and the same write is legal. And `sudo bb-auth-adm` keeps working with no change at
+all — root may write anything, and because the writer *preserves the owner it finds*, its
+rewrites leave the file `bb-auth-web:bb-auth` too. The two editors go on sharing one file,
+which is what the `rev` check was built for.
+
+A deploy that does **not** carry the GUI performs no migration: nothing would need the new
+owner, so `root:bb-auth` stays exactly as it is.
+
+#### Making an edit live
+
+`bb-auth-reload.path` watches `users.json` and runs `systemctl reload bb-auth` whenever it
+is replaced — by the GUI or by a `sudo bb-auth-adm` over SSH. It is installed with the GUI
+because it is what makes a GUI edit live: `bb-auth-web` runs unprivileged, is not the gate,
+and could not signal it. It uses `PathChanged=`, which catches the `rename(2)` both editors
+end with (and a hand-edit's close-write); `PathModified=` would only add mid-write triggers,
+i.e. reloading the gate on half a file.
+
+So a CLI operator no longer *has* to reload by hand — and if they do, it is one extra
+reload of the same file, which costs nothing: a reload re-reads the file, and one that fails
+to parse keeps the live table. The habit is still worth keeping, since the watcher is only
+there when the GUI is.
+
+nginx wiring: see [The admin GUI behind the gate](#the-admin-gui-behind-the-gate).
 
 ### Validating and reloading
 
@@ -504,6 +569,25 @@ to a database).
 > know what `"@mcp"` is, fails the load outright and keeps its previous table (fail-closed;
 > there is no partial grant to worry about). `bb-auth --check-users` on the old binary
 > tells you the same thing before a restart does.
+>
+> **Upgrading to 3.0.** **Nobody is logged out**: the cookie is still `bb4`, the HMAC key
+> is preserved as always, the access file is unchanged, and so is every env var the gate
+> reads — its unit is byte-identical too. The major number is about the *deploy*, which
+> grows a second service: `bb-auth-web`, with its own system user, its own unit and env,
+> and the `bb-auth-reload.path` watcher — and, when it is installed, the access file
+> changes owner to `bb-auth-web:bb-auth`.
+>
+> All of that is **opt-in by staging**. A `dist/` without `bb-auth-web` deploys exactly as
+> it did on 2.6: no new user, no new units, no migration, `users.json` still `root:bb-auth`.
+> If you do ship it, know two things. The first deploy **stops at the env preflight** —
+> `/opt/bb-auth/etc/bb-auth-web.env` has just been installed from the template with an
+> empty `BB_AUTH_WEB_ADMINS`, which is fatal by design; fill it in on the host and re-run.
+> Nothing was restarted, exactly as with any other rejected config. And the GUI is reachable
+> only through nginx, so it needs a gated location
+> ([The admin GUI behind the gate](#the-admin-gui-behind-the-gate)) plus the admin area in
+> each admin's `authorized_urls`. `sudo bb-auth-adm` needs no change and keeps working on
+> the same file; rolling back is dropping the old `dist/` back on, though the file stays
+> `bb-auth-web`-owned until someone chowns it back.
 
 ## Session cookie
 
@@ -543,8 +627,9 @@ just an edit (remove the user or a single API key, or add them to `denied`) +
 
 ```bash
 bash scripts/build.sh        # run on Linux (or WSL)
-# → dist/bb-auth   (the build prints the max GLIBC symbol required, so you can
-#                   match it to your target host's glibc)
+# → dist/{bb-auth, bb-auth-adm, bb-auth-web}
+#   (the build prints the max GLIBC symbol required for the gate, so you can
+#    match it to your target host's glibc)
 ```
 
 `scripts/build.sh` cross-compiles to `aarch64-unknown-linux-gnu` by default; edit
@@ -560,9 +645,20 @@ On the target, bb-auth is laid out as:
 ```text
 /opt/bb-auth/bin/bb-auth          # binary (root-owned, read-only to the service)
 /opt/bb-auth/etc/bb-auth.env      # config + HMAC key (0640, service-user readable)
-/opt/bb-auth/var/lib/users.json   # access list (0640, service-user readable)
+/opt/bb-auth/var/lib/users.json   # access list (0640, readable by the bb-auth group)
 /etc/systemd/system/bb-auth.service
+
+# optional, installed only when staged — see "Editing it" and "Editing it in a browser"
+/opt/bb-auth/bin/bb-auth-adm      # the admin CLI
+/opt/bb-auth/bin/bb-auth-web      # the admin GUI, run by its own bb-auth-web user
+/opt/bb-auth/etc/bb-auth-web.env  # the GUI's config (operator-owned, no secret)
+/etc/systemd/system/bb-auth-web.service
+/etc/systemd/system/bb-auth-reload.{path,service}   # users.json changed -> reload the gate
 ```
+
+Installing the GUI is what moves `users.json` to `bb-auth-web:bb-auth` (the gate keeps
+reading it through the group, unit unchanged); a deploy without it changes no ownership at
+all. See [Who owns the access file](#who-owns-the-access-file).
 
 `scripts/deploy.sh` is the **on-host installer** (run as root, on the target):
 it installs the binary/unit + staged `bb-auth.env` (generating the HMAC key on
@@ -587,6 +683,9 @@ binary serving.
 It verifies SSH + passwordless sudo + aarch64, stages the artifacts, runs
 `deploy.sh` as root, pings healthz, and cleans up. By default it ships no
 users.json and never regenerates the HMAC key, so redeploys are zero-downtime.
+It also stages `dist/bb-auth-adm` and `dist/bb-auth-web` when the build produced
+them — both optional, both installed only because they were staged, so an older
+`dist/` carrying just the gate still deploys exactly as it did.
 
 ## Run
 
@@ -722,6 +821,93 @@ The binary is service-agnostic. To front a service at `app.example.com`:
 
 Step 3 is the only per-service behaviour change; the SSO scope in step 2 is now
 just configuration (`BB_AUTH_COOKIE_DOMAIN` + `BB_AUTH_AUTHORIZED_HOSTS`).
+
+### The admin GUI behind the gate
+
+[`bb-auth-web`](#editing-it-in-a-browser--bb-auth-web) is fronted the same way as anything
+else — there is no special case for it, and that is the point. Mount it on whichever vhost
+you keep for auth (here `auth.badbat75.com`, an existing server block), at the prefix its
+`BB_AUTH_WEB_BASE_PATH` names:
+
+```nginx
+server {
+    listen 443 ssl;
+    server_name auth.badbat75.com;
+
+    # The gate. Identical to every other vhost's — one bb-auth serves them all.
+    location = /internal/auth-gate {
+        internal;
+        proxy_pass              http://127.0.0.1:4181/auth/validate;
+        proxy_pass_request_body off;
+        proxy_set_header        Content-Length "";
+        proxy_set_header        X-Original-URL $bb_url;
+        proxy_set_header        Authorization $http_authorization;
+    }
+
+    location /admin/ {
+        # Mandatory, and it must live HERE, not at server level: the auth_request
+        # subrequest re-runs the server rewrite phase and would clobber it, and inside
+        # the subrequest $uri is /internal/auth-gate. Hardcode the host; use $uri.
+        set $bb_url https://auth.badbat75.com$uri;
+        auth_request /internal/auth-gate;
+
+        # Who the gate authenticated. bb-auth-web reads THIS and nothing else, so the
+        # proxy_set_header is not decoration: it overwrites whatever the client sent,
+        # and without it anyone could name themselves an admin.
+        auth_request_set $bb_email $upstream_http_x_auth_email;
+        proxy_set_header X-Auth-Email     $bb_email;
+        proxy_set_header X-Forwarded-User "";
+        proxy_set_header Remote-User      "";
+        # The GUI has no use for a display name; clear them rather than relay the
+        # client's. (Only needed if BB_AUTH_PROFILE_CLAIMS names them at all.)
+        proxy_set_header X-Auth-Given-Name  "";
+        proxy_set_header X-Auth-Family-Name "";
+        # If this server block gets its proxy headers from a server-level
+        # `include proxy_params;`, re-include it here: a location-level
+        # proxy_set_header discards every inherited one.
+
+        auth_request_set $bb_login $upstream_http_x_auth_login_url;
+        error_page 401 = @bb_signin;
+
+        # NO URI part. The request path passes through unchanged, so /admin/users
+        # arrives as /admin/users — which is why BB_AUTH_WEB_BASE_PATH=/admin.
+        # Writing `proxy_pass http://127.0.0.1:8091/;` would strip the prefix and every
+        # link the GUI emits would 404.
+        proxy_pass http://127.0.0.1:8091;
+    }
+
+    location @bb_signin {
+        return 302 $bb_login_safe?rd=$scheme://$host$request_uri;
+    }
+}
+```
+
+Three operator notes, and the first is the one that matters:
+
+- **The admin area must be in each admin's `authorized_urls`.** The gate is the lock;
+  `BB_AUTH_WEB_ADMINS` is the backstop behind it. Enrol each admin:
+
+  ```bash
+  sudo /opt/bb-auth/bin/bb-auth-adm -f /opt/bb-auth/var/lib/users.json \
+      user set you@badbat75.com \
+      --add-url 'https://auth.badbat75.com/admin,https://auth.badbat75.com/admin/*'
+  ```
+
+  A blanket `*://*.badbat75.com/*` scope already covers it — check with
+  `bb-auth-adm can you@badbat75.com https://auth.badbat75.com/admin/` before assuming
+  either way.
+- **Never cover the admin area with a `public_auth` site.** That grants on identity alone,
+  to anyone who can register, and Cognito self-signup is open — it would put every account
+  in front of the admin surface with only `BB_AUTH_WEB_ADMINS` left standing. Two locks or
+  one is the whole difference.
+- **Every gated location must set or clear `X-Auth-Email`**, here as everywhere — see
+  [Passing the identity to the app](#passing-the-identity-to-the-app). `proxy_set_header`
+  only overrides the names it lists, so an unlisted one travels straight through from the
+  client.
+
+The vhost's host must also match `BB_AUTH_AUTHORIZED_HOSTS`, or the `401 → login → back
+here` round trip lands on the login page instead (`*.badbat75.com` covers
+`auth.badbat75.com`).
 
 ### Where the post-login redirect may land
 

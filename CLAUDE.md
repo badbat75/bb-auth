@@ -27,7 +27,7 @@ One crate, four targets, and the split is load-bearing:
   (would this credential get in?). It links the library, none of the gate.
 - **[src/bin/bb-auth-web.rs](src/bin/bb-auth-web.rs)** — the access-file admin GUI
   (server-rendered, `maud`, no JavaScript): the same CRUD as the CLI, made **only** through
-  the library's editing core, with the deploy phase still to come. A `GET` never mutates;
+  the library's editing core. A `GET` never mutates;
   every mutation is a `POST` guarded by a strict same-origin check (`Sec-Fetch-Site`, else
   `Origin`'s host vs `Host`'s — never the scheme, it speaks plain HTTP behind nginx) and by a
   hidden `rev` = sha256 of the file's exact bytes as the form was rendered, so a lost update
@@ -89,8 +89,8 @@ cargo clippy --all-targets
 cargo fmt
 cargo doc --no-deps                   # must emit zero warnings, across all four targets
 
-# Release cross-compile for the target — run in WSL/Linux, NOT on Windows.
-# Produces dist/bb-auth (aarch64) and prints the max GLIBC symbol required.
+# Release cross-compile for the target — run in WSL/Linux, NOT on Windows. Produces
+# dist/{bb-auth,bb-auth-adm,bb-auth-web} (aarch64) and the max GLIBC symbol required.
 bash scripts/build.sh                 # target overridable via BB_AUTH_TARGET
 
 # Deploy from Windows over SSH (build in WSL + ship + remote self-verify)
@@ -125,9 +125,11 @@ bash scripts/build.sh                 # target overridable via BB_AUTH_TARGET
   and `write_atomically` is private to the library. A rejected access file is a fatal
   startup, and under `Restart=on-failure` that is a boot loop; this tool and
   `--check-users` are the two places that can catch it in time. The write is atomic
-  (temp + rename) and **preserves mode and owner**: the live file is `root:bb-auth 0640`,
-  and a rewrite by root that left it `root:root` would lock the service out of its own
-  access list — the chown failing is therefore a hard abort, not a warning.
+  (temp + rename) and **preserves mode and owner**: the live file is `root:bb-auth 0640`
+  — `bb-auth-web:bb-auth 0640` once the GUI is installed — and a rewrite that left it
+  `root:root` would lock the service out of its own access list. The chown failing is
+  therefore a hard abort, not a warning; it is also what makes the *unprivileged* writer
+  work at all, so its owner and group are a deploy-time contract, not cosmetics.
 - **The cookie is a versioned wire format, and exactly one version is accepted.** `bb4` is it;
   there is deliberately no verify-only arm for `bb1`/`bb2`/`bb3` any more. So changing the
   serialization or the signed-message bytes logs out **every** existing user — that is the
@@ -321,12 +323,34 @@ bash scripts/build.sh                 # target overridable via BB_AUTH_TARGET
 - All config is env vars (`Config::from_env`); missing required vars are a fatal exit. The only
   secret is `BB_AUTH_HMAC_KEY` (≥32 bytes). Full reference: [deploy/bb-auth.env.example](deploy/bb-auth.env.example)
   and `docs/ARCHITECTURE.md` §8.
-- **Target layout is a tree**: `/opt/bb-auth/{bin/bb-auth, bin/bb-auth-adm, etc/bb-auth.env,
-  var/lib/users.json}`, unit at `/etc/systemd/system/bb-auth.service`. The service writes nothing,
-  so the whole prefix is `ReadOnlyPaths` and no `StateDirectory` is needed despite the `var/lib`
-  name — `bb-auth-adm` writes that file from *outside* the unit's namespace, as root, and the
-  hardening does not apply to it. It runs hardened and non-privileged on loopback behind a
-  TLS-terminating reverse proxy, speaks plain HTTP, and holds no Cognito secret.
+- **Target layout is a tree**: `/opt/bb-auth/{bin/bb-auth, bin/bb-auth-adm, bin/bb-auth-web,
+  etc/bb-auth.env, etc/bb-auth-web.env, var/lib/users.json}`, units at
+  `/etc/systemd/system/{bb-auth.service, bb-auth-web.service, bb-auth-reload.{path,service}}`.
+  **The gate** writes nothing, so its whole prefix is `ReadOnlyPaths` and no `StateDirectory` is
+  needed despite the `var/lib` name — `bb-auth-adm` writes that file from *outside* the unit's
+  namespace, as root, and the hardening does not apply to it. It runs hardened and non-privileged
+  on loopback behind a TLS-terminating reverse proxy, speaks plain HTTP, and holds no Cognito
+  secret. **`bb-auth-web` is a second unit of the same shape** — the gate's hardening mirrored,
+  its own `bb-auth-web` user, its own operator-owned env (`BB_AUTH_WEB_ADMINS` required and
+  never empty), and one hole in the read-only tree: `ReadWritePaths=/opt/bb-auth/var/lib`. The
+  hole is the **directory**, because the write is a temp file renamed into place. Both admin
+  tools are **optional in the deploy** (installed iff staged), and must stay that way.
+- **Installing `bb-auth-web` is what moves the access file to `bb-auth-web:bb-auth 0640`**
+  (its directory `bb-auth-web:bb-auth 0750`); a deploy without it changes no ownership at all,
+  which is what keeps an older `dist/` byte-identical in behaviour. The gate keeps read access
+  through the `bb-auth` group and its unit is unchanged. The owner has to move because the
+  library's writer restores the replaced file's mode and owner before renaming, and an
+  unprivileged process may only `chown` to the uid it already owns and a group it belongs to —
+  hence `SupplementaryGroups=bb-auth` on the unit; without either, every GUI save aborts with
+  `EPERM`. And because the writer *preserves* the owner rather than resetting it, `sudo
+  bb-auth-adm` keeps working untouched and leaves the file `bb-auth-web:bb-auth` too — the two
+  editors go on sharing one file, which is what the GUI's `rev` check exists for.
+- **`bb-auth-reload.path` is what makes an edit live**, from either editor: it watches
+  `users.json` and runs `systemctl reload bb-auth`, so neither the GUI (unprivileged, and not
+  the gate) nor the CLI operator needs the privilege to signal the service. `PathChanged=`, not
+  `PathModified=`: both editors end with a `rename(2)`, seen as `IN_MOVED_TO` on the watched
+  directory, and `IN_MODIFY` would only add a reload on a half-written file. It ships with the
+  GUI, so a CLI-only host still reloads by hand; a doubled reload costs nothing.
 - **The live `users.json` is the copy that is current** — it is edited on the host (`sudo
   bb-auth-adm …; systemctl reload bb-auth`) and a repo copy drifts from it within a week. So
   `deploy.sh` preserves it unless one is explicitly staged, and `deploy.ps1 -UsersFile` **replaces**

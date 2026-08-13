@@ -254,6 +254,12 @@ Required vars cause a fatal exit if missing.
 | `BB_AUTH_LOGIN_URL` | yes | — | Where `401`/logout send the user (the login page), and where a rejected `rd` falls back to. |
 | `BB_AUTH_WORKERS` | no | `4` | Thread pool size (min 1). |
 
+The admin GUI is a separate service with a separate env file
+(`deploy/bb-auth-web.env.example`, installed as `etc/bb-auth-web.env`): `BB_AUTH_USERS_FILE`
+— the same name for the same file — plus `BB_AUTH_WEB_ADMINS` (required, empty is fatal),
+`BB_AUTH_WEB_LISTEN`, `BB_AUTH_WEB_BASE_PATH` and `BB_AUTH_WEB_DEFAULT_LANG`. It shares no
+variable with the gate but that one, and holds no secret at all.
+
 ### 9a. Where the post-login redirect may land (`safe_rd`)
 
 There is no canonical service base URL: one gate fronts several hosts, and which one is
@@ -324,14 +330,21 @@ The layout, separated by role:
 ```text
 <install-dir>/
 ├── bin/bb-auth          # binary (read-only to the service)
+├── bin/bb-auth-adm      # admin CLI      — optional, installed only if staged
+├── bin/bb-auth-web      # admin GUI      — optional, installed only if staged
 ├── etc/bb-auth.env      # config + HMAC key (service-user readable only)
+├── etc/bb-auth-web.env  # the GUI's config (no secret) — with the GUI
 └── var/lib/users.json   # access list: emails + API keys + URL scopes
 <systemd-unit-dir>/bb-auth.service
+<systemd-unit-dir>/bb-auth-web.service           # with the GUI
+<systemd-unit-dir>/bb-auth-reload.{path,service} # with the GUI
 ```
 
-Nothing under the tree is ever written by the service (sessions are stateless), so
+Nothing under the tree is ever written by **the gate** (sessions are stateless), so
 the whole prefix stays read-only to it and no `StateDirectory` is needed despite the
-`var/lib` name.
+`var/lib` name. The admin tools write `var/lib/users.json`, and they do it from
+outside the gate's namespace: `bb-auth-adm` as root, `bb-auth-web` as its own service
+user under its own unit (see below).
 
 `scripts/deploy.sh` is an example installer (idempotent): it creates the
 system user/group, installs the binary, users file (backing up the prior
@@ -342,6 +355,29 @@ preserved `bb-auth.env`: instead it validates it (every required var present, an
 `BB_AUTH_USERS_FILE` pointing at the file this deploy installs) alongside the users
 file itself (`bb-auth --check-users`), aborting before the restart if either is
 rejected — so a bad config can never become a `Restart=on-failure` boot loop.
+
+### The admin GUI's unit, and who owns the access file
+
+`bb-auth-web` is installed only when it is staged, and everything about it follows: the
+`bb-auth-web` user, `bb-auth-web.service`, `etc/bb-auth-web.env` (operator-owned and
+validated exactly like the gate's — `BB_AUTH_WEB_ADMINS` non-empty, `BB_AUTH_USERS_FILE`
+naming the file this deploy installs), and the ownership migration below. A deploy that
+does not carry it does none of this.
+
+It is the one thing here that **writes** the access file, so the file changes hands with
+it: `var/lib/` becomes `bb-auth-web:bb-auth 0750` and `users.json`
+`bb-auth-web:bb-auth 0640`. The gate reads it through the `bb-auth` group and its unit is
+unchanged. Two properties of the library's writer force that shape — it replaces the file
+with a temp file renamed into place (so write permission is needed on the *directory*),
+and it restores the replaced file's mode and owner before renaming (so an unprivileged
+writer must already own the file and be a member of its group, hence
+`SupplementaryGroups=bb-auth`). Because the owner is *preserved* rather than reset,
+`sudo bb-auth-adm` keeps working unchanged and leaves the file `bb-auth-web:bb-auth` too.
+
+`bb-auth-reload.path` watches `users.json` with `PathChanged=` and runs `systemctl reload
+bb-auth` when it is replaced — the `rename(2)` both editors end with is seen as
+`IN_MOVED_TO` on the watched directory. It ships with the GUI because the GUI cannot
+signal the gate itself; a CLI operator reloading by hand as well merely reloads twice.
 
 ### systemd hardening
 
@@ -355,6 +391,14 @@ restrictions:
 AF_INET6 AF_UNIX AF_NETLINK` (loopback bind + outbound HTTPS to Cognito +
 resolver), `SystemCallFilter=@system-service`, empty `CapabilityBoundingSet`,
 `ReadOnlyPaths=<install-dir>` (the whole tree), `UMask=0077`.
+
+`deploy/bb-auth-web.service` mirrors that list, with the two differences its job forces:
+`ReadWritePaths=<install-dir>/var/lib` is the single hole in the otherwise read-only tree
+(`ProtectSystem=strict` already covers the rest, so it carries no `ReadOnlyPaths=` of its
+own), and `SupplementaryGroups=bb-auth` is what lets the write restore the file's group.
+`SystemCallFilter=@system-service` is kept as-is deliberately: it contains `@chown` and
+`copy_file_range`, which the writer needs — a narrower set would turn every save into an
+`EPERM` indistinguishable from a permissions bug.
 
 ---
 

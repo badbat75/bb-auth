@@ -1,0 +1,28 @@
+[Unit]
+Description=Watch the bb-auth access file and reload the gate when it changes
+Documentation=man:systemd.path(5)
+
+[Path]
+# An edit is not live until the gate re-reads the file (SIGHUP -> fail-soft table swap).
+# This is what sends that signal, for BOTH editors: bb-auth-web writing as its own user,
+# and `sudo bb-auth-adm` over SSH. Declaring it here means neither of them needs the
+# privilege to talk to systemd — the GUI runs unprivileged and could not reload anything
+# anyway, and the CLI operator gets it for free.
+#
+# PathChanged=, not PathModified=. Both editors replace the file the same way: a temp
+# file written beside it, then rename(2) onto it. PathChanged watches the target with
+# IN_CLOSE_WRITE|IN_MOVED_TO|... and every ancestor directory with
+# IN_CREATE|IN_MOVED_TO|... (systemd src/core/path.c), so the rename is seen on the
+# var/lib watch as IN_MOVED_TO — which is the event that matters here, since the bytes
+# are never written through this path at all. It also still catches a hand-edit, which
+# ends in IN_CLOSE_WRITE. PathModified= would add IN_MODIFY, i.e. plain writes: that adds
+# nothing for a rename-into-place and would fire mid-write on a hand-edit, reloading the
+# gate on a half-written file. Fail-soft or not, reloading garbage is not an improvement.
+#
+# One save can trigger more than one reload (the .bak copy and the temp file are both
+# IN_CREATE in the watched directory). That is harmless: a reload re-reads the same file,
+# and a reload that fails to parse keeps the live table.
+PathChanged=/opt/bb-auth/var/lib/users.json
+
+[Install]
+WantedBy=multi-user.target

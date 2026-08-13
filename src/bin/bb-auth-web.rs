@@ -7,9 +7,14 @@
 //! there, by the gate's own [`decide`]. And what `bb-auth-adm` *edits*, this edits: full
 //! CRUD over every section, through the library's editing core and through nothing else.
 //!
-//! **Phase status.** Read-only was phase 1; the mutations below are phase 2. What is still
-//! outstanding is the deploy phase — the unit, the nginx snippet, and a place in the ship
-//! script — so this is still run by hand.
+//! **Deployment.** Its own hardened unit (`deploy/bb-auth-web.service`) under a dedicated
+//! `bb-auth-web` user, its own operator-owned env (`deploy/bb-auth-web.env.example`), and
+//! `deploy/bb-auth-reload.path`, which turns any rewrite of the access file — this one's or
+//! a `bb-auth-adm` over SSH — into a `systemctl reload bb-auth`. Optional in the deploy just
+//! like `bb-auth-adm`: installed iff it was staged. Installing it is also what moves the
+//! access file to `bb-auth-web:bb-auth 0640`, because the writer restores the owner it finds
+//! and an unprivileged one may only chown to a uid it already owns and a group it is a
+//! member of. See the README and `scripts/deploy.sh`.
 //!
 //! # Trust model
 //!
