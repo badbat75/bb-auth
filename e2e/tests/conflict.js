@@ -3,9 +3,9 @@
 // exact bytes as the form was rendered, so a lost update against a `bb-auth-adm` over
 // SSH (or another tab) is a visible 409 instead of a silent clobber.
 //
-// Two different 409s, and the difference is v3.0.1's point:
+// Two different 409s, and telling them apart is the point:
 // * the **generic** one blames another writer, writes nothing, and points at the Back
-//   button (this GUI being JavaScript-free, the bfcache still holds the filled form);
+//   button (no page here runs a script on load, so the bfcache still holds the form);
 // * the **mint** route's own one fires when the stale `rev` comes with a key that now
 //   exists — which is what a reloaded reveal page looks like. There the generic advice
 //   ("make the change again") would mint a second key, so it offers a rotation instead.
@@ -31,7 +31,7 @@ async function run(ctx, t) {
     t.eq('a stale rev is a 409', r409.status(), 409);
     const en = await mainText(page);
     t.check('the generic 409 blames the file, not the admin', en.includes('The file changed'), en.slice(0, 300));
-    t.check('v3.0.1: it carries the Back-button recovery hint', en.includes('Back button'), en.slice(0, 400));
+    t.check('it carries the Back-button recovery hint', en.includes('Back button'), en.slice(0, 400));
     t.check('and offers to reload the form',
       (await page.locator('main a[href*="friend%40example.com/edit"]').count()) >= 1);
     t.check('the conflicting edit was not applied', !bytes(ctx).includes('typed-not-saved'));
@@ -70,17 +70,17 @@ async function run(ctx, t) {
     t.eq('replaying the saved form\'s exact bytes is the generic 409', rStale.status(), 409);
     t.check('with the generic copy', (await mainText(page)).includes('The file changed'));
 
-    // --- v3.0.1: the mint-specific 409, English ----------------------------------
+    // --- the mint-specific 409, English -----------------------------------------
     const mintUrl = '/admin/users/bot%40example.com/keys/+add';
     await page.goto(ctx.base + '/users/bot%40example.com/keys/+add?lang=en');
-    await page.fill('input[name=id]', 'v301');
+    await page.fill('input[name=id]', 'demo');
     await page.fill('input[name=duration]', '30d');
     const mintFields = await formBytes(page); // the exact bytes a reload would re-POST
     await submit(page);
     t.check('the mint reveals the bearer once', (await mainText(page)).includes('Authorization: Bearer bbk_'));
     const keyCount = (id) =>
       doc(ctx).users.find((u) => u.email === 'bot@example.com').api_keys.filter((k) => k.id === id).length;
-    t.eq('one key named v301 exists', keyCount('v301'), 1);
+    t.eq('one key named demo exists', keyCount('demo'), 1);
 
     const rMint = await resubmit(page, mintUrl, mintFields); // = reloading the reveal page
     t.eq('re-posting the mint form is a 409', rMint.status(), 409);
@@ -91,14 +91,14 @@ async function run(ctx, t) {
     t.check('and no Back-button hint — the typed input is not worth recovering', !mc.includes('Back button'));
     t.check('it offers the rotation instead',
       ((await page.locator('main a', { hasText: 'rotate this key' }).getAttribute('href')) || '')
-        .includes('/keys/v301/rotate'));
-    t.eq('still exactly one key — the resubmit minted nothing', keyCount('v301'), 1);
+        .includes('/keys/demo/rotate'));
+    t.eq('still exactly one key — the resubmit minted nothing', keyCount('demo'), 1);
     t.check('and no bearer appears on the conflict page', !mc.includes('bbk_'));
     await t.shot(page, 'mint-409-en');
 
     // --- the mint-specific 409, Italian ------------------------------------------
     await page.goto(ctx.base + '/users/bot%40example.com/keys/+add?lang=it');
-    await page.fill('input[name=id]', 'v301-it');
+    await page.fill('input[name=id]', 'demo-it');
     await page.fill('input[name=duration]', '30d');
     const mintFieldsIt = await formBytes(page);
     await submit(page);
@@ -110,7 +110,7 @@ async function run(ctx, t) {
     t.check('Italian mint-conflict copy', mcIt.includes('Questa chiave è già stata creata'), mcIt.slice(0, 300));
     t.check('unrecoverable, in Italian', mcIt.includes('non può essere recuperato'), mcIt.slice(0, 500));
     t.check('rotation offered, in Italian', mcIt.includes('rigenera questa chiave'));
-    t.eq('still exactly one v301-it key', keyCount('v301-it'), 1);
+    t.eq('still exactly one demo-it key', keyCount('demo-it'), 1);
     await t.shot(page, 'mint-409-it');
   } finally {
     await context.close();

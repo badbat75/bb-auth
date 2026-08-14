@@ -26,8 +26,15 @@ One crate, four targets, and the split is load-bearing:
   `url_groups` / `sites` / `denied` / `users` / `api_keys`, key minting, and `can EMAIL URL`
   (would this credential get in?). It links the library, none of the gate.
 - **[src/bin/bb-auth-web.rs](src/bin/bb-auth-web.rs)** — the access-file admin GUI
-  (server-rendered, `maud`, no JavaScript): the same CRUD as the CLI, made **only** through
-  the library's editing core. A `GET` never mutates;
+  (server-rendered, `maud`): the same CRUD as the CLI, made **only** through the library's
+  editing core. **No page may need JavaScript** — the rule that replaced "no JavaScript at
+  all", and the *only* thing standing on the far side of it is `SETTINGS_ONCHANGE`, one
+  inline handler that applies a Settings list box the moment it is picked, with a
+  `<noscript>` submit button behind it doing the same job one click later. There is no
+  `<script>` tag anywhere and nothing else carries a handler of any kind; a page that stops
+  working with scripting off is the thing that must never ship
+  (`the_page_carries_one_handler_and_no_script`, and `nojs.js` runs the whole GUI with
+  scripting disabled). A `GET` never mutates;
   every mutation is a `POST` guarded by a strict same-origin check (`Sec-Fetch-Site`, else
   `Origin`'s host vs `Host`'s — never the scheme, it speaks plain HTTP behind nginx) and by a
   hidden `rev` = sha256 of the file's exact bytes as the form was rendered, so a lost update
@@ -101,6 +108,21 @@ bash scripts/build.sh                 # target overridable via BB_AUTH_TARGET
 ./scripts/deploy.ps1 user@host -Build
 ./scripts/deploy.ps1 user@host -UsersFile .\deploy\users.json   # first install / replace access file
 ```
+
+**Match the check to the change.** Every suite here is cheap to start and slow to finish, so
+run what the edit can actually break, not the whole board. Re-running a check that already
+passed, on code untouched since it passed, tells you nothing you did not already know.
+
+| What changed | What to run |
+| --- | --- |
+| Only the `CSS` constant in `bb-auth-web.rs` | `cargo build --bin bb-auth-web` (it is a Rust string: it still has to compile) and `node e2e/shots.js <scene>` |
+| `maud` markup, or a `K` translation key | the above, plus `cargo test` (several tests assert on rendered HTML) and `node e2e/run.js` |
+| A signature, a handler, the gate, or the library | all of it, plus `cargo clippy --all-targets` |
+
+`cargo doc --no-deps` earns its place when an intra-doc link could have moved, which is a
+real risk when a type or a function is renamed and no risk at all when a border-radius
+changes. `node e2e/shots.js` takes a scene-name filter for the same reason: the full walk is
+124 screenshots across seven views, and a change to one page needs one of them.
 
 `docs/*.md` are linted with markdownlint (`.markdownlint.jsonc`).
 

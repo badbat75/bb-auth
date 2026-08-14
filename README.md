@@ -410,14 +410,14 @@ its `root:bb-auth 0640` ownership. Then reload — see below.
 
 ### Editing it in a browser — `bb-auth-web`
 
-The same file in a browser: a server-rendered admin GUI, no JavaScript. It shows the
+The same file in a browser: a server-rendered admin GUI that needs no JavaScript. It shows the
 roster, each url group and who references it, the sites **numbered in file order** (the
 number is the meaning — first match wins), the `denied` veto, every key's expiry, and a
 `can` tester answered by the gate's own decision function.
 
 It **edits** the file too — the same CRUD as `bb-auth-adm`, made through the same library
 code, so it cannot save a file the gate would reject. Three rules make that safe with no
-JavaScript and no server-side session: a `GET` never mutates; every `POST` must be
+script and no server-side session: a `GET` never mutates; every `POST` must be
 same-origin (`Sec-Fetch-Site`, else `Origin`'s host against `Host`'s — hosts, not schemes,
 since this speaks plain HTTP behind nginx); and every form carries a hidden `rev`, the
 sha256 of the file's exact bytes when the form was rendered. If the file moved in between —

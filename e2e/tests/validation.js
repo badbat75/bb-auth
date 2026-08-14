@@ -5,7 +5,7 @@
 // written** — the server re-runs the gate's own parser on the exact bytes about to
 // land, so a file the gate would reject can never leave this GUI either.
 //
-// Includes the two v3.0.1 refusals: a malformed email on `users · add` and on
+// Includes the two malformed-email refusals: `users · add` and
 // `denied · add` is caught up front with the library's message, instead of surviving
 // until the whole-file compile refuses it with a message about someone else's row.
 
@@ -45,8 +45,7 @@ async function run(ctx, t) {
     await refused('unknown @group in user add', 'nosuchgroup');
     t.check('unknown @group: no row written', !doc(ctx).users.find((u) => u.email === 'valid@example.com'));
 
-    // v3.0.1 (a): a malformed email on users · add, refused in-context with the
-    // library's own words.
+    // A malformed email on users · add, refused in-context with the library's own words.
     await page.goto(ctx.base + '/users/+add');
     await page.fill('input[name=email]', 'not an email');
     await page.fill('textarea[name=urls]', '*://*/*');
@@ -56,7 +55,7 @@ async function run(ctx, t) {
     t.check('malformed email: no row written', !doc(ctx).users.find((u) => u.email === 'not an email'));
     await t.shot(page, 'bad-email');
 
-    // v3.0.1 (a): the same door on denied · add — a veto that is a typo protects nobody.
+    // The same door on denied · add — a veto that is a typo protects nobody.
     await page.goto(ctx.base + '/denied/+add');
     await page.fill('input[name=email]', 'bob@example,com');
     await refused('malformed email in denied add', 'does not look like an email address');

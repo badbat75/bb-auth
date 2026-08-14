@@ -1,0 +1,137 @@
+'use strict';
+// Bringing up the thing under test: build the binary, hand it a throwaway copy of the
+// fixture, and start it on a port the OS picked. Shared by `run.js` (the suite) and
+// `shots.js` (the visual walk-through) so both drive exactly the same server, started
+// exactly the same way; a screenshot of a differently-configured binary would be
+// evidence about nothing.
+//
+// The access file is ALWAYS a per-run temp copy: the callers write to it, and pointing a
+// server at anything in the repo would make a test run a working-tree change.
+
+const { spawn, spawnSync } = require('child_process');
+const fs = require('fs');
+const net = require('net');
+const os = require('os');
+const path = require('path');
+
+const E2E_DIR = path.resolve(__dirname, '..');
+const REPO = path.resolve(E2E_DIR, '..');
+const FIXTURE = path.join(REPO, 'deploy', 'users.example.json');
+const CHANNEL = process.env.E2E_BROWSER_CHANNEL || 'msedge';
+
+/** Run a command, inheriting stdio; a non-zero exit is fatal to the whole run. */
+function sh(cmd, cwd) {
+  const r = spawnSync(cmd, { shell: true, cwd, stdio: 'inherit' });
+  if (r.status !== 0) {
+    console.error(`FATAL: \`${cmd}\` exited ${r.status}`);
+    process.exit(1);
+  }
+}
+
+/** Install the e2e dependencies on a fresh clone. No browser download: see README. */
+function ensureDeps() {
+  if (!fs.existsSync(path.join(E2E_DIR, 'node_modules', 'playwright'))) {
+    console.log('== installing e2e dependencies (first run) ==');
+    sh('npm install --no-audit --no-fund', E2E_DIR);
+  }
+  return require('playwright');
+}
+
+/** Build the binary under test and return its path. Debug profile is fine here. */
+function buildBin() {
+  console.log('== cargo build --bin bb-auth-web ==');
+  sh('cargo build --bin bb-auth-web', REPO);
+  return path.join(REPO, 'target', 'debug', process.platform === 'win32' ? 'bb-auth-web.exe' : 'bb-auth-web');
+}
+
+/** A fresh temp directory holding a copy of the fixture, plus the copy's path. */
+function tempAccessFile() {
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'bb-auth-e2e-'));
+  const file = path.join(dir, 'users.json');
+  fs.copyFileSync(FIXTURE, file);
+  return { dir, file };
+}
+
+/** Ask the OS for a free loopback port. */
+function freePort() {
+  return new Promise((resolve, reject) => {
+    const s = net.createServer();
+    s.once('error', reject);
+    s.listen(0, '127.0.0.1', () => {
+      const { port } = s.address();
+      s.close(() => resolve(port));
+    });
+  });
+}
+
+/** Start bb-auth-web and resolve once it says it is listening. */
+function startServer(bin, usersFile, port) {
+  return new Promise((resolve, reject) => {
+    const child = spawn(bin, [], {
+      cwd: REPO,
+      env: {
+        ...process.env,
+        BB_AUTH_WEB_ADMINS: 'admin@example.com',
+        BB_AUTH_USERS_FILE: usersFile,
+        BB_AUTH_WEB_LISTEN: `127.0.0.1:${port}`,
+        BB_AUTH_WEB_BASE_PATH: '/admin',
+        BB_AUTH_WEB_DEFAULT_LANG: 'en',
+      },
+      stdio: ['ignore', 'pipe', 'pipe'],
+    });
+    let log = '';
+    const timer = setTimeout(() => {
+      child.kill();
+      reject(new Error(`server did not report listening within 30s. stderr:\n${log}`));
+    }, 30_000);
+    const watch = (chunk) => {
+      log += chunk.toString();
+      if (log.includes('listening on')) {
+        clearTimeout(timer);
+        resolve(child);
+      }
+    };
+    child.stderr.on('data', watch);
+    child.stdout.on('data', watch);
+    child.once('exit', (code) => {
+      clearTimeout(timer);
+      reject(new Error(`server exited early (${code}). stderr:\n${log}`));
+    });
+  });
+}
+
+/**
+ * Everything above, in the one order that works, and the teardown that undoes it.
+ * Resolves to `{ ctx, stop }`: `ctx` is what a test area (or the visual walk) receives,
+ * `stop()` closes the browser, kills the server and removes the temp directory.
+ */
+async function boot() {
+  const { chromium } = ensureDeps();
+  const bin = buildBin();
+  const { dir, file: usersFile } = tempAccessFile();
+  const port = await freePort();
+
+  let server, browser;
+  const stop = async () => {
+    if (browser) await browser.close().catch(() => {});
+    if (server) server.kill();
+    fs.rmSync(dir, { recursive: true, force: true });
+  };
+  try {
+    server = await startServer(bin, usersFile, port);
+    browser = await chromium.launch({ channel: CHANNEL, headless: true });
+  } catch (e) {
+    await stop();
+    throw e;
+  }
+  const ctx = {
+    browser,
+    origin: `http://127.0.0.1:${port}`,
+    base: `http://127.0.0.1:${port}/admin`,
+    usersFile,
+  };
+  console.log(`== server on ${ctx.origin} (file: ${usersFile}) | browser: ${CHANNEL} ==\n`);
+  return { ctx, stop };
+}
+
+module.exports = { E2E_DIR, REPO, FIXTURE, CHANNEL, sh, boot };

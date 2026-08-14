@@ -58,8 +58,8 @@
 //! Four rules hold on every mutating route, and between them they are the whole mechanism:
 //!
 //! * **A `GET` never mutates.** Every mutation is a `POST`, to the same path that renders
-//!   its form. The single redirect a `GET` performs is the `?lang=` one, which sets a
-//!   display cookie and changes nothing else.
+//!   its form. The only redirects a `GET` performs are the two preference ones (`?lang=`,
+//!   `?theme=`), which set a display cookie and change nothing else.
 //! * **Strict same-origin on every `POST`** ([`csrf_ok`]). If `Sec-Fetch-Site` is present it
 //!   must say `same-origin`: the browser sets it, a page cannot, so where it exists it is
 //!   the whole answer. Otherwise `Origin`'s **host** must equal the `Host:` header's —
@@ -131,14 +131,37 @@
 //! die: it renders the library's message verbatim, which is the sentence an operator needs
 //! ("the gate would reject this file as it stands"), on a page whose navigation still works.
 //!
-//! # Language
+//! # Settings: the language and the theme
 //!
-//! English and Italian, from a table compiled into the binary ([`t`]). Prose and labels are
-//! translated; the **file's vocabulary never is** — `public_auth`, `authorized_urls`,
-//! `url_groups`, `sites`, `denied`, `bbk_`, an `@group` reference, and every name, email and
-//! URL pattern read the same in both, because they are what an operator will type into
-//! `bb-auth-adm` and into the file itself. Library error messages render verbatim, in the
-//! English the gate and the CLI already say them in.
+//! The two live together in one **Settings** menu at the right of the header ([`shell`])
+//! because they are the same kind of thing and the only two of it: preferences that change
+//! how this GUI looks to one browser and touch neither the access file nor anybody else.
+//! Anything that did touch the file would be a form on a page, not a menu in the chrome.
+//!
+//! The menu is a `<details>` disclosure, which is what a menu is when there is no
+//! JavaScript to open one, holding a `GET` form with the two list boxes. Picking an option
+//! applies it there and then, through the one handler this binary emits
+//! ([`SETTINGS_ONCHANGE`]) — and with scripting off, through a `<noscript>` submit button
+//! that costs one click and sets both preferences in the same trip. Either way the form
+//! puts `?lang=` and `?theme=` on the current URL and the handler does with them what it
+//! always did: turn each into a cookie ([`LANG_COOKIE`], [`THEME_COOKIE`]) and redirect the
+//! parameter back out of the URL, so a bookmark or a reload does not carry a preference
+//! around forever. The rest of the query goes back into the form as hidden fields, which is
+//! what keeps a `can` result on screen across a preference change.
+//!
+//! **Language** is English and Italian, from a table compiled into the binary ([`t`]), plus
+//! `Auto`: the choice to make no choice, which resolves per request against the browser's
+//! `Accept-Language` and is what a session that never chose has always been getting (see
+//! [`LangPref`]). Prose and labels are translated; the **file's vocabulary never is** —
+//! `public_auth`, `authorized_urls`, `url_groups`, `sites`, `denied`, `bbk_`, an `@group`
+//! reference, and every name, email and URL pattern read the same in both, because they are
+//! what an operator will type into `bb-auth-adm` and into the file itself. Library error
+//! messages render verbatim, in the English the gate and the CLI already say them in.
+//!
+//! **Theme** is light, dark or system, and [`Theme::System`] is the floor for the same
+//! reason `Auto` is: an existing session's page does not change appearance until someone
+//! chooses. One CSS attribute selector, and no script at all, is what repaints the page; see
+//! [`CSS`] for the two-arm dark rule that makes an explicit choice win over the OS.
 
 use bb_auth_core::{
     add_api_key, add_denied, add_site, add_url_group, add_user, decide, edit_urls, format_date,
@@ -164,104 +187,286 @@ const IDENTITY_HEADER: &str = "X-Auth-Email";
 /// would be a lie about half the deployments.
 const LANG_COOKIE: &str = "lang";
 
-/// A year. The preference is a preference, not a session.
-const LANG_COOKIE_MAX_AGE: i64 = 31_536_000;
+/// Cookie remembering the theme choice. Same reasoning as [`LANG_COOKIE`]: it carries no
+/// identity and no capability, so the worst an attacker who reads or rewrites it achieves is
+/// a page in the wrong palette. Not `Secure`, for the same reason too.
+const THEME_COOKIE: &str = "theme";
+
+/// A year. The preference is a preference, not a session. Shared by every preference cookie:
+/// today [`LANG_COOKIE`] and [`THEME_COOKIE`], both set through [`respond_preference_redirect`].
+const PREFERENCE_COOKIE_MAX_AGE: i64 = 31_536_000;
+
+/// **The only JavaScript this GUI emits**, on the two Settings list boxes and nowhere else.
+///
+/// A `<select>` has no native way to say "I changed, act on it", so applying a preference the
+/// moment it is picked needs a script — one expression of it. It is an *enhancement*: with
+/// scripting off, the `<noscript>` submit button [`shell`] renders instead does exactly the
+/// same thing, one click later, and that path sets **both** preferences in one trip where
+/// this one sets whichever was just touched. Nothing on any page depends on it, and no other
+/// element in this binary carries a handler of any kind (`the_page_carries_one_handler_and_no_script`
+/// pins that, and `nojs.js` pins it in a real browser).
+///
+/// `this.form.submit()` and not `requestSubmit()`: the older method is universal, and it
+/// submits without firing the submit event, which is exactly what is wanted here since there
+/// is no handler for one. The one way to break it is a control named `submit` shadowing the
+/// method on the form, which would need a query parameter literally called `submit` (see
+/// [`preserved_query`]) — no link this GUI builds has one, and the failure mode is a menu
+/// that stops applying on change, not a broken page.
+const SETTINGS_ONCHANGE: &str = "this.form.submit()";
 
 /// Blocking request threads. Fixed, and deliberately not an env var: this serves the
 /// handful of people on `BB_AUTH_WEB_ADMINS`, not the public.
 const WORKERS: usize = 2;
 
 /// The whole stylesheet, inlined. No external request of any kind — no font, no script, no
-/// image — so the page renders identically on a laptop, on a phone, and on a host with no
-/// route to the internet.
+/// image — so the page needs nothing beyond this constant on a laptop, on a phone, or on a
+/// host with no route to the internet. Below 640px the layout adapts (a compact header, table
+/// rows stacked into cards) but ships not one byte more to get there.
 ///
-/// Light and dark come from `prefers-color-scheme` over a handful of custom properties;
-/// there is no theme toggle, and no JavaScript on any page — not for a form, not for a
-/// confirmation, not for reordering a site.
+/// Light and dark come from `prefers-color-scheme` over a handful of custom properties, and
+/// an explicit choice overrides it through a `data-theme` attribute [`shell`] puts on `html`
+/// (see [`Theme::attr`]) and a selector that outranks the media query. There is still no
+/// script on any page: not for a form, not for a confirmation, not for reordering a site,
+/// not for opening the Settings menu, and not for the theme it sets either. The override is
+/// CSS specificity, nothing more, which is why the dark token list below is written twice
+/// and kept in sync by hand. (The one handler in the binary, [`SETTINGS_ONCHANGE`], saves a
+/// click on a list box and paints nothing.)
 const CSS: &str = r"
 *,*::before,*::after{box-sizing:border-box}
 :root{color-scheme:light dark;
   --bg:#f7f7fa;--panel:#fff;--fg:#1c1c21;--muted:#65656f;--line:#e2e2ea;
-  --accent:#3350c8;--ok:#1c6b40;--warn:#8a5a00;--bad:#b3261e;--chip:#eeeef4}
-@media (prefers-color-scheme:dark){:root{
+  --accent:#3350c8;--ok:#1c6b40;--warn:#8a5a00;--bad:#b3261e;--chip:#eeeef4;--on-accent:#fff;
+  /* Shape and small-text tokens, not colour: a radius or a font-size does not change with
+     the theme, so unlike every token above these are defined exactly once, here, and must
+     never be copied into either dark block below. */
+  --r-box:10px;--r-ctl:7px;--r-pill:999px;--fs-sm:.85rem}
+/* An explicit light choice needs no different tokens (the block above already holds them),
+   only color-scheme narrowed from the System default's `light dark` to plain `light`, so the
+   browser's own scrollbars and form controls stop following a dark OS. */
+:root[data-theme=light]{color-scheme:light}
+/* Dark tokens, written twice on purpose: once here for System (data-theme absent, the only
+   state an unvisited browser is ever in) so the OS still drives, and once below for an
+   explicit dark choice on a light OS. `:not([data-theme=light])` is what lets an explicit
+   light choice win over a dark OS instead of this arm re-applying dark anyway. Keep both
+   lists in sync by hand; there is no third place to define them once without JavaScript to
+   flip a class. */
+@media (prefers-color-scheme:dark){:root:not([data-theme=light]){
   --bg:#16161b;--panel:#1e1e25;--fg:#e8e8ee;--muted:#9a9aa8;--line:#30303b;
-  --accent:#8aa0ff;--ok:#5fd08a;--warn:#e3b341;--bad:#ff8a80;--chip:#292933}}
+  --accent:#8aa0ff;--ok:#5fd08a;--warn:#e3b341;--bad:#ff8a80;--chip:#292933;--on-accent:#16161b}}
+/* Kept in sync with the media-query block above by hand; see its comment. This is the arm
+   that wins on a light OS once the operator picks dark explicitly, and it narrows
+   color-scheme the same way the light override above does, only to `dark`. */
+:root[data-theme=dark]{
+  --bg:#16161b;--panel:#1e1e25;--fg:#e8e8ee;--muted:#9a9aa8;--line:#30303b;
+  --accent:#8aa0ff;--ok:#5fd08a;--warn:#e3b341;--bad:#ff8a80;--chip:#292933;--on-accent:#16161b;
+  color-scheme:dark}
 body{margin:0;background:var(--bg);color:var(--fg);
   font:15px/1.55 -apple-system,Segoe UI,Roboto,Helvetica,Arial,sans-serif}
 a{color:var(--accent)}
+:focus-visible{outline:2px solid var(--accent);outline-offset:2px}
 code,.mono{font-family:ui-monospace,SFMono-Regular,Consolas,Menlo,monospace;font-size:.92em}
 header.top{background:var(--panel);border-bottom:1px solid var(--line);padding:10px 16px}
-.bar{max-width:1000px;margin:0 auto;display:flex;flex-wrap:wrap;gap:10px;align-items:center}
+/* The gap between the header's three parts (the brand, the tabs, the Settings menu). It has
+   to beat the tabs' own 4px by enough to be read as a boundary: every control in the row
+   looks the same on purpose, so space is the only thing left that says where one group ends,
+   and separating them with a rule or a tint would put back exactly the differentiating trait
+   the pill object exists to remove. */
+.bar{max-width:1000px;margin:0 auto;display:flex;flex-wrap:wrap;gap:20px;align-items:center}
 .brand{font-weight:600;letter-spacing:.02em}
+a.brand{color:inherit;text-decoration:none}
+a.brand:hover{text-decoration:underline}
 .brand .v{color:var(--muted);font-weight:400;font-size:.85em;margin-left:6px}
 nav{display:flex;flex-wrap:wrap;gap:4px;flex:1 1 auto}
-nav a{padding:4px 10px;border-radius:6px;text-decoration:none;color:var(--fg)}
-nav a:hover{background:var(--chip)}
-nav a.on{background:var(--accent);color:#fff}
-.lang{display:flex;gap:6px;align-items:center;color:var(--muted);font-size:.85em}
 main{max-width:1000px;margin:0 auto;padding:18px 16px 40px}
 h1{font-size:1.25rem;margin:0 0 4px}
 h2{font-size:1rem;margin:26px 0 8px}
+/* A group's own heading, inside a .panel that already carries top padding: the panel's
+   padding and this h2's own top margin would otherwise stack. */
+h2.tight{margin-top:0}
 p.lede{color:var(--muted);margin:0 0 18px}
-.panel{background:var(--panel);border:1px solid var(--line);border-radius:10px;
+/* A lede introducing a subsection (h2), not the page (h1): same voice, one size down so it
+   doesn't compete with the page's own lede above it. */
+p.lede.sub{font-size:.92em;margin:0 0 14px}
+.panel{background:var(--panel);border:1px solid var(--line);border-radius:var(--r-box);
   padding:14px 16px;margin:0 0 16px;overflow-x:auto}
+/* Modifiers for a panel that is also a state, reusing .flash/.err's left-bar treatment
+   (a 4px accent border over the plain 1px one) without duplicating panel's own box model.
+   `color` is reset to `--fg` on purpose: `bad`/`warn`/`ok` are also bare utility classes
+   below (`.bad{color:var(--bad)}` etc.) and a panel carries its state word as one of its
+   two classes, so without this the inherited color would tint every word inside it, not
+   just the border. */
+.panel.ok{border-color:var(--ok);border-left:4px solid var(--ok);color:var(--fg)}
+.panel.warn{border-color:var(--warn);border-left:4px solid var(--warn);color:var(--fg)}
+.panel.bad{border-color:var(--bad);border-left:4px solid var(--bad);color:var(--fg)}
 table{border-collapse:collapse;width:100%;min-width:420px}
 th,td{text-align:left;padding:7px 10px;border-bottom:1px solid var(--line);vertical-align:top}
-th{font-weight:600;font-size:.8rem;text-transform:uppercase;letter-spacing:.04em;color:var(--muted)}
+th{font-weight:600;font-size:var(--fs-sm);text-transform:uppercase;letter-spacing:.04em;color:var(--muted)}
 tr:last-child td{border-bottom:0}
+/* Was --chip: the same colour a hovered pill fills with, so a row action's hover was
+   invisible on exactly the two pages that have rows (users, api_keys). --bg leaves --line
+   free for the pill's own hover border below. */
+tbody tr:hover{background:var(--bg)}
 ul.plain{list-style:none;margin:0;padding:0}
 ul.plain li{padding:2px 0}
 ol.sites{margin:0;padding-left:22px}
-ol.sites li{margin:0 0 14px}
-.cards{display:flex;flex-wrap:wrap;gap:10px;margin:0 0 18px}
-.card{background:var(--panel);border:1px solid var(--line);border-radius:10px;
-  padding:12px 16px;min-width:110px;flex:1 1 110px}
+ol.sites > li{margin:0 0 14px}
+.cards{display:grid;grid-template-columns:repeat(auto-fit,minmax(110px,160px));gap:10px;
+  margin:0 0 18px}
+.card{background:var(--panel);border:1px solid var(--line);border-radius:var(--r-box);
+  padding:14px 16px}
+a.card{display:block;color:inherit;text-decoration:none}
+a.card:hover{border-color:var(--accent)}
 .card .n{font-size:1.6rem;font-weight:600;line-height:1.1}
-.card .l{color:var(--muted);font-size:.82rem}
-.tag{display:inline-block;padding:1px 7px;border-radius:999px;background:var(--chip);
-  font-size:.78rem;white-space:nowrap}
-.tag.bad{background:var(--bad);color:#fff}
-.tag.warn{background:var(--warn);color:#fff}
-.tag.ok{background:var(--ok);color:#fff}
+.card .l{color:var(--muted);font-size:var(--fs-sm)}
+.tag{display:inline-block;padding:1px 7px;border-radius:var(--r-pill);background:var(--chip);
+  font-size:var(--fs-sm);white-space:nowrap}
+.tag.bad{background:var(--bad);color:var(--on-accent)}
+.tag.warn{background:var(--warn);color:var(--on-accent)}
+.tag.ok{background:var(--ok);color:var(--on-accent)}
 .muted{color:var(--muted)}
 .bad{color:var(--bad)}
 form.can{display:flex;flex-wrap:wrap;gap:10px;align-items:flex-end}
-form.can label{display:flex;flex-direction:column;gap:4px;flex:1 1 240px;font-size:.82rem;
+form.can label{display:flex;flex-direction:column;gap:4px;flex:1 1 240px;font-size:var(--fs-sm);
   text-transform:uppercase;letter-spacing:.04em;color:var(--muted)}
-input[type=text]{font:inherit;padding:7px 9px;border:1px solid var(--line);border-radius:7px;
-  background:var(--bg);color:var(--fg);width:100%}
-button{font:inherit;padding:8px 18px;border:0;border-radius:7px;background:var(--accent);
-  color:#fff;cursor:pointer}
+/* One rule for both kinds of field, so the Settings menu's list boxes are the same object as
+   every text field in the app: same border, same radius, same padding, same measure. A
+   select still draws its own arrow, which is the browser's job and the one part of a control
+   that must look native. */
+input[type=text],select{font:inherit;padding:7px 9px;border:1px solid var(--line);
+  border-radius:var(--r-ctl);background:var(--bg);color:var(--fg);width:100%}
+/* Per-field measure, keyed off the wire field name text_field() stamps onto the input as
+   `f-<name>` (see its doc comment): a short token stays narrow, an email/name/URL stays
+   readable but never balloons to the panel's full width. Both still shrink below their
+   measure on a narrow viewport because width:100% is left standing. */
+input.f-id,input.f-duration{max-width:14ch}
+input.f-email,input.f-name,input.f-login_url{max-width:40ch}
+input::placeholder{color:var(--muted);font-style:italic}
+/* The one field a refusal is attributed to (see Refusal): border only, so radius, padding
+   and background stay exactly what the plain field has, and the focus ring above (which
+   draws an outline, not a border) still shows plainly over it. */
+input[type=text].invalid,textarea.invalid{border-color:var(--bad)}
+/* The border is 1px solid var(--accent), invisible against the button's own fill, which is
+   the point: it is what makes a filled submit and the outlined cancel pill beside it land on
+   exactly the same footprint as .pill below (same border width, same radius, same padding
+   step). A class selector already outranks this element selector regardless of source order,
+   so the two reorder buttons on the sites page (plain buttons carrying class pill) take the
+   pill shape either way; .pill still follows button here so the object reads as built on top
+   of it. */
+button{font:inherit;padding:6px 14px;border:1px solid var(--accent);border-radius:var(--r-pill);
+  background:var(--accent);color:var(--on-accent);cursor:pointer}
+button.danger{background:var(--bad);border-color:var(--bad)}
+p.primary{margin:16px 0 20px}
 .verdict{font-size:1.05rem;font-weight:600;margin:0 0 6px}
 .verdict.yes{color:var(--ok)}
 .verdict.no{color:var(--bad)}
-footer{max-width:1000px;margin:0 auto;padding:0 16px 30px;color:var(--muted);font-size:.82rem;
+footer{max-width:1000px;margin:0 auto;padding:0 16px 30px;color:var(--muted);font-size:var(--fs-sm);
   display:flex;flex-wrap:wrap;gap:10px;justify-content:space-between}
 form.edit label{display:block;margin:0 0 14px}
-form.edit .lbl{display:block;font-size:.8rem;text-transform:uppercase;letter-spacing:.04em;
+form.edit .lbl{display:block;font-size:var(--fs-sm);text-transform:uppercase;letter-spacing:.04em;
   color:var(--muted);margin:0 0 4px}
-form.edit .hint{display:block;color:var(--muted);font-size:.82rem;margin:4px 0 0}
+form.edit .hint{display:block;color:var(--muted);font-size:var(--fs-sm);margin:4px 0 0}
 textarea{font-family:ui-monospace,SFMono-Regular,Consolas,Menlo,monospace;font-size:.92em;
-  padding:7px 9px;border:1px solid var(--line);border-radius:7px;background:var(--bg);
+  padding:7px 9px;border:1px solid var(--line);border-radius:var(--r-ctl);background:var(--bg);
   color:var(--fg);width:100%;line-height:1.5}
 form.edit .radio{display:flex;gap:8px;align-items:baseline;margin:0 0 6px}
 form.edit .radio input{margin:0}
 .actions{display:flex;flex-wrap:wrap;gap:12px;align-items:center;margin:18px 0 0}
-button.danger{background:var(--bad)}
-a.cancel{color:var(--muted)}
-.rowacts{display:flex;flex-wrap:wrap;gap:8px;align-items:center;white-space:nowrap}
-.rowacts form{display:inline}
-.rowacts button.mv{background:none;color:var(--accent);padding:2px 7px;border:1px solid var(--line);
-  border-radius:6px;font-size:.85rem}
-.rowacts button.mv[disabled]{color:var(--muted);cursor:default}
+/* The pill: one shape for every small control that used to style itself where it happened
+   to be used: a nav tab, the Settings menu's own trigger, a row's edit/rotate/remove, the two
+   site reorder buttons, a form's cancel. .pills is the group (the flex row that holds them);
+   .pill is the member. Nothing at a call site is allowed to say how a pill looks any more,
+   which is why no style= attribute survives anywhere in this file. Every pill looks the same
+   at rest, on purpose: the only things allowed to change one are its state (selected, hovered,
+   disabled) and the one case where the click's consequence differs in kind (rm). */
+.pills{display:inline-flex;flex-wrap:wrap;gap:6px;align-items:center}
+/* A table cell's action group must not wrap: wrapping is exactly what broke the api_keys
+   row's three actions onto two ragged lines inside a narrow right-aligned cell. The panel
+   already scrolls (overflow-x:auto) if a row's actions ever outgrow the column, so nowrap
+   here costs nothing. */
+td.pills{display:flex;flex-wrap:nowrap;justify-content:flex-end}
+/* The resting box is currentColor, not --line: the old hairline measured about 1.3 to 1
+   against the panel, which is why these did not read as controls at all before this pass.
+   Every pill carries the box, with no exception, so a nav tab, a language or theme choice,
+   a row action, a reorder button and cancel all look identical at rest. */
+.pill{display:inline-flex;align-items:center;font:inherit;font-size:var(--fs-sm);
+  line-height:1.45;padding:3px 10px;border:1px solid currentColor;border-radius:var(--r-pill);
+  background:none;color:var(--accent);text-decoration:none;cursor:pointer;white-space:nowrap}
+/* The one destructive member: quieter than the rest at rest (--muted, not --accent, and the
+   border follows along since it is currentColor) and only turns --bad on hover, so the
+   consequence is legible right before the click without making the row alarming at rest. */
+.pill.rm{color:var(--muted)}
+/* Has to read on every surface a pill can sit on: the plain panel, a hovered row now tinted
+   --bg, a coloured .panel.ok/.bad/.warn state. --line is one step off all of them, and the
+   accent border is the half none of those surfaces can cancel out; this is the rule that
+   makes a row action's hover plainly visible again, which was the reported defect. */
+.pill:hover{background:var(--line);border-color:var(--accent)}
+.pill.rm:hover{color:var(--bad);border-color:var(--bad)}
+.pill[disabled]{color:var(--muted);border-color:var(--line);background:none;cursor:default}
+/* Selected state as a fill, never as a border: the top nav's own idiom before this pass, now
+   the whole family's. Declared last so a selected pill always outranks a hovered one. */
+.pill.on,.pill.on:hover{background:var(--accent);border-color:var(--accent);
+  color:var(--on-accent);font-weight:600}
+/* The size step: body-size pills for the nav, for a list page's one creating action, and for
+   a form's way out (cancel), so each sits at the same footprint as the text or button beside
+   it. A size, declared once here for three named contexts, not a call site restyling itself. */
+nav .pill,p.primary .pill,.actions .pill{font-size:1rem;padding:6px 14px}
+/* The Settings menu. `details` is the disclosure widget HTML has had all along: the summary
+   is the trigger and takes the same pill as every other control in the bar, and .menu is the
+   panel it opens, taken out of flow so opening it never reflows the header. What is inside
+   the panel is not styled here at all: it is form.edit's labels and .actions' button, the
+   same two objects every editing form on every page is built from. */
+details.settings{position:relative;margin-left:auto}
+/* Two ways of saying the same thing, because browsers disagree on which one they read: the
+   pill's own display:inline-flex already drops the marker triangle in Chromium, list-style
+   does it in Firefox, and the pseudo-element in WebKit. */
+details.settings > summary{list-style:none}
+details.settings > summary::-webkit-details-marker{display:none}
+.menu{position:absolute;right:0;top:calc(100% + 8px);z-index:10;min-width:230px;
+  background:var(--panel);border:1px solid var(--line);border-radius:var(--r-box);
+  padding:14px 16px;box-shadow:0 8px 24px rgba(0,0,0,.25)}
+/* The panel's own padding is the space below the last field, so the gap above the button is
+   left to .actions and reads exactly as it does in any form on any page. */
+.menu form.edit label:last-of-type{margin-bottom:0}
 .flash{background:var(--panel);border:1px solid var(--ok);border-left:4px solid var(--ok);
-  border-radius:8px;padding:10px 14px;margin:0 0 16px}
+  border-radius:var(--r-box);padding:14px 16px;margin:0 0 16px}
 .err{background:var(--panel);border:1px solid var(--bad);border-left:4px solid var(--bad);
-  border-radius:8px;padding:10px 14px;margin:0 0 16px;white-space:pre-wrap}
-.secret{border:1px solid var(--warn);border-left:4px solid var(--warn);border-radius:8px;
-  padding:12px 14px;margin:0 0 16px;background:var(--panel)}
-.secret code{display:block;margin:8px 0 0;padding:10px;background:var(--chip);border-radius:6px;
-  word-break:break-all;user-select:all}
+  border-radius:var(--r-box);padding:14px 16px;margin:0 0 16px;white-space:pre-wrap}
+.secret{border:1px solid var(--warn);border-left:4px solid var(--warn);border-radius:var(--r-box);
+  padding:14px 16px;margin:0 0 16px;background:var(--panel)}
+/* The one string on the page that matters, so it must outrank the paragraph explaining it:
+   bigger than body text (not just bigger than code's own .92em default), roomy padding and
+   line-height, a border of its own so the box reads as a distinct object against .secret's
+   panel background, and a pointer cursor as a visible cue for the user-select:all below. */
+.secret code{display:block;margin:10px 0 0;padding:16px 18px;background:var(--chip);
+  border:1px solid var(--line);border-radius:6px;font-size:1.15em;line-height:1.6;
+  word-break:break-all;user-select:all;cursor:pointer}
+.secret .hint{display:block;color:var(--muted);font-size:.82rem;margin:8px 0 0}
+
+/* Phone layout: a compact single-row header, and every table row becomes a stacked card so
+   no column is ever off-screen. Everything below is scoped to this query; nothing above it
+   changes. */
+@media (max-width:640px){
+  header.top{padding:6px 10px}
+  .bar{gap:6px 8px}
+  .brand{order:1}
+  /* The menu keeps the brand company on the first line, at the right edge, and the tabs get
+     the whole second line to scroll along. One trigger instead of ten pills is what makes
+     that first line fit on a phone at all. */
+  .settings{order:2}
+  .pill{padding:3px 8px}
+  nav .pill,p.primary .pill,.actions .pill{font-size:var(--fs-sm);padding:4px 9px}
+  nav{order:3;flex:1 1 100%;flex-wrap:nowrap;overflow-x:auto;gap:1px;padding-bottom:2px}
+  table{min-width:0}
+  table,thead,tbody,tr,td{display:block}
+  thead{position:absolute;width:1px;height:1px;padding:0;margin:-1px;overflow:hidden;
+    clip:rect(0,0,0,0);white-space:nowrap;border:0}
+  tbody tr{border-bottom:1px solid var(--line);padding:8px 0;margin:0 0 2px}
+  tbody tr:last-child{border-bottom:0}
+  td{border-bottom:0;padding:3px 0}
+  td[data-label]::before{content:attr(data-label);display:block;font-weight:600;font-size:.8rem;
+    text-transform:uppercase;letter-spacing:.04em;color:var(--muted)}
+  td.pills{justify-content:flex-start;padding-top:6px}
+}
 ";
 
 // ---------------------------------------------------------------------------
@@ -284,21 +489,130 @@ impl Lang {
         }
     }
 
-    /// The one the switch in the header offers.
-    fn other(self) -> Lang {
+    /// How the language names itself, for its option in the Settings menu. A language menu
+    /// that translated its own entries would hide the one an operator is looking for behind
+    /// the language they cannot read, which is the one case where translating is the bug.
+    fn name(self) -> &'static str {
         match self {
-            Lang::En => Lang::It,
-            Lang::It => Lang::En,
+            Lang::En => "English",
+            Lang::It => "Italiano",
         }
     }
 }
 
-/// Parse a language name, from the query, the cookie or `BB_AUTH_WEB_DEFAULT_LANG`.
-/// `None` for anything else — an unknown value is simply not a preference.
+/// Parse a language name, from `BB_AUTH_WEB_DEFAULT_LANG` or, through [`parse_lang_pref`],
+/// from the query and the cookie. `None` for anything else — an unknown value is simply not
+/// a preference.
 fn parse_lang(s: &str) -> Option<Lang> {
     match s.trim().to_ascii_lowercase().as_str() {
         "en" => Some(Lang::En),
         "it" => Some(Lang::It),
+        _ => None,
+    }
+}
+
+/// What the Settings menu offers, which is not the same set as [`Lang`]: `Auto` is the
+/// choice to make no choice, and it resolves per request against the browser's
+/// `Accept-Language` (see [`negotiate_lang`]).
+///
+/// It needs a type of its own because [`Lang`] has to stay the two the table actually holds:
+/// every string on the page is looked up by one, so `Auto` could never travel that far. The
+/// theme needs no such second type for exactly the mirror reason: [`Theme::System`] *is* a
+/// value the renderer carries all the way to the page, as an absent attribute.
+///
+/// `Auto` is also the floor, not an extra state bolted on: a session that never expressed a
+/// preference has always been served what `Auto` means, so naming the behaviour changes
+/// nobody's page and only makes it choosable again after choosing something else.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+enum LangPref {
+    Auto,
+    Fixed(Lang),
+}
+
+impl LangPref {
+    /// The cookie value and the query parameter value: one spelling, and for a fixed choice
+    /// it is [`Lang::code`]'s own, so `?lang=it` still means exactly what it always meant.
+    fn code(self) -> &'static str {
+        match self {
+            LangPref::Auto => "auto",
+            LangPref::Fixed(l) => l.code(),
+        }
+    }
+
+    /// The label its option in the Settings menu shows, rendered in `lang`. Only `Auto` is
+    /// translated: the other two name themselves (see [`Lang::name`]).
+    fn label(self, lang: Lang) -> &'static str {
+        match self {
+            LangPref::Auto => t(lang, K::LangAuto),
+            LangPref::Fixed(l) => l.name(),
+        }
+    }
+}
+
+/// Parse a language preference, from the query or the cookie: the two language codes plus
+/// `auto`. `None` for anything else, exactly as [`parse_lang`] does and for the same reason.
+fn parse_lang_pref(s: &str) -> Option<LangPref> {
+    match s.trim().to_ascii_lowercase().as_str() {
+        "auto" => Some(LangPref::Auto),
+        _ => parse_lang(s).map(LangPref::Fixed),
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Theme
+// ---------------------------------------------------------------------------
+
+/// The three appearances the GUI can render in. `System` is the default: it is what
+/// [`negotiate_theme`] returns for a request that expressed no preference at all, so nobody's
+/// page changes appearance until they choose one.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+enum Theme {
+    Light,
+    Dark,
+    System,
+}
+
+impl Theme {
+    /// The cookie value and the query parameter value: one spelling.
+    fn code(self) -> &'static str {
+        match self {
+            Theme::Light => "light",
+            Theme::Dark => "dark",
+            Theme::System => "system",
+        }
+    }
+
+    /// The `data-theme` attribute [`shell`] puts on `html`, for the CSS in [`CSS`] to key
+    /// off. `None` for `System`: leaving the attribute off the page entirely is what lets the
+    /// `prefers-color-scheme` media query keep deciding, instead of a third value it would
+    /// have to special-case.
+    fn attr(self) -> Option<&'static str> {
+        match self {
+            Theme::Light => Some("light"),
+            Theme::Dark => Some("dark"),
+            Theme::System => None,
+        }
+    }
+
+    /// The label its option in the Settings menu shows. A [`K`] and not a string, unlike
+    /// [`LangPref::label`]: an appearance is prose about the page, so it translates.
+    fn label(self) -> K {
+        match self {
+            Theme::Light => K::ThemeLight,
+            Theme::Dark => K::ThemeDark,
+            Theme::System => K::ThemeSystem,
+        }
+    }
+}
+
+/// Parse a theme name, from the query or the cookie. `None` for anything else: an
+/// unrecognised value is not an error, it just means no choice was expressed, and falls back
+/// exactly as a missing cookie does.
+fn parse_theme(s: &str) -> Option<Theme> {
+    match s.trim().to_ascii_lowercase().as_str() {
+        "light" => Some(Theme::Light),
+        "dark" => Some(Theme::Dark),
+        "system" => Some(Theme::System),
         _ => None,
     }
 }
@@ -309,14 +623,21 @@ fn parse_lang(s: &str) -> Option<Lang> {
 /// without translating it does not fall back at runtime, it fails to compile. And because
 /// each arm names both spellings on one line, no key can be half-translated either.
 ///
-/// What is *not* here is as deliberate as what is: `users`, `url_groups`, `sites`, `denied`,
-/// `authorized_urls`, `public_auth`, `login_url`, `api_keys`, `released`, `duration`,
-/// `notes`, `can`, `bbk_` and every `@group` reference are the access file's own vocabulary.
-/// They stay in both languages because they are what an operator types into the file and
-/// into `bb-auth-adm`; translating them would invent a second name for a thing that has one.
+/// [`K::Dashboard`], [`K::Groups`], [`K::Sites`], [`K::Users`], [`K::Denied`] and [`K::Can`]
+/// are the nav labels and page headings: descriptive prose *about* a section, not that
+/// section's name. The name itself stays untranslated wherever it appears as itself,
+/// namely `authorized_urls`, `public_auth`, `login_url`, `api_keys`, `released`, `duration`,
+/// `notes`, `bbk_`, every `@group` reference, and the raw key shown in muted monospace
+/// beside a heading; that is because it is what an operator types into the file and into
+/// `bb-auth-adm`, and translating it would invent a second name for a thing that has one.
 #[derive(Clone, Copy)]
 enum K {
     Dashboard,
+    Groups,
+    Sites,
+    Users,
+    Denied,
+    Can,
     Back,
     None,
     Counts,
@@ -363,6 +684,15 @@ enum K {
     FileErrorHint,
     SignedInAs,
     ReloadHint,
+    // --- the settings menu ---
+    Settings,
+    SettingLanguage,
+    SettingTheme,
+    LangAuto,
+    Apply,
+    ThemeLight,
+    ThemeDark,
+    ThemeSystem,
     // --- actions, buttons, form furniture ---
     Add,
     Edit,
@@ -394,6 +724,7 @@ enum K {
     // --- the minted bearer ---
     BearerHeading,
     BearerOnce,
+    BearerClickHint,
     // --- refusals a form makes on its own ---
     EmailRequired,
     NameRequired,
@@ -447,6 +778,11 @@ fn m(lang: Lang, en: &'static str, it: &'static str) -> &'static str {
 fn t(lang: Lang, key: K) -> &'static str {
     match key {
         K::Dashboard => m(lang, "Dashboard", "Cruscotto"),
+        K::Groups => m(lang, "URL groups", "Gruppi di URL"),
+        K::Sites => m(lang, "Sites", "Siti"),
+        K::Users => m(lang, "Users", "Utenti"),
+        K::Denied => m(lang, "Denied", "Bloccati"),
+        K::Can => m(lang, "Access check", "Verifica accesso"),
         K::Back => m(lang, "back", "indietro"),
         K::None => m(lang, "none", "nessuno"),
         K::Counts => m(lang, "What is in the file", "Cosa c'è nel file"),
@@ -584,6 +920,18 @@ fn t(lang: Lang, key: K) -> &'static str {
             "una modifica è attiva quando il gate rilegge il file:",
         ),
 
+        K::Settings => m(lang, "Settings", "Impostazioni"),
+        K::SettingLanguage => m(lang, "Language", "Lingua"),
+        K::SettingTheme => m(lang, "Theme", "Tema"),
+        // Named after what decides when nobody has: the browser. "Auto" alone would leave an
+        // operator guessing what it follows, and this is the one option whose answer is not
+        // written next to it in the list.
+        K::LangAuto => m(lang, "Auto (browser)", "Auto (browser)"),
+        K::Apply => m(lang, "Apply", "Applica"),
+        K::ThemeLight => m(lang, "Light", "Chiaro"),
+        K::ThemeDark => m(lang, "Dark", "Scuro"),
+        K::ThemeSystem => m(lang, "System", "Sistema"),
+
         K::Add => m(lang, "add", "aggiungi"),
         K::Edit => m(lang, "edit", "modifica"),
         K::Remove => m(lang, "remove", "rimuovi"),
@@ -706,6 +1054,11 @@ fn t(lang: Lang, key: K) -> &'static str {
             "Mostrato una volta sola, qui, e non memorizzato da nessuna parte: il file tiene \
              solo il suo sha256, e quel lookup è tutta la verifica. Non è recuperabile — si \
              può solo sostituire con una rotazione.",
+        ),
+        K::BearerClickHint => m(
+            lang,
+            "Click the credential to select it all, then copy.",
+            "Fai clic sulla credenziale per selezionarla tutta, poi copiala.",
         ),
 
         K::EmailRequired => m(lang, "an email is required", "serve un'email"),
@@ -1116,8 +1469,11 @@ impl Route {
         }
     }
 
-    /// Which nav tab to mark current for this route — everything about a user belongs to
-    /// the `users` tab, and so on down the four sections.
+    /// Which nav tab to mark current for this route: everything about a user belongs to
+    /// the `users` tab, and so on down the sections. `denied` has no tab of its own: its
+    /// page still lives at its own route, but the bar lights up `users` for it, since the
+    /// two are the sections about people and [`page_users`] is where an operator now finds
+    /// both.
     fn tab(&self) -> Route {
         match self {
             Route::User(_)
@@ -1127,12 +1483,14 @@ impl Route {
             | Route::KeyAdd(_)
             | Route::KeyEdit(..)
             | Route::KeyRotate(..)
-            | Route::KeyRm(..) => Route::Users,
+            | Route::KeyRm(..)
+            | Route::Denied
+            | Route::DenyAdd
+            | Route::DenyRm(_) => Route::Users,
             Route::SiteAdd | Route::SiteEdit(_) | Route::SiteRm(_) | Route::SiteMove(_) => {
                 Route::Sites
             }
             Route::GroupAdd | Route::GroupEdit(_) | Route::GroupRm(_) => Route::Groups,
-            Route::DenyAdd | Route::DenyRm(_) => Route::Denied,
             other => other.clone(),
         }
     }
@@ -1157,16 +1515,20 @@ impl Route {
         }
     }
 
-    /// The `<title>` and the tab label this route lives under — the section's own name,
-    /// untranslated, because that is the word an operator types.
+    /// The `<title>`: the section's own name, untranslated, because that is the word an
+    /// operator types. Matched on `self` and not on [`Route::tab`]: `denied` now shares the
+    /// `users` *tab*, but its `<title>` should still say which page this is, not which tab
+    /// is lit.
     fn title(&self) -> &'static str {
-        match self.tab() {
-            Route::Groups => "url_groups",
-            Route::Sites => "sites",
-            Route::Denied => "denied",
-            Route::Users => "users",
-            Route::Can => "can",
-            _ => "bb-auth-web",
+        match self {
+            Route::Denied | Route::DenyAdd | Route::DenyRm(_) => "denied",
+            _ => match self.tab() {
+                Route::Groups => "url_groups",
+                Route::Sites => "sites",
+                Route::Users => "users",
+                Route::Can => "can",
+                _ => "bb-auth-web",
+            },
         }
     }
 }
@@ -1432,19 +1794,33 @@ fn respond_page(req: Request, status: u16, page: Markup) {
     let _ = req.respond(resp);
 }
 
-/// `302` to `location`, setting the language cookie. `location` is built from a [`Route`]
-/// and re-encoded query parameters, so it is printable ASCII by construction and [`h`]
-/// cannot panic on it.
-fn respond_lang_redirect(req: Request, location: &str, lang: Lang) {
-    let cookie = format!(
-        "{LANG_COOKIE}={}; Max-Age={LANG_COOKIE_MAX_AGE}; Path=/; HttpOnly; SameSite=Lax",
-        lang.code()
-    );
+/// `302` to `location`, setting one preference cookie to `value`. `location` is built from a
+/// [`Route`] and re-encoded query parameters, so it is printable ASCII by construction and
+/// [`h`] cannot panic on it; `value` is always one of a closed enum's own [`Lang::code`] or
+/// [`Theme::code`], never request-supplied.
+///
+/// The one redirect both preferences use: see [`respond_lang_redirect`] and
+/// [`respond_theme_redirect`].
+fn respond_preference_redirect(req: Request, location: &str, cookie_name: &str, value: &str) {
+    let cookie =
+        format!("{cookie_name}={value}; Max-Age={PREFERENCE_COOKIE_MAX_AGE}; Path=/; HttpOnly; SameSite=Lax");
     let resp = Response::empty(StatusCode(302))
         .with_header(h("Location", location))
         .with_header(h("Set-Cookie", &cookie[..]))
         .with_header(h("Cache-Control", "no-store"));
     let _ = req.respond(resp);
+}
+
+/// [`respond_preference_redirect`] for a language choice. It takes the [`LangPref`] and not
+/// the [`Lang`] it resolved to: `Auto` has to be storable, or choosing it would write the
+/// language it happens to resolve to today and stop following the browser.
+fn respond_lang_redirect(req: Request, location: &str, pref: LangPref) {
+    respond_preference_redirect(req, location, LANG_COOKIE, pref.code());
+}
+
+/// [`respond_preference_redirect`] for a theme choice.
+fn respond_theme_redirect(req: Request, location: &str, theme: Theme) {
+    respond_preference_redirect(req, location, THEME_COOKIE, theme.code());
 }
 
 /// `303` to `location` — the redirect half of POST-redirect-GET, so a reload of the result
@@ -1461,45 +1837,69 @@ fn respond_redirect(req: Request, location: &str) {
     let _ = req.respond(resp);
 }
 
-/// Which language to render in. Query, then cookie, then `Accept-Language`, then the
-/// configured default — most explicit wins.
+/// The preference in force and the language it renders as. Query, then cookie, then
+/// `Accept-Language`, then the configured default — most explicit wins.
+///
+/// Both halves come back because the page needs both, and they are genuinely different
+/// questions: the [`Lang`] looks every string up, while the [`LangPref`] is which option the
+/// Settings menu must show as chosen, and `Auto` and `en` can render the identical page
+/// while being different answers to that one. Returning the pair from a single function is
+/// what keeps the rule stated once, where two negotiate calls could drift apart.
 ///
 /// The `Accept-Language` check is deliberately crude: does the header start with `it`? A
 /// full RFC 4647 negotiation over two languages would be more code than the question is
-/// worth, and both wrong answers are one click from being right (and then remembered).
+/// worth, and both wrong answers are one choice in the menu from being right (and then
+/// remembered).
 fn negotiate_lang(
     query: Option<&str>,
     cookie: Option<&str>,
     accept: Option<&str>,
     default: Lang,
-) -> Lang {
-    if let Some(l) = query.and_then(parse_lang) {
-        return l;
-    }
-    if let Some(l) = cookie.and_then(parse_lang) {
-        return l;
-    }
-    if accept.is_some_and(|a| a.trim().to_ascii_lowercase().starts_with("it")) {
-        return Lang::It;
-    }
-    default
+) -> (LangPref, Lang) {
+    let pref = query
+        .and_then(parse_lang_pref)
+        .or_else(|| cookie.and_then(parse_lang_pref))
+        .unwrap_or(LangPref::Auto);
+    let lang = match pref {
+        LangPref::Fixed(l) => l,
+        LangPref::Auto
+            if accept.is_some_and(|a| a.trim().to_ascii_lowercase().starts_with("it")) =>
+        {
+            Lang::It
+        }
+        LangPref::Auto => default,
+    };
+    (pref, lang)
 }
 
-/// This request's URL with the `lang` parameter dropped, or set to `to`.
+/// Which theme to render in. Query, then cookie, then `Theme::System`: most explicit wins,
+/// and `System` is the floor rather than a configured default, since there is nothing to
+/// configure; it is what every session already has until it chooses otherwise.
+fn negotiate_theme(query: Option<&str>, cookie: Option<&str>) -> Theme {
+    if let Some(t) = query.and_then(parse_theme) {
+        return t;
+    }
+    if let Some(t) = cookie.and_then(parse_theme) {
+        return t;
+    }
+    Theme::System
+}
+
+/// This request's URL with the `param` query parameter dropped: where a preference redirect
+/// lands, once the choice that parameter carried has become a cookie. The rest of the query
+/// survives, which is what keeps a `can` result on screen across a preference change.
 ///
-/// Used for both the language switch link and the redirect that follows one. Every byte of
-/// the result is a constant, a [`Route::path`] or a re-encoded query parameter — nothing the
-/// client sent survives verbatim, which is what makes the same string safe in an `href` and
-/// in a `Location:` header.
-fn lang_href(cfg: &Config, at: &Route, query: &str, to: Option<Lang>) -> String {
+/// One builder for both preferences, named by the cookie constant at the call site
+/// (`LANG_COOKIE`, `THEME_COOKIE`): each doubles as its query parameter's name, so there is
+/// one spelling per preference and no second place to keep in step. Every byte of the result
+/// is a constant, a [`Route::path`] or a re-encoded query parameter — nothing the client sent
+/// survives verbatim, which is what makes the string safe in a `Location:` header.
+fn preference_href(cfg: &Config, at: &Route, query: &str, param: &str) -> String {
     let mut ser = form_urlencoded::Serializer::new(String::new());
     for (k, v) in form_urlencoded::parse(query.as_bytes()) {
-        if k != "lang" {
+        if k != param {
             ser.append_pair(&k, &v);
         }
-    }
-    if let Some(l) = to {
-        ser.append_pair("lang", l.code());
     }
     let q = ser.finish();
     let path = format!("{}{}", cfg.base_path, at.path());
@@ -1510,6 +1910,20 @@ fn lang_href(cfg: &Config, at: &Route, query: &str, to: Option<Lang>) -> String 
     }
 }
 
+/// The query as received, minus the two parameters the Settings form sets itself, as hidden
+/// fields for that form to put back.
+///
+/// A switch that was a link could rebuild the whole URL ([`preference_href`]); a `GET` form
+/// sends its own fields and nothing else, so without this, changing the theme on a `can`
+/// result page would throw the result away. `msg` is deliberately *not* dropped: the flash
+/// belongs to the page the operator is looking at, and survived the old switch links too.
+fn preserved_query(query: &str) -> Vec<(String, String)> {
+    form_urlencoded::parse(query.as_bytes())
+        .filter(|(k, _)| k != LANG_COOKIE && k != THEME_COOKIE)
+        .map(|(k, v)| (k.into_owned(), v.into_owned()))
+        .collect()
+}
+
 // ---------------------------------------------------------------------------
 // The shell
 // ---------------------------------------------------------------------------
@@ -1518,6 +1932,15 @@ fn lang_href(cfg: &Config, at: &Route, query: &str, to: Option<Lang>) -> String 
 struct View<'a> {
     cfg: &'a Config,
     lang: Lang,
+    /// Which option the Settings menu shows as the chosen language, which is not the same
+    /// thing as `lang`: `Auto` renders as one of the two and must still come back as `Auto`
+    /// (see [`LangPref`]). Both come from one [`negotiate_lang`] call.
+    lang_pref: LangPref,
+    /// Which appearance to render in; see [`Theme`]. `System` unless the visitor chose
+    /// otherwise, in which case [`shell`] stamps the choice onto `html` as `data-theme`.
+    /// It is its own chosen-option marker too, `System` included, which is why the theme
+    /// needs no second field beside this one.
+    theme: Theme,
     /// The signed-in administrator, when there is one. `None` suppresses the navigation:
     /// a visitor who got a `401` or a `403` has nowhere to go but the login page.
     admin: Option<&'a str>,
@@ -1544,25 +1967,39 @@ impl View<'_> {
     }
 }
 
-/// The chrome around every page: the tabs, the language switch, the footer.
+/// The chrome around every page: the tabs, the Settings menu, the footer.
 ///
-/// The tabs are the access file's four sections **in file order** — `url_groups`, `sites`,
-/// `denied`, `users` — with the dashboard in front and the tester at the end. Reading the
-/// nav left to right is reading the file top to bottom, and the labels are the section names
-/// themselves, untranslated, because those are the words an operator types.
+/// Five tabs, not the file's four sections plus the tester: `denied` shares the `users` tab
+/// (see [`Route::tab`]) because both are about people, and the page itself moved to sit at
+/// the bottom of [`page_users`] rather than stand on its own in the bar. What is left reads
+/// left to right roughly as the file reads top to bottom, dashboard in front and the tester
+/// at the end. Labels are translated, descriptive prose about a section ([`K::Groups`] and
+/// friends), not the section's own name in the file; that name still appears, untranslated,
+/// beside the heading each tab leads to.
 fn shell(v: &View, title: &str, content: Markup) -> Markup {
     let tabs = [
         (Route::Dashboard, v.t(K::Dashboard)),
-        (Route::Groups, "url_groups"),
-        (Route::Sites, "sites"),
-        (Route::Denied, "denied"),
-        (Route::Users, "users"),
-        (Route::Can, "can"),
+        (Route::Groups, v.t(K::Groups)),
+        (Route::Sites, v.t(K::Sites)),
+        (Route::Users, v.t(K::Users)),
+        (Route::Can, v.t(K::Can)),
     ];
     let current = v.at.tab();
+    // The two list boxes' options, each in the order they are offered. Both lead with the
+    // choice that follows something outside this GUI (the browser, the OS), because that is
+    // where every session starts and what the other options are departures from.
+    let langs = [
+        LangPref::Auto,
+        LangPref::Fixed(Lang::En),
+        LangPref::Fixed(Lang::It),
+    ];
+    let themes = [Theme::System, Theme::Light, Theme::Dark];
     html! {
         (DOCTYPE)
-        html lang=(v.lang.code()) {
+        // `data-theme=[v.theme.attr()]` is maud's optional-attribute form: `Theme::System`'s
+        // `None` omits the attribute outright rather than emitting `data-theme=""`, which is
+        // what leaves the `prefers-color-scheme` rule in `CSS` as the one deciding.
+        html lang=(v.lang.code()) data-theme=[v.theme.attr()] {
             head {
                 meta charset="utf-8";
                 meta name="viewport" content="width=device-width,initial-scale=1";
@@ -1574,25 +2011,74 @@ fn shell(v: &View, title: &str, content: Markup) -> Markup {
             body {
                 header class="top" {
                     div class="bar" {
-                        span class="brand" {
-                            "bb-auth-web"
-                            span class="v" { "v" (env!("CARGO_PKG_VERSION")) }
+                        // The brand is the way home, but only when there is a home to go
+                        // to: the 403 page has no nav for the same reason, so the brand
+                        // stays the plain inert span it always was.
+                        @if v.admin.is_some() {
+                            a class="brand" href=(v.href(&Route::Dashboard)) {
+                                "bb-auth-web"
+                                span class="v" { "v" (env!("CARGO_PKG_VERSION")) }
+                            }
+                        } @else {
+                            span class="brand" {
+                                "bb-auth-web"
+                                span class="v" { "v" (env!("CARGO_PKG_VERSION")) }
+                            }
                         }
                         @if v.admin.is_some() {
                             nav {
                                 @for (r, label) in &tabs {
-                                    a class=@if *r == current { "on" } @else { "" }
+                                    a class=@if *r == current { "pill on" } @else { "pill" }
                                       href=(v.href(r)) { (label) }
                                 }
                             }
                         } @else {
                             nav {}
                         }
-                        span class="lang" {
-                            span { (v.lang.code()) }
-                            "·"
-                            a href=(lang_href(v.cfg, &v.at, v.query, Some(v.lang.other()))) {
-                                (v.lang.other().code())
+                        // The Settings menu: `details` is the disclosure widget HTML has had
+                        // all along, so the menu opens with no script, and closes by itself
+                        // on submit, because submitting reloads the page. The form is a
+                        // plain `GET` back to this same route, which is exactly the URL the
+                        // old switch links built by hand; the handler below turns each
+                        // parameter into a cookie and redirects it back out.
+                        details class="settings" {
+                            summary class="pill" { (v.t(K::Settings)) }
+                            div class="menu" {
+                                // class=edit is not decoration here: it is the form
+                                // furniture every other field in this GUI is dressed in, and
+                                // a settings field that invented its own would be one more
+                                // thing on the page that looks like nothing else.
+                                form class="edit" method="get" action=(v.href(&v.at)) {
+                                    @for (k, val) in preserved_query(v.query) {
+                                        input type="hidden" name=(k) value=(val);
+                                    }
+                                    label {
+                                        span class="lbl" { (v.t(K::SettingLanguage)) }
+                                        select name=(LANG_COOKIE) onchange=(SETTINGS_ONCHANGE) {
+                                            @for p in langs {
+                                                option value=(p.code()) selected[p == v.lang_pref] {
+                                                    (p.label(v.lang))
+                                                }
+                                            }
+                                        }
+                                    }
+                                    label {
+                                        span class="lbl" { (v.t(K::SettingTheme)) }
+                                        select name=(THEME_COOKIE) onchange=(SETTINGS_ONCHANGE) {
+                                            @for th in themes {
+                                                option value=(th.code()) selected[th == v.theme] {
+                                                    (v.t(th.label()))
+                                                }
+                                            }
+                                        }
+                                    }
+                                    // The way in for a browser with scripting off, and the
+                                    // only path that sets both preferences at once. With
+                                    // scripting on the browser parses this as text, so the
+                                    // button is not in the DOM at all and picking an option
+                                    // is the whole interaction.
+                                    noscript { div class="actions" { button { (v.t(K::Apply)) } } }
+                                }
                             }
                         }
                     }
@@ -1620,6 +2106,14 @@ fn tag(class: &str, text: &str) -> Markup {
     html! { span class=(format!("tag {class}")) { (text) } }
 }
 
+/// A top-level section page's `h1`: the descriptive, translated label the nav now carries,
+/// with the access file's own key for that section beside it in muted monospace. The label
+/// is the headline; the key is what the docs, the CLI and the file itself all speak, so it
+/// must not disappear, only stop being the first thing an operator reads.
+fn section_heading(label: &str, key: &str) -> Markup {
+    html! { (label) " " span class="muted mono" { (key) } }
+}
+
 /// A URL-pattern list as the file stores it. `@group` references are shown **raw, never
 /// expanded**: the file is what an operator edits and what `bb-auth-adm` prints, so a page
 /// that quietly substituted a group's patterns would be showing something nobody wrote.
@@ -1637,41 +2131,100 @@ fn url_list(lang: Lang, urls: Option<&Vec<String>>, absent: &str) -> Markup {
 // Form furniture
 // ---------------------------------------------------------------------------
 
+/// A refused submission: the library's or a handler's own sentence, verbatim, and, only
+/// when the failing step can be about exactly one field, the wire `name=` of that field.
+///
+/// Most refusals attribute nothing: a bare `String` converts into one via [`From`] with
+/// `field: None`, so a `?` on a library call that cannot be pinned to one field costs a
+/// handler nothing. [`Refusal::on`] is the deliberate exception, spelled out at each call
+/// site [`mutate`] attributes; never guessed from the message text.
+struct Refusal {
+    msg: String,
+    field: Option<&'static str>,
+}
+
+impl Refusal {
+    /// Attribute this refusal to the field named `field` (its `name=` attribute, exactly).
+    fn on(field: &'static str, msg: impl Into<String>) -> Self {
+        Refusal {
+            msg: msg.into(),
+            field: Some(field),
+        }
+    }
+
+    /// `true` when this refusal is attributed to the field named `name`: what
+    /// [`text_field`] and [`urls_field`] ask to decide whether to render themselves invalid.
+    fn is(&self, name: &str) -> bool {
+        self.field == Some(name)
+    }
+}
+
+impl From<String> for Refusal {
+    /// The common case: a message with nothing to attribute it to.
+    fn from(msg: String) -> Self {
+        Refusal { msg, field: None }
+    }
+}
+
+/// The id of a form's `div.err` block. The one field a [`Refusal`] is attributed to points
+/// at it with `aria-describedby`, since the message itself lives above the form, not beside
+/// the field.
+const ERR_ID: &str = "form-error";
+
 /// The scaffold every editing form shares: the `POST` back to the route that rendered it,
 /// the `rev` the concurrency check reads, the refusal above the fields it is about, and a
 /// way out that changes nothing.
 ///
 /// The action is always [`View::at`] — a form posts to the path it was served from — which
 /// is what makes a re-render after a refusal literally the same call with an error added.
-fn form_shell(v: &View, err: Option<&str>, fields: Markup, submit: &str, danger: bool) -> Markup {
+fn form_shell(
+    v: &View,
+    err: Option<&Refusal>,
+    fields: Markup,
+    submit: &str,
+    danger: bool,
+) -> Markup {
     html! {
         form class="edit" method="post" action=(v.href(&v.at)) {
             // The library's words, verbatim: the sentence `bb-auth-adm` prints for the same
-            // refusal, so an operator who has read one recognises the other.
-            @if let Some(e) = err { div class="err" { (e) } }
+            // refusal, so an operator who has read one recognises the other. `id` is what
+            // an attributed field's `aria-describedby` points at.
+            @if let Some(e) = err { div class="err" id=(ERR_ID) { (e.msg) } }
             input type="hidden" name="rev" value=(v.rev);
             (fields)
             div class="actions" {
                 button type="submit" class=@if danger { "danger" } @else { "" } { (submit) }
-                a class="cancel" href=(v.href(&v.at.parent())) { (v.t(K::Cancel)) }
+                a class="pill" href=(v.href(&v.at.parent())) { (v.t(K::Cancel)) }
             }
         }
     }
 }
 
 /// A one-line text field. The label is the file's own field name wherever there is one.
+/// The input also carries an `f-<name>` class, keyed off that same wire name, so the
+/// stylesheet can size each field to what it holds (an email wide, a `duration` narrow)
+/// without this helper knowing anything about measures itself.
+///
+/// `invalid` marks this as the one field a [`Refusal`] is attributed to: it adds `.invalid`
+/// (the `.f-<name>` class stays, so the width rule still applies) to colour the border
+/// `--bad`, and sets `aria-invalid` plus `aria-describedby` so the association with the
+/// message above the form is real for assistive tech, not just a colour.
 fn text_field(
     label: &str,
     name: &str,
     value: &str,
     placeholder: &str,
     hint: Option<&str>,
+    invalid: bool,
 ) -> Markup {
     html! {
         label {
             span class="lbl" { (label) }
             input type="text" name=(name) value=(value) placeholder=(placeholder)
-                  autocapitalize="off" spellcheck="false";
+                  class=(format!("f-{name}{}", if invalid { " invalid" } else { "" }))
+                  autocapitalize="off" spellcheck="false"
+                  aria-invalid=[invalid.then_some("true")]
+                  aria-describedby=[invalid.then_some(ERR_ID)];
             @if let Some(h) = hint { span class="hint" { (h) } }
         }
     }
@@ -1679,13 +2232,18 @@ fn text_field(
 
 /// A URL-pattern list: one per line, `@refs` written literally. The same shape for a user's
 /// scope, a key's, a site's `urls` and a group's patterns — one grammar, as in the file.
-fn urls_field(label: &str, name: &str, value: &str, hint: Markup) -> Markup {
+///
+/// `invalid` is the same attribution [`text_field`] takes: see its doc comment.
+fn urls_field(label: &str, name: &str, value: &str, hint: Markup, invalid: bool) -> Markup {
     html! {
         label {
             // An empty label is a field whose heading is already above it (the key form's
             // scope radios) — not a blank line to leave in the page.
             @if !label.is_empty() { span class="lbl" { (label) } }
-            textarea name=(name) rows="6" spellcheck="false" autocapitalize="off" { (value) }
+            textarea name=(name) rows="6" spellcheck="false" autocapitalize="off"
+                      class=[invalid.then_some("invalid")]
+                      aria-invalid=[invalid.then_some("true")]
+                      aria-describedby=[invalid.then_some(ERR_ID)] { (value) }
             span class="hint" { (hint) }
         }
     }
@@ -1696,9 +2254,17 @@ fn urls_text(urls: Option<&Vec<String>>) -> String {
     urls.map(|l| l.join("\n")).unwrap_or_default()
 }
 
-/// A small `add` / `edit` / `remove` link beside the thing it acts on.
+/// A small `add` / `edit` / `remove` pill beside the thing it acts on.
 fn act(v: &View, at: &Route, label: &str) -> Markup {
-    html! { a href=(v.href(at)) { (label) } }
+    html! { a class="pill" href=(v.href(at)) { (label) } }
+}
+
+/// Same as [`act`], marked as the destructive member of its `.pills` group (CSS `.pill.rm`):
+/// the one action here that removes a row, not just changes it. `rotate` replaces a credential
+/// rather than deleting anything, so it stays plain [`act`]; only an actual `Rm` route earns
+/// this.
+fn act_rm(v: &View, at: &Route, label: &str) -> Markup {
+    html! { a class="pill rm" href=(v.href(at)) { (label) } }
 }
 
 /// A confirmation page: what is about to go, what that means, and a `POST` that does it.
@@ -1710,12 +2276,12 @@ fn page_confirm(
     what: Markup,
     why: &str,
     button: &str,
-    err: Option<&str>,
+    err: Option<&Refusal>,
 ) -> Markup {
     html! {
         h1 { (heading) }
         p class="lede" { (why) }
-        div class="panel" {
+        div class="panel bad" {
             (what)
             (form_shell(v, err, html! {}, button, true))
         }
@@ -1855,16 +2421,23 @@ fn page_dashboard(v: &View, doc: &AccessFile) -> Markup {
 
         h2 { (v.t(K::Counts)) }
         div class="cards" {
-            @for (label, count) in [
-                ("users", doc.users.len()),
-                ("api_keys", key_count),
-                ("sites", doc.sites.len()),
-                ("url_groups", doc.url_groups.len()),
-                ("denied", doc.denied.len()),
+            @for (label, count, route) in [
+                ("users", doc.users.len(), Some(Route::Users)),
+                ("api_keys", key_count, None),
+                ("sites", doc.sites.len(), Some(Route::Sites)),
+                ("url_groups", doc.url_groups.len(), Some(Route::Groups)),
+                ("denied", doc.denied.len(), Some(Route::Denied)),
             ] {
-                div class="card" {
-                    div class="n" { (count) }
-                    div class="l mono" { (label) }
+                @if let Some(r) = &route {
+                    a class="card" href=(v.href(r)) {
+                        div class="n" { (count) }
+                        div class="l mono" { (label) }
+                    }
+                } @else {
+                    div class="card" {
+                        div class="n" { (count) }
+                        div class="l mono" { (label) }
+                    }
                 }
             }
         }
@@ -1883,9 +2456,11 @@ fn page_dashboard(v: &View, doc: &AccessFile) -> Markup {
                     tbody {
                         @for (email, k, e) in &keys {
                             tr {
-                                td { a href=(v.href(&Route::User(email.clone()))) { (email) } }
-                                td class="mono" { (k.id.trim()) }
-                                td { (expiry_markup(v.lang, e)) }
+                                td data-label=(v.t(K::ColOwner)) {
+                                    a href=(v.href(&Route::User(email.clone()))) { (email) }
+                                }
+                                td class="mono" data-label="id" { (k.id.trim()) }
+                                td data-label=(v.t(K::ColExpiry)) { (expiry_markup(v.lang, e)) }
                             }
                         }
                     }
@@ -1894,7 +2469,7 @@ fn page_dashboard(v: &View, doc: &AccessFile) -> Markup {
         }
 
         h2 { (v.t(K::Warnings)) }
-        div class="panel" {
+        div class=@if warnings.is_empty() { "panel" } @else { "panel warn" } {
             @if warnings.is_empty() {
                 span class="muted" { (v.t(K::NoWarnings)) }
             } @else {
@@ -1908,9 +2483,9 @@ fn page_dashboard(v: &View, doc: &AccessFile) -> Markup {
 fn page_users(v: &View, doc: &AccessFile) -> Markup {
     let denied = denied_set(doc);
     html! {
-        h1 { "users" }
+        h1 { (section_heading(v.t(K::Users), "users")) }
         p class="lede" { (v.t(K::UsersIntro)) }
-        p { (act(v, &Route::UserAdd, &format!("+ {}", v.t(K::Add)))) }
+        p class="primary" { (act(v, &Route::UserAdd, &format!("+ {}", v.t(K::Add)))) }
         div class="panel" {
             @if doc.users.is_empty() {
                 span class="muted" { (v.t(K::None)) }
@@ -1926,7 +2501,7 @@ fn page_users(v: &View, doc: &AccessFile) -> Markup {
                         @for u in &doc.users {
                             @let email = norm_email(&u.email);
                             tr {
-                                td {
+                                td data-label="email" {
                                     a href=(v.href(&Route::User(email.clone()))) { (email) }
                                     @if denied.contains(&email) {
                                         " " (tag("bad", "denied"))
@@ -1934,17 +2509,17 @@ fn page_users(v: &View, doc: &AccessFile) -> Markup {
                                 }
                                 // Raw entries, so an `@group` reference counts as the one
                                 // line it is in the file.
-                                td {
+                                td data-label="authorized_urls" {
                                     @if scope_is_empty(u.authorized_urls.as_ref()) {
                                         span class="bad" { (v.t(K::ReachesNothing)) }
                                     } @else {
                                         (u.authorized_urls.as_ref().map_or(0, Vec::len))
                                     }
                                 }
-                                td { (u.api_keys.len()) }
-                                td class="rowacts" {
+                                td data-label="api_keys" { (u.api_keys.len()) }
+                                td class="pills" {
                                     (act(v, &Route::UserEdit(email.clone()), v.t(K::Edit)))
-                                    (act(v, &Route::UserRm(email.clone()), v.t(K::Remove)))
+                                    (act_rm(v, &Route::UserRm(email.clone()), v.t(K::Remove)))
                                 }
                             }
                         }
@@ -1952,6 +2527,17 @@ fn page_users(v: &View, doc: &AccessFile) -> Markup {
                 }
             }
         }
+
+        // The `denied` veto, as a second section of this same page rather than a tab of
+        // its own: the two sections are both about people, and an operator managing the
+        // roster is the one most likely to also need the veto list. The route `/denied`
+        // still exists on its own (see `page_denied`) for the add/remove PRG redirects and
+        // for a direct link; `denied_list` is what keeps the two views of the same list
+        // from ever drifting apart.
+        h2 { (v.t(K::Denied)) }
+        p class="lede sub" { (v.t(K::DeniedIntro)) }
+        p class="primary" { (act(v, &Route::DenyAdd, &format!("+ {}", v.t(K::Add)))) }
+        (denied_list(v, doc))
     }
 }
 
@@ -1981,9 +2567,9 @@ fn page_user(v: &View, doc: &AccessFile, email: &str) -> (u16, Markup) {
             p class="lede" {
                 a href=(v.href(&Route::Users)) { "← " (v.t(K::Back)) }
             }
-            p class="rowacts" {
+            p class="pills" {
                 (act(v, &Route::UserEdit(normalised.clone()), v.t(K::Edit)))
-                (act(v, &Route::UserRm(normalised.clone()), v.t(K::Remove)))
+                (act_rm(v, &Route::UserRm(normalised.clone()), v.t(K::Remove)))
             }
 
             @if let Some(notes) = notes {
@@ -1996,7 +2582,7 @@ fn page_user(v: &View, doc: &AccessFile, email: &str) -> (u16, Markup) {
             }
 
             h2 { "api_keys" }
-            p { (act(v, &Route::KeyAdd(normalised.clone()), &format!("+ {}", v.t(K::Add)))) }
+            p class="primary" { (act(v, &Route::KeyAdd(normalised.clone()), &format!("+ {}", v.t(K::Add)))) }
             div class="panel" {
                 @if u.api_keys.is_empty() {
                     span class="muted" { (v.t(K::None)) }
@@ -2014,23 +2600,25 @@ fn page_user(v: &View, doc: &AccessFile, email: &str) -> (u16, Markup) {
                             @for k in &u.api_keys {
                                 @let id = k.id.trim().to_string();
                                 tr {
-                                    td class="mono" { (id) }
-                                    td class="mono" { (k.released.trim()) }
-                                    td class="mono" { (k.duration.trim()) }
-                                    td { (expiry_markup(v.lang, &expiry_of(k, n))) }
-                                    td {
+                                    td class="mono" data-label="id" { (id) }
+                                    td class="mono" data-label="released" { (k.released.trim()) }
+                                    td class="mono" data-label="duration" { (k.duration.trim()) }
+                                    td data-label=(v.t(K::ColExpiry)) {
+                                        (expiry_markup(v.lang, &expiry_of(k, n)))
+                                    }
+                                    td data-label="authorized_urls" {
                                         (url_list(
                                             v.lang,
                                             k.authorized_urls.as_ref(),
                                             t(v.lang, K::Inherits),
                                         ))
                                     }
-                                    td class="rowacts" {
+                                    td class="pills" {
                                         (act(v, &Route::KeyEdit(normalised.clone(), id.clone()),
                                              v.t(K::Edit)))
                                         (act(v, &Route::KeyRotate(normalised.clone(), id.clone()),
                                              v.t(K::Rotate)))
-                                        (act(v, &Route::KeyRm(normalised.clone(), id.clone()),
+                                        (act_rm(v, &Route::KeyRm(normalised.clone(), id.clone()),
                                              v.t(K::Remove)))
                                     }
                                 }
@@ -2046,21 +2634,21 @@ fn page_user(v: &View, doc: &AccessFile, email: &str) -> (u16, Markup) {
 /// `/groups` — each `url_groups` entry and everything that names it.
 fn page_groups(v: &View, doc: &AccessFile) -> Markup {
     html! {
-        h1 { "url_groups" }
+        h1 { (section_heading(v.t(K::Groups), "url_groups")) }
         p class="lede" { (v.t(K::GroupsIntro)) }
-        p { (act(v, &Route::GroupAdd, &format!("+ {}", v.t(K::Add)))) }
+        p class="primary" { (act(v, &Route::GroupAdd, &format!("+ {}", v.t(K::Add)))) }
         @if doc.url_groups.is_empty() {
             div class="panel" { span class="muted" { (v.t(K::None)) } }
         } @else {
             @for (name, urls) in &doc.url_groups {
                 @let refs = url_group_refs(doc, name);
                 div class="panel" {
-                    h2 style="margin-top:0" {
+                    h2 class="tight" {
                         code { "@" (name) }
                         " "
-                        span class="rowacts" style="display:inline-flex;font-size:.8rem" {
+                        span class="pills" {
                             (act(v, &Route::GroupEdit(name.clone()), v.t(K::Edit)))
-                            (act(v, &Route::GroupRm(name.clone()), v.t(K::Remove)))
+                            (act_rm(v, &Route::GroupRm(name.clone()), v.t(K::Remove)))
                         }
                     }
                     p class="muted" {
@@ -2090,9 +2678,9 @@ fn page_groups(v: &View, doc: &AccessFile) -> Markup {
 fn page_sites(v: &View, doc: &AccessFile) -> Markup {
     let last = doc.sites.len().saturating_sub(1);
     html! {
-        h1 { "sites" }
+        h1 { (section_heading(v.t(K::Sites), "sites")) }
         p class="lede" { (v.t(K::SitesIntro)) }
-        p { (act(v, &Route::SiteAdd, &format!("+ {}", v.t(K::Add)))) }
+        p class="primary" { (act(v, &Route::SiteAdd, &format!("+ {}", v.t(K::Add)))) }
         div class="panel" {
             @if doc.sites.is_empty() {
                 span class="muted" { (v.t(K::None)) }
@@ -2124,7 +2712,7 @@ fn move_button(
         form method="post" action=(v.href(&Route::SiteMove(name.to_string()))) {
             input type="hidden" name="rev" value=(v.rev);
             input type="hidden" name="dir" value=(dir);
-            button type="submit" class="mv" title=(label) disabled[disabled] { (glyph) }
+            button type="submit" class="pill" title=(label) disabled[disabled] { (glyph) }
         }
     }
 }
@@ -2141,9 +2729,9 @@ fn site_block(v: &View, s: &SiteSpec, i: usize, last: usize) -> Markup {
                 (tag("", "public_auth: false"))
             }
             " "
-            span class="rowacts" style="display:inline-flex" {
+            span class="pills" {
                 (act(v, &Route::SiteEdit(name.clone()), v.t(K::Edit)))
-                (act(v, &Route::SiteRm(name.clone()), v.t(K::Remove)))
+                (act_rm(v, &Route::SiteRm(name.clone()), v.t(K::Remove)))
                 (move_button(v, &name, "up", v.t(K::MoveUp), "↑", i == 0))
                 (move_button(v, &name, "down", v.t(K::MoveDown), "↓", i >= last))
             }
@@ -2159,12 +2747,23 @@ fn site_block(v: &View, s: &SiteSpec, i: usize, last: usize) -> Markup {
     }
 }
 
-/// `/denied` — the veto list.
+/// `/denied`: the veto list, standing on its own for a direct link and for the add/remove
+/// PRG redirects. [`page_users`] also renders this same list, as its own second section; both
+/// go through [`denied_list`] so the two views can never show two different lists.
 fn page_denied(v: &View, doc: &AccessFile) -> Markup {
     html! {
-        h1 { "denied" }
+        h1 { (section_heading(v.t(K::Denied), "denied")) }
         p class="lede" { (v.t(K::DeniedIntro)) }
-        p { (act(v, &Route::DenyAdd, &format!("+ {}", v.t(K::Add)))) }
+        p class="primary" { (act(v, &Route::DenyAdd, &format!("+ {}", v.t(K::Add)))) }
+        (denied_list(v, doc))
+    }
+}
+
+/// The `denied` panel's body: the empty state, or the list itself, one row per vetoed
+/// email. Factored out of [`page_denied`] because [`page_users`] renders the identical
+/// panel as its own second section, and the two must never be free to drift apart.
+fn denied_list(v: &View, doc: &AccessFile) -> Markup {
+    html! {
         div class="panel" {
             @if doc.denied.is_empty() {
                 span class="muted" { (v.t(K::None)) }
@@ -2172,14 +2771,14 @@ fn page_denied(v: &View, doc: &AccessFile) -> Markup {
                 ul class="plain" {
                     @for d in &doc.denied {
                         @let email = norm_email(d);
-                        li class="rowacts" {
+                        li class="pills" {
                             code { (email) }
                             @if user_pos(doc, &email).is_some() {
                                 a href=(v.href(&Route::User(email.clone()))) {
                                     (tag("", t(v.lang, K::AlsoEnrolled)))
                                 }
                             }
-                            (act(v, &Route::DenyRm(email.clone()), v.t(K::Remove)))
+                            (act_rm(v, &Route::DenyRm(email.clone()), v.t(K::Remove)))
                         }
                     }
                 }
@@ -2203,7 +2802,7 @@ fn page_can(v: &View, access: &Access, query: &str) -> Markup {
     let url = request_url(&url_in);
 
     html! {
-        h1 { "can" }
+        h1 { (section_heading(v.t(K::Can), "can")) }
         p class="lede" { (v.t(K::CanIntro)) }
         div class="panel" {
             form class="can" method="get" action=(v.href(&Route::Can)) {
@@ -2224,16 +2823,20 @@ fn page_can(v: &View, access: &Access, query: &str) -> Markup {
             }
         }
         @if asked {
-            div class="panel" { (verdict(v, access, &email, &url)) }
+            @let (granted, verdict_markup) = verdict(v, access, &email, &url);
+            div class=@if granted { "panel ok" } @else { "panel bad" } { (verdict_markup) }
         }
     }
 }
 
-/// One verdict, with the reason the gate would have. The wording follows `bb-auth-adm can`'s
-/// — same decision, same explanation, so an operator who has read one recognises the other.
-fn verdict(v: &View, access: &Access, email: &str, url: &str) -> Markup {
+/// One verdict, with the reason the gate would have. The wording follows `bb-auth-adm can`'s:
+/// same decision, same explanation, so an operator who has read one recognises the other.
+/// Returns whether the request was granted alongside the markup, so the caller can carry that
+/// same boolean onto the panel wrapping it (an `--ok` or `--bad` left bar).
+fn verdict(v: &View, access: &Access, email: &str, url: &str) -> (bool, Markup) {
     let decision = decide(access, email, Some(url));
-    html! {
+    let granted = decision.granted();
+    let markup = html! {
         p class=@if decision.granted() { "verdict yes" } @else { "verdict no" } {
             @if decision.granted() { (v.t(K::Authorized)) } @else { (v.t(K::VerdictDenied)) }
         }
@@ -2253,7 +2856,8 @@ fn verdict(v: &View, access: &Access, email: &str, url: &str) -> Markup {
                 (v.t(K::AppSees)) " " code { (IDENTITY_HEADER) ": " (email) }
             }
         }
-    }
+    };
+    (granted, markup)
 }
 
 // ---------------------------------------------------------------------------
@@ -2293,19 +2897,20 @@ impl UserForm {
 ///
 /// A user's scope has no absent-vs-empty distinction to express — absent and empty both
 /// deny — so it is a plain textarea, and an emptied one collapses to absent.
-fn page_user_form(v: &View, existing: Option<&str>, f: &UserForm, err: Option<&str>) -> Markup {
+fn page_user_form(v: &View, existing: Option<&str>, f: &UserForm, err: Option<&Refusal>) -> Markup {
     let editing = existing.is_some();
+    let about = |name| err.is_some_and(|e| e.is(name));
     html! {
-        h1 { "users · " (if editing { v.t(K::Edit) } else { v.t(K::Add) }) }
+        h1 { (v.t(K::Users)) " · " (if editing { v.t(K::Edit) } else { v.t(K::Add) }) }
         @if let Some(e) = existing { p class="lede" { code { (e) } } }
         div class="panel" {
             (form_shell(v, err, html! {
                 (text_field(
                     if editing { v.t(K::NewEmail) } else { "email" },
-                    "email", &f.email, "bob@x.com", None))
+                    "email", &f.email, "bob@x.com", None, about("email")))
                 (urls_field("authorized_urls", "urls", &f.urls, html! {
                     (v.t(K::ScopeHelp)) " " (v.t(K::ScopeEmptyMeans)) " " code { "*://*/*" } "."
-                }))
+                }, about("urls")))
             }, if editing { v.t(K::Save) } else { v.t(K::Create) }, false))
         }
     }
@@ -2361,19 +2966,20 @@ fn page_key_form(
     existing: Option<&str>,
     released: &str,
     f: &KeyForm,
-    err: Option<&str>,
+    err: Option<&Refusal>,
 ) -> Markup {
     let editing = existing.is_some();
+    let about = |name| err.is_some_and(|e| e.is(name));
     html! {
         h1 { (owner) " · api_keys · " (if editing { v.t(K::Edit) } else { v.t(K::Add) }) }
         @if let Some(id) = existing { p class="lede" { code { (id) } } }
         div class="panel" {
             (form_shell(v, err, html! {
                 @if !editing {
-                    (text_field("id", "id", &f.id, "laptop", None))
+                    (text_field("id", "id", &f.id, "laptop", None, about("id")))
                 }
                 (text_field("duration", "duration", &f.duration, "365d",
-                            Some("<n>d · <n>h · never")))
+                            Some("<n>d · <n>h · never"), about("duration")))
                 label {
                     span class="lbl" { "released" }
                     span class="mono" { (released) }
@@ -2391,7 +2997,7 @@ fn page_key_form(
                 }
                 (urls_field("", "urls", &f.urls, html! {
                     (v.t(K::ScopeHelp)) " " (v.t(K::KeyScopeOwnEmpty))
-                }))
+                }, about("urls")))
             }, if editing { v.t(K::Save) } else { v.t(K::Create) }, false))
         }
     }
@@ -2427,21 +3033,23 @@ impl SiteForm {
     }
 }
 
-fn page_site_form(v: &View, existing: Option<&str>, f: &SiteForm, err: Option<&str>) -> Markup {
+fn page_site_form(v: &View, existing: Option<&str>, f: &SiteForm, err: Option<&Refusal>) -> Markup {
     let editing = existing.is_some();
+    let about = |name| err.is_some_and(|e| e.is(name));
     html! {
-        h1 { "sites · " (if editing { v.t(K::Edit) } else { v.t(K::Add) }) }
+        h1 { (v.t(K::Sites)) " · " (if editing { v.t(K::Edit) } else { v.t(K::Add) }) }
         @if let Some(n) = existing { p class="lede" { code { (n) } } }
         div class="panel" {
             (form_shell(v, err, html! {
                 (text_field(if editing { v.t(K::NewName) } else { "name" },
-                            "name", &f.name, "app1", None))
-                (urls_field("urls", "urls", &f.urls, html! { (v.t(K::SiteUrlsHelp)) }))
+                            "name", &f.name, "app1", None, about("name")))
+                (urls_field("urls", "urls", &f.urls, html! { (v.t(K::SiteUrlsHelp)) }, about("urls")))
                 label class="radio" {
                     input type="checkbox" name="public_auth" value="on" checked[f.public_auth];
                     span { "public_auth" " — " (v.t(K::PublicAuthWarn)) }
                 }
-                (text_field("login_url", "login_url", &f.login_url, "https://login.x.com/", None))
+                (text_field("login_url", "login_url", &f.login_url, "https://login.x.com/", None,
+                            about("login_url")))
             }, if editing { v.t(K::Save) } else { v.t(K::Create) }, false))
         }
     }
@@ -2463,10 +3071,16 @@ impl GroupForm {
     }
 }
 
-fn page_group_form(v: &View, existing: Option<&str>, f: &GroupForm, err: Option<&str>) -> Markup {
+fn page_group_form(
+    v: &View,
+    existing: Option<&str>,
+    f: &GroupForm,
+    err: Option<&Refusal>,
+) -> Markup {
     let editing = existing.is_some();
+    let about = |name| err.is_some_and(|e| e.is(name));
     html! {
-        h1 { "url_groups · " (if editing { v.t(K::Edit) } else { v.t(K::Add) }) }
+        h1 { (v.t(K::Groups)) " · " (if editing { v.t(K::Edit) } else { v.t(K::Add) }) }
         @if let Some(n) = existing { p class="lede" { code { "@" (n) } } }
         div class="panel" {
             (form_shell(v, err, html! {
@@ -2474,9 +3088,9 @@ fn page_group_form(v: &View, existing: Option<&str>, f: &GroupForm, err: Option<
                 @if editing {
                     p class="muted" { (v.t(K::GroupNoRename)) }
                 } @else {
-                    (text_field("name", "name", &f.name, "mcp", None))
+                    (text_field("name", "name", &f.name, "mcp", None, about("name")))
                 }
-                (urls_field("urls", "urls", &f.urls, html! { (v.t(K::GroupUrlsHelp)) }))
+                (urls_field("urls", "urls", &f.urls, html! { (v.t(K::GroupUrlsHelp)) }, about("urls")))
             }, if editing { v.t(K::Save) } else { v.t(K::Create) }, false))
         }
     }
@@ -2496,13 +3110,14 @@ impl DenyForm {
     }
 }
 
-fn page_deny_form(v: &View, f: &DenyForm, err: Option<&str>) -> Markup {
+fn page_deny_form(v: &View, f: &DenyForm, err: Option<&Refusal>) -> Markup {
+    let about = |name| err.is_some_and(|e| e.is(name));
     html! {
-        h1 { "denied · " (v.t(K::Add)) }
+        h1 { (v.t(K::Denied)) " · " (v.t(K::Add)) }
         p class="lede" { (v.t(K::DeniedIntro)) }
         div class="panel" {
             (form_shell(v, err, html! {
-                (text_field("email", "email", &f.email, "spammer@x.com", None))
+                (text_field("email", "email", &f.email, "spammer@x.com", None, about("email")))
             }, v.t(K::Create), false))
         }
     }
@@ -2520,6 +3135,7 @@ fn page_minted(v: &View, owner: &str, id: &str, bearer: &str) -> Markup {
             div { strong { (v.t(K::BearerHeading)) } }
             p { (v.t(K::BearerOnce)) }
             code { "Authorization: Bearer " (bearer) }
+            p class="hint" { (v.t(K::BearerClickHint)) }
         }
         p { a href=(v.href(&Route::User(owner.to_string()))) { "← " (v.t(K::Back)) } }
     }
@@ -2527,7 +3143,7 @@ fn page_minted(v: &View, owner: &str, id: &str, bearer: &str) -> Markup {
 
 /// The `409`: the file moved under the form. Nothing was written, and the way out is a
 /// fresh read of what the file says now — with a pointer at the browser's Back button,
-/// which (this GUI being JavaScript-free, so nothing disturbs the bfcache) still holds
+/// which (no page here runs a script on load, so nothing disturbs the bfcache) still holds
 /// the form exactly as it was filled in.
 fn page_conflict(v: &View) -> Markup {
     // A `POST`-only route has no form to reload, so it goes back to its section.
@@ -2537,7 +3153,7 @@ fn page_conflict(v: &View) -> Markup {
     };
     html! {
         h1 { (v.t(K::ConflictTitle)) }
-        div class="panel" {
+        div class="panel warn" {
             p { (v.t(K::ConflictBody)) }
             p { (v.t(K::ConflictRecover)) }
             p { a href=(v.href(&back)) { "← " (v.t(K::ConflictBack)) } }
@@ -2556,7 +3172,7 @@ fn page_mint_conflict(v: &View, owner: &str, id: &str) -> Markup {
     let owner = norm_email(owner);
     html! {
         h1 { (v.t(K::MintConflictTitle)) }
-        div class="panel" {
+        div class="panel warn" {
             p { code { (owner) } " · api_keys · " code { (id) } }
             p { (v.t(K::MintConflictBody)) }
             p { (v.t(K::MintConflictLost)) }
@@ -2573,10 +3189,13 @@ fn page_mint_conflict(v: &View, owner: &str, id: &str) -> Markup {
 
 /// A page that is only a message: the `401`, the `403`, the `404`, the `405` and the
 /// broken-file page. Content only — the caller wraps it in [`shell`], as it does any page.
-fn notice(title: &str, body: Markup) -> Markup {
+/// `kind` styles the panel the same way [`tag`] styles a label (`"bad"`, `"warn"`, `"ok"`,
+/// or `""` for a neutral one); every call site today is a refusal, so every one passes
+/// `"bad"`.
+fn notice(kind: &str, title: &str, body: Markup) -> Markup {
     html! {
         h1 { (title) }
-        div class="panel" { (body) }
+        div class=(format!("panel {kind}")) { (body) }
     }
 }
 
@@ -2585,6 +3204,7 @@ fn notice(title: &str, body: Markup) -> Markup {
 /// print, and an operator who can match those three is an operator who can fix the file.
 fn page_file_error(v: &View, err: &str) -> Markup {
     notice(
+        "bad",
         v.t(K::FileErrorTitle),
         html! {
             p class="mono bad" { (err) }
@@ -2697,10 +3317,10 @@ fn mutate(v: &View, form: &Form) -> Outcome {
     match &v.at {
         Route::UserAdd => {
             let f = UserForm::read(form);
-            let r = (|| -> Result<String, String> {
+            let r = (|| -> Result<String, Refusal> {
                 let email = norm_email(&f.email);
                 if email.is_empty() {
-                    return Err(v.t(K::EmailRequired).to_string());
+                    return Err(Refusal::on("email", v.t(K::EmailRequired)));
                 }
                 let urls = form.lines("urls");
                 add_user(
@@ -2710,8 +3330,11 @@ fn mutate(v: &View, form: &Form) -> Outcome {
                         authorized_urls: if urls.is_empty() { None } else { Some(urls) },
                         ..Default::default()
                     },
-                )?;
-                commit(v, &doc, "user add", &email)?;
+                )
+                .map_err(|e| Refusal::on("email", e))?;
+                // Everything else in the file already compiled before this request; the
+                // scope just submitted is the only new, still-unvalidated content.
+                commit(v, &doc, "user add", &email).map_err(|e| Refusal::on("urls", e))?;
                 Ok(email)
             })();
             match r {
@@ -2722,19 +3345,19 @@ fn mutate(v: &View, form: &Form) -> Outcome {
 
         Route::UserEdit(target) => {
             let f = UserForm::read(form);
-            let r = (|| -> Result<String, String> {
+            let r = (|| -> Result<String, Refusal> {
                 let email = norm_email(&f.email);
                 if email.is_empty() {
-                    return Err(v.t(K::EmailRequired).to_string());
+                    return Err(Refusal::on("email", v.t(K::EmailRequired)));
                 }
-                rename_user(&mut doc, target, &email)?;
+                rename_user(&mut doc, target, &email).map_err(|e| Refusal::on("email", e))?;
                 let u = user_mut(&mut doc, &email)?;
                 // A user's scope has no "inherit": an emptied list collapses to absent, and
                 // both mean the same thing — reaches nothing.
                 let urls = form.lines("urls");
                 let clear = urls.is_empty();
                 edit_urls(&mut u.authorized_urls, urls, Vec::new(), Vec::new(), clear);
-                commit(v, &doc, "user set", &email)?;
+                commit(v, &doc, "user set", &email).map_err(|e| Refusal::on("urls", e))?;
                 Ok(email)
             })();
             match r {
@@ -2744,7 +3367,7 @@ fn mutate(v: &View, form: &Form) -> Outcome {
         }
 
         Route::UserRm(target) => {
-            let r = (|| -> Result<(), String> {
+            let r = (|| -> Result<(), Refusal> {
                 let u = remove_user(&mut doc, target)?;
                 commit(v, &doc, "user rm", &norm_email(&u.email))?;
                 Ok(())
@@ -2756,7 +3379,7 @@ fn mutate(v: &View, form: &Form) -> Outcome {
                     title,
                     page_confirm(
                         v,
-                        html! { "users · " (v.t(K::Remove)) },
+                        html! { (v.t(K::Users)) " · " (v.t(K::Remove)) },
                         html! { p { code { (norm_email(target)) } } },
                         v.t(K::ConfirmUserRm),
                         v.t(K::Remove),
@@ -2771,17 +3394,19 @@ fn mutate(v: &View, form: &Form) -> Outcome {
             // Today, and not a field: a key's issue date is a fact about a secret that is
             // being created right now.
             let released = format_date(now());
-            let r = (|| -> Result<(String, String), String> {
+            let r = (|| -> Result<(String, String), Refusal> {
                 let id = f.id.trim().to_string();
                 if id.is_empty() {
-                    return Err(v.t(K::KeyIdRequired).to_string());
+                    return Err(Refusal::on("id", v.t(K::KeyIdRequired)));
                 }
                 let duration = f.duration.trim().to_string();
                 // Fail before minting: a key the file would reject is a secret handed out
                 // for nothing.
                 if key_expiry(&released, &duration).is_none() {
-                    return Err(v.t(K::BadKeyWindow).to_string());
+                    return Err(Refusal::on("duration", v.t(K::BadKeyWindow)));
                 }
+                // Not attributed: besides a duplicate id, this can also fail on an owner
+                // lookup or on entropy for the mint itself; neither is a field to blame.
                 let sealed: SealedKey = add_api_key(
                     &mut doc,
                     owner,
@@ -2795,7 +3420,10 @@ fn mutate(v: &View, form: &Form) -> Outcome {
                 )?;
                 // The bearer opens only against the receipt of a completed write, so this
                 // order is the library's and not a convention this file could get wrong.
-                let written = commit(v, &doc, "key add", &format!("{}/{id}", norm_email(owner)))?;
+                // The id and duration already passed; the scope just submitted is the only
+                // new, still-unvalidated content left for the compile to catch.
+                let written = commit(v, &doc, "key add", &format!("{}/{id}", norm_email(owner)))
+                    .map_err(|e| Refusal::on("urls", e))?;
                 Ok((id, sealed.reveal(&written)))
             })();
             match r {
@@ -2815,16 +3443,17 @@ fn mutate(v: &View, form: &Form) -> Outcome {
             let released = key_mut(&mut doc, owner, id)
                 .map(|k| k.released.trim().to_string())
                 .unwrap_or_default();
-            let r = (|| -> Result<(), String> {
+            let r = (|| -> Result<(), Refusal> {
                 let k = key_mut(&mut doc, owner, id)?;
                 k.duration = f.duration.trim().to_string();
                 if key_expiry(&k.released, &k.duration).is_none() {
-                    return Err(v.t(K::BadKeyWindow).to_string());
+                    return Err(Refusal::on("duration", v.t(K::BadKeyWindow)));
                 }
                 // Absent vs present-and-empty is the whole point of the radio: absent
                 // inherits the owner's scope, empty is an own scope that reaches nothing.
                 k.authorized_urls = f.scope(form.lines("urls"));
-                commit(v, &doc, "key set", &format!("{}/{id}", norm_email(owner)))?;
+                commit(v, &doc, "key set", &format!("{}/{id}", norm_email(owner)))
+                    .map_err(|e| Refusal::on("urls", e))?;
                 Ok(())
             })();
             match r {
@@ -2838,7 +3467,7 @@ fn mutate(v: &View, form: &Form) -> Outcome {
         }
 
         Route::KeyRotate(owner, id) => {
-            let r = (|| -> Result<String, String> {
+            let r = (|| -> Result<String, Refusal> {
                 let sealed = rotate_api_key(&mut doc, owner, id)?;
                 let written = commit(
                     v,
@@ -2868,7 +3497,7 @@ fn mutate(v: &View, form: &Form) -> Outcome {
         }
 
         Route::KeyRm(owner, id) => {
-            let r = (|| -> Result<(), String> {
+            let r = (|| -> Result<(), Refusal> {
                 remove_api_key(&mut doc, owner, id)?;
                 commit(v, &doc, "key rm", &format!("{}/{id}", norm_email(owner)))?;
                 Ok(())
@@ -2892,9 +3521,12 @@ fn mutate(v: &View, form: &Form) -> Outcome {
 
         Route::SiteAdd => {
             let f = SiteForm::read(form);
-            let r = (|| -> Result<(), String> {
+            let r = (|| -> Result<(), Refusal> {
                 let name = f.name.trim().to_string();
-                add_site(&mut doc, site_spec(&f, form.lines("urls")), None)?;
+                add_site(&mut doc, site_spec(&f, form.lines("urls")), None)
+                    .map_err(|e| Refusal::on("name", e))?;
+                // Not attributed: the new record's urls and login_url are both still
+                // unvalidated at this point, so a compile failure could be either.
                 commit(v, &doc, "site add", &name)?;
                 Ok(())
             })();
@@ -2906,17 +3538,19 @@ fn mutate(v: &View, form: &Form) -> Outcome {
 
         Route::SiteEdit(target) => {
             let f = SiteForm::read(form);
-            let r = (|| -> Result<(), String> {
+            let r = (|| -> Result<(), Refusal> {
                 let name = f.name.trim().to_string();
                 if name.is_empty() {
-                    return Err(v.t(K::NameRequired).to_string());
+                    return Err(Refusal::on("name", v.t(K::NameRequired)));
                 }
                 // The rename first, then the record is addressed by the name it now has.
-                rename_site(&mut doc, target, &name)?;
+                rename_site(&mut doc, target, &name).map_err(|e| Refusal::on("name", e))?;
                 let i =
                     site_pos(&doc, &name).ok_or_else(|| format!("no site '{}'", target.trim()))?;
                 let spec = site_spec(&f, form.lines("urls"));
                 doc.sites[i] = spec;
+                // Not attributed: urls and login_url are both still unvalidated here, so a
+                // compile failure could be either.
                 commit(v, &doc, "site set", &name)?;
                 Ok(())
             })();
@@ -2948,13 +3582,13 @@ fn mutate(v: &View, form: &Form) -> Outcome {
                 Err(e) => Outcome::Page(
                     400,
                     title,
-                    notice(v.t(K::NotFoundTitle), html! { p { (e) } }),
+                    notice("bad", v.t(K::NotFoundTitle), html! { p { (e) } }),
                 ),
             }
         }
 
         Route::SiteRm(target) => {
-            let r = (|| -> Result<(), String> {
+            let r = (|| -> Result<(), Refusal> {
                 let s = remove_site(&mut doc, target)?;
                 commit(v, &doc, "site rm", &site_name(&s))?;
                 Ok(())
@@ -2966,7 +3600,7 @@ fn mutate(v: &View, form: &Form) -> Outcome {
                     title,
                     page_confirm(
                         v,
-                        html! { "sites · " (v.t(K::Remove)) },
+                        html! { (v.t(K::Sites)) " · " (v.t(K::Remove)) },
                         html! { p { code { (target) } } },
                         v.t(K::ConfirmSiteRm),
                         v.t(K::Remove),
@@ -2978,10 +3612,14 @@ fn mutate(v: &View, form: &Form) -> Outcome {
 
         Route::GroupAdd => {
             let f = GroupForm::read(form);
-            let r = (|| -> Result<(), String> {
+            let r = (|| -> Result<(), Refusal> {
                 let name = f.name.trim().to_string();
-                add_url_group(&mut doc, &name, form.lines("urls"))?;
-                commit(v, &doc, "url-group add", &format!("@{name}"))?;
+                add_url_group(&mut doc, &name, form.lines("urls"))
+                    .map_err(|e| Refusal::on("name", e))?;
+                // The name already passed; the patterns just submitted are the only new,
+                // still-unvalidated content left for the compile to catch.
+                commit(v, &doc, "url-group add", &format!("@{name}"))
+                    .map_err(|e| Refusal::on("urls", e))?;
                 Ok(())
             })();
             match r {
@@ -2992,11 +3630,12 @@ fn mutate(v: &View, form: &Form) -> Outcome {
 
         Route::GroupEdit(target) => {
             let f = GroupForm::read(form);
-            let r = (|| -> Result<(), String> {
+            let r = (|| -> Result<(), Refusal> {
                 // No rename: a reference names a group by its exact spelling, so the
                 // library does not offer one and neither does this form.
                 *url_group_mut(&mut doc, target)? = form.lines("urls");
-                commit(v, &doc, "url-group set", &format!("@{}", target.trim()))?;
+                commit(v, &doc, "url-group set", &format!("@{}", target.trim()))
+                    .map_err(|e| Refusal::on("urls", e))?;
                 Ok(())
             })();
             match r {
@@ -3006,7 +3645,7 @@ fn mutate(v: &View, form: &Form) -> Outcome {
         }
 
         Route::GroupRm(target) => {
-            let r = (|| -> Result<(), String> {
+            let r = (|| -> Result<(), Refusal> {
                 // The library refuses while anything still references the group, and its
                 // refusal names every referrer — which is the list of places to go and fix.
                 remove_url_group(&mut doc, target)?;
@@ -3020,7 +3659,7 @@ fn mutate(v: &View, form: &Form) -> Outcome {
                     title,
                     page_confirm(
                         v,
-                        html! { "url_groups · " (v.t(K::Remove)) },
+                        html! { (v.t(K::Groups)) " · " (v.t(K::Remove)) },
                         html! { p { code { "@" (target) } } },
                         v.t(K::ConfirmGroupRm),
                         v.t(K::Remove),
@@ -3032,14 +3671,15 @@ fn mutate(v: &View, form: &Form) -> Outcome {
 
         Route::DenyAdd => {
             let f = DenyForm::read(form);
-            let r = (|| -> Result<(), String> {
+            let r = (|| -> Result<(), Refusal> {
                 let email = norm_email(&f.email);
                 if email.is_empty() {
-                    return Err(v.t(K::EmailRequired).to_string());
+                    return Err(Refusal::on("email", v.t(K::EmailRequired)));
                 }
-                if !add_denied(&mut doc, &email)? {
-                    return Err(v.t(K::AlreadyDenied).to_string());
+                if !add_denied(&mut doc, &email).map_err(|e| Refusal::on("email", e))? {
+                    return Err(Refusal::on("email", v.t(K::AlreadyDenied)));
                 }
+                // This form has no urls field, so nothing new reaches the compile unchecked.
                 commit(v, &doc, "deny add", &email)?;
                 Ok(())
             })();
@@ -3051,9 +3691,9 @@ fn mutate(v: &View, form: &Form) -> Outcome {
 
         Route::DenyRm(target) => {
             let email = norm_email(target);
-            let r = (|| -> Result<(), String> {
+            let r = (|| -> Result<(), Refusal> {
                 if remove_denied(&mut doc, std::slice::from_ref(&email)) == 0 {
-                    return Err(v.t(K::NoSuchDenied).to_string());
+                    return Err(Refusal::from(v.t(K::NoSuchDenied).to_string()));
                 }
                 commit(v, &doc, "deny rm", &email)?;
                 Ok(())
@@ -3065,7 +3705,7 @@ fn mutate(v: &View, form: &Form) -> Outcome {
                     title,
                     page_confirm(
                         v,
-                        html! { "denied · " (v.t(K::Remove)) },
+                        html! { (v.t(K::Denied)) " · " (v.t(K::Remove)) },
                         html! { p { code { (email) } } },
                         v.t(K::ConfirmDenyRm),
                         v.t(K::Remove),
@@ -3080,6 +3720,7 @@ fn mutate(v: &View, form: &Form) -> Outcome {
             405,
             title,
             notice(
+                "bad",
                 v.t(K::NotAllowedTitle),
                 html! { p { (v.t(K::NotAllowedBody)) } },
             ),
@@ -3119,16 +3760,22 @@ fn handle(mut req: Request, cfg: &Config) {
         None => (target, String::new()),
     };
     let posting = *req.method() == Method::Post;
-    let lang = negotiate_lang(
-        query_param(&query, "lang").as_deref(),
+    let (lang_pref, lang) = negotiate_lang(
+        query_param(&query, LANG_COOKIE).as_deref(),
         header_value(&req, "Cookie").and_then(|c| cookie_value(c, LANG_COOKIE)),
         header_value(&req, "Accept-Language"),
         cfg.default_lang,
     );
-    // Nothing is routed yet, so the language switch on an error page points at the root.
+    let theme = negotiate_theme(
+        query_param(&query, THEME_COOKIE).as_deref(),
+        header_value(&req, "Cookie").and_then(|c| cookie_value(c, THEME_COOKIE)),
+    );
+    // Nothing is routed yet, so the Settings menu on an error page submits to the root.
     let anon = |at: Route| View {
         cfg,
         lang,
+        lang_pref,
+        theme,
         admin: None,
         at,
         query: "",
@@ -3143,6 +3790,7 @@ fn handle(mut req: Request, cfg: &Config) {
         _ => {
             let v = anon(Route::Dashboard);
             let page = notice(
+                "bad",
                 v.t(K::NoIdentityTitle),
                 html! { p { (v.t(K::NoIdentityBody)) } },
             );
@@ -3154,6 +3802,7 @@ fn handle(mut req: Request, cfg: &Config) {
     if !cfg.is_admin(&email) {
         let v = anon(Route::Dashboard);
         let page = notice(
+            "bad",
             v.t(K::NotAdminTitle),
             html! { p { code { (email) } " " (v.t(K::NotAdminBody)) } },
         );
@@ -3167,6 +3816,8 @@ fn handle(mut req: Request, cfg: &Config) {
             let v = View {
                 cfg,
                 lang,
+                lang_pref,
+                theme,
                 admin: Some(&email),
                 at: Route::Dashboard,
                 query: "",
@@ -3174,6 +3825,7 @@ fn handle(mut req: Request, cfg: &Config) {
                 msg: None,
             };
             let page = notice(
+                "bad",
                 v.t(K::NotFoundTitle),
                 html! { p { (v.t(K::NotFoundBody)) } },
             );
@@ -3193,6 +3845,8 @@ fn handle(mut req: Request, cfg: &Config) {
         let v = View {
             cfg,
             lang,
+            lang_pref,
+            theme,
             admin: Some(&email),
             at: at.clone(),
             query: "",
@@ -3200,7 +3854,7 @@ fn handle(mut req: Request, cfg: &Config) {
             msg: None,
         };
         if !allowed {
-            let page = notice(v.t(K::CsrfTitle), html! { p { (v.t(K::CsrfBody)) } });
+            let page = notice("bad", v.t(K::CsrfTitle), html! { p { (v.t(K::CsrfBody)) } });
             respond_page(req, 403, shell(&v, v.t(K::CsrfTitle), page));
             return;
         }
@@ -3219,14 +3873,30 @@ fn handle(mut req: Request, cfg: &Config) {
 
     // ----- GET: the rendering half -----------------------------------------
 
-    // An explicit `?lang=` is a choice: remember it, then send the browser to the same page
-    // without the parameter, so a bookmark or a reload does not carry it around forever.
-    // The rest of the query survives, which is what keeps a `can` result on screen.
-    if query_param(&query, "lang")
-        .and_then(|l| parse_lang(&l))
+    // An explicit `?lang=` or `?theme=` is a choice: remember it, then send the browser to
+    // the same page without that parameter, so a bookmark or a reload does not carry it
+    // around forever. The rest of the query survives, which is what keeps a `can` result on
+    // screen. The two checks are independent and each returns on its own redirect, which is
+    // what makes the Settings form's single submit work while setting both: the first pass
+    // stores the language and leaves `?theme=` standing, the redirect comes straight back in
+    // and the second pass stores the theme. Two round trips on loopback, and no coupling
+    // between the two preferences anywhere in the code.
+    if query_param(&query, LANG_COOKIE)
+        .and_then(|l| parse_lang_pref(&l))
         .is_some()
     {
-        respond_lang_redirect(req, &lang_href(cfg, &at, &query, None), lang);
+        respond_lang_redirect(
+            req,
+            &preference_href(cfg, &at, &query, LANG_COOKIE),
+            lang_pref,
+        );
+        return;
+    }
+    if query_param(&query, THEME_COOKIE)
+        .and_then(|t| parse_theme(&t))
+        .is_some()
+    {
+        respond_theme_redirect(req, &preference_href(cfg, &at, &query, THEME_COOKIE), theme);
         return;
     }
 
@@ -3237,6 +3907,8 @@ fn handle(mut req: Request, cfg: &Config) {
     let v = View {
         cfg,
         lang,
+        lang_pref,
+        theme,
         admin: Some(&email),
         at: at.clone(),
         query: &query,
@@ -3295,7 +3967,7 @@ fn handle(mut req: Request, cfg: &Config) {
                     200,
                     page_confirm(
                         &v,
-                        html! { "users · " (v.t(K::Remove)) },
+                        html! { (v.t(K::Users)) " · " (v.t(K::Remove)) },
                         html! {
                             p { code { (email) } }
                             @if keys > 0 {
@@ -3416,7 +4088,7 @@ fn handle(mut req: Request, cfg: &Config) {
                     200,
                     page_confirm(
                         &v,
-                        html! { "sites · " (v.t(K::Remove)) },
+                        html! { (v.t(K::Sites)) " · " (v.t(K::Remove)) },
                         html! {
                             p { code { (site_name(s)) } }
                             @if s.public_auth { p { (tag("warn", "public_auth")) } }
@@ -3439,6 +4111,7 @@ fn handle(mut req: Request, cfg: &Config) {
         Route::SiteMove(_) => (
             405,
             notice(
+                "bad",
                 v.t(K::NotAllowedTitle),
                 html! { p { (v.t(K::NotAllowedBody)) } },
             ),
@@ -3469,7 +4142,7 @@ fn handle(mut req: Request, cfg: &Config) {
                 200,
                 page_confirm(
                     &v,
-                    html! { "url_groups · " (v.t(K::Remove)) },
+                    html! { (v.t(K::Groups)) " · " (v.t(K::Remove)) },
                     html! {
                         p { code { "@" (n.trim()) } }
                         @let refs = url_group_refs(&doc, n.trim());
@@ -3504,7 +4177,7 @@ fn handle(mut req: Request, cfg: &Config) {
                     200,
                     page_confirm(
                         &v,
-                        html! { "denied · " (v.t(K::Remove)) },
+                        html! { (v.t(K::Denied)) " · " (v.t(K::Remove)) },
                         html! { p { code { (email) } } },
                         v.t(K::ConfirmDenyRm),
                         v.t(K::Remove),
@@ -3836,54 +4509,133 @@ mod tests {
     fn negotiate_lang_prefers_query_then_cookie_then_header_then_default() {
         // query beats everything
         assert_eq!(
-            negotiate_lang(Some("it"), Some("en"), Some("en-GB"), Lang::En),
+            negotiate_lang(Some("it"), Some("en"), Some("en-GB"), Lang::En).1,
             Lang::It
         );
         // cookie beats the header
         assert_eq!(
-            negotiate_lang(None, Some("it"), Some("en-GB"), Lang::En),
+            negotiate_lang(None, Some("it"), Some("en-GB"), Lang::En).1,
             Lang::It
         );
         // header beats the default
         assert_eq!(
-            negotiate_lang(None, None, Some("it-IT,it;q=0.9"), Lang::En),
+            negotiate_lang(None, None, Some("it-IT,it;q=0.9"), Lang::En).1,
             Lang::It
         );
         // and the default is the floor
         assert_eq!(
-            negotiate_lang(None, None, Some("de-DE"), Lang::En),
+            negotiate_lang(None, None, Some("de-DE"), Lang::En).1,
             Lang::En
         );
-        assert_eq!(negotiate_lang(None, None, None, Lang::It), Lang::It);
+        assert_eq!(negotiate_lang(None, None, None, Lang::It).1, Lang::It);
         // an unparseable preference is not a preference
         assert_eq!(
-            negotiate_lang(Some("fr"), Some("it"), None, Lang::En),
+            negotiate_lang(Some("fr"), Some("it"), None, Lang::En).1,
             Lang::It
         );
     }
 
     #[test]
-    fn lang_href_swaps_the_parameter_and_keeps_the_rest() {
-        let cfg = cfg_for("x.json", "/admin");
-        let q = "email=bob%40x.com&lang=en";
-        assert_eq!(
-            lang_href(&cfg, &Route::Can, q, Some(Lang::It)),
-            "/admin/can?email=bob%40x.com&lang=it"
-        );
-        assert_eq!(
-            lang_href(&cfg, &Route::Can, q, None),
-            "/admin/can?email=bob%40x.com"
-        );
-        assert_eq!(lang_href(&cfg, &Route::Dashboard, "", None), "/admin/");
+    fn parse_lang_pref_accepts_auto_and_the_two_codes() {
+        assert_eq!(parse_lang_pref("auto"), Some(LangPref::Auto));
+        assert_eq!(parse_lang_pref(" Auto "), Some(LangPref::Auto));
+        assert_eq!(parse_lang_pref("en"), Some(LangPref::Fixed(Lang::En)));
+        assert_eq!(parse_lang_pref("IT"), Some(LangPref::Fixed(Lang::It)));
+        assert_eq!(parse_lang_pref("fr"), None);
+        assert_eq!(parse_lang_pref(""), None);
+        // The code a choice is stored under is the one it is read back from.
+        for p in [
+            LangPref::Auto,
+            LangPref::Fixed(Lang::En),
+            LangPref::Fixed(Lang::It),
+        ] {
+            assert_eq!(parse_lang_pref(p.code()), Some(p));
+        }
     }
 
     #[test]
-    fn lang_href_never_carries_client_bytes_verbatim() {
+    fn auto_is_the_floor_and_is_choosable_back_out_of_a_fixed_choice() {
+        // No preference expressed at all reads as Auto, which is what makes naming the
+        // behaviour in the menu change nobody's page.
+        assert_eq!(negotiate_lang(None, None, None, Lang::En).0, LangPref::Auto);
+        // A stored `auto` beats no header and still follows one when there is one, so
+        // choosing it undoes a fixed choice instead of freezing today's answer.
+        assert_eq!(
+            negotiate_lang(None, Some("auto"), Some("it-IT"), Lang::En),
+            (LangPref::Auto, Lang::It)
+        );
+        assert_eq!(
+            negotiate_lang(None, Some("auto"), Some("de-DE"), Lang::En),
+            (LangPref::Auto, Lang::En)
+        );
+        // And an explicit `?lang=auto` outranks a fixed cookie: that is the submit that
+        // switches the menu back to Auto.
+        assert_eq!(
+            negotiate_lang(Some("auto"), Some("it"), Some("de-DE"), Lang::En),
+            (LangPref::Auto, Lang::En)
+        );
+        // A fixed choice reports itself, never the language it happens to agree with.
+        assert_eq!(
+            negotiate_lang(None, Some("en"), Some("en-GB"), Lang::En).0,
+            LangPref::Fixed(Lang::En)
+        );
+    }
+
+    #[test]
+    fn preference_href_drops_the_parameter_and_keeps_the_rest() {
+        let cfg = cfg_for("x.json", "/admin");
+        assert_eq!(
+            preference_href(&cfg, &Route::Can, "email=bob%40x.com&lang=en", LANG_COOKIE),
+            "/admin/can?email=bob%40x.com"
+        );
+        // The other preference survives the first redirect, which is what lets one submit
+        // set both: see the two checks in `handle`.
+        assert_eq!(
+            preference_href(&cfg, &Route::Can, "lang=en&theme=dark", LANG_COOKIE),
+            "/admin/can?theme=dark"
+        );
+        assert_eq!(
+            preference_href(&cfg, &Route::Can, "lang=en&theme=dark", THEME_COOKIE),
+            "/admin/can?lang=en"
+        );
+        assert_eq!(
+            preference_href(&cfg, &Route::Dashboard, "", LANG_COOKIE),
+            "/admin/"
+        );
+    }
+
+    #[test]
+    fn preference_href_never_carries_client_bytes_verbatim() {
         // Everything a client sent is re-encoded, so this string is safe in a Location:.
         let cfg = cfg_for("x.json", "");
-        let href = lang_href(&cfg, &Route::Can, "url=https://x/%0d%0aX:+1&lang=it", None);
-        assert!(href.bytes().all(|b| b.is_ascii_graphic()), "{href}");
-        assert!(!href.contains('\r') && !href.contains('\n'));
+        for param in [LANG_COOKIE, THEME_COOKIE] {
+            let href = preference_href(
+                &cfg,
+                &Route::Can,
+                "url=https://x/%0d%0aX:+1&lang=it&theme=dark",
+                param,
+            );
+            assert!(href.bytes().all(|b| b.is_ascii_graphic()), "{href}");
+            assert!(!href.contains('\r') && !href.contains('\n'));
+        }
+    }
+
+    #[test]
+    fn preserved_query_keeps_everything_the_settings_form_does_not_set() {
+        // The form sends its own fields and nothing else, so what it does not put back as a
+        // hidden field is lost: a `can` result, and the flash the page is showing.
+        let kept = preserved_query(
+            "email=bob%40x.com&url=https%3A%2F%2Fx%2Fa&lang=en&theme=dark&msg=user-added",
+        );
+        assert_eq!(
+            kept,
+            vec![
+                ("email".to_string(), "bob@x.com".to_string()),
+                ("url".to_string(), "https://x/a".to_string()),
+                ("msg".to_string(), "user-added".to_string()),
+            ]
+        );
+        assert!(preserved_query("").is_empty());
     }
 
     #[test]
@@ -3894,6 +4646,153 @@ mod tests {
         assert_eq!(cookie_value("a=1", LANG_COOKIE), None);
     }
 
+    // --- theme ----------------------------------------------------------------
+
+    #[test]
+    fn parse_theme_accepts_the_three_spellings_and_nothing_else() {
+        assert_eq!(parse_theme("light"), Some(Theme::Light));
+        assert_eq!(parse_theme("Dark"), Some(Theme::Dark));
+        assert_eq!(parse_theme(" system "), Some(Theme::System));
+        // an unrecognised value is not an error, just no preference expressed
+        assert_eq!(parse_theme("blue"), None);
+        assert_eq!(parse_theme(""), None);
+    }
+
+    #[test]
+    fn negotiate_theme_prefers_query_then_cookie_then_system() {
+        // query beats the cookie
+        assert_eq!(negotiate_theme(Some("dark"), Some("light")), Theme::Dark);
+        // cookie beats the default
+        assert_eq!(negotiate_theme(None, Some("light")), Theme::Light);
+        // System is the floor, with nothing expressed
+        assert_eq!(negotiate_theme(None, None), Theme::System);
+        // an unparseable preference is not a preference, so the next source still applies
+        assert_eq!(negotiate_theme(Some("blue"), Some("dark")), Theme::Dark);
+        assert_eq!(negotiate_theme(None, Some("blue")), Theme::System);
+    }
+
+    #[test]
+    fn cookie_value_parses_the_theme_cookie() {
+        assert_eq!(cookie_value("theme=dark", THEME_COOKIE), Some("dark"));
+        assert_eq!(
+            cookie_value("a=1; theme=light; b=2", THEME_COOKIE),
+            Some("light")
+        );
+        assert_eq!(cookie_value("mytheme=dark", THEME_COOKIE), None);
+        assert_eq!(cookie_value("a=1", THEME_COOKIE), None);
+    }
+
+    #[test]
+    fn theme_attr_is_none_only_for_system() {
+        // `None` is what leaves `data-theme` off the page for System; an explicit choice
+        // always carries its own spelling.
+        assert_eq!(Theme::Light.attr(), Some("light"));
+        assert_eq!(Theme::Dark.attr(), Some("dark"));
+        assert_eq!(Theme::System.attr(), None);
+    }
+
+    #[test]
+    fn shell_emits_data_theme_only_for_an_explicit_choice() {
+        // The stylesheet itself mentions `data-theme` in its selectors, so the assertion has
+        // to look at the `<html ...>` tag specifically, not the page as a whole.
+        let cfg = cfg_for("x.json", "");
+        let mut v = view(&cfg, Route::Dashboard, "REV");
+        let html = shell(&v, "t", html! { "x" }).into_string();
+        assert!(
+            html.contains(r#"<html lang="en">"#),
+            "System must render no data-theme attribute at all: {html}"
+        );
+        v.theme = Theme::Dark;
+        let html = shell(&v, "t", html! { "x" }).into_string();
+        assert!(
+            html.contains(r#"<html lang="en" data-theme="dark">"#),
+            "{html}"
+        );
+    }
+
+    #[test]
+    fn the_settings_menu_marks_the_chosen_option_in_both_list_boxes() {
+        let cfg = cfg_for("x.json", "");
+        let mut v = view(&cfg, Route::Dashboard, "REV");
+        let html = shell(&v, "t", html! { "x" }).into_string();
+        // The floor, and the reason it has to be a LangPref: `Auto` renders an English page
+        // and must still come back as `Auto`, not as `en`.
+        assert!(html.contains(r#"<option value="auto" selected>"#), "{html}");
+        assert!(
+            html.contains(r#"<option value="system" selected>"#),
+            "{html}"
+        );
+        assert_eq!(html.matches(" selected>").count(), 2, "{html}");
+
+        v.lang_pref = LangPref::Fixed(Lang::It);
+        v.theme = Theme::Dark;
+        let html = shell(&v, "t", html! { "x" }).into_string();
+        assert!(html.contains(r#"<option value="it" selected>"#), "{html}");
+        assert!(html.contains(r#"<option value="dark" selected>"#), "{html}");
+        assert_eq!(html.matches(" selected>").count(), 2, "{html}");
+    }
+
+    #[test]
+    fn the_page_carries_one_handler_and_no_script() {
+        // The invariant that replaced "no JavaScript": no page may *need* a script. One
+        // inline handler is allowed to save a click on the Settings list boxes; anything
+        // else — a `<script>` tag, a second kind of handler, a `javascript:` href — would be
+        // a page that stops working when scripting is off, which this GUI must never be.
+        for html in [
+            render("nojs-dash", Route::Dashboard),
+            render("nojs-users", Route::Users),
+            render("nojs-can", Route::Can),
+        ] {
+            assert!(!html.contains("<script"), "no page may carry a script tag");
+            assert!(!html.contains("javascript:"), "{html}");
+            // Two selects, two handlers, and no other `on…=` attribute anywhere.
+            assert_eq!(
+                html.matches(&format!("onchange=\"{SETTINGS_ONCHANGE}\""))
+                    .count(),
+                2,
+                "{html}"
+            );
+            for handler in [
+                " onclick=",
+                " onload=",
+                " onsubmit=",
+                " oninput=",
+                " onfocus=",
+                " onerror=",
+            ] {
+                assert!(!html.contains(handler), "{handler} in {html}");
+            }
+            // And the way through without a script is on the page, inside <noscript>.
+            assert!(
+                html.contains("<noscript><div class=\"actions\"><button>"),
+                "the no-script submit must be there, and inside noscript: {html}"
+            );
+        }
+    }
+
+    #[test]
+    fn the_settings_menu_is_a_get_that_carries_the_rest_of_the_query() {
+        // A GET, because it mutates nothing: every POST in this binary is a write to the
+        // access file, guarded by the rev and the same-origin check, and a display
+        // preference is neither.
+        let cfg = cfg_for("x.json", "/admin");
+        let mut v = view(&cfg, Route::Can, "REV");
+        v.query = "email=bob%40x.com&lang=en&theme=dark";
+        let html = shell(&v, "t", html! { "x" }).into_string();
+        assert!(
+            html.contains(r#"<form class="edit" method="get" action="/admin/can">"#),
+            "{html}"
+        );
+        // The `can` result survives the round trip; the two parameters the form sets itself
+        // do not come back as hidden fields, or the list boxes could never change them.
+        assert!(
+            html.contains(r#"<input type="hidden" name="email" value="bob@x.com">"#),
+            "{html}"
+        );
+        assert!(!html.contains(r#"type="hidden" name="lang""#), "{html}");
+        assert!(!html.contains(r#"type="hidden" name="theme""#), "{html}");
+    }
+
     // --- rendering ----------------------------------------------------------
 
     /// A view over `cfg` at `at`, as a request would build one.
@@ -3901,6 +4800,8 @@ mod tests {
         View {
             cfg,
             lang: Lang::En,
+            lang_pref: LangPref::Auto,
+            theme: Theme::System,
             admin: Some("admin@x.com"),
             at,
             query: "",
@@ -4337,6 +5238,80 @@ mod tests {
             "{html}"
         );
         assert_eq!(read(&path), before);
+        cleanup(&path);
+    }
+
+    #[test]
+    fn a_malformed_email_marks_the_email_field_invalid_and_leaves_urls_alone() {
+        let path = scratch("m-bademail-attr", SAMPLE);
+        let cfg = cfg_for(&path, "");
+        let got = post(
+            &cfg,
+            Route::UserAdd,
+            &[
+                ("rev", &rev_of(&path)),
+                ("email", "not an email"),
+                ("urls", "*://*/*"),
+            ],
+        );
+        let (status, html) = got.page();
+        assert_eq!(status, 400);
+        // The one field the refusal is about: an invalid border, and the two attributes
+        // that tie it to the message above the form for assistive tech.
+        assert!(
+            html.contains("class=\"f-email invalid\""),
+            "the email field carries the invalid state: {html}"
+        );
+        assert!(
+            html.contains(&format!("aria-describedby=\"{ERR_ID}\"")),
+            "{html}"
+        );
+        assert!(
+            html.contains(&format!("id=\"{ERR_ID}\"")),
+            "the error box carries the id aria-describedby points at: {html}"
+        );
+        // The urls textarea contributed nothing to this refusal: no invalid class, no aria
+        // attributes; only the email field is marked.
+        assert_eq!(
+            html.matches("aria-invalid=\"true\"").count(),
+            1,
+            "only the email field is marked: {html}"
+        );
+        assert!(
+            !html.contains("class=\"invalid\""),
+            "the untouched urls textarea is not bare-invalid: {html}"
+        );
+        cleanup(&path);
+    }
+
+    #[test]
+    fn an_unattributable_refusal_marks_no_field_invalid() {
+        // A site's `urls` and `login_url` are both still-unvalidated when `commit` runs, so
+        // a compile failure there cannot be pinned to either one with certainty, unlike a
+        // malformed email, which always names `email` (see `mutate`'s `Route::SiteAdd` arm).
+        // A confidently wrong field is worse than none, so this refusal marks nothing.
+        let path = scratch("m-unattributed", SAMPLE);
+        let cfg = cfg_for(&path, "");
+        let got = post(
+            &cfg,
+            Route::SiteAdd,
+            &[
+                ("rev", &rev_of(&path)),
+                ("name", "app1"),
+                ("urls", "https://app.x.com/*"),
+                ("login_url", "http://login.x.com/"),
+            ],
+        );
+        let (status, html) = got.page();
+        assert_eq!(status, 400);
+        assert!(html.contains("must be an absolute https"), "{html}");
+        assert!(!html.contains("aria-invalid=\"true\""), "{html}");
+        assert!(
+            !html.contains(&format!("aria-describedby=\"{ERR_ID}\"")),
+            "{html}"
+        );
+        assert!(!html.contains("class=\"invalid\""), "{html}");
+        assert!(!html.contains(" invalid\""), "{html}");
         cleanup(&path);
     }
 

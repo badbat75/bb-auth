@@ -5,6 +5,10 @@
 // other half — a successful mutation answers 303 to `?msg=<key>`, so a reload of what
 // the browser shows repeats nothing. And `can` answers with the gate's own decision
 // function, read-only by construction.
+//
+// The rule is no longer "no JavaScript" but "no page may need it": the Settings list boxes
+// carry one inline handler that saves a click, and the last block here runs the whole GUI
+// with scripting switched off to prove nothing else does.
 
 const { doc, bytes, newPage, submit, mainText } = require('../lib/harness');
 
@@ -15,6 +19,13 @@ async function run(ctx, t) {
     for (const p of ['/', '/users', '/sites', '/users/bot%40example.com/keys/+add']) {
       await page.goto(ctx.base + p);
       t.eq(`no <script> on ${p}`, await page.locator('script').count(), 0);
+      // And exactly one kind of handler, on exactly the two controls entitled to it.
+      const handlers = await page.evaluate(() => [...document.querySelectorAll('*')]
+        .flatMap((el) => [...el.attributes]
+          .filter((a) => a.name.startsWith('on'))
+          .map((a) => `${el.tagName.toLowerCase()}[${el.getAttribute('name')}] ${a.name}=${a.value}`)));
+      t.eq(`the only JavaScript on ${p} is the settings list boxes`, handlers.join(' | '),
+        'select[lang] onchange=this.form.submit() | select[theme] onchange=this.form.submit()');
     }
 
     // PRG: save, land on the msg page, reload it — a GET, so nothing can repeat.
@@ -53,6 +64,45 @@ async function run(ctx, t) {
     t.check('asking `can` wrote nothing', bytes(ctx) === before, 'can mutated the file');
   } finally {
     await context.close();
+  }
+
+  // --- the same GUI with scripting off ------------------------------------
+  // The one handler is an enhancement, so everything has to still work without it: the
+  // Settings menu grows its submit button back, and that button is the only path that
+  // sets both preferences in a single trip.
+  const noJs = await ctx.browser.newContext({
+    viewport: { width: 1280, height: 900 },
+    extraHTTPHeaders: { 'X-Auth-Email': 'admin@example.com' },
+    javaScriptEnabled: false,
+  });
+  try {
+    const page = await noJs.newPage();
+    await page.goto(ctx.base + '/users');
+    // `details` is HTML, not script: the menu still opens.
+    await page.click('details.settings > summary');
+    t.eq('with scripting off the Settings menu still opens',
+      await page.locator('.menu select[name=lang]').count(), 1);
+    t.eq('and grows its submit button back', await page.locator('.menu button').count(), 1);
+
+    await page.selectOption('.menu select[name=lang]', 'it');
+    await page.selectOption('.menu select[name=theme]', 'dark');
+    t.eq('picking an option alone changes nothing without the click',
+      await page.locator('html').getAttribute('lang'), 'en');
+    await submit(page, '.menu button');
+    t.eq('the button applies the language', await page.locator('html').getAttribute('lang'), 'it');
+    t.eq('and the theme, both in one trip',
+      await page.locator('html').getAttribute('data-theme'), 'dark');
+
+    // Every other page shape is unchanged by scripting: a mutation still goes through.
+    const beforeSave = bytes(ctx);
+    await page.goto(ctx.base + '/denied/+add');
+    await page.fill('input[name=email]', 'noscript@example.com');
+    await submit(page);
+    t.check('and a save still writes with no script anywhere', bytes(ctx) !== beforeSave);
+    t.check('the file has the new row',
+      doc(ctx).denied.includes('noscript@example.com'), JSON.stringify(doc(ctx).denied));
+  } finally {
+    await noJs.close();
   }
 }
 
