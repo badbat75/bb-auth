@@ -67,6 +67,8 @@ intra-doc link is the cheapest rot detector this repo has, and it now spans two 
 Deep docs: [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md) (service internals) and
 [docs/AUTHENTICATION_FLOW.md](docs/AUTHENTICATION_FLOW.md) (the end-to-end
 browser↔Cognito↔nginx sequence). Read those before changing the request flow or cookie format.
+[scripts/README.md](scripts/README.md) maps the five build/deploy scripts: which machine each
+one runs on, who calls whom, and which invariant each one is there to hold.
 
 ## Commands
 
@@ -104,9 +106,20 @@ cargo doc --no-deps                   # must emit zero warnings, across all four
 # dist/{bb-auth,bb-auth-adm,bb-auth-web} (aarch64) and the max GLIBC symbol required.
 bash scripts/build.sh                 # target overridable via BB_AUTH_TARGET
 
-# Deploy from Windows over SSH (build in WSL + ship + remote self-verify)
-./scripts/deploy.ps1 user@host -Build
-./scripts/deploy.ps1 user@host -UsersFile .\deploy\users.json   # first install / replace access file
+# .deb packages for the target: three of them, one per binary (cargo-deb; the metadata
+# is [package.metadata.deb] in Cargo.toml). Builds through build.sh, so dist/ stays
+# current for deploy.ps1 too. Runs in WSL; started from a Windows shell it hands itself
+# over. Output: dist/{bb-auth,bb-auth-adm,bb-auth-web}_<ver>-<rev>_<arch>.deb
+bash scripts/package.sh               # arm64; --arch amd64, --no-build, --only, --revision
+
+# Deploy from Windows over SSH: package in WSL, ship the .deb, dpkg -i, remote verify.
+# Building is no longer opt-in; -NoBuild repackages the current dist/ instead.
+./scripts/deploy.ps1 user@host
+./scripts/deploy.ps1 user@host -Packages bb-auth                # gate only, no admin tools
+./scripts/deploy.ps1 user@host -UsersFile .\deploy\users.json   # also replace the access file
+
+# Health-check a host without deploying to it (also run at the end of every deploy)
+ssh user@host 'sudo bash -s' < ./scripts/verify.sh
 ```
 
 **Match the check to the change.** Every suite here is cheap to start and slow to finish, so
@@ -350,8 +363,10 @@ changes. `node e2e/shots.js` takes a scene-name filter for the same reason: the 
   secret is `BB_AUTH_HMAC_KEY` (≥32 bytes). Full reference: [deploy/bb-auth.env.example](deploy/bb-auth.env.example)
   and `docs/ARCHITECTURE.md` §8.
 - **Target layout is a tree**: `/opt/bb-auth/{bin/bb-auth, bin/bb-auth-adm, bin/bb-auth-web,
-  etc/bb-auth.env, etc/bb-auth-web.env, var/lib/users.json}`, units at
-  `/etc/systemd/system/{bb-auth.service, bb-auth-web.service, bb-auth-reload.{path,service}}`.
+  etc/bb-auth.env, etc/bb-auth-web.env, share/*.example, var/lib/users.json}`, units at
+  `/usr/lib/systemd/system/{bb-auth.service, bb-auth-web.service, bb-auth-reload.{path,service}}`
+  (where a **package** must put them; `/etc/systemd/system` is the admin's, and a copy there
+  from a pre-package install *overrides* it, which is what `deploy.sh` moves aside).
   **The gate** writes nothing, so its whole prefix is `ReadOnlyPaths` and no `StateDirectory` is
   needed despite the `var/lib` name — `bb-auth-adm` writes that file from *outside* the unit's
   namespace, as root, and the hardening does not apply to it. It runs hardened and non-privileged
@@ -360,7 +375,8 @@ changes. `node e2e/shots.js` takes a scene-name filter for the same reason: the 
   its own `bb-auth-web` user, its own operator-owned env (`BB_AUTH_WEB_ADMINS` required and
   never empty), and one hole in the read-only tree: `ReadWritePaths=/opt/bb-auth/var/lib`. The
   hole is the **directory**, because the write is a temp file renamed into place. Both admin
-  tools are **optional in the deploy** (installed iff staged), and must stay that way.
+  tools are **optional in the deploy** (their own packages, `deploy.ps1 -Packages`), and must
+  stay that way.
 - **Installing `bb-auth-web` is what moves the access file to `bb-auth-web:bb-auth 0640`**
   (its directory `bb-auth-web:bb-auth 0750`); a deploy without it changes no ownership at all,
   which is what keeps an older `dist/` byte-identical in behaviour. The gate keeps read access
@@ -379,18 +395,31 @@ changes. `node e2e/shots.js` takes a scene-name filter for the same reason: the 
   GUI, so a CLI-only host still reloads by hand; a doubled reload costs nothing.
 - **The live `users.json` is the copy that is current** — it is edited on the host (`sudo
   bb-auth-adm …; systemctl reload bb-auth`) and a repo copy drifts from it within a week. So
-  `deploy.sh` preserves it unless one is explicitly staged, and `deploy.ps1 -UsersFile` **replaces**
-  it wholesale: never stage a stale file. `bb-auth-adm` is installed to the host precisely so the
-  edit can happen where the current file is. It is optional in the deploy (installed if staged), and
-  must stay that way: the gate never calls it, and an older `dist/` must still deploy.
-- `scripts/deploy.sh` is the on-host installer (root, idempotent, self-verifying). It is
-  **lockout-safe by construction**: it generates the HMAC key once and preserves it forever, and
-  preserves the live `users.json` unless a new one is explicitly staged. **The env file is
-  operator-owned** — installed once, then never edited. So the deploy *validates* config rather
-  than fixing it: a missing required var, or a `BB_AUTH_USERS_FILE` that doesn't point at the file
-  this deploy installs, aborts **before** the restart. Both matter — a fatal startup under
-  `Restart=on-failure` is a boot loop, and a mismatched path means `--check-users` vouched for a
-  file nothing loads. A redeploy must never log anyone out *by accident* — that is what preserving
-  the HMAC key buys, and it stays non-negotiable; the one sanctioned exception is a deliberate
-  cookie-format bump, which does log everyone out and belongs in the release's upgrade note. A
-  rejected users file must never reach a restart.
+  a redeploy preserves it and `deploy.ps1 -UsersFile` **replaces** it wholesale: never stage a
+  stale file. `bb-auth-adm` is installed to the host precisely so the edit can happen where the
+  current file is. It is its own package and optional, and must stay that way: the gate never
+  calls it.
+- **The deploy is `dpkg -i`, and the packages are where the install lives.** Everything the
+  old file-copying installer did (the binaries, the units, the service users, the env file, the
+  HMAC key, the empty access file, and the order they must happen in) is now
+  `deploy/debian/*/postinst`, and it is **lockout-safe by the same argument, made stronger**:
+  no state is packaged, so dpkg *cannot* clobber the HMAC key or the live `users.json`, because
+  it cannot clobber a file it does not ship. That is also why they are **not** `conf-files`: a
+  prompt one `--force-confnew` would lose is not the same guarantee. The env file stays
+  operator-owned (created once from `share/*.example`, then never edited), so the install
+  *validates* config rather than fixing it: a missing required var, or a `BB_AUTH_USERS_FILE`
+  that does not name the file this install creates, fails the `postinst` **before** the restart
+  and dpkg reports it. Both matter: a fatal startup under `Restart=on-failure` is a boot loop,
+  and a mismatched path means `--check-users` vouched for a file nothing loads. A redeploy must
+  never log anyone out *by accident*, and the one sanctioned exception is a deliberate
+  cookie-format bump, which belongs in the release's upgrade note.
+- **`scripts/deploy.sh` is what a package may not do**, and nothing else: `dpkg -i` in one
+  transaction (not `apt install`, which declines to reinstall an equal version, so a rebuilt
+  `3.0.0-1` would silently not deploy); moving aside a unit an older install left in
+  `/etc/systemd/system`, which overrides the packaged one forever; installing a staged
+  `users.json` after the gate's own parser has vouched for it, with the owner and mode the live
+  file already had; and running `scripts/verify.sh`. `deploy.ps1` builds the packages
+  (`package.sh` first, always), ships them with those two scripts, and runs `deploy.sh` as root
+  there. Keep the host-side logic in those files rather than in a string quoted through
+  PowerShell into `ssh` into a remote shell, and keep `verify.sh` read-only so it stays runnable
+  by hand on a host nobody is deploying to.

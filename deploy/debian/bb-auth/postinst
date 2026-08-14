@@ -1,0 +1,132 @@
+#!/bin/sh
+# bb-auth postinst. dpkg runs this with `configure` on a first install AND on every
+# upgrade; $2 is the previously configured version, empty only the first time. That
+# difference is most of this file: everything below is written once, when it is
+# absent, and never again.
+#
+# Nothing here may destroy state an earlier install created. The HMAC key logs every
+# user out if it changes, and the access file is the only copy that is current. So
+# neither is in the package at all: dpkg cannot clobber a file it does not ship, which
+# is preservation by construction rather than by a conffile prompt.
+set -e
+
+DEST=/opt/bb-auth
+ENV_FILE="$DEST/etc/bb-auth.env"
+USERS_FILE="$DEST/var/lib/users.json"
+UNIT=bb-auth.service
+
+case "$1" in
+configure)
+    # --- identity: the service user, no login, no home (as scripts/deploy.sh) ---
+    getent group bb-auth >/dev/null || groupadd --system bb-auth
+    getent passwd bb-auth >/dev/null || useradd --system --gid bb-auth \
+        --no-create-home --home-dir "$DEST" --shell /usr/sbin/nologin bb-auth
+
+    # dpkg only creates directories that hold a packaged file, and neither of these
+    # does: both hold state this script writes.
+    install -d -o root -g root -m 0755 "$DEST/etc" "$DEST/var" "$DEST/var/lib"
+
+    # --- the env file, once ---
+    # The HMAC key is generated here and preserved forever after: changing it
+    # invalidates every session cookie in the wild. It is the one secret in the
+    # deployment and it exists nowhere but this file.
+    FRESH_ENV=0
+    if [ ! -e "$ENV_FILE" ]; then
+        FRESH_ENV=1
+        umask 027
+        { printf 'BB_AUTH_HMAC_KEY=%s\n' "$(head -c 48 /dev/urandom | base64 -w0)"
+          grep -vE '^[[:space:]]*BB_AUTH_HMAC_KEY=' "$DEST/share/bb-auth.env.example"
+        } > "$ENV_FILE"
+        chown root:bb-auth "$ENV_FILE"
+        chmod 0640 "$ENV_FILE"
+    fi
+
+    # --- the access file, once, and EMPTY ---
+    # Deliberately not a copy of share/users.example.json, which grants '*://*/*' to
+    # you@example.com. An empty roster authorizes nobody, which is the only safe thing
+    # an unattended install can write, and it parses.
+    if [ ! -e "$USERS_FILE" ]; then
+        printf '{\n  "users": []\n}\n' > "$USERS_FILE"
+        chown root:bb-auth "$USERS_FILE"
+        chmod 0640 "$USERS_FILE"
+    fi
+
+    # --- a scripts/deploy.sh install shadows this one ---
+    # That installer writes /etc/systemd/system, the ADMIN directory, whose copy wins
+    # over the packaged unit in /usr/lib/systemd/system. dpkg may not remove it, so say
+    # so out loud: otherwise the unit this package ships is simply never read.
+    if [ -e "/etc/systemd/system/$UNIT" ]; then
+        echo "bb-auth: WARNING /etc/systemd/system/$UNIT exists and overrides the packaged unit." >&2
+        echo "bb-auth:          It is from scripts/deploy.sh. Remove it, then: systemctl daemon-reload" >&2
+    fi
+
+    # --- preflight: validate, never fix ---
+    # The checks scripts/deploy.sh runs before it restarts anything. A missing required
+    # var, or an access file the parser rejects, is a fatal startup, and under
+    # Restart=on-failure that is a boot loop. Failing HERE, before the restart below,
+    # leaves the already-running process serving on the inode it still holds.
+    envval() {
+        grep -E "^[[:space:]]*$1=" "$ENV_FILE" 2>/dev/null | tail -1 | cut -d= -f2- | tr -d '[:space:]' || true
+    }
+    FAIL=0
+    for req in BB_AUTH_HMAC_KEY BB_AUTH_COGNITO_ISSUER BB_AUTH_CLIENT_ID \
+               BB_AUTH_AUTHORIZED_HOSTS BB_AUTH_LOGIN_URL BB_AUTH_USERS_FILE; do
+        if [ -z "$(envval "$req")" ]; then
+            echo "bb-auth: $ENV_FILE does not set $req (required)" >&2
+            FAIL=1
+        fi
+    done
+
+    # --check-users must have vouched for the file the service will actually read.
+    ENV_USERS="$(envval BB_AUTH_USERS_FILE)"
+    if [ -n "$ENV_USERS" ] && [ "$ENV_USERS" != "$USERS_FILE" ]; then
+        echo "bb-auth: BB_AUTH_USERS_FILE=$ENV_USERS but this package installs $USERS_FILE." >&2
+        echo "bb-auth:          The gate would read a file nothing validated." >&2
+        FAIL=1
+    fi
+
+    # The authoritative check: the gate's own parser, on the exact bytes going live.
+    "$DEST/bin/bb-auth" --check-users "$USERS_FILE" || FAIL=1
+
+    if [ -d /run/systemd/system ]; then
+        systemctl --system daemon-reload >/dev/null || true
+    fi
+
+    if [ "$FRESH_ENV" = 1 ]; then
+        # First install. The env file is a template with a real key in it and nothing
+        # else filled in, so there is nothing to start yet, and enabling the unit would
+        # only queue a fatal startup for the next boot.
+        echo "bb-auth: installed, not started."
+        echo "bb-auth:   1. fill in $ENV_FILE (issuer, client id, authorized hosts,"
+        echo "bb-auth:      login URL). The HMAC key is already there and must stay."
+        echo "bb-auth:   2. $USERS_FILE is empty: nobody is authorized. Add someone with"
+        echo "bb-auth:      bb-auth-adm -f $USERS_FILE user add you@example.com --url 'https://app.example.com/*'"
+        echo "bb-auth:   3. systemctl enable --now bb-auth"
+    elif [ "$FAIL" = 1 ]; then
+        echo "bb-auth: NOT restarted. The running process is still serving." >&2
+        echo "bb-auth: Fix the above, then: systemctl restart bb-auth" >&2
+        exit 1
+    else
+        # The debhelper idiom: was-enabled defaults to true, so a first configure
+        # enables and an operator who disabled the unit keeps it disabled on upgrade.
+        if [ -x /usr/bin/deb-systemd-helper ]; then
+            deb-systemd-helper unmask "$UNIT" >/dev/null || true
+            if deb-systemd-helper --quiet was-enabled "$UNIT"; then
+                deb-systemd-helper enable "$UNIT" >/dev/null || true
+            else
+                deb-systemd-helper update-state "$UNIT" >/dev/null || true
+            fi
+        fi
+        # restart, not stop-then-start: sessions are stateless, so the only cost is the
+        # window itself, and prerm deliberately does not stop the gate on an upgrade.
+        if [ -d /run/systemd/system ] && [ -x /usr/bin/deb-systemd-invoke ]; then
+            deb-systemd-invoke restart "$UNIT" >/dev/null || true
+        fi
+    fi
+    ;;
+
+abort-upgrade|abort-remove|abort-deconfigure)
+    ;;
+esac
+
+exit 0

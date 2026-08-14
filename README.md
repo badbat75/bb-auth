@@ -454,10 +454,10 @@ well: what a form needs to know about the file travels in the form.
 
 #### Deploying it
 
-Optional, exactly like `bb-auth-adm`: `scripts/build.sh` produces `dist/bb-auth-web`,
-`deploy.ps1` stages it when it is there, and `deploy.sh` installs it — with its unit, its
-env and the reload watcher — only if it was staged. A `dist/` without it deploys precisely
-as it always did, down to the ownership of the access file.
+Optional, exactly like `bb-auth-adm`: it is its own package, `bb-auth-web`, carrying its
+unit, its env template and the reload watcher, and depending on the exact same version of
+`bb-auth`. `deploy.ps1 -Packages bb-auth` leaves it out, and a host that never installs it
+is untouched by all of this, down to the ownership of the access file.
 
 ```text
 /opt/bb-auth/bin/bb-auth-web        # binary (root-owned, executed by bb-auth-web)
@@ -645,47 +645,83 @@ On the target, bb-auth is laid out as:
 ```text
 /opt/bb-auth/bin/bb-auth          # binary (root-owned, read-only to the service)
 /opt/bb-auth/etc/bb-auth.env      # config + HMAC key (0640, service-user readable)
+/opt/bb-auth/share/*.example      # the templates the first install copies from
 /opt/bb-auth/var/lib/users.json   # access list (0640, readable by the bb-auth group)
-/etc/systemd/system/bb-auth.service
+/usr/lib/systemd/system/bb-auth.service
 
-# optional, installed only when staged — see "Editing it" and "Editing it in a browser"
+# separate packages, both optional: see "Editing it" and "Editing it in a browser"
 /opt/bb-auth/bin/bb-auth-adm      # the admin CLI
 /opt/bb-auth/bin/bb-auth-web      # the admin GUI, run by its own bb-auth-web user
 /opt/bb-auth/etc/bb-auth-web.env  # the GUI's config (operator-owned, no secret)
-/etc/systemd/system/bb-auth-web.service
-/etc/systemd/system/bb-auth-reload.{path,service}   # users.json changed -> reload the gate
+/usr/lib/systemd/system/bb-auth-web.service
+/usr/lib/systemd/system/bb-auth-reload.{path,service}   # users.json changed -> reload the gate
 ```
+
+The units live where a **package** must put them. `/etc/systemd/system` is the admin's
+directory and a copy there *overrides* them, which is what an install from before the
+packages left behind; `deploy.sh` moves any it finds aside.
 
 Installing the GUI is what moves `users.json` to `bb-auth-web:bb-auth` (the gate keeps
 reading it through the group, unit unchanged); a deploy without it changes no ownership at
 all. See [Who owns the access file](#who-owns-the-access-file).
 
-`scripts/deploy.sh` is the **on-host installer** (run as root, on the target):
-it installs the binary/unit + staged `bb-auth.env` (generating the HMAC key on
-first install, then preserving it forever), restarts the service, and runs a
-**post-deploy verification** — service active, `GET /auth/healthz == ok`,
-`GET /auth/validate` (no cookie) `== 401`, HMAC key present, users.json
-integrity, clean journal startup — exiting non-zero if any check fails. Staging a
-`users.json` is **optional**: if absent, the live one is preserved, so a
-binary-only redeploy can never lock anyone out. Before it restarts anything it
-validates the users file that is about to go live with the real parser
-(`bb-auth --check-users`) and aborts if it is rejected, leaving the previous
-binary serving.
+**The install is a `.deb`.** Three of them, one per binary, built by
+`scripts/package.sh` (cargo-deb; the metadata is `[package.metadata.deb]` in
+`Cargo.toml`, the maintainer scripts are real files under `deploy/debian/`):
+
+```powershell
+bash scripts/package.sh                    # arm64; --arch amd64, --no-build, --only
+# → dist/{bb-auth,bb-auth-adm,bb-auth-web}_<version>-1_<arch>.deb
+```
+
+Everything the install does lives in those packages: the service users, the units, the
+env file, the HMAC key, an empty access file, and the order they must happen in. What
+they deliberately do **not** carry is any state, so `dpkg` cannot clobber
+`etc/bb-auth.env` (the HMAC key: every live session cookie depends on it) or
+`var/lib/users.json` (the only copy that is current). It cannot clobber a file it does
+not ship, and that is a stronger guarantee than a `conffile` prompt, which one
+`--force-confnew` would lose. Both are created on the **first** install only, and the
+`postinst` runs the same preflight before anything restarts: the required env vars, and
+`bb-auth --check-users` on the access file about to go live. A failure there exits
+non-zero with the running process still serving, because a fatal startup under
+`Restart=on-failure` is a boot loop.
+
+A first install therefore ends *without* starting the gate: it says what to fill in.
+
+`scripts/deploy.sh` is the **on-host installer** (run as root, on the target) and does
+only what a package may not: `dpkg -i` in one transaction (not `apt install`, which
+declines to reinstall an equal version, so a rebuilt `3.0.0-1` would silently not
+deploy); moves aside any unit an older install left in `/etc/systemd/system`; installs a
+staged `users.json` after `--check-users` has vouched for it, with the owner and mode
+the live file already had; and runs `scripts/verify.sh`.
+
+`scripts/verify.sh` is the **post-deploy verification**, and it is standalone: packages
+configured, no unit shadowed, service active, `GET /auth/healthz == ok`,
+`GET /auth/validate` (no cookie) `== 401`, HMAC key present, the access file parsing,
+clean journal startup, and with the GUI its own liveness plus the ownership the write
+path needs. It exits non-zero if any check fails, and changes nothing, so it is also the
+way to ask a host how it is doing:
+
+```powershell
+ssh user@host 'sudo bash -s' < ./scripts/verify.sh
+```
 
 `scripts/deploy.ps1` (**run from Windows**) orchestrates the whole thing for a
 `user@host`:
 
 ```powershell
-./scripts/deploy.ps1 emiliano@rpi-01.bombicci.local -Build          # build in WSL + redeploy (users.json + HMAC key kept)
-./scripts/deploy.ps1 emiliano@rpi-01.bombicci.local -UsersFile .\deploy\users.json   # first install / replace access file
+./scripts/deploy.ps1 emiliano@rpi-01.bombicci.local          # package in WSL + redeploy (users.json + HMAC key kept)
+./scripts/deploy.ps1 emiliano@rpi-01.bombicci.local -Packages bb-auth   # gate only
+./scripts/deploy.ps1 emiliano@rpi-01.bombicci.local -UsersFile .\deploy\users.json   # also replace the access file
 ```
 
-It verifies SSH + passwordless sudo + aarch64, stages the artifacts, runs
-`deploy.sh` as root, pings healthz, and cleans up. By default it ships no
-users.json and never regenerates the HMAC key, so redeploys are zero-downtime.
-It also stages `dist/bb-auth-adm` and `dist/bb-auth-web` when the build produced
-them — both optional, both installed only because they were staged, so an older
-`dist/` carrying just the gate still deploys exactly as it did.
+It builds the packages (`package.sh`, which builds through `build.sh`, so `dist/` stays
+current for everything else), verifies SSH + passwordless sudo + the target's
+architecture, ships the `.deb` files with `deploy.sh` and `verify.sh`, runs `deploy.sh`
+as root, and cleans up. By default it ships no `users.json` and never regenerates the
+HMAC key, so redeploys are zero-downtime. `-Packages` is how the two admin tools stay
+optional: they are separate packages that `Depends: bb-auth (= <version>)`, and a
+gate-only host installs the gate alone.
 
 ## Run
 
@@ -694,9 +730,11 @@ to run **as a non-privileged service, on loopback, behind a TLS-terminating
 reverse proxy** that performs the `auth_request`. It needs two files: the env
 file (holds the HMAC secret) and the users file (JSON access list). The included
 `deploy/bb-auth.service` runs it as a dedicated system user with aggressive
-systemd hardening; `scripts/deploy.sh` is an example installer (creates the
-user, installs the binary/unit + staged `bb-auth.env`, generates the HMAC key
-once and preserves it across redeploys). See [`docs/ARCHITECTURE.md`](docs/ARCHITECTURE.md) §"Running it".
+systemd hardening, and the `bb-auth` package installs exactly that: it creates the
+user, puts the binary and the unit in place, writes `bb-auth.env` from the shipped
+template with a freshly generated HMAC key on the **first** install, and preserves that
+key and the access file through every later upgrade. See
+[`docs/ARCHITECTURE.md`](docs/ARCHITECTURE.md) §"Running it".
 
 ## Config
 

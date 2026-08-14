@@ -1,0 +1,54 @@
+#!/bin/sh
+# bb-auth-web postrm. On purge it hands the access file back: installing this package
+# is what moved it to bb-auth-web:bb-auth, so removing it is what must undo that, or
+# the gate is left reading a file owned by a user nothing runs as.
+set -e
+
+DEST=/opt/bb-auth
+VAR_DIR="$DEST/var/lib"
+USERS_FILE="$VAR_DIR/users.json"
+
+if [ -d /run/systemd/system ]; then
+    systemctl --system daemon-reload >/dev/null || true
+fi
+
+case "$1" in
+remove)
+    if [ -x /usr/bin/deb-systemd-helper ]; then
+        for u in bb-auth-web.service bb-auth-reload.path bb-auth-reload.service; do
+            deb-systemd-helper mask "$u" >/dev/null || true
+        done
+    fi
+    ;;
+
+purge)
+    if [ -x /usr/bin/deb-systemd-helper ]; then
+        for u in bb-auth-web.service bb-auth-reload.path bb-auth-reload.service; do
+            deb-systemd-helper purge "$u" >/dev/null || true
+            deb-systemd-helper unmask "$u" >/dev/null || true
+        done
+    fi
+
+    rm -f "$DEST/etc/bb-auth-web.env"
+
+    # Back to what a gate-only host looks like: the file root:bb-auth 0640, its
+    # directory root:root 0755. Only while the gate's group still exists to own it;
+    # if it does not, the gate is going too and its own purge deals with the file.
+    if getent group bb-auth >/dev/null 2>&1; then
+        if [ -e "$USERS_FILE" ]; then
+            chown root:bb-auth "$USERS_FILE"
+            chmod 0640 "$USERS_FILE"
+        fi
+        if [ -e "$USERS_FILE.bak" ]; then
+            chown root:bb-auth "$USERS_FILE.bak"
+            chmod 0640 "$USERS_FILE.bak"
+        fi
+        if [ -d "$VAR_DIR" ]; then
+            chown root:root "$VAR_DIR"
+            chmod 0755 "$VAR_DIR"
+        fi
+    fi
+    ;;
+esac
+
+exit 0

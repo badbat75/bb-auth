@@ -1,69 +1,102 @@
 <#
 .SYNOPSIS
-    Stage and deploy bb-auth to a remote host over SSH (run from Windows).
+    Build the .deb packages and deploy them to a remote host over SSH (run from Windows).
 
 .DESCRIPTION
-    Orchestrates a zero-downtime (re)deploy of bb-auth to a Linux host:
-      1. (with -Build) cross-build the aarch64 binary in WSL
-      2. verify the local artifacts exist
-      3. verify SSH access, passwordless sudo, and an aarch64 target
-      4. stage binary + service unit + env placeholder + deploy.sh on the remote
-      5. run deploy.sh on the remote as root (it installs, restarts, self-verifies)
-      6. final liveness ping, then clean up the remote staging directory
+    Orchestrates a (re)deploy of bb-auth to a Linux host, through dpkg:
+      1. build the packages in WSL (scripts/package.sh, which builds through
+         scripts/build.sh, so dist/ stays current for everything else too)
+      2. probe the target BEFORE copying anything: SSH access, passwordless sudo, the
+         architecture, and which package manager it has. A `.deb` host (Debian, Ubuntu,
+         Raspberry Pi OS, Mint) is the only supported family; an RPM host (Fedora, RHEL,
+         Rocky, openSUSE) is refused with a plain "not supported yet", because
+         scripts/package.sh builds with cargo-deb and there is no RPM to ship
+      3. ship the .deb files, scripts/deploy.sh and scripts/verify.sh to a staging
+         directory on the remote
+      4. run deploy.sh there as root, then clean the staging directory up
 
-    On the target, bb-auth lives at /opt/bb-auth/{bin/bb-auth, etc/bb-auth.env,
-    var/lib/users.json}.
+    deploy.sh is the host side and does the four things a package cannot: `dpkg -i` in
+    one transaction, moving aside any unit an older deploy.sh left in /etc/systemd/system
+    (it overrides the packaged one forever), installing a staged access file after the
+    gate's own parser has vouched for it, and running verify.sh. It is staged rather
+    than inlined here so the logic that touches a live gate is reviewable in the repo,
+    not quoted through PowerShell into ssh into a remote shell.
 
-    The two admin tools travel the same way, and both are optional: dist/bb-auth-adm
-    and dist/bb-auth-web are staged when they are there and skipped when they are not,
-    so an older dist/ still deploys. Staging bb-auth-web pulls its unit, its env and
-    the bb-auth-reload.path watcher along with it — and hands the access file over to
-    the bb-auth-web user on the host (see deploy.sh). Its env is deploy/bb-auth-web.env
-    if you keep one, else the tracked template; either way the remote copy is installed
-    once and never edited, so the first GUI deploy stops at the preflight until
-    BB_AUTH_WEB_ADMINS is filled in on the host.
+    The install itself, and everything that must survive it, is the packages' business:
+    see [package.metadata.deb] in Cargo.toml and deploy/debian/*/postinst. In short, no
+    state is packaged, so an upgrade cannot touch either of the two things that must
+    never change by accident:
 
-    Lockout-safe by construction:
-      - By default NOTHING is staged for users.json, so deploy.sh keeps the
-        existing var/lib/users.json untouched. Use -UsersFile for a first install
-        or to replace the access file.
-      - deploy.sh preserves an existing etc/bb-auth.env and never edits it, so the
-        HMAC key — and therefore every existing session cookie — stays valid across
-        redeploys. It validates the env and aborts on a missing required var.
-      - deploy.sh validates the users file that is about to go live with the real
-        parser and aborts BEFORE restarting if it is rejected.
+      - etc/bb-auth.env, which carries the HMAC key. It is created once, on a first
+        install, and preserved forever after, so existing session cookies keep
+        verifying and nobody is logged out by a redeploy.
+      - var/lib/users.json, the live access file. A redeploy leaves it exactly as it
+        is. -UsersFile is the only thing here that replaces it, and it validates the
+        file with `bb-auth --check-users` before anything is overwritten.
+
+    `dpkg -i` rather than `apt install`, deliberately: apt would decline to reinstall a
+    version equal to the one already there, so a rebuilt 3.0.0-1 would silently not
+    deploy. dpkg always unpacks and re-configures, which is what a redeploy means here.
 
 .PARAMETER Target
     SSH target as user@host, e.g. emiliano@rpi-01.bombicci.local.
 
+.PARAMETER Packages
+    Which packages to install. Default: all three. The two admin tools are optional by
+    design (the gate never calls either), so `-Packages bb-auth` is a gate-only host.
+    NOTE installing bb-auth-web is what hands the access file to the bb-auth-web user;
+    a deploy without it changes no ownership at all.
+
 .PARAMETER UsersFile
-    Local users.json to stage instead of preserving the remote one. Required for a
-    first install. Validated as JSON, then parsed by the freshly-installed binary,
-    before it replaces the live file.
+    Local users.json to install over the remote one. Required only for a first install
+    on a host where you want a roster immediately: the package creates an EMPTY access
+    file (nobody authorized) and never touches it again. Validated as JSON locally, then
+    by the freshly-installed binary on the host, before it replaces the live file.
     Check it locally first: cargo run -- --check-users .\deploy\users.json
 
-.PARAMETER Build
-    Cross-build the aarch64 binary in WSL before staging.
+.PARAMETER Arch
+    Debian architecture to build and deploy. Default: arm64 (the Pi).
+
+.PARAMETER NoBuild
+    Skip the compile and package whatever binaries are already in dist/. The packages
+    are still rebuilt, which takes seconds.
+
+.PARAMETER KeepLegacyUnits
+    Leave any /etc/systemd/system/bb-auth*.{service,path} from an older
+    scripts/deploy.sh install in place. They OVERRIDE the packaged units, so this is
+    only for a host you are deliberately keeping on the old layout.
 
 .PARAMETER WslDistro
-    WSL distribution to use with -Build. Default: FedoraLinux-44.
+    WSL distribution used for the build. Default: FedoraLinux-44.
 
 .EXAMPLE
-    ./scripts/deploy.ps1 emiliano@rpi-01.bombicci.local -Build
-    Cross-build in WSL, then redeploy to rpi-01 (users.json + HMAC key kept).
+    ./scripts/deploy.ps1 emiliano@rpi-01.bombicci.local
+    Build the arm64 packages and deploy all three (users.json + HMAC key kept).
+
+.EXAMPLE
+    ./scripts/deploy.ps1 emiliano@rpi-01.bombicci.local -NoBuild -Packages bb-auth
+    Repackage the current dist/ and install the gate only.
 
 .EXAMPLE
     ./scripts/deploy.ps1 emiliano@rpi-01.bombicci.local -UsersFile .\deploy\users.json
-    Deploy and replace the access file (users.json) with the given file.
+    Deploy, then replace the access file with the given one.
 #>
 [CmdletBinding()]
 param(
     [Parameter(Mandatory = $true, Position = 0)]
     [string]$Target,
 
+    [ValidateSet('bb-auth', 'bb-auth-adm', 'bb-auth-web')]
+    [string[]]$Packages = @('bb-auth', 'bb-auth-adm', 'bb-auth-web'),
+
     [string]$UsersFile,
 
-    [switch]$Build,
+    [ValidateSet('arm64', 'amd64', 'armhf')]
+    [string]$Arch = 'arm64',
+
+    [switch]$NoBuild,
+
+    [switch]$KeepLegacyUnits,
 
     [string]$WslDistro = 'FedoraLinux-44'
 )
@@ -73,27 +106,26 @@ $ErrorActionPreference = 'Stop'
 # letting them auto-throw, so we can report the failing step clearly.
 $PSNativeCommandUseErrorActionPreference = $false
 
-$Repo           = (Resolve-Path (Join-Path $PSScriptRoot '..')).Path
-$BinPath        = Join-Path $Repo 'dist\bb-auth'
-# The access-file admin CLI. Shipped when it is there and skipped when it is not, so an
-# older dist/ still deploys: it is a tool for the operator, never a dependency of the gate.
-$AdmPath        = Join-Path $Repo 'dist\bb-auth-adm'
-# The admin GUI. Same rule as the CLI — shipped when it is there — but it does not travel
-# alone: it needs its unit, its env and the reload watcher, and deploy.sh treats a staged
-# binary without them as a fatal staging error rather than installing a service that
-# cannot start.
-$WebPath        = Join-Path $Repo 'dist\bb-auth-web'
-$WebUnit        = Join-Path $Repo 'deploy\bb-auth-web.service'
-$ReloadPathUnit = Join-Path $Repo 'deploy\bb-auth-reload.path'
-$ReloadSvcUnit  = Join-Path $Repo 'deploy\bb-auth-reload.service'
-# Operator-owned like the gate's: a real deploy\bb-auth-web.env if you keep one (it is
-# gitignored, as *.env is), otherwise the tracked template. It carries no secret.
-$WebEnvReal     = Join-Path $Repo 'deploy\bb-auth-web.env'
-$WebEnvTemplate = Join-Path $Repo 'deploy\bb-auth-web.env.example'
-$ServiceUnit    = Join-Path $Repo 'deploy\bb-auth.service'
-$EnvPlaceholder = Join-Path $Repo 'deploy\bb-auth.env'
-$DeploySh       = Join-Path $Repo 'scripts\deploy.sh'
-$RemoteStage    = 'bb-auth-stage'
+$Repo        = (Resolve-Path (Join-Path $PSScriptRoot '..')).Path
+$DistDir     = Join-Path $Repo 'dist'
+# The host side of the deploy: dpkg -i, the legacy-unit migration, the access file, and
+# the checks. It runs as root on the target and is staged with the packages, so the
+# logic that touches a live gate is in the repo and not in a quoted string.
+$DeploySh    = Join-Path $Repo 'scripts\deploy.sh'
+$VerifySh    = Join-Path $Repo 'scripts\verify.sh'
+$RemoteStage = 'bb-auth-stage'
+
+# The gate is not optional, and it must be configured before the two admin packages,
+# which Depends: bb-auth (= <version>). dpkg sorts one transaction out by itself, but
+# the order also decides which postinst prints what, so keep it deliberate.
+if ($Packages -notcontains 'bb-auth') {
+    throw "-Packages must include bb-auth: the other two Depends: bb-auth (= <version>)."
+}
+$Packages = @('bb-auth', 'bb-auth-adm', 'bb-auth-web') | Where-Object { $Packages -contains $_ }
+
+# uname -m on the target, per Debian architecture. A mismatch here is a package apt
+# would install and the kernel could not exec.
+$UnameFor = @{ arm64 = 'aarch64'; amd64 = 'x86_64'; armhf = 'armv7l' }
 
 function Assert-Native([string]$What) {
     if ($LASTEXITCODE -ne 0) {
@@ -107,43 +139,58 @@ function ConvertTo-WslPath([string]$WinPath) {
     return "/mnt/$drive" + $p.Substring(2)
 }
 
-# --- 1. optional build -------------------------------------------------------
-if ($Build) {
-    Write-Host "==> cross-building aarch64 binary in WSL ($WslDistro)" -ForegroundColor Cyan
-    $wslRepo = ConvertTo-WslPath $Repo
-    wsl -d $WslDistro -- bash -lc "cd `"$wslRepo`" && bash scripts/build.sh"
-    Assert-Native "WSL build (scripts/build.sh)"
-}
+# --- 1. build the packages ---------------------------------------------------
+$pkgArgs = "--arch $Arch"
+if ($NoBuild) { $pkgArgs += ' --no-build' }
+Write-Host "==> building the $Arch packages in WSL ($WslDistro)" -ForegroundColor Cyan
+$wslRepo = ConvertTo-WslPath $Repo
+wsl -d $WslDistro -- bash -lc "cd `"$wslRepo`" && bash scripts/package.sh $pkgArgs"
+Assert-Native "WSL package build (scripts/package.sh $pkgArgs)"
 
-# --- 2. local artifacts ------------------------------------------------------
-if (-not (Test-Path -LiteralPath $BinPath)) {
-    throw "Binary not found: $BinPath. Re-run with -Build, or build first in WSL (bash scripts/build.sh)."
+# --- 2. the artifacts --------------------------------------------------------
+# The version comes from Cargo.toml, and the revision is package.sh's default. Matching
+# on the exact filename rather than a glob is what stops a stale .deb from an older
+# version being shipped when this build produced nothing.
+$Version = (Select-String -Path (Join-Path $Repo 'Cargo.toml') -Pattern '^version\s*=\s*"([^"]+)"' |
+            Select-Object -First 1).Matches[0].Groups[1].Value
+$DebVersion = "$Version-1"
+
+$debs = foreach ($p in $Packages) {
+    $f = Join-Path $DistDir "${p}_${DebVersion}_${Arch}.deb"
+    if (-not (Test-Path -LiteralPath $f)) {
+        throw "Package not found: $f. scripts/package.sh should have produced it."
+    }
+    $f
 }
-foreach ($f in @($ServiceUnit, $EnvPlaceholder, $DeploySh)) {
+foreach ($f in @($DeploySh, $VerifySh)) {
     if (-not (Test-Path -LiteralPath $f)) { throw "Missing required file: $f" }
 }
-if ($UsersFile -and -not (Test-Path -LiteralPath $UsersFile)) {
-    throw "UsersFile not found: $UsersFile"
+if ($UsersFile) {
+    if (-not (Test-Path -LiteralPath $UsersFile)) { throw "UsersFile not found: $UsersFile" }
+    # Cheap local sanity check, so a typo costs a second instead of a round trip. The
+    # authoritative check is the gate's own parser, on the host, below.
+    try { $null = Get-Content -Raw -LiteralPath $UsersFile | ConvertFrom-Json }
+    catch { throw "UsersFile is not valid JSON: $UsersFile" }
 }
-# Resolve the GUI's companions now, so a missing one is a local error with a name on it
-# rather than a fatal abort halfway through the remote deploy.
-$WebEnv = $null
-if (Test-Path -LiteralPath $WebPath) {
-    foreach ($f in @($WebUnit, $ReloadPathUnit, $ReloadSvcUnit)) {
-        if (-not (Test-Path -LiteralPath $f)) { throw "Missing required file: $f" }
-    }
-    $WebEnv = if (Test-Path -LiteralPath $WebEnvReal) { $WebEnvReal } else { $WebEnvTemplate }
-    if (-not (Test-Path -LiteralPath $WebEnv)) { throw "Missing required file: $WebEnvTemplate" }
-}
+Write-Host "    $($debs.Count) package(s) for $Arch at $DebVersion"
 
-# --- 3. verify remote access -------------------------------------------------
-Write-Host "==> verifying SSH access, sudo, and arch on $Target" -ForegroundColor Cyan
+# --- 3. verify the remote BEFORE anything is copied --------------------------
+# Three questions, and all three must be answered before the first scp: who we are,
+# what machine this is, and what it installs software with. A wrong architecture or a
+# host that speaks RPM cannot be discovered halfway through a transfer.
+Write-Host "==> probing $Target (sudo, architecture, package manager)" -ForegroundColor Cyan
 # SSH first-connect can be flaky (slow DNS/ARP, an idle Pi waking up), so retry
 # once. Merge stderr so a benign SSH warning or the failure reason is visible.
+$probeCmd = 'echo "USER=$(whoami)"; echo "ARCH=$(uname -m)"; ' +
+            '. /etc/os-release 2>/dev/null || true; echo "OS=${PRETTY_NAME:-unknown}"; ' +
+            'if command -v dpkg >/dev/null 2>&1; then echo "PKG=deb"; ' +
+            'elif command -v rpm >/dev/null 2>&1; then echo "PKG=rpm"; ' +
+            'else echo "PKG=unknown"; fi; ' +
+            'sudo -n true 2>/dev/null && echo "SUDO=ok" || echo "SUDO=needs-password"'
 $probeOk = $false
 $probe = $null
 foreach ($attempt in 1..2) {
-    $probe = ssh -o BatchMode=yes -o ConnectTimeout=10 $Target 'echo "USER=$(whoami)"; echo "ARCH=$(uname -m)"; sudo -n true 2>/dev/null && echo "SUDO=ok" || echo "SUDO=needs-password"' 2>&1
+    $probe = ssh -o BatchMode=yes -o ConnectTimeout=10 $Target $probeCmd 2>&1
     if ($LASTEXITCODE -eq 0 -and $probe -match 'SUDO=ok' -and $probe -match 'ARCH=') {
         $probeOk = $true
         break
@@ -155,65 +202,88 @@ foreach ($attempt in 1..2) {
 }
 if (-not $probeOk) {
     Write-Host "    probe output:`n$probe" -ForegroundColor Yellow
-    if ($probe -and $probe -notmatch 'SUDO=ok') {
-        throw "Passwordless sudo is unavailable on $Target - deploy.sh must run as root."
+    # Only claim a sudo problem when sudo actually answered: an unresolvable host or a
+    # refused key produces no SUDO= line at all, and blaming sudo for that sends the
+    # operator to the wrong file.
+    if ($probe -match 'SUDO=needs-password') {
+        throw "Passwordless sudo is unavailable on $Target - the install must run as root."
     }
     throw "SSH probe to $Target failed (key auth / host reachable? see output above)."
 }
 $lines = $probe -split "`n"
-$remoteUser = ($lines | Where-Object { $_ -match '^USER=' }) -replace '^USER=', ''
-$arch       = ($lines | Where-Object { $_ -match '^ARCH=' }) -replace '^ARCH=', ''
-if ($arch.Trim() -ne 'aarch64') {
-    throw "Target architecture is '$($arch.Trim())', but the binary is built for aarch64. Refusing to deploy."
+function Get-ProbeValue([string]$Key) {
+    $v = $lines | Where-Object { $_ -match "^$Key=" } | Select-Object -First 1
+    if ($null -eq $v) { return '' }
+    return ($v -replace "^$Key=", '').Trim()
 }
-Write-Host "    connected as $($remoteUser.Trim()) on $($arch.Trim())"
+# NOT $arch: PowerShell variable names are case-insensitive, so that would silently be
+# the -Arch parameter and the comparison below would compare the host against itself.
+$remoteUser = Get-ProbeValue 'USER'
+$remoteArch = Get-ProbeValue 'ARCH'
+$osName     = Get-ProbeValue 'OS'
+$pkgKind    = Get-ProbeValue 'PKG'
+Write-Host "    $remoteUser@$($Target.Split('@')[-1]): $osName, $remoteArch, package manager: $pkgKind"
+
+# The package manager decides whether this deploy is possible at all. RPM hosts are a
+# real target family (Fedora, RHEL, Rocky, openSUSE) and nothing here builds for them
+# yet: cargo-deb produces .deb only, so say that plainly instead of failing later with
+# "dpkg: command not found".
+switch ($pkgKind) {
+    'deb' { }
+    'rpm' {
+        throw ("$Target is RPM-based ($osName). This deploy ships .deb packages and " +
+               "RPM packaging is NOT SUPPORTED yet: scripts/package.sh builds with " +
+               "cargo-deb, which produces .deb only. Nothing was copied.")
+    }
+    default {
+        throw ("Cannot tell what $Target installs software with (neither dpkg nor rpm " +
+               "answered; it reports '$osName'). Only Debian-family hosts are supported. " +
+               "Nothing was copied.")
+    }
+}
+
+if ($remoteArch -ne $UnameFor[$Arch]) {
+    $suggest = ($UnameFor.GetEnumerator() | Where-Object { $_.Value -eq $remoteArch } |
+                Select-Object -First 1).Key
+    $hint = if ($suggest) { "Re-run with -Arch $suggest." }
+            else { "No -Arch value here maps to '$remoteArch'." }
+    throw "$Target is $remoteArch, but these packages are $Arch (which expects $($UnameFor[$Arch])). $hint Nothing was copied."
+}
 
 # --- 4. stage on remote ------------------------------------------------------
-Write-Host "==> staging artifacts on $Target (~/$RemoteStage)" -ForegroundColor Cyan
+Write-Host "==> staging on $Target (~/$RemoteStage)" -ForegroundColor Cyan
 ssh -o BatchMode=yes $Target "rm -rf ~/$RemoteStage && mkdir -p ~/$RemoteStage"
 Assert-Native "create staging dir on $Target"
 
-$staged = @(
-    @{ src = $BinPath;        dst = 'bb-auth' }
-    @{ src = $ServiceUnit;    dst = 'bb-auth.service' }
-    @{ src = $EnvPlaceholder; dst = 'bb-auth.env' }
-    @{ src = $DeploySh;       dst = 'deploy.sh' }
-)
-if (Test-Path -LiteralPath $AdmPath) { $staged += @{ src = $AdmPath; dst = 'bb-auth-adm' } }
-if (Test-Path -LiteralPath $WebPath) {
-    $staged += @{ src = $WebPath;        dst = 'bb-auth-web' }
-    $staged += @{ src = $WebUnit;        dst = 'bb-auth-web.service' }
-    $staged += @{ src = $WebEnv;         dst = 'bb-auth-web.env' }
-    $staged += @{ src = $ReloadPathUnit; dst = 'bb-auth-reload.path' }
-    $staged += @{ src = $ReloadSvcUnit;  dst = 'bb-auth-reload.service' }
-}
+$staged = @()
+foreach ($f in $debs) { $staged += @{ src = $f; dst = (Split-Path -Leaf $f) } }
+$staged += @{ src = $DeploySh; dst = 'deploy.sh' }
+$staged += @{ src = $VerifySh; dst = 'verify.sh' }
 if ($UsersFile) { $staged += @{ src = $UsersFile; dst = 'users.json' } }
 
 foreach ($a in $staged) {
     scp -o BatchMode=yes $a.src "${Target}:~/$RemoteStage/$($a.dst)"
     Assert-Native "scp $($a.dst) -> $Target"
 }
-$usersMode = if ($UsersFile) { 'replaced' } else { 'preserved (none staged)' }
-Write-Host "    staged $($staged.Count) file(s); users.json will be $usersMode"
-if (Test-Path -LiteralPath $WebPath) {
-    Write-Host "    bb-auth-web included (env from $(Split-Path -Leaf $WebEnv))"
-}
+Write-Host "    staged $($staged.Count) file(s): $($Packages -join ', ')"
 
-# --- 5. run deploy.sh as root (installs + restarts + self-verifies) ----------
+# --- 5. run deploy.sh as root (dpkg -i + units + access file + verify) --------
+# Everything that touches the live host is in that script, staged alongside the
+# packages, rather than in a string quoted through PowerShell into ssh into a remote
+# shell. A postinst that fails its preflight makes dpkg exit non-zero and this step
+# fails with the gate still serving on the inode it holds, which is the point.
 Write-Host "==> running deploy.sh as root on $Target" -ForegroundColor Cyan
-ssh -o BatchMode=yes $Target "sudo bash ~/$RemoteStage/deploy.sh ~/$RemoteStage"
-Assert-Native "remote deploy.sh (one or more verification checks failed)"
+$deployEnv = if ($KeepLegacyUnits) { 'BB_AUTH_KEEP_LEGACY_UNITS=1 ' } else { '' }
+ssh -o BatchMode=yes $Target "sudo ${deployEnv}bash ~/$RemoteStage/deploy.sh ~/$RemoteStage"
+Assert-Native "remote deploy.sh (install, migration or verification failed)"
 
-# --- 6. final liveness ping --------------------------------------------------
-Write-Host "==> final liveness check" -ForegroundColor Cyan
-$hz = ssh -o BatchMode=yes $Target 'L=$(sudo grep -E "^[[:space:]]*BB_AUTH_LISTEN=" /opt/bb-auth/etc/bb-auth.env | tail -1 | cut -d= -f2-); curl -fsS --max-time 3 "http://${L:-127.0.0.1:4181}/auth/healthz"'
-Assert-Native "post-deploy healthz"
-Write-Host "    healthz: $hz" -ForegroundColor Green
-
-# --- 7. cleanup staging ------------------------------------------------------
+# --- 6. cleanup staging ------------------------------------------------------
 Write-Host "==> cleaning up ~/$RemoteStage on $Target" -ForegroundColor Cyan
 ssh -o BatchMode=yes $Target "rm -rf ~/$RemoteStage"
 Assert-Native "cleanup staging dir"
 
 Write-Host ""
-Write-Host "DEPLOY COMPLETE — bb-auth deployed to $Target" -ForegroundColor Green
+Write-Host "DEPLOY COMPLETE: $($Packages -join ', ') $DebVersion ($Arch) on $Target" -ForegroundColor Green
+if (-not $UsersFile) {
+    Write-Host "The access file and the HMAC key were left untouched." -ForegroundColor Green
+}

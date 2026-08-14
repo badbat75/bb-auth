@@ -3,6 +3,10 @@
 #
 #   bash scripts/build.sh
 #
+# Normally you do not run this: scripts/package.sh runs it, then packages exactly the
+# binaries it left in dist/. Run it directly when you want the raw binaries and no .deb,
+# or just the GLIBC report it prints at the end.
+#
 # Target and the objdump used for the GLIBC report are overridable:
 #   BB_AUTH_TARGET=aarch64-unknown-linux-gnu  (default)
 #   BB_AUTH_OBJDUMP=aarch64-linux-gnu-objdump (default)
@@ -36,9 +40,9 @@ rustup target add "$TARGET" >/dev/null 2>&1 || true
 
 mkdir -p "$CRATE_DIR/dist"
 # Three binaries out of one crate: the gate, the access-file admin CLI, and the admin GUI.
-# The two admin tools are shipped alongside the gate because the file they edit lives on
-# the host. Both are OPTIONAL to the deploy — see scripts/deploy.sh — so an older dist/
-# with only bb-auth in it still installs; staging one is what asks for it to be installed.
+# The two admin tools are built alongside the gate because the file they edit lives on the
+# host. They are still OPTIONAL to a deploy, but that is now expressed by each being its
+# own package (`deploy.ps1 -Packages`), not by what happens to be sitting in dist/.
 for b in bb-auth bb-auth-adm bb-auth-web; do
   cp "$BUILD_DIR/target/$TARGET/release/$b" "$CRATE_DIR/dist/$b"
 done

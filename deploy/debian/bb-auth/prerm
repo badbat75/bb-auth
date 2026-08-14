@@ -1,0 +1,12 @@
+#!/bin/sh
+# Stop the gate on REMOVE only. On an upgrade it keeps running while dpkg unpacks and
+# the new postinst restarts it at the end, which is the shortest window an auth gate
+# can have: every request in between is answered by the process still holding its own
+# inode. Stopping here would blackhole them instead.
+set -e
+
+if [ "$1" = "remove" ] && [ -d /run/systemd/system ] && [ -x /usr/bin/deb-systemd-invoke ]; then
+    deb-systemd-invoke stop bb-auth.service >/dev/null || true
+fi
+
+exit 0

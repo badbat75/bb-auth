@@ -346,19 +346,27 @@ the whole prefix stays read-only to it and no `StateDirectory` is needed despite
 outside the gate's namespace: `bb-auth-adm` as root, `bb-auth-web` as its own service
 user under its own unit (see below).
 
-`scripts/deploy.sh` is an example installer (idempotent): it creates the
-system user/group, installs the binary, users file (backing up the prior
-`users.json`) and the staged `bb-auth.env`, **generates `BB_AUTH_HMAC_KEY` on first
-run if empty and never overwrites it**, installs the systemd unit,
-`daemon-reload`s, enables + restarts, then probes `/auth/healthz`. It never edits a
-preserved `bb-auth.env`: instead it validates it (every required var present, and
-`BB_AUTH_USERS_FILE` pointing at the file this deploy installs) alongside the users
-file itself (`bb-auth --check-users`), aborting before the restart if either is
-rejected — so a bad config can never become a `Restart=on-failure` boot loop.
+The install is a Debian package, `bb-auth`, and its `postinst` is what does all of
+this (idempotent, because dpkg runs it again on every upgrade): it creates the system
+user/group, and on a **first** install writes `bb-auth.env` from the shipped template
+with a freshly generated `BB_AUTH_HMAC_KEY`, plus an empty `users.json` that authorizes
+nobody. Neither file is part of the package, which is precisely why an upgrade cannot
+touch either: dpkg does not clobber files it does not ship, so the key survives and
+every session cookie with it. It never edits a preserved `bb-auth.env`: instead it
+validates it (every required var present, and `BB_AUTH_USERS_FILE` pointing at the file
+this package creates) alongside the access file itself (`bb-auth --check-users`), and a
+failure there exits non-zero **before** the restart, leaving the running process
+serving, so a bad config can never become a `Restart=on-failure` boot loop. A first
+install ends without starting the gate at all, since its env is still a template.
+
+`scripts/deploy.sh` is the host-side driver around that (`dpkg -i` in one transaction,
+the legacy-unit migration, an optional staged `users.json`, then `scripts/verify.sh`),
+and `scripts/deploy.ps1` builds the packages and drives it over SSH.
 
 ### The admin GUI's unit, and who owns the access file
 
-`bb-auth-web` is installed only when it is staged, and everything about it follows: the
+`bb-auth-web` is its own package, installed only when it is asked for, and everything
+about it follows from that: the
 `bb-auth-web` user, `bb-auth-web.service`, `etc/bb-auth-web.env` (operator-owned and
 validated exactly like the gate's — `BB_AUTH_WEB_ADMINS` non-empty, `BB_AUTH_USERS_FILE`
 naming the file this deploy installs), and the ownership migration below. A deploy that
@@ -482,7 +490,8 @@ believed they had written. So a malformed pattern, an unknown field on a site, a
 `url_groups` name or reference, and any residual pre-2.0 `enabled_paths` field, make the
 whole load fail. At startup that is an exit; on `SIGHUP` the live table survives.
 `bb-auth --check-users <file>` runs exactly this parser and exits `0`/`1`, which is how
-`scripts/deploy.sh` refuses to restart the service onto a file that would not boot.
+the package's `postinst` refuses to restart the service onto a file that would not boot,
+and how `scripts/deploy.sh` refuses to install a staged one.
 
 ### URL groups (`url_groups`)
 

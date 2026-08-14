@@ -1,0 +1,127 @@
+#!/bin/sh
+# bb-auth-web postinst. Same contract as the gate's: the env file is created once and
+# never touched again, and nothing here writes the access file. What is special to this
+# package is that installing it is what MOVES the access file to bb-auth-web:bb-auth,
+# so that migration lives here and a host without the GUI never sees it.
+set -e
+
+DEST=/opt/bb-auth
+ENV_FILE="$DEST/etc/bb-auth-web.env"
+VAR_DIR="$DEST/var/lib"
+USERS_FILE="$VAR_DIR/users.json"
+
+case "$1" in
+configure)
+    # --- its own identity ---
+    # This is the only thing here that WRITES the access file and the gate must not
+    # inherit that. Membership in the gate's group is load-bearing twice over: the gate
+    # reads the file through it, and the library's writer chowns its temp file back to
+    # the replaced file's owner before renaming it into place, which an unprivileged
+    # process may only do to a group it belongs to. Without it every save is an EPERM.
+    getent group bb-auth-web >/dev/null || groupadd --system bb-auth-web
+    getent passwd bb-auth-web >/dev/null || useradd --system --gid bb-auth-web \
+        --groups bb-auth --no-create-home --home-dir "$DEST" \
+        --shell /usr/sbin/nologin bb-auth-web
+    # Asserted separately: --groups only applies at creation, and this user may predate
+    # the line above (a GUI that was installed, purged, and installed again).
+    case " $(id -nG bb-auth-web) " in
+        *" bb-auth "*) ;;
+        *) usermod -aG bb-auth bb-auth-web ;;
+    esac
+
+    FRESH_ENV=0
+    if [ ! -e "$ENV_FILE" ]; then
+        FRESH_ENV=1
+        install -o root -g bb-auth-web -m 0640 \
+            "$DEST/share/bb-auth-web.env.example" "$ENV_FILE"
+    fi
+
+    # --- the access file changes hands ---
+    # Idempotent, re-asserted on every configure. The DIRECTORY moves too, because the
+    # replacement is a temp file written beside the target and renamed onto it, and
+    # both creating and renaming need write permission there. 0750 keeps the gate able
+    # to traverse and read through the bb-auth group and everyone else out.
+    # `sudo bb-auth-adm` goes on working untouched: the writer preserves the owner it
+    # finds, which is what lets the two editors share one file.
+    if [ -e "$USERS_FILE" ]; then
+        chown bb-auth-web:bb-auth "$VAR_DIR" "$USERS_FILE"
+        chmod 0750 "$VAR_DIR"
+        chmod 0640 "$USERS_FILE"
+        # The writer's one-step-back copy is replaced with open(O_TRUNC), never
+        # recreated, so its owner survives whoever writes next. Creating it here once,
+        # owned by the GUI, is what stops a root-run bb-auth-adm from leaving behind a
+        # root-owned .bak that the GUI's next save could not open for writing.
+        [ -e "$USERS_FILE.bak" ] || cp -p "$USERS_FILE" "$USERS_FILE.bak"
+        chown bb-auth-web:bb-auth "$USERS_FILE.bak"
+        chmod 0640 "$USERS_FILE.bak"
+    fi
+
+    for u in bb-auth-web.service bb-auth-reload.path bb-auth-reload.service; do
+        if [ -e "/etc/systemd/system/$u" ]; then
+            echo "bb-auth-web: WARNING /etc/systemd/system/$u overrides the packaged unit." >&2
+            echo "bb-auth-web:          It is from scripts/deploy.sh. Remove it, then: systemctl daemon-reload" >&2
+        fi
+    done
+
+    # --- preflight, for the same reason as the gate's ---
+    # Both of these are fatal in the binary, and a fatal startup under
+    # Restart=on-failure is a boot loop.
+    envval() {
+        grep -E "^[[:space:]]*$1=" "$ENV_FILE" 2>/dev/null | tail -1 | cut -d= -f2- | tr -d '[:space:]' || true
+    }
+    FAIL=0
+    if [ -z "$(envval BB_AUTH_WEB_ADMINS)" ]; then
+        echo "bb-auth-web: $ENV_FILE does not set BB_AUTH_WEB_ADMINS (required)." >&2
+        echo "bb-auth-web:              Empty must never mean 'everyone': a public_auth site" >&2
+        echo "bb-auth-web:              covering this URL would otherwise open the admin surface" >&2
+        echo "bb-auth-web:              to any Cognito account." >&2
+        FAIL=1
+    fi
+    WEB_USERS="$(envval BB_AUTH_USERS_FILE)"
+    if [ "$WEB_USERS" != "$USERS_FILE" ]; then
+        echo "bb-auth-web: BB_AUTH_USERS_FILE=${WEB_USERS:-<unset>}, but the gate reads $USERS_FILE." >&2
+        echo "bb-auth-web:              The GUI would edit a file nothing serves, and every save" >&2
+        echo "bb-auth-web:              would silently do nothing." >&2
+        FAIL=1
+    fi
+
+    if [ -d /run/systemd/system ]; then
+        systemctl --system daemon-reload >/dev/null || true
+    fi
+
+    if [ "$FAIL" = 1 ] && [ "$FRESH_ENV" = 1 ]; then
+        echo "bb-auth-web: installed, not started. List the admin emails in $ENV_FILE,"
+        echo "bb-auth-web: then: systemctl enable --now bb-auth-web bb-auth-reload.path"
+    elif [ "$FAIL" = 1 ]; then
+        echo "bb-auth-web: NOT restarted. The running process is still serving." >&2
+        echo "bb-auth-web: Fix the above, then: systemctl restart bb-auth-web" >&2
+        exit 1
+    else
+        for u in bb-auth-web.service bb-auth-reload.path; do
+            if [ -x /usr/bin/deb-systemd-helper ]; then
+                deb-systemd-helper unmask "$u" >/dev/null || true
+                if deb-systemd-helper --quiet was-enabled "$u"; then
+                    deb-systemd-helper enable "$u" >/dev/null || true
+                else
+                    deb-systemd-helper update-state "$u" >/dev/null || true
+                fi
+            fi
+        done
+        # bb-auth-reload.service is deliberately not enabled: it is what the .path unit
+        # triggers, and enabling it would run a reload at every boot for no reason.
+        if [ -d /run/systemd/system ] && [ -x /usr/bin/deb-systemd-invoke ]; then
+            # The GUI first, then the watcher. Arming the watcher earlier could fire a
+            # reload into a gate that is itself mid-restart from its own postinst.
+            deb-systemd-invoke restart bb-auth-web.service >/dev/null || true
+            deb-systemd-invoke restart bb-auth-reload.path >/dev/null || true
+        fi
+        echo "bb-auth-web: answers only through nginx. Gate its location with auth_request"
+        echo "bb-auth-web: and inject X-Auth-Email (README, \"The admin GUI behind the gate\")."
+    fi
+    ;;
+
+abort-upgrade|abort-remove|abort-deconfigure)
+    ;;
+esac
+
+exit 0

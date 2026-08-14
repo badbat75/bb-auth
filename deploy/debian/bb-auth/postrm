@@ -1,0 +1,51 @@
+#!/bin/sh
+# bb-auth postrm. The interesting case is `purge`, where the question is what a
+# package may delete that it never installed.
+set -e
+
+DEST=/opt/bb-auth
+UNIT=bb-auth.service
+
+if [ -d /run/systemd/system ]; then
+    systemctl --system daemon-reload >/dev/null || true
+fi
+
+case "$1" in
+remove)
+    if [ -x /usr/bin/deb-systemd-helper ]; then
+        deb-systemd-helper mask "$UNIT" >/dev/null || true
+    fi
+    ;;
+
+purge)
+    if [ -x /usr/bin/deb-systemd-helper ]; then
+        deb-systemd-helper purge "$UNIT" >/dev/null || true
+        deb-systemd-helper unmask "$UNIT" >/dev/null || true
+    fi
+
+    # The HMAC key goes: purge means gone, and a key nothing verifies with authorizes
+    # nothing anyway.
+    rm -f "$DEST/etc/bb-auth.env"
+
+    # The access file does NOT. It was never part of this package, it is the only copy
+    # that is current, and a purge that silently deletes a hand-maintained roster is a
+    # data loss no upgrade note can undo. It is moved aside instead: no longer live
+    # (which is what purge means), still on disk (which is what an operator means).
+    # Its .bak is one step back from a file being kept, so that one does go.
+    if [ -e "$DEST/var/lib/users.json" ]; then
+        KEPT="$DEST/var/lib/users.json.purged-$(date +%Y%m%d-%H%M%S)"
+        mv "$DEST/var/lib/users.json" "$KEPT"
+        echo "bb-auth: purge does not delete the access file. Kept as $KEPT"
+    fi
+    rm -f "$DEST/var/lib/users.json.bak"
+
+    # Best effort: these hold no packaged file, so dpkg will not remove them, and they
+    # are only empty if nothing above was kept.
+    rmdir "$DEST/etc" "$DEST/var/lib" "$DEST/var" "$DEST" 2>/dev/null || true
+
+    # The bb-auth user and group are left alone, as system users always are: files
+    # elsewhere on the host may still carry that uid.
+    ;;
+esac
+
+exit 0

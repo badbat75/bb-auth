@@ -74,3 +74,86 @@ lto = true
 codegen-units = 1
 panic = "abort"
 strip = true
+
+# ---------------------------------------------------------------------------
+# .deb packaging (cargo-deb). Driven by scripts/package.sh, which is the supported
+# entry point: it stages the crate off the Windows drive, builds through
+# scripts/build.sh, and packages the exact bytes that land in dist/.
+#
+# THREE PACKAGES, one per variant, for the same reason scripts/deploy.sh installs the
+# two admin tools only if they were staged: the gate never calls either of them, and a
+# host that wants only the gate must be able to have only the gate. The dependency on
+# the gate is version-strict because all three link one library and must agree on what
+# an access file MEANS, byte for byte; scripts/package.sh rewrites that literal from
+# the crate version and the revision it was given, so the two cannot drift.
+#
+# NO STATE IS PACKAGED. Not etc/bb-auth.env (it carries the HMAC key: replacing it
+# logs every user out), not var/lib/users.json (the live access file is the only copy
+# that is current). dpkg cannot clobber a file it does not ship, so preservation here
+# is by construction, not by a conffile prompt that one --force-confnew would lose.
+# What ships instead is share/*.example; the maintainer scripts create the real files
+# once, only when absent, and never touch them again.
+#
+# `systemd-units` is deliberately NOT used, though the units are packaged: the
+# fragments it generates enable and start unconditionally, and a first install has an
+# unconfigured env file. A fatal startup under Restart=on-failure is a boot loop, so
+# deploy/debian/*/postinst does the enable and the restart itself, after the same
+# preflight scripts/deploy.sh runs and only when that preflight passes.
+[package.metadata.deb]
+maintainer = "Emiliano De Simoni <emiliano.desimoni@outlook.com>"
+section = "admin"
+priority = "optional"
+# There is no variant-less package: each variant below replaces this list.
+assets = []
+
+# The gate. `$auto` is not an option for `depends`: dpkg-shlibdeps cannot inspect a
+# cross-compiled aarch64 binary on the build host, so the dependency is stated instead.
+# libc.so.6 is the only NEEDED library (panic="abort" leaves no libgcc_s), and
+# GLIBC_2.34 is the highest symbol version the release binary references:
+# scripts/build.sh prints it and scripts/package.sh re-checks it against this line.
+[package.metadata.deb.variants.gate]
+name = "bb-auth"
+depends = "libc6 (>= 2.34), passwd, init-system-helpers (>= 1.54)"
+maintainer-scripts = "deploy/debian/bb-auth"
+assets = [
+    ["target/release/bb-auth", "opt/bb-auth/bin/", "755"],
+    ["deploy/bb-auth.service", "usr/lib/systemd/system/", "644"],
+    ["deploy/bb-auth.env.example", "opt/bb-auth/share/", "644"],
+    ["deploy/users.example.json", "opt/bb-auth/share/", "644"],
+]
+extended-description = """
+bb-auth validates an AWS Cognito id_token that a browser-side login page already obtained, and issues an HMAC-signed session cookie that nginx enforces on every request through auth_request. It also accepts per-request bearer credentials (a Cognito id_token or a static bbk_ API key) and enforces per-identity URL scopes read from a JSON access file.
+.
+The HMAC key and the access file are NOT part of this package. Both are created on first install and preserved by every later upgrade: a changed key would log every user out, and the access file is edited on the host.
+"""
+
+# The access-file admin CLI. No maintainer scripts: it owns no service, no config and
+# no state, and the file it edits belongs to the gate's package.
+[package.metadata.deb.variants.adm]
+name = "bb-auth-adm"
+depends = "bb-auth (= 3.0.0-1), libc6 (>= 2.34)"
+assets = [
+    ["target/release/bb-auth-adm", "opt/bb-auth/bin/", "755"],
+]
+extended-description = """
+CRUD over a bb-auth access file: url_groups, sites, denied, users and API keys, plus `can EMAIL URL`, which answers with the gate's own decision function. Every write is re-parsed with the gate's parser on the exact bytes about to land on disk, replaced atomically, and left with the mode and owner it found.
+"""
+
+# The admin GUI. Installing it is what moves the access file to bb-auth-web:bb-auth,
+# which is why this package, and not the gate's, carries that migration.
+[package.metadata.deb.variants.web]
+name = "bb-auth-web"
+depends = "bb-auth (= 3.0.0-1), libc6 (>= 2.34), passwd, init-system-helpers (>= 1.54)"
+maintainer-scripts = "deploy/debian/bb-auth-web"
+assets = [
+    ["target/release/bb-auth-web", "opt/bb-auth/bin/", "755"],
+    ["deploy/bb-auth-web.service", "usr/lib/systemd/system/", "644"],
+    ["deploy/bb-auth-reload.path", "usr/lib/systemd/system/", "644"],
+    ["deploy/bb-auth-reload.service", "usr/lib/systemd/system/", "644"],
+    ["deploy/bb-auth-web.env.example", "opt/bb-auth/share/", "644"],
+]
+extended-description = """
+The same CRUD as bb-auth-adm, server-rendered and made through the same library. No page needs JavaScript. It is just another app bb-auth fronts: loopback only, gated by nginx auth_request, identity read from the X-Auth-Email nginx injects and from nowhere else, with BB_AUTH_WEB_ADMINS as its own allowlist on top of that.
+.
+It also installs bb-auth-reload.path, which turns any rewrite of the access file into a `systemctl reload bb-auth`, so an edit from either editor goes live without anyone needing the privilege to signal the gate.
+"""

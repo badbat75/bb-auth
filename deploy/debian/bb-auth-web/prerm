@@ -1,0 +1,12 @@
+#!/bin/sh
+# Stop the GUI and its watcher on REMOVE only, never on an upgrade: the postinst
+# restarts them at the end. The watcher goes first, so a save landing mid-removal
+# cannot trigger a reload of a gate that is still fine.
+set -e
+
+if [ "$1" = "remove" ] && [ -d /run/systemd/system ] && [ -x /usr/bin/deb-systemd-invoke ]; then
+    deb-systemd-invoke stop bb-auth-reload.path >/dev/null || true
+    deb-systemd-invoke stop bb-auth-web.service >/dev/null || true
+fi
+
+exit 0
