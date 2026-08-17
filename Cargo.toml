@@ -1,6 +1,6 @@
 [package]
 name = "bb-auth"
-version = "3.0.0"
+version = "3.1.0"
 edition = "2021"
 description = "Minimal, service-agnostic Cognito id_token → session-cookie auth gate (nginx auth_request)"
 license = "MIT"
@@ -121,6 +121,7 @@ assets = [
     ["deploy/bb-auth.service", "usr/lib/systemd/system/", "644"],
     ["deploy/bb-auth.env.example", "opt/bb-auth/share/", "644"],
     ["deploy/access.example.json", "opt/bb-auth/share/", "644"],
+    ["deploy/settings.example.json", "opt/bb-auth/share/", "644"],
 ]
 extended-description = """
 bb-auth validates an AWS Cognito id_token that a browser-side login page already obtained, and issues an HMAC-signed session cookie that nginx enforces on every request through auth_request. It also accepts per-request bearer credentials (a Cognito id_token or a static bbk_ API key) and enforces the access policy of the application scope that owns the request URL, read from a JSON access file.
@@ -132,7 +133,7 @@ The HMAC key and the access file are NOT part of this package. Both are created 
 # no state, and the file it edits belongs to the gate's package.
 [package.metadata.deb.variants.adm]
 name = "bb-auth-adm"
-depends = "bb-auth (= 3.0.0-1), libc6 (>= 2.34)"
+depends = "bb-auth (= 3.1.0-1), libc6 (>= 2.34)"
 assets = [
     ["target/release/bb-auth-adm", "opt/bb-auth/bin/", "755"],
 ]
@@ -144,7 +145,7 @@ CRUD over a bb-auth access file: applications and their scopes, user groups, den
 # which is why this package, and not the gate's, carries that migration.
 [package.metadata.deb.variants.web]
 name = "bb-auth-web"
-depends = "bb-auth (= 3.0.0-1), libc6 (>= 2.34), passwd, init-system-helpers (>= 1.54)"
+depends = "bb-auth (= 3.1.0-1), libc6 (>= 2.34), passwd, init-system-helpers (>= 1.54)"
 maintainer-scripts = "deploy/debian/bb-auth-web"
 assets = [
     ["target/release/bb-auth-web", "opt/bb-auth/bin/", "755"],
@@ -154,7 +155,7 @@ assets = [
     ["deploy/bb-auth-web.env.example", "opt/bb-auth/share/", "644"],
 ]
 extended-description = """
-The same CRUD as bb-auth-adm, server-rendered and made through the same library. No page needs JavaScript. It is just another app bb-auth fronts: loopback only, gated by nginx auth_request, identity read from the X-Auth-Email nginx injects and from nowhere else, with BB_AUTH_WEB_ADMINS as its own allowlist on top of that.
+The same CRUD as bb-auth-adm, server-rendered and made through the same library. No page needs JavaScript. It is just another app bb-auth fronts: loopback only, gated by nginx auth_request, identity read from the X-Auth-Email nginx injects and from nowhere else, with its own administrator allowlist (web.admins in the settings file) on top of that.
 .
 It also installs bb-auth-reload.path, which turns any rewrite of the access file into a `systemctl reload bb-auth`, so an edit from either editor goes live without anyone needing the privilege to signal the gate.
 """

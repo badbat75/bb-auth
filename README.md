@@ -133,10 +133,11 @@ What decides authorization is the access file, and only the gate reads it.
 ### Profile claims (optional)
 
 So an app need not guess a display name out of the email's local part, a `204` can also
-carry OIDC profile claims from the token. **Which** claims is configuration:
+carry OIDC profile claims from the token. **Which** claims is configuration, in the settings
+file:
 
 ```bash
-BB_AUTH_PROFILE_CLAIMS=given_name,family_name
+bb-auth-adm settings set --claims given_name,family_name
 ```
 
 Empty by default — set it and the gate emits, on every `204` where the credential
@@ -476,14 +477,16 @@ its `root:bb-auth 0640` ownership. Then reload — see below.
 
 ### Editing it in a browser — `bb-auth-web`
 
-The same file in a browser: a server-rendered admin GUI that needs no JavaScript. Four tabs.
+The same file in a browser: a server-rendered admin GUI that needs no JavaScript. Five tabs
+about the access file, and a sixth for the settings file.
 **Users** holds the three sections about people, in the order they nest: the user groups and
 who references each one, then the roster, then the `denied` veto. **Applications** lists each
 one with its area, its scope count and which credential classes get in anywhere inside it,
 and each application's page shows its scopes **numbered in file order** (the number is the
 meaning — first match wins) with their members, their credentials and their `excluded`.
 Every key's expiry is on its owner's page, and the **can** tab is a tester answered by the
-gate's own decision function.
+gate's own decision function. **Settings** is the odd one out and reads like it: it edits the
+other file (see [Config](#config)), which is why it is last.
 
 Every list carries a **filter box and a pager**, both of which are just query parameters — so
 they work with scripting off, survive a language change, and can be bookmarked. Scopes are
@@ -512,14 +515,22 @@ with no identity header answers `401` and says so, rather than serving anyone.
 | Var | Required | Default | Meaning |
 |-----|----------|---------|---------|
 | `BB_AUTH_ACCESS_FILE` | yes | — | the access file to render (the gate's own variable name) |
-| `BB_AUTH_WEB_ADMINS` | yes | — | comma-separated emails allowed in. **Empty is fatal**, never "everyone" |
+| `BB_AUTH_SETTINGS_FILE` | no | `settings.json` beside it | the settings file, read **and written** (the gate's own variable name) |
 | `BB_AUTH_WEB_LISTEN` | no | `127.0.0.1:8091` | bind address. Keep it on loopback |
 | `BB_AUTH_WEB_BASE_PATH` | no | *(empty)* | the URL prefix nginx mounts it at, e.g. `/admin` |
 | `BB_AUTH_WEB_DEFAULT_LANG` | no | `en` | `en` or `it`; a `?lang=` choice is remembered in a cookie |
 
-`BB_AUTH_WEB_ADMINS` is deliberate defense in depth, not a second copy of the roster: a
+Who may use it is **not** an env var: it is `web.admins` in the settings file, read fresh on
+every request and editable from the GUI's own Settings tab, because this is the one service
+that can edit it and a change that needed a restart would be a change it could make and not
+see. It is required and never empty: the binary refuses to serve without one, and both
+editors refuse to write an empty list.
+
+That list is deliberate defense in depth, not a second copy of the roster: an
 `authenticated` scope covering the GUI's URL would otherwise hand the admin surface to any
-Cognito account, and self-signup is open.
+Cognito account, and self-signup is open. The GUI will not let an administrator remove
+themselves from it; `bb-auth-adm settings admin rm` will, over SSH, which is the escape
+hatch that keeps the guard from being a trap.
 
 The file is read fresh on **every request** — no cache, no reload signal, and no
 server-side session. An edit made over SSH with `bb-auth-adm` a second ago is on the next
@@ -549,14 +560,16 @@ is the **directory**, not the file, because the replacement is a temp file renam
 place — that is what makes it atomic, and renaming needs the directory.
 
 Its env is operator-owned like the gate's: installed once, then never edited by a redeploy,
-and *validated* before anything restarts (`BB_AUTH_WEB_ADMINS` non-empty, and
-`BB_AUTH_ACCESS_FILE` naming the file the gate actually loads). A missing required var is a
-fatal startup and under `Restart=on-failure` a boot loop, so the deploy aborts first. The
-practical consequence: **the first deploy that carries the GUI stops at that check**, having
-installed `/opt/bb-auth/etc/bb-auth-web.env` from the template. Fill in
-`BB_AUTH_WEB_ADMINS` on the host and re-run. (Keep a filled-in `deploy/bb-auth-web.env`
-locally — gitignored — and it is staged instead, and the first deploy goes straight
-through.)
+and *validated* before anything restarts (`BB_AUTH_ACCESS_FILE` naming the file the gate
+actually loads, and the settings file naming at least one administrator). A missing required
+var is a fatal startup and under `Restart=on-failure` a boot loop, so the deploy aborts
+first. The practical consequence: **the first deploy that carries the GUI stops at that
+check**, having installed `/opt/bb-auth/etc/bb-auth-web.env` from the template. Name an
+administrator on the host and re-run:
+
+```bash
+sudo /opt/bb-auth/bin/bb-auth-adm settings admin add you@example.com
+```
 
 #### Who owns the access file
 
@@ -664,6 +677,48 @@ to a database).
 > the same file; rolling back is dropping the old `dist/` back on, though the file stays
 > `bb-auth-web`-owned until someone chowns it back.
 
+### Upgrading to 3.1
+
+**Nobody is logged out**: the cookie is still `bb4`, the HMAC key is preserved, the access
+file is untouched, and nginx needs no change. What moves is **six settings, out of the
+environment and into a settings file** beside the access file:
+
+| was | is now |
+|-----|--------|
+| `BB_AUTH_PROFILE_CLAIMS` | `gate.profile_claims` |
+| `BB_AUTH_IDENTITY_ATTRS` | `gate.identity_attrs` |
+| `BB_AUTH_ALLOW_UNVERIFIED_SOCIAL` | `gate.allow_unverified_social` |
+| `BB_AUTH_SOCIAL_PROVIDERS` | `gate.social_providers` |
+| `BB_AUTH_SESSION_TTL_SECS` | `gate.session_ttl_secs` |
+| `BB_AUTH_WEB_ADMINS` | `web.admins` |
+
+Not for tidiness. A process cannot re-read its own environment: systemd loads
+`EnvironmentFile=` once, at `ExecStart`, so nothing in an env file can *ever* take effect
+without a restart. These six are read per request, cannot lock anybody out when they are
+wrong, and hold no secret, which is exactly the rule that decided which file each setting
+belongs in. In a file they are reloadable, editable from the GUI's new **Settings** tab, and
+`bb-auth-reload.path` now watches both files.
+
+**The upgrade is two steps, and dpkg walks you through it.** `dpkg -i` creates
+`/opt/bb-auth/var/lib/settings.json` seeded from whatever those variables still say in your
+env files, so behaviour does not change; then it **stops before the restart** and names the
+lines to delete. Delete them, run `dpkg --configure bb-auth bb-auth-web` (or deploy again),
+and you are done. Nothing was restarted in between: the running gate keeps serving on the
+table it already holds.
+
+Leaving one of them in an env file is a **fatal startup**, deliberately: a value an operator
+can see and the service silently ignores is the failure mode this deployment does not
+accept. That is why the postinst refuses rather than shrugging.
+
+After the upgrade:
+
+```bash
+bb-auth-adm settings show                 # what the two services read
+bb-auth-adm settings set --claims given_name,family_name
+bb-auth-adm settings admin add you@example.com
+bb-auth --check-settings /opt/bb-auth/var/lib/settings.json
+```
+
 ### Upgrading to 3.0
 
 **Nobody is logged out**: the cookie is still `bb4` and the HMAC key is preserved, as
@@ -768,7 +823,7 @@ empty segment**, never as `{}`. Values are stored as raw UTF-8 and percent-encod
 when emitted as a header.
 
 The blob names its own claims rather than relying on position, which is what makes
-`BB_AUTH_PROFILE_CLAIMS` safe to edit: a cookie lives up to a month, and positional
+the claim list safe to edit: a cookie lives up to a month, and positional
 segments would let a change to that list reinterpret a live cookie's values under
 someone else's claim name. Editing the list is therefore *not* a format change — no one
 is logged out by it.
@@ -899,9 +954,33 @@ key and the access file through every later upgrade. See
 
 ## Config
 
-All via env — see [`deploy/bb-auth.env.example`](deploy/bb-auth.env.example) for
-every variable. The only secret is `BB_AUTH_HMAC_KEY` (`openssl rand -base64 48`);
-keep it out of version control and off shared storage.
+Two files, and which one a setting is in is decided by one question: what does changing it
+cost?
+
+**[`deploy/bb-auth.env.example`](deploy/bb-auth.env.example)**: everything a change to
+costs a restart or a re-login: the listener and the worker count, the Cognito trust roots,
+the cookie's name and domain, and `BB_AUTH_LOGIN_URL` / `BB_AUTH_AUTHORIZED_HOSTS` /
+`BB_AUTH_ORIGINAL_URL_HEADER`, which *are* the lockout when they are wrong. The only secret
+is `BB_AUTH_HMAC_KEY` (`openssl rand -base64 48`); keep it out of version control and off
+shared storage.
+
+**[`deploy/settings.example.json`](deploy/settings.example.json)**: the six that are read
+per request, cannot lock anybody out, and hold no secret: the profile claims, the identity
+attributes, the social relaxation and its providers, the session lifetime, and who may use
+`bb-auth-web`. They are in a file rather than the environment for one mechanical reason: a
+process cannot re-read its own environment, so nothing in an env file can take effect
+without a restart. These take effect on the next request.
+
+```bash
+bb-auth-adm settings show                              # what the two services read
+bb-auth-adm settings set --claims given_name,family_name
+bb-auth-adm settings admin add you@example.com         # who may use the GUI
+bb-auth --check-settings /opt/bb-auth/var/lib/settings.json
+```
+
+The GUI's **Settings** tab is the same six, in a form, guarded by the same `rev` check every
+other form uses. It will not let an administrator remove themselves: that one is
+`bb-auth-adm settings admin rm`, over SSH, on purpose.
 
 ## Putting a service behind the gate
 
@@ -960,7 +1039,7 @@ The binary is service-agnostic. To front a service at `app.example.com`:
            proxy_set_header Remote-User      "";
 
            # Optional: profile claims, for a display name. These two are what
-           # BB_AUTH_PROFILE_CLAIMS=given_name,family_name emits; omit both pairs
+           # profile_claims [given_name, family_name] emits; omit both pairs
            # if the app has no use for them.
            auth_request_set $bb_given  $upstream_http_x_auth_given_name;
            auth_request_set $bb_family $upstream_http_x_auth_family_name;
@@ -1058,7 +1137,7 @@ server {
         proxy_set_header X-Forwarded-User "";
         proxy_set_header Remote-User      "";
         # The GUI has no use for a display name; clear them rather than relay the
-        # client's. (Only needed if BB_AUTH_PROFILE_CLAIMS names them at all.)
+        # client's. (Only needed if profile_claims names them at all.)
         proxy_set_header X-Auth-Given-Name  "";
         proxy_set_header X-Auth-Family-Name "";
         # If this server block gets its proxy headers from a server-level
@@ -1084,7 +1163,7 @@ server {
 Three operator notes, and the first is the one that matters:
 
 - **The admin area must be a scope that lists each admin.** The gate is the lock;
-  `BB_AUTH_WEB_ADMINS` is the backstop behind it. Enrol each admin:
+  `web.admins` in the settings file is the backstop behind it. Enrol each admin:
 
   ```bash
   sudo /opt/bb-auth/bin/bb-auth-adm -f /opt/bb-auth/var/lib/access.json \
@@ -1097,7 +1176,7 @@ Three operator notes, and the first is the one that matters:
   either way.
 - **Never cover the admin area with an `anonymous` or `authenticated` scope.** Those grant without listing anybody,
   to anyone who can register, and Cognito self-signup is open — it would put every account
-  in front of the admin surface with only `BB_AUTH_WEB_ADMINS` left standing. Two locks or
+  in front of the admin surface with only `web.admins` left standing. Two locks or
   one is the whole difference.
 - **Every gated location must set or clear `X-Auth-Email`**, here as everywhere — see
   [Passing the identity to the app](#passing-the-identity-to-the-app). `proxy_set_header`

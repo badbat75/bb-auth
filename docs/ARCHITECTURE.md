@@ -69,13 +69,13 @@ the gate is the gate's, and stays in one file.
 | `src/lib.rs` (`bb_auth_core`) | **The access file.** Schema (`AccessFile`), parser (`compile_access`), URL matcher (`glob_match` / `UrlScope`), the two-level resolution (`Access::resolve`, `base_covers`), the grant model (`decide`, `decide_api_key`), identity and key minting (`mint_uuid`, `mint_api_key`), and how a file is edited and written (`open_access_file`, `AccessWrite`, the document mutations). Reads no env, opens no socket, holds no HTTP, prints nothing. |
 | `src/bin/bb-auth.rs` (`bb-auth`) | **The gate**, still a single file read top to bottom: HTTP, config, the session cookie, id_token validation, the nginx contract. |
 | `src/bin/bb-auth-adm.rs` (`bb-auth-adm`) | **The access-file admin CLI.** CRUD over `applications` / `scopes` / `user_groups` / `denied` / `users` / `api_keys`, key minting and rotation, `migrate` for a pre-3.0 file, and `can EMAIL URL` — which calls the library's `decide`, so it answers the question the gate will answer. Every edit and every write is a library call (`AccessWrite`), so it cannot save a file the gate would reject; what is left here is flags, warnings and the wording of a verdict. See §12. |
-| `src/bin/bb-auth-web.rs` (`bb-auth-web`) | **The access-file admin GUI**: server-rendered (`maud`; no page needs JavaScript, the one inline handler is a Settings-menu shortcut with a `<noscript>` submit behind it) over the library, read *and* write — CRUD through `AccessWrite` alone, `POST`-only mutations behind a same-origin check and a `rev` (sha256-of-file) concurrency check. Loopback behind nginx `auth_request`, identity from the `X-Auth-Email` nginx injects plus its own required `BB_AUTH_WEB_ADMINS` allowlist. Links the library, none of the gate. |
+| `src/bin/bb-auth-web.rs` (`bb-auth-web`) | **The access-file admin GUI**: server-rendered (`maud`; no page needs JavaScript, the one inline handler is a Settings-menu shortcut with a `<noscript>` submit behind it) over the library, read *and* write — CRUD through `AccessWrite` alone, `POST`-only mutations behind a same-origin check and a `rev` (sha256-of-file) concurrency check. Loopback behind nginx `auth_request`, identity from the `X-Auth-Email` nginx injects plus its own administrator allowlist (`web.admins` in the settings file, read fresh on every request and editable from its own Settings tab). Links the library, none of the gate. |
 
 Inside `src/bin/bb-auth.rs`, in file order:
 
 | Section | Purpose |
 |---------|---------|
-| `Config` / `from_env` | All tunables from env vars; fatal-`exit`s on missing required values, a too-short HMAC key, or an unusable `BB_AUTH_PROFILE_CLAIMS` / `BB_AUTH_IDENTITY_ATTRS` entry (`compile_profile_claims` / `compile_identity_attrs`, which also derive each header name; see §12). |
+| `Config` / `from_env` | The env-var half of the configuration; fatal-`exit`s on a missing required value, a too-short HMAC key, or any of the five variables that moved into the settings file in 3.1 (`check_legacy_env`: a setting read from nowhere is worse than no setting). The other half is `State::settings`, re-read on `SIGHUP`; see §8a. |
 | `State` / `JwksCache` | Shared state behind `Arc`: config, a `RwLock<Access>` access table, a `RwLock` JWKS cache, and a `Mutex` serializing JWKS refreshes. |
 | `load_access` / `reload_access` | Wrap the library's `read_access`, which parses the JSON access file (`BB_AUTH_ACCESS_FILE`) into the applications and their scopes, the two `denied` sets, and three indices: identifiers (`by_identifier`), the roster (`by_uuid`) and `bbk_` API keys (`by_key_hash`); identifiers lowercased. `load_access` aborts startup if unreadable (warns if nothing is granted); `reload_access` swaps the table live on `SIGHUP`, keeping the old table on error. See §12. |
 | `authorize` / `bearer_apikey` | Thin wrappers over the library's `decide` / `decide_api_key`: they add the log line naming the reason, and the wall clock a key's expiry is measured against. The rule itself is in the library, which is what lets `bb-auth-adm can` be truthful. `authorize_login` resolves the identifier to a roster row and re-attaches the profile claims after the decision, which never sees them. See §12. |
@@ -125,7 +125,7 @@ And in `src/lib.rs`:
 
 | Method | Path | Caller | Behavior |
 |--------|------|--------|----------|
-| `GET` | `/auth/validate` | nginx only (`auth_request`) | `204` naming the identity in one header per `BB_AUTH_IDENTITY_ATTRS` entry (default `X-Auth-Email`) if an accepted credential authorizes the request URL, otherwise `401` + `X-Auth-Login-URL: <this area's login page>`. A `204` also carries one header per `BB_AUTH_PROFILE_CLAIMS` entry the credential knows (percent-encoded; omitted otherwise). Accepts (in order) an `Authorization: Bearer bbk_…` static API key, an `Authorization: Bearer <id_token>`, or the session cookie, and then no credential at all, which only an `anonymous` scope grants (and which names nobody). See §12. |
+| `GET` | `/auth/validate` | nginx only (`auth_request`) | `204` naming the identity in one header per `identity_attrs` entry (default `X-Auth-Email`) if an accepted credential authorizes the request URL, otherwise `401` + `X-Auth-Login-URL: <this area's login page>`. A `204` also carries one header per `profile_claims` entry the credential knows (percent-encoded; omitted otherwise). Accepts (in order) an `Authorization: Bearer bbk_…` static API key, an `Authorization: Bearer <id_token>`, or the session cookie, and then no credential at all, which only an `anonymous` scope grants (and which names nobody). See §12. |
 | `POST` | `/auth/session` | browser | Body `application/x-www-form-urlencoded`: `id_token=…&rd=…`. Fully validates the id_token; on success sets the session cookie and `302`s to `rd` (open-redirect guarded). |
 | `GET` | `/auth/logout[?rd=…]` | browser | Sets an expired (Max-Age=0) cookie and `302` → `rd` (same `safe_rd` guard) or, with no `rd`, the login page. Cross-site requests (`Sec-Fetch-Site: cross-site`) are ignored (no cookie clear) to block CSRF-forced logout. |
 | `GET` | `/auth/healthz` | local | `200 ok`. Liveness probe. |
@@ -153,15 +153,15 @@ ever issuing a cookie:
 4. **Cognito-specific claims:** `token_use == "id"` (rejects access tokens) and
    `email_verified` truthy (accepts JSON `true` or the string `"true"`).
    - **Social-login exception** (off by default): when
-     `BB_AUTH_ALLOW_UNVERIFIED_SOCIAL` is enabled, a token with
+     `allow_unverified_social` is enabled, a token with
      `email_verified=false` is still accepted **iff** it carries a federated
      `identities` entry (a social login — Cognito often can't verify a social
-     sign-up's email even though the IdP asserted it). `BB_AUTH_SOCIAL_PROVIDERS`
+     sign-up's email even though the IdP asserted it). `social_providers`
      can narrow this to specific `providerName`s. **Native** Cognito users (no
      `identities` claim) are never relaxed: self-signup is open, so an unverified
      native email is attacker-controlled. See `unverified_social_ok`.
 5. Returns the `email` claim, lowercased, together with whichever
-   `BB_AUTH_PROFILE_CLAIMS` the token asserts — trimmed, ≤ 256 raw UTF-8 bytes, free of
+   `profile_claims` the token asserts — trimmed, ≤ 256 raw UTF-8 bytes, free of
    control characters, and **not** lowercased (`clean_claim`). Anything else about one
    (missing, empty, over-long, or not even a string) drops that single claim and nothing
    else: they are not an identity, they authorize nothing, and a badly mapped IdP
@@ -204,7 +204,7 @@ sig = HMAC_SHA256("bb4.<keyid>.<exp>.<b64url(email)>.<b64url(claims_json)>", key
   have minted it). Each value is capped at 256 bytes.
 - **The blob is self-describing, and that is what makes the claim list configurable.** A
   cookie lives up to a month; positional segments would let an edit to
-  `BB_AUTH_PROFILE_CLAIMS` reinterpret a live cookie's values under a different claim
+  the claim list reinterpret a live cookie's values under a different claim
   name. So changing that list is *not* a format change — nobody is logged out, a claim
   removed from it stops being emitted from cookies that still carry it (`profile_headers`
   filters against the live config), and one added appears at the next sign-in. Two claims
@@ -216,7 +216,7 @@ sig = HMAC_SHA256("bb4.<keyid>.<exp>.<b64url(email)>.<b64url(claims_json)>", key
 - **Attributes:** `HttpOnly`, `Secure`, `SameSite=Lax`, `Path=/`, host-only on
   the service host (a `Domain` can be set via `BB_AUTH_COOKIE_DOMAIN` but is
   empty by default).
-- **TTL:** ~30 days (`BB_AUTH_SESSION_TTL_SECS=2592000`).
+- **TTL:** ~30 days (`gate.session_ttl_secs`, §8a).
 
 Because the cookie is self-contained and key addressed, **key rotation
 invalidates nobody**: the new key is added as verify-only, then flipped to
@@ -230,8 +230,17 @@ for that cookie returns `401` even though the cookie signature is still valid. O
 
 ## 8. Configuration
 
-All config is via environment variables (see `deploy/bb-auth.env.example`).
-Required vars cause a fatal exit if missing.
+Two places, and which one a setting is in is decided by one question: what does changing it
+cost?
+
+**`bb-auth.env`** (see `deploy/bb-auth.env.example`) holds everything a change to costs a
+restart or a re-login. Required vars cause a fatal exit if missing.
+
+**The settings file** (see `deploy/settings.example.json`, and §8a below) holds the six that
+are read per request, cannot lock anybody out when they are wrong, and hold no secret. They
+are in a file rather than the environment for one mechanical reason: **a process cannot
+re-read its own environment**. systemd loads `EnvironmentFile=` once, at `ExecStart`, so
+nothing in an env file can ever take effect without a restart.
 
 | Variable | Required | Default | Notes |
 |----------|:--------:|---------|-------|
@@ -241,24 +250,49 @@ Required vars cause a fatal exit if missing.
 | `BB_AUTH_COGNITO_ISSUER` | yes | — | The Cognito user-pool issuer URL, `https://cognito-idp.<region>.amazonaws.com/<user-pool-id>`. Trailing `/` stripped. JWKS URL is derived from this. |
 | `BB_AUTH_CLIENT_ID` | yes | — | The public app client used by the login page; always an accepted `id_token.aud`. |
 | `BB_AUTH_AUDIENCES` | no | empty | Comma-separated extra accepted `aud`s (Cognito app client ids), e.g. a separate social-login client. `BB_AUTH_CLIENT_ID` is always accepted; a token is valid if its `aud` matches any. Read at startup → needs `restart`, not `reload`. |
-| `BB_AUTH_ALLOW_UNVERIFIED_SOCIAL` | no | `false` | Truthy (`1`/`true`/`yes`/`on`) accepts `email_verified=false` tokens **only** for federated/social logins (those carrying an `identities` claim); native Cognito users stay strict. Off = strict for everyone. |
-| `BB_AUTH_SOCIAL_PROVIDERS` | no | empty → any | Comma-separated `providerName`s (case-insensitive, e.g. `Google,SignInWithApple`) the relaxation above applies to. Empty = any federated provider. No effect unless `BB_AUTH_ALLOW_UNVERIFIED_SOCIAL` is on. |
-| `BB_AUTH_PROFILE_CLAIMS` | no | empty → none | Comma-separated OIDC claim names to propagate to the app on a `204`, each in a header derived from its own name (`given_name` → `X-Auth-Given-Name`; see §12). Empty = nothing but the email. Any unusable entry is a fatal startup error. Read at startup → needs `restart`, not `reload`; changing it logs nobody out. |
 | `BB_AUTH_ACCESS_FILE` | yes | — | Path to the JSON access file (`sites`, `denied`, and the roster of emails with their `bbk_` API keys and URL scopes; see §12). Loaded at startup, hot-reloaded on `SIGHUP`. Named for the roster it used to hold only; the name is a contract with the operator-owned env file a deploy never rewrites. |
 | `BB_AUTH_ORIGINAL_URL_HEADER` | no | `X-Original-URL` | Request header carrying the original request URL (scheme + host + normalised path). Set by nginx on the `auth_request` subrequest (from a `$bb_url` captured in the gated location — **not** from `$uri`, see §12) **and** on `/auth/session` (there a plain `https://app.example.com$uri` is correct). Drives URL scoping, and on `/auth/session` tells bb-auth which host the login is on. Query/fragment are stripped; missing ⇒ fail closed. |
 | `BB_AUTH_LISTEN` | no | `127.0.0.1:4181` | Bind address. Loopback only — nginx fronts it. |
 | `BB_AUTH_COOKIE_NAME` | no | `bb_session` | |
 | `BB_AUTH_COOKIE_DOMAIN` | no | empty → host-only | Set to a parent domain for cross-service SSO. |
-| `BB_AUTH_SESSION_TTL_SECS` | no | `2592000` (30 d) | |
 | `BB_AUTH_AUTHORIZED_HOSTS` | yes | — | Comma-separated host globs a post-login `rd` may land on, e.g. `example.com,*.example.com`. The sole authority for the `rd` guard (see §9a). `*.x.com` does not match the apex `x.com`. Replaces the pre-2.0 `BB_AUTH_SEARCH_URL` + `BB_AUTH_RD_BASE_DOMAIN`. |
 | `BB_AUTH_LOGIN_URL` | yes | — | Where `401`/logout send the user (the login page), and where a rejected `rd` falls back to. |
+| `BB_AUTH_SETTINGS_FILE` | no | `settings.json` beside the access file | Path to the settings file (§8a). Re-read on `SIGHUP` like the access file, fail-soft on both. A missing file is a fatal startup. |
 | `BB_AUTH_WORKERS` | no | `4` | Thread pool size (min 1). |
 
 The admin GUI is a separate service with a separate env file
 (`deploy/bb-auth-web.env.example`, installed as `etc/bb-auth-web.env`): `BB_AUTH_ACCESS_FILE`
-— the same name for the same file — plus `BB_AUTH_WEB_ADMINS` (required, empty is fatal),
-`BB_AUTH_WEB_LISTEN`, `BB_AUTH_WEB_BASE_PATH` and `BB_AUTH_WEB_DEFAULT_LANG`. It shares no
-variable with the gate but that one, and holds no secret at all.
+and `BB_AUTH_SETTINGS_FILE`, the same names for the same files, plus `BB_AUTH_WEB_LISTEN`,
+`BB_AUTH_WEB_BASE_PATH` and `BB_AUTH_WEB_DEFAULT_LANG`. It holds no secret at all, and its
+administrator allowlist is not an env var: it is `web.admins` in the settings file, read
+fresh on every request, because this is the one service that can edit it.
+
+### 8a. The settings file
+
+`compile_settings` (in the library, so all three programs agree on it) turns it into
+`Settings`. Two sections, one per service; each reads its own and ignores the other's, and
+both go through the same parser, so an edit made by either is one the other would accept.
+
+| Setting | Default | Notes |
+|---------|---------|-------|
+| `gate.profile_claims` | `[]` → none | OIDC claim names to propagate to the app on a `204`, each in a header derived from its own name (`given_name` → `X-Auth-Given-Name`; see §12). Any unusable entry is refused, never skipped. Changing it logs nobody out: a claim removed stops being emitted at once, one added appears at the holder's next sign-in. |
+| `gate.identity_attrs` | `["email"]` | Which identity attributes a `204` names (§12). `email` and `uuid` are the only two that exist. **Empty is refused**: a `204` that names nobody breaks every application behind the gate, in silence. |
+| `gate.allow_unverified_social` | `false` | Accepts `email_verified=false` tokens **only** for federated/social logins (those carrying an `identities` claim); native Cognito users stay strict. |
+| `gate.social_providers` | `[]` → any | `providerName`s (case-insensitive, e.g. `Google`, `SignInWithApple`) the relaxation above applies to. No effect unless it is on. |
+| `gate.session_ttl_secs` | `2592000` (30 d) | Applies to cookies minted from then on and to none already in a browser, so changing it logs nobody out. Below 60s is refused (a login loop); above 400 days is warned about (the cap browsers apply to `Max-Age`). |
+| `web.admins` | `[]` | Who may use `bb-auth-web`, matched against the `X-Auth-Email` nginx injects. **Never empty**: the binary refuses to serve without one and both editors refuse to write an empty list. The gate ignores this section. |
+
+What is **not** in it is the point of it. The listener and the worker count need a rebind;
+the HMAC key is the secret; the Cognito trust roots, the cookie's name and its domain change
+who can log in or log everyone out; and `BB_AUTH_LOGIN_URL`, `BB_AUTH_AUTHORIZED_HOSTS` and
+`BB_AUTH_ORIGINAL_URL_HEADER` *are* the lockout when they are wrong. All of those stay in the
+env file, where changing one is a deliberate act with a restart attached.
+
+Edited with `bb-auth-adm settings …` or from `bb-auth-web`'s Settings tab, through the same
+validate-before-write the access file gets (`SettingsWrite`). Checked by hand with
+`bb-auth --check-settings <file>`; `scripts/verify.sh` and the gate's `postinst` both run it.
+Unknown keys **inside a section** are a hard error, for the reason a misspelled scope field
+is one; unknown keys at the top level are preserved, which is where `_comment` lives.
 
 ### 9a. Where the post-login redirect may land (`safe_rd`)
 
@@ -368,7 +402,7 @@ and `scripts/deploy.ps1` builds the packages and drives it over SSH.
 `bb-auth-web` is its own package, installed only when it is asked for, and everything
 about it follows from that: the
 `bb-auth-web` user, `bb-auth-web.service`, `etc/bb-auth-web.env` (operator-owned and
-validated exactly like the gate's — `BB_AUTH_WEB_ADMINS` non-empty, `BB_AUTH_ACCESS_FILE`
+validated exactly like the gate's — the settings file naming an administrator, `BB_AUTH_ACCESS_FILE`
 naming the file this deploy installs), and the ownership migration below. A deploy that
 does not carry it does none of this.
 
@@ -423,9 +457,9 @@ own), and `SupplementaryGroups=bb-auth` is what lets the write restore the file'
 - **Why `email_verified` is mandatory for native users.** Self-signup being open,
   if an unverified native email were accepted, anyone could register
   `boss@company.com` without controlling it and inherit that email's allowlist
-  entry. `BB_AUTH_ALLOW_UNVERIFIED_SOCIAL` relaxes this **only** for federated
+  entry. `allow_unverified_social` relaxes this **only** for federated
   logins, where the email is asserted by the upstream IdP rather than self-claimed
-  — and is best narrowed (via `BB_AUTH_SOCIAL_PROVIDERS`) to IdPs that actually
+  — and is best narrowed (via `social_providers`) to IdPs that actually
   verify the email (Google, Apple). Leaving it off keeps the strict invariant.
 - **`rd` is open-redirect-guarded:** it must resolve to an `https://` URL whose host
   matches `BB_AUTH_AUTHORIZED_HOSTS` — an absolute path resolves against the caller's
@@ -829,7 +863,7 @@ blocks an otherwise-valid cookie, and only then is the anonymous case considered
 credential that *does* authorize still names its holder downstream. Any authorized
 credential → `204`; otherwise `401`.
 
-### Identity propagation (`BB_AUTH_IDENTITY_ATTRS`)
+### Identity propagation (`identity_attrs`)
 
 Whichever credential wins, it resolves to one roster row, or to one identifier that is in no
 row at all (on an `authenticated` scope, which is exactly what an onboarding app needs in
@@ -843,7 +877,7 @@ proxy_set_header X-Auth-Email $bb_email;   # rename to whatever the app reads
 proxy_set_header X-Auth-Uuid  "";          # clear what this location does not set
 ```
 
-**Which** attributes go out is configuration (`BB_AUTH_IDENTITY_ATTRS`, default `email`);
+**Which** attributes go out is configuration (`gate.identity_attrs`, default `email`);
 the header each one derives is code, through the very function the profile claims use, so
 `email` is `X-Auth-Email` and `uuid` is `X-Auth-Uuid` and the two can never disagree. Three
 consequences:
@@ -883,11 +917,11 @@ cookie is an HMAC blob holding the email and the profile claims below, an API ke
 opaque secret — and a valid `id_token` proves identity, not authorization: self-signup is
 open, so authorization lives in the access file and only the gate consults it.
 
-### Profile claims (`BB_AUTH_PROFILE_CLAIMS`)
+### Profile claims (`profile_claims`)
 
 A `204` can carry OIDC profile claims from the token, so an app has a display name
 without inventing one from the email's local part. **Which** claims is configuration;
-empty by default. With `BB_AUTH_PROFILE_CLAIMS=given_name,family_name`:
+empty by default. With `gate.profile_claims = ["given_name", "family_name"]`:
 
 ```nginx
 auth_request_set $bb_given  $upstream_http_x_auth_given_name;

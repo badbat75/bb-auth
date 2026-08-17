@@ -46,6 +46,13 @@ const doc = (ctx) => JSON.parse(fs.readFileSync(ctx.accessFile, 'utf8'));
 /** The working access file, exact bytes — what `rev` and "wrote nothing" are about. */
 const bytes = (ctx) => fs.readFileSync(ctx.accessFile, 'utf8');
 
+/** The working settings file, parsed and raw: the other file the GUI edits. */
+const settings = (ctx) => JSON.parse(fs.readFileSync(ctx.settingsFile, 'utf8'));
+const settingsBytes = (ctx) => fs.readFileSync(ctx.settingsFile, 'utf8');
+
+/** An out-of-band write to the settings file, as a `bb-auth-adm settings set` would do. */
+const writeSettings = (ctx, d) => fs.writeFileSync(ctx.settingsFile, JSON.stringify(d, null, 2) + '\n');
+
 /** An out-of-band write, as a `bb-auth-adm` over SSH would do it: valid file, new bytes. */
 const writeDoc = (ctx, d) => fs.writeFileSync(ctx.accessFile, JSON.stringify(d, null, 2) + '\n');
 
@@ -114,5 +121,6 @@ const formBytes = (page) =>
   page.locator('main form').first().evaluate((f) => Object.fromEntries(new FormData(f).entries()));
 
 module.exports = {
-  Checker, doc, bytes, writeDoc, sha256, newPage, submit, mainText, pageLang, api, resubmit, formBytes,
+  Checker, doc, bytes, writeDoc, settings, settingsBytes, writeSettings, sha256, newPage, submit,
+  mainText, pageLang, api, resubmit, formBytes,
 };

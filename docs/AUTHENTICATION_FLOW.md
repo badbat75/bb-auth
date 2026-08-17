@@ -100,13 +100,13 @@ Inside bb-auth (`handle_session`):
    - verify signature + `exp` (60 s leeway) + `iss` + `aud == client_id`;
      require `exp`/`aud`/`iss` present.
    - require `token_use == "id"` and `email_verified` truthy. Exception: if
-     `BB_AUTH_ALLOW_UNVERIFIED_SOCIAL` is on, an `email_verified=false` token is
+     `allow_unverified_social` is on, an `email_verified=false` token is
      accepted when it carries a federated `identities` entry (a social login),
-     optionally narrowed to `BB_AUTH_SOCIAL_PROVIDERS`. Native users stay strict.
+     optionally narrowed to `social_providers`. Native users stay strict.
    - extract and lowercase the `email` claim, and require it to be printable ASCII
      (`header_safe_email`) — it will be handed to the app in `X-Auth-Email`, and on an
      `authenticated` scope no table has vetted it.
-   - capture each `BB_AUTH_PROFILE_CLAIMS` claim the token asserts (`clean_claim`:
+   - capture each `profile_claims` claim the token asserts (`clean_claim`:
      trimmed, ≤ 256 bytes, no control characters, case preserved). A value that fails any
      of that is dropped on its own; it never costs the token. Unconfigured claims — the
      default, since the list is empty unless set — are not even looked at.
@@ -195,13 +195,13 @@ A few things are worth emphasizing:
   An `anonymous` scope goes further and asks for nothing at all, and its `204` names
   nobody.
 - **The gate names the identity; the app trusts nginx for it.** A `204` carries it in the
-  headers `BB_AUTH_IDENTITY_ATTRS` names (default `email`, hence `X-Auth-Email`), the gated
+  headers `identity_attrs` names (default `email`, hence `X-Auth-Email`), the gated
   location lifts them with `auth_request_set` and passes them upstream. nginx must clear
   every header the gate *could* emit, not only the ones this installation enabled. An API
   key resolves to its *owning user's* row. The app must not decode the credential itself: the cookie is not a
   JWT and an API key carries no token, and a valid `id_token` proves identity, never
   authorization. This holds only while the app is unreachable except through nginx.
-- **It can also name them, optionally.** `BB_AUTH_PROFILE_CLAIMS` lists OIDC claims to
+- **It can also name them, optionally.** `profile_claims` lists OIDC claims to
   carry, each in a header derived from its own name (`given_name` → `X-Auth-Given-Name`),
   percent-encoded (RFC 3986), when the credential has them — so never for an API key, and
   not for a token that asserts none, in which case the header is omitted rather than sent

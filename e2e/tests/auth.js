@@ -3,7 +3,7 @@
 //
 // The GUI trusts exactly one thing: the `X-Auth-Email` header nginx injects. No header
 // is a 401 (a broken deployment must be an error page, not an anonymous session), a
-// header that is not on BB_AUTH_WEB_ADMINS is a 403, and every mutation must arrive as
+// header that is not on web.admins is a 403, and every mutation must arrive as
 // a same-origin POST. These are raw-HTTP contracts, so this area speaks fetch, not the
 // browser: what matters is the status line and that the file did not move.
 
@@ -18,11 +18,11 @@ async function run(ctx, t) {
   t.check('the 401 points at the nginx wiring', b401.includes('auth_request'), b401.slice(0, 300));
 
   // friend@example.com is enrolled in the access file — the 403 is exactly the point:
-  // being on the roster the gate enforces buys nothing here, only BB_AUTH_WEB_ADMINS does.
+  // being on the roster the gate enforces buys nothing here, only web.admins does.
   const r403 = await api(ctx, '/admin/', { email: 'friend@example.com' });
   t.eq('authenticated non-admin is a 403', r403.status, 403);
   const b403 = await r403.text();
-  t.check('the 403 names the allowlist', b403.includes('BB_AUTH_WEB_ADMINS'), b403.slice(0, 300));
+  t.check('the 403 says why', b403.includes('is not an administrator'), b403.slice(0, 300));
   t.check('the 403 echoes who was refused', b403.includes('friend@example.com'), b403.slice(0, 300));
 
   const r200 = await api(ctx, '/admin/');

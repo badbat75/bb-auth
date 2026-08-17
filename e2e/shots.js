@@ -23,7 +23,7 @@
 const fs = require('fs');
 const path = require('path');
 
-const { E2E_DIR, FIXTURE, boot } = require('./lib/server');
+const { E2E_DIR, FIXTURE, SETTINGS_FIXTURE, boot } = require('./lib/server');
 const { submit, formBytes, resubmit, writeDoc, doc } = require('./lib/harness');
 
 /** Where a screenshot lands. Under artifacts/, which is gitignored. */
@@ -122,6 +122,15 @@ const SCENES = [
   ['group-edit', go('/groups/mcp/edit')],
   ['deny-add', go('/denied/%2Badd')],
 
+  // The other file. One page, one form, and the two shapes worth looking at: as it reads,
+  // and refusing a save. It is last in the bar and last here.
+  ['config', go('/config')],
+  ['config-refused', async (page, ctx) => {
+    await page.goto(ctx.base + '/config');
+    await page.fill('textarea[name=admins]', 'somebody@else.example.com');
+    await submit(page);
+  }],
+
   // The Settings menu, open. A scene and not a state: what is inside it is prose (so the
   // `it` view has to see it) and a 230px panel hanging off the right edge (so the phone
   // does). It is the one page shape a `goto` cannot reach, because `details` remembers
@@ -176,7 +185,7 @@ const SCENES = [
   // The two refusals a browser can hit head-on, rendered as pages.
   ['not-found', go('/users/nobody%40example.com')],
   ['forbidden', async (page, ctx) => {
-    // A Cognito identity that is not on BB_AUTH_WEB_ADMINS: authenticated, not an admin.
+    // A Cognito identity that is not on web.admins: authenticated, not an admin.
     await page.setExtraHTTPHeaders({ 'X-Auth-Email': 'friend@example.com' });
     await page.goto(ctx.base + '/');
     await page.setExtraHTTPHeaders({ 'X-Auth-Email': 'admin@example.com' });
@@ -293,7 +302,10 @@ async function main() {
       if (view.lang) await page.goto(`${ctx.base}/?lang=${view.lang}`);
       if (view.theme) await page.goto(`${ctx.base}/?theme=${view.theme}`);
       for (const [name, steps] of scenes) {
-        fs.copyFileSync(FIXTURE, ctx.accessFile); // every scene starts from the fixture
+        // Every scene starts from the fixture, both files: the settings scenes write to
+        // the second one exactly as the others write to the first.
+        fs.copyFileSync(FIXTURE, ctx.accessFile);
+        fs.writeFileSync(ctx.settingsFile, SETTINGS_FIXTURE);
         // One scene that cannot reach its state (a selector the markup no longer has,
         // typically) must not cost the other hundred their screenshot: this is evidence
         // for a human, not an assertion, so it degrades instead of aborting. The exit

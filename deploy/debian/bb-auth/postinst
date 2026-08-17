@@ -12,8 +12,23 @@ set -e
 
 DEST=/opt/bb-auth
 ENV_FILE="$DEST/etc/bb-auth.env"
+WEB_ENV_FILE="$DEST/etc/bb-auth-web.env"
 ACCESS_FILE="$DEST/var/lib/access.json"
+SETTINGS_FILE="$DEST/var/lib/settings.json"
 UNIT=bb-auth.service
+
+# The last value an env file gives a variable, whitespace stripped. Used for the preflight
+# and for the one-time seeding below.
+envval_of() {
+    grep -E "^[[:space:]]*$2=" "$1" 2>/dev/null | tail -1 | cut -d= -f2- | tr -d '[:space:]' || true
+}
+
+# "a, b ,c" -> "a", "b", "c": a comma-separated env value as a JSON array's contents.
+json_list() {
+    printf '%s' "$1" | tr ',' '\n' \
+        | sed 's/^[[:space:]]*//;s/[[:space:]]*$//' | grep -v '^$' \
+        | sed 's/.*/"&"/' | paste -sd, - || true
+}
 
 case "$1" in
 configure)
@@ -74,6 +89,68 @@ configure)
         chmod 0640 "$ACCESS_FILE"
     fi
 
+    # --- the settings file, once, seeded from the env vars it replaces ---
+    # Six settings moved out of the environment in 3.1, for one mechanical reason: a process
+    # cannot re-read its own environment, so nothing in an env file can ever be reloaded
+    # without a restart. Seeding is done HERE, from whatever those variables still say, so
+    # that an upgrade changes no behaviour at all; the operator then deletes the lines, which
+    # the check below refuses to proceed without.
+    #
+    # `web.admins` is seeded from the GUI's env file if there is one, because this package
+    # owns the file both services read and the GUI's postinst runs after this one.
+    if [ ! -e "$SETTINGS_FILE" ]; then
+        S_CLAIMS="$(json_list "$(envval_of "$ENV_FILE" BB_AUTH_PROFILE_CLAIMS)")"
+        S_ATTRS="$(json_list "$(envval_of "$ENV_FILE" BB_AUTH_IDENTITY_ATTRS)")"
+        [ -n "$S_ATTRS" ] || S_ATTRS='"email"'
+        S_PROVIDERS="$(json_list "$(envval_of "$ENV_FILE" BB_AUTH_SOCIAL_PROVIDERS)")"
+        S_TTL="$(envval_of "$ENV_FILE" BB_AUTH_SESSION_TTL_SECS)"
+        case "$S_TTL" in ''|*[!0-9]*) S_TTL=2592000 ;; esac
+        S_SOCIAL=false
+        case "$(envval_of "$ENV_FILE" BB_AUTH_ALLOW_UNVERIFIED_SOCIAL | tr 'A-Z' 'a-z')" in
+            1|true|yes|on) S_SOCIAL=true ;;
+        esac
+        S_ADMINS="$(json_list "$(envval_of "$WEB_ENV_FILE" BB_AUTH_WEB_ADMINS)")"
+        cat > "$SETTINGS_FILE" <<EOF
+{
+  "version": 1,
+  "gate": {
+    "profile_claims": [$S_CLAIMS],
+    "identity_attrs": [$S_ATTRS],
+    "allow_unverified_social": $S_SOCIAL,
+    "social_providers": [$S_PROVIDERS],
+    "session_ttl_secs": $S_TTL
+  },
+  "web": {
+    "admins": [$S_ADMINS]
+  }
+}
+EOF
+        chown root:bb-auth "$SETTINGS_FILE"
+        chmod 0640 "$SETTINGS_FILE"
+        echo "bb-auth: created $SETTINGS_FILE from the settings that were in $ENV_FILE."
+    fi
+
+    # --- a setting read from nowhere is worse than no setting ---
+    # The variables above are not read any more, and the binary is fatal on any of them, for
+    # the reason it is fatal on a misspelled scope field: a value an operator can see in a
+    # file and the service silently ignores is the failure mode this deployment does not
+    # accept. The seeding above has already happened, so deleting the lines loses nothing.
+    MOVED=""
+    for v in BB_AUTH_PROFILE_CLAIMS BB_AUTH_IDENTITY_ATTRS BB_AUTH_ALLOW_UNVERIFIED_SOCIAL \
+             BB_AUTH_SOCIAL_PROVIDERS BB_AUTH_SESSION_TTL_SECS; do
+        if grep -qE "^[[:space:]]*$v=" "$ENV_FILE" 2>/dev/null; then
+            MOVED="$MOVED $v"
+        fi
+    done
+    if [ -n "$MOVED" ]; then
+        echo "bb-auth: these variables moved into $SETTINGS_FILE and are no longer read:" >&2
+        for v in $MOVED; do echo "bb-auth:            $v" >&2; done
+        echo "bb-auth:          Their values are already in that file. Delete the lines from" >&2
+        echo "bb-auth:          $ENV_FILE, then: dpkg --configure bb-auth" >&2
+        echo "bb-auth:          NOT restarted; the running process is still serving." >&2
+        exit 1
+    fi
+
     # --- a scripts/deploy.sh install shadows this one ---
     # That installer writes /etc/systemd/system, the ADMIN directory, whose copy wins
     # over the packaged unit in /usr/lib/systemd/system. dpkg may not remove it, so say
@@ -89,7 +166,7 @@ configure)
     # Restart=on-failure that is a boot loop. Failing HERE, before the restart below,
     # leaves the already-running process serving on the inode it still holds.
     envval() {
-        grep -E "^[[:space:]]*$1=" "$ENV_FILE" 2>/dev/null | tail -1 | cut -d= -f2- | tr -d '[:space:]' || true
+        envval_of "$ENV_FILE" "$1"
     }
     FAIL=0
     for req in BB_AUTH_HMAC_KEY BB_AUTH_COGNITO_ISSUER BB_AUTH_CLIENT_ID \
@@ -108,8 +185,18 @@ configure)
         FAIL=1
     fi
 
-    # The authoritative check: the gate's own parser, on the exact bytes going live.
+    # And the settings file must be the one the service will read, for the same reason.
+    ENV_SETTINGS="$(envval BB_AUTH_SETTINGS_FILE)"
+    if [ -n "$ENV_SETTINGS" ] && [ "$ENV_SETTINGS" != "$SETTINGS_FILE" ]; then
+        echo "bb-auth: BB_AUTH_SETTINGS_FILE=$ENV_SETTINGS but this package installs $SETTINGS_FILE." >&2
+        FAIL=1
+    fi
+
+    # The authoritative checks: the parsers themselves, on the exact bytes going live. A
+    # settings file the gate refuses only costs a reload while the service runs, but the
+    # restart below would meet it, and that is the boot loop.
     "$DEST/bin/bb-auth" --check-access "$ACCESS_FILE" || FAIL=1
+    "$DEST/bin/bb-auth" --check-settings "$SETTINGS_FILE" || FAIL=1
 
     if [ -d /run/systemd/system ]; then
         systemctl --system daemon-reload >/dev/null || true

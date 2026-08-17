@@ -17,6 +17,7 @@ DEST="${DEST:-/opt/bb-auth}"
 ENV_FILE="$DEST/etc/bb-auth.env"
 WEB_ENV_FILE="$DEST/etc/bb-auth-web.env"
 ACCESS_FILE="$DEST/var/lib/access.json"
+SETTINGS_FILE="$DEST/var/lib/settings.json"
 VAR_DIR="$DEST/var/lib"
 SVC_USER=bb-auth
 WEB_USER=bb-auth-web
@@ -103,6 +104,29 @@ else
   bad "$ACCESS_FILE does not exist"
 fi
 
+# The other file the gate reads on every SIGHUP. Its own parser, for the same reason: a file
+# it refuses costs only a declined reload while the service runs, and the next restart.
+if [ -e "$SETTINGS_FILE" ]; then
+  if OUT="$("$DEST/bin/bb-auth" --check-settings "$SETTINGS_FILE" 2>&1)"; then
+    note "$OUT"
+  else
+    bad "settings file rejected by the gate's own parser:"
+    echo "$OUT" | sed 's/^/        /'
+  fi
+else
+  bad "$SETTINGS_FILE does not exist"
+fi
+
+# The six settings that moved out of the environment in 3.1. Any of them still in an env
+# file is a fatal startup, on purpose: a value an operator can see and the service ignores
+# is the failure mode this deployment does not accept.
+for v in BB_AUTH_PROFILE_CLAIMS BB_AUTH_IDENTITY_ATTRS BB_AUTH_SESSION_TTL_SECS \
+         BB_AUTH_ALLOW_UNVERIFIED_SOCIAL BB_AUTH_SOCIAL_PROVIDERS; do
+  if grep -qE "^[[:space:]]*$v=" "$ENV_FILE" 2>/dev/null; then
+    bad "$v is still set in $ENV_FILE: it moved into $SETTINGS_FILE and is now fatal"
+  fi
+done
+
 SINCE="$(unit_active_since bb-auth)"
 if [ -n "$SINCE" ] && journalctl -u bb-auth --since "$SINCE" --no-pager 2>/dev/null | grep -q 'listening on'; then
   echo "  PASS  journal: clean startup (listening line since the unit came up)"
@@ -124,10 +148,16 @@ if [ -x "$DEST/bin/bb-auth-web" ]; then
   chk "GET bb-auth-web / (no identity header) == 401" "401" \
       "$(curl -s -o /dev/null -w '%{http_code}' --max-time 3 "http://$WEB_LISTEN/" || true)"
 
-  if [ -z "$(envval BB_AUTH_WEB_ADMINS "$WEB_ENV_FILE")" ]; then
-    bad "$WEB_ENV_FILE sets no BB_AUTH_WEB_ADMINS (empty must never mean 'everyone')"
+  # The allowlist lives in the settings file since 3.1. Emptiness is what must never mean
+  # "everyone", and the binary refuses to serve without it, so this is the check that keeps
+  # that refusal from being discovered by the first visitor.
+  if grep -qE '^[[:space:]]*BB_AUTH_WEB_ADMINS=' "$WEB_ENV_FILE" 2>/dev/null; then
+    bad "BB_AUTH_WEB_ADMINS is still set in $WEB_ENV_FILE: it moved into $SETTINGS_FILE"
+  fi
+  if tr -d '[:space:]' < "$SETTINGS_FILE" 2>/dev/null | grep -q '"admins":\["'; then
+    echo "  PASS  the settings file names at least one administrator"
   else
-    echo "  PASS  BB_AUTH_WEB_ADMINS is set"
+    bad "$SETTINGS_FILE names no administrator (empty must never mean 'everyone')"
   fi
   chk "the GUI edits the file the gate reads" "$ACCESS_FILE" \
       "$(envval BB_AUTH_ACCESS_FILE "$WEB_ENV_FILE")"
@@ -136,6 +166,8 @@ if [ -x "$DEST/bin/bb-auth-web" ]; then
   # write permission on the DIRECTORY, because the replacement is a rename into place.
   chk "access.json ownership" "$WEB_USER:$SVC_USER 640" \
       "$(stat -c '%U:%G %a' "$ACCESS_FILE" 2>/dev/null || true)"
+  chk "settings.json ownership" "$WEB_USER:$SVC_USER 640" \
+      "$(stat -c '%U:%G %a' "$SETTINGS_FILE" 2>/dev/null || true)"
   chk "var/lib ownership" "$WEB_USER:$SVC_USER 750" \
       "$(stat -c '%U:%G %a' "$VAR_DIR" 2>/dev/null || true)"
 

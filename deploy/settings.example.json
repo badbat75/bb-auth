@@ -1,0 +1,106 @@
+{
+  "_comment": [
+    "bb-auth settings file — TEMPLATE. The real one is <install-dir>/var/lib/settings.json,",
+    "created by the package and never shipped, exactly like access.json: it is state.",
+    "",
+    "What is in here and what is not is decided by one rule. A setting lives in this file",
+    "iff it (1) is read per request, so a new value takes effect on the next one, (2) cannot",
+    "lock the operator out if it is wrong, and (3) is not a secret. Everything else stays in",
+    "bb-auth.env, on the host: the listener, the worker count, the HMAC key, the Cognito",
+    "trust roots, the cookie's name and domain, BB_AUTH_LOGIN_URL, BB_AUTH_AUTHORIZED_HOSTS",
+    "and BB_AUTH_ORIGINAL_URL_HEADER.",
+    "",
+    "It is a file rather than more env vars for one mechanical reason: a process cannot",
+    "re-read its own environment. systemd loads EnvironmentFile= once, at ExecStart, so",
+    "nothing in an env file can ever be reloaded without a restart.",
+    "",
+    "Edit it with `bb-auth-adm settings ...`, or from bb-auth-web's Settings tab; both go",
+    "through the same validate-before-write. Check one by hand with:",
+    "  bb-auth --check-settings settings.json",
+    "The gate re-reads it on SIGHUP (systemctl reload bb-auth) and a file it refuses leaves",
+    "the running values in place; bb-auth-web reads it fresh on every request.",
+    "",
+    "COMMENTS LIVE UP HERE, and that is not a limitation to work around: unknown keys inside",
+    "a section are a hard error, for the reason a misspelled scope field is one. A setting",
+    "silently dropped is worse than a setting refused. Unknown keys at THIS level are kept",
+    "across an edit, which is what makes these blocks survive a save from either editor."
+  ],
+
+  "version": 1,
+
+  "_comment_profile_claims": [
+    "gate.profile_claims — OIDC claims to hand to the application on a 204, in the order the",
+    "headers come out. EMPTY BY DEFAULT: nothing is propagated but the identity.",
+    "['given_name', 'family_name'] reproduces what 2.4 emitted unconditionally.",
+    "The header name is DERIVED and never configured: '_' and ':' become '-', each part is",
+    "title-cased, and 'X-Auth-' is prefixed. given_name -> X-Auth-Given-Name,",
+    "custom:department -> X-Auth-Custom-Department (nginx:",
+    "$upstream_http_x_auth_custom_department). A claim name may contain only [A-Za-z0-9_:-];",
+    "anything else, a claim the gate consumes itself (email, email_verified, token_use,",
+    "identities), or two entries deriving the same header, is refused rather than skipped.",
+    "These are self-asserted profile attributes: display hints, never authorization. They",
+    "ride inside the session cookie, so keep the list short (a browser silently drops a",
+    "cookie over ~4 KB, and the gate warns at startup when you get close). Changing it is NOT",
+    "a cookie-format change: nobody is logged out, a claim removed stops being emitted at",
+    "once, and one added appears at each user's next sign-in."
+  ],
+
+  "_comment_identity_attrs": [
+    "gate.identity_attrs — which identity attributes a 204 names. Default ['email'], which is",
+    "exactly what every version before this file emitted. Only 'email' and 'uuid' exist; a",
+    "third would be a code change, not a string you may invent. An empty list is refused: a",
+    "204 that names nobody breaks every application behind the gate, in silence.",
+    "NGINX MUST CLEAR EVERY POSSIBLE NAME, not the ones enabled here. proxy_set_header",
+    "overrides only the names it lists, so a header you neither set nor clear is one a client",
+    "can send. Clear X-Auth-Uuid on every gated location even while it is off, and turning it",
+    "on here later needs no nginx change at all.",
+    "Multiple values of one attribute come out SPACE-separated (a user with two emails); a",
+    "space can never appear inside an identifier, which is what makes that unambiguous."
+  ],
+
+  "_comment_social": [
+    "gate.allow_unverified_social — relax the email_verified requirement, but ONLY for",
+    "federated (social) logins. Cognito cannot verify the email of a Google/Apple sign-up, so",
+    "it stamps email_verified=false even though the IdP asserted the address. Native",
+    "self-signup stays strict: an unverified native email is attacker-controlled. It",
+    "multiplies with an 'authenticated' scope: together they mean any social account,",
+    "unverified email, no enrolment.",
+    "gate.social_providers narrows it to named IdPs, matched case-insensitively against the",
+    "token's identities[].providerName. Empty = any federated provider. Prefer listing only",
+    "providers that verify the email."
+  ],
+
+  "_comment_session_ttl_secs": [
+    "gate.session_ttl_secs — the session cookie's lifetime, in seconds. Applies to cookies",
+    "minted from now on and to no cookie already in a browser, so changing it logs nobody",
+    "out. Below 60s is refused (a session that expires as it is handed over is a login loop);",
+    "above 400 days is warned about, because that is the cap browsers apply to Max-Age",
+    "regardless of what the header says."
+  ],
+
+  "_comment_admins": [
+    "web.admins — who may use bb-auth-web, matched against the X-Auth-Email nginx injects",
+    "(trimmed and lowercased, so a login's capitalisation cannot matter). REQUIRED and never",
+    "empty: bb-auth-web refuses to serve without one, and both editors refuse to write an",
+    "empty list. The gate ignores this section entirely.",
+    "It is deliberate defense in depth, not a second copy of the roster: a scope that grants",
+    "on identity alone (anonymous or authenticated) covering the admin URL would otherwise",
+    "hand the admin surface to any Cognito account, and self-signup is open. But it is the",
+    "BACKSTOP, not the lock: the gate is what stands in front, so the admin area must be a",
+    "'restricted' scope that lists each admin, and covered by NO anonymous or authenticated",
+    "scope.",
+    "The GUI will not let an administrator remove themselves from this list. That is on",
+    "purpose, and `bb-auth-adm settings admin rm` is the way to do it anyway."
+  ],
+
+  "gate": {
+    "profile_claims": [],
+    "identity_attrs": ["email"],
+    "allow_unverified_social": false,
+    "social_providers": [],
+    "session_ttl_secs": 2592000
+  },
+  "web": {
+    "admins": ["you@example.com"]
+  }
+}

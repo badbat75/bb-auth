@@ -44,12 +44,20 @@ function buildBin() {
   return path.join(REPO, 'target', 'debug', process.platform === 'win32' ? 'bb-auth-web.exe' : 'bb-auth-web');
 }
 
-/** A fresh temp directory holding a copy of the fixture, plus the copy's path. */
+/**
+ * A fresh temp directory holding a copy of the fixture, plus the copy's path.
+ *
+ * The settings file is written beside it under the name the binary derives when nothing
+ * names one, so the suite exercises that default rather than a path of its own invention.
+ * Its one administrator is the identity every test signs in as.
+ */
 function tempAccessFile() {
   const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'bb-auth-e2e-'));
   const file = path.join(dir, 'access.json');
+  const settings = path.join(dir, 'settings.json');
   fs.copyFileSync(FIXTURE, file);
-  return { dir, file };
+  fs.writeFileSync(settings, SETTINGS_FIXTURE);
+  return { dir, file, settings };
 }
 
 /** Ask the OS for a free loopback port. */
@@ -71,7 +79,6 @@ function startServer(bin, accessFile, port) {
       cwd: REPO,
       env: {
         ...process.env,
-        BB_AUTH_WEB_ADMINS: 'admin@example.com',
         BB_AUTH_ACCESS_FILE: accessFile,
         BB_AUTH_WEB_LISTEN: `127.0.0.1:${port}`,
         BB_AUTH_WEB_BASE_PATH: '/admin',
@@ -101,6 +108,14 @@ function startServer(bin, accessFile, port) {
 }
 
 /**
+ * The settings file every run starts from: the defaults, and the one administrator every
+ * test signs in as. Written beside the access file under the name the binary derives when
+ * nothing names one, so the suite exercises that default rather than a path of its own.
+ */
+const SETTINGS_FIXTURE =
+  JSON.stringify({ version: 1, web: { admins: ['admin@example.com'] } }, null, 2) + '\n';
+
+/**
  * Everything above, in the one order that works, and the teardown that undoes it.
  * Resolves to `{ ctx, stop }`: `ctx` is what a test area (or the visual walk) receives,
  * `stop()` closes the browser, kills the server and removes the temp directory.
@@ -108,7 +123,7 @@ function startServer(bin, accessFile, port) {
 async function boot() {
   const { chromium } = ensureDeps();
   const bin = buildBin();
-  const { dir, file: accessFile } = tempAccessFile();
+  const { dir, file: accessFile, settings: settingsFile } = tempAccessFile();
   const port = await freePort();
 
   let server, browser;
@@ -129,9 +144,10 @@ async function boot() {
     origin: `http://127.0.0.1:${port}`,
     base: `http://127.0.0.1:${port}/admin`,
     accessFile,
+    settingsFile,
   };
   console.log(`== server on ${ctx.origin} (file: ${accessFile}) | browser: ${CHANNEL} ==\n`);
   return { ctx, stop };
 }
 
-module.exports = { E2E_DIR, REPO, FIXTURE, CHANNEL, sh, boot };
+module.exports = { E2E_DIR, REPO, FIXTURE, SETTINGS_FIXTURE, CHANNEL, sh, boot };

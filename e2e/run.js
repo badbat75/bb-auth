@@ -19,9 +19,9 @@
 const fs = require('fs');
 const path = require('path');
 
-const { E2E_DIR, FIXTURE, boot } = require('./lib/server');
+const { E2E_DIR, FIXTURE, SETTINGS_FIXTURE, boot } = require('./lib/server');
 
-const AREAS = ['auth', 'crud', 'validation', 'conflict', 'i18n', 'nojs'];
+const AREAS = ['auth', 'crud', 'settings', 'validation', 'conflict', 'i18n', 'nojs'];
 
 async function main() {
   const shotsDir = process.env.E2E_SHOTS === '1' ? path.join(E2E_DIR, 'artifacts') : null;
@@ -32,7 +32,10 @@ async function main() {
   try {
     const { Checker } = require('./lib/harness');
     for (const area of AREAS) {
-      fs.copyFileSync(FIXTURE, ctx.accessFile); // every area starts from the pristine fixture
+      // Every area starts from the pristine fixture, both files: the settings area writes
+      // to the second one exactly as the others write to the first.
+      fs.copyFileSync(FIXTURE, ctx.accessFile);
+      fs.writeFileSync(ctx.settingsFile, SETTINGS_FIXTURE);
       const t = new Checker(area, shotsDir);
       try {
         await require(`./tests/${area}`).run(ctx, t);

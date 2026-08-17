@@ -60,11 +60,11 @@
 //! and injects into the request it proxies — that is how the application learns who is
 //! calling. On an `authenticated` scope that email may name someone with no entry
 //! anywhere: it is an *authenticated* identity, and enrolling it is the application's
-//! business. Which attributes go out is `BB_AUTH_IDENTITY_ATTRS` ([`IdentityAttr`]);
+//! business. Which attributes go out is the settings file's `identity_attrs` ([`IdentityAttr`]);
 //! `email` is the default and the header every application already reads.
 //!
 //! The two Cognito-backed credentials can also carry **profile claims** — whichever OIDC
-//! claims `BB_AUTH_PROFILE_CLAIMS` names, each in a header derived from its own name
+//! claims the settings file's `profile_claims` names, each in a header derived from its own name
 //! ([`ProfileClaim`]), percent-encoded — so an application has a display name without
 //! parsing one out of the email. Off by default, and always optional: a token that asserts
 //! no such claim, and every API key, omit the header rather than send it empty. They are
@@ -77,6 +77,26 @@
 //! claim would work for exactly one of the three credentials. It would not be safe either —
 //! self-signup means a valid id_token proves identity, never authorization. The headers are
 //! trustworthy only in so far as the application is unreachable except through nginx.
+//!
+//! # Where the configuration lives
+//!
+//! Three places, and which one a setting is in is decided by one question: what does it cost
+//! to change it?
+//!
+//! * **`bb-auth.env`**, read once at `ExecStart` ([`Config`]). Everything a change to costs a
+//!   restart or a re-login: the listener and the worker count, the HMAC keys (the only secret
+//!   in the system), the Cognito trust roots, the cookie's name and domain, and the three that
+//!   *are* the lockout if they are wrong: `BB_AUTH_LOGIN_URL`, `BB_AUTH_AUTHORIZED_HOSTS`,
+//!   `BB_AUTH_ORIGINAL_URL_HEADER`.
+//! * **the settings file** (`BB_AUTH_SETTINGS_FILE`, [`bb_auth_core::Settings`]), re-read on
+//!   SIGHUP and held in [`State::settings`]. The five that are read per request, cannot lock
+//!   anybody out, and are not secret. They are in a file rather than the environment because a
+//!   process cannot re-read its own environment: that, and not taste, is why the split exists.
+//! * **the access file** ([`bb_auth_core::Access`]), re-read on SIGHUP: who reaches what.
+//!
+//! Both files are validated by the parser their editors use, both reload **fail-soft** (a
+//! broken file keeps what is already live), and `--check-access` / `--check-settings` are the
+//! two commands that catch either before a restart meets it.
 
 use std::collections::{BTreeMap, HashMap};
 use std::io::Read;
@@ -98,9 +118,10 @@ use tiny_http::{Header, Request, Response, Server, StatusCode};
 // access file has no opinion about — HTTP, the cookie, id_token validation, the nginx
 // contract — stays here, in one file, read top to bottom.
 use bb_auth_core::{
-    compile_host_pattern, compile_login_url, decide, decide_api_key, header_safe_email,
-    login_url_for, lower_authority, now, read_access, sha256_hex, Access, AccessKind, ApiKeyRecord,
-    Decision, KeyDecision, Subject, UrlPattern, API_KEY_PREFIX,
+    claim_name_ok, compile_host_pattern, compile_login_url, decide, decide_api_key,
+    default_settings_path, header_safe_email, login_url_for, lower_authority, now, read_access,
+    read_settings, sha256_hex, Access, AccessKind, ApiKeyRecord, Decision, IdentityAttr,
+    KeyDecision, ProfileClaim, Settings, Subject, UrlPattern, API_KEY_PREFIX,
 };
 
 type HmacSha256 = Hmac<Sha256>;
@@ -141,7 +162,7 @@ const MAX_CLAIM_VALUE_BYTES: usize = 256;
 /// theirs. They are percent-encoded only on the way out ([`ProfileClaim`]).
 ///
 /// The blob is **self-describing** — it names its own claims — and that is the point.
-/// `BB_AUTH_PROFILE_CLAIMS` is config, a cookie lives up to a month, and positional
+/// the claim list is config, a cookie lives up to a month, and positional
 /// segments would let an edit to that list silently reinterpret a live cookie's values
 /// under someone else's claim name. It also means changing the list is *not* a format
 /// change: old cookies keep verifying, claims dropped from the config stop being emitted
@@ -200,14 +221,18 @@ const COOKIE_VERSION: &str = "bb4";
 /// application is unreachable except through nginx.
 ///
 /// The two name lines are the derived headers of the example config
-/// `BB_AUTH_PROFILE_CLAIMS=given_name,family_name`; a different claim list means different
+/// `profile_claims: [given_name, family_name]`; a different claim list means different
 /// variables, mechanically named ([`ProfileClaim`] — `custom:department` would be
 /// `$upstream_http_x_auth_custom_department`). They are optional and additive: a location
 /// that lifts only `$bb_email` keeps seeing exactly what it saw before. But the
 /// empty-variable rule is also the *clear* — an application that trusts a profile header
 /// behind a location that does not `proxy_set_header` it would be reading whatever the
 /// client sent, so set them or clear them explicitly, like `X-Forwarded-User` above.
-const IDENTITY_HEADER: &str = "X-Auth-Email";
+///
+/// The *string* lives on [`bb_auth_core::IDENTITY_HEADER`], because `compile_identity_attrs`
+/// checks its own derivation against it and `bb-auth-web` reads its administrator out of it;
+/// the nginx contract above is this end of it, and stays here.
+const IDENTITY_HEADER: &str = bb_auth_core::IDENTITY_HEADER;
 
 /// Response header naming the login page on a `401` from `/auth/validate` — the site's
 /// `login_url`, or `BB_AUTH_LOGIN_URL` when it declares none ([`login_url_for`]).
@@ -275,233 +300,6 @@ impl HmacKeys {
     }
 }
 
-/// One configured OIDC profile claim, and the response header derived from its name.
-///
-/// The **set** is configuration (`BB_AUTH_PROFILE_CLAIMS`, comma-separated, empty by
-/// default); the **derivation** is code, and fixed. That split is the whole point: an
-/// operator names a claim, never a header, so the two can never disagree and no header
-/// name is attacker- or typo-reachable.
-///
-/// Derivation: map `_` and `:` to `-`, title-case each `-`-separated token, prefix
-/// `X-Auth-`. So `given_name` → `X-Auth-Given-Name` and `family_name` →
-/// `X-Auth-Family-Name` — the two v2.4 hard-coded — while `nickname` → `X-Auth-Nickname`
-/// and `custom:department` → `X-Auth-Custom-Department`. Because [`compile_profile_claims`]
-/// admits only `[A-Za-z0-9_:-]`, a derived header is always `[A-Za-z0-9-]+` — a valid
-/// header token by construction, so [`h`] cannot panic on the name.
-///
-/// The **value** is emitted **percent-encoded UTF-8 per RFC 3986**: every byte outside the
-/// unreserved set `[A-Za-z0-9-._~]` becomes `%XX`, so a space is `%20` and `Niccolò` is
-/// `Niccol%C3%B2`. Any standard URI-decoder reads it back; note this is *not* the
-/// `application/x-www-form-urlencoded` variant, so a `+` means a literal plus (`%2B` never
-/// appears for a space). [`pct_encode`]'s output is printable ASCII for **any** input, and
-/// that construction — not a validator — is what lets [`respond_authorized`] hand a value
-/// to [`h`] with no per-request check, the way [`header_safe_email`] does for the email.
-///
-/// **An absent claim omits its header entirely**, never sends it empty. That covers a token
-/// that carries no such claim, a cookie minted before the claim was configured, and every
-/// API key ([`bearer_apikey`] — no token to read one from). nginx carries the
-/// distinction through unchanged: an unset `$upstream_http_*` drops the header there too.
-///
-/// These are **self-asserted profile attributes** — any Cognito user, verified email or
-/// not, writes their own — so they are display hints and nothing may key on them. They
-/// authorize nothing, no field of the access file mentions them, and they are never logged.
-/// The identity is, and stays, [`IDENTITY_HEADER`]. The nginx wiring is on that constant.
-struct ProfileClaim {
-    /// The OIDC claim name, exactly as it appears in the id_token.
-    claim: String,
-    /// The response header derived from it. See the type doc.
-    header: String,
-}
-
-/// Claim names bb-auth consumes itself, and so cannot propagate.
-///
-/// [`Claims`] deserializes these into typed fields, and `#[serde(flatten)]` never sees a
-/// key a typed field already took — so configuring one of them would propagate nothing,
-/// silently and forever. Rejecting them at startup turns that into a fatal typo instead.
-const RESERVED_CLAIMS: [&str; 4] = ["email", "email_verified", "token_use", "identities"];
-
-/// Every identity attribute this binary knows how to emit.
-///
-/// The **set** an installation emits is configuration (`BB_AUTH_IDENTITY_ATTRS`); the
-/// derivation from an attribute name to a header is code, exactly as it is for a profile
-/// claim, so an operator names an attribute and never a header.
-///
-/// The set of *possible* names is this array, and it being finite is the security
-/// argument. `proxy_set_header` overrides only the names it lists, so nginx must clear
-/// every header the gate could ever emit, **including the ones this installation has
-/// turned off**: an identity header nginx does not clear is one a client can send. An
-/// operator who turns an attribute on later must add nothing to nginx, because the clear
-/// was already there. See [`IdentityAttr`] and the README's nginx section.
-///
-/// It is also the reason a new attribute is a code change: `phone` will be a fourth
-/// credential's worth of work in `validate_id_token` (the `phone_number` claim and its own
-/// verification), not a string an operator may invent.
-const IDENTITY_ATTRS: [&str; 2] = ["uuid", "email"];
-
-/// Whether `s` is a syntactically valid profile-claim name: non-empty and
-/// `[A-Za-z0-9_:-]` only.
-///
-/// Shared by [`compile_profile_claims`] (config) and [`decode_claims_segment`] (a cookie's
-/// claim blob), so a cookie can never carry a key that no config could have produced.
-fn claim_name_ok(s: &str) -> bool {
-    !s.is_empty()
-        && s.bytes()
-            .all(|b| b.is_ascii_alphanumeric() || b == b'_' || b == b':' || b == b'-')
-}
-
-/// Derive a claim's response header. See [`ProfileClaim`] for the rule and why it is code
-/// rather than config. Assumes `claim` passed [`compile_profile_claims`]'s checks.
-fn derive_profile_header(claim: &str) -> String {
-    let normalized = claim.replace([':', '_'], "-");
-    let mut out = String::from("X-Auth-");
-    for (i, token) in normalized.split('-').enumerate() {
-        if i > 0 {
-            out.push('-');
-        }
-        let mut chars = token.chars();
-        if let Some(first) = chars.next() {
-            out.push(first.to_ascii_uppercase());
-            out.extend(chars.map(|c| c.to_ascii_lowercase()));
-        }
-    }
-    out
-}
-
-/// Compile `BB_AUTH_PROFILE_CLAIMS` — a comma-separated list of OIDC claim names — into
-/// the claims to capture and the headers to emit. Empty (the default) means none: profile
-/// propagation is opt-in.
-///
-/// Pure and fallible so it can be tested; [`Config::from_env`] turns an `Err` into the
-/// usual fatal exit. Every rejection is a startup failure rather than a skipped entry,
-/// because a silently dropped claim is a header an application waits for forever.
-///
-/// Rejects, naming the entry: a name outside `[A-Za-z0-9_:-]`; an empty token around a
-/// separator (`:dept`, `dept:`, `a--b`), which would derive a header with an empty
-/// component; a claim in [`RESERVED_CLAIMS`]; and a derived header that collides
-/// case-insensitively with [`IDENTITY_HEADER`], [`LOGIN_URL_HEADER`] or another entry's
-/// (which also catches a repeated claim, and spellings that differ only in case or
-/// separator, e.g. `given_name` and `given-name`).
-fn compile_profile_claims(spec: &str) -> Result<Vec<ProfileClaim>, String> {
-    let mut out: Vec<ProfileClaim> = Vec::new();
-    for claim in spec.split(',').map(str::trim).filter(|s| !s.is_empty()) {
-        if !claim_name_ok(claim) {
-            return Err(format!(
-                "claim '{claim}' must be non-empty and contain only [A-Za-z0-9_:-]"
-            ));
-        }
-        if claim.replace([':', '_'], "-").split('-').any(str::is_empty) {
-            return Err(format!(
-                "claim '{claim}' has an empty part around a '_', ':' or '-'"
-            ));
-        }
-        if RESERVED_CLAIMS.contains(&claim) {
-            return Err(format!(
-                "claim '{claim}' is consumed by the gate itself and cannot be propagated"
-            ));
-        }
-        let header = derive_profile_header(claim);
-        // Every *possible* identity header is reserved, not merely the ones this
-        // installation emits: turning an attribute on tomorrow must not collide with a
-        // claim configured today, because that discovery would happen at runtime, on a
-        // header an application already trusts.
-        let reserved = IDENTITY_ATTRS
-            .iter()
-            .map(|a| derive_profile_header(a))
-            .chain(std::iter::once(LOGIN_URL_HEADER.to_string()));
-        for r in reserved {
-            if header.eq_ignore_ascii_case(&r) {
-                return Err(format!(
-                    "claim '{claim}' derives '{header}', which is reserved"
-                ));
-            }
-        }
-        if let Some(prev) = out.iter().find(|p| p.header.eq_ignore_ascii_case(&header)) {
-            return Err(format!(
-                "claims '{}' and '{claim}' both derive '{header}'",
-                prev.claim
-            ));
-        }
-        out.push(ProfileClaim {
-            claim: claim.to_string(),
-            header,
-        });
-    }
-    Ok(out)
-}
-
-/// One configured identity attribute, and the response header derived from its name.
-///
-/// The same split as [`ProfileClaim`], for the same reason: the **set** is configuration
-/// (`BB_AUTH_IDENTITY_ATTRS`, comma-separated, `email` by default), the **derivation** is
-/// code, so an operator names an attribute and no header name is typo-reachable. The
-/// derivation is literally the same function, so `uuid` becomes `X-Auth-Uuid` and `email`
-/// becomes `X-Auth-Email`, which is the header every application behind this gate already
-/// reads.
-///
-/// These are **not** profile claims, and the difference is the whole point of the split.
-/// An identity attribute is what the access file decided a request belongs to: it is
-/// checked, it is what `denied` vetoes, and an application may key its own records on it.
-/// A profile claim is self-asserted decoration nothing may key on.
-///
-/// A multi-valued attribute is emitted **space-separated**, and that is safe by
-/// construction rather than by convention: every identifier passed
-/// [`header_safe_email`], which requires printable ASCII,
-/// and a space is not printable ASCII. A comma would not do, because
-/// [`well_formed_email`](bb_auth_core::well_formed_email) allows one in a local part, and a
-/// list an application cannot split unambiguously is a parsing burden the gate exists to
-/// absorb.
-///
-/// An absent attribute **omits its header** rather than sending it empty, exactly as a
-/// profile claim does: nginx reads an unset variable as no header at all, so
-/// present-and-empty is a distinction the application cannot make. An identity granted by
-/// an `authenticated` scope is in no roster row, so it has no `uuid` to send.
-struct IdentityAttr {
-    /// The attribute name, one of [`IDENTITY_ATTRS`].
-    attr: String,
-    /// The response header derived from it.
-    header: String,
-}
-
-/// Compile `BB_AUTH_IDENTITY_ATTRS` into the identity headers to emit. Default `email`,
-/// which is exactly what every earlier version emitted.
-///
-/// Fatal on every rejection, and fatal on an **empty** list above all: an authorized `204`
-/// that names nobody is an application silently losing its identity, and silence is the
-/// one failure mode this gate does not accept. Unknown names are rejected against
-/// [`IDENTITY_ATTRS`] rather than passed through, so a typo cannot quietly turn an
-/// attribute off.
-fn compile_identity_attrs(spec: &str) -> Result<Vec<IdentityAttr>, String> {
-    // The one place the derivation and the documented constant are checked against each
-    // other. Every application behind this gate reads `X-Auth-Email`, and every nginx
-    // snippet in the README names it literally, so a change to the derivation must not be
-    // allowed to rename it in silence.
-    assert_eq!(derive_profile_header("email"), IDENTITY_HEADER);
-    let mut out: Vec<IdentityAttr> = Vec::new();
-    for attr in spec.split(',').map(str::trim).filter(|s| !s.is_empty()) {
-        if !IDENTITY_ATTRS.contains(&attr) {
-            return Err(format!(
-                "unknown identity attribute '{attr}' (known: {})",
-                IDENTITY_ATTRS.join(", ")
-            ));
-        }
-        if out.iter().any(|a| a.attr == attr) {
-            return Err(format!("identity attribute '{attr}' is listed twice"));
-        }
-        out.push(IdentityAttr {
-            attr: attr.to_string(),
-            header: derive_profile_header(attr),
-        });
-    }
-    if out.is_empty() {
-        return Err(format!(
-            "at least one identity attribute is required (known: {}); a 204 that names \
-             nobody breaks every application behind this gate, in silence",
-            IDENTITY_ATTRS.join(", ")
-        ));
-    }
-    Ok(out)
-}
-
 /// Upper bound on the session cookie's size, in bytes, for a given claim set — what the
 /// startup warning is measured against.
 ///
@@ -540,22 +338,11 @@ struct Config {
     /// `BB_AUTH_CLIENT_ID` at index 0; `BB_AUTH_AUDIENCES` appends extras (e.g. a
     /// separate social-login client). A token is accepted if its `aud` matches any entry.
     audiences: Vec<String>,
-    /// Relax the `email_verified` requirement, but ONLY for federated (social) logins —
-    /// never for native Cognito users. Cognito often cannot verify the email of a social
-    /// sign-up (Google/Apple/…), so it stamps `email_verified=false` even though the IdP
-    /// itself asserted the address. Off by default. See [`unverified_social_ok`].
-    allow_unverified_social: bool,
-    /// Optional provider allowlist narrowing [`Config::allow_unverified_social`], matched
-    /// case-insensitively against the token's `identities[].providerName`. `None` = any
-    /// federated provider. Restrict it to IdPs that actually verify the email.
-    social_providers: Option<Vec<String>>,
     /// `BB_AUTH_COOKIE_NAME`, the session cookie's name. Default `bb_session`.
     cookie_name: String,
     /// `BB_AUTH_COOKIE_DOMAIN`. `None` = a host-only cookie (per-service login); a parent
     /// domain (`.example.com`) shares one session across every service behind the gate.
     cookie_domain: Option<String>,
-    /// `BB_AUTH_SESSION_TTL_SECS`, the cookie's lifetime in seconds.
-    session_ttl: u64,
     /// Hosts a post-login `rd` may land on (`BB_AUTH_AUTHORIZED_HOSTS`), as globs matched
     /// against the host alone, e.g. `badbat75.com,*.badbat75.com`.
     ///
@@ -593,23 +380,69 @@ struct Config {
     /// string, so `/app/%2e%2e/admin` would match an `/app/*` scope while nginx serves
     /// `/admin`. A gated location that forgets the `set` sends no header and is denied.
     original_url_header: String,
-    /// OIDC profile claims to capture from an id_token and hand to the application, from
-    /// `BB_AUTH_PROFILE_CLAIMS` (comma-separated claim names). Empty by default — profile
-    /// propagation is opt-in; `given_name,family_name` reproduces v2.4's two headers.
-    ///
-    /// Order is the operator's, and is the order the headers come out in. Since this is
-    /// read at startup, changing it needs a restart — and it is *not* a cookie-format
-    /// change: a claim dropped here stops being emitted from cookies that still carry it,
-    /// and one added here appears at the holder's next login ([`COOKIE_VERSION`]).
-    profile_claims: Vec<ProfileClaim>,
-    /// Which identity attributes a `204` names, from `BB_AUTH_IDENTITY_ATTRS`
-    /// (comma-separated). Default `email`, which is what every earlier version emitted.
-    ///
-    /// Order is the operator's, and is the order the headers come out in. Unlike the
-    /// profile claims this may never be empty: see [`compile_identity_attrs`].
-    identity_attrs: Vec<IdentityAttr>,
     /// `BB_AUTH_WORKERS`, the number of blocking request threads. At least 1.
     workers: usize,
+}
+
+/// The five settings that used to be env vars and are now read from the settings file, plus
+/// the reason they moved.
+///
+/// A process cannot re-read its own environment: systemd loads `EnvironmentFile=` once, at
+/// `ExecStart`, so a `SIGHUP` handler asking `std::env::var` would be handed the same values
+/// it started with. Anything that must change while the gate keeps serving therefore cannot
+/// be an env var, whatever else recommends one. These five qualified on three counts, all of
+/// which are the settings file's membership rule ([`bb_auth_core::Settings`]): read per
+/// request, harmless to get wrong, and not a secret.
+///
+/// What is left in [`Config`] is everything that fails one of those: the listener and the
+/// worker count (a rebind), the HMAC keys (the secret), the Cognito trust roots and the
+/// cookie's name and domain (a change logs everyone out or lets nobody in), and the three
+/// that *are* the lockout: `BB_AUTH_LOGIN_URL`, `BB_AUTH_AUTHORIZED_HOSTS` and
+/// `BB_AUTH_ORIGINAL_URL_HEADER`.
+///
+/// The env vars they were are not accepted any more, and their presence is a fatal startup
+/// naming the file ([`check_legacy_env`]): a setting silently read from nowhere is the one
+/// failure mode this gate does not accept.
+const MOVED_TO_SETTINGS: [&str; 5] = [
+    "BB_AUTH_PROFILE_CLAIMS",
+    "BB_AUTH_IDENTITY_ATTRS",
+    "BB_AUTH_ALLOW_UNVERIFIED_SOCIAL",
+    "BB_AUTH_SOCIAL_PROVIDERS",
+    "BB_AUTH_SESSION_TTL_SECS",
+];
+
+/// Refuse to start while any of [`MOVED_TO_SETTINGS`] is still set in the environment.
+///
+/// The alternative is to ignore them, and ignoring them is exactly the trap: an operator who
+/// left `BB_AUTH_PROFILE_CLAIMS` in `bb-auth.env` would get a gate that emits no profile
+/// header and reports a successful start, and the discovery would happen in an application
+/// waiting for a header that never comes. The same reflex as the access file's `check_legacy`,
+/// pointed at the env file instead: name the variables found, name where they went, and stop.
+///
+/// It is checked *before* anything else in [`Config::from_env`], so the message is the first
+/// thing in the journal rather than the last.
+fn check_legacy_env() {
+    let found: Vec<&str> = MOVED_TO_SETTINGS
+        .iter()
+        .copied()
+        .filter(|k| std::env::var_os(k).is_some())
+        .collect();
+    if found.is_empty() {
+        return;
+    }
+    let (subject, them, line) = match found.len() {
+        1 => ("this setting", "it", "the line"),
+        _ => ("these settings", "them", "the lines"),
+    };
+    eprintln!(
+        "[bb-auth] FATAL: {} set, but {subject} moved out of the environment and into the \
+         settings file (BB_AUTH_SETTINGS_FILE, by default settings.json beside the access \
+         file). Nothing reads {them} here any more.\n\
+         [bb-auth]   Move the values with `bb-auth-adm settings set …`, then delete {line} \
+         from bb-auth.env.",
+        found.join(", ")
+    );
+    std::process::exit(1);
 }
 
 /// Read an env var, falling back to `default` when unset.
@@ -625,20 +458,12 @@ fn env_req(key: &str) -> String {
     })
 }
 
-/// Parse a boolean env var. Truthy: `1`/`true`/`yes`/`on` (case-insensitive);
-/// anything else (incl. unset) is false.
-fn env_flag(key: &str) -> bool {
-    matches!(
-        env_or(key, "").trim().to_ascii_lowercase().as_str(),
-        "1" | "true" | "yes" | "on"
-    )
-}
-
 impl Config {
     /// Build the config from the `BB_AUTH_*` env vars, exiting on the first fatal
     /// problem: a missing required var, a short HMAC key, a malformed key id, or an
     /// empty/unparseable `BB_AUTH_AUTHORIZED_HOSTS`.
     fn from_env() -> Self {
+        check_legacy_env();
         let active_key = env_req("BB_AUTH_HMAC_KEY").into_bytes();
         if active_key.len() < 32 {
             eprintln!("[bb-auth] FATAL: BB_AUTH_HMAC_KEY must be >= 32 bytes");
@@ -726,49 +551,13 @@ impl Config {
             }
         }
 
-        // Social-login relaxation of `email_verified` (see Config fields).
-        let allow_unverified_social = env_flag("BB_AUTH_ALLOW_UNVERIFIED_SOCIAL");
-        let social_providers: Vec<String> = env_or("BB_AUTH_SOCIAL_PROVIDERS", "")
-            .split(',')
-            .map(str::trim)
-            .filter(|s| !s.is_empty())
-            .map(str::to_string)
-            .collect();
-        let social_providers = if social_providers.is_empty() {
-            None
-        } else {
-            Some(social_providers)
-        };
-
-        // Which OIDC profile claims to propagate. Unset or empty = none; every rejection
-        // is fatal, because a claim silently dropped here is a header the application
-        // waits for forever.
-        // Which identity attributes a 204 names. Default `email`: the header every
-        // application behind this gate already reads.
-        let identity_attrs = compile_identity_attrs(&env_or("BB_AUTH_IDENTITY_ATTRS", "email"))
-            .unwrap_or_else(|e| {
-                eprintln!("[bb-auth] FATAL: BB_AUTH_IDENTITY_ATTRS: {e}");
-                std::process::exit(1);
-            });
-
-        let profile_claims = compile_profile_claims(&env_or("BB_AUTH_PROFILE_CLAIMS", ""))
-            .unwrap_or_else(|e| {
-                eprintln!("[bb-auth] FATAL: BB_AUTH_PROFILE_CLAIMS: {e}");
-                std::process::exit(1);
-            });
-
         Config {
             listen: env_or("BB_AUTH_LISTEN", "127.0.0.1:4181"),
             hmac_keys: HmacKeys { by_id, active_id },
             issuer,
             audiences,
-            allow_unverified_social,
-            social_providers,
             cookie_name: env_or("BB_AUTH_COOKIE_NAME", "bb_session"),
             cookie_domain,
-            session_ttl: env_or("BB_AUTH_SESSION_TTL_SECS", "2592000")
-                .parse()
-                .unwrap_or(2_592_000),
             authorized_hosts,
             // The global fallback for every site that declares no `login_url`. Validated
             // with the same parser, so nothing that reaches a header or a page can carry
@@ -778,8 +567,6 @@ impl Config {
                 std::process::exit(1);
             }),
             original_url_header: env_or("BB_AUTH_ORIGINAL_URL_HEADER", "X-Original-URL"),
-            profile_claims,
-            identity_attrs,
             workers: env_or("BB_AUTH_WORKERS", "4").parse().unwrap_or(4).max(1),
         }
     }
@@ -803,9 +590,18 @@ struct State {
     /// and its API keys.
     /// Swapped wholesale on SIGHUP by `reload_access` (POSIX only, hence not linked here).
     access: RwLock<Access>,
-    /// Path to re-read on SIGHUP. Only the POSIX reload path needs it.
+    /// The five settings that are read per request rather than per process, swapped on the
+    /// same SIGHUP and by the same rule: a reload that fails keeps what is already live.
+    ///
+    /// Behind a lock for exactly the reason the access table is: an operator edits the file
+    /// and expects the next request to answer differently, without a restart and without
+    /// anybody being logged out. See [`bb_auth_core::Settings`] for what belongs in it.
+    settings: RwLock<Settings>,
+    /// Paths to re-read on SIGHUP. Only the POSIX reload path needs them.
     #[cfg(unix)]
     access_path: String,
+    #[cfg(unix)]
+    settings_path: String,
     jwks: RwLock<JwksCache>,
     /// Serializes JWKS refreshers, so a `kid` miss under load triggers one fetch, not
     /// one per worker. See [`refresh_jwks_if_due`].
@@ -855,6 +651,26 @@ fn load_access(path: &str) -> Access {
     }
 }
 
+/// Initial settings load, with the same rule the access file gets: a missing, unreadable or
+/// invalid file is fatal, because there is no safe default for "what does a `204` name".
+///
+/// The file is created by the package and edited by both editors, so its absence is somebody
+/// having deleted it, not a fresh install, and starting on built-in defaults would mean an
+/// installation quietly emitting fewer headers than it was configured to.
+fn load_settings(path: &str) -> Settings {
+    match read_settings(path) {
+        Ok(s) => s,
+        Err(e) => {
+            eprintln!("[bb-auth] FATAL: cannot read settings file: {e}");
+            eprintln!(
+                "[bb-auth]   Check it with `bb-auth --check-settings {path}`, or write a fresh \
+                 one with `bb-auth-adm settings init -f {path}`."
+            );
+            std::process::exit(1);
+        }
+    }
+}
+
 /// Hot-reload the access table from disk (SIGHUP). On read/parse failure, keep the
 /// current table and log — never nuke the live table on a transient error.
 #[cfg(unix)]
@@ -875,8 +691,41 @@ fn reload_access(state: &State) {
     }
 }
 
-/// Spawn the SIGHUP -> access-reload thread. SIGHUP is POSIX-only, so this is a
-/// no-op on non-unix hosts (where the table simply reloads across a restart).
+/// Hot-reload the settings from disk (SIGHUP), by exactly the access table's rule: swap on
+/// success, keep what is live on failure.
+///
+/// Fail-soft is what makes the whole arrangement safe to hand to a GUI. A settings file that
+/// does not compile is a reload the gate declines, not a gate that stops answering, so the
+/// worst an editor can do between two saves is leave the previous values in force, and say so
+/// in the journal.
+#[cfg(unix)]
+fn reload_settings(state: &State) {
+    match read_settings(&state.settings_path) {
+        Ok(new) => {
+            let c = new.profile_claims.len();
+            let a = new
+                .identity_attrs
+                .iter()
+                .map(|x| x.attr.as_str())
+                .collect::<Vec<_>>()
+                .join(",");
+            let ttl = new.session_ttl;
+            *state.settings.write().unwrap() = new; // fail-safe: atomic swap
+            eprintln!(
+                "[bb-auth] settings reloaded (SIGHUP): identity={a}, {c} profile claims, \
+                 session_ttl={ttl}s"
+            );
+        }
+        Err(e) => eprintln!("[bb-auth] settings reload FAILED, keeping current ones: {e}"),
+    }
+}
+
+/// Spawn the SIGHUP -> reload thread, for both files. SIGHUP is POSIX-only, so this is a
+/// no-op on non-unix hosts (where the tables simply reload across a restart).
+///
+/// One signal for two files, because there is one thing an operator wants when they send it:
+/// make what is on disk live. Each file is reloaded independently and each failure is its own
+/// line, so a broken settings file cannot cost an access-file edit its reload.
 #[cfg(unix)]
 fn spawn_access_reload_handler(state: &Arc<State>) {
     use signal_hook::consts::SIGHUP;
@@ -893,6 +742,7 @@ fn spawn_access_reload_handler(state: &Arc<State>) {
         };
         for _ in signals.forever() {
             reload_access(&sig_state);
+            reload_settings(&sig_state);
         }
     });
 }
@@ -1005,7 +855,7 @@ struct Claims {
     /// Must be `"id"` — an access_token must not be usable as a credential here.
     token_use: Option<String>,
     /// Every other claim in the token, by name — where the configured profile claims are
-    /// looked up ([`Config::profile_claims`]).
+    /// looked up ([`bb_auth_core::GateSettings::profile_claims`]).
     ///
     /// Values stay raw `serde_json::Value`s, not `String`s, for the same reason
     /// `email_verified` above does: a federated IdP whose attribute mapping emits a
@@ -1014,7 +864,7 @@ struct Claims {
     /// cannot use.
     ///
     /// `flatten` collects only what no typed field above already took, which is exactly
-    /// why those four names are in [`RESERVED_CLAIMS`]: configuring one would look up a
+    /// why those four names are in [`bb_auth_core::RESERVED_CLAIMS`]: configuring one would look up a
     /// key that can never be here.
     #[serde(flatten)]
     extra: serde_json::Map<String, serde_json::Value>,
@@ -1104,7 +954,7 @@ fn clean_claim(v: &serde_json::Value) -> Option<String> {
 }
 
 /// Fully validate a Cognito id_token, returning the verified identity: the lowercased
-/// email, plus whichever [`Config::profile_claims`] the token asserts ([`clean_claim`]).
+/// email, plus whichever [`bb_auth_core::GateSettings::profile_claims`] the token asserts ([`clean_claim`]).
 ///
 /// Enforces all of: `alg == RS256`, a known `kid`, the signature, `exp` (required,
 /// 60 s leeway), `iss`, `aud` against [`Config::audiences`], `token_use == "id"`,
@@ -1113,7 +963,7 @@ fn clean_claim(v: &serde_json::Value) -> Option<String> {
 ///
 /// The profile claims are subject to none of that. They are not an identity and authorize
 /// nothing, they need no `header_safe_email` (the encoder at emission is what makes them
-/// safe), and `BB_AUTH_ALLOW_UNVERIFIED_SOCIAL` does not change their standing — a profile
+/// safe), and `allow_unverified_social` does not change their standing — a profile
 /// attribute is self-asserted on *every* token, whatever the email's verification status.
 fn validate_id_token(token: &str, state: &State) -> Result<UserIdentity, String> {
     let header = decode_header(token).map_err(|e| format!("bad token header: {e}"))?;
@@ -1145,12 +995,16 @@ fn validate_id_token(token: &str, state: &State) -> Result<UserIdentity, String>
     if !header_safe_email(&email) {
         return Err(format!("token email is not printable ASCII: {email:?}"));
     }
+    // One read of the live settings for the whole of this token: the relaxation and the claim
+    // list are one operator decision, and a reload landing between the two halves would apply
+    // half of it.
+    let settings = state.settings.read().unwrap();
     if !email_verified_true(&c.email_verified) {
         // Strict by default. The only exception is a social login whose email
         // Cognito couldn't verify itself — and only when explicitly enabled.
         if !unverified_social_ok(
-            state.cfg.allow_unverified_social,
-            &state.cfg.social_providers,
+            settings.allow_unverified_social,
+            &settings.social_providers,
             &c.identities,
         ) {
             return Err("email not verified".into());
@@ -1163,7 +1017,7 @@ fn validate_id_token(token: &str, state: &State) -> Result<UserIdentity, String>
     // Whatever the operator asked for, and only that: an unconfigured claim is never
     // looked at, let alone carried.
     let mut claims = BTreeMap::new();
-    for pc in &state.cfg.profile_claims {
+    for pc in &settings.profile_claims {
         if let Some(v) = c.extra.get(&pc.claim).and_then(clean_claim) {
             claims.insert(pc.claim.clone(), v);
         }
@@ -1219,7 +1073,7 @@ fn finish_session(exp: u64, eb: &str) -> Option<String> {
 /// [`finish_session`] takes on the email.
 ///
 /// What it deliberately does *not* check is the current configuration: a cookie legitimately
-/// outlives an edit to `BB_AUTH_PROFILE_CLAIMS` and may carry a claim no longer listed.
+/// outlives an edit to the claim list and may carry a claim no longer listed.
 /// Filtering to the live config is emission's job ([`profile_headers`]), not verification's.
 fn decode_claims_segment(seg: &str) -> Option<BTreeMap<String, String>> {
     if seg.is_empty() {
@@ -1471,7 +1325,7 @@ fn respond_empty(req: Request, status: u16) {
 /// identity actually has, value percent-encoded, in configuration order.
 ///
 /// **The live configuration is the authority, not the credential.** A cookie outlives an
-/// edit to `BB_AUTH_PROFILE_CLAIMS`, so it may carry a claim that has since been removed —
+/// edit to the claim list, so it may carry a claim that has since been removed —
 /// which emits nothing — or lack one that has since been added, which omits that header
 /// until its holder next signs in. Emitting a header for a claim nobody configured would
 /// hand the application a value no current config accounts for.
@@ -1566,17 +1420,27 @@ fn identity_headers<'a>(attrs: &'a [IdentityAttr], who: &Authorized) -> Vec<(&'a
 /// printable ASCII whatever it is handed — so safety is a property of the construction, not
 /// of where the value came from. The second assert pins *that*: it is what would catch a
 /// later change emitting a raw value, or a header name that stopped being a token.
-fn respond_authorized(req: Request, granted: &Granted, cfg: &Config) {
+fn respond_authorized(req: Request, granted: &Granted, settings: &Settings) {
+    // The derivation lives in the library; the wire name every nginx snippet in this repo
+    // clears literally is [`IDENTITY_HEADER`], here. This is where the two are held against
+    // each other, so a change to the derivation cannot rename the header in silence.
+    debug_assert!(
+        settings
+            .identity_attrs
+            .iter()
+            .all(|a| a.attr != "email" || a.header == IDENTITY_HEADER),
+        "the email attribute must derive {IDENTITY_HEADER}"
+    );
     let mut resp = Response::empty(StatusCode(204));
     if let Granted::Identity(who) = granted {
-        for (name, value) in identity_headers(&cfg.identity_attrs, who) {
+        for (name, value) in identity_headers(&settings.identity_attrs, who) {
             debug_assert!(
                 !value.is_empty() && value.bytes().all(|b| b.is_ascii_graphic() || b == b' '),
                 "identity header must be printable: {name:?}: {value:?}"
             );
             resp = resp.with_header(h(name, &value));
         }
-        for (name, enc) in profile_headers(&cfg.profile_claims, &who.claims) {
+        for (name, enc) in profile_headers(&settings.profile_claims, &who.claims) {
             debug_assert!(
                 !enc.is_empty()
                     && enc.bytes().all(|b| b.is_ascii_graphic())
@@ -1859,7 +1723,7 @@ fn handle_validate(req: Request, state: &State) {
             }
         };
         if let Some(granted) = granted {
-            respond_authorized(req, &granted, cfg);
+            respond_authorized(req, &granted, &state.settings.read().unwrap());
             return;
         }
     }
@@ -1869,7 +1733,7 @@ fn handle_validate(req: Request, state: &State) {
         .and_then(|v| verify_session(&v, &cfg.hmac_keys))
         .and_then(|ident| authorize_login(&state.access.read().unwrap(), ident, url.as_deref()));
     if let Some(granted) = granted {
-        respond_authorized(req, &granted, cfg);
+        respond_authorized(req, &granted, &state.settings.read().unwrap());
         return;
     }
 
@@ -1888,7 +1752,7 @@ fn handle_validate(req: Request, state: &State) {
         )
     };
     if anonymous {
-        respond_authorized(req, &Granted::Anonymous, cfg);
+        respond_authorized(req, &Granted::Anonymous, &state.settings.read().unwrap());
     } else {
         respond_unauthorized(req, &login)
     }
@@ -1999,11 +1863,11 @@ fn handle_session(mut req: Request, state: &State) {
         &cfg.authorized_hosts,
         &login,
     );
-    let cookie = build_cookie(
-        cfg,
-        &make_session(&ident, cfg.session_ttl, &cfg.hmac_keys),
-        cfg.session_ttl as i64,
-    );
+    // The lifetime the cookie is minted with is read now, not at startup: an edit to it
+    // applies to sessions from here on and to no cookie already in a browser, which is what
+    // keeps changing it out of the logout business.
+    let ttl = state.settings.read().unwrap().session_ttl;
+    let cookie = build_cookie(cfg, &make_session(&ident, ttl, &cfg.hmac_keys), ttl as i64);
     eprintln!("[bb-auth] session granted: {} -> {rd}", ident.email);
     respond_redirect(req, &rd, Some(&cookie));
 }
@@ -2119,26 +1983,84 @@ fn check_access(path: &str) -> ! {
             std::process::exit(0);
         }
         Err(e) => {
-            eprintln!("[bb-auth] {path}: INVALID — {e}");
+            eprintln!("[bb-auth] INVALID {path}: {e}");
             std::process::exit(1);
         }
     }
 }
 
-/// Parse argv (only `--check-access`), build the config, load the access table, prime the
-/// JWKS, then serve forever on a fixed pool of blocking worker threads.
+/// Validate a settings file with the parser both services use, print what it says, exit 0/1.
+///
+/// The same job `--check-access` does for the other file, and it earns its place for a
+/// narrower reason: a settings file the gate refuses only costs a *reload* while the service
+/// is running, but the next restart meets it, and a restart that fails under
+/// `Restart=on-failure` is a boot loop. `scripts/deploy.sh` runs this before it restarts
+/// anything.
+///
+/// It reads no env and needs no config, exactly as `--check-access` does, so it is runnable
+/// on a workstation against a file that is going nowhere near a host yet.
+fn check_settings(path: &str) -> ! {
+    match read_settings(path) {
+        Ok(s) => {
+            println!(
+                "[bb-auth] {path}: OK: identity {}, {} profile claim(s), session_ttl {}s",
+                s.identity_attrs
+                    .iter()
+                    .map(|a| format!("{} ({})", a.attr, a.header))
+                    .collect::<Vec<_>>()
+                    .join(", "),
+                s.profile_claims.len(),
+                s.session_ttl
+            );
+            for c in &s.profile_claims {
+                println!("[bb-auth] {path}: claim '{}' -> {}", c.claim, c.header);
+            }
+            if s.allow_unverified_social {
+                let scope = match &s.social_providers {
+                    Some(p) => p.join(", "),
+                    None => "any provider".to_string(),
+                };
+                println!(
+                    "[bb-auth] {path}: accepting unverified emails for social logins [{scope}]"
+                );
+            }
+            // Named, not counted: this list is the GUI's whole door, and an operator reading
+            // a check should see whether their own address is on it.
+            println!(
+                "[bb-auth] {path}: bb-auth-web administrators: {}",
+                match s.admins.len() {
+                    0 => "(none: bb-auth-web will refuse to serve)".to_string(),
+                    _ => s.admins.join(", "),
+                }
+            );
+            std::process::exit(0);
+        }
+        Err(e) => {
+            eprintln!("[bb-auth] INVALID {path}: {e}");
+            std::process::exit(1);
+        }
+    }
+}
+
+/// Parse argv (`--check-access`, `--check-settings`), build the config, load both files,
+/// prime the JWKS, then serve forever on a fixed pool of blocking worker threads.
 fn main() {
     let args: Vec<String> = std::env::args().skip(1).collect();
-    match args.first().map(String::as_str) {
-        Some("--check-access") => match args.get(1) {
-            Some(p) => check_access(p),
+    let flag = args.first().map(String::as_str);
+    match flag {
+        Some(f @ ("--check-access" | "--check-settings")) => match args.get(1) {
+            Some(p) if f == "--check-access" => check_access(p),
+            Some(p) => check_settings(p),
             None => {
-                eprintln!("usage: bb-auth --check-access <access.json>");
+                eprintln!("usage: bb-auth {f} <file.json>");
                 std::process::exit(2);
             }
         },
         Some(other) => {
-            eprintln!("[bb-auth] unknown argument '{other}' (only --check-access is accepted)");
+            eprintln!(
+                "[bb-auth] unknown argument '{other}' (only --check-access and --check-settings \
+                 are accepted)"
+            );
             std::process::exit(2);
         }
         None => {}
@@ -2147,6 +2069,14 @@ fn main() {
     let cfg = Config::from_env();
     let access_path = env_req("BB_AUTH_ACCESS_FILE");
     let access = load_access(&access_path);
+    // Optional, and defaulted from the access file's own directory: see
+    // `bb_auth_core::default_settings_path` for why a second *required* variable would be a
+    // boot loop waiting for an upgrade that forgot it.
+    let settings_path = std::env::var("BB_AUTH_SETTINGS_FILE")
+        .ok()
+        .filter(|p| !p.trim().is_empty())
+        .unwrap_or_else(|| default_settings_path(&access_path));
+    let settings = load_settings(&settings_path);
 
     let initial = fetch_jwks(&cfg.issuer).unwrap_or_else(|e| {
         eprintln!("[bb-auth] FATAL: initial JWKS fetch failed: {e}");
@@ -2179,8 +2109,11 @@ fn main() {
     let state = Arc::new(State {
         cfg,
         access: RwLock::new(access),
+        settings: RwLock::new(settings),
         #[cfg(unix)]
         access_path,
+        #[cfg(unix)]
+        settings_path: settings_path.clone(),
         jwks: RwLock::new(JwksCache {
             keys: initial,
             last_refresh: Instant::now(),
@@ -2188,8 +2121,8 @@ fn main() {
         jwks_refresh: Mutex::new(()),
     });
 
-    // Hot-reload the access table on SIGHUP (systemctl reload bb-auth). Failures
-    // keep the current table; no one is logged out by a transient disk error.
+    // Hot-reload both files on SIGHUP (systemctl reload bb-auth). Failures
+    // keep the current tables; no one is logged out by a transient disk error.
     // POSIX-only; no-op on non-unix hosts.
     spawn_access_reload_handler(&state);
 
@@ -2198,8 +2131,10 @@ fn main() {
         std::process::exit(1);
     }));
 
-    let identity_attrs = state
-        .cfg
+    // Read once for the banner, through the same lock every request reads: what is printed is
+    // what is live, not what a file said a moment ago.
+    let settings = state.settings.read().unwrap();
+    let identity_attrs = settings
         .identity_attrs
         .iter()
         .map(|a| a.attr.as_str())
@@ -2207,11 +2142,10 @@ fn main() {
         .join(",");
     // Claim *names* are configuration, so they belong in the banner; claim *values* are
     // PII and are never logged, here or anywhere.
-    let claim_names = if state.cfg.profile_claims.is_empty() {
+    let claim_names = if settings.profile_claims.is_empty() {
         "(none)".to_string()
     } else {
-        state
-            .cfg
+        settings
             .profile_claims
             .iter()
             .map(|c| c.claim.as_str())
@@ -2225,12 +2159,12 @@ fn main() {
     );
     // A browser silently drops a cookie over ~4 KB, which would look like a login loop
     // rather than an error. Warn while it is still a config question.
-    let worst = worst_case_cookie_bytes(&state.cfg.profile_claims);
+    let worst = worst_case_cookie_bytes(&settings.profile_claims);
     if worst > 3072 {
         eprintln!(
             "[bb-auth] WARNING: {} profile claims can mint a session cookie of up to ~{worst} bytes, \
-             near the ~4 KB a browser will store (BB_AUTH_PROFILE_CLAIMS)",
-            state.cfg.profile_claims.len()
+             near the ~4 KB a browser will store (profile_claims in {settings_path})",
+            settings.profile_claims.len()
         );
     }
     if !open_scopes.is_empty() {
@@ -2241,15 +2175,19 @@ fn main() {
             open_scopes.join(",")
         );
     }
-    if state.cfg.allow_unverified_social {
-        let scope = match &state.cfg.social_providers {
+    if settings.allow_unverified_social {
+        let scope = match &settings.social_providers {
             Some(p) => p.join(","),
             None => "any provider".to_string(),
         };
         eprintln!(
-            "[bb-auth] WARNING: accepting unverified emails for social logins [{scope}] (BB_AUTH_ALLOW_UNVERIFIED_SOCIAL)"
+            "[bb-auth] WARNING: accepting unverified emails for social logins [{scope}] \
+             (allow_unverified_social in {settings_path})"
         );
     }
+    // Held only for the banner. Dropped before the workers start, so nothing below this line
+    // can hold a read lock across a request and starve the SIGHUP swap.
+    drop(settings);
 
     let mut handles = Vec::new();
     for _ in 0..workers {
@@ -2308,7 +2246,7 @@ mod tests {
     }
 
     /// An identity with no claims: every login under the default (empty)
-    /// `BB_AUTH_PROFILE_CLAIMS`.
+    /// the settings file's `profile_claims`.
     fn ident(email: &str) -> UserIdentity {
         UserIdentity {
             email: email.to_string(),
@@ -2329,103 +2267,17 @@ mod tests {
     fn ident_full(email: &str, given: &str, family: &str) -> UserIdentity {
         ident_claims(email, &[("given_name", given), ("family_name", family)])
     }
+    /// A compiled claim list from the comma-separated spelling an operator used to write in
+    /// an env var. The compiler itself, and everything it refuses, is the library's and is
+    /// tested there; what these tests need is a list to emit from.
+    fn claims(spec: &str) -> Vec<ProfileClaim> {
+        let list: Vec<String> = spec.split(',').map(str::to_string).collect();
+        bb_auth_core::compile_profile_claims(&list).unwrap()
+    }
+
     /// The claim set an operator writes to reproduce v2.4's behaviour.
     fn claims_cfg() -> Vec<ProfileClaim> {
-        compile_profile_claims("given_name,family_name").unwrap()
-    }
-
-    #[test]
-    fn compile_profile_claims_default_is_empty() {
-        // Profile propagation is opt-in: unset and empty both mean "emit nothing".
-        for spec in ["", "   ", ",", " , ,"] {
-            assert!(
-                compile_profile_claims(spec).unwrap().is_empty(),
-                "should be empty: {spec:?}"
-            );
-        }
-    }
-
-    #[test]
-    fn compile_profile_claims_derives_v24_headers_exactly() {
-        // The 2.4 compatibility pin: this spec, and only this spec, must reproduce the two
-        // headers that used to be constants — byte for byte, in this order.
-        let c = claims_cfg();
-        let got: Vec<(&str, &str)> = c
-            .iter()
-            .map(|p| (p.claim.as_str(), p.header.as_str()))
-            .collect();
-        assert_eq!(
-            got,
-            vec![
-                ("given_name", "X-Auth-Given-Name"),
-                ("family_name", "X-Auth-Family-Name"),
-            ]
-        );
-    }
-
-    #[test]
-    fn compile_profile_claims_derivation_and_trimming() {
-        let c =
-            compile_profile_claims(" nickname , custom:department ,phone_number,ZoneInfo").unwrap();
-        let got: Vec<(&str, &str)> = c
-            .iter()
-            .map(|p| (p.claim.as_str(), p.header.as_str()))
-            .collect();
-        assert_eq!(
-            got,
-            vec![
-                // Entries are trimmed, and the claim keeps its own spelling — only the
-                // header is normalised.
-                ("nickname", "X-Auth-Nickname"),
-                ("custom:department", "X-Auth-Custom-Department"),
-                ("phone_number", "X-Auth-Phone-Number"),
-                ("ZoneInfo", "X-Auth-Zoneinfo"),
-            ]
-        );
-    }
-
-    #[test]
-    fn compile_profile_claims_rejects_bad_names() {
-        for spec in [
-            "full name",  // space
-            "naïve",      // non-ASCII
-            "a.b",        // a dot would be ambiguous in a header token
-            "given/name", // slash
-            ":dept",      // empty leading part …
-            "dept:",      // … trailing …
-            "a--b",       // … and interior: all would derive an empty component
-        ] {
-            assert!(
-                compile_profile_claims(spec).is_err(),
-                "should reject: {spec:?}"
-            );
-        }
-    }
-
-    #[test]
-    fn compile_profile_claims_rejects_claims_the_gate_consumes() {
-        // `Claims` takes these into typed fields, so `flatten` never sees them: configuring
-        // one would propagate nothing, silently and forever. Fatal instead.
-        for claim in RESERVED_CLAIMS {
-            assert!(
-                compile_profile_claims(claim).is_err(),
-                "should reject: {claim}"
-            );
-        }
-    }
-
-    #[test]
-    fn compile_profile_claims_rejects_header_collisions() {
-        // Reserved headers the gate emits itself.
-        assert!(compile_profile_claims("login_url").is_err()); // -> X-Auth-Login-Url
-        assert!(compile_profile_claims("login-URL").is_err());
-        // A repeated claim, and spellings that differ only in case or separator, all derive
-        // the same header — one value would silently win.
-        assert!(compile_profile_claims("nickname,nickname").is_err());
-        assert!(compile_profile_claims("given_name,given-name").is_err());
-        assert!(compile_profile_claims("nickname,NickName").is_err());
-        // Distinct headers are fine.
-        assert_eq!(compile_profile_claims("nickname,locale").unwrap().len(), 2);
+        claims("given_name,family_name")
     }
 
     #[test]
@@ -2436,7 +2288,7 @@ mod tests {
         // The threshold `main` warns at. A couple of claims is comfortable; a handful of
         // max-length ones is not, which is the whole point of warning.
         assert!(two <= 3072, "the v2.4 pair must not warn: {two}");
-        let many = compile_profile_claims("a,b,c,d,e,f,g,h").unwrap();
+        let many = claims("a,b,c,d,e,f,g,h");
         assert!(
             worst_case_cookie_bytes(&many) > 3072,
             "eight claims must warn"
@@ -2768,7 +2620,7 @@ mod tests {
             r#"{"email":"a@b.com","email_verified":true,"token_use":"id","identities":[]}"#,
         )
         .expect("claims must parse");
-        for reserved in RESERVED_CLAIMS {
+        for reserved in bb_auth_core::RESERVED_CLAIMS {
             assert!(
                 c.extra.get(reserved).is_none(),
                 "{reserved} must not be in extra"
@@ -3216,34 +3068,8 @@ mod tests {
     // --- the identity headers ------------------------------------------------
 
     fn attrs(spec: &str) -> Vec<IdentityAttr> {
-        compile_identity_attrs(spec).unwrap()
-    }
-
-    /// The refusal, without asking the `Ok` side for a `Debug` it deliberately lacks.
-    fn refusal<T>(r: Result<T, String>) -> String {
-        match r {
-            Ok(_) => panic!("expected a refusal"),
-            Err(e) => e,
-        }
-    }
-
-    #[test]
-    fn compile_identity_attrs_defaults_to_email_and_derives_its_header() {
-        let a = attrs("email");
-        assert_eq!(a.len(), 1);
-        assert_eq!(a[0].header, IDENTITY_HEADER);
-        // The derivation is the profile claims' own, so the two can never disagree.
-        assert_eq!(attrs("uuid,email")[0].header, "X-Auth-Uuid");
-    }
-
-    #[test]
-    fn compile_identity_attrs_refuses_the_unknown_the_repeated_and_the_empty() {
-        for spec in ["", "  ", ",,"] {
-            let e = refusal(compile_identity_attrs(spec));
-            assert!(e.contains("at least one"), "{spec:?}: {e}");
-        }
-        assert!(refusal(compile_identity_attrs("phone")).contains("unknown identity attribute"));
-        assert!(refusal(compile_identity_attrs("email,email")).contains("listed twice"));
+        let list: Vec<String> = spec.split(',').map(str::to_string).collect();
+        bb_auth_core::compile_identity_attrs(&list).unwrap()
     }
 
     #[test]
@@ -3280,16 +3106,5 @@ mod tests {
             identity_headers(&attrs("email,uuid"), &who)[0].0,
             IDENTITY_HEADER
         );
-    }
-
-    #[test]
-    fn a_profile_claim_may_not_collide_with_an_identity_header_even_a_disabled_one() {
-        // `uuid` is off by default, and that is exactly why the collision has to be
-        // refused now: turning it on later would otherwise silently overwrite a claim an
-        // application already trusts.
-        for claim in ["uuid", "email"] {
-            let e = refusal(compile_profile_claims(claim));
-            assert!(!e.is_empty(), "{claim} must be refused");
-        }
     }
 }

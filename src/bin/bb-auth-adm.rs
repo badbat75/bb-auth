@@ -43,13 +43,14 @@ use std::process::ExitCode;
 
 use bb_auth_core::{
     add_api_key, add_application, add_denied, add_scope, add_user, add_user_email, add_user_group,
-    app_mut, app_pos, base_covers, decide, decide_api_key, edit_url_list, edit_urls, format_date,
-    key_expiry, key_mut, mint_uuid, move_scope, norm_email, now, open_access_file, remove_api_key,
-    remove_application, remove_denied, remove_scope, remove_user, remove_user_email,
-    remove_user_group, rename_application, rename_scope, render_access_file, request_url,
-    rotate_api_key, scope_pos, user_group_mut, user_group_refs, user_label, user_pos,
-    well_formed_uuid, Access, AccessFile, AccessWrite, ApiKeySpec, AppSpec, Decision, KeyDecision,
-    ScopeSpec, SealedKey, Subject, UrlScope, UserSpec, Written, ACCESS_FILE_VERSION,
+    app_mut, app_pos, base_covers, decide, decide_api_key, default_settings_path, edit_url_list,
+    edit_urls, format_date, key_expiry, key_mut, mint_uuid, move_scope, norm_email, now,
+    open_access_file, open_settings_file, remove_api_key, remove_application, remove_denied,
+    remove_scope, remove_user, remove_user_email, remove_user_group, rename_application,
+    rename_scope, render_access_file, render_settings_file, request_url, rotate_api_key, scope_pos,
+    user_group_mut, user_group_refs, user_label, user_pos, well_formed_uuid, Access, AccessFile,
+    AccessWrite, ApiKeySpec, AppSpec, Decision, KeyDecision, ScopeSpec, SealedKey, SettingsFile,
+    SettingsWrite, Subject, UrlScope, UserSpec, Written, ACCESS_FILE_VERSION, SETTINGS_VERSION,
 };
 
 const USAGE: &str = "\
@@ -58,6 +59,9 @@ bb-auth-adm — edit a bb-auth access file (access.json)
 usage: bb-auth-adm [-f FILE] [--dry-run] <command> [args]
 
   -f, --file FILE   the access file (default: $BB_AUTH_ACCESS_FILE)
+  -s, --settings-file FILE
+                    the settings file (default: $BB_AUTH_SETTINGS_FILE, else settings.json
+                    beside the access file)
   --dry-run         print the resulting file to stdout, write nothing
 
 file
@@ -121,6 +125,17 @@ denied                          a veto. Outranks EVERY grant, on every credentia
   deny add WHO...               an enrolled user is written down by uuid, a stranger by email
   deny rm WHO...
 
+settings                        the OTHER file: what takes effect with no restart at all
+  settings init                 create a settings file (refuses to clobber one)
+  settings show                 what the gate and the GUI read from it
+  settings set [--claims LIST] [--identity LIST] [--session-ttl SECS]
+               [--unverified-social true|false] [--providers LIST] [--no-providers]
+  settings admin add EMAIL...   who may use bb-auth-web. NEVER empty, never 'everyone'
+  settings admin rm EMAIL...
+  Default path: settings.json beside the access file; -s/--settings-file, or
+  $BB_AUTH_SETTINGS_FILE. These five are hot BECAUSE they are in a file: a process cannot
+  re-read its own environment, so an env var could never be one.
+
 --url takes a <scheme>://<host>/<path> glob; repeat it, or comma-separate. `*` never
 crosses '/' unless it is the pattern's last character; blanket coverage is '*://*/*'.
 A --base is LITERAL (no wildcards): it is the area an application owns, and every scope
@@ -149,6 +164,7 @@ fn run() -> Result<ExitCode, String> {
 
     // Global options first, so `-f` may sit anywhere.
     let mut file: Option<String> = None;
+    let mut settings_file: Option<String> = None;
     let mut dry_run = false;
     let mut i = 0;
     while i < argv.len() {
@@ -159,6 +175,14 @@ fn run() -> Result<ExitCode, String> {
                     .cloned()
                     .ok_or("-f/--file needs a path".to_string())?;
                 file = Some(v);
+                argv.drain(i..=i + 1);
+            }
+            "-s" | "--settings-file" => {
+                let v = argv
+                    .get(i + 1)
+                    .cloned()
+                    .ok_or("-s/--settings-file needs a path".to_string())?;
+                settings_file = Some(v);
                 argv.drain(i..=i + 1);
             }
             "--dry-run" => {
@@ -179,10 +203,18 @@ fn run() -> Result<ExitCode, String> {
         None => return Err("no access file: pass -f FILE or set BB_AUTH_ACCESS_FILE".into()),
     };
 
+    // Derived from the access file's own path when nothing names it, exactly as the gate
+    // derives it: the two files live together, and an operator who moved one moved both.
+    let settings_path = settings_file
+        .or_else(|| std::env::var("BB_AUTH_SETTINGS_FILE").ok())
+        .filter(|p| !p.trim().is_empty())
+        .unwrap_or_else(|| default_settings_path(&path));
+
     let (words, flags) = parse_args(&argv)?;
     let cmd: Vec<&str> = words.iter().map(String::as_str).collect();
     let ctx = Ctx {
         path,
+        settings_path,
         dry_run,
         flags,
     };
@@ -229,6 +261,16 @@ fn run() -> Result<ExitCode, String> {
         ["deny", "add", rest @ ..] if !rest.is_empty() => cmd_deny_add(ctx, rest),
         ["deny", "rm", rest @ ..] if !rest.is_empty() => cmd_deny_rm(ctx, rest),
 
+        ["settings", "init"] => cmd_settings_init(ctx),
+        ["settings", "show"] => cmd_settings_show(ctx),
+        ["settings", "set"] => cmd_settings_set(ctx),
+        ["settings", "admin", "add", rest @ ..] if !rest.is_empty() => {
+            cmd_settings_admin(ctx, rest, true)
+        }
+        ["settings", "admin", "rm", rest @ ..] if !rest.is_empty() => {
+            cmd_settings_admin(ctx, rest, false)
+        }
+
         [] => Err("no command (see --help)".into()),
         other => Err(format!(
             "unknown command '{}' (see --help)",
@@ -247,6 +289,10 @@ fn run() -> Result<ExitCode, String> {
 /// the access file.
 struct Ctx {
     path: String,
+    /// The settings file, which only the `settings` commands touch. Resolved for every
+    /// invocation rather than only for those, so that `--help` and an error message can name
+    /// it without the caller having had to ask for it.
+    settings_path: String,
     dry_run: bool,
     flags: Flags,
 }
@@ -439,6 +485,274 @@ fn cmd_init(ctx: Ctx) -> Result<ExitCode, String> {
         "[bb-auth-adm] created {}: it grants nobody anything yet",
         ctx.path
     );
+    Ok(ExitCode::SUCCESS)
+}
+
+// ---------------------------------------------------------------------------
+// The settings file
+// ---------------------------------------------------------------------------
+//
+// The other file, and the only one whose values need no restart. Everything below goes
+// through the library exactly as the access-file commands do: one parser, one writer, one
+// answer to "would the gate accept this?", so an edit made here and one made in the GUI are
+// the same edit.
+
+/// A tri-state boolean flag: absent (leave the setting alone), or an explicit value.
+///
+/// [`Flags::take_flag`] cannot serve here, because it reads an absent flag as `false`, and
+/// on a `set` command that would turn every unrelated edit into a silent
+/// `allow_unverified_social = false`.
+fn take_tristate(flags: &mut Flags, name: &str) -> Result<Option<bool>, String> {
+    match flags.take_one(name) {
+        Ok(None) => Ok(None),
+        Ok(Some(v)) => match v.trim().to_ascii_lowercase().as_str() {
+            "1" | "true" | "yes" | "on" => Ok(Some(true)),
+            "0" | "false" | "no" | "off" => Ok(Some(false)),
+            other => Err(format!("--{name}: expected true/false, got '{other}'")),
+        },
+        // a bare `--flag` lands here, and means the same as `=true`
+        Err(e) if e.contains("needs a value") => Ok(Some(true)),
+        Err(e) => Err(e),
+    }
+}
+
+/// The settings document, refusing to start from one the services would reject.
+fn load_settings(ctx: &Ctx) -> Result<SettingsFile, String> {
+    let (doc, _) = open_settings_file(&ctx.settings_path).map_err(|e| {
+        format!(
+            "{e}\n[bb-auth-adm] create one with: bb-auth-adm -s {} settings init",
+            ctx.settings_path
+        )
+    })?;
+    Ok(doc)
+}
+
+/// Check the edit with the parser both services use, then write it.
+///
+/// The reload line says `reload`, not `restart`, and that is the whole point of this file: a
+/// value here is live on the next request. On a host with `bb-auth-reload.path` installed the
+/// operator does not even have to run it.
+fn save_settings(ctx: &Ctx, doc: &SettingsFile) -> Result<(), String> {
+    let pending = SettingsWrite::prepare(doc)?;
+    if ctx.dry_run {
+        print!("{}", pending.json());
+        eprintln!("[bb-auth-adm] --dry-run: {} NOT written", ctx.settings_path);
+        return Ok(());
+    }
+    let written = pending.commit(&ctx.settings_path)?;
+    eprintln!(
+        "[bb-auth-adm] previous file kept at {}",
+        written.backup.display()
+    );
+    let s = pending.settings();
+    eprintln!(
+        "[bb-auth-adm] wrote {}: identity={}, {} profile claim(s), session_ttl={}s, {} admin(s)",
+        ctx.settings_path,
+        s.identity_attrs
+            .iter()
+            .map(|a| a.attr.as_str())
+            .collect::<Vec<_>>()
+            .join(","),
+        s.profile_claims.len(),
+        s.session_ttl,
+        s.admins.len()
+    );
+    eprintln!("[bb-auth-adm] the gate re-reads it on: systemctl reload bb-auth");
+    Ok(())
+}
+
+/// `settings init` creates a new settings file: a version and nothing else, which compiles to
+/// exactly the behaviour every version before this file had.
+///
+/// Refuses to overwrite, for the reason `init` refuses to overwrite an access file: every
+/// other command starts by reading, so this is the only way to lose one.
+fn cmd_settings_init(ctx: Ctx) -> Result<ExitCode, String> {
+    ctx.flags.finish()?;
+    if std::path::Path::new(&ctx.settings_path).exists() {
+        return Err(format!(
+            "{} already exists: refusing to overwrite a settings file",
+            ctx.settings_path
+        ));
+    }
+    let doc = SettingsFile {
+        version: SETTINGS_VERSION,
+        ..Default::default()
+    };
+    let json = render_settings_file(&doc)?;
+    if ctx.dry_run {
+        print!("{json}");
+        eprintln!("[bb-auth-adm] --dry-run: {} NOT created", ctx.settings_path);
+        return Ok(ExitCode::SUCCESS);
+    }
+    std::fs::write(&ctx.settings_path, &json)
+        .map_err(|e| format!("write {}: {e}", ctx.settings_path))?;
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        std::fs::set_permissions(&ctx.settings_path, std::fs::Permissions::from_mode(0o640))
+            .map_err(|e| format!("chmod {}: {e}", ctx.settings_path))?;
+    }
+    eprintln!(
+        "[bb-auth-adm] created {}: the defaults, and no bb-auth-web administrator yet",
+        ctx.settings_path
+    );
+    Ok(ExitCode::SUCCESS)
+}
+
+/// `settings show`: the file as the two services resolve it, defaults filled in.
+///
+/// Every line names the derived header where there is one, because that is the half an
+/// operator cannot compute: they configure a claim and nginx configures a header.
+fn cmd_settings_show(ctx: Ctx) -> Result<ExitCode, String> {
+    ctx.flags.finish()?;
+    let (_, s) = open_settings_file(&ctx.settings_path)?;
+    println!("file: {}", ctx.settings_path);
+    println!();
+    println!("gate");
+    println!(
+        "  identity_attrs          {}",
+        s.identity_attrs
+            .iter()
+            .map(|a| format!("{} -> {}", a.attr, a.header))
+            .collect::<Vec<_>>()
+            .join(", ")
+    );
+    println!(
+        "  profile_claims          {}",
+        match s.profile_claims.len() {
+            0 => "(none)".to_string(),
+            _ => s
+                .profile_claims
+                .iter()
+                .map(|c| format!("{} -> {}", c.claim, c.header))
+                .collect::<Vec<_>>()
+                .join(", "),
+        }
+    );
+    println!(
+        "  allow_unverified_social {}{}",
+        s.allow_unverified_social,
+        match (&s.social_providers, s.allow_unverified_social) {
+            (Some(p), true) => format!("  (providers: {})", p.join(", ")),
+            (None, true) => "  (any federated provider)".to_string(),
+            _ => String::new(),
+        }
+    );
+    println!(
+        "  session_ttl_secs        {} ({} days)",
+        s.session_ttl,
+        s.session_ttl / 86_400
+    );
+    println!();
+    println!("web");
+    println!(
+        "  admins                  {}",
+        match s.admins.len() {
+            0 => "(none: bb-auth-web will refuse to serve)".to_string(),
+            _ => s.admins.join(", "),
+        }
+    );
+    Ok(ExitCode::SUCCESS)
+}
+
+/// `settings set`: change one or more of the five. Absent flags leave their setting alone;
+/// `--no-claims` and `--no-providers` are how a list is emptied, the spelling `scope set` and
+/// `key set` already use.
+fn cmd_settings_set(mut ctx: Ctx) -> Result<ExitCode, String> {
+    let claims = ctx.flags.take_many("claims")?;
+    let no_claims = ctx.flags.take_flag("no-claims")?;
+    let identity = ctx.flags.take_many("identity")?;
+    let ttl = ctx.flags.take_one("session-ttl")?;
+    let social = take_tristate(&mut ctx.flags, "unverified-social")?;
+    let providers = ctx.flags.take_many("providers")?;
+    let no_providers = ctx.flags.take_flag("no-providers")?;
+    ctx.flags.finish()?;
+
+    if !claims.is_empty() && no_claims {
+        return Err("--claims and --no-claims contradict each other".into());
+    }
+    if !providers.is_empty() && no_providers {
+        return Err("--providers and --no-providers contradict each other".into());
+    }
+    let nothing = claims.is_empty()
+        && !no_claims
+        && identity.is_empty()
+        && ttl.is_none()
+        && social.is_none()
+        && providers.is_empty()
+        && !no_providers;
+    if nothing {
+        return Err("nothing to set (see --help)".into());
+    }
+
+    let mut doc = load_settings(&ctx)?;
+    if no_claims {
+        doc.gate.profile_claims.clear();
+    } else if !claims.is_empty() {
+        doc.gate.profile_claims = claims;
+    }
+    if !identity.is_empty() {
+        doc.gate.identity_attrs = identity;
+    }
+    if let Some(t) = ttl {
+        doc.gate.session_ttl_secs = t
+            .trim()
+            .parse()
+            .map_err(|_| format!("--session-ttl: '{t}' is not a number of seconds"))?;
+    }
+    if let Some(v) = social {
+        doc.gate.allow_unverified_social = v;
+    }
+    if no_providers {
+        doc.gate.social_providers.clear();
+    } else if !providers.is_empty() {
+        doc.gate.social_providers = providers;
+    }
+    save_settings(&ctx, &doc)?;
+    Ok(ExitCode::SUCCESS)
+}
+
+/// `settings admin add|rm`: who may use `bb-auth-web`.
+///
+/// Removing the last one is refused, and that refusal is the same rule the binary enforces at
+/// startup: an empty list must never come to mean "everyone". What this tool will happily do,
+/// and the GUI will not, is remove *the person running it*, because this is the escape hatch
+/// for exactly that case, reached over SSH by somebody who already has root.
+fn cmd_settings_admin(ctx: Ctx, who: &[&str], add: bool) -> Result<ExitCode, String> {
+    ctx.flags.finish()?;
+    let mut doc = load_settings(&ctx)?;
+    let mut changed = 0;
+    for raw in who {
+        let email = norm_email(raw);
+        if email.is_empty() {
+            continue;
+        }
+        let at = doc.web.admins.iter().position(|a| norm_email(a) == email);
+        match (add, at) {
+            (true, None) => {
+                doc.web.admins.push(email.clone());
+                changed += 1;
+            }
+            (true, Some(_)) => eprintln!("[bb-auth-adm] {email} is already an administrator"),
+            (false, Some(i)) => {
+                doc.web.admins.remove(i);
+                changed += 1;
+            }
+            (false, None) => eprintln!("[bb-auth-adm] {email} is not an administrator"),
+        }
+    }
+    if changed == 0 {
+        eprintln!("[bb-auth-adm] nothing changed");
+        return Ok(ExitCode::SUCCESS);
+    }
+    if doc.web.admins.is_empty() {
+        return Err(
+            "that would leave no bb-auth-web administrator, and an empty list must never come \
+             to mean 'everyone': bb-auth-web refuses to serve without one"
+                .into(),
+        );
+    }
+    save_settings(&ctx, &doc)?;
     Ok(ExitCode::SUCCESS)
 }
 

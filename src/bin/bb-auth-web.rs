@@ -36,14 +36,15 @@
 //! so a missing header is a `401` here rather than an anonymous session, which turns a
 //! broken deployment into an error page instead of a silent open door.
 //!
-//! And the header is not the last word: the email must also be on **`BB_AUTH_WEB_ADMINS`**.
+//! And the header is not the last word: the email must also be on **`web.admins`** in the
+//! settings file.
 //! That allowlist is deliberate defense in depth: a `public_auth` site covering the GUI's
 //! URL would otherwise open the admin surface to any Cognito account. It is required, and
 //! must be non-empty — empty must never mean "everyone".
 //!
 //! Both checks are **route-global** and run before the router: there is no path — not a
 //! `404`, not a `POST`, not a broken access file — that answers anything to someone nginx
-//! did not vouch for and `BB_AUTH_WEB_ADMINS` does not name.
+//! did not vouch for and `web.admins` does not name.
 //!
 //! # Mutations
 //!
@@ -109,13 +110,19 @@
 //! | Var | Required | Default | Meaning |
 //! |-----|----------|---------|---------|
 //! | `BB_AUTH_ACCESS_FILE` | yes | — | the access file to render. Same name, same meaning as the gate's |
-//! | `BB_AUTH_WEB_ADMINS` | yes | — | comma-separated emails allowed in. Empty is fatal |
+//! | `BB_AUTH_SETTINGS_FILE` | no | `settings.json` beside the access file | the settings file, read **and written** |
 //! | `BB_AUTH_WEB_LISTEN` | no | `127.0.0.1:8091` | bind address. Keep it on loopback |
 //! | `BB_AUTH_WEB_BASE_PATH` | no | *(empty)* | URL prefix nginx mounts the GUI at, e.g. `/admin` |
 //! | `BB_AUTH_WEB_DEFAULT_LANG` | no | `en` | `en` or `it`, when the request expresses no preference |
 //!
 //! Read once at startup, like the gate: a change needs a restart. A missing required var is
 //! a fatal exit, in the same words and for the same reason — there is no safe default.
+//!
+//! The administrator allowlist is **not** in this table any more. It is `web.admins` in the
+//! settings file, read fresh on every request, and editable from the Settings tab: it is the
+//! one setting this service both enforces and owns, so a change that needed a restart would
+//! be a change this GUI could make and not see. `BB_AUTH_WEB_ADMINS` is therefore a fatal
+//! startup if it is still set, for the reason a silently ignored setting always is.
 //!
 //! # The file is read fresh on every request
 //!
@@ -167,12 +174,13 @@
 
 use bb_auth_core::{
     add_api_key, add_application, add_denied, add_scope, add_user, add_user_email, add_user_group,
-    app_mut, app_pos, decide, edit_urls, format_date, group_ref, key_expiry, key_mut, move_scope,
-    norm_email, now, open_access_file, remove_api_key, remove_application, remove_denied,
-    remove_scope, remove_user, remove_user_email, remove_user_group, rename_application,
-    rename_scope, request_url, rotate_api_key, scope_mut, scope_pos, sha256_hex, user_group_mut,
-    user_group_refs, user_label, user_pos, user_refs, Access, AccessFile, AccessWrite, ApiKeySpec,
-    AppSpec, Decision, ScopeSpec, SealedKey, Subject, UserSpec, Written,
+    app_mut, app_pos, decide, default_settings_path, edit_urls, format_date, group_ref, key_expiry,
+    key_mut, move_scope, norm_email, now, open_access_file, open_settings_file, remove_api_key,
+    remove_application, remove_denied, remove_scope, remove_user, remove_user_email,
+    remove_user_group, rename_application, rename_scope, request_url, rotate_api_key, scope_mut,
+    scope_pos, sha256_hex, user_group_mut, user_group_refs, user_label, user_pos, user_refs,
+    Access, AccessFile, AccessWrite, ApiKeySpec, AppSpec, Decision, ScopeSpec, SealedKey,
+    SettingsFile, SettingsWrite, Subject, UserSpec, Written,
 };
 use maud::{html, Markup, PreEscaped, DOCTYPE};
 use std::io::Read;
@@ -218,7 +226,7 @@ const PREFERENCE_COOKIE_MAX_AGE: i64 = 31_536_000;
 const SETTINGS_ONCHANGE: &str = "this.form.submit()";
 
 /// Blocking request threads. Fixed, and deliberately not an env var: this serves the
-/// handful of people on `BB_AUTH_WEB_ADMINS`, not the public.
+/// handful of people on `web.admins`, not the public.
 const WORKERS: usize = 2;
 
 /// The whole stylesheet, inlined. No external request of any kind — no font, no script, no
@@ -829,6 +837,28 @@ enum K {
     MsgGroupRemoved,
     MsgDeniedAdded,
     MsgDeniedRemoved,
+    MsgSettingsSaved,
+    // --- the settings page ---
+    Config,
+    ConfigIntro,
+    ConfigGate,
+    ConfigWeb,
+    ConfigHot,
+    ProfileClaims,
+    ProfileClaimsHelp,
+    IdentityAttrs,
+    IdentityAttrsHelp,
+    SessionTtl,
+    SessionTtlHelp,
+    UnverifiedSocial,
+    UnverifiedSocialHelp,
+    SocialProviders,
+    SocialProvidersHelp,
+    Admins,
+    AdminsHelp,
+    AdminsKeepYourself,
+    AdminsNeverEmpty,
+    Days,
 }
 
 /// Pick one of a key's two spellings.
@@ -844,6 +874,71 @@ fn m(lang: Lang, en: &'static str, it: &'static str) -> &'static str {
 fn t(lang: Lang, key: K) -> &'static str {
     match key {
         K::Dashboard => m(lang, "Dashboard", "Cruscotto"),
+        K::Config => m(lang, "Settings", "Impostazioni"),
+        K::ConfigIntro => m(
+            lang,
+            "The settings that take effect with no restart. Everything else bb-auth is              configured with stays in its env file, on the host.",
+            "Le impostazioni che hanno effetto senza riavvio. Tutto il resto della              configurazione di bb-auth resta nel suo file di environment, sull'host.",
+        ),
+        K::ConfigGate => m(lang, "What the gate answers with", "Come risponde il gate"),
+        K::ConfigWeb => m(lang, "Who administers this", "Chi amministra questo"),
+        K::ConfigHot => m(
+            lang,
+            "Saved here, live on the next request.",
+            "Salvato qui, attivo dalla richiesta successiva.",
+        ),
+        K::ProfileClaims => m(lang, "Profile claims", "Claim di profilo"),
+        K::ProfileClaimsHelp => m(
+            lang,
+            "OIDC claims to hand to the application, one per line. The header is derived              from the name and is never configured: given_name becomes X-Auth-Given-Name.              They are self-asserted decoration: they authorize nothing.",
+            "Claim OIDC da passare all'applicazione, uno per riga. L'header è derivato dal              nome e non si configura: given_name diventa X-Auth-Given-Name. Sono decorazione              auto-dichiarata: non autorizzano nulla.",
+        ),
+        K::IdentityAttrs => m(lang, "Identity attributes", "Attributi di identità"),
+        K::IdentityAttrsHelp => m(
+            lang,
+            "What a 204 names the authorized identity with, one per line: email, uuid.              Never empty. nginx already clears both names, so turning one on needs no              change there.",
+            "Con cosa un 204 nomina l'identità autorizzata, uno per riga: email, uuid. Mai              vuoto. nginx azzera già entrambi i nomi, quindi accenderne uno non richiede              modifiche lì.",
+        ),
+        K::SessionTtl => m(lang, "Session lifetime", "Durata della sessione"),
+        K::SessionTtlHelp => m(
+            lang,
+            "Seconds. Applies to cookies minted from now on: nobody is logged out by              changing it.",
+            "Secondi. Vale per i cookie coniati da adesso: cambiarla non disconnette              nessuno.",
+        ),
+        K::UnverifiedSocial => m(
+            lang,
+            "Accept unverified social emails",
+            "Accetta email social non verificate",
+        ),
+        K::UnverifiedSocialHelp => m(
+            lang,
+            "Only for federated logins (Google, Apple…), never for native Cognito users,              whose sign-up is open and whose unverified email is attacker-controlled.",
+            "Solo per accessi federati (Google, Apple…), mai per utenti Cognito nativi: la              loro registrazione è aperta e un'email non verificata è controllata da chi              attacca.",
+        ),
+        K::SocialProviders => m(lang, "Providers", "Provider"),
+        K::SocialProvidersHelp => m(
+            lang,
+            "One per line, matched against the token's providerName. Empty means any              federated provider.",
+            "Uno per riga, confrontati con il providerName del token. Vuoto significa              qualsiasi provider federato.",
+        ),
+        K::Admins => m(lang, "Administrators", "Amministratori"),
+        K::AdminsHelp => m(
+            lang,
+            "One email per line. These are the only people this interface opens for, on top              of the gate that already stands in front of it.",
+            "Un'email per riga. Sono le uniche persone per cui questa interfaccia si apre,              oltre al gate che le sta già davanti.",
+        ),
+        K::AdminsKeepYourself => m(
+            lang,
+            "you cannot remove yourself here: do it from bb-auth-adm, over SSH",
+            "non puoi rimuovere te stesso da qui: fallo da bb-auth-adm, via SSH",
+        ),
+        K::AdminsNeverEmpty => m(
+            lang,
+            "at least one administrator is required: an empty list must never come to mean              'everyone'",
+            "serve almeno un amministratore: una lista vuota non deve mai finire per              significare 'chiunque'",
+        ),
+        K::Days => m(lang, "days", "giorni"),
+        K::MsgSettingsSaved => m(lang, "settings saved", "impostazioni salvate"),
         K::Groups => m(lang, "User groups", "Gruppi di utenti"),
         K::Apps => m(lang, "Applications", "Applicazioni"),
         K::Scopes => m(lang, "Scopes", "Ambiti"),
@@ -1023,8 +1118,8 @@ fn t(lang: Lang, key: K) -> &'static str {
         K::NotAdminTitle => m(lang, "Not an administrator", "Non sei un amministratore"),
         K::NotAdminBody => m(
             lang,
-            "is authenticated, but is not on BB_AUTH_WEB_ADMINS.",
-            "è autenticato, ma non è in BB_AUTH_WEB_ADMINS.",
+            "is authenticated, but is not an administrator of this interface.",
+            "è autenticato, ma non è amministratore di questa interfaccia.",
         ),
         K::NotFoundTitle => m(lang, "Not found", "Non trovato"),
         K::NotFoundBody => m(
@@ -1045,7 +1140,7 @@ fn t(lang: Lang, key: K) -> &'static str {
              subito — senza riavvio né reload.",
         ),
         K::SignedInAs => m(lang, "signed in as", "accesso come"),
-        K::Settings => m(lang, "Settings", "Impostazioni"),
+        K::Settings => m(lang, "Preferences", "Preferenze"),
         K::SettingLanguage => m(lang, "Language", "Lingua"),
         K::SettingTheme => m(lang, "Theme", "Tema"),
         // Named after what decides when nobody has: the browser. "Auto" alone would leave an
@@ -1420,6 +1515,7 @@ enum Msg {
     GroupRemoved,
     DeniedAdded,
     DeniedRemoved,
+    SettingsSaved,
 }
 
 impl Msg {
@@ -1444,6 +1540,7 @@ impl Msg {
             Msg::GroupRemoved => "group-removed",
             Msg::DeniedAdded => "denied-added",
             Msg::DeniedRemoved => "denied-removed",
+            Msg::SettingsSaved => "settings-saved",
         }
     }
 
@@ -1467,6 +1564,7 @@ impl Msg {
             Msg::GroupRemoved,
             Msg::DeniedAdded,
             Msg::DeniedRemoved,
+            Msg::SettingsSaved,
         ]
         .into_iter()
         .find(|m| m.key() == s)
@@ -1491,6 +1589,7 @@ impl Msg {
                 Msg::GroupAdded => K::MsgGroupAdded,
                 Msg::GroupSaved => K::MsgGroupSaved,
                 Msg::GroupRemoved => K::MsgGroupRemoved,
+                Msg::SettingsSaved => K::MsgSettingsSaved,
                 Msg::DeniedAdded => K::MsgDeniedAdded,
                 Msg::DeniedRemoved => K::MsgDeniedRemoved,
             },
@@ -1511,9 +1610,14 @@ struct Config {
     /// `BB_AUTH_ACCESS_FILE`, the access file to render. The gate's variable name, on
     /// purpose: each service gets its own env file, and one name means one meaning.
     access_path: String,
-    /// `BB_AUTH_WEB_ADMINS`, normalised with [`norm_email`] — the emails allowed in, and
-    /// never empty ([`compile_admins`]).
-    admins: Vec<String>,
+    /// `BB_AUTH_SETTINGS_FILE`, the settings file this GUI reads **and writes**, defaulting
+    /// to `settings.json` beside the access file exactly as the gate defaults it.
+    ///
+    /// Its `web.admins` is the allowlist that used to be `BB_AUTH_WEB_ADMINS`, and it is read
+    /// **per request** rather than at startup: this is the one service that can edit it, and
+    /// a change that needed a restart to take effect would be a change this GUI could make
+    /// but not see.
+    settings_path: String,
     /// `BB_AUTH_WEB_BASE_PATH`, normalised by [`normalize_base_path`]: `""` or `/admin`.
     /// Every internal href carries it and the router strips it.
     base_path: String,
@@ -1532,29 +1636,6 @@ fn env_req(key: &str) -> String {
         eprintln!("[bb-auth-web] FATAL: missing required env var {key}");
         std::process::exit(1);
     })
-}
-
-/// Compile `BB_AUTH_WEB_ADMINS` — comma-separated emails — into the allowlist. Entries are
-/// trimmed, lowercased ([`norm_email`], so a login's capitalisation cannot matter) and
-/// deduplicated; blank entries are dropped, which is what makes a trailing comma harmless.
-///
-/// **An empty result is an error**, never "everyone". This list is the only thing standing
-/// between a `public_auth` site that happens to cover the GUI's URL and an admin surface
-/// open to any Cognito account — and Cognito self-signup is open.
-///
-/// Pure and fallible so it can be tested; [`Config::from_env`] turns an `Err` into the usual
-/// fatal exit.
-fn compile_admins(spec: &str) -> Result<Vec<String>, String> {
-    let mut out: Vec<String> = Vec::new();
-    for email in spec.split(',').map(norm_email).filter(|e| !e.is_empty()) {
-        if !out.contains(&email) {
-            out.push(email);
-        }
-    }
-    if out.is_empty() {
-        return Err("no admin emails — this must never mean 'everyone'".into());
-    }
-    Ok(out)
 }
 
 /// Normalise `BB_AUTH_WEB_BASE_PATH` — the prefix nginx mounts the GUI at.
@@ -1589,10 +1670,22 @@ fn normalize_base_path(raw: &str) -> Result<String, String> {
 impl Config {
     /// Build the config from the environment, exiting on the first fatal problem.
     fn from_env() -> Config {
-        let admins = compile_admins(&env_req("BB_AUTH_WEB_ADMINS")).unwrap_or_else(|e| {
-            eprintln!("[bb-auth-web] FATAL: BB_AUTH_WEB_ADMINS: {e}");
+        // The allowlist is no longer an env var: it lives in the settings file, where this
+        // GUI can edit it and see the edit. What used to be a fatal startup over an empty
+        // `BB_AUTH_WEB_ADMINS` is now a refusal to serve, per request, in `handle`, and the
+        // variable itself is fatal if it is still set, because a list read from nowhere is
+        // worse than no list at all.
+        if std::env::var_os("BB_AUTH_WEB_ADMINS").is_some() {
+            eprintln!(
+                "[bb-auth-web] FATAL: BB_AUTH_WEB_ADMINS is set, but the administrator list \
+                 moved into the settings file (web.admins). Nothing reads it here any more."
+            );
+            eprintln!(
+                "[bb-auth-web]   Move it with `bb-auth-adm settings admin add EMAIL`, then \
+                 delete the line from bb-auth-web.env."
+            );
             std::process::exit(1);
-        });
+        }
         let base_path =
             normalize_base_path(&env_or("BB_AUTH_WEB_BASE_PATH", "")).unwrap_or_else(|e| {
                 eprintln!("[bb-auth-web] FATAL: BB_AUTH_WEB_BASE_PATH: {e}");
@@ -1605,18 +1698,18 @@ impl Config {
             );
             std::process::exit(1);
         });
+        let access_path = env_req("BB_AUTH_ACCESS_FILE");
+        let settings_path = std::env::var("BB_AUTH_SETTINGS_FILE")
+            .ok()
+            .filter(|p| !p.trim().is_empty())
+            .unwrap_or_else(|| default_settings_path(&access_path));
         Config {
             listen: env_or("BB_AUTH_WEB_LISTEN", "127.0.0.1:8091"),
-            access_path: env_req("BB_AUTH_ACCESS_FILE"),
-            admins,
+            access_path,
+            settings_path,
             base_path,
             default_lang,
         }
-    }
-
-    /// Whether `email` (already [`norm_email`]-normalised) may use the GUI.
-    fn is_admin(&self, email: &str) -> bool {
-        self.admins.iter().any(|a| a == email)
     }
 }
 
@@ -1624,8 +1717,9 @@ impl Config {
 // Routing
 // ---------------------------------------------------------------------------
 
-/// A page. The four section routes are the access file's four sections, which is the whole
-/// navigation: what the file has, the GUI has a tab for. Everything else is a form, a
+/// A page. The four section routes are the access file's four sections, which is most of the
+/// navigation: what the file has, the GUI has a tab for. [`Route::Config`] is the exception
+/// and says so by being one: it edits the *other* file. Everything else is a form, a
 /// confirmation, or the one `POST`-only route ([`Route::ScopeMove`]).
 ///
 /// A route that mutates is reached by `POST` on **the same path** that renders its form by
@@ -1645,6 +1739,9 @@ enum Route {
     /// and an email can be added or dropped without the page moving.
     User(String),
     Can,
+    /// The settings file, which is not a section of the access file at all: the five values
+    /// the gate reads per request, and the list of people this GUI opens for.
+    Config,
 
     AppAdd,
     AppEdit(String),
@@ -1700,6 +1797,7 @@ impl Route {
             Route::Users => "/users".to_string(),
             Route::User(u) => format!("/users/{}", seg(u)),
             Route::Can => "/can".to_string(),
+            Route::Config => "/config".to_string(),
 
             Route::AppAdd => format!("/apps/{ACTION_ADD}"),
             Route::AppEdit(a) => format!("/apps/{}/edit", seg(a)),
@@ -1802,6 +1900,7 @@ impl Route {
                 Route::Apps => "applications",
                 Route::Users => "users",
                 Route::Can => "can",
+                Route::Config => "settings",
                 _ => "bb-auth-web",
             },
         }
@@ -1840,6 +1939,7 @@ fn route(path: &str, base: &str) -> Option<Route> {
     match segs.as_slice() {
         [] | [""] => Some(Route::Dashboard),
         ["can"] => Some(Route::Can),
+        ["config"] => Some(Route::Config),
 
         ["users"] => Some(Route::Users),
         ["users", ACTION_ADD] => Some(Route::UserAdd),
@@ -2407,11 +2507,12 @@ impl View<'_> {
 
 /// The chrome around every page: the tabs, the Settings menu, the footer.
 ///
-/// Five tabs, not the file's four sections plus the tester: `denied` shares the `users` tab
-/// (see [`Route::tab`]) because both are about people, and the page itself moved to sit at
-/// the bottom of [`page_users`] rather than stand on its own in the bar. What is left reads
-/// left to right roughly as the file reads top to bottom, dashboard in front and the tester
-/// at the end. Labels are translated, descriptive prose about a section ([`K::Groups`] and
+/// Five tabs, not the access file's four sections plus the dashboard, the tester and the
+/// settings: `denied` shares the `users` tab (see [`Route::tab`]) because both are about
+/// people, and the page itself moved to sit at the bottom of [`page_users`] rather than
+/// stand on its own in the bar. What is left reads left to right roughly as the file reads
+/// top to bottom, dashboard in front, then the tester, then the settings, which are last
+/// because they are the *other* file, and the one tab not about who reaches what. Labels are translated, descriptive prose about a section ([`K::Groups`] and
 /// friends), not the section's own name in the file; that name still appears, untranslated,
 /// beside the heading each tab leads to.
 fn shell(v: &View, title: &str, content: Markup) -> Markup {
@@ -2420,6 +2521,7 @@ fn shell(v: &View, title: &str, content: Markup) -> Markup {
         (Route::Apps, v.t(K::Apps)),
         (Route::Users, v.t(K::Users)),
         (Route::Can, v.t(K::Can)),
+        (Route::Config, v.t(K::Config)),
     ];
     let current = v.at.tab();
     // The two list boxes' options, each in the order they are offered. Both lead with the
@@ -4026,6 +4128,142 @@ fn page_group_form(
     }
 }
 
+/// Which file a route edits, and therefore which one its `rev` fingerprints.
+///
+/// Two files, one optimistic-concurrency check. A settings form carrying the access file's
+/// fingerprint would `409` on every unrelated roster edit, and, far worse, one carrying a
+/// fingerprint of the wrong file would not notice a concurrent `bb-auth-adm settings set` at
+/// all, which is the whole thing the check exists for.
+fn edited_file<'a>(cfg: &'a Config, at: &Route) -> &'a str {
+    match at.tab() {
+        Route::Config => &cfg.settings_path,
+        _ => &cfg.access_path,
+    }
+}
+
+/// The settings form: the five the gate answers with, and the list of people this GUI opens
+/// for.
+///
+/// One form, not five, and one `Save`: these are read together on every request and written
+/// together in one file, so splitting them into a form each would only invent five chances to
+/// hit a stale `rev`.
+///
+/// Nothing here is a secret and nothing here can lock anybody out, which is exactly the rule
+/// that decided what the file holds; see `bb_auth_core::Settings`. What is *not* on this page
+/// is the rest of the configuration: the listener, the HMAC key, the Cognito trust roots, the
+/// login page and the authorized hosts stay in the env file on the host, where changing one
+/// costs a restart and getting one wrong costs the service.
+struct ConfigForm {
+    claims: String,
+    identity: String,
+    ttl: String,
+    social: bool,
+    providers: String,
+    admins: String,
+}
+
+impl ConfigForm {
+    /// The form as the file says it, which is what a `GET` renders.
+    fn of(doc: &SettingsFile) -> ConfigForm {
+        ConfigForm {
+            claims: doc.gate.profile_claims.join("\n"),
+            identity: doc.gate.identity_attrs.join("\n"),
+            ttl: doc.gate.session_ttl_secs.to_string(),
+            social: doc.gate.allow_unverified_social,
+            providers: doc.gate.social_providers.join("\n"),
+            admins: doc.web.admins.join("\n"),
+        }
+    }
+
+    fn read(f: &Form) -> ConfigForm {
+        ConfigForm {
+            claims: f.get("claims").to_string(),
+            identity: f.get("identity").to_string(),
+            ttl: f.get("ttl").to_string(),
+            // An unchecked checkbox sends nothing at all, which is what makes its absence the
+            // `false` rather than a value to parse.
+            social: !f.get("social").is_empty(),
+            providers: f.get("providers").to_string(),
+            admins: f.get("admins").to_string(),
+        }
+    }
+
+    /// One textarea's lines, trimmed, blanks dropped: the grammar every list field in this
+    /// GUI already uses.
+    fn lines(s: &str) -> Vec<String> {
+        s.lines()
+            .map(str::trim)
+            .filter(|l| !l.is_empty())
+            .map(str::to_string)
+            .collect()
+    }
+
+    /// Apply the form to the document. The refusals here are the two the library cannot make
+    /// on its own: it does not know who is signed in, and it does not parse a form.
+    fn apply(&self, doc: &mut SettingsFile, admin: &str, lang: Lang) -> Result<(), Refusal> {
+        let ttl: u64 = self
+            .ttl
+            .trim()
+            .parse()
+            .map_err(|_| Refusal::on("ttl", t(lang, K::SessionTtlHelp)))?;
+        let admins = Self::lines(&self.admins);
+        if admins.is_empty() {
+            return Err(Refusal::on("admins", t(lang, K::AdminsNeverEmpty)));
+        }
+        // The guard that makes this page safe to hand an administrator: you may add anyone
+        // and remove anyone but yourself. Removing the last administrator is refused above;
+        // removing *this* one would leave a GUI nobody can open, and the way back is the SSH
+        // this page exists to save people from. `bb-auth-adm` will still do it.
+        if !admins.iter().any(|a| norm_email(a) == admin) {
+            return Err(Refusal::on("admins", t(lang, K::AdminsKeepYourself)));
+        }
+        doc.gate.profile_claims = Self::lines(&self.claims);
+        doc.gate.identity_attrs = Self::lines(&self.identity);
+        doc.gate.session_ttl_secs = ttl;
+        doc.gate.allow_unverified_social = self.social;
+        doc.gate.social_providers = Self::lines(&self.providers);
+        doc.web.admins = admins;
+        Ok(())
+    }
+}
+
+fn page_config(v: &View, f: &ConfigForm, err: Option<&Refusal>) -> Markup {
+    let about = |name| err.is_some_and(|e| e.is(name));
+    let days = f.ttl.trim().parse::<u64>().unwrap_or(0) / 86_400;
+    html! {
+        h1 { (v.t(K::Config)) }
+        p class="lede" { (v.t(K::ConfigIntro)) }
+        div class="panel" {
+            (form_shell(v, err, html! {
+                (section_heading(v.t(K::ConfigGate), "gate"))
+                (urls_field(v.t(K::IdentityAttrs), "identity", &f.identity,
+                            html! { (v.t(K::IdentityAttrsHelp)) }, about("identity")))
+                (urls_field(v.t(K::ProfileClaims), "claims", &f.claims,
+                            html! { (v.t(K::ProfileClaimsHelp)) }, about("claims")))
+                (text_field(v.t(K::SessionTtl), "ttl", &f.ttl, "2592000",
+                            Some(&format!("{days} {}", v.t(K::Days))), about("ttl")))
+                // The scope form's own furniture, because a checkbox here is the same thing
+                // it is there and inventing a second one would show.
+                div {
+                    label class="radio" {
+                        input type="checkbox" name="social" value="on" checked[f.social];
+                        span { (v.t(K::UnverifiedSocial)) }
+                    }
+                    span class="hint" { (v.t(K::UnverifiedSocialHelp)) }
+                }
+                (urls_field(v.t(K::SocialProviders), "providers", &f.providers,
+                            html! { (v.t(K::SocialProvidersHelp)) }, about("providers")))
+
+                (section_heading(v.t(K::ConfigWeb), "web"))
+                (urls_field(v.t(K::Admins), "admins", &f.admins,
+                            html! { (v.t(K::AdminsHelp)) " (" (v.t(K::AdminsKeepYourself)) ")" },
+                            about("admins")))
+            }, v.t(K::Save), false))
+            p class="muted" { (v.t(K::ConfigHot)) }
+        }
+    }
+}
+
 /// The `denied` form — one address, and the veto that outranks every grant.
 #[derive(Default)]
 struct DenyForm {
@@ -4203,7 +4441,9 @@ fn commit(v: &View, doc: &AccessFile, verb: &str, target: &str) -> Result<Writte
 /// way. From the browser's side the two say the same thing — nothing happened, here is the
 /// sentence that says why — and the sentence itself is what distinguishes them.
 fn mutate(v: &View, form: &Form) -> Outcome {
-    let path = &v.cfg.access_path;
+    // Whichever file this route edits: the same `rev` field, checked against the file whose
+    // fingerprint the form was given ([`edited_file`]).
+    let path = edited_file(v.cfg, &v.at);
     let title = v.at.title();
 
     // (1) The file as it is right now, byte for byte.
@@ -4233,6 +4473,26 @@ fn mutate(v: &View, form: &Form) -> Outcome {
             }
         }
         return Outcome::Page(409, title, page_conflict(v));
+    }
+
+    // The settings file's own mutation, and the only one that never touches the access file.
+    // It sits here, between the concurrency check and the access file's own parse, because it
+    // needs the first and has no use for the second.
+    if v.at == Route::Config {
+        let f = ConfigForm::read(form);
+        let r = (|| -> Result<(), Refusal> {
+            let (mut doc, _) = open_settings_file(path)?;
+            f.apply(&mut doc, v.admin.unwrap_or_default(), v.lang)?;
+            // The library is the only door here too: `prepare` compiles the exact bytes with
+            // the parser the gate uses, `commit` writes the bytes it compiled.
+            SettingsWrite::prepare(&doc)?.commit(path)?;
+            audit(v.admin.unwrap_or("?"), "settings set", path);
+            Ok(())
+        })();
+        return match r {
+            Ok(()) => Outcome::Done(Route::Config, Msg::SettingsSaved),
+            Err(e) => Outcome::Page(400, title, page_config(v, &f, Some(&e))),
+        };
     }
 
     // (2) And as the gate would read it. A file that does not compile is not a file to edit.
@@ -4967,7 +5227,36 @@ fn handle(mut req: Request, cfg: &Config) {
         }
     };
     let email = norm_email(&raw_email);
-    if !cfg.is_admin(&email) {
+
+    // The allowlist, fresh off disk on every request, because this is the one service that
+    // can edit it. Three outcomes, and they are deliberately different pages: a file that
+    // does not compile is a `500` naming the parser's own sentence (nobody is an
+    // administrator, but saying "you are not one" would be a lie); an empty list is a `500`
+    // too, because "everyone" is the one thing it must never come to mean; and only a list
+    // that simply does not name this identity is the `403`.
+    let settings = match open_settings_file(&cfg.settings_path) {
+        Ok((_, s)) => s,
+        Err(e) => {
+            let v = anon(Route::Dashboard);
+            respond_page(
+                req,
+                500,
+                shell(&v, v.t(K::FileErrorTitle), page_file_error(&v, &e)),
+            );
+            return;
+        }
+    };
+    if settings.admins.is_empty() {
+        let v = anon(Route::Dashboard);
+        let e = format!("{}: {}", cfg.settings_path, v.t(K::AdminsNeverEmpty));
+        respond_page(
+            req,
+            500,
+            shell(&v, v.t(K::FileErrorTitle), page_file_error(&v, &e)),
+        );
+        return;
+    }
+    if !settings.is_admin(&email) {
         let v = anon(Route::Dashboard);
         let page = notice(
             "bad",
@@ -5069,8 +5358,10 @@ fn handle(mut req: Request, cfg: &Config) {
     }
 
     // Fresh off disk, every request, and hashed: `rev` is what every form on this page will
-    // carry, and what the `POST` that comes back has to still match.
-    let raw = std::fs::read_to_string(&cfg.access_path).unwrap_or_default();
+    // carry, and what the `POST` that comes back has to still match. Which file it fingerprints
+    // is the file this page *edits*, so the settings page guards the settings file and every
+    // other page guards the access file, through one field and one check.
+    let raw = std::fs::read_to_string(edited_file(cfg, &at)).unwrap_or_default();
     let rev = sha256_hex(&raw);
     let v = View {
         cfg,
@@ -5083,6 +5374,18 @@ fn handle(mut req: Request, cfg: &Config) {
         rev: &rev,
         msg: query_param(&query, "msg").as_deref().and_then(Msg::parse),
     };
+
+    // Answered before the access file is even opened, and deliberately: this page does not
+    // read it, and a broken access file must not take away the one page where the
+    // administrator list is fixed.
+    if at == Route::Config {
+        let content = match open_settings_file(&cfg.settings_path) {
+            Ok((doc, _)) => page_config(&v, &ConfigForm::of(&doc), None),
+            Err(e) => page_file_error(&v, &e),
+        };
+        respond_page(req, 200, shell(&v, v.t(K::Config), content));
+        return;
+    }
 
     let (doc, access) = match open_access_file(&cfg.access_path) {
         Ok(pair) => pair,
@@ -5114,6 +5417,9 @@ fn handle(mut req: Request, cfg: &Config) {
             (status, content, title)
         }
         Route::Can => (200, page_can(&v, &access, &query), title),
+        // Answered above, before the access file was opened: it is the one page that does
+        // not read it.
+        Route::Config => unreachable!("the settings page returns before this match"),
 
         Route::UserAdd => (200, page_user_form(&v, &UserForm::default(), None), title),
         Route::UserRm(key) => match user_pos(&doc, key) {
@@ -5510,11 +5816,21 @@ fn main() {
     } else {
         cfg.base_path.clone()
     };
+    // The administrator list is read per request, not here, so what the banner can honestly
+    // report is where it will be read from. A file that is missing or does not compile is
+    // said so now rather than discovered by the first visitor.
+    let admins = match open_settings_file(&cfg.settings_path) {
+        Ok((_, s)) => format!("{}", s.admins.len()),
+        Err(e) => {
+            eprintln!("[bb-auth-web] WARNING: {e}");
+            "unreadable".to_string()
+        }
+    };
     eprintln!(
-        "[bb-auth-web] listening on {} | file={} | admins={} | base={base} | lang={}",
+        "[bb-auth-web] listening on {} | file={} | settings={} | admins={admins} | base={base}          | lang={}",
         cfg.listen,
         cfg.access_path,
-        cfg.admins.len(),
+        cfg.settings_path,
         cfg.default_lang.code()
     );
     eprintln!(
@@ -5593,27 +5909,51 @@ mod tests {
       "users": [ { "uuid": "8f14e45f-ceea-467a-9f79-3b4e5c6d7a8b", "emails": ["bob@x.com"] } ]
     }"#;
 
+    /// The settings file a test runs against: one administrator, and the defaults.
+    ///
+    /// Written beside its access file under that file's own unique name rather than at the
+    /// derived default, because the default is one `settings.json` per *directory* and every
+    /// test here shares the temp directory. Tests run in parallel.
+    const SETTINGS: &str = r#"{ "version": 1, "web": { "admins": ["admin@x.com"] } }"#;
+
+    fn settings_path(access_path: &str) -> String {
+        format!("{access_path}.settings")
+    }
+
+    /// Names the two files; creates neither. A rendering-only test passes a path that is not
+    /// on disk at all, and this must leave it that way: a helper that wrote a file for every
+    /// `Config` it built would litter the working tree from the tests that never touch one.
     fn cfg_for(path: &str, base: &str) -> Config {
         Config {
             listen: String::new(),
             access_path: path.to_string(),
-            admins: vec!["admin@x.com".to_string()],
+            settings_path: settings_path(path),
             base_path: base.to_string(),
             default_lang: Lang::En,
         }
     }
 
-    /// Write `json` to a uniquely-named temp file so tests can run in parallel.
+    /// Write `json` to a uniquely-named temp file so tests can run in parallel, and the
+    /// settings file beside it: the two are one fixture, and every test that has an access
+    /// file on disk needs a settings file to be served at all.
     fn scratch(name: &str, json: &str) -> String {
         let p = std::env::temp_dir().join(format!("bb-auth-web-{name}.json"));
         std::fs::write(&p, json).unwrap();
-        p.to_string_lossy().into_owned()
+        let path = p.to_string_lossy().into_owned();
+        std::fs::write(settings_path(&path), SETTINGS).unwrap();
+        path
     }
 
-    /// The scratch file and the backup a write leaves beside it.
+    /// The scratch file, the settings file beside it, and the backups a write leaves.
     fn cleanup(path: &str) {
-        let _ = std::fs::remove_file(path);
-        let _ = std::fs::remove_file(format!("{path}.bak"));
+        for p in [
+            path.to_string(),
+            format!("{path}.bak"),
+            settings_path(path),
+            format!("{}.bak", settings_path(path)),
+        ] {
+            let _ = std::fs::remove_file(p);
+        }
     }
 
     fn read(path: &str) -> String {
@@ -5683,24 +6023,166 @@ mod tests {
             .to_string()
     }
 
-    // --- config -------------------------------------------------------------
+    // --- the settings page ---------------------------------------------------
 
-    #[test]
-    fn compile_admins_trims_lowercases_and_dedupes() {
-        assert_eq!(
-            compile_admins("  Alice@X.com , bob@x.com ,, ALICE@x.com ,").unwrap(),
-            vec!["alice@x.com".to_string(), "bob@x.com".to_string()]
-        );
-        assert_eq!(compile_admins("one@x.com").unwrap(), vec!["one@x.com"]);
-    }
-
-    #[test]
-    fn compile_admins_rejects_an_empty_list() {
-        // Empty must never mean "everyone" — it is the whole point of the allowlist.
-        for spec in ["", "   ", ",", " , , "] {
-            assert!(compile_admins(spec).is_err(), "{spec:?} must be rejected");
+    /// The fields the settings form posts, as a browser would, with one override applied.
+    fn settings_fields<'a>(rev: &'a str, over: &[(&'a str, &'a str)]) -> Vec<(&'a str, &'a str)> {
+        let mut f: Vec<(&str, &str)> = vec![
+            ("rev", rev),
+            ("identity", "email"),
+            ("claims", ""),
+            ("ttl", "2592000"),
+            ("providers", ""),
+            ("admins", "admin@x.com"),
+        ];
+        for (k, v) in over {
+            match f.iter_mut().find(|(n, _)| n == k) {
+                Some(slot) => slot.1 = v,
+                None => f.push((k, v)),
+            }
         }
+        f
     }
+
+    #[test]
+    fn the_settings_page_writes_the_five_and_the_administrators() {
+        let path = scratch("cfg-write", SAMPLE);
+        let cfg = cfg_for(&path, "");
+        let sp = cfg.settings_path.clone();
+        let got = post(
+            &cfg,
+            Route::Config,
+            &settings_fields(
+                &rev_of(&sp),
+                &[
+                    ("identity", "email\nuuid"),
+                    ("claims", " given_name \n\n family_name "),
+                    ("ttl", "604800"),
+                    ("social", "on"),
+                    ("providers", "Google"),
+                    ("admins", "admin@x.com\nAnother@X.com"),
+                ],
+            ),
+        );
+        assert_eq!(got.location(), "/config?msg=settings-saved");
+
+        let (_, s) = open_settings_file(&sp).unwrap();
+        assert_eq!(
+            s.identity_attrs
+                .iter()
+                .map(|a| a.attr.as_str())
+                .collect::<Vec<_>>(),
+            vec!["email", "uuid"]
+        );
+        // Trimmed, blanks dropped, and the header derived rather than configured.
+        assert_eq!(s.profile_claims[1].header, "X-Auth-Family-Name");
+        assert_eq!(s.session_ttl, 604_800);
+        assert!(s.allow_unverified_social);
+        assert_eq!(s.social_providers, Some(vec!["Google".to_string()]));
+        assert_eq!(s.admins.len(), 2);
+        // The access file was not touched: this page edits the other one.
+        assert_eq!(read(&path), SAMPLE);
+        cleanup(&path);
+    }
+
+    #[test]
+    fn the_settings_page_refuses_what_would_lock_the_administrator_out() {
+        let path = scratch("cfg-lockout", SAMPLE);
+        let cfg = cfg_for(&path, "");
+        let sp = cfg.settings_path.clone();
+        let before = read(&sp);
+
+        // Removing yourself: refused here, and the message says where it can be done.
+        let got = post(
+            &cfg,
+            Route::Config,
+            &settings_fields(&rev_of(&sp), &[("admins", "someone@else.com")]),
+        );
+        let (status, page) = got.page();
+        assert_eq!(status, 400);
+        assert!(page.contains("cannot remove yourself"), "{page}");
+
+        // Emptying the list: refused before the library ever sees it, because an empty list
+        // must never come to mean "everyone".
+        let got = post(
+            &cfg,
+            Route::Config,
+            &settings_fields(&rev_of(&sp), &[("admins", "  \n ")]),
+        );
+        assert_eq!(got.page().0, 400);
+        assert!(got.page().1.contains("at least one administrator"));
+
+        // An identity list the gate would refuse never reaches the disk either.
+        let got = post(
+            &cfg,
+            Route::Config,
+            &settings_fields(&rev_of(&sp), &[("identity", "phone")]),
+        );
+        assert_eq!(got.page().0, 400);
+        assert!(got.page().1.contains("unknown identity attribute"));
+
+        assert_eq!(read(&sp), before, "nothing was written on any refusal");
+        cleanup(&path);
+    }
+
+    #[test]
+    fn the_settings_form_is_guarded_by_the_settings_file_own_fingerprint() {
+        let path = scratch("cfg-rev", SAMPLE);
+        let cfg = cfg_for(&path, "");
+        let sp = cfg.settings_path.clone();
+
+        // The form a `GET` renders carries the settings file's fingerprint, not the access
+        // file's; otherwise every roster edit would 409 this page, and a concurrent
+        // `bb-auth-adm settings set` would go unnoticed, which is the case the check is for.
+        let rev = rev_of(&sp);
+        let v = view(&cfg, Route::Config, &rev);
+        let (doc, _) = open_settings_file(&sp).unwrap();
+        let html =
+            shell(&v, "settings", page_config(&v, &ConfigForm::of(&doc), None)).into_string();
+        assert_eq!(rev_in(&html), rev_of(&sp));
+        assert_ne!(rev_of(&sp), rev_of(&path));
+
+        // And a stale one is a 409 that writes nothing.
+        let got = post(
+            &cfg,
+            Route::Config,
+            &settings_fields("stale", &[("ttl", "60")]),
+        );
+        assert_eq!(got.page().0, 409);
+        assert_eq!(open_settings_file(&sp).unwrap().1.session_ttl, 2_592_000);
+        cleanup(&path);
+    }
+
+    #[test]
+    fn an_unreadable_settings_file_is_an_error_page_not_a_denial() {
+        // Saying "you are not an administrator" when the file that would say so cannot be
+        // read is a lie, and one that sends an operator looking in the wrong place.
+        let path = scratch("cfg-broken", SAMPLE);
+        let cfg = cfg_for(&path, "");
+        std::fs::write(&cfg.settings_path, "{ not json").unwrap();
+
+        let server = Server::http("127.0.0.1:0").expect("bind an ephemeral port");
+        let port = server.server_addr().to_ip().expect("an ip address").port();
+        let served = cfg_for(&path, "");
+        std::thread::spawn(move || {
+            for req in server.incoming_requests() {
+                handle(req, &served);
+            }
+        });
+        match ureq::get(&format!("http://127.0.0.1:{port}/"))
+            .set(IDENTITY_HEADER, "admin@x.com")
+            .call()
+        {
+            Err(ureq::Error::Status(500, r)) => {
+                let body = r.into_string().unwrap();
+                assert!(body.contains("settings"), "{body}");
+            }
+            other => panic!("expected 500, got {other:?}"),
+        }
+        cleanup(&path);
+    }
+
+    // --- config -------------------------------------------------------------
 
     #[test]
     fn normalize_base_path_normalizes_and_rejects() {
@@ -7204,7 +7686,7 @@ mod tests {
             .send_form(&[("rev", &rev)])
         {
             Err(ureq::Error::Status(403, r)) => {
-                assert!(r.into_string().unwrap().contains("BB_AUTH_WEB_ADMINS"));
+                assert!(r.into_string().unwrap().contains("someone@x.com"));
             }
             other => panic!("expected 403 for a non-admin POST, got {other:?}"),
         }

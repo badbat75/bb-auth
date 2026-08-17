@@ -151,12 +151,14 @@ deploying to. Keep it that way.
 ## What must not break
 
 - **No state in the packages.** `etc/*.env` (the HMAC key: every live session cookie
-  depends on it) and `var/lib/access.json` are created by `postinst` only when absent and
+  depends on it), `var/lib/access.json` and `var/lib/settings.json` are created by
+  `postinst` only when absent and
   are in no package, so `dpkg` cannot clobber them. They are deliberately not
   `conf-files`: a prompt that one `--force-confnew` would lose is not the same guarantee.
 - **One build path.** `package.sh` goes through `build.sh` so the `.deb` contains exactly
   the bytes in `dist/`, which is what makes those bytes independently checkable.
-- **Validate before restart.** The `postinst` preflight, and `--check-access` on any staged
+- **Validate before restart.** The `postinst` preflight, `--check-settings` on the settings
+  file it creates, and `--check-access` on any staged
   access file, run before anything is restarted. A fatal startup under
   `Restart=on-failure` is a boot loop.
 - **Host-side logic stays in these files**, not in strings assembled by the orchestrator.

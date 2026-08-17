@@ -1,5 +1,5 @@
 [Unit]
-Description=Watch the bb-auth access file and reload the gate when it changes
+Description=Watch the bb-auth access and settings files and reload the gate when either changes
 Documentation=man:systemd.path(5)
 
 [Path]
@@ -22,7 +22,12 @@ Documentation=man:systemd.path(5)
 # One save can trigger more than one reload (the .bak copy and the temp file are both
 # IN_CREATE in the watched directory). That is harmless: a reload re-reads the same file,
 # and a reload that fails to parse keeps the live table.
+#
+# Two files, one signal. The gate's SIGHUP re-reads both, each fail-soft on its own, so
+# there is nothing to route: what an operator means by "make this live" is the same in both
+# cases. A second unit would only mean two ways to get the same reload.
 PathChanged=/opt/bb-auth/var/lib/access.json
+PathChanged=/opt/bb-auth/var/lib/settings.json
 
 [Install]
 WantedBy=multi-user.target

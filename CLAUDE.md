@@ -17,14 +17,19 @@ policy (`anonymous`, `authenticated`, `restricted`) and an `excluded` list that 
 people out of it ahead of that policy; a user is a **uuid** plus the emails
 that resolve to it plus its API keys, and carries no URL at all. A grant is written once,
 on the side of the place. It is service-agnostic — one binary fronts any web service, wired
-per-deployment through `BB_AUTH_*` env vars.
+per-deployment through `BB_AUTH_*` env vars **and a settings file** (`settings.json` beside
+the access file): since 3.1 the six settings that must change without a restart live there,
+because a process cannot re-read its own environment.
 
 One crate, four targets, and the split is load-bearing:
 
-- **[src/lib.rs](src/lib.rs)** (`bb_auth_core`) — **the access file**: its schema, its
-  parser, the URL matcher, the two-level resolution (`Access::resolve`), the grant model
-  (`decide` / `decide_api_key`), and how one is *edited and written* (`open_access_file`,
-  `AccessWrite`, the document mutations). Everything two programs must agree on, byte for
+- **[src/lib.rs](src/lib.rs)** (`bb_auth_core`): **the files the programs share**. The
+  access file above all: its schema, its parser, the URL matcher, the two-level resolution
+  (`Access::resolve`), the grant model (`decide` / `decide_api_key`), and how one is *edited
+  and written* (`open_access_file`, `AccessWrite`, the document mutations). And since 3.1
+  **the settings file** beside it (`SettingsFile`, `compile_settings`, `SettingsWrite`, plus
+  `compile_profile_claims` / `compile_identity_attrs`, which moved here because three
+  programs now validate them). Everything more than one program must agree on, byte for
   byte.
 - **[src/bin/bb-auth.rs](src/bin/bb-auth.rs)** — **the gate**, and everything the access file has no
   opinion about: HTTP, the session cookie, id_token validation, the nginx contract. Still
@@ -36,9 +41,11 @@ One crate, four targets, and the split is load-bearing:
   library, none of the gate.
 - **[src/bin/bb-auth-web.rs](src/bin/bb-auth-web.rs)** — the access-file admin GUI
   (server-rendered, `maud`): the same CRUD as the CLI, made **only** through the library's
-  editing core. Four tabs, not five: `user_groups` and `denied` are **sections of the users
+  editing core, plus a **Settings** tab over the settings file. Five tabs, and none of them
+  is `denied` or `user_groups`: those two are **sections of the users
   page**, groups above the roster, because a group only means anything in terms of the roster
-  and both are about people. Every unordered list carries a filter and a pager, both living
+  and both are about people. Settings is last because it is the only tab that is not about
+  the access file at all. Every unordered list carries a filter and a pager, both living
   entirely in the query string (`Listing`, `list_controls`) since a page here must work with
   scripting off; each list namespaces its two parameters (`uq`/`up`, `gq`/`gp`, …) so several
   on one page do not steal each other's state. **Scopes are deliberately excluded from that**:
@@ -57,7 +64,7 @@ One crate, four targets, and the split is load-bearing:
   against a `bb-auth-adm` over SSH is a 409 instead of a silent clobber. It links the library,
   none of the gate, and is **just another app bb-auth fronts**: loopback only, gated by nginx
   `auth_request`, identity read from the `X-Auth-Email` nginx injects and from nowhere else —
-  a missing header is a 401, not an anonymous visitor. `BB_AUTH_WEB_ADMINS` is its own
+  a missing header is a 401, not an anonymous visitor. `web.admins` is its own
   allowlist on top of that, required and never empty, because an `authenticated` scope covering
   its URL would otherwise open the admin surface to any Cognito account.
 
@@ -103,6 +110,10 @@ cargo test session_roundtrip_bb4      # a single test by name
 # scopes that grant without listing anybody (anonymous, authenticated).
 cargo run --bin bb-auth -- --check-access .\deploy\access.example.json
 
+# Validate a SETTINGS file with the parser all three programs use. Prints the derived
+# header for every claim and attribute, and names the GUI's administrators.
+cargo run --bin bb-auth -- --check-settings .\deploy\settings.example.json
+
 # Administer an access file (CRUD; every write is validated with the gate's own parser).
 # `can` answers with the gate's own decision function — exit 0 = the request would pass.
 cargo run --bin bb-auth-adm -- --help
@@ -112,6 +123,12 @@ cargo run --bin bb-auth-adm -- -f .\deploy\access.json scope add mpa admin --url
 cargo run --bin bb-auth-adm -- -f .\deploy\access.json user add bob@x.com
 cargo run --bin bb-auth-adm -- -f .\deploy\access.json key add bob@x.com --id laptop --duration 365d
 cargo run --bin bb-auth-adm -- -f .\deploy\access.json can bob@x.com https://app.x.com/mpa/admin/panel
+
+# The settings file: the six values that take effect with no restart at all. `-s` names it;
+# with no `-s` it is settings.json beside the access file, which is what the packages create.
+cargo run --bin bb-auth-adm -- -s .\deploy\settings.json settings show
+cargo run --bin bb-auth-adm -- -s .\deploy\settings.json settings set --claims given_name,family_name
+cargo run --bin bb-auth-adm -- -s .\deploy\settings.json settings admin add bob@x.com
 
 # Convert an older access file (one with no "version"). It replays every (identity, URL)
 # pair the old file speaks
@@ -167,15 +184,21 @@ changes. `node e2e/shots.js` takes a scene-name filter for the same reason: the 
 
 ## Invariants — do not break these
 
-- **The library is the access file, and nothing else.** `bb_auth_core` exists because two
-  programs must agree, byte for byte, on what an access file *means* — so there is exactly
-  one parser (`compile_access`), one matcher (`glob_match`), one grant model (`decide`,
-  `decide_api_key`), and both link it. That is the whole membership rule: a thing belongs
-  in the library iff the access file has an opinion about it. The rule reaches **how a file
+- **The library is the shared files, and nothing else.** `bb_auth_core` exists because more
+  than one program must agree, byte for byte, on what a shared file *means*, so there is
+  exactly one parser (`compile_access`), one matcher (`glob_match`), one grant model
+  (`decide`, `decide_api_key`), and all three link it. That is the whole membership rule: a
+  thing belongs in the library iff a file more than one program reads has an opinion about
+  it. The rule reaches **how a file
   is edited and written**, too — validate-before-write on the exact bytes, atomic replace,
   mode and owner preserved (`open_access_file`, `AccessWrite`, and the document mutations
-  beside them) — because `bb-auth-adm` today and the web admin next must agree on that byte
-  for byte: the same argument that created the library. What stays in a tool is what has an
+  beside them), because `bb-auth-adm` and the web admin must agree on that byte
+  for byte: the same argument that created the library. It is also what admitted the
+  **settings file** in 3.1 (`compile_settings`, `SettingsWrite`), and with it
+  `compile_profile_claims` / `compile_identity_attrs`, which had been the gate's while the
+  gate was the only program that read them: the moment an editor must refuse to *write* a
+  bad claim list, the rule that decides one is shared. `write_atomically` stays private and
+  serves both writers. What stays in a tool is what has an
   operator: flags, warnings, and the wording of a verdict. HTTP, the cookie, the JWT,
   the env, the nginx contract are the **gate's**, and stay in `src/bin/bb-auth.rs` — which is
   still one file, read top to bottom. Do not move gate code into the library to "share" it
@@ -183,11 +206,12 @@ changes. `node e2e/shots.js` takes a scene-name filter for the same reason: the 
   `bb-auth.rs` (`authorize`, `bearer_apikey_email`) are thin wrappers that add the log line
   and the wall clock to the library's decision — keep them thin, and keep the rule in the
   library, or `bb-auth-adm can` starts answering a different question from the gate.
-- **`bb-auth-adm` must never write a file the gate would reject.** Every mutation is
+- **No editor may write a file the gate would reject.** Every mutation is
   serialized, re-parsed, and run through `compile_access` — the gate's own parser, on the
   exact bytes about to land on disk — before the write. `AccessWrite` is that order made
   unskippable and is the only door: `prepare` compiles, `commit` writes what it compiled,
-  and `write_atomically` is private to the library. A rejected access file is a fatal
+  and `write_atomically` is private to the library. `SettingsWrite` is the same type for the
+  settings file, with the same three parts and the same single door. A rejected access file is a fatal
   startup, and under `Restart=on-failure` that is a boot loop; this tool and
   `--check-access` are the two places that can catch it in time. The write is atomic
   (temp + rename) and **preserves mode and owner**: the live file is `root:bb-auth 0640`
@@ -205,7 +229,7 @@ changes. `node e2e/shots.js` takes a scene-name filter for the same reason: the 
   axis: the keyid in the cookie is what makes it zero-downtime (README "Key rotation").
   `make_session` / `verify_session` and their tests pin the format, and
   `pre_bb4_cookies_are_rejected` pins the absence of the legacy arms. The claims segment is a
-  **self-describing JSON object**, and that is what keeps `BB_AUTH_PROFILE_CLAIMS` off this
+  **self-describing JSON object**, and that is what keeps `profile_claims` off this
   axis: positional segments would let a config edit reinterpret a live cookie's values under
   another claim's name, so editing the list must stay a no-logout change. Verify checks the
   signature over the segment **as received** and only then parses it — never parse and
@@ -220,6 +244,26 @@ changes. `node e2e/shots.js` takes a scene-name filter for the same reason: the 
   `version` at all) is a **fatal, explanatory** load error naming `bb-auth-adm migrate`
   (`check_legacy`): a new binary that ignored the old sections would read it as an empty access
   table, which is a total lockout reported as a successful load.
+- **The settings file is what must change without a restart, and the rule for what goes in it
+  is three-part.** A setting belongs there iff it is (1) read **per request**, (2) unable to
+  lock the operator out when it is wrong, and (3) not a secret. Six pass:
+  `gate.profile_claims`, `gate.identity_attrs`, `gate.allow_unverified_social`,
+  `gate.social_providers`, `gate.session_ttl_secs`, and `web.admins`. Everything else stays in
+  `bb-auth.env`: the listener and the worker count (a rebind), the HMAC key (the secret), the
+  Cognito trust roots and the cookie's name and domain (a change lets nobody in or logs
+  everybody out), and `BB_AUTH_LOGIN_URL` / `BB_AUTH_AUTHORIZED_HOSTS` /
+  `BB_AUTH_ORIGINAL_URL_HEADER`, which **are** the lockout. It is a *file* for one mechanical
+  reason, and not for tidiness: **a process cannot re-read its own environment** (systemd
+  loads `EnvironmentFile=` once, at `ExecStart`), so an env var can never be hot. Do not add a
+  seventh setting because it would be convenient there; check it against the three parts
+  first. It is held in `RwLock<Settings>`, reloaded by the same SIGHUP as the access file and
+  **fail-soft in the same way** (a broken file keeps the live values), which is what makes it
+  safe to hand to a GUI: the worst a bad save can do is leave the previous values in force.
+  `bb-auth-web` reads it fresh per request instead, because it is the one service that edits
+  its own half of it. The five env vars that moved are a **fatal startup** if still set
+  (`check_legacy_env`, and the same for `BB_AUTH_WEB_ADMINS` in the GUI): a value an operator
+  can see and the service silently ignores is exactly the failure this repo refuses
+  everywhere else.
 - **What changes who reaches what is fatal; what drops one credential is skipped.** Fatal
   (`read_access` returns `Err`: fatal at startup, old table retained on SIGHUP): a malformed URL
   pattern, an `access` that is absent or misspelled, `users`/`groups`/`credentials` on a scope that
@@ -303,7 +347,7 @@ changes. `node e2e/shots.js` takes a scene-name filter for the same reason: the 
   that means anyone who can register, which is the right grant for an onboarding area and the wrong
   one for anything else. It reaches only the two Cognito-backed credentials: an unknown `bbk_` key
   stays unknown, because Cognito vouches for no key of ours and there would be no identity to hand
-  back. Note it multiplies with `BB_AUTH_ALLOW_UNVERIFIED_SOCIAL`.
+  back. Note it multiplies with `allow_unverified_social`.
 - **Static API keys (`bbk_` namespace) act as their user, and may only narrow.** The raw key is
   never stored, and the `sha256(bearer)` lookup in `by_key_hash` **is** the verification. A key must
   have a non-denied owner and be unexpired (`decide_api_key`), and then the scope that answers
@@ -339,7 +383,7 @@ changes. `node e2e/shots.js` takes a scene-name filter for the same reason: the 
   location that forgets it sends no header and is denied — fail-closed, which is why this is
   survivable. nginx must also forward `Authorization`, and set the header on `/auth/session` too.
 - **The gate names the identity; nginx is what makes that trustworthy.** A `204` carries the
-  authorized identity in headers derived from `BB_AUTH_IDENTITY_ATTRS` (`IdentityAttr`), default
+  authorized identity in headers derived from `identity_attrs` (`IdentityAttr`), default
   `email` and therefore `X-Auth-Email`, which is what every application behind this gate already
   reads. It is only safe because nginx sets or clears those names on **every** gated location
   (`proxy_set_header` overrides just the names it lists) and the app is unreachable except through
@@ -370,7 +414,7 @@ changes. `node e2e/shots.js` takes a scene-name filter for the same reason: the 
   id_token proves identity, never authorization. On an `authenticated` scope the identity may be in
   no table at all, and it then has no `uuid` to send; enrolling them is the application's business.
 - **The profile claims are decoration, and the encoder is what makes them safe.** A `204` may also
-  carry OIDC claims from the token — `BB_AUTH_PROFILE_CLAIMS`, empty by default. They are **not**
+  carry OIDC claims from the token — `profile_claims`, empty by default. They are **not**
   identities: they authorize nothing, no field of the access file mentions them, and
   `authorize_identity` keeps them out of `decide` — otherwise `bb-auth-adm can` would stop
   answering the gate's question. Being self-asserted (any Cognito user edits their own profile,
@@ -384,8 +428,8 @@ changes. `node e2e/shots.js` takes a scene-name filter for the same reason: the 
   safety: a bad value costs that claim, never the login, which is why `Claims::extra` holds
   `serde_json::Value`s.
 - **The set is config; the header name is code.** This holds twice over, for the same reason and
-  through the same function. An operator names a *claim* (`BB_AUTH_PROFILE_CLAIMS`) or an
-  *attribute* (`BB_AUTH_IDENTITY_ATTRS`), never a header: `derive_profile_header` maps both
+  through the same function. An operator names a *claim* (`profile_claims`) or an
+  *attribute* (`identity_attrs`), never a header: `derive_profile_header` maps both
   (`given_name` -> `X-Auth-Given-Name`, `custom:department` -> `X-Auth-Custom-Department`, `email`
   -> `X-Auth-Email`, `uuid` -> `X-Auth-Uuid`), so the two can never disagree and no header name is
   typo-reachable. Since a claim name is restricted to `[A-Za-z0-9_:-]`, a derived header is always a
@@ -417,8 +461,8 @@ changes. `node e2e/shots.js` takes a scene-name filter for the same reason: the 
   (`tiny_http` is blocking + threaded) — keeps the binary and resident memory small.
 - **id_token validation** must keep all of: `alg==RS256`, `iss`/`aud`/`exp` enforced (`exp`
   required, 60s leeway), `token_use=="id"`, `email_verified` truthy. The **one** sanctioned
-  exception: `BB_AUTH_ALLOW_UNVERIFIED_SOCIAL` accepts `email_verified=false` **only** for federated
-  logins, optionally narrowed by `BB_AUTH_SOCIAL_PROVIDERS` — never for native Cognito users, since
+  exception: `allow_unverified_social` accepts `email_verified=false` **only** for federated
+  logins, optionally narrowed by `social_providers` — never for native Cognito users, since
   self-signup is open and an unverified native email is attacker-controlled. Off by default. See
   `validate_id_token` / `unverified_social_ok`. It multiplies with `authenticated`: together they mean
   "any social account, unverified email, no enrolment".
@@ -456,11 +500,13 @@ changes. `node e2e/shots.js` takes a scene-name filter for the same reason: the 
 
 ## Config & deploy notes
 
-- All config is env vars (`Config::from_env`); missing required vars are a fatal exit. The only
-  secret is `BB_AUTH_HMAC_KEY` (≥32 bytes). Full reference: [deploy/bb-auth.env.example](deploy/bb-auth.env.example)
-  and `docs/ARCHITECTURE.md` §8.
+- Config is env vars (`Config::from_env`; missing required vars are a fatal exit) **plus the
+  settings file** (`compile_settings`) for the six that must be hot. The only secret is
+  `BB_AUTH_HMAC_KEY` (≥32 bytes), and it is in the env file. Full reference:
+  [deploy/bb-auth.env.example](deploy/bb-auth.env.example),
+  [deploy/settings.example.json](deploy/settings.example.json) and `docs/ARCHITECTURE.md` §8/§8a.
 - **Target layout is a tree**: `/opt/bb-auth/{bin/bb-auth, bin/bb-auth-adm, bin/bb-auth-web,
-  etc/bb-auth.env, etc/bb-auth-web.env, share/*.example, var/lib/access.json}`, units at
+  etc/bb-auth.env, etc/bb-auth-web.env, share/*.example, var/lib/{access,settings}.json}`, units at
   `/usr/lib/systemd/system/{bb-auth.service, bb-auth-web.service, bb-auth-reload.{path,service}}`
   (where a **package** must put them; `/etc/systemd/system` is the admin's, and a copy there
   from a pre-package install *overrides* it, which is what `deploy.sh` moves aside).
@@ -469,12 +515,13 @@ changes. `node e2e/shots.js` takes a scene-name filter for the same reason: the 
   namespace, as root, and the hardening does not apply to it. It runs hardened and non-privileged
   on loopback behind a TLS-terminating reverse proxy, speaks plain HTTP, and holds no Cognito
   secret. **`bb-auth-web` is a second unit of the same shape** — the gate's hardening mirrored,
-  its own `bb-auth-web` user, its own operator-owned env (`BB_AUTH_WEB_ADMINS` required and
-  never empty), and one hole in the read-only tree: `ReadWritePaths=/opt/bb-auth/var/lib`. The
+  its own `bb-auth-web` user, its own operator-owned env, an administrator list it reads from
+  the settings file (required and never empty), and one hole in the read-only tree: `ReadWritePaths=/opt/bb-auth/var/lib`. The
   hole is the **directory**, because the write is a temp file renamed into place. Both admin
   tools are **optional in the deploy** (their own packages, `deploy.ps1 -Packages`), and must
   stay that way.
-- **Installing `bb-auth-web` is what moves the access file to `bb-auth-web:bb-auth 0640`**
+- **Installing `bb-auth-web` is what moves the access file (and the settings file) to
+  `bb-auth-web:bb-auth 0640`**
   (its directory `bb-auth-web:bb-auth 0750`); a deploy without it changes no ownership at all,
   which is what keeps an older `dist/` byte-identical in behaviour. The gate keeps read access
   through the `bb-auth` group and its unit is unchanged. The owner has to move because the
@@ -485,8 +532,11 @@ changes. `node e2e/shots.js` takes a scene-name filter for the same reason: the 
   bb-auth-adm` keeps working untouched and leaves the file `bb-auth-web:bb-auth` too — the two
   editors go on sharing one file, which is what the GUI's `rev` check exists for.
 - **`bb-auth-reload.path` is what makes an edit live**, from either editor: it watches
-  `access.json` and runs `systemctl reload bb-auth`, so neither the GUI (unprivileged, and not
-  the gate) nor the CLI operator needs the privilege to signal the service. `PathChanged=`, not
+  `access.json` **and `settings.json`** and runs `systemctl reload bb-auth`, so neither the GUI
+  (unprivileged, and not the gate) nor the CLI operator needs the privilege to signal the
+  service. One unit for both files, because the gate's SIGHUP re-reads both and each is
+  fail-soft on its own, so there is nothing to route: a second unit would only be a second way
+  to ask for the same reload. `PathChanged=`, not
   `PathModified=`: both editors end with a `rename(2)`, seen as `IN_MOVED_TO` on the watched
   directory, and `IN_MODIFY` would only add a reload on a half-written file. It ships with the
   GUI, so a CLI-only host still reloads by hand; a doubled reload costs nothing.
@@ -506,6 +556,17 @@ changes. `node e2e/shots.js` takes a scene-name filter for the same reason: the 
   the path unit fires cannot find the old name, so it fails soft); the **GUI** 500s for that window,
   because it re-reads the file per request. No `BB_AUTH_USERS_FILE` fallback: the repo carries no
   compatibility arms, for the same reason there is exactly one accepted cookie version.
+- **Upgrading to 3.1 is a two-step `dpkg -i`, and the postinst is what makes it one-way.**
+  The six settings move out of the env files and into `settings.json`. The gate's `postinst`
+  **creates that file seeded from whatever the env files still say** (including
+  `BB_AUTH_WEB_ADMINS`, read out of `bb-auth-web.env`, because the gate's package configures
+  first and owns the file both services read), so behaviour does not change; then it **aborts
+  before the restart** naming the lines to delete, and the GUI's does the same for its own
+  variable. Nothing is restarted in between, so the running gate keeps serving on the table it
+  holds. The order is not negotiable: seed, *then* refuse. Refusing first would mean an
+  operator deleting values that had nowhere to go. And the refusal itself is the point: a
+  variable an operator can still see, that nothing reads, is exactly the trap the repo refuses
+  elsewhere, so it must not become a warning.
 - **Upgrading a *pre-3.0* host is also a file conversion, and the order is what keeps it
   lockout-free.** The new gate *refuses* the older access file (fatal, so a boot loop under
   `Restart=on-failure`), and the old gate reading a 3.0 one would see an empty table (a silent,

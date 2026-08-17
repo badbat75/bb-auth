@@ -9,6 +9,7 @@ DEST=/opt/bb-auth
 ENV_FILE="$DEST/etc/bb-auth-web.env"
 VAR_DIR="$DEST/var/lib"
 ACCESS_FILE="$VAR_DIR/access.json"
+SETTINGS_FILE="$VAR_DIR/settings.json"
 
 case "$1" in
 configure)
@@ -47,6 +48,16 @@ configure)
         chown bb-auth-web:bb-auth "$VAR_DIR" "$ACCESS_FILE"
         chmod 0750 "$VAR_DIR"
         chmod 0640 "$ACCESS_FILE"
+        # The settings file is the second one this service writes, and it changes hands on
+        # exactly the same argument. It is created by the gate's package, which configures
+        # before this one, so it is here to be found.
+        if [ -e "$SETTINGS_FILE" ]; then
+            chown bb-auth-web:bb-auth "$SETTINGS_FILE"
+            chmod 0640 "$SETTINGS_FILE"
+            [ -e "$SETTINGS_FILE.bak" ] || cp -p "$SETTINGS_FILE" "$SETTINGS_FILE.bak"
+            chown bb-auth-web:bb-auth "$SETTINGS_FILE.bak"
+            chmod 0640 "$SETTINGS_FILE.bak"
+        fi
         # The writer's one-step-back copy is replaced with open(O_TRUNC), never
         # recreated, so its owner survives whoever writes next. Creating it here once,
         # owned by the GUI, is what stops a root-run bb-auth-adm from leaving behind a
@@ -70,11 +81,26 @@ configure)
         grep -E "^[[:space:]]*$1=" "$ENV_FILE" 2>/dev/null | tail -1 | cut -d= -f2- | tr -d '[:space:]' || true
     }
     FAIL=0
-    if [ -z "$(envval BB_AUTH_WEB_ADMINS)" ]; then
-        echo "bb-auth-web: $ENV_FILE does not set BB_AUTH_WEB_ADMINS (required)." >&2
-        echo "bb-auth-web:              Empty must never mean 'everyone': a public_auth site" >&2
-        echo "bb-auth-web:              covering this URL would otherwise open the admin surface" >&2
-        echo "bb-auth-web:              to any Cognito account." >&2
+    # The allowlist moved into the settings file in 3.1, where this service can edit it and
+    # see the edit. The gate's postinst has already copied whatever this file said into it
+    # (it configures first), so the line here is now a value nothing reads: delete it.
+    if grep -qE '^[[:space:]]*BB_AUTH_WEB_ADMINS=' "$ENV_FILE" 2>/dev/null; then
+        echo "bb-auth-web: BB_AUTH_WEB_ADMINS moved into $SETTINGS_FILE (web.admins) and is" >&2
+        echo "bb-auth-web:              no longer read. Its value is already there. Delete the" >&2
+        echo "bb-auth-web:              line from $ENV_FILE, then: dpkg --configure bb-auth-web" >&2
+        FAIL=1
+    fi
+    # And it must still name somebody, for the reason it always had to: empty must never
+    # come to mean 'everyone'. Whitespace is stripped first, so the test does not depend on
+    # how the file happens to be laid out; the binary is the one that truly enforces this,
+    # per request, and this is only what keeps the enforcement from being discovered by the
+    # first visitor.
+    if ! tr -d '[:space:]' < "$SETTINGS_FILE" 2>/dev/null | grep -q '"admins":\["'; then
+        echo "bb-auth-web: $SETTINGS_FILE names no administrator." >&2
+        echo "bb-auth-web:              Empty must never mean 'everyone': a scope granting on" >&2
+        echo "bb-auth-web:              identity alone over this URL would otherwise open the" >&2
+        echo "bb-auth-web:              admin surface to any Cognito account. Add one with:" >&2
+        echo "bb-auth-web:                bb-auth-adm settings admin add you@example.com" >&2
         FAIL=1
     fi
     WEB_ACCESS="$(envval BB_AUTH_ACCESS_FILE)"
@@ -90,7 +116,8 @@ configure)
     fi
 
     if [ "$FAIL" = 1 ] && [ "$FRESH_ENV" = 1 ]; then
-        echo "bb-auth-web: installed, not started. List the admin emails in $ENV_FILE,"
+        echo "bb-auth-web: installed, not started. Name at least one administrator:"
+        echo "bb-auth-web:   bb-auth-adm settings admin add you@example.com"
         echo "bb-auth-web: then: systemctl enable --now bb-auth-web bb-auth-reload.path"
     elif [ "$FAIL" = 1 ]; then
         echo "bb-auth-web: NOT restarted. The running process is still serving." >&2

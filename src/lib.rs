@@ -1,23 +1,34 @@
-//! bb-auth-core — **the access file**: its schema, its parser, the URL matcher every
-//! check goes through, and the authorization decision itself.
+//! bb-auth-core, **the files bb-auth's programs share**: the access file above all, plus
+//! the settings file beside it. Their schemas, their parsers, the URL matcher every check
+//! goes through, and the authorization decision itself.
 //!
-//! This library exists for exactly one reason: there are two programs that must agree,
-//! byte for byte, on what an access file *means*.
+//! This library exists for exactly one reason: there are programs that must agree, byte for
+//! byte, on what a shared file *means*.
 //!
-//! * `bb-auth`, the gate, reads it on every `/auth/validate` ([`read_access`], [`decide`]).
-//! * `bb-auth-adm`, the admin CLI, edits it — and must never write a file the gate would
+//! * `bb-auth`, the gate, reads both ([`read_access`], [`decide`], [`read_settings`]).
+//! * `bb-auth-adm`, the admin CLI, edits both, and must never write a file the gate would
 //!   reject, nor believe it granted something the gate will not.
+//! * `bb-auth-web`, the admin GUI, edits both through the same door.
 //!
 //! A second parser, or a second matcher, would be a second answer to "who may reach
-//! what". So there is one of each, and it lives here. The gate keeps everything the
-//! access file has no opinion about — HTTP, the session cookie, id_token validation,
-//! the nginx contract — in its own single file, and `bb-auth-adm` links nothing of it.
+//! what". So there is one of each, and it lives here. The gate keeps everything neither file
+//! has an opinion about — HTTP, the session cookie, id_token validation, the nginx
+//! contract — in its own single file, and neither admin tool links any of it.
 //!
-//! The same argument reaches one step further than the meaning of a file: **how an access
-//! file is edited and written** ([`AccessWrite`], [`open_access_file`], and the document
-//! mutations beside them) is also something more than one program has to get right byte
-//! for byte — `bb-auth-adm` today, a web admin next. Validate-before-write, atomic
-//! replace, mode and owner preserved: one implementation, here.
+//! The same argument reaches one step further than the meaning of a file: **how one is
+//! edited and written** ([`AccessWrite`], [`SettingsWrite`], [`open_access_file`], and the
+//! document mutations beside them) is also something more than one program has to get right
+//! byte for byte. Validate-before-write, atomic replace, mode and owner preserved: one
+//! implementation, here.
+//!
+//! # Two files, and the line between them
+//!
+//! The access file answers **who reaches what**. The settings file holds the handful of
+//! values that change *how the gate answers* and that must take effect **without a restart**,
+//! and it is a file, rather than more env vars, for one mechanical reason: a process cannot
+//! re-read its own environment. See the settings-file section for the three-part rule that
+//! decides which of the two a setting belongs in, and why the rest of bb-auth's configuration
+//! is in neither.
 //!
 //! # What is in an access file
 //!
@@ -2789,6 +2800,584 @@ pub fn remove_denied(doc: &mut AccessFile, who: &[String]) -> usize {
 }
 
 // ---------------------------------------------------------------------------
+// The settings file
+// ---------------------------------------------------------------------------
+//
+// The second file this crate owns, and the reason it is a file at all: **everything in it
+// takes effect without a restart**. A process cannot re-read its own environment: systemd
+// loads `EnvironmentFile=` once, at `ExecStart`, so a setting that must change while the
+// gate keeps serving cannot live in an env var, whatever else recommends one. That is the
+// whole argument, and it is why the rest of the configuration (the listener, the worker
+// count, the HMAC key, the Cognito trust roots, the login page, the authorized hosts, the
+// original-URL header) stays in `bb-auth.env` where it has always been.
+//
+// The membership rule here is as narrow as the access file's, and deliberately so. A
+// setting belongs in this file iff all three hold:
+//
+// 1. it is read **per request**, so a new value takes effect on the next one: no socket to
+//    rebind, no credential to re-issue, no cache to invalidate;
+// 2. a wrong value **cannot lock the operator out**. `BB_AUTH_LOGIN_URL`, `_AUTHORIZED_HOSTS`
+//    and `_ORIGINAL_URL_HEADER` all fail that test outright, and `_COOKIE_NAME` fails it
+//    softly by logging everyone out mid-edit;
+// 3. it is **not a secret**. The one credential in the system stays in the gate's env file,
+//    which no other service reads and no editor writes.
+//
+// Six settings pass, and the file is shaped like the two services that read it: `gate` is
+// the five the gate answers with, `web` is the one the GUI's own door is made of. Each
+// service reads its own section and ignores the other's; both go through [`compile_settings`],
+// so an edit made by either is one the other would also accept.
+//
+// The write path is the access file's, unchanged and for the same reason: [`SettingsWrite`]
+// is [`AccessWrite`] with a different document, `commit` writes exactly the bytes `prepare`
+// compiled, and `write_atomically` stays private so there is no other door.
+
+/// The settings file's `version`. Exactly one accepted value, like the access file's.
+pub const SETTINGS_VERSION: u32 = 1;
+
+/// The file name [`default_settings_path`] builds, and the one the packages create.
+pub const DEFAULT_SETTINGS_FILE: &str = "settings.json";
+
+/// Where the settings file lives when nothing names it: beside the access file.
+///
+/// A derived default rather than a second required env var, and that is a lockout argument
+/// rather than a convenience: a required variable missing from an operator-owned env file is
+/// a fatal startup, and under `Restart=on-failure` a fatal startup is a boot loop. An upgrade
+/// that needs no edit to `bb-auth.env` cannot cause one.
+/// String surgery rather than [`std::path::Path::join`], and deliberately: the value is
+/// echoed back in the startup banner and in every error message about the file, so it must
+/// read the way the operator wrote the access path, with the separator they used. Joining
+/// through `Path` would rewrite a POSIX path with a backslash when this code is compiled on
+/// Windows, which is where it is developed.
+pub fn default_settings_path(access_path: &str) -> String {
+    match access_path.rfind(['/', '\\']) {
+        Some(i) => format!("{}{DEFAULT_SETTINGS_FILE}", &access_path[..=i]),
+        None => DEFAULT_SETTINGS_FILE.to_string(),
+    }
+}
+
+/// The wire name of the header a `401` carries this area's login page in.
+///
+/// The nginx contract around it is documented on the gate's own `LOGIN_URL_HEADER`, which is
+/// this constant: the gate is where that contract belongs. The *string* is here because
+/// [`compile_profile_claims`] has to reserve the name, and a claim that quietly stole it
+/// would be discovered at runtime, on a header nginx already trusts.
+pub const LOGIN_URL_HEADER: &str = "X-Auth-Login-URL";
+
+/// The wire name of the header naming the authorized identity, and what every application
+/// behind this gate already reads.
+///
+/// Here for the same reason [`LOGIN_URL_HEADER`] is, plus one: it is what `bb-auth-web` reads
+/// its own administrator's identity out of, so three programs now name it and exactly one
+/// should spell it. The nginx wiring is on the gate's constant of the same name.
+pub const IDENTITY_HEADER: &str = "X-Auth-Email";
+
+/// Claim names bb-auth consumes itself, and so cannot propagate.
+///
+/// The gate's `Claims` deserializes these into typed fields, and `#[serde(flatten)]` never
+/// sees a key a typed field already took, so configuring one of them would propagate
+/// nothing, silently and forever. Rejecting them at compile time turns that into an error a
+/// form can show.
+pub const RESERVED_CLAIMS: [&str; 4] = ["email", "email_verified", "token_use", "identities"];
+
+/// Every identity attribute the gate knows how to emit.
+///
+/// The **set** an installation emits is configuration ([`GateSettings::identity_attrs`]); the
+/// derivation from an attribute name to a header is code, exactly as it is for a profile
+/// claim, so an operator names an attribute and never a header.
+///
+/// The set of *possible* names is this array, and it being finite is the security argument.
+/// `proxy_set_header` overrides only the names it lists, so nginx must clear every header the
+/// gate could ever emit, **including the ones this installation has turned off**: an identity
+/// header nginx does not clear is one a client can send. An operator who turns an attribute on
+/// later must add nothing to nginx, because the clear was already there, which is exactly
+/// what makes this setting safe to change at runtime.
+///
+/// It is also the reason a new attribute is a code change: `phone` will be a fourth
+/// credential's worth of work in the gate's `validate_id_token`, not a string an operator may
+/// invent.
+pub const IDENTITY_ATTRS: [&str; 2] = ["uuid", "email"];
+
+/// Whether `s` is a syntactically valid profile-claim name: non-empty and `[A-Za-z0-9_:-]`
+/// only.
+///
+/// Shared by [`compile_profile_claims`] (config) and the gate's `decode_claims_segment` (a
+/// cookie's claim blob), so a cookie can never carry a key that no config could have produced.
+pub fn claim_name_ok(s: &str) -> bool {
+    !s.is_empty()
+        && s.bytes()
+            .all(|b| b.is_ascii_alphanumeric() || b == b'_' || b == b':' || b == b'-')
+}
+
+/// Derive a claim's response header. See [`ProfileClaim`] for the rule and why it is code
+/// rather than config. Assumes `claim` passed [`compile_profile_claims`]'s checks.
+pub fn derive_profile_header(claim: &str) -> String {
+    let normalized = claim.replace([':', '_'], "-");
+    let mut out = String::from("X-Auth-");
+    for (i, token) in normalized.split('-').enumerate() {
+        if i > 0 {
+            out.push('-');
+        }
+        let mut chars = token.chars();
+        if let Some(first) = chars.next() {
+            out.push(first.to_ascii_uppercase());
+            out.extend(chars.map(|c| c.to_ascii_lowercase()));
+        }
+    }
+    out
+}
+
+/// One configured OIDC profile claim, and the response header derived from its name.
+///
+/// The **set** is configuration ([`GateSettings::profile_claims`], empty by default); the
+/// **derivation** is code, and fixed. That split is the whole point: an operator names a
+/// claim, never a header, so the two can never disagree and no header name is attacker- or
+/// typo-reachable.
+///
+/// Derivation: map `_` and `:` to `-`, title-case each `-`-separated token, prefix `X-Auth-`.
+/// So `given_name` → `X-Auth-Given-Name` and `custom:department` → `X-Auth-Custom-Department`.
+/// Because [`compile_profile_claims`] admits only `[A-Za-z0-9_:-]`, a derived header is always
+/// `[A-Za-z0-9-]+`: a valid header token by construction.
+///
+/// The **value** is emitted percent-encoded per RFC 3986 by the gate, whose `pct_encode`
+/// produces printable ASCII for *any* input; that construction, not a validator, is what makes
+/// emitting a self-asserted value safe. An absent claim **omits its header entirely**, never
+/// sends it empty.
+///
+/// These are **self-asserted profile attributes**: any Cognito user, verified email or not,
+/// writes their own, so they are display hints and nothing may key on them. They authorize
+/// nothing, no field of the access file mentions them, and they are never logged.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct ProfileClaim {
+    /// The OIDC claim name, exactly as it appears in the id_token.
+    pub claim: String,
+    /// The response header derived from it. See the type doc.
+    pub header: String,
+}
+
+/// Compile a list of OIDC claim names into the claims to capture and the headers to emit.
+/// Empty (the default) means none: profile propagation is opt-in.
+///
+/// Every rejection is an error rather than a skipped entry, because a silently dropped claim
+/// is a header an application waits for forever. In the gate that is a fatal load; in an
+/// editor it is a refusal shown on the field, and nothing is written.
+///
+/// Rejects, naming the entry: a name outside `[A-Za-z0-9_:-]`; an empty token around a
+/// separator (`:dept`, `dept:`, `a--b`), which would derive a header with an empty component;
+/// a claim in [`RESERVED_CLAIMS`]; and a derived header that collides case-insensitively with
+/// **any possible** identity header, with [`LOGIN_URL_HEADER`], or with another entry's (which
+/// also catches a repeated claim, and spellings that differ only in case or separator).
+pub fn compile_profile_claims(list: &[String]) -> Result<Vec<ProfileClaim>, String> {
+    let mut out: Vec<ProfileClaim> = Vec::new();
+    for raw in list {
+        let claim = raw.trim();
+        if claim.is_empty() {
+            continue;
+        }
+        if !claim_name_ok(claim) {
+            return Err(format!(
+                "claim '{claim}' must be non-empty and contain only [A-Za-z0-9_:-]"
+            ));
+        }
+        if claim.replace([':', '_'], "-").split('-').any(str::is_empty) {
+            return Err(format!(
+                "claim '{claim}' has an empty part around a '_', ':' or '-'"
+            ));
+        }
+        if RESERVED_CLAIMS.contains(&claim) {
+            return Err(format!(
+                "claim '{claim}' is consumed by the gate itself and cannot be propagated"
+            ));
+        }
+        let header = derive_profile_header(claim);
+        // Every *possible* identity header is reserved, not merely the ones this installation
+        // emits: turning an attribute on tomorrow must not collide with a claim configured
+        // today, because that discovery would happen at runtime, on a header an application
+        // already trusts.
+        let reserved = IDENTITY_ATTRS
+            .iter()
+            .map(|a| derive_profile_header(a))
+            .chain(std::iter::once(LOGIN_URL_HEADER.to_string()));
+        for r in reserved {
+            if header.eq_ignore_ascii_case(&r) {
+                return Err(format!(
+                    "claim '{claim}' derives '{header}', which is reserved"
+                ));
+            }
+        }
+        if let Some(prev) = out.iter().find(|p| p.header.eq_ignore_ascii_case(&header)) {
+            return Err(format!(
+                "claims '{}' and '{claim}' both derive '{header}'",
+                prev.claim
+            ));
+        }
+        out.push(ProfileClaim {
+            claim: claim.to_string(),
+            header,
+        });
+    }
+    Ok(out)
+}
+
+/// One configured identity attribute, and the response header derived from its name.
+///
+/// The same split as [`ProfileClaim`], for the same reason: the **set** is configuration
+/// ([`GateSettings::identity_attrs`], `email` by default), the **derivation** is code. The
+/// derivation is literally the same function, so `uuid` becomes `X-Auth-Uuid` and `email`
+/// becomes [`IDENTITY_HEADER`].
+///
+/// These are **not** profile claims, and the difference is the whole point of the split. An
+/// identity attribute is what the access file decided a request belongs to: it is checked, it
+/// is what `denied` vetoes, and an application may key its own records on it. A profile claim
+/// is self-asserted decoration nothing may key on.
+///
+/// A multi-valued attribute is emitted **space-separated**, and that is safe by construction
+/// rather than by convention: every identifier passed [`header_safe_email`], which requires
+/// printable ASCII, and a space is not printable ASCII. A comma would not do, because
+/// [`well_formed_email`] allows one in a local part.
+///
+/// An absent attribute **omits its header** rather than sending it empty: nginx reads an unset
+/// variable as no header at all, so present-and-empty is a distinction the application cannot
+/// make. An identity granted by an `authenticated` scope is in no roster row, so it has no
+/// `uuid` to send.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct IdentityAttr {
+    /// The attribute name, one of [`IDENTITY_ATTRS`].
+    pub attr: String,
+    /// The response header derived from it.
+    pub header: String,
+}
+
+/// Compile the identity attributes a `204` names. Default `email`, which is exactly what every
+/// version before the settings file emitted.
+///
+/// Fatal on every rejection, and fatal on an **empty** list above all: an authorized `204` that
+/// names nobody is an application silently losing its identity, and silence is the one failure
+/// mode this gate does not accept. Unknown names are rejected against [`IDENTITY_ATTRS`] rather
+/// than passed through, so a typo cannot quietly turn an attribute off.
+pub fn compile_identity_attrs(list: &[String]) -> Result<Vec<IdentityAttr>, String> {
+    // The one place the derivation and the documented constant are checked against each other.
+    // Every application behind this gate reads `X-Auth-Email`, and every nginx snippet in the
+    // README names it literally, so a change to the derivation must not be allowed to rename it
+    // in silence.
+    assert_eq!(derive_profile_header("email"), IDENTITY_HEADER);
+    let mut out: Vec<IdentityAttr> = Vec::new();
+    for raw in list {
+        let attr = raw.trim();
+        if attr.is_empty() {
+            continue;
+        }
+        if !IDENTITY_ATTRS.contains(&attr) {
+            return Err(format!(
+                "unknown identity attribute '{attr}' (known: {})",
+                IDENTITY_ATTRS.join(", ")
+            ));
+        }
+        if out.iter().any(|a| a.attr == attr) {
+            return Err(format!("identity attribute '{attr}' is listed twice"));
+        }
+        out.push(IdentityAttr {
+            attr: attr.to_string(),
+            header: derive_profile_header(attr),
+        });
+    }
+    if out.is_empty() {
+        return Err(format!(
+            "at least one identity attribute is required (known: {}); a 204 that names nobody \
+             breaks every application behind this gate, in silence",
+            IDENTITY_ATTRS.join(", ")
+        ));
+    }
+    Ok(out)
+}
+
+/// The shortest session lifetime that is not a login loop.
+///
+/// A cookie is minted with this as its `Max-Age` and the same value inside the signed
+/// message, so a tiny one means the browser presents an expired cookie moments after the login
+/// page handed it over, which looks exactly like a broken login rather than a bad setting. A
+/// minute is arbitrary; being non-zero is not.
+pub const MIN_SESSION_TTL: u64 = 60;
+
+/// The longest lifetime a browser will actually honour: 400 days, the cap Chrome (and Safari,
+/// lower) applies to `Max-Age` regardless of what the header says. Beyond it the value is not
+/// wrong, it is merely fiction, so this is a warning rather than a refusal.
+pub const MAX_HONOURED_SESSION_TTL: u64 = 400 * 86_400;
+
+/// The gate's half of the settings file: the five it answers with.
+#[derive(Deserialize, Serialize, Clone, Debug, PartialEq, Eq)]
+#[serde(deny_unknown_fields)]
+pub struct GateSettings {
+    /// OIDC claim names to capture from an id_token and hand to the application. Empty by
+    /// default: profile propagation is opt-in. See [`ProfileClaim`].
+    ///
+    /// Order is the operator's, and is the order the headers come out in. Removing one stops
+    /// it being emitted at once, from cookies that still carry it; adding one appears at each
+    /// holder's next sign-in, because the value rides inside the cookie. Neither is a
+    /// cookie-format change and neither logs anybody out.
+    #[serde(default)]
+    pub profile_claims: Vec<String>,
+    /// Which identity attributes a `204` names. `["email"]` by default. See [`IdentityAttr`].
+    #[serde(default = "default_identity_attrs")]
+    pub identity_attrs: Vec<String>,
+    /// Relax the `email_verified` requirement, but ONLY for federated (social) logins, never
+    /// for native Cognito users, whose self-signup is open and whose unverified email is
+    /// therefore attacker-controlled.
+    #[serde(default)]
+    pub allow_unverified_social: bool,
+    /// Narrows the relaxation above to these IdPs, matched case-insensitively against the
+    /// token's `identities[].providerName`. Empty = any federated provider.
+    #[serde(default)]
+    pub social_providers: Vec<String>,
+    /// The session cookie's lifetime in seconds. Affects cookies minted from now on and no
+    /// others, which is what keeps changing it out of the logout business.
+    #[serde(default = "default_session_ttl")]
+    pub session_ttl_secs: u64,
+}
+
+fn default_identity_attrs() -> Vec<String> {
+    vec!["email".to_string()]
+}
+
+fn default_session_ttl() -> u64 {
+    2_592_000
+}
+
+impl Default for GateSettings {
+    /// Hand-written, and it must stay in step with the `serde(default = …)` above: a derived
+    /// `Default` would give an empty attribute list (fatal) and a zero TTL (a login loop),
+    /// which is the wrong answer to a section somebody left out.
+    fn default() -> Self {
+        GateSettings {
+            profile_claims: Vec::new(),
+            identity_attrs: default_identity_attrs(),
+            allow_unverified_social: false,
+            social_providers: Vec::new(),
+            session_ttl_secs: default_session_ttl(),
+        }
+    }
+}
+
+/// The GUI's half of the settings file: who may open its door.
+#[derive(Deserialize, Serialize, Clone, Debug, Default, PartialEq, Eq)]
+#[serde(deny_unknown_fields)]
+pub struct WebSettings {
+    /// The emails allowed to use `bb-auth-web`, matched against the identity nginx injects.
+    ///
+    /// **Never empty**, and never "everyone": it is the backstop that keeps an `anonymous` or
+    /// `authenticated` scope covering the admin URL from handing the admin surface to any
+    /// Cognito account. It is enforced where it can be acted on: `bb-auth-web` refuses to
+    /// serve without it, and both editors refuse to write an empty list, rather than here,
+    /// because the *gate* has no business failing to start over a list it never reads.
+    #[serde(default)]
+    pub admins: Vec<String>,
+}
+
+/// A settings file as it is written: two sections, a version, and whatever else was in it.
+///
+/// Unknown keys are rejected inside each section, for the reason [`AppSpec`] rejects them,
+/// a typo in a setting that narrows behaviour must not be dropped in silence, and preserved
+/// at the top level, where `_comment` is the only thing anyone puts.
+#[derive(Deserialize, Serialize, Default)]
+pub struct SettingsFile {
+    /// The format this file is written in. The only accepted value is [`SETTINGS_VERSION`].
+    #[serde(default)]
+    pub version: u32,
+    #[serde(default)]
+    pub gate: GateSettings,
+    #[serde(default)]
+    pub web: WebSettings,
+    /// Unknown top-level keys, preserved verbatim across an edit.
+    #[serde(flatten)]
+    pub extra: Map<String, Value>,
+}
+
+/// The settings as the two services use them: names resolved to headers, lists normalised,
+/// every refusal already made.
+///
+/// One compiled type for both, rather than one each, so that "would the other program accept
+/// this?" is not a question an editor has to answer for itself.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct Settings {
+    /// See [`GateSettings::profile_claims`].
+    pub profile_claims: Vec<ProfileClaim>,
+    /// See [`GateSettings::identity_attrs`]. Never empty.
+    pub identity_attrs: Vec<IdentityAttr>,
+    /// See [`GateSettings::allow_unverified_social`].
+    pub allow_unverified_social: bool,
+    /// `None` = any federated provider, which is what an empty list means.
+    pub social_providers: Option<Vec<String>>,
+    /// See [`GateSettings::session_ttl_secs`].
+    pub session_ttl: u64,
+    /// See [`WebSettings::admins`], normalised with [`norm_email`] and deduplicated. May be
+    /// empty here; `bb-auth-web` is where that is fatal.
+    pub admins: Vec<String>,
+}
+
+impl Settings {
+    /// Whether `email` (already [`norm_email`]-normalised) may use the GUI.
+    pub fn is_admin(&self, email: &str) -> bool {
+        self.admins.iter().any(|a| a == email)
+    }
+}
+
+/// Turn a settings document into the compiled settings, or say why it cannot be one.
+///
+/// Fatal, with the same reflex the access file's parser has: what changes behaviour is an
+/// error, what merely drops one entry is a warning. So a bad claim name, an unknown identity
+/// attribute, an empty attribute list, a wrong `version` and a nonsensical TTL all refuse the
+/// file; a malformed admin email is warned about and skipped, which fails closed (one fewer
+/// administrator) exactly as a malformed roster identifier does.
+///
+/// The gate reads only the `gate` half and the GUI only the `web` half, but both compile the
+/// whole file: an editor that validated only its own section could write one the other
+/// refuses, and the point of a shared parser is that it cannot.
+pub fn compile_settings(file: &SettingsFile) -> Result<Settings, String> {
+    if file.version != SETTINGS_VERSION {
+        return Err(format!(
+            "\"version\": {} is not this format (expected {SETTINGS_VERSION})",
+            file.version
+        ));
+    }
+    let profile_claims = compile_profile_claims(&file.gate.profile_claims)
+        .map_err(|e| format!("profile_claims: {e}"))?;
+    let identity_attrs = compile_identity_attrs(&file.gate.identity_attrs)
+        .map_err(|e| format!("identity_attrs: {e}"))?;
+
+    let ttl = file.gate.session_ttl_secs;
+    if ttl < MIN_SESSION_TTL {
+        return Err(format!(
+            "session_ttl_secs: {ttl} is below the {MIN_SESSION_TTL}s floor; a session that \
+             expires as it is handed over is a login loop, not a short login"
+        ));
+    }
+    if ttl > MAX_HONOURED_SESSION_TTL {
+        eprintln!(
+            "[bb-auth] WARNING: session_ttl_secs {ttl} exceeds the {MAX_HONOURED_SESSION_TTL}s \
+             (400 day) cap browsers apply to Max-Age; the excess is fiction"
+        );
+    }
+
+    let providers: Vec<String> = file
+        .gate
+        .social_providers
+        .iter()
+        .map(|p| p.trim().to_string())
+        .filter(|p| !p.is_empty())
+        .collect();
+    if !providers.is_empty() && !file.gate.allow_unverified_social {
+        eprintln!(
+            "[bb-auth] WARNING: social_providers lists {} provider(s) but \
+             allow_unverified_social is off, so it narrows nothing",
+            providers.len()
+        );
+    }
+
+    let mut admins: Vec<String> = Vec::new();
+    for raw in &file.web.admins {
+        let e = norm_email(raw);
+        if e.is_empty() {
+            continue;
+        }
+        // The same rule the roster's identifiers are held to, and skipped for the same reason:
+        // an entry that could never match the identity nginx injects is one administrator
+        // fewer, which is the safe direction to be wrong in.
+        if !header_safe_email(&e) || !well_formed_email(&e) {
+            eprintln!("[bb-auth] WARNING: web.admins: '{e}' is not an email, skipping");
+            continue;
+        }
+        if !admins.contains(&e) {
+            admins.push(e);
+        }
+    }
+
+    Ok(Settings {
+        profile_claims,
+        identity_attrs,
+        allow_unverified_social: file.gate.allow_unverified_social,
+        social_providers: (!providers.is_empty()).then_some(providers),
+        session_ttl: ttl,
+        admins,
+    })
+}
+
+/// Read and parse a settings file, without compiling it.
+pub fn read_settings_file(path: &str) -> Result<SettingsFile, String> {
+    let raw = std::fs::read_to_string(path).map_err(|e| format!("{path}: {e}"))?;
+    serde_json::from_str(&raw).map_err(|e| format!("{path}: {e}"))
+}
+
+/// Read, parse and compile a settings file: what the gate does at startup and on every
+/// SIGHUP, and what `--check-settings` reports on.
+pub fn read_settings(path: &str) -> Result<Settings, String> {
+    let file = read_settings_file(path)?;
+    compile_settings(&file).map_err(|e| format!("{path}: {e}"))
+}
+
+/// Open a settings file for editing: the document to mutate, and what the services would make
+/// of it as it stands.
+///
+/// A file either service would reject is refused here too, for the reason [`open_access_file`]
+/// refuses one: an edit must start from a file that works, or a tool would cheerfully fix one
+/// problem while carrying a fatal one to the disk.
+pub fn open_settings_file(path: &str) -> Result<(SettingsFile, Settings), String> {
+    let doc = read_settings_file(path)?;
+    let settings = compile_settings(&doc)
+        .map_err(|e| format!("{path}: the gate would reject this file as it stands: {e}"))?;
+    Ok((doc, settings))
+}
+
+/// Serialize a settings document to the exact bytes it is written as: pretty JSON plus one
+/// trailing newline, the same shape an access file is written in.
+pub fn render_settings_file(doc: &SettingsFile) -> Result<String, String> {
+    let mut json = serde_json::to_string_pretty(doc).map_err(|e| e.to_string())?;
+    json.push('\n');
+    Ok(json)
+}
+
+/// An edited settings document, rendered to the exact bytes it would be written as, and
+/// already compiled.
+///
+/// [`AccessWrite`] for the other file, and the same rule made unskippable the same way:
+/// [`SettingsWrite::prepare`] compiles, [`SettingsWrite::commit`] writes only what was
+/// compiled, and `write_atomically` is private to this crate so there is no other door. The
+/// stakes are lower than the access file's by exactly one step: a settings file the gate
+/// refuses is a *reload* it declines, not a boot loop, because the running table survives,
+/// but a restart would still meet it, so the check stays where it cannot be skipped.
+pub struct SettingsWrite {
+    json: String,
+    settings: Settings,
+}
+
+impl SettingsWrite {
+    /// Render `doc`, then re-parse and compile the rendered text. `Err` means these bytes must
+    /// not reach the disk, and says why.
+    pub fn prepare(doc: &SettingsFile) -> Result<SettingsWrite, String> {
+        let json = render_settings_file(doc).map_err(|e| format!("cannot serialize: {e}"))?;
+        let reparsed: SettingsFile =
+            serde_json::from_str(&json).map_err(|e| format!("serialized to invalid JSON: {e}"))?;
+        let settings =
+            compile_settings(&reparsed).map_err(|e| format!("refusing to write: {e}"))?;
+        Ok(SettingsWrite { json, settings })
+    }
+
+    /// The bytes: what a dry run prints, and exactly what [`SettingsWrite::commit`] writes.
+    pub fn json(&self) -> &str {
+        &self.json
+    }
+
+    /// What the services will make of those bytes.
+    pub fn settings(&self) -> &Settings {
+        &self.settings
+    }
+
+    /// Replace `path` with these bytes. The file must already exist: its mode and owner are
+    /// what the replacement inherits.
+    pub fn commit(&self, path: &str) -> Result<Written, String> {
+        write_atomically(path, &self.json)
+    }
+}
+
+// ---------------------------------------------------------------------------
 // Tests
 // ---------------------------------------------------------------------------
 
@@ -4317,5 +4906,293 @@ mod tests {
                      "access": "restricted" } ] } ] }"#,
         );
         assert!(!b.any_authenticated_scope());
+    }
+
+    // --- the settings file ---------------------------------------------------
+
+    /// A claim list from the comma-separated spelling, which is how these cases read best.
+    fn claims(spec: &str) -> Vec<String> {
+        spec.split(',').map(str::to_string).collect()
+    }
+
+    /// The refusal, without asking the `Ok` side for a `Debug` it need not have.
+    fn refusal<T>(r: Result<T, String>) -> String {
+        match r {
+            Ok(_) => panic!("expected a refusal"),
+            Err(e) => e,
+        }
+    }
+
+    #[test]
+    fn compile_profile_claims_default_is_empty() {
+        // Profile propagation is opt-in: an absent list and a list of blanks both mean
+        // "emit nothing".
+        for spec in ["", "   ", ",", " , ,"] {
+            assert!(
+                compile_profile_claims(&claims(spec)).unwrap().is_empty(),
+                "should be empty: {spec:?}"
+            );
+        }
+        assert!(compile_profile_claims(&[]).unwrap().is_empty());
+    }
+
+    #[test]
+    fn compile_profile_claims_derives_v24_headers_exactly() {
+        // The 2.4 compatibility pin: this list, and only this list, must reproduce the two
+        // headers that used to be constants, byte for byte, in this order.
+        let c = compile_profile_claims(&claims("given_name,family_name")).unwrap();
+        let got: Vec<(&str, &str)> = c
+            .iter()
+            .map(|p| (p.claim.as_str(), p.header.as_str()))
+            .collect();
+        assert_eq!(
+            got,
+            vec![
+                ("given_name", "X-Auth-Given-Name"),
+                ("family_name", "X-Auth-Family-Name"),
+            ]
+        );
+    }
+
+    #[test]
+    fn compile_profile_claims_derivation_and_trimming() {
+        let c = compile_profile_claims(&claims(
+            " nickname , custom:department ,phone_number,ZoneInfo",
+        ))
+        .unwrap();
+        let got: Vec<(&str, &str)> = c
+            .iter()
+            .map(|p| (p.claim.as_str(), p.header.as_str()))
+            .collect();
+        assert_eq!(
+            got,
+            vec![
+                // Entries are trimmed, and the claim keeps its own spelling: only the header
+                // is normalised.
+                ("nickname", "X-Auth-Nickname"),
+                ("custom:department", "X-Auth-Custom-Department"),
+                ("phone_number", "X-Auth-Phone-Number"),
+                ("ZoneInfo", "X-Auth-Zoneinfo"),
+            ]
+        );
+    }
+
+    #[test]
+    fn compile_profile_claims_rejects_bad_names() {
+        for spec in [
+            "full name",  // space
+            "naïve",      // non-ASCII
+            "a.b",        // a dot would be ambiguous in a header token
+            "given/name", // slash
+            ":dept",      // empty leading part …
+            "dept:",      // … trailing …
+            "a--b",       // … and interior: all would derive an empty component
+        ] {
+            assert!(
+                compile_profile_claims(&claims(spec)).is_err(),
+                "should reject: {spec:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn compile_profile_claims_rejects_claims_the_gate_consumes() {
+        // The gate's `Claims` takes these into typed fields, so `flatten` never sees them:
+        // configuring one would propagate nothing, silently and forever. Refused instead.
+        for claim in RESERVED_CLAIMS {
+            assert!(
+                compile_profile_claims(&claims(claim)).is_err(),
+                "should reject: {claim}"
+            );
+        }
+    }
+
+    #[test]
+    fn compile_profile_claims_rejects_header_collisions() {
+        // Reserved headers the gate emits itself.
+        assert!(compile_profile_claims(&claims("login_url")).is_err()); // -> X-Auth-Login-Url
+        assert!(compile_profile_claims(&claims("login-URL")).is_err());
+        // A repeated claim, and spellings that differ only in case or separator, all derive
+        // the same header: one value would silently win.
+        assert!(compile_profile_claims(&claims("nickname,nickname")).is_err());
+        assert!(compile_profile_claims(&claims("given_name,given-name")).is_err());
+        assert!(compile_profile_claims(&claims("nickname,NickName")).is_err());
+        // Distinct headers are fine.
+        assert_eq!(
+            compile_profile_claims(&claims("nickname,locale"))
+                .unwrap()
+                .len(),
+            2
+        );
+    }
+
+    #[test]
+    fn a_profile_claim_may_not_collide_with_an_identity_header_even_a_disabled_one() {
+        // `uuid` is off by default, and that is exactly why the collision has to be refused
+        // now: turning it on later would otherwise silently overwrite a claim an application
+        // already trusts.
+        for claim in IDENTITY_ATTRS {
+            assert!(
+                compile_profile_claims(&claims(claim)).is_err(),
+                "{claim} must be refused"
+            );
+        }
+    }
+
+    #[test]
+    fn compile_identity_attrs_defaults_to_email_and_derives_its_header() {
+        let a = compile_identity_attrs(&claims("email")).unwrap();
+        assert_eq!(a.len(), 1);
+        assert_eq!(a[0].header, IDENTITY_HEADER);
+        // The derivation is the profile claims' own, so the two can never disagree.
+        assert_eq!(
+            compile_identity_attrs(&claims("uuid,email")).unwrap()[0].header,
+            "X-Auth-Uuid"
+        );
+    }
+
+    #[test]
+    fn compile_identity_attrs_refuses_the_unknown_the_repeated_and_the_empty() {
+        for spec in ["", "  ", ",,"] {
+            let e = refusal(compile_identity_attrs(&claims(spec)));
+            assert!(e.contains("at least one"), "{spec:?}: {e}");
+        }
+        assert!(refusal(compile_identity_attrs(&[])).contains("at least one"));
+        assert!(refusal(compile_identity_attrs(&claims("phone")))
+            .contains("unknown identity attribute"));
+        assert!(refusal(compile_identity_attrs(&claims("email,email"))).contains("listed twice"));
+    }
+
+    fn settings(json: &str) -> Result<Settings, String> {
+        let f: SettingsFile = serde_json::from_str(json).map_err(|e| e.to_string())?;
+        compile_settings(&f)
+    }
+
+    #[test]
+    fn a_minimal_settings_file_is_the_behaviour_every_earlier_version_had() {
+        // Both sections absent. What comes out has to be exactly what the gate did before
+        // there was a settings file, or an upgrade would change behaviour by omission.
+        let s = settings(r#"{ "version": 1 }"#).unwrap();
+        assert!(s.profile_claims.is_empty());
+        assert_eq!(s.identity_attrs.len(), 1);
+        assert_eq!(s.identity_attrs[0].header, IDENTITY_HEADER);
+        assert!(!s.allow_unverified_social);
+        assert_eq!(s.social_providers, None);
+        assert_eq!(s.session_ttl, 2_592_000);
+        assert!(s.admins.is_empty());
+    }
+
+    #[test]
+    fn the_version_is_checked_the_way_the_access_file_checks_its_own() {
+        // No version at all deserializes to 0, which is not this format either.
+        for json in [r#"{}"#, r#"{ "version": 2 }"#] {
+            assert!(refusal(settings(json)).contains("version"), "{json}");
+        }
+    }
+
+    #[test]
+    fn an_unknown_key_inside_a_section_is_refused_and_one_at_the_top_is_kept() {
+        // The same split the access file makes: strict where a typo would drop a setting
+        // that narrows behaviour, permissive where `_comment` lives.
+        assert!(settings(r#"{ "version": 1, "gate": { "profil_claims": [] } }"#).is_err());
+        assert!(settings(r#"{ "version": 1, "web": { "admin": [] } }"#).is_err());
+
+        let doc: SettingsFile =
+            serde_json::from_str(r#"{ "version": 1, "_comment": "hi" }"#).unwrap();
+        let round = render_settings_file(&doc).unwrap();
+        assert!(
+            round.contains("_comment"),
+            "an edit must not eat it: {round}"
+        );
+    }
+
+    #[test]
+    fn a_session_ttl_that_is_a_login_loop_is_refused() {
+        for ttl in [0, 1, MIN_SESSION_TTL - 1] {
+            let json = format!(r#"{{ "version": 1, "gate": {{ "session_ttl_secs": {ttl} }} }}"#);
+            assert!(refusal(settings(&json)).contains("floor"), "{ttl}");
+        }
+        // The floor itself is fine, and so is a year.
+        assert!(settings(r#"{ "version": 1, "gate": { "session_ttl_secs": 60 } }"#).is_ok());
+        assert!(settings(r#"{ "version": 1, "gate": { "session_ttl_secs": 31536000 } }"#).is_ok());
+    }
+
+    #[test]
+    fn an_empty_provider_list_means_any_provider() {
+        let s = settings(
+            r#"{ "version": 1, "gate": { "allow_unverified_social": true,
+                 "social_providers": [] } }"#,
+        )
+        .unwrap();
+        assert!(s.allow_unverified_social);
+        assert_eq!(
+            s.social_providers, None,
+            "empty must mean 'any', not 'none'"
+        );
+
+        let s = settings(
+            r#"{ "version": 1, "gate": { "allow_unverified_social": true,
+                 "social_providers": ["Google", " SignInWithApple "] } }"#,
+        )
+        .unwrap();
+        assert_eq!(
+            s.social_providers,
+            Some(vec!["Google".to_string(), "SignInWithApple".to_string()])
+        );
+    }
+
+    #[test]
+    fn an_admin_that_could_never_match_is_skipped_not_fatal() {
+        // Fail-closed, the roster identifiers' own rule: one administrator fewer is the safe
+        // direction to be wrong in, and a gate that refused to start over a list it never
+        // reads would be a lockout caused by the GUI's half of the file.
+        let s = settings(
+            r#"{ "version": 1, "web": { "admins": ["Bob@X.com", "not an email", "",
+                 "bob@x.com"] } }"#,
+        )
+        .unwrap();
+        assert_eq!(
+            s.admins,
+            vec!["bob@x.com".to_string()],
+            "normalised, deduped"
+        );
+        assert!(s.is_admin("bob@x.com"));
+        assert!(!s.is_admin("eve@x.com"));
+    }
+
+    #[test]
+    fn settings_write_compiles_the_exact_bytes_it_would_write() {
+        // The access file's rule, for the other file: what is checked is the byte string that
+        // lands on disk, not the document it came from.
+        let mut doc = SettingsFile {
+            version: SETTINGS_VERSION,
+            ..Default::default()
+        };
+        doc.gate.profile_claims = claims("given_name");
+        let w = SettingsWrite::prepare(&doc).unwrap();
+        assert!(w.json().ends_with("}\n"), "one trailing newline");
+        assert_eq!(w.settings().profile_claims[0].header, "X-Auth-Given-Name");
+        // And the round trip is exact.
+        let back: SettingsFile = serde_json::from_str(w.json()).unwrap();
+        assert_eq!(back.gate, doc.gate);
+
+        // A document the gate would refuse never becomes bytes.
+        doc.gate.identity_attrs = Vec::new();
+        assert!(refusal(SettingsWrite::prepare(&doc)).contains("at least one"));
+    }
+
+    #[test]
+    fn the_settings_file_sits_beside_the_access_file() {
+        assert_eq!(
+            default_settings_path("/opt/bb-auth/var/lib/access.json"),
+            "/opt/bb-auth/var/lib/settings.json"
+        );
+        // A bare name has no directory to inherit, and must not grow one.
+        assert_eq!(default_settings_path("access.json"), "settings.json");
+        // The separator the operator wrote is the separator that comes back.
+        assert_eq!(
+            default_settings_path(r"C:\tmp\access.json"),
+            r"C:\tmp\settings.json"
+        );
     }
 }

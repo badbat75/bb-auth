@@ -37,7 +37,7 @@ async function run(ctx, t) {
     const r403 = await page.goto(ctx.base + '/');
     t.eq('the 403 is still a 403 under lang=it', r403.status(), 403);
     t.check('and speaks Italian', (await page.locator('body').innerText())
-      .includes('è autenticato, ma non è in BB_AUTH_WEB_ADMINS'), await page.locator('body').innerText());
+      .includes('è autenticato, ma non è amministratore'), await page.locator('body').innerText());
     await t.shot(page, '403-it');
     await context.setExtraHTTPHeaders({ 'X-Auth-Email': 'admin@example.com' });
 
