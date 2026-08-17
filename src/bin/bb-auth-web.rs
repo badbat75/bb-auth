@@ -5951,6 +5951,20 @@ mod tests {
         std::fs::read_to_string(path).unwrap()
     }
 
+    /// The HTTP client every over-the-wire test uses, and both of its settings are the
+    /// point. A refusal here is asserted on by its **body**, not just its code (that the
+    /// 403 names the identity, that the 409 says the file changed), and the client's own
+    /// status error carries only the number, so a non-2xx has to arrive as a response.
+    /// And a `303` is the thing under test rather than a step on the way to something,
+    /// so redirects are never followed.
+    fn client() -> ureq::Agent {
+        ureq::Agent::config_builder()
+            .http_status_as_error(false)
+            .max_redirects(0)
+            .build()
+            .new_agent()
+    }
+
     /// The fingerprint a form rendered from this file would carry.
     fn rev_of(path: &str) -> String {
         sha256_hex(&read(path))
@@ -6160,16 +6174,14 @@ mod tests {
                 handle(req, &served);
             }
         });
-        match ureq::get(&format!("http://127.0.0.1:{port}/"))
-            .set(IDENTITY_HEADER, "admin@x.com")
+        let mut r = client()
+            .get(format!("http://127.0.0.1:{port}/"))
+            .header(IDENTITY_HEADER, "admin@x.com")
             .call()
-        {
-            Err(ureq::Error::Status(500, r)) => {
-                let body = r.into_string().unwrap();
-                assert!(body.contains("settings"), "{body}");
-            }
-            other => panic!("expected 500, got {other:?}"),
-        }
+            .expect("a response");
+        assert_eq!(r.status(), 500);
+        let body = r.body_mut().read_to_string().unwrap();
+        assert!(body.contains("settings"), "{body}");
         cleanup(&path);
     }
 
@@ -7588,41 +7600,46 @@ mod tests {
         let at = |p: &str| format!("http://127.0.0.1:{port}{p}");
 
         // No header at all: a broken deployment, not an anonymous visitor.
-        match ureq::get(&at("/")).call() {
-            Err(ureq::Error::Status(401, r)) => {
-                assert!(r.into_string().unwrap().contains("auth_request"));
-            }
-            other => panic!("expected 401, got {other:?}"),
-        }
+        let mut r = client().get(at("/")).call().expect("a response");
+        assert_eq!(r.status(), 401);
+        assert!(r
+            .body_mut()
+            .read_to_string()
+            .unwrap()
+            .contains("auth_request"));
+
         // Authenticated, but not on the allowlist.
-        match ureq::get(&at("/"))
-            .set(IDENTITY_HEADER, "someone@x.com")
+        let mut r = client()
+            .get(at("/"))
+            .header(IDENTITY_HEADER, "someone@x.com")
             .call()
-        {
-            Err(ureq::Error::Status(403, r)) => {
-                assert!(r.into_string().unwrap().contains("someone@x.com"));
-            }
-            other => panic!("expected 403, got {other:?}"),
-        }
+            .expect("a response");
+        assert_eq!(r.status(), 403);
+        assert!(r
+            .body_mut()
+            .read_to_string()
+            .unwrap()
+            .contains("someone@x.com"));
+
         // An administrator gets the dashboard, in the configured language.
-        let body = ureq::get(&at("/"))
-            .set(IDENTITY_HEADER, "Admin@X.com") // normalised, so capitalisation is fine
+        let mut r = client()
+            .get(at("/"))
+            .header(IDENTITY_HEADER, "Admin@X.com") // normalised, so capitalisation is fine
             .call()
-            .expect("200")
-            .into_string()
-            .unwrap();
+            .expect("a response");
+        assert_eq!(r.status(), 200);
+        let body = r.body_mut().read_to_string().unwrap();
         assert!(
             body.contains("user_groups") && body.contains("Warnings"),
             "{body}"
         );
         // And an unknown path is a 404, not a fall-through to the dashboard.
-        match ureq::get(&at("/nope"))
-            .set(IDENTITY_HEADER, "admin@x.com")
+        let r = client()
+            .get(at("/nope"))
+            .header(IDENTITY_HEADER, "admin@x.com")
             .call()
-        {
-            Err(ureq::Error::Status(404, _)) => {}
-            other => panic!("expected 404, got {other:?}"),
-        }
+            .expect("a response");
+        assert_eq!(r.status(), 404);
         let _ = std::fs::remove_file(&path);
     }
 
@@ -7641,18 +7658,18 @@ mod tests {
             }
         });
         let url = format!("http://127.0.0.1:{port}/admin/users/bob%40x.com/rm");
-        // 303s must be visible, not followed.
-        let agent = ureq::builder().redirects(0).build();
-        let post = || agent.post(&url).set(IDENTITY_HEADER, "admin@x.com");
+        let agent = client();
+        let post = || agent.post(&url).header(IDENTITY_HEADER, "admin@x.com");
 
         // The confirmation page is a GET, and a GET changes nothing.
         let before = read(&path);
-        let page = ureq::get(&url)
-            .set(IDENTITY_HEADER, "admin@x.com")
+        let mut r = client()
+            .get(&url)
+            .header(IDENTITY_HEADER, "admin@x.com")
             .call()
-            .expect("200")
-            .into_string()
-            .unwrap();
+            .expect("a response");
+        assert_eq!(r.status(), 200);
+        let page = r.body_mut().read_to_string().unwrap();
         assert!(
             page.contains("denied is for"),
             "the consequence is spelled out"
@@ -7663,81 +7680,83 @@ mod tests {
 
         // The identity header and the allowlist guard a POST exactly as they guard a GET:
         // they are above the router, so no method reaches a mutation without them.
-        match agent
+        let r = agent
             .post(&url)
-            .set("Sec-Fetch-Site", "same-origin")
-            .send_form(&[("rev", &rev)])
-        {
-            Err(ureq::Error::Status(401, _)) => {}
-            other => panic!("expected 401 with no identity header, got {other:?}"),
-        }
-        match agent
+            .header("Sec-Fetch-Site", "same-origin")
+            .send_form([("rev", rev.as_str())])
+            .expect("a response");
+        assert_eq!(r.status(), 401, "no identity header");
+        let mut r = agent
             .post(&url)
-            .set(IDENTITY_HEADER, "someone@x.com")
-            .set("Sec-Fetch-Site", "same-origin")
-            .send_form(&[("rev", &rev)])
-        {
-            Err(ureq::Error::Status(403, r)) => {
-                assert!(r.into_string().unwrap().contains("someone@x.com"));
-            }
-            other => panic!("expected 403 for a non-admin POST, got {other:?}"),
-        }
+            .header(IDENTITY_HEADER, "someone@x.com")
+            .header("Sec-Fetch-Site", "same-origin")
+            .send_form([("rev", rev.as_str())])
+            .expect("a response");
+        assert_eq!(r.status(), 403, "a non-admin POST");
+        assert!(r
+            .body_mut()
+            .read_to_string()
+            .unwrap()
+            .contains("someone@x.com"));
         assert_eq!(read(&path), before, "neither may have written anything");
 
         // No Sec-Fetch-Site and no Origin: not a browser posting a form.
-        match post().send_form(&[("rev", &rev)]) {
-            Err(ureq::Error::Status(403, r)) => {
-                assert!(r.into_string().unwrap().contains("same-origin"));
-            }
-            other => panic!("expected 403, got {other:?}"),
-        }
+        let mut r = post()
+            .send_form([("rev", rev.as_str())])
+            .expect("a response");
+        assert_eq!(r.status(), 403);
+        assert!(r
+            .body_mut()
+            .read_to_string()
+            .unwrap()
+            .contains("same-origin"));
         assert_eq!(read(&path), before);
 
         // Cross-site is a refusal too, whatever the Origin claims.
-        match post()
-            .set("Sec-Fetch-Site", "cross-site")
-            .set("Origin", &format!("http://127.0.0.1:{port}"))
-            .send_form(&[("rev", &rev)])
-        {
-            Err(ureq::Error::Status(403, _)) => {}
-            other => panic!("expected 403, got {other:?}"),
-        }
+        let r = post()
+            .header("Sec-Fetch-Site", "cross-site")
+            .header("Origin", format!("http://127.0.0.1:{port}"))
+            .send_form([("rev", rev.as_str())])
+            .expect("a response");
+        assert_eq!(r.status(), 403);
         assert_eq!(read(&path), before);
 
         // Same-origin, current rev: it happens, and answers a 303 under the base path.
         let resp = post()
-            .set("Sec-Fetch-Site", "same-origin")
-            .send_form(&[("rev", &rev)])
-            .expect("a 303 is not an error");
+            .header("Sec-Fetch-Site", "same-origin")
+            .send_form([("rev", rev.as_str())])
+            .expect("a response");
         assert_eq!(resp.status(), 303);
         assert_eq!(
-            resp.header("Location"),
+            resp.headers().get("location").map(|v| v.to_str().unwrap()),
             Some("/admin/users?msg=user-removed")
         );
         let after = read(&path);
         assert!(!after.contains("Bob@X.com"), "bob is gone: {after}");
 
         // The browser still holds the old rev — a resubmission cannot repeat the deed.
-        match post()
-            .set("Sec-Fetch-Site", "same-origin")
-            .send_form(&[("rev", &rev)])
-        {
-            Err(ureq::Error::Status(409, r)) => {
-                assert!(r.into_string().unwrap().contains("The file changed"));
-            }
-            other => panic!("expected 409, got {other:?}"),
-        }
+        let mut r = post()
+            .header("Sec-Fetch-Site", "same-origin")
+            .send_form([("rev", rev.as_str())])
+            .expect("a response");
+        assert_eq!(r.status(), 409);
+        assert!(r
+            .body_mut()
+            .read_to_string()
+            .unwrap()
+            .contains("The file changed"));
         assert_eq!(read(&path), after);
 
         // And the redirect target renders the banner it was sent with.
-        let landed = ureq::get(&format!(
-            "http://127.0.0.1:{port}/admin/users?msg=user-removed"
-        ))
-        .set(IDENTITY_HEADER, "admin@x.com")
-        .call()
-        .expect("200")
-        .into_string()
-        .unwrap();
+        let mut r = client()
+            .get(format!(
+                "http://127.0.0.1:{port}/admin/users?msg=user-removed"
+            ))
+            .header(IDENTITY_HEADER, "admin@x.com")
+            .call()
+            .expect("a response");
+        assert_eq!(r.status(), 200);
+        let landed = r.body_mut().read_to_string().unwrap();
         assert!(landed.contains("user removed"), "{landed}");
         cleanup(&path);
     }

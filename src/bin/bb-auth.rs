@@ -105,7 +105,7 @@ use std::time::{Duration, Instant};
 
 use base64::engine::general_purpose::URL_SAFE_NO_PAD;
 use base64::Engine;
-use hmac::{Hmac, Mac};
+use hmac::{Hmac, KeyInit, Mac};
 use jsonwebtoken::jwk::JwkSet;
 use jsonwebtoken::{decode, decode_header, Algorithm, DecodingKey, Validation};
 use serde::Deserialize;
@@ -708,11 +708,18 @@ fn spawn_access_reload_handler(_state: &Arc<State>) {}
 /// never sends anything to Cognito and holds no client secret.
 fn fetch_jwks(issuer: &str) -> Result<HashMap<String, DecodingKey>, String> {
     let url = format!("{issuer}/.well-known/jwks.json");
-    let body = ureq::get(&url)
-        .timeout(Duration::from_secs(10))
+    // The timeout is a property of the agent, not of the request, so it is built here
+    // rather than set per call: one fetch, one agent, no connection pool to outlive it.
+    let agent = ureq::Agent::config_builder()
+        .timeout_global(Some(Duration::from_secs(10)))
+        .build()
+        .new_agent();
+    let body = agent
+        .get(&url)
         .call()
         .map_err(|e| format!("jwks GET {url}: {e}"))?
-        .into_string()
+        .body_mut()
+        .read_to_string()
         .map_err(|e| format!("jwks read: {e}"))?;
     let set: JwkSet = serde_json::from_str(&body).map_err(|e| format!("jwks parse: {e}"))?;
     let mut map = HashMap::new();

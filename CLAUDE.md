@@ -446,9 +446,14 @@ changes. `node e2e/shots.js` takes a scene-name filter for the same reason: the 
   and `safe_rd` may have already replaced it).
 - **Sessions are stateless** — no server-side store. Any worker validates any cookie; a restart
   logs nobody out. Don't introduce per-session server state.
-- **Dependencies stay pure-Rust / `ring`-based** (`ureq`+rustls with bundled Mozilla roots,
-  `jsonwebtoken`, `hmac`/`sha2`). The point is a clean aarch64 cross-compile with **no system
-  OpenSSL or cert store**. Do not add a dep that pulls in `openssl`/native-tls. No async runtime
+- **Dependencies stay pure-Rust, on `ring` or RustCrypto** (`ureq`+rustls with bundled Mozilla
+  roots via `webpki-roots`; `jsonwebtoken`, `hmac`/`sha2` on RustCrypto). The point is a clean
+  aarch64 cross-compile with **no system
+  OpenSSL or cert store**. Do not add a dep that pulls in `openssl`/native-tls, and do not let
+  rustls or a JWT crate switch to `aws-lc-rs` or a platform verifier: both reintroduce exactly
+  what this rule exists to keep out. After any dependency bump, check with
+  `cargo tree | grep -iE "openssl|native-tls|aws-lc|schannel|security-framework"`, which must
+  stay empty, and confirm `webpki-roots` is still there. No async runtime
   (`tiny_http` is blocking + threaded) — keeps the binary and resident memory small.
 - **id_token validation** must keep all of: `alg==RS256`, `iss`/`aud`/`exp` enforced (`exp`
   required, 60s leeway), `token_use=="id"`, `email_verified` truthy. The **one** sanctioned

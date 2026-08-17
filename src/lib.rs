@@ -1145,7 +1145,7 @@ pub fn sha256_hex(s: &str) -> String {
 /// of it *is* the verification; losing the raw key means minting a new one.
 pub fn mint_api_key() -> Result<(String, String), String> {
     let mut secret = [0u8; 32];
-    getrandom::getrandom(&mut secret).map_err(|e| format!("no entropy from the OS: {e}"))?;
+    getrandom::fill(&mut secret).map_err(|e| format!("no entropy from the OS: {e}"))?;
     let key = format!("{API_KEY_PREFIX}{}", URL_SAFE_NO_PAD.encode(secret));
     let hash = sha256_hex(&key);
     Ok((key, hash))
@@ -2290,7 +2290,7 @@ fn check_new_email(email: &str) -> Result<(), String> {
 /// format string.
 pub fn mint_uuid() -> Result<String, String> {
     let mut b = [0u8; 16];
-    getrandom::getrandom(&mut b).map_err(|e| format!("no entropy from the OS: {e}"))?;
+    getrandom::fill(&mut b).map_err(|e| format!("no entropy from the OS: {e}"))?;
     b[6] = (b[6] & 0x0f) | 0x40; // version 4
     b[8] = (b[8] & 0x3f) | 0x80; // variant 1
     let h: String = b.iter().map(|x| format!("{x:02x}")).collect();
