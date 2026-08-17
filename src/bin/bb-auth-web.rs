@@ -98,9 +98,11 @@
 //! `bb-auth-adm` spells it, and the target's name — never a bearer, never a hash, never a
 //! submitted value beyond the name.
 //!
-//! An edit is not live until the gate re-reads the file: `systemctl reload bb-auth`. This
-//! binary cannot send that signal (it is not the gate, and does not run in its namespace),
-//! so every page says so in the footer.
+//! An edit is not live until the gate re-reads the file, and this binary cannot send that
+//! signal: it is not the gate and does not run in its namespace. It does not have to.
+//! `bb-auth-reload.path` watches the file and turns every save into a
+//! `systemctl reload bb-auth`, so the footer says nothing about it — a standing instruction
+//! to run a command nobody has to run is worse than no instruction.
 //!
 //! # Configuration
 //!
@@ -407,10 +409,14 @@ td.pills{display:flex;flex-wrap:nowrap;justify-content:flex-end}
    the whole family's. Declared last so a selected pill always outranks a hovered one. */
 .pill.on,.pill.on:hover{background:var(--accent);border-color:var(--accent);
   color:var(--on-accent);font-weight:600}
-/* The size step: body-size pills for the nav, for a list page's one creating action, and for
-   a form's way out (cancel), so each sits at the same footprint as the text or button beside
-   it. A size, declared once here for three named contexts, not a call site restyling itself. */
-nav .pill,p.primary .pill,.actions .pill{font-size:1rem;padding:6px 14px}
+/* The size step: body-size pills for the nav, for the Settings trigger that sits in the same
+   bar as the nav, for a list page's one creating action, and for a form's way out (cancel),
+   so each sits at the same footprint as the text or button beside it. A size, declared once
+   here for four named contexts, not a call site restyling itself.
+   The Settings summary has to be named separately because it is the one pill in the header
+   that is NOT inside `nav` — it is `details`' own trigger — so `nav .pill` never reached it
+   and it read a step smaller than the tabs beside it. */
+nav .pill,details.settings>summary.pill,p.primary .pill,.actions .pill{font-size:1rem;padding:6px 14px}
 /* A pager arm with nowhere to go. Not [disabled], because it is a span and not a control:
    the first and last pages have no link at all rather than a link that does nothing. */
 .pill.off{color:var(--muted);border-color:var(--line);background:none;cursor:default}
@@ -468,7 +474,7 @@ details.settings > summary::-webkit-details-marker{display:none}
      that first line fit on a phone at all. */
   .settings{order:2}
   .pill{padding:3px 8px}
-  nav .pill,p.primary .pill,.actions .pill{font-size:var(--fs-sm);padding:4px 9px}
+  nav .pill,details.settings>summary.pill,p.primary .pill,.actions .pill{font-size:var(--fs-sm);padding:4px 9px}
   nav{order:3;flex:1 1 100%;flex-wrap:nowrap;overflow-x:auto;gap:1px;padding-bottom:2px}
   table{min-width:0}
   table,thead,tbody,tr,td{display:block}
@@ -703,7 +709,6 @@ enum K {
     FileErrorTitle,
     FileErrorHint,
     SignedInAs,
-    ReloadHint,
     // --- the settings menu ---
     Settings,
     SettingLanguage,
@@ -1040,12 +1045,6 @@ fn t(lang: Lang, key: K) -> &'static str {
              subito — senza riavvio né reload.",
         ),
         K::SignedInAs => m(lang, "signed in as", "accesso come"),
-        K::ReloadHint => m(
-            lang,
-            "an edit is live when the gate re-reads the file:",
-            "una modifica è attiva quando il gate rilegge il file:",
-        ),
-
         K::Settings => m(lang, "Settings", "Impostazioni"),
         K::SettingLanguage => m(lang, "Language", "Lingua"),
         K::SettingTheme => m(lang, "Theme", "Tema"),
@@ -2529,7 +2528,9 @@ fn shell(v: &View, title: &str, content: Markup) -> Markup {
                     (content)
                 }
                 footer {
-                    span { (v.t(K::ReloadHint)) " " code { "systemctl reload bb-auth" } }
+                    // No reload hint any more: `bb-auth-reload.path` watches the file and
+                    // reloads the gate on every save, so telling an administrator to run
+                    // `systemctl reload bb-auth` described work nobody has to do.
                     @if let Some(a) = v.admin {
                         span { (v.t(K::SignedInAs)) " " code { (a) } }
                     }
@@ -2697,6 +2698,16 @@ fn act(v: &View, at: &Route, label: &str) -> Markup {
     html! { a class="pill" href=(v.href(at)) { (label) } }
 }
 
+/// The way back out of a detail page, as a pill like every other small control.
+///
+/// A link and not a button, because it navigates and changes nothing; a pill and not body
+/// prose, because it sits in the same row as `edit` and `remove` and is the same kind of
+/// thing. Declared once here for the same reason [`act`] is: nothing at a call site is
+/// allowed to say how a pill looks.
+fn back(v: &View, to: &Route) -> Markup {
+    html! { a class="pill" href=(v.href(to)) { "\u{2190} " (v.t(K::Back)) } }
+}
+
 /// Same as [`act`], marked as the destructive member of its `.pills` group (CSS `.pill.rm`):
 /// the one action here that removes a row, not just changes it. `rotate` replaces a credential
 /// rather than deleting anything, so it stays plain [`act`]; only an actual `Rm` route earns
@@ -2727,11 +2738,11 @@ fn page_confirm(
 }
 
 /// "no such user / api key / site / url group" — a `GET` for a name the file does not have.
-fn page_missing(v: &View, what: &str, name: &str, back: &Route) -> Markup {
+fn page_missing(v: &View, what: &str, name: &str, back_to: &Route) -> Markup {
     html! {
         h1 { (what) }
         p class="lede" { code { (name) } }
-        p { a href=(v.href(back)) { "← " (v.t(K::Back)) } }
+        p { (back(v, back_to)) }
     }
 }
 
@@ -3057,9 +3068,7 @@ fn page_user(v: &View, doc: &AccessFile, access: &Access, key: &str) -> (u16, Ma
                 (user_label(u))
                 @if denied { " " (tag("bad", "denied")) }
             }
-            p class="lede" {
-                a href=(v.href(&Route::Users)) { "← " (v.t(K::Back)) }
-            }
+            p class="lede" { (back(v, &Route::Users)) }
             p class="pills" {
                 (act_rm(v, &Route::UserRm(uuid.clone()), v.t(K::Remove)))
             }
@@ -3312,7 +3321,7 @@ fn page_app(v: &View, doc: &AccessFile, name: &str) -> (u16, Markup) {
         200,
         html! {
             h1 { (app_name) }
-            p class="lede" { a href=(v.href(&Route::Apps)) { "← " (v.t(K::Back)) } }
+            p class="lede" { (back(v, &Route::Apps)) }
             p class="pills" {
                 (act(v, &Route::AppEdit(app_name.clone()), v.t(K::Edit)))
                 (act_rm(v, &Route::AppRm(app_name.clone()), v.t(K::Remove)))
@@ -4058,7 +4067,7 @@ fn page_minted(v: &View, owner_uuid: &str, owner_label: &str, id: &str, bearer: 
             code { "Authorization: Bearer " (bearer) }
             p class="hint" { (v.t(K::BearerClickHint)) }
         }
-        p { a href=(v.href(&Route::User(owner_uuid.to_string()))) { "← " (v.t(K::Back)) } }
+        p { (back(v, &Route::User(owner_uuid.to_string()))) }
     }
 }
 
@@ -4097,12 +4106,11 @@ fn page_mint_conflict(v: &View, owner: &str, id: &str) -> Markup {
             p { code { (owner) } " · api_keys · " code { (id) } }
             p { (v.t(K::MintConflictBody)) }
             p { (v.t(K::MintConflictLost)) }
-            p {
-                a href=(v.href(&Route::KeyRotate(owner.clone(), id.to_string()))) {
+            p class="pills" {
+                a class="pill" href=(v.href(&Route::KeyRotate(owner.clone(), id.to_string()))) {
                     (v.t(K::MintConflictRotate))
                 }
-                " · "
-                a href=(v.href(&Route::User(owner.clone()))) { "← " (v.t(K::Back)) }
+                (back(v, &Route::User(owner.clone())))
             }
         }
     }
@@ -6013,6 +6021,29 @@ mod tests {
         assert!(html.contains(r#"<option value="it" selected>"#), "{html}");
         assert!(html.contains(r#"<option value="dark" selected>"#), "{html}");
         assert_eq!(html.matches(" selected>").count(), 2, "{html}");
+    }
+
+    #[test]
+    fn every_small_control_is_a_pill_of_the_same_family() {
+        // The rule the CSS states in prose: nothing at a call site decides how a pill looks,
+        // and the two controls that used to sit outside the family are in it now.
+        let app = render("pill-app", Route::App("mpa".into()));
+        assert!(
+            app.contains(r#"<a class="pill" href="/apps">"#),
+            "the way back is a pill, not prose: {app}"
+        );
+        // The Settings trigger is the one pill in the header that is not inside `nav`, so it
+        // has to be named in the size rule or it reads a step smaller than the tabs beside it.
+        assert!(
+            CSS.contains("nav .pill,details.settings>summary.pill,"),
+            "the Settings trigger must share the nav's size step"
+        );
+        assert!(
+            app.contains(r#"<summary class="pill">"#),
+            "and carry the class that rule selects: {app}"
+        );
+        // The footer no longer tells anybody to reload: `bb-auth-reload.path` does it.
+        assert!(!app.contains("systemctl reload"), "{app}");
     }
 
     #[test]
