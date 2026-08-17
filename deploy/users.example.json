@@ -37,6 +37,14 @@
     "                  credential classes in `credentials` ('login' = an id_token or the",
     "                  session cookie, 'api_key' = a bbk_ key; absent means both).",
     "",
+    "EXCLUDED is a scope's own veto, checked BEFORE its grant, so it beats a group the",
+    "subject is in and it beats `authenticated` — which lists nobody, so it is the only way",
+    "to keep one person out of an onboarding area. It takes a uuid, a '@group', or a bare",
+    "email for an identity the roster has never heard of, exactly as `denied` does, and an",
+    "email that does resolve is folded onto its uuid at load. It is REFUSED on `anonymous`:",
+    "that scope grants with no credential at all, so an excluded client would simply send",
+    "none. Use `denied` to shut somebody out everywhere; use this to shut them out of here.",
+    "",
     "USERS are identified by a uuid, and every reference in this file uses it. The emails",
     "are the identifiers Cognito can vouch for, and any of them resolves to the same row, so",
     "changing how someone signs in touches one line instead of every scope that lists them.",
@@ -84,8 +92,9 @@
           "urls": ["https://app.example.com/app1/admin/*"],
           "access": "restricted",
           "groups": ["@admins"],
+          "excluded": ["c1d2e3f4-5a6b-4c7d-8e9f-0a1b2c3d4e5f"],
           "credentials": ["login"],
-          "notes": "a browser login only: no machine credential reaches the admin area"
+          "notes": "a browser login only, and one member of @admins is kept out of THIS scope without being taken out of the group"
         },
         {
           "name": "everything",
@@ -94,7 +103,8 @@
             "https://app.example.com/app1/*"
           ],
           "access": "authenticated",
-          "notes": "the onboarding grant: anyone Cognito vouches for, enrolled or not"
+          "excluded": ["nuisance@example.com"],
+          "notes": "the onboarding grant: anyone Cognito vouches for, enrolled or not — except the one address named here, who is in no users entry and so can be excluded no other way"
         }
       ]
     },
@@ -118,7 +128,10 @@
   ],
 
   "user_groups": {
-    "admins": ["8f14e45f-ceea-467a-9f79-3b4e5c6d7a8b"]
+    "admins": [
+      "8f14e45f-ceea-467a-9f79-3b4e5c6d7a8b",
+      "c1d2e3f4-5a6b-4c7d-8e9f-0a1b2c3d4e5f"
+    ]
   },
 
   "denied": [
@@ -156,7 +169,7 @@
     {
       "uuid": "c1d2e3f4-5a6b-4c7d-8e9f-0a1b2c3d4e5f",
       "emails": ["suspended@example.com"],
-      "notes": "in no scope, so reaches nothing. NOTE this does NOT keep them off an authenticated scope; that is what `denied` is for."
+      "notes": "in @admins, and `excluded` from app1/admin: still in the group, still reaching everything else the group reaches, kept out of that one scope. NOTE neither being in no scope nor being excluded from one keeps them off an authenticated scope; that is what `denied`, or that scope's own `excluded`, is for."
     }
   ]
 }

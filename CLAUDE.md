@@ -11,8 +11,9 @@ accepts per-request bearer credentials — a Cognito `id_token` or a static `bbk
 
 The access list is a JSON **access file** (`BB_AUTH_USERS_FILE` — the var keeps its
 pre-3.0 name), and since **3.0 it is application-centric**: an `applications` entry owns a
-literal URL area and a list of named **scopes**; a scope owns URL patterns and one access
-policy (`anonymous`, `authenticated`, `restricted`); a user is a **uuid** plus the emails
+literal URL area and a list of named **scopes**; a scope owns URL patterns, one access
+policy (`anonymous`, `authenticated`, `restricted`) and an `excluded` list that keeps named
+people out of it ahead of that policy; a user is a **uuid** plus the emails
 that resolve to it plus its API keys, and carries no URL at all. A grant is written once,
 on the side of the place. It is service-agnostic — one binary fronts any web service, wired
 per-deployment through `BB_AUTH_*` env vars.
@@ -34,7 +35,14 @@ One crate, four targets, and the split is load-bearing:
   library, none of the gate.
 - **[src/bin/bb-auth-web.rs](src/bin/bb-auth-web.rs)** — the access-file admin GUI
   (server-rendered, `maud`): the same CRUD as the CLI, made **only** through the library's
-  editing core. **No page may need JavaScript** — the rule that replaced "no JavaScript at
+  editing core. Four tabs, not five: `user_groups` and `denied` are **sections of the users
+  page**, groups above the roster, because a group only means anything in terms of the roster
+  and both are about people. Every unordered list carries a filter and a pager, both living
+  entirely in the query string (`Listing`, `list_controls`) since a page here must work with
+  scripting off; each list namespaces its two parameters (`uq`/`up`, `gq`/`gp`, …) so several
+  on one page do not steal each other's state. **Scopes are deliberately excluded from that**:
+  their order is their meaning and the ↑/↓ buttons move them within the *file*, so a filtered
+  view would show positions that are not the file's and a move that appears to do nothing. **No page may need JavaScript** — the rule that replaced "no JavaScript at
   all", and the *only* thing standing on the far side of it is `SETTINGS_ONCHANGE`, one
   inline handler that applies a Settings list box the moment it is picked, with a
   `<noscript>` submit button behind it doing the same job one click later. There is no
@@ -261,6 +269,24 @@ changes. `node e2e/shots.js` takes a scene-name filter for the same reason: the 
   scope, which grants before it (`decide`): that scope grants with no credential at all, so a vetoed
   client would simply omit theirs. A veto bypassed by sending *less* is not a veto, and offering it
   would be worse than not offering it, because an operator would believe it.
+- **A scope's `excluded` is the same veto, one level down, and it is checked before the
+  scope's own grant.** `denied` shuts somebody out everywhere; this shuts them out of *here*,
+  and the two exist for different jobs rather than as a convenience. It is what makes a
+  carve-out expressible in the other direction: a member of a `@group` can be kept out of one
+  scope without the group being unpicked, and an `authenticated` scope — which lists nobody,
+  so there is nobody to remove — can finally keep one identity out. It takes the same three
+  spellings the file-level veto does (a uuid, a bare email for a stranger, plus `@group`), and
+  an email that resolves is folded onto its uuid at load, so excluding one address of a user
+  cannot leave another standing (`compile_access`, `ScopeRecord::excludes_identifier`). Order
+  matters and is pinned: `denied` is reported **ahead** of it (`Decision::Vetoed` before
+  `Decision::Excluded`), because an operator reading a log must be told the identity is out
+  everywhere rather than only here. It is **fatal on `anonymous`** for exactly the reason the
+  file-level veto does not reach that kind either: the scope grants with no credential at all,
+  so an excluded client would simply send none, and a field that reads like a defence while
+  defending nothing is worse than no field. Both editors resolve people to uuids and keep an
+  unknown email as itself (`to_exclusions`, `parse_exclusions`), and `remove_user` and
+  `user_group_refs` count an exclusion as a reference like any other — marked `(excluded)`,
+  because a sweep that reported the two alike would read as if the user had been let in there.
 - **A scope names people, and that is the only place a grant is written.** The rule the old
   "a site describes a place, never a person" enforced was against **duplication**, not against a
   direction: it existed so a user removed from the roster could not still walk in through a place.

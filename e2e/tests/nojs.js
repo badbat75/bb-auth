@@ -105,6 +105,22 @@ async function run(ctx, t) {
     t.check('and a save still writes with no script anywhere', bytes(ctx) !== beforeSave);
     t.check('the file has the new row',
       doc(ctx).denied.includes('noscript@example.com'), JSON.stringify(doc(ctx).denied));
+
+    // A list's filter is a GET form, so it navigates with no script at all. This is the
+    // whole reason filtering and paging live in the query string.
+    await page.goto(ctx.base + '/users');
+    // Scoped to the roster's own control row: three lists share this page, and each one
+    // has to submit only its own two parameters.
+    const roster = '.listctl:has(input[name=uq])';
+    await page.fill(`${roster} input[name=uq]`, 'bot@');
+    await submit(page, `${roster} button`);
+    t.check('the filter navigates with scripting off', page.url().includes('uq=bot'), page.url());
+    const filtered = await mainText(page);
+    t.check('and it narrows the roster', filtered.includes('bot@example.com'), filtered);
+    t.check('dropping the rows it does not match',
+      !filtered.includes('/users/8f14e45f'), filtered);
+    t.check('while the groups section beside it is untouched',
+      (await page.locator('h2:has-text("user_groups")').count()) === 1);
   } finally {
     await noJs.close();
   }

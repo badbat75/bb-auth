@@ -370,6 +370,35 @@ pub struct ScopeRecord {
     /// Which credential classes may exercise this grant. Only meaningful under
     /// [`AccessKind::Restricted`]; the file refuses it on the other two.
     pub credentials: CredentialSet,
+    /// Excluded uuids, with `user_groups` already expanded, exactly as `members` is.
+    ///
+    /// Empty on an [`AccessKind::Anonymous`] scope because the file refuses the field
+    /// there; consulted on the other two.
+    pub excluded_users: HashSet<String>,
+    /// Excluded identifiers that resolve to no roster row, lowercased.
+    ///
+    /// The scope-local twin of [`Access::denied_identifiers`], and it exists for the same
+    /// reason: an [`AccessKind::Authenticated`] scope admits identities that are in no
+    /// table, so for them an email is the only exclusion there is. An identifier that
+    /// *does* resolve is folded into [`ScopeRecord::excluded_users`] at load.
+    pub excluded_identifiers: HashSet<String>,
+}
+
+impl ScopeRecord {
+    /// Does this scope keep `identifier` out?
+    ///
+    /// The same two-halves shape as [`Access::vetoes_identifier`], one level down: the
+    /// stranger's own email, or the uuid the roster resolves them to. One implementation,
+    /// because [`decide`] asks it for a browser login and for a key and an exclusion that
+    /// covered one and not the other would be worse than none.
+    pub fn excludes_identifier(&self, access: &Access, identifier: &str) -> bool {
+        let id = norm_email(identifier);
+        self.excluded_identifiers.contains(&id)
+            || access
+                .by_identifier
+                .get(&id)
+                .is_some_and(|u| self.excluded_users.contains(u))
+    }
 }
 
 /// A resolved application: a literal URL area, the login page for it, and its scopes in
@@ -605,6 +634,11 @@ pub enum Decision {
     Granted { app: String, scope: String },
     /// `denied` vetoes this subject, ahead of every grant and on every credential.
     Vetoed,
+    /// The scope that answered lists this subject in its own `excluded`, ahead of its
+    /// grant. Distinct from [`Decision::Vetoed`] on purpose: this one is local, so the
+    /// same identity may well reach the very next scope, and an operator reading a log
+    /// needs to know which of the two shut the door.
+    Excluded { app: String, scope: String },
     /// No application's area covers this URL, so nobody reaches it. With no per-user URLs
     /// left, this is the only fail-closed reading, and it is the posture change an
     /// operator has to be told about: a gated location outside every application is a
@@ -644,7 +678,10 @@ impl Decision {
 ///    simply omit theirs and walk in anyway. A veto that is bypassed by sending *less* is
 ///    not a veto, and offering it would be worse than not offering it, because an operator
 ///    would believe it.
-/// 3. The veto, on every remaining credential.
+/// 3. The veto, on every remaining credential: first the file's `denied`, then the
+///    answering scope's own `excluded`. Both are refusals *ahead* of the grant, which is
+///    what lets one exclude a member of a group without unpicking the group, and what lets
+///    one exclude anybody at all from an [`AccessKind::Authenticated`] scope.
 /// 4. [`AccessKind::Authenticated`]: any identity Cognito vouches for, enrolled or not. A
 ///    key is refused here rather than admitted, because Cognito vouches for no static key
 ///    of ours and this grant is about who Cognito says you are.
@@ -676,6 +713,20 @@ pub fn decide(access: &Access, subject: &Subject, url: Option<&str>) -> Decision
     };
     if vetoed {
         return Decision::Vetoed;
+    }
+
+    // The scope's own veto, in the same place in the order and for the same reason: ahead
+    // of the grant, so it beats a `@group` this subject is in and it beats `authenticated`,
+    // which lists nobody there would be to remove them from. It sits *after* the file-level
+    // veto so that a `denied` identity is still reported as vetoed rather than as merely
+    // excluded from wherever they happened to knock.
+    let excluded = match subject {
+        Subject::Anonymous => false,
+        Subject::Identifier(id) => scope.excludes_identifier(access, id),
+        Subject::Key(rec) => scope.excluded_users.contains(&rec.uuid),
+    };
+    if excluded {
+        return Decision::Excluded { app: a, scope: s };
     }
 
     match scope.access {
@@ -923,6 +974,17 @@ pub struct ScopeSpec {
     /// fatal. See [`CredentialSet`].
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub credentials: Option<Vec<String>>,
+    /// Who this scope keeps out, whatever else admits them: a roster uuid, a `"@name"`
+    /// group, or a bare email for an identity the roster has never heard of.
+    ///
+    /// The scope-local twin of the file's `denied`, and it exists for the case that field
+    /// cannot express: keeping one person out of *one* place while they keep everything
+    /// else. Checked ahead of the grant, so it beats a `@group` membership and it beats
+    /// `authenticated` — which is the whole point, since that kind lists nobody to remove
+    /// anyone from. Present on an `anonymous` scope is **fatal**: that scope grants with no
+    /// credential at all, so an excluded client would simply send none.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub excluded: Option<Vec<String>>,
     /// Operator documentation, round-tripped.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub notes: Option<String>,
@@ -1564,6 +1626,19 @@ pub fn compile_access(file: &AccessFile) -> Result<Access, String> {
                     ));
                 }
             }
+            // `excluded` is the one membership-ish field that also belongs to
+            // `authenticated` — that kind lists nobody, so an exclusion is the only way to
+            // keep one person out of it. On `anonymous` it is refused for the reason the
+            // file-level veto is not consulted there either: the scope grants with no
+            // credential at all, so an excluded client would simply send none, and a field
+            // that reads like a defence while defending nothing is worse than no field.
+            if access == AccessKind::Anonymous && s.excluded.is_some() {
+                return Err(format!(
+                    "{at}: 'excluded' means nothing on an access of \"anonymous\": that scope \
+                     grants with no credential at all, so an excluded client would simply send \
+                     none. Make the scope \"authenticated\", or narrow its urls"
+                ));
+            }
 
             let urls = UrlScope::compile(&s.urls).map_err(|e| format!("{at}: {e}"))?;
             for p in urls.patterns() {
@@ -1652,12 +1727,66 @@ pub fn compile_access(file: &AccessFile) -> Result<Access, String> {
                 }
             }
 
+            // Same grammar as `denied`, plus `@group`, and folded the same way: an email
+            // the roster resolves becomes the uuid, so excluding one address of a user
+            // cannot leave another standing. An entry that is none of the three is refused
+            // rather than kept as a string nothing will ever equal — an exclusion that
+            // excludes nobody while reading as if it did fails *open*, which is the one
+            // shape this format never accepts.
+            let mut excluded_users: HashSet<String> = HashSet::new();
+            let mut excluded_identifiers: HashSet<String> = HashSet::new();
+            for entry in s.excluded.iter().flatten() {
+                let e = entry.trim();
+                if e.is_empty() {
+                    continue;
+                }
+                if e.starts_with('@') {
+                    let g = group_ref(e).ok_or_else(|| {
+                        format!("{at}: excluded '{e}': a group reference is written '@name'")
+                    })?;
+                    match groups.get(g) {
+                        Some(list) => excluded_users.extend(list.iter().cloned()),
+                        None => return Err(format!("{at}: excluded: unknown user group '@{g}'")),
+                    }
+                    continue;
+                }
+                let lower = e.to_ascii_lowercase();
+                if well_formed_uuid(&lower) {
+                    if !by_uuid.contains_key(&lower) {
+                        eprintln!(
+                            "[bb-auth] WARNING: {at} excludes {lower}, which is in no users \
+                             entry: that exclusion keeps nobody out"
+                        );
+                    }
+                    excluded_users.insert(lower);
+                    continue;
+                }
+                if !e.contains('@') {
+                    return Err(format!(
+                        "{at}: excluded '{e}': not a uuid, not '@group' and not an email. An \
+                         exclusion names a user by uuid, a group by '@name', or an identity the \
+                         roster does not know by its email"
+                    ));
+                }
+                let id = norm_email(e);
+                match by_identifier.get(&id) {
+                    Some(uuid) => {
+                        excluded_users.insert(uuid.clone());
+                    }
+                    None => {
+                        excluded_identifiers.insert(id);
+                    }
+                }
+            }
+
             scopes.push(ScopeRecord {
                 name: sname,
                 urls,
                 access,
                 members,
                 credentials,
+                excluded_users,
+                excluded_identifiers,
             });
         }
         if scopes.is_empty() {
@@ -2078,19 +2207,31 @@ pub fn user_group_mut<'a>(
 /// this is what turns that refusal into a list of places to go and fix.
 pub fn user_group_refs(doc: &AccessFile, name: &str) -> Vec<String> {
     let mut out = Vec::new();
+    let names = |list: &Option<Vec<String>>| {
+        list.iter()
+            .flatten()
+            .any(|g| group_ref(g) == Some(name.trim()))
+    };
     for a in &doc.applications {
         for s in &a.scopes {
-            if s.groups
-                .iter()
-                .flatten()
-                .any(|g| group_ref(g) == Some(name.trim()))
-            {
-                out.push(format!("{}/{}", a.name.trim(), s.name.trim()));
+            let at = format!("{}/{}", a.name.trim(), s.name.trim());
+            if names(&s.groups) {
+                out.push(at.clone());
+            }
+            // An `excluded` reference counts every bit as much: `compile_access` refuses an
+            // unknown group there too, so removing a group a scope excludes would produce a
+            // file the gate rejects, which is exactly what this list exists to prevent.
+            if names(&s.excluded) {
+                out.push(format!("{at} ({EXCLUDED_REF})"));
             }
         }
     }
     out
 }
+
+/// How [`user_refs`] and [`user_group_refs`] mark a reference that keeps someone *out*
+/// rather than letting them in. Display only, and one constant so the two agree.
+pub const EXCLUDED_REF: &str = "excluded";
 
 /// Every place that names `uuid`: scopes as `application/scope`, groups as `@name`.
 ///
@@ -2100,10 +2241,17 @@ pub fn user_group_refs(doc: &AccessFile, name: &str) -> Vec<String> {
 pub fn user_refs(doc: &AccessFile, uuid: &str) -> Vec<String> {
     let want = norm_email(uuid);
     let mut out = Vec::new();
+    let names = |list: &Option<Vec<String>>| list.iter().flatten().any(|u| norm_email(u) == want);
     for a in &doc.applications {
         for s in &a.scopes {
-            if s.users.iter().flatten().any(|u| norm_email(u) == want) {
-                out.push(format!("{}/{}", a.name.trim(), s.name.trim()));
+            let at = format!("{}/{}", a.name.trim(), s.name.trim());
+            if names(&s.users) {
+                out.push(at.clone());
+            }
+            // Marked, because the two say opposite things about the same row and a sweep
+            // that reported them alike would read as if the user had been let in there.
+            if names(&s.excluded) {
+                out.push(format!("{at} ({EXCLUDED_REF})"));
             }
         }
     }
@@ -2301,6 +2449,13 @@ pub fn remove_user(doc: &mut AccessFile, key: &str) -> Result<(UserSpec, Vec<Str
     for a in &mut doc.applications {
         for s in &mut a.scopes {
             if let Some(list) = s.users.as_mut() {
+                list.retain(|u| norm_email(u) != uuid);
+            }
+            // Swept too, though a stale exclusion fails closed rather than open. Uuids are
+            // random and never reused, so it could not come back to bite the next person;
+            // it would simply be a line naming nobody, in the one file where a line naming
+            // nobody is what an operator must never have to wonder about.
+            if let Some(list) = s.excluded.as_mut() {
                 list.retain(|u| norm_email(u) != uuid);
             }
         }
@@ -3327,6 +3482,173 @@ mod tests {
         assert!(e.contains("not a uuid and not an email"), "{e}");
     }
 
+    // --- the scope's own veto ------------------------------------------------
+
+    /// The fixture with `excluded` on the scopes named, so each test below says only what
+    /// it is about.
+    fn with_exclusion(scope_urls: &str, excluded: &str) -> String {
+        fixture().replace(
+            &format!(r#""urls": ["{scope_urls}"],"#),
+            &format!(r#""urls": ["{scope_urls}"], "excluded": [{excluded}],"#),
+        )
+    }
+
+    #[test]
+    fn an_exclusion_beats_the_group_that_admits() {
+        // bob reaches mpa/admin only through @admins. Excluded by uuid, the scope refuses
+        // him without the group being touched — which is the whole reason the field exists.
+        let a = access_of(
+            "excl-group",
+            &with_exclusion("https://app.x.com/mpa/admin/*", &format!("\"{BOB}\"")),
+        );
+        assert_eq!(
+            decide(
+                &a,
+                &Subject::Identifier("bob@x.com"),
+                Some("https://app.x.com/mpa/admin/panel")
+            ),
+            Decision::Excluded {
+                app: "mpa".into(),
+                scope: "admin".into()
+            }
+        );
+        // Local, not global: the next application still admits him.
+        assert!(decide(
+            &a,
+            &Subject::Identifier("bob@x.com"),
+            Some("https://ai.x.com/mcp/logs/x")
+        )
+        .granted());
+    }
+
+    #[test]
+    fn an_exclusion_beats_authenticated_and_reaches_a_stranger() {
+        // The kind that lists nobody, so there is nobody to remove: an exclusion is the
+        // only way to keep one identity out, and a stranger is named by email because the
+        // roster has never heard of them.
+        let a = access_of(
+            "excl-auth",
+            &with_exclusion("https://app.x.com/mpa/*", "\"newcomer@x.com\""),
+        );
+        assert_eq!(
+            decide(
+                &a,
+                &Subject::Identifier("newcomer@x.com"),
+                Some("https://app.x.com/mpa/welcome")
+            ),
+            Decision::Excluded {
+                app: "mpa".into(),
+                scope: "onboarding".into()
+            }
+        );
+        // Anybody else Cognito vouches for still walks in.
+        assert!(decide(
+            &a,
+            &Subject::Identifier("someone@x.com"),
+            Some("https://app.x.com/mpa/welcome")
+        )
+        .granted());
+    }
+
+    #[test]
+    fn excluding_one_email_excludes_the_whole_user() {
+        // Folded onto the uuid at load, exactly as `denied` is: excluding one address of a
+        // user cannot leave another standing.
+        let a = access_of(
+            "excl-fold",
+            &with_exclusion("https://app.x.com/mpa/*", "\"bob@old.com\""),
+        );
+        assert!(a.apps[0].scopes[2].excluded_users.contains(BOB));
+        assert_eq!(
+            decide(
+                &a,
+                &Subject::Identifier("bob@x.com"),
+                Some("https://app.x.com/mpa/welcome")
+            ),
+            Decision::Excluded {
+                app: "mpa".into(),
+                scope: "onboarding".into()
+            }
+        );
+    }
+
+    #[test]
+    fn an_exclusion_stops_a_key_through_its_owner() {
+        // A key acts as its owner, so it is kept out by what keeps its owner out.
+        let a = access_of(
+            "excl-key",
+            &with_exclusion("https://ai.x.com/mcp/*", &format!("\"{BOB}\"")),
+        );
+        let key = fixture_key(&a);
+        assert_eq!(
+            decide(&a, &Subject::Key(key), Some("https://ai.x.com/mcp/tool")),
+            Decision::Excluded {
+                app: "mcp".into(),
+                scope: "api".into()
+            }
+        );
+    }
+
+    #[test]
+    fn a_group_may_be_excluded() {
+        let a = access_of(
+            "excl-groupref",
+            &with_exclusion("https://app.x.com/mpa/*", "\"@admins\""),
+        );
+        assert!(a.apps[0].scopes[2].excluded_users.contains(BOB));
+    }
+
+    #[test]
+    fn denied_outranks_an_exclusion() {
+        // Both would refuse, and the file-level veto is what must be reported: an operator
+        // reading a log has to be told the identity is out everywhere, not just here.
+        let a = access_of(
+            "excl-vs-denied",
+            &with_exclusion("https://app.x.com/mpa/*", "\"spammer@x.com\""),
+        );
+        assert_eq!(
+            decide(
+                &a,
+                &Subject::Identifier("spammer@x.com"),
+                Some("https://app.x.com/mpa/welcome")
+            ),
+            Decision::Vetoed
+        );
+    }
+
+    #[test]
+    fn an_anonymous_scope_refuses_an_exclusion() {
+        let e = access_err(
+            "excl-anon",
+            &with_exclusion("https://app.x.com/mpa/healthz", "\"bob@x.com\""),
+        );
+        assert!(e.contains("'excluded' means nothing"), "{e}");
+        assert!(
+            e.contains("no credential at all"),
+            "the message must say WHY: {e}"
+        );
+    }
+
+    #[test]
+    fn an_exclusion_must_be_a_uuid_a_group_or_an_email() {
+        let e = access_err(
+            "excl-junk",
+            &with_exclusion("https://app.x.com/mpa/*", "\"nonsense\""),
+        );
+        assert!(
+            e.contains("not a uuid, not '@group' and not an email"),
+            "{e}"
+        );
+
+        // An unknown group is fatal here for the same reason it is in `groups`: it is a
+        // typo that would silently protect nothing.
+        let e = access_err(
+            "excl-badgroup",
+            &with_exclusion("https://app.x.com/mpa/*", "\"@nope\""),
+        );
+        assert!(e.contains("unknown user group '@nope'"), "{e}");
+    }
+
     // --- keys ---------------------------------------------------------------
 
     #[test]
@@ -3674,6 +3996,44 @@ mod tests {
     }
 
     // --- editing the document -----------------------------------------------
+
+    #[test]
+    fn removing_a_user_sweeps_the_exclusions_that_named_them() {
+        let mut doc = doc_of(&with_exclusion(
+            "https://app.x.com/mpa/*",
+            &format!("\"{BOB}\""),
+        ));
+        let refs = user_refs(&doc, BOB);
+        assert!(
+            refs.iter().any(|r| r == "mpa/onboarding (excluded)"),
+            "an exclusion is a reference, and marked as one: {refs:?}"
+        );
+        let (_, swept) = remove_user(&mut doc, "bob@x.com").unwrap();
+        assert!(swept.iter().any(|r| r.contains("excluded")), "{swept:?}");
+        assert!(doc.applications[0].scopes[2]
+            .excluded
+            .iter()
+            .flatten()
+            .all(|e| e != BOB));
+    }
+
+    #[test]
+    fn a_group_only_an_exclusion_names_still_cannot_be_removed() {
+        // `compile_access` refuses an unknown group in `excluded` too, so removing this one
+        // would produce a file the gate rejects. The refusal names where to go and fix it.
+        let mut doc = doc_of(&fixture().replace(
+            r#"{ "name": "onboarding", "urls": ["https://app.x.com/mpa/*"],
+                  "access": "authenticated" }"#,
+            r#"{ "name": "onboarding", "urls": ["https://app.x.com/mpa/*"],
+                  "access": "authenticated", "excluded": ["@admins"] }"#,
+        ));
+        // The membership reference goes first, so only the exclusion is left holding it.
+        doc.applications[0].scopes[1].groups = None;
+        doc.applications[0].scopes[1].users = Some(vec![BOB.to_string()]);
+        let e = err_of(remove_user_group(&mut doc, "admins"));
+        assert!(e.contains("still referenced by"), "{e}");
+        assert!(e.contains("mpa/onboarding (excluded)"), "{e}");
+    }
 
     #[test]
     fn add_user_mints_a_uuid_and_refuses_a_taken_email() {

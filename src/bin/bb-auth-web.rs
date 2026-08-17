@@ -411,6 +411,19 @@ td.pills{display:flex;flex-wrap:nowrap;justify-content:flex-end}
    a form's way out (cancel), so each sits at the same footprint as the text or button beside
    it. A size, declared once here for three named contexts, not a call site restyling itself. */
 nav .pill,p.primary .pill,.actions .pill{font-size:1rem;padding:6px 14px}
+/* A pager arm with nowhere to go. Not [disabled], because it is a span and not a control:
+   the first and last pages have no link at all rather than a link that does nothing. */
+.pill.off{color:var(--muted);border-color:var(--line);background:none;cursor:default}
+/* Every list's filter and pager, above the panel it belongs to. One flex row that wraps, so
+   the pager drops under the search box on a narrow screen instead of squeezing it. The
+   search input takes the same border and radius as a .pill so the row reads as one object. */
+.listctl{display:flex;flex-wrap:wrap;gap:10px;align-items:center;margin:0 0 10px}
+.listctl form{display:flex;gap:6px;align-items:center;margin:0}
+.listctl input[type=search]{font:inherit;font-size:var(--fs-sm);padding:4px 10px;
+  background:var(--panel);color:var(--fg);border:1px solid var(--line);
+  border-radius:var(--r-pill);min-width:min(16rem,60vw)}
+.listctl input[type=search]:focus{outline:none;border-color:var(--accent)}
+.listctl .pager{display:inline-flex;gap:6px;align-items:center}
 /* The Settings menu. `details` is the disclosure widget HTML has had all along: the summary
    is the trigger and takes the same pill as every other control in the bar, and .menu is the
    panel it opens, taken out of flow so opening it never reflows the header. What is inside
@@ -668,10 +681,11 @@ enum K {
     Submit,
     Authorized,
     VerdictDenied,
-    // --- the ten decisions, in the order `Decision` declares them ---
+    // --- the eleven decisions, in the order `Decision` declares them ---
     WhyAnonymousGrant,
     WhyGranted,
     WhyVetoed,
+    WhyExcluded,
     WhyNoApplication,
     WhyNoScope,
     WhyUnauthenticated,
@@ -717,6 +731,13 @@ enum K {
     GroupMembersHelp,
     GroupNoRename,
     NewName,
+    // --- the filter and pager every list carries ---
+    Filter,
+    FilterClear,
+    Page,
+    PagePrev,
+    PageNext,
+    NoMatch,
     // --- the words the application-centric file is made of ---
     Base,
     BaseHelp,
@@ -733,6 +754,10 @@ enum K {
     CredApiKey,
     Members,
     MembersHelp,
+    Excluded,
+    ExcludedHelp,
+    ExcludedNone,
+    CredNoneNeeded,
     Uuid,
     Emails,
     AddEmail,
@@ -757,6 +782,7 @@ enum K {
     BearerOnce,
     BearerClickHint,
     // --- refusals a form makes on its own ---
+    ExcludedNotAnon,
     EmailRequired,
     NameRequired,
     KeyIdRequired,
@@ -937,6 +963,13 @@ fn t(lang: Lang, key: K) -> &'static str {
             lang,
             "is on the denied list, which outranks every grant.",
             "è nella lista denied, che batte ogni concessione.",
+        ),
+        K::WhyExcluded => m(
+            lang,
+            "is excluded by the scope that answered, ahead of its own grant. This is local: \
+             another scope may still admit them.",
+            "è escluso dallo scope che ha risposto, prima della sua stessa concessione. È \
+             locale: un altro scope può comunque ammetterlo.",
         ),
         K::WhyNoApplication => m(
             lang,
@@ -1145,6 +1178,33 @@ fn t(lang: Lang, key: K) -> &'static str {
         ),
         K::NewName => m(lang, "name (rename)", "nome (rinomina)"),
 
+        K::Filter => m(lang, "filter", "filtro"),
+        K::FilterClear => m(lang, "clear the filter", "azzera il filtro"),
+        K::Page => m(lang, "page", "pagina"),
+        K::PagePrev => m(lang, "previous", "precedente"),
+        K::PageNext => m(lang, "next", "successiva"),
+        K::NoMatch => m(
+            lang,
+            "nothing here matches that filter.",
+            "niente qui corrisponde a quel filtro.",
+        ),
+
+        K::Excluded => m(lang, "excluded", "esclusi"),
+        K::ExcludedHelp => m(
+            lang,
+            "Kept OUT of this scope, whatever else admits them: one per line, an email or a \
+             uuid for a person, '@name' for a group. Checked before the grant, so it beats a \
+             group membership and it beats 'authenticated'. An email nobody here owns is kept \
+             as written \u{2014} that is how a stranger is excluded.",
+            "Tenuti FUORI da questo scope, qualunque altra cosa li ammetta: uno per riga, \
+             un\u{2019}email o un uuid per una persona, '@nome' per un gruppo. Controllato prima \
+             della concessione, quindi batte l\u{2019}appartenenza a un gruppo e batte \
+             \u{2018}authenticated\u{2019}. Un\u{2019}email che qui non è di nessuno resta com\u{2019}è \
+             scritta: è così che si esclude un estraneo.",
+        ),
+        K::ExcludedNone => m(lang, "nobody", "nessuno"),
+        K::CredNoneNeeded => m(lang, "none needed", "nessuna necessaria"),
+
         K::ConfirmUserRm => m(
             lang,
             "The roster row goes, and every api key it owns with it. It does NOT keep them \
@@ -1221,6 +1281,13 @@ fn t(lang: Lang, key: K) -> &'static str {
             "Fai clic sulla credenziale per selezionarla tutta, poi copiala.",
         ),
 
+        K::ExcludedNotAnon => m(
+            lang,
+            "an anonymous scope grants with no credential at all, so an excluded client would \
+             simply send none. Make it authenticated, or narrow the urls",
+            "uno scope anonymous concede senza alcuna credenziale, quindi un client escluso \
+             semplicemente non ne manderebbe nessuna. Rendilo authenticated, o restringi le url",
+        ),
         K::EmailRequired => m(lang, "an email is required", "serve un'email"),
         K::NameRequired => m(lang, "a name is required", "serve un nome"),
         K::KeyIdRequired => m(
@@ -1573,8 +1640,6 @@ enum Route {
     Apps,
     /// One application and its scopes, in file order.
     App(String),
-    /// The user groups.
-    Groups,
     Denied,
     Users,
     /// One roster row, addressed by its uuid: the identity is what the file references,
@@ -1632,7 +1697,6 @@ impl Route {
             Route::Dashboard => "/".to_string(),
             Route::Apps => "/apps".to_string(),
             Route::App(a) => format!("/apps/{}", seg(a)),
-            Route::Groups => "/groups".to_string(),
             Route::Denied => "/denied".to_string(),
             Route::Users => "/users".to_string(),
             Route::User(u) => format!("/users/{}", seg(u)),
@@ -1693,7 +1757,7 @@ impl Route {
             | Route::ScopeEdit(..)
             | Route::ScopeRm(..)
             | Route::ScopeMove(..) => Route::Apps,
-            Route::GroupAdd | Route::GroupEdit(_) | Route::GroupRm(_) => Route::Groups,
+            Route::GroupAdd | Route::GroupEdit(_) | Route::GroupRm(_) => Route::Users,
             other => other.clone(),
         }
     }
@@ -1721,21 +1785,21 @@ impl Route {
             | Route::AppEdit(a)
             | Route::AppRm(a) => Route::App(a.clone()),
             Route::AppAdd => Route::Apps,
-            Route::GroupAdd | Route::GroupEdit(_) | Route::GroupRm(_) => Route::Groups,
+            Route::GroupAdd | Route::GroupEdit(_) | Route::GroupRm(_) => Route::Users,
             Route::DenyAdd | Route::DenyRm(_) => Route::Denied,
             other => other.clone(),
         }
     }
 
     /// The `<title>`: the section's own name, untranslated, because that is the word an
-    /// operator types. Matched on `self` and not on [`Route::tab`]: `denied` now shares the
-    /// `users` *tab*, but its `<title>` should still say which page this is, not which tab
-    /// is lit.
+    /// operator types. Matched on `self` and not on [`Route::tab`]: `denied` and
+    /// `user_groups` now share the `users` *tab*, but a form's `<title>` should still say
+    /// which section it edits, not which tab is lit.
     fn title(&self) -> &'static str {
         match self {
             Route::Denied | Route::DenyAdd | Route::DenyRm(_) => "denied",
+            Route::GroupAdd | Route::GroupEdit(_) | Route::GroupRm(_) => "user_groups",
             _ => match self.tab() {
-                Route::Groups => "user_groups",
                 Route::Apps => "applications",
                 Route::Users => "users",
                 Route::Can => "can",
@@ -1800,7 +1864,9 @@ fn route(path: &str, base: &str) -> Option<Route> {
         ["apps", a, "scopes", n, "rm"] if !a.is_empty() => Some(Route::ScopeRm(s(a), s(n))),
         ["apps", a, "scopes", n, "move"] if !a.is_empty() => Some(Route::ScopeMove(s(a), s(n))),
 
-        ["groups"] => Some(Route::Groups),
+        // `/groups` is now a section of the users page rather than a page: an old link
+        // lands where the list actually is instead of on a 404.
+        ["groups"] => Some(Route::Users),
         ["groups", ACTION_ADD] => Some(Route::GroupAdd),
         ["groups", n, "edit"] if !n.is_empty() => Some(Route::GroupEdit(s(n))),
         ["groups", n, "rm"] if !n.is_empty() => Some(Route::GroupRm(s(n))),
@@ -2143,6 +2209,161 @@ fn preserved_query(query: &str) -> Vec<(String, String)> {
 }
 
 // ---------------------------------------------------------------------------
+// Filtering and paging a list
+// ---------------------------------------------------------------------------
+//
+// Both live entirely in the query string, which is the only place they *can* live: a page
+// here must work with scripting off, and a `GET` never mutates, so a filter is a form that
+// navigates and a page is a link. That also makes both bookmarkable and survivable across a
+// language change for free — `preserved_query` already carries every parameter but the two
+// preferences through the Settings form.
+//
+// Each list namespaces its two parameters with a prefix (`uq`/`up`, `gq`/`gp`, …) so that
+// several lists can sit on one page — as users, groups and denied now do — without stealing
+// each other's state.
+//
+// Scopes are deliberately NOT in this scheme. They are first-match-wins, their position is
+// their meaning, and the ↑/↓ buttons move a scope within the *file*: a filtered view would
+// show positions that are not the file's and a move that appears to do nothing. A list whose
+// order is data does not get to be reordered by a search box.
+
+/// Rows of one list per page.
+const PAGE_SIZE: usize = 25;
+
+/// One list's filter and page, read out of the query string.
+struct Listing {
+    /// Namespaces this list's two parameters. `""` is legal and means the page has one list.
+    prefix: &'static str,
+    /// The filter as typed, lowercased once so [`Listing::keeps`] does not do it per row.
+    q: String,
+    /// 0-based, as requested. [`Listing::window`] is what clamps it to what exists.
+    page: usize,
+}
+
+impl Listing {
+    fn read(prefix: &'static str, query: &str) -> Listing {
+        let q = query_param(query, &format!("{prefix}q")).unwrap_or_default();
+        let page = query_param(query, &format!("{prefix}p"))
+            .and_then(|p| p.trim().parse::<usize>().ok())
+            .unwrap_or(1);
+        Listing {
+            prefix,
+            q: q.trim().to_lowercase(),
+            // Pages are 1-based in the URL, where a human reads them, and 0-based here.
+            page: page.saturating_sub(1),
+        }
+    }
+
+    /// Does this row survive the filter? A plain case-insensitive substring, over whatever
+    /// the caller decided the row's searchable text is — no globs, because the box next to a
+    /// list of URL patterns must not look like it takes one.
+    fn keeps(&self, hay: &str) -> bool {
+        self.q.is_empty() || hay.to_lowercase().contains(&self.q)
+    }
+
+    /// The visible slice of `matched` rows, and how many pages there are.
+    ///
+    /// The page is clamped rather than refused: a filter that shrinks the list under the
+    /// page someone was on is an ordinary thing to do, and answering it with an empty table
+    /// would read as "nothing matches" when plenty does.
+    fn window(&self, matched: usize) -> (usize, usize, usize, usize) {
+        let pages = matched.div_ceil(PAGE_SIZE).max(1);
+        let page = self.page.min(pages - 1);
+        let start = page * PAGE_SIZE;
+        (start, (start + PAGE_SIZE).min(matched), page, pages)
+    }
+
+    /// This list's own two parameter names.
+    fn q_name(&self) -> String {
+        format!("{}q", self.prefix)
+    }
+    fn p_name(&self) -> String {
+        format!("{}p", self.prefix)
+    }
+}
+
+/// An href for this page with this list's parameters replaced by `set`, everything else
+/// kept: `[("up", "3")]` pages, `[]` clears both the filter and the page.
+///
+/// Every byte is a constant, a [`Route::path`] or a re-encoded parameter, so the result is
+/// safe in an `href` for the same reason [`preference_href`]'s is.
+fn listing_href(v: &View, l: &Listing, set: &[(String, String)]) -> String {
+    let (q_name, p_name) = (l.q_name(), l.p_name());
+    let mut ser = form_urlencoded::Serializer::new(String::new());
+    for (k, val) in form_urlencoded::parse(v.query.as_bytes()) {
+        if k != q_name && k != p_name {
+            ser.append_pair(&k, &val);
+        }
+    }
+    for (k, val) in set {
+        ser.append_pair(k, val);
+    }
+    let q = ser.finish();
+    if q.is_empty() {
+        v.href(&v.at)
+    } else {
+        format!("{}?{q}", v.href(&v.at))
+    }
+}
+
+/// This list's page `page` (1-based), with its filter kept.
+fn page_href(v: &View, l: &Listing, page: usize) -> String {
+    let mut set = Vec::new();
+    if !l.q.is_empty() {
+        set.push((l.q_name(), l.q.clone()));
+    }
+    set.push((l.p_name(), page.to_string()));
+    listing_href(v, l, &set)
+}
+
+/// The filter box and the pager for one list, rendered above it.
+///
+/// The form is a `GET` back to this same route, exactly like the Settings menu: submitting
+/// it *is* the navigation. Every other parameter on the page rides along as a hidden input
+/// so filtering one list does not reset another's page — except this list's own page, which
+/// is dropped on purpose, because a new filter belongs at the top of its results.
+fn list_controls(v: &View, l: &Listing, matched: usize, total: usize) -> Markup {
+    let (_, _, page, pages) = l.window(matched);
+    let q_name = l.q_name();
+    let p_name = l.p_name();
+    html! {
+        div class="listctl" {
+            form method="get" action=(v.href(&v.at)) {
+                @for (k, val) in preserved_query(v.query) {
+                    @if k != q_name && k != p_name {
+                        input type="hidden" name=(k) value=(val);
+                    }
+                }
+                input type="search" name=(q_name) value=(l.q) placeholder=(v.t(K::Filter))
+                      aria-label=(v.t(K::Filter));
+                button type="submit" class="pill" { (v.t(K::Apply)) }
+                @if !l.q.is_empty() {
+                    a class="pill" href=(listing_href(v, l, &[])) title=(v.t(K::FilterClear)) { "×" }
+                }
+            }
+            @if pages > 1 {
+                span class="pager" {
+                    @if page > 0 {
+                        a class="pill" href=(page_href(v, l, page)) { "← " (v.t(K::PagePrev)) }
+                    } @else {
+                        span class="pill off" { "← " (v.t(K::PagePrev)) }
+                    }
+                    span class="muted" { (v.t(K::Page)) " " (page + 1) "/" (pages) }
+                    @if page + 1 < pages {
+                        a class="pill" href=(page_href(v, l, page + 2)) { (v.t(K::PageNext)) " →" }
+                    } @else {
+                        span class="pill off" { (v.t(K::PageNext)) " →" }
+                    }
+                }
+            }
+            @if !l.q.is_empty() {
+                span class="muted" { (matched) "/" (total) }
+            }
+        }
+    }
+}
+
+// ---------------------------------------------------------------------------
 // The shell
 // ---------------------------------------------------------------------------
 
@@ -2197,7 +2418,6 @@ impl View<'_> {
 fn shell(v: &View, title: &str, content: Markup) -> Markup {
     let tabs = [
         (Route::Dashboard, v.t(K::Dashboard)),
-        (Route::Groups, v.t(K::Groups)),
         (Route::Apps, v.t(K::Apps)),
         (Route::Users, v.t(K::Users)),
         (Route::Can, v.t(K::Can)),
@@ -2658,7 +2878,7 @@ fn page_dashboard(v: &View, doc: &AccessFile, access: &Access) -> Markup {
                 ("scopes", scope_count, None),
                 ("users", doc.users.len(), Some(Route::Users)),
                 ("api_keys", key_count, None),
-                ("user_groups", doc.user_groups.len(), Some(Route::Groups)),
+                ("user_groups", doc.user_groups.len(), Some(Route::Users)),
                 ("denied", doc.denied.len(), Some(Route::Denied)),
             ] {
                 @if let Some(r) = &route {
@@ -2732,15 +2952,33 @@ fn scope_shadowed(access: &Access, app_idx: usize, urls: &[String], scope_idx: u
             .all(|u| earlier.iter().any(|s| s.urls.allows(Some(u))))
 }
 
-/// `/users` — the roster.
+/// `/users` — everything the file says about people, in three sections: the groups, the
+/// roster, and the veto.
+///
+/// One tab, because all three answer the same question from different sides, and an operator
+/// editing one usually has to look at another. `user_groups` leads, above the roster,
+/// because a group is what a scope names and the roster is what a group names: the page
+/// reads outside-in. Each section carries its own filter and pager, namespaced (`g`, `u`,
+/// `d`) so that searching one does not disturb the others; `/groups` and `/denied` still
+/// resolve, to this page and to [`page_denied`], so no bookmark breaks.
 fn page_users(v: &View, doc: &AccessFile, access: &Access) -> Markup {
+    let lu = Listing::read("u", v.query);
+    let rows: Vec<&UserSpec> = doc.users.iter().filter(|u| l_keeps_user(&lu, u)).collect();
+    let (start, end, _, _) = lu.window(rows.len());
     html! {
-        h1 { (section_heading(v.t(K::Users), "users")) }
+        h1 { (v.t(K::Users)) }
         p class="lede" { (v.t(K::UsersIntro)) }
+
+        (groups_section(v, doc))
+
+        h2 { (section_heading(v.t(K::Users), "users")) }
         p class="primary" { (act(v, &Route::UserAdd, &format!("+ {}", v.t(K::Add)))) }
+        (list_controls(v, &lu, rows.len(), doc.users.len()))
         div class="panel" {
             @if doc.users.is_empty() {
                 span class="muted" { (v.t(K::None)) }
+            } @else if rows.is_empty() {
+                span class="muted" { (v.t(K::NoMatch)) }
             } @else {
                 table {
                     thead { tr {
@@ -2749,7 +2987,7 @@ fn page_users(v: &View, doc: &AccessFile, access: &Access) -> Markup {
                         th {}
                     } }
                     tbody {
-                        @for u in &doc.users {
+                        @for u in &rows[start..end] {
                             @let uuid = u.uuid.trim().to_ascii_lowercase();
                             tr {
                                 td data-label=(v.t(K::Emails)) {
@@ -2769,17 +3007,32 @@ fn page_users(v: &View, doc: &AccessFile, access: &Access) -> Markup {
             }
         }
 
-        // The `denied` veto, as a second section of this same page rather than a tab of
-        // its own: the two sections are both about people, and an operator managing the
+        // The `denied` veto, as the last section of this same page rather than a tab of
+        // its own: all three sections are about people, and an operator managing the
         // roster is the one most likely to also need the veto list. The route `/denied`
         // still exists on its own (see `page_denied`) for the add/remove PRG redirects and
         // for a direct link; `denied_list` is what keeps the two views of the same list
         // from ever drifting apart.
-        h2 { (v.t(K::Denied)) }
+        h2 { (section_heading(v.t(K::Denied), "denied")) }
         p class="lede sub" { (v.t(K::DeniedIntro)) }
         p class="primary" { (act(v, &Route::DenyAdd, &format!("+ {}", v.t(K::Add)))) }
         (denied_list(v, doc))
     }
+}
+
+/// A roster row's searchable text: every identifier, the uuid, and each key's id — all of
+/// what identifies the person, not just the label the table happens to show.
+fn l_keeps_user(l: &Listing, u: &UserSpec) -> bool {
+    let mut hay = u.uuid.trim().to_string();
+    for e in &u.emails {
+        hay.push(' ');
+        hay.push_str(e.trim());
+    }
+    for k in &u.api_keys {
+        hay.push(' ');
+        hay.push_str(k.id.trim());
+    }
+    l.keeps(&hay)
 }
 
 /// `/users/{uuid}` — one roster row, as the file stores it, plus the scopes computed from
@@ -2897,26 +3150,45 @@ fn page_user(v: &View, doc: &AccessFile, access: &Access, key: &str) -> (u16, Ma
     )
 }
 
-/// `/groups` — each `user_groups` entry, who it references, and everything that names it.
-/// Members are people now: an email where a roster row still resolves it, the raw uuid
-/// where none does, and flagged when it matches nobody at all.
-fn page_groups(v: &View, doc: &AccessFile) -> Markup {
+/// The `user_groups` section of [`page_users`]: each entry, who it references, and
+/// everything that names it. Members are people now: an email where a roster row still
+/// resolves it, the raw uuid where none does, and flagged when it matches nobody at all.
+///
+/// A section rather than a page of its own: a group only ever means something in terms of
+/// the roster below it, and the nav bar had a tab for a list that is usually three lines
+/// long.
+fn groups_section(v: &View, doc: &AccessFile) -> Markup {
+    let l = Listing::read("g", v.query);
+    // A group is searchable by its own name and by who is in it, because "which group is
+    // bob in?" is the question this list is usually opened to answer.
+    let rows: Vec<(&String, &Vec<String>)> = doc
+        .user_groups
+        .iter()
+        .filter(|(name, members)| {
+            let people: Vec<String> = members.iter().map(|m| label_of(doc, m)).collect();
+            l.keeps(&format!("@{name} {}", people.join(" ")))
+        })
+        .collect();
+    let (start, end, _, _) = l.window(rows.len());
     html! {
-        h1 { (section_heading(v.t(K::Groups), "user_groups")) }
-        p class="lede" { (v.t(K::GroupsIntro)) }
+        h2 { (section_heading(v.t(K::Groups), "user_groups")) }
+        p class="lede sub" { (v.t(K::GroupsIntro)) }
         p class="primary" { (act(v, &Route::GroupAdd, &format!("+ {}", v.t(K::Add)))) }
+        (list_controls(v, &l, rows.len(), doc.user_groups.len()))
         @if doc.user_groups.is_empty() {
             div class="panel" { span class="muted" { (v.t(K::None)) } }
+        } @else if rows.is_empty() {
+            div class="panel" { span class="muted" { (v.t(K::NoMatch)) } }
         } @else {
-            @for (name, members) in &doc.user_groups {
+            @for (name, members) in &rows[start..end] {
                 @let refs = user_group_refs(doc, name);
                 div class="panel" {
-                    h2 class="tight" {
+                    h3 class="tight" {
                         code { "@" (name) }
                         " "
                         span class="pills" {
-                            (act(v, &Route::GroupEdit(name.clone()), v.t(K::Edit)))
-                            (act_rm(v, &Route::GroupRm(name.clone()), v.t(K::Remove)))
+                            (act(v, &Route::GroupEdit((*name).clone()), v.t(K::Edit)))
+                            (act_rm(v, &Route::GroupRm((*name).clone()), v.t(K::Remove)))
                         }
                     }
                     p class="muted" {
@@ -2935,7 +3207,7 @@ fn page_groups(v: &View, doc: &AccessFile) -> Markup {
                         p class="muted" { (v.t(K::None)) }
                     } @else {
                         ul class="plain" {
-                            @for m in members {
+                            @for m in members.iter() {
                                 @let uuid = m.trim().to_ascii_lowercase();
                                 li {
                                     @match user_pos(doc, &uuid) {
@@ -2959,25 +3231,45 @@ fn page_groups(v: &View, doc: &AccessFile) -> Markup {
     }
 }
 
-/// `/apps` — the applications, with their base and scope count.
+/// `/apps` — the applications, with their base, their scope count, and which credential
+/// classes get in anywhere inside them ([`app_credentials`]).
 fn page_apps(v: &View, doc: &AccessFile) -> Markup {
+    let l = Listing::read("a", v.query);
+    // Filtered on everything the row shows, so what an operator reads is what they can
+    // search: the name, the area, and the credentials column.
+    let rows: Vec<&AppSpec> = doc
+        .applications
+        .iter()
+        .filter(|a| {
+            let creds = match app_credentials(a) {
+                None => "anonymous".to_string(),
+                Some(list) => list.join(" "),
+            };
+            l.keeps(&format!("{} {} {creds}", a.name.trim(), a.base.join(" ")))
+        })
+        .collect();
+    let (start, end, _, _) = l.window(rows.len());
     html! {
         h1 { (section_heading(v.t(K::Apps), "applications")) }
         p class="lede" { (v.t(K::AppsIntro)) }
         p class="primary" { (act(v, &Route::AppAdd, &format!("+ {}", v.t(K::Add)))) }
+        (list_controls(v, &l, rows.len(), doc.applications.len()))
         div class="panel" {
             @if doc.applications.is_empty() {
                 span class="muted" { (v.t(K::None)) }
+            } @else if rows.is_empty() {
+                span class="muted" { (v.t(K::NoMatch)) }
             } @else {
                 table {
                     thead { tr {
                         th { "name" }
                         th { (v.t(K::Base)) }
                         th { (v.t(K::Scopes)) }
+                        th { (v.t(K::Credentials)) }
                         th {}
                     } }
                     tbody {
-                        @for a in &doc.applications {
+                        @for a in &rows[start..end] {
                             tr {
                                 td data-label="name" {
                                     a href=(v.href(&Route::App(a.name.trim().to_string()))) {
@@ -2986,6 +3278,15 @@ fn page_apps(v: &View, doc: &AccessFile) -> Markup {
                                 }
                                 td data-label=(v.t(K::Base)) { (url_list(v.lang, Some(&a.base), "")) }
                                 td data-label=(v.t(K::Scopes)) { (a.scopes.len()) }
+                                td data-label=(v.t(K::Credentials)) {
+                                    @match app_credentials(a) {
+                                        None => (tag("warn", v.t(K::CredNoneNeeded))),
+                                        Some(list) if list.is_empty() => {
+                                            span class="muted" { (v.t(K::None)) }
+                                        }
+                                        Some(list) => code { (list.join(", ")) }
+                                    }
+                                }
                                 td class="pills" {
                                     (act_rm(v, &Route::AppRm(a.name.trim().to_string()), v.t(K::Remove)))
                                 }
@@ -3122,13 +3423,91 @@ fn scope_block(
                         }
                     }
                 }
-                @if let Some(creds) = &s.credentials {
-                    div class="muted" { (v.t(K::Credentials)) ": " (creds.join(", ")) }
-                }
             }
             _ => {}
         }
+        // Credentials, and the exclusions, on every kind rather than only where the file
+        // carries a field. An absent `credentials` means BOTH, which is the one default in
+        // this format an operator can misread as "none", and `anonymous`/`authenticated`
+        // have an answer too even though they have no field: this line says what actually
+        // gets in, which is what the question is.
+        div class="muted" {
+            (v.t(K::Credentials)) ": "
+            @match scope_credentials(s) {
+                None => span class="mono" { (v.t(K::CredNoneNeeded)) },
+                Some(list) => code { (list.join(", ")) }
+            }
+        }
+        @if access != "anonymous" {
+            @let excluded = scope_excluded_display(doc, s);
+            div class="muted" {
+                (v.t(K::Excluded)) ": "
+                @if excluded.is_empty() {
+                    span { (v.t(K::ExcludedNone)) }
+                } @else {
+                    @for (i, e) in excluded.iter().enumerate() {
+                        @if i > 0 { ", " }
+                        code class="bad" { (e) }
+                    }
+                }
+            }
+        }
     }
+}
+
+/// Which credential classes actually get into this scope, as the file's own words.
+///
+/// `None` is not "nothing": it is an `anonymous` scope, which needs no credential at all.
+/// `authenticated` is `login` alone, because Cognito vouches for no static key of ours, and
+/// `restricted` with no `credentials` field is **both** — the default this exists to spell
+/// out, since an absent field is exactly where a reader guesses wrong.
+fn scope_credentials(s: &ScopeSpec) -> Option<Vec<&'static str>> {
+    match s.access.trim() {
+        "anonymous" => None,
+        "authenticated" => Some(vec!["login"]),
+        _ => match &s.credentials {
+            None => Some(vec!["login", "api_key"]),
+            Some(list) => {
+                let mut out = Vec::new();
+                if list.iter().any(|c| c.trim() == "login") {
+                    out.push("login");
+                }
+                if list.iter().any(|c| c.trim() == "api_key") {
+                    out.push("api_key");
+                }
+                Some(out)
+            }
+        },
+    }
+}
+
+/// Every credential class that gets in **anywhere** in this application: the union of
+/// [`scope_credentials`] over its scopes, for the one column [`page_apps`] has room for.
+///
+/// A `None` from any scope (an `anonymous` one) makes the whole application answerable
+/// without a credential, and that outranks the rest of the union: it is the thing an
+/// operator scanning the list most needs to see.
+fn app_credentials(a: &AppSpec) -> Option<Vec<&'static str>> {
+    let (mut login, mut api_key) = (false, false);
+    for s in &a.scopes {
+        match scope_credentials(s) {
+            None => return None,
+            Some(list) => {
+                login |= list.contains(&"login");
+                api_key |= list.contains(&"api_key");
+            }
+        }
+    }
+    // Built in a fixed order rather than sorted, so the column reads the same way the scope
+    // below it does and the two can be compared at a glance.
+    let mut out = Vec::new();
+    if login {
+        out.push("login");
+    }
+    if api_key {
+        out.push("api_key");
+    }
+    Some(out)
 }
 
 /// A scope's `users` (resolved to a label where the roster still can) and `groups` (`@name`,
@@ -3138,6 +3517,27 @@ fn scope_members_display(doc: &AccessFile, s: &ScopeSpec) -> Vec<String> {
     let mut out: Vec<String> = s.users.iter().flatten().map(|u| label_of(doc, u)).collect();
     out.extend(s.groups.iter().flatten().map(|g| g.trim().to_string()));
     out
+}
+
+/// A scope's `excluded`, for display and for the form's textarea.
+///
+/// One flat list, because the field is one flat list: a `@group` stays as written, a uuid
+/// the roster still resolves becomes the person, and anything else — a stranger's email —
+/// stays exactly as the file spells it. [`parse_exclusions`] is the inverse, and the
+/// round-trip through the form is what that pairing has to keep exact.
+fn scope_excluded_display(doc: &AccessFile, s: &ScopeSpec) -> Vec<String> {
+    s.excluded
+        .iter()
+        .flatten()
+        .map(|e| {
+            let e = e.trim();
+            if e.starts_with('@') {
+                e.to_string()
+            } else {
+                label_of(doc, e)
+            }
+        })
+        .collect()
 }
 
 /// `/denied`: the veto list, standing on its own for a direct link and for the add/remove
@@ -3157,13 +3557,28 @@ fn page_denied(v: &View, doc: &AccessFile) -> Markup {
 /// [`page_denied`] because [`page_users`] renders the identical panel as its own second
 /// section, and the two must never be free to drift apart.
 fn denied_list(v: &View, doc: &AccessFile) -> Markup {
+    let l = Listing::read("d", v.query);
+    // Filtered on what the row *shows*, which for an enrolled user is their label rather
+    // than the uuid the file stores: searching for the email you can see must work.
+    let rows: Vec<&String> = doc
+        .denied
+        .iter()
+        .filter(|d| {
+            let raw = d.trim().to_ascii_lowercase();
+            l.keeps(&format!("{raw} {}", label_of(doc, &raw)))
+        })
+        .collect();
+    let (start, end, _, _) = l.window(rows.len());
     html! {
+        (list_controls(v, &l, rows.len(), doc.denied.len()))
         div class="panel" {
             @if doc.denied.is_empty() {
                 span class="muted" { (v.t(K::None)) }
+            } @else if rows.is_empty() {
+                span class="muted" { (v.t(K::NoMatch)) }
             } @else {
                 ul class="plain" {
-                    @for d in &doc.denied {
+                    @for d in &rows[start..end] {
                         @let raw = d.trim().to_ascii_lowercase();
                         li class="pills" {
                             @match user_pos(doc, &raw) {
@@ -3250,6 +3665,9 @@ fn verdict(v: &View, access: &Access, email_in: &str, url: &str) -> (bool, Marku
                 }
                 Decision::Granted { app, scope } => { (at(app, scope)) " " (v.t(K::WhyGranted)) }
                 Decision::Vetoed => { code { (email) } " " (v.t(K::WhyVetoed)) }
+                Decision::Excluded { app, scope } => {
+                    (at(app, scope)) " " (v.t(K::WhyExcluded))
+                }
                 Decision::NoApplication => { code { (url) } " " (v.t(K::WhyNoApplication)) }
                 Decision::NoScope { app } => { code { (app) } " " (v.t(K::WhyNoScope)) }
                 Decision::Unauthenticated { app, scope } => {
@@ -3463,6 +3881,10 @@ struct ScopeForm {
     members: String,
     cred_login: bool,
     cred_api_key: bool,
+    /// The scope's own `excluded`, one per line: a person, a `@group`, or a stranger's
+    /// email. Its own box and not a `-` prefix inside `members`, because the two lists say
+    /// opposite things and a typo that turned one into the other would fail *open*.
+    excluded: String,
     notes: String,
 }
 
@@ -3482,6 +3904,7 @@ impl ScopeForm {
             members: scope_members_display(doc, s).join("\n"),
             cred_login,
             cred_api_key,
+            excluded: scope_excluded_display(doc, s).join("\n"),
             notes: s.notes.clone().unwrap_or_default(),
         }
     }
@@ -3493,6 +3916,7 @@ impl ScopeForm {
             members: f.get("members").to_string(),
             cred_login: f.checked("cred_login"),
             cred_api_key: f.checked("cred_api_key"),
+            excluded: f.get("excluded").to_string(),
             notes: f.get("notes").to_string(),
         }
     }
@@ -3531,6 +3955,8 @@ fn page_scope_form(
                 }
                 (urls_field(v.t(K::Members), "members", &f.members, html! { (v.t(K::MembersHelp)) },
                             about("members")))
+                (urls_field(v.t(K::Excluded), "excluded", &f.excluded,
+                            html! { (v.t(K::ExcludedHelp)) }, about("excluded")))
                 div {
                     span class="lbl" { (v.t(K::Credentials)) }
                     label class="radio" {
@@ -4137,8 +4563,7 @@ fn mutate(v: &View, form: &Form) -> Outcome {
         Route::ScopeAdd(app) => {
             let f = ScopeForm::read(form);
             let r = (|| -> Result<(), Refusal> {
-                let spec = scope_spec(&doc, &f, form.lines("urls"))
-                    .map_err(|e| Refusal::on("members", e))?;
+                let spec = scope_spec(v, &doc, &f, form.lines("urls"))?;
                 add_scope(&mut doc, app, spec, None).map_err(|e| Refusal::on("name", e))?;
                 commit(v, &doc, "scope add", &format!("{app}/{}", f.name.trim()))?;
                 Ok(())
@@ -4157,8 +4582,7 @@ fn mutate(v: &View, form: &Form) -> Outcome {
                     return Err(Refusal::on("name", v.t(K::NameRequired)));
                 }
                 rename_scope(&mut doc, app, target, &name).map_err(|e| Refusal::on("name", e))?;
-                let spec = scope_spec(&doc, &f, form.lines("urls"))
-                    .map_err(|e| Refusal::on("members", e))?;
+                let spec = scope_spec(v, &doc, &f, form.lines("urls"))?;
                 *scope_mut(&mut doc, app, &name)? = spec;
                 commit(v, &doc, "scope set", &format!("{app}/{name}"))?;
                 Ok(name)
@@ -4241,7 +4665,7 @@ fn mutate(v: &View, form: &Form) -> Outcome {
                 Ok(())
             })();
             match r {
-                Ok(()) => Outcome::Done(Route::Groups, Msg::GroupAdded),
+                Ok(()) => Outcome::Done(Route::Users, Msg::GroupAdded),
                 Err(e) => Outcome::Page(400, title, page_group_form(v, None, &f, Some(&e))),
             }
         }
@@ -4258,7 +4682,7 @@ fn mutate(v: &View, form: &Form) -> Outcome {
                 Ok(())
             })();
             match r {
-                Ok(()) => Outcome::Done(Route::Groups, Msg::GroupSaved),
+                Ok(()) => Outcome::Done(Route::Users, Msg::GroupSaved),
                 Err(e) => Outcome::Page(400, title, page_group_form(v, Some(target), &f, Some(&e))),
             }
         }
@@ -4272,7 +4696,7 @@ fn mutate(v: &View, form: &Form) -> Outcome {
                 Ok(())
             })();
             match r {
-                Ok(()) => Outcome::Done(Route::Groups, Msg::GroupRemoved),
+                Ok(()) => Outcome::Done(Route::Users, Msg::GroupRemoved),
                 Err(e) => Outcome::Page(
                     400,
                     title,
@@ -4354,10 +4778,15 @@ fn mutate(v: &View, form: &Form) -> Outcome {
 /// three words), and the membership fields populated only under `restricted` — present on
 /// any other kind is fatal, so this is what keeps a stray tick from ever reaching the
 /// compile.
-fn scope_spec(doc: &AccessFile, f: &ScopeForm, urls: Vec<String>) -> Result<ScopeSpec, String> {
+fn scope_spec(
+    v: &View,
+    doc: &AccessFile,
+    f: &ScopeForm,
+    urls: Vec<String>,
+) -> Result<ScopeSpec, Refusal> {
     let access = f.access.trim().to_string();
     let (users, groups, credentials) = if access == "restricted" {
-        let (u, g) = parse_members(doc, &f.members)?;
+        let (u, g) = parse_members(doc, &f.members).map_err(|e| Refusal::on("members", e))?;
         let credentials = if !f.cred_login && !f.cred_api_key {
             None
         } else {
@@ -4378,6 +4807,19 @@ fn scope_spec(doc: &AccessFile, f: &ScopeForm, urls: Vec<String>) -> Result<Scop
     } else {
         (None, None, None)
     };
+    // Exclusions belong to `restricted` *and* to `authenticated` — that kind lists nobody,
+    // so an exclusion is the only way to keep one person out of it. `anonymous` refuses
+    // them, and refuses them out loud: silently dropping what an operator typed into a box
+    // meant to keep somebody out is the worst of the three possible answers.
+    let excluded = if access == "anonymous" {
+        if !f.excluded.trim().is_empty() {
+            return Err(Refusal::on("excluded", v.t(K::ExcludedNotAnon)));
+        }
+        None
+    } else {
+        let list = parse_exclusions(doc, &f.excluded).map_err(|e| Refusal::on("excluded", e))?;
+        (!list.is_empty()).then_some(list)
+    };
     Ok(ScopeSpec {
         name: f.name.trim().to_string(),
         urls,
@@ -4385,6 +4827,7 @@ fn scope_spec(doc: &AccessFile, f: &ScopeForm, urls: Vec<String>) -> Result<Scop
         users,
         groups,
         credentials,
+        excluded,
         notes: match f.notes.trim() {
             "" => None,
             n => Some(n.to_string()),
@@ -4409,6 +4852,38 @@ fn parse_members(doc: &AccessFile, text: &str) -> Result<(Vec<String>, Vec<Strin
         }
     }
     Ok((users, groups))
+}
+
+/// The inverse of [`scope_excluded_display`]: one textarea into a scope's `excluded`.
+///
+/// Unlike [`parse_members`] this accepts an email the roster has never heard of, and keeps
+/// it. That is the whole point of the field on an `authenticated` scope, which admits
+/// exactly the people who are in no roster row — refusing to name them here would leave
+/// that scope with no exclusion at all. Anyone the roster *does* know is written as their
+/// uuid, so the exclusion covers every identifier they have.
+fn parse_exclusions(doc: &AccessFile, text: &str) -> Result<Vec<String>, String> {
+    let mut out = Vec::new();
+    for line in text.lines().map(str::trim).filter(|l| !l.is_empty()) {
+        if line.starts_with('@') {
+            match group_ref(line) {
+                Some(g) if doc.user_groups.contains_key(g) => out.push(line.to_string()),
+                Some(g) => return Err(format!("no user group '@{g}'")),
+                None => return Err(format!("'{line}': a group reference is written '@name'")),
+            }
+            continue;
+        }
+        match user_pos(doc, line) {
+            Some(i) => out.push(doc.users[i].uuid.trim().to_ascii_lowercase()),
+            None if line.contains('@') => out.push(norm_email(line)),
+            None => {
+                return Err(format!(
+                    "'{line}': not a user, not '@group' and not an email. An exclusion names \
+                     somebody enrolled, a group, or a stranger by their email"
+                ))
+            }
+        }
+    }
+    Ok(out)
 }
 
 /// [`parse_members`] for a `user_groups` member list, which may only ever hold uuids: a
@@ -4616,7 +5091,6 @@ fn handle(mut req: Request, cfg: &Config) {
     let title = at.title();
     let (status, content, title) = match &at {
         Route::Dashboard => (200, page_dashboard(&v, &doc, &access), v.t(K::Dashboard)),
-        Route::Groups => (200, page_groups(&v, &doc), title),
         Route::Apps => (200, page_apps(&v, &doc), title),
         Route::App(n) => {
             let (status, content) = page_app(&v, &doc, n);
@@ -4918,7 +5392,7 @@ fn handle(mut req: Request, cfg: &Config) {
             }
             None => (
                 404,
-                page_missing(&v, v.t(K::NoSuchGroup), n, &Route::Groups),
+                page_missing(&v, v.t(K::NoSuchGroup), n, &Route::Users),
                 title,
             ),
         },
@@ -4949,7 +5423,7 @@ fn handle(mut req: Request, cfg: &Config) {
             ),
             None => (
                 404,
-                page_missing(&v, v.t(K::NoSuchGroup), n, &Route::Groups),
+                page_missing(&v, v.t(K::NoSuchGroup), n, &Route::Users),
                 title,
             ),
         },
@@ -5252,7 +5726,7 @@ mod tests {
         assert_eq!(route("", ""), Some(Route::Dashboard));
         assert_eq!(route("/users", ""), Some(Route::Users));
         assert_eq!(route("/users/", ""), Some(Route::Users));
-        assert_eq!(route("/groups", ""), Some(Route::Groups));
+        assert_eq!(route("/groups", ""), Some(Route::Users));
         assert_eq!(route("/apps", ""), Some(Route::Apps));
         assert_eq!(route("/denied", ""), Some(Route::Denied));
         assert_eq!(route("/can", ""), Some(Route::Can));
@@ -5621,13 +6095,19 @@ mod tests {
 
     /// Render one read-only page of `SAMPLE` and hand back the HTML.
     fn render(name: &str, at: Route) -> String {
-        let path = scratch(name, SAMPLE);
+        render_of(name, SAMPLE, at, "")
+    }
+
+    /// [`render`] with a query string and a fixture of its own: what a filter or a pager
+    /// arrives as, since both live entirely in the URL.
+    fn render_of(name: &str, fixture: &str, at: Route, query: &str) -> String {
+        let path = scratch(name, fixture);
         let cfg = cfg_for(&path, "");
         let (doc, access) = open_access_file(&cfg.access_path).unwrap();
-        let v = view(&cfg, at.clone(), "REV");
+        let mut v = view(&cfg, at.clone(), "REV");
+        v.query = query;
         let content = match &at {
             Route::Dashboard => page_dashboard(&v, &doc, &access),
-            Route::Groups => page_groups(&v, &doc),
             Route::Apps => page_apps(&v, &doc),
             Route::App(n) => page_app(&v, &doc, n).1,
             Route::Denied => page_denied(&v, &doc),
@@ -5704,10 +6184,104 @@ mod tests {
     }
 
     #[test]
-    fn groups_page_names_who_references_a_group() {
-        let html = render("groups", Route::Groups);
+    fn the_users_page_leads_with_the_groups_section() {
+        let html = render("groups", Route::Users);
+        // The groups section is on the users page now, and it is ABOVE the roster.
+        let g = html.find("user_groups").expect("no user_groups section");
+        let u = html.rfind(">users<").expect("no users section");
+        assert!(g < u, "user_groups must come before users: {html}");
         assert!(html.contains("referenced by"));
         assert!(html.contains("mpa/admin"));
+        // And it is no longer a tab of its own.
+        assert!(
+            !html.contains("href=\"/groups\""),
+            "the nav must not offer a groups tab any more: {html}"
+        );
+    }
+
+    /// A roster of `n` users, to have something worth paging.
+    fn many_users(n: usize) -> String {
+        let rows: Vec<String> = (0..n)
+            .map(|i| {
+                format!(
+                    r#"{{ "uuid": "{i:08x}-0000-4000-8000-000000000000",
+                          "emails": ["user{i:03}@x.com"] }}"#
+                )
+            })
+            .collect();
+        format!(
+            r#"{{ "version": 3, "applications": [], "users": [{}] }}"#,
+            rows.join(",")
+        )
+    }
+
+    #[test]
+    fn a_list_filters_and_pages_with_nothing_but_the_query_string() {
+        let big = many_users(PAGE_SIZE + 5);
+
+        // Page one: the first PAGE_SIZE rows, and a pager offering the second.
+        let html = render_of("pg1", &big, Route::Users, "");
+        assert!(html.contains("user000@x.com"), "{html}");
+        assert!(
+            !html.contains("user025@x.com"),
+            "page 1 must stop at the size"
+        );
+        assert!(html.contains("up=2"), "a next-page link: {html}");
+
+        // Page two, asked for the way a link asks: 1-based, in the URL.
+        let html = render_of("pg2", &big, Route::Users, "up=2");
+        assert!(html.contains("user025@x.com"), "{html}");
+        assert!(!html.contains("user000@x.com"));
+
+        // The filter narrows, and the pager goes away when one page is enough.
+        let html = render_of("pg3", &big, Route::Users, "uq=user01");
+        assert!(html.contains("user010@x.com"));
+        assert!(!html.contains("user020@x.com"));
+        assert!(!html.contains("up=2"), "10 rows need no pager: {html}");
+
+        // A filter that matches nothing says so, rather than looking like an empty file.
+        let html = render_of("pg4", &big, Route::Users, "uq=nobodyatall");
+        assert!(html.contains("matches that filter"), "{html}");
+
+        // And none of it needs scripting.
+        assert!(!html.contains("<script"), "{html}");
+    }
+
+    #[test]
+    fn each_list_on_the_users_page_filters_on_its_own() {
+        // Three lists, three namespaces: filtering the roster must not touch the groups.
+        let html = render_of("ns", SAMPLE, Route::Users, "uq=nowhere");
+        // The per-row Remove action is what only the roster table renders, so it is what
+        // distinguishes "in the table" from "mentioned elsewhere on the page".
+        assert!(html.contains("/users/11111111-1111-1111-1111-111111111111/rm"));
+        assert!(
+            !html.contains("/users/8f14e45f-ceea-467a-9f79-3b4e5c6d7a8b/rm"),
+            "the roster row for bob is filtered out: {html}"
+        );
+        // Bob is still on the page, in the groups section, which this filter never touched.
+        assert!(html.contains("@admins"), "the groups list is not: {html}");
+        assert!(html.contains("bob@x.com"), "as a group member: {html}");
+        assert!(html.contains("spammer@x.com"), "nor is denied: {html}");
+    }
+
+    #[test]
+    fn the_apps_list_says_which_credentials_get_in() {
+        let html = render("appcreds", Route::Apps);
+        // mpa/admin is restricted with no `credentials` field, which means BOTH — the one
+        // default a reader can get wrong, so the column spells it out.
+        assert!(html.contains("login, api_key"), "{html}");
+    }
+
+    #[test]
+    fn a_scope_shows_its_credentials_and_its_exclusions() {
+        let fixture = SAMPLE.replace(
+            r#""groups": ["@admins"], "notes": "the admin area""#,
+            r#""groups": ["@admins"], "excluded": ["nowhere@x.com"], "notes": "the admin area""#,
+        );
+        let html = render_of("scopeblock", &fixture, Route::App("mpa".into()), "");
+        assert!(html.contains("excluded"), "{html}");
+        assert!(html.contains("nowhere@x.com"), "{html}");
+        assert!(html.contains("login, api_key"), "{html}");
     }
 
     #[test]
@@ -6225,7 +6799,8 @@ mod tests {
             Route::GroupRm("unused".to_string()),
             &[("rev", &rev_of(&path))],
         );
-        assert_eq!(got.location(), "/groups?msg=group-removed");
+        // Back to the users page, which is where the group list lives now.
+        assert_eq!(got.location(), "/users?msg=group-removed");
         let doc = bb_auth_core::read_access_file(&path).unwrap();
         assert!(!doc.user_groups.contains_key("unused"));
         assert!(doc.user_groups.contains_key("admins"));
@@ -6303,6 +6878,52 @@ mod tests {
             Route::ScopeMove("app1".to_string(), "second".to_string()),
             &[("rev", &rev_of(&path)), ("dir", "up")],
         );
+        assert_eq!(read(&path), before);
+        cleanup(&path);
+    }
+
+    #[test]
+    fn a_scope_form_writes_and_refuses_exclusions() {
+        let path = scratch("m-excl", TWO_SCOPES);
+        let cfg = cfg_for(&path, "");
+
+        // An enrolled person becomes their uuid; a stranger stays their email, which is
+        // the only exclusion an `authenticated` scope can have.
+        let got = post(
+            &cfg,
+            Route::ScopeEdit("app1".to_string(), "second".to_string()),
+            &[
+                ("rev", &rev_of(&path)),
+                ("name", "second"),
+                ("urls", "https://app.x.com/b/*"),
+                ("access", "authenticated"),
+                ("excluded", "bob@x.com\nstranger@x.com"),
+            ],
+        );
+        assert_eq!(got.location(), "/apps/app1?msg=scope-saved");
+        let doc = bb_auth_core::read_access_file(&path).unwrap();
+        assert_eq!(
+            doc.applications[0].scopes[1].excluded.as_deref(),
+            Some(&[BOB.to_string(), "stranger@x.com".to_string()][..])
+        );
+
+        // And the form refuses the one kind that cannot mean anything, out loud, with the
+        // field named so it renders invalid.
+        let before = read(&path);
+        let got = post(
+            &cfg,
+            Route::ScopeEdit("app1".to_string(), "second".to_string()),
+            &[
+                ("rev", &rev_of(&path)),
+                ("name", "second"),
+                ("urls", "https://app.x.com/b/*"),
+                ("access", "anonymous"),
+                ("excluded", "bob@x.com"),
+            ],
+        );
+        let (status, html) = got.page();
+        assert_eq!(status, 400);
+        assert!(html.contains("no credential at all"), "{html}");
         assert_eq!(read(&path), before);
         cleanup(&path);
     }

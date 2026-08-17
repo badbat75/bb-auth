@@ -80,10 +80,15 @@ scopes                          inside one application. FIRST MATCH WINS: narrow
   scope list APP
   scope add APP NAME --url U... --access anonymous|authenticated|restricted
                      [--user WHO]... [--group @G]... [--credentials login,api_key]
-                     [--note TEXT] [--at N]
+                     [--exclude WHO]... [--note TEXT] [--at N]
   scope set APP NAME [--url U]... [--add-url U]... [--rm-url U]... [--access A]
                      [--user WHO]... [--add-user WHO]... [--rm-user WHO]...
-                     [--group @G]... [--credentials C] [--no-credentials] [--note TEXT]
+                     [--group @G]... [--credentials C] [--no-credentials]
+                     [--exclude WHO]... [--add-exclude WHO]... [--rm-exclude WHO]...
+                     [--no-exclude] [--note TEXT]
+  --exclude keeps somebody OUT of this one scope, ahead of its own grant: a user, a
+  '@group', or a stranger's email. It beats a group membership and it beats
+  'authenticated'. Not on 'anonymous', which needs no credential to grant.
   scope mv APP NAME --at N      reorder (0 = first). Order is meaning.
   scope rename APP NAME NEW
   scope rm APP NAME
@@ -492,6 +497,36 @@ fn to_uuids(doc: &AccessFile, who: &[String]) -> Result<Vec<String>, String> {
     who.iter().map(|w| to_uuid(doc, w)).collect()
 }
 
+/// Resolve a list of `--exclude` values the way `excluded` is written: an enrolled person
+/// becomes their **uuid**, a group stays `@name`, and an email the roster has never heard of
+/// stays itself.
+///
+/// The last case is why this is not [`to_uuids`], which refuses an unknown email. Excluding
+/// a stranger is the only exclusion that exists on an `authenticated` scope, and that scope
+/// is precisely the one that admits people who are in no roster row — so refusing to name
+/// them here would make the field useless where it is needed most. An enrolled person is
+/// still written as a uuid, so an exclusion covers every identifier they have.
+fn to_exclusions(doc: &AccessFile, who: &[String]) -> Result<Vec<String>, String> {
+    who.iter()
+        .map(|w| {
+            let w = w.trim();
+            if w.starts_with('@') {
+                return Ok(w.to_string());
+            }
+            if let Some(i) = user_pos(doc, w) {
+                return Ok(doc.users[i].uuid.trim().to_ascii_lowercase());
+            }
+            if w.contains('@') {
+                return Ok(norm_email(w));
+            }
+            Err(format!(
+                "--exclude '{w}': not a uuid, not '@group', and no user of that name. Give an \
+                 email (a stranger's is fine) or a group as '@name'"
+            ))
+        })
+        .collect()
+}
+
 fn print_scope(app: &str, i: usize, s: &ScopeSpec, doc: &AccessFile) {
     let access = s.access.trim();
     println!("  {i}. {app}/{}  [access: {access}]", s.name.trim());
@@ -509,6 +544,26 @@ fn print_scope(app: &str, i: usize, s: &ScopeSpec, doc: &AccessFile) {
         if !g.is_empty() {
             println!("       groups: {}", g.join(", "));
         }
+    }
+    let excluded: Vec<String> = s
+        .excluded
+        .iter()
+        .flatten()
+        .map(|e| {
+            let e = e.trim();
+            // A bare email that resolves to nobody is a *stranger*, which is the one thing
+            // this field can say that `users` cannot, so it prints as itself rather than
+            // through `who_is`, whose "IN NO users ENTRY" would read as a mistake here.
+            match (e.starts_with('@'), user_pos(doc, e)) {
+                (true, _) => e.to_string(),
+                (false, Some(_)) => who_is(doc, e),
+                (false, None) if e.contains('@') => format!("{e} (a stranger)"),
+                (false, None) => who_is(doc, e),
+            }
+        })
+        .collect();
+    if !excluded.is_empty() {
+        println!("       excluded: {}", excluded.join(", "));
     }
     if let Some(n) = &s.notes {
         if !n.is_empty() {
@@ -927,6 +982,11 @@ fn verdict(
             println!("DENIED — on the denied list, which outranks every grant");
             ExitCode::FAILURE
         }
+        Decision::Excluded { app, scope } => {
+            println!("DENIED — {app}/{scope} excludes this identity, ahead of its own grant");
+            println!("  this is local: another scope may still admit them");
+            ExitCode::FAILURE
+        }
         Decision::NoApplication => {
             println!("DENIED — no application's base covers {url}, so nobody reaches it");
             ExitCode::FAILURE
@@ -1142,6 +1202,7 @@ fn cmd_scope_add(mut ctx: Ctx, app: &str, name: &str) -> Result<ExitCode, String
     let users = ctx.flags.take_many("user")?;
     let groups = ctx.flags.take_many("group")?;
     let credentials = ctx.flags.take_many("credentials")?;
+    let exclude = ctx.flags.take_many("exclude")?;
     let note = ctx.flags.take_one("note")?;
     let at = ctx.flags.take_one("at")?;
     ctx.flags.finish()?;
@@ -1149,6 +1210,18 @@ fn cmd_scope_add(mut ctx: Ctx, app: &str, name: &str) -> Result<ExitCode, String
 
     let access = access.trim().to_string();
     let (users, groups, credentials) = scope_membership(&doc, &access, users, groups, credentials)?;
+    let excluded = if exclude.is_empty() {
+        None
+    } else {
+        if access == "anonymous" {
+            return Err(
+                "--exclude means nothing on --access anonymous: that scope grants with no \
+                 credential at all, so an excluded client would simply send none"
+                    .into(),
+            );
+        }
+        Some(to_exclusions(&doc, &exclude)?)
+    };
     let at = match at {
         Some(v) => Some(
             v.trim()
@@ -1167,6 +1240,7 @@ fn cmd_scope_add(mut ctx: Ctx, app: &str, name: &str) -> Result<ExitCode, String
             users,
             groups,
             credentials,
+            excluded,
             notes: note,
         },
         at,
@@ -1199,6 +1273,10 @@ fn cmd_scope_set(mut ctx: Ctx, app: &str, name: &str) -> Result<ExitCode, String
     let groups = ctx.flags.take_many("group")?;
     let credentials = ctx.flags.take_many("credentials")?;
     let no_credentials = ctx.flags.take_flag("no-credentials")?;
+    let exclude = ctx.flags.take_many("exclude")?;
+    let add_exclude = ctx.flags.take_many("add-exclude")?;
+    let rm_exclude = ctx.flags.take_many("rm-exclude")?;
+    let no_exclude = ctx.flags.take_flag("no-exclude")?;
     let note = ctx.flags.take_one("note")?;
     ctx.flags.finish()?;
     let (mut doc, _) = load(&ctx)?;
@@ -1207,6 +1285,9 @@ fn cmd_scope_set(mut ctx: Ctx, app: &str, name: &str) -> Result<ExitCode, String
     let users = to_uuids(&doc, &users)?;
     let add_users = to_uuids(&doc, &add_users)?;
     let rm_users = to_uuids(&doc, &rm_users)?;
+    let exclude = to_exclusions(&doc, &exclude)?;
+    let add_exclude = to_exclusions(&doc, &add_exclude)?;
+    let rm_exclude = to_exclusions(&doc, &rm_exclude)?;
     let groups: Vec<String> = groups
         .iter()
         .map(|g| {
@@ -1237,6 +1318,19 @@ fn cmd_scope_set(mut ctx: Ctx, app: &str, name: &str) -> Result<ExitCode, String
     if !credentials.is_empty() {
         s.credentials = Some(credentials);
         changed = true;
+    }
+    // Same set/add/rm shape as every other list. Then the collapse: absent and empty both
+    // mean nobody is kept out, so the file says it one way, and `"excluded": []` never
+    // survives to be refused by a later `--access anonymous`.
+    changed |= edit_urls(
+        &mut s.excluded,
+        exclude,
+        add_exclude,
+        rm_exclude,
+        no_exclude,
+    );
+    if s.excluded.as_ref().is_some_and(Vec::is_empty) {
+        s.excluded = None;
     }
     if let Some(n) = note {
         s.notes = Some(n);
@@ -2209,6 +2303,36 @@ mod tests {
         // A wildcard in the authority leaves no area to own.
         assert_eq!(literal_prefix("*://*/*"), None);
         assert_eq!(literal_prefix("https://*.x.com/a"), None);
+    }
+
+    #[test]
+    fn to_exclusions_keeps_a_stranger_and_resolves_a_user() {
+        let doc: AccessFile = serde_json::from_str(
+            r#"{ "version": 3, "user_groups": { "admins": [] },
+                 "users": [ { "uuid": "11111111-1111-4111-8111-111111111111",
+                              "emails": ["bob@x.com"] } ] }"#,
+        )
+        .unwrap();
+        let got = to_exclusions(
+            &doc,
+            &[
+                "BOB@x.com".to_string(),
+                "@admins".to_string(),
+                "Stranger@X.com".to_string(),
+            ],
+        )
+        .unwrap();
+        assert_eq!(
+            got,
+            [
+                "11111111-1111-4111-8111-111111111111",
+                "@admins",
+                "stranger@x.com"
+            ]
+        );
+        // Something that is none of the three is refused rather than written down as a
+        // string nothing will ever equal.
+        assert!(to_exclusions(&doc, &["nonsense".to_string()]).is_err());
     }
 
     #[test]

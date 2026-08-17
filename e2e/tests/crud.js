@@ -21,7 +21,7 @@ async function run(ctx, t) {
     await page.fill('input[name=name]', 'testgrp');
     await page.fill('textarea[name=members]', 'you@example.com');
     await submit(page);
-    t.check('group add lands on the list via PRG', page.url().endsWith('/admin/groups?msg=group-added'), page.url());
+    t.check('group add lands on the users page via PRG', page.url().endsWith('/admin/users?msg=group-added'), page.url());
     t.check('and shows the flash', (await page.locator('.flash').innerText()).includes('group added'));
     t.eq('group add resolves the email to the uuid the file stores', doc(ctx).user_groups.testgrp, [YOU]);
     await t.shot(page, 'group-added');
@@ -46,6 +46,30 @@ async function run(ctx, t) {
     t.eq('removing a referenced group is refused with a 400', rRef.status(), 400);
     t.check('and the group is still in the file', 'admins' in doc(ctx).user_groups);
     await t.shot(page, 'group-rm-refused');
+
+    // ================= a scope's own veto ==========================================
+    // `excluded` is checked before the scope grants, so it can keep one member of a group
+    // out of one place. Written through the same form, resolved the same way: an enrolled
+    // person becomes a uuid, a stranger stays their email.
+    await page.goto(ctx.base + '/apps/app1/scopes/admin/edit');
+    await page.fill('textarea[name=excluded]', ['you@example.com', 'stranger@example.com'].join('\n'));
+    await submit(page);
+    const admin = () => appBy(ctx, 'app1').scopes.find((x) => x.name === 'admin');
+    t.eq('a scope exclusion resolves a user to their uuid and keeps a stranger as typed',
+      admin().excluded, [YOU, 'stranger@example.com']);
+    t.check('and the gate agrees: the excluded member of @admins is now DENIED',
+      (await (async () => {
+        await page.goto(`${ctx.base}/can?email=you%40example.com&url=${encodeURIComponent('https://app.example.com/app1/admin/panel')}`);
+        return mainText(page);
+      })()).includes('DENIED'));
+    await t.shot(page, 'scope-excluded');
+
+    // And the one place it cannot mean anything is refused rather than dropped.
+    await page.goto(ctx.base + '/apps/app1/scopes/healthz/edit');
+    await page.fill('textarea[name=excluded]', 'you@example.com');
+    const rExcl = await submit(page);
+    t.eq('excluding on an anonymous scope is refused with a 400', rExcl.status(), 400);
+    t.check('and says why', (await mainText(page)).includes('no credential at all'));
 
     // ================= applications ===============================================
     await page.goto(ctx.base + '/apps/+add');

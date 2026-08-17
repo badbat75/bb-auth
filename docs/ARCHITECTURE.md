@@ -460,10 +460,11 @@ a grant is written once, on the side of the place.
         { "name": "healthz", "urls": ["https://app.example.com/app1/healthz"],
           "access": "anonymous" },
         { "name": "admin", "urls": ["https://app.example.com/app1/admin/*"],
-          "access": "restricted", "groups": ["@admins"], "credentials": ["login"] },
+          "access": "restricted", "groups": ["@admins"], "credentials": ["login"],
+          "excluded": ["c1d2e3f4-5a6b-4c7d-8e9f-0a1b2c3d4e5f"] },
         { "name": "everything", "urls": ["https://app.example.com/app1",
                                          "https://app.example.com/app1/*"],
-          "access": "authenticated" } ] } ],
+          "access": "authenticated", "excluded": ["nuisance@example.com"] } ] } ],
   "user_groups": { "admins": ["8f14e45f-ceea-467a-9f79-3b4e5c6d7a8b"] },
   "denied": ["spammer@example.com"],
   "users": [
@@ -564,7 +565,8 @@ never resolve to the most open value:
 
 `users`, `groups` and `credentials` are legal **only** under `restricted`. Ignoring them
 elsewhere would let a scope read as if it restricted access while granting to everyone,
-which is the failing-open shape this format refuses everywhere else too.
+which is the failing-open shape this format refuses everywhere else too. `excluded` is the
+one that also belongs to `authenticated` — see below.
 
 ### Credential classes (`credentials`)
 
@@ -576,6 +578,29 @@ nothing.
 This is a property of the **place**, not of the credential: "this area is reached by a
 browser login" and "this area is reached by a machine key" are statements an operator makes
 about an application. Expressing them here is what let a key stop carrying URLs of its own.
+
+### The scope's own veto (`excluded`)
+
+`denied` shuts an identity out everywhere. `excluded` shuts them out of **one scope**, and
+it is checked *before* that scope grants (`decide`, `ScopeRecord::excludes_identifier`). The
+placement is the feature: it beats a `@group` the subject is in, so one member can be kept
+out of one place without the group being unpicked, and it beats `authenticated`, which lists
+nobody and so has nobody to remove.
+
+It takes the same spellings `denied` takes, plus groups: a **uuid**, a **`"@name"`**, or a
+bare **email** for an identity the roster has never heard of. An email that resolves is
+folded onto its uuid at load, so excluding one address of a user cannot leave another
+standing. An entry that is none of the three is a fatal load error, and so is an unknown
+`@name`: an exclusion that excludes nobody while reading as if it did fails *open*.
+
+Two orderings are pinned. `denied` is reported **ahead** of it — `Decision::Vetoed` before
+`Decision::Excluded` — because a log line must say the identity is out everywhere rather
+than only here. And the field is **fatal on `anonymous`**, for exactly the reason the
+file-level veto does not reach that kind: the scope grants with no credential at all, so an
+excluded client would simply send none.
+
+`user_refs` and `user_group_refs` count an exclusion as a reference, marked `(excluded)`, so
+`remove_user` sweeps it and `remove_user_group` refuses while one still names the group.
 
 ### A scope names people, and that is the only place a grant is written
 
@@ -795,9 +820,9 @@ literal bytes rather than a segment boundary — which also fails closed.
 `decide` is one rule, in this order: resolve the URL to one application and one scope (a
 URL outside every application is reachable by nobody); an `anonymous` scope grants
 immediately, before the veto, because a scope that grants with no credential cannot be
-protected by one; then `denied` vetoes; then the scope's kind decides, and for a
-`restricted` one the credential class, the roster, membership and the key's own restriction
-follow in that order.
+protected by one; then `denied` vetoes, and after it the answering scope's own `excluded`;
+then the scope's kind decides, and for a `restricted` one the credential class, the roster,
+membership and the key's own restriction follow in that order.
 
 A failed bearer falls through to the cookie check, so a stray `Authorization` header never
 blocks an otherwise-valid cookie, and only then is the anonymous case considered, so a

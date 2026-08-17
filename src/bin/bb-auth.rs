@@ -1737,6 +1737,10 @@ fn authorize(access: &Access, subject: &Subject, url: Option<&str>, who: &str) -
             eprintln!("[bb-auth] denied: {who} is on the denied list");
             false
         }
+        Decision::Excluded { app, scope } => {
+            eprintln!("[bb-auth] denied: {app}/{scope} excludes {who}");
+            false
+        }
         Decision::NoApplication => {
             eprintln!("[bb-auth] denied: no application covers {} [{who}]", at());
             false

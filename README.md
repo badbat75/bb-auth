@@ -89,7 +89,7 @@ prints the raw bearer **once**, on stdout, after the file is safely saved:
 
 ```bash
 bb-auth-adm -f users.json key add bob@badbat75.com --id laptop --duration 365d \
-    --url 'https://ai.badbat75.com/mcp,https://ai.badbat75.com/mcp/*'
+    --scope mcp/api
 # → stdout: bbk_…                   (the bearer — give it to the client, it is not recoverable)
 # → the file now holds only its sha256
 bb-auth-adm -f users.json key rotate bob@badbat75.com laptop   # a leak? new secret, same grant
@@ -238,7 +238,7 @@ place. Four sibling sections answer four different questions:
           "access": "restricted", "groups": ["@admins"], "credentials": ["login"] },
         { "name": "everything", "urls": ["https://app.badbat75.com/app1",
                                          "https://app.badbat75.com/app1/*"],
-          "access": "authenticated" } ] } ],
+          "access": "authenticated", "excluded": ["nuisance@badbat75.com"] } ] } ],
   "user_groups": { "admins": ["8f14e45f-ceea-467a-9f79-3b4e5c6d7a8b"] },
   "denied": ["spammer@badbat75.com"],
   "users": [
@@ -251,8 +251,8 @@ place. Four sibling sections answer four different questions:
 ```
 
 A request is authorized when the URL resolves to a scope and **that scope admits the
-credential**. All of it is re-checked on every `/validate`. The one thing that takes
-access away is `denied`.
+credential**. All of it is re-checked on every `/validate`. Two things take access away:
+`denied`, everywhere, and a scope's own `excluded`, in that one place.
 
 Coming from an older file, one with no `"version"` in it? The format changed, and the
 gate refuses the old one by name. Convert it with `bb-auth-adm migrate`, which replays
@@ -293,6 +293,7 @@ two would never be reached. `bb-auth-adm scope mv` reorders them, and
   - `restricted` — the people in `users` and `groups`, and nobody else.
 - **`users`** / **`groups`** — uuids and `"@name"` group references. Legal **only** under `restricted`.
 - **`credentials`** — `["login"]` and/or `["api_key"]`; absent means both. Legal only under `restricted`. This is a property of the *place*: "this area is reached by a browser login" is a statement about the application, and expressing it here is what let a key stop carrying URLs of its own.
+- **`excluded`** — the scope's own veto, checked **before** its grant. See [`excluded`](#excluded--the-scopes-own-veto) below.
 - Unknown fields are a **hard error** in an application or a scope, unlike in the sections that describe people. The day `access` gains a companion restriction, a typo in that companion must not be silently dropped, leaving the field it was meant to narrow standing alone — that would fail *open*.
 
 > Cognito self-signup is open, so `authenticated` means *anyone who can register*, and
@@ -300,6 +301,36 @@ two would never be reached. `bb-auth-adm scope mv` reorders them, and
 > area and the wrong one for everything else. `--check-users` and the startup banner
 > print every scope of either kind by name, because they are the two an operator most
 > often did not mean to leave open.
+
+#### `excluded` — the scope's own veto
+
+`denied` shuts somebody out everywhere. `excluded` shuts them out of **this scope**, and
+it is checked *before* the scope grants, which is what makes it able to do two things
+nothing else can:
+
+- keep one member of a `@group` out of one place, without unpicking the group;
+- keep one identity out of an `authenticated` scope, which lists nobody and so has nobody
+  to remove.
+
+It takes the same spellings the file-level veto does, plus groups: a **uuid**, a
+**`"@name"`** group, or a bare **email** for an identity the roster has never heard of. An
+email that does resolve is folded onto its uuid when the file loads, so excluding one
+address of a user cannot leave another standing.
+
+Two rules worth knowing before you reach for it. `denied` is reported **ahead** of it, so
+somebody vetoed file-wide is logged as vetoed rather than as merely excluded from wherever
+they knocked. And it is a **fatal error on `anonymous`**, for the same reason the file-level
+veto does not reach that kind: the scope grants with no credential at all, so an excluded
+client would simply send none, and a field that reads like a defence while defending
+nothing is worse than no field at all.
+
+```bash
+bb-auth-adm -f users.json scope set app1 admin --add-exclude bob@x.com
+bb-auth-adm -f users.json scope set app1 everything --add-exclude nuisance@x.com
+bb-auth-adm -f users.json scope set app1 admin --rm-exclude bob@x.com
+bb-auth-adm -f users.json can bob@x.com https://app.x.com/app1/admin/panel
+# → DENIED — app1/admin excludes this identity, ahead of its own grant
+```
 
 ### `user_groups` — one name for a set of people
 
@@ -409,33 +440,34 @@ under `Restart=on-failure` that is a boot loop.
 
 ```bash
 bb-auth-adm -f users.json show                 # the file as the gate resolves it
-bb-auth-adm -f users.json user add bob@x.com --url 'https://app.x.com/reports/*'
-bb-auth-adm -f users.json user set bob@x.com --add-url 'https://app.x.com/reports'
-bb-auth-adm -f users.json key add bob@x.com --id laptop --duration 365d
 bb-auth-adm -f users.json app add app1 --base 'https://app.x.com/app1'
-bb-auth-adm -f users.json scope add app1 onboarding --url 'https://app.x.com/app1/*' --access authenticated
+bb-auth-adm -f users.json user add bob@x.com   # mints the uuid; a user carries no URL
 bb-auth-adm -f users.json group add admins --member bob@x.com
-bb-auth-adm -f users.json user set bob@x.com --add-url '@mcp'
+bb-auth-adm -f users.json scope add app1 reports --url 'https://app.x.com/app1/reports/*'     --access restricted --group @admins
+bb-auth-adm -f users.json scope set app1 reports --add-exclude carol@x.com
+bb-auth-adm -f users.json key add bob@x.com --id laptop --duration 365d --scope app1/reports
 bb-auth-adm -f users.json deny add spammer@x.com
 bb-auth-adm -f users.json check                # the gate's parser, then lint
 ```
 
-It talks back. Adding a user with no `--url` says so ("they reach NOTHING"); adding a
+It talks back. Adding a user says they reach nothing until a scope lists them; adding an
 `authenticated` scope says what that means; removing a user reminds you that such a scope
-does not consult the roster, so deleting them is not a lockout: `deny` is. `check`
-also finds what parses fine and still doesn't mean what it says: a duplicate email (the
-last one silently wins), an expired key, a site listed after a broader one that already
-answers for its URLs, so it never speaks, a url group nothing references. And it refuses
-to remove a url group while some list still names it.
+does not consult the roster, so deleting them is not a lockout: `deny` is, or that scope's
+own `excluded`. `check` also finds what parses fine and still doesn't mean what it says: a
+duplicate email, an expired key, a scope listed after a broader one that already answers
+for its URLs so it never speaks, a group nothing references. And it refuses to remove a
+group while a scope still names it — in `groups` or in `excluded`.
 
 And it answers the question you actually have, with the gate's own decision function —
 exit 0 iff the request would pass:
 
 ```bash
-bb-auth-adm -f users.json can bob@x.com https://app.x.com/reports/q3
-# AUTHORIZED — app1/reports lists bob@x.com, and it is the scope that owns this URL
-bb-auth-adm -f users.json can bob@x.com https://app.x.com/admin --key laptop
-# DENIED — https://app.x.com/admin is outside the key's scope (...)
+bb-auth-adm -f users.json can bob@x.com https://app.x.com/app1/reports/q3
+# AUTHORIZED — app1/reports admits this credential for https://app.x.com/app1/reports/q3
+bb-auth-adm -f users.json can carol@x.com https://app.x.com/app1/reports/q3
+# DENIED — app1/reports excludes this identity, ahead of its own grant
+bb-auth-adm -f users.json can bob@x.com https://app.x.com/app1/admin --key laptop
+# DENIED — this key restricted itself to other scopes, not app1/admin
 ```
 
 Edit the **live** file (`sudo bb-auth-adm -f /opt/bb-auth/var/lib/users.json …`, the tool
@@ -444,10 +476,19 @@ its `root:bb-auth 0640` ownership. Then reload — see below.
 
 ### Editing it in a browser — `bb-auth-web`
 
-The same file in a browser: a server-rendered admin GUI that needs no JavaScript. It shows the
-roster, each user group and who references it, each application's scopes **numbered in file order** (the
-number is the meaning — first match wins), the `denied` veto, every key's expiry, and a
-`can` tester answered by the gate's own decision function.
+The same file in a browser: a server-rendered admin GUI that needs no JavaScript. Four tabs.
+**Users** holds the three sections about people, in the order they nest: the user groups and
+who references each one, then the roster, then the `denied` veto. **Applications** lists each
+one with its area, its scope count and which credential classes get in anywhere inside it,
+and each application's page shows its scopes **numbered in file order** (the number is the
+meaning — first match wins) with their members, their credentials and their `excluded`.
+Every key's expiry is on its owner's page, and the **can** tab is a tester answered by the
+gate's own decision function.
+
+Every list carries a **filter box and a pager**, both of which are just query parameters — so
+they work with scripting off, survive a language change, and can be bookmarked. Scopes are
+the one list without them, deliberately: their order is their meaning and the ↑/↓ buttons
+move them within the file, so a filtered view would show positions that are not the file's.
 
 It **edits** the file too — the same CRUD as `bb-auth-adm`, made through the same library
 code, so it cannot save a file the gate would reject. Three rules make that safe with no
