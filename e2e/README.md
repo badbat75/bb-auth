@@ -21,7 +21,7 @@ Dependencies (`playwright` only) are installed automatically on first run.
 
 ## Run it
 
-```
+```sh
 node e2e/run.js        # from the repo root (or `npm test` inside e2e/)
 ```
 
@@ -50,7 +50,7 @@ idempotent and areas are order-independent.
 
 ## The visual walk-through (`shots.js`)
 
-```
+```sh
 node e2e/shots.js               # every scene, every view
 node e2e/shots.js users conflict   # only scenes whose name contains one of these
 ```
