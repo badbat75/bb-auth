@@ -158,5 +158,5 @@ deploying to. Keep it that way.
   `Restart=on-failure` is a boot loop.
 - **Host-side logic stays in these files**, not in strings assembled by the orchestrator.
 
-The rules behind all of this are in [`../CLAUDE.md`](../CLAUDE.md); the deploy narrative,
+The rules behind all of this are in [`../AGENTS.md`](../AGENTS.md); the deploy narrative,
 including the layout on the target, is in [`../README.md`](../README.md) under "Deploy".
