@@ -66,38 +66,38 @@ the gate is the gate's, and stays in one file.
 
 | Target | What it is |
 |--------|------------|
-| `src/lib.rs` (`bb_auth_core`) | **The access file.** Schema (`AccessFile`), parser (`compile_access`), URL matcher (`glob_match` / `UrlScope`), the site table (`Sites`), the grant model (`decide`, `decide_api_key`), key minting (`mint_api_key`), and how a file is edited and written (`open_access_file`, `AccessWrite`, the document mutations). Reads no env, opens no socket, holds no HTTP, prints nothing. |
+| `src/lib.rs` (`bb_auth_core`) | **The access file.** Schema (`AccessFile`), parser (`compile_access`), URL matcher (`glob_match` / `UrlScope`), the two-level resolution (`Access::resolve`, `base_covers`), the grant model (`decide`, `decide_api_key`), identity and key minting (`mint_uuid`, `mint_api_key`), and how a file is edited and written (`open_access_file`, `AccessWrite`, the document mutations). Reads no env, opens no socket, holds no HTTP, prints nothing. |
 | `src/bin/bb-auth.rs` (`bb-auth`) | **The gate**, still a single file read top to bottom: HTTP, config, the session cookie, id_token validation, the nginx contract. |
-| `src/bin/bb-auth-adm.rs` (`bb-auth-adm`) | **The access-file admin CLI.** CRUD over `url_groups` / `sites` / `denied` / `users` / `api_keys`, key minting and rotation, and `can EMAIL URL` — which calls the library's `decide`, so it answers the question the gate will answer. Every edit and every write is a library call (`AccessWrite`), so it cannot save a file the gate would reject; what is left here is flags, warnings and the wording of a verdict. See §12. |
+| `src/bin/bb-auth-adm.rs` (`bb-auth-adm`) | **The access-file admin CLI.** CRUD over `applications` / `scopes` / `user_groups` / `denied` / `users` / `api_keys`, key minting and rotation, `migrate` for a pre-3.0 file, and `can EMAIL URL` — which calls the library's `decide`, so it answers the question the gate will answer. Every edit and every write is a library call (`AccessWrite`), so it cannot save a file the gate would reject; what is left here is flags, warnings and the wording of a verdict. See §12. |
 | `src/bin/bb-auth-web.rs` (`bb-auth-web`) | **The access-file admin GUI**: server-rendered (`maud`; no page needs JavaScript, the one inline handler is a Settings-menu shortcut with a `<noscript>` submit behind it) over the library, read *and* write — CRUD through `AccessWrite` alone, `POST`-only mutations behind a same-origin check and a `rev` (sha256-of-file) concurrency check. Loopback behind nginx `auth_request`, identity from the `X-Auth-Email` nginx injects plus its own required `BB_AUTH_WEB_ADMINS` allowlist. Links the library, none of the gate. |
 
 Inside `src/bin/bb-auth.rs`, in file order:
 
 | Section | Purpose |
 |---------|---------|
-| `Config` / `from_env` | All tunables from env vars; fatal-`exit`s on missing required values, a too-short HMAC key, or an unusable `BB_AUTH_PROFILE_CLAIMS` entry (`compile_profile_claims`, which also derives each claim's header — see §12). |
+| `Config` / `from_env` | All tunables from env vars; fatal-`exit`s on missing required values, a too-short HMAC key, or an unusable `BB_AUTH_PROFILE_CLAIMS` / `BB_AUTH_IDENTITY_ATTRS` entry (`compile_profile_claims` / `compile_identity_attrs`, which also derive each header name; see §12). |
 | `State` / `JwksCache` | Shared state behind `Arc`: config, a `RwLock<Access>` access table, a `RwLock` JWKS cache, and a `Mutex` serializing JWKS refreshes. |
-| `load_access` / `reload_access` | Wrap the library's `read_access`, which parses the JSON access file (`BB_AUTH_USERS_FILE`) into the site list, the `denied` set, and two indices — allowlisted emails (`by_email`) and `bbk_` API keys (`by_key_hash`), each with a URL scope; emails lowercased. `load_access` aborts startup if unreadable (warns if nothing is granted); `reload_access` swaps the table live on `SIGHUP`, keeping the old table on error. See §12. |
-| `authorize` / `bearer_apikey_email` | Thin wrappers over the library's `decide` / `decide_api_key`: they add the log line naming the reason, and the wall clock a key's expiry is measured against. The rule itself is in the library — that is what lets `bb-auth-adm can` be truthful. `authorize_identity` re-attaches the profile claims after the decision, which is made on the email alone. See §12. |
+| `load_access` / `reload_access` | Wrap the library's `read_access`, which parses the JSON access file (`BB_AUTH_USERS_FILE`) into the applications and their scopes, the two `denied` sets, and three indices: identifiers (`by_identifier`), the roster (`by_uuid`) and `bbk_` API keys (`by_key_hash`); identifiers lowercased. `load_access` aborts startup if unreadable (warns if nothing is granted); `reload_access` swaps the table live on `SIGHUP`, keeping the old table on error. See §12. |
+| `authorize` / `bearer_apikey` | Thin wrappers over the library's `decide` / `decide_api_key`: they add the log line naming the reason, and the wall clock a key's expiry is measured against. The rule itself is in the library, which is what lets `bb-auth-adm can` be truthful. `authorize_login` resolves the identifier to a roster row and re-attaches the profile claims after the decision, which never sees them. See §12. |
 | `check_users` | The `bb-auth --check-users <file>` mode: parse and exit `0`/`1`, no env and no network. Lets a deploy reject an access file before restarting onto it. |
 | `fetch_jwks` / `refresh_jwks_if_due` / `decoding_key` | `GET {issuer}/.well-known/jwks.json` via `ureq`+rustls; cache keyed by `kid`, refreshed at most once per 60 s, deduped across workers by double-checked locking. |
 | `validate_id_token` | Full JWT validation (see §6). Returns a `UserIdentity`: the verified, lowercased email plus whichever configured profile claims the token asserted (`clean_claim`). |
 | `make_session` / `verify_session` | HMAC-SHA256 signed cookie (see §7). |
 | HTTP helpers | Header/cookie parsing, cookie building, open-redirect `safe_rd`, `pct_encode`, response builders. |
-| `handle_validate` / `handle_session` / `handle_logout` | The three real handlers (plus `/auth/healthz` inline). `/auth/validate` resolves a cookie or bearer credential to an identity, authorizes the request URL against it, and returns the email in `X-Auth-Email` — plus one header per configured profile claim the credential carried (`bearer_apikey_email` / `authorize` / `authorize_identity` / `original_url` / `profile_headers` / `respond_authorized`). |
+| `handle_validate` / `handle_session` / `handle_logout` | The three real handlers (plus `/auth/healthz` inline). `/auth/validate` resolves a cookie or bearer credential to an identity, authorizes the request URL against it, and returns the identity in one header per configured attribute, plus one per configured profile claim the credential carried (`bearer_apikey` / `authorize` / `authorize_login` / `original_url` / `identity_headers` / `profile_headers` / `respond_authorized`). |
 | `main` | Build config/state, prime JWKS, spawn the worker thread pool, route requests. |
 
 And in `src/lib.rs`:
 
 | Section | Purpose |
 |---------|---------|
-| `glob_match` / `compile_pattern` / `UrlScope` | The one URL matcher — a user's `authorized_urls`, a key's, and a site's `urls` all go through it: validates + normalises patterns at load, then matches a request URL with `*` / `&` wildcards, denying a missing URL and any `..`. See §12. |
-| `Sites` / `SiteRecord` / `login_url_for` | URL areas and the properties that hold for them, in file order. `Sites::resolve` is first-match-wins; `public_auth` grants the area to any authenticated identity, enrolled or not; `login_url` names its login page. Sites only grant. See §12. |
-| `compile_login_url` | Validates `BB_AUTH_LOGIN_URL` and every site's `login_url`: printable ASCII, absolute `https://`, no userinfo `@`, no backslash. What makes emitting them in `X-Auth-Login-URL`, a `Location:` and a page safe with no per-use check. |
-| `decide` / `decide_api_key` | The grant model as a value (`Decision` / `KeyDecision`): `denied` veto → `public_auth` site → roster + URL scope; and for a key, owner → expiry → scope. The single authorization point, shared by the gate and the CLI. See §12. |
+| `glob_match` / `compile_pattern` / `UrlScope` | The one URL matcher: every scope's `urls` goes through it. Validates and normalises patterns at load, then matches a request URL with `*` / `&` wildcards, denying a missing URL and any `..`. See §12. |
+| `AppRecord` / `ScopeRecord` / `Access::resolve` / `base_covers` | The two levels: applications partition the URL space by literal area (so at most one answers, and `base_covers` compares at a path boundary), and scopes inside one are first-match-wins in file order. `login_url_for` names the area's login page. See §12. |
+| `compile_login_url` | Validates `BB_AUTH_LOGIN_URL` and every application's `login_url`: printable ASCII, absolute `https://`, no userinfo `@`, no backslash. What makes emitting them in `X-Auth-Login-URL`, a `Location:` and a page safe with no per-use check. |
+| `decide` / `decide_api_key` / `Subject` | The grant model as a value (`Decision` / `KeyDecision`): resolve the URL, an `anonymous` scope grants ahead of the veto, then `denied`, then the scope's kind, the credential class, the roster, membership and the key's own restriction. The single authorization point, shared by the gate and both editors. See §12. |
 | `AccessFile` / `compile_access` / `read_access` | The document model (what `bb-auth-adm` edits, `notes` and `_comment` round-tripping untouched) and the parser that turns it into the runtime table. |
 | `mint_api_key` | 256 bits from the OS CSPRNG, `bbk_` + base64url; returns the bearer and the `sha256` the file stores. |
-| `open_access_file` / `AccessWrite` / the document mutations | **Editing an access file** — here rather than in a tool because `bb-auth-adm` and the coming web admin must do it identically. Open (refusing a file the gate would reject), the lookups and mutations behind every CRUD command (`add_user`, `add_api_key`, `add_site`, `move_site`, `remove_url_group`, `add_denied`, `edit_urls`, …), and the write: render → re-parse → `compile_access` → atomic temp+rename, preserving mode and owner. `AccessWrite::prepare` is the only way to obtain bytes and `commit` writes exactly those, with `write_atomically` private, so the check cannot be skipped; a minted bearer comes back as a `SealedKey` that only opens against the `Written` receipt of a completed write. |
+| `open_access_file` / `AccessWrite` / the document mutations | **Editing an access file** — here rather than in a tool because `bb-auth-adm` and the coming web admin must do it identically. Open (refusing a file the gate would reject), the lookups and mutations behind every CRUD command (`add_user`, `add_user_email`, `add_api_key`, `add_application`, `add_scope`, `move_scope`, `remove_user_group`, `add_denied`, `edit_urls`, …), and the write: render → re-parse → `compile_access` → atomic temp+rename, preserving mode and owner. `AccessWrite::prepare` is the only way to obtain bytes and `commit` writes exactly those, with `write_atomically` private, so the check cannot be skipped; a minted bearer comes back as a `SealedKey` that only opens against the `Written` receipt of a completed write. |
 
 ---
 
@@ -125,7 +125,7 @@ And in `src/lib.rs`:
 
 | Method | Path | Caller | Behavior |
 |--------|------|--------|----------|
-| `GET` | `/auth/validate` | nginx only (`auth_request`) | `204` + `X-Auth-Email: <authorized user>` if an accepted credential authorizes the request URL, otherwise `401` + `X-Auth-Login-URL: <this area's login page>`. A `204` also carries one header per `BB_AUTH_PROFILE_CLAIMS` entry the credential knows (percent-encoded; omitted otherwise). Accepts (in order) an `Authorization: Bearer bbk_…` static API key, an `Authorization: Bearer <id_token>`, or the session cookie; each is additionally checked against the caller's `authorized_urls`, or against a `public_auth` site. See §12. |
+| `GET` | `/auth/validate` | nginx only (`auth_request`) | `204` naming the identity in one header per `BB_AUTH_IDENTITY_ATTRS` entry (default `X-Auth-Email`) if an accepted credential authorizes the request URL, otherwise `401` + `X-Auth-Login-URL: <this area's login page>`. A `204` also carries one header per `BB_AUTH_PROFILE_CLAIMS` entry the credential knows (percent-encoded; omitted otherwise). Accepts (in order) an `Authorization: Bearer bbk_…` static API key, an `Authorization: Bearer <id_token>`, or the session cookie, and then no credential at all, which only an `anonymous` scope grants (and which names nobody). See §12. |
 | `POST` | `/auth/session` | browser | Body `application/x-www-form-urlencoded`: `id_token=…&rd=…`. Fully validates the id_token; on success sets the session cookie and `302`s to `rd` (open-redirect guarded). |
 | `GET` | `/auth/logout[?rd=…]` | browser | Sets an expired (Max-Age=0) cookie and `302` → `rd` (same `safe_rd` guard) or, with no `rd`, the login page. Cross-site requests (`Sec-Fetch-Site: cross-site`) are ignored (no cookie clear) to block CSRF-forced logout. |
 | `GET` | `/auth/healthz` | local | `200 ok`. Liveness probe. |
@@ -224,7 +224,7 @@ active, then the old one is dropped after a TTL. See README "Key rotation".
 De-authorizing an email is separate from signatures: remove the user from the
 access file (or add them to `denied`) and reload/restart — the next `/auth/validate`
 for that cookie returns `401` even though the cookie signature is still valid. On a
-`public_auth` site the roster is not consulted, so there `denied` is the only lever.
+`authenticated` scope the roster is not consulted, so there `denied` is the only lever.
 
 ---
 
@@ -279,7 +279,7 @@ Every candidate — including one resolved against the caller — passes through
 `rd_url_allowed` gate, so even a spoofed caller origin cannot produce an off-domain
 redirect. The gate is https-only and rejects userinfo (`@`), backslashes, `//evil`,
 `/\evil` and any control byte (CR/LF ⇒ no response splitting), stripping a `:port`
-before matching the host with the same glob used by `authorized_urls`. Lookalikes such
+before matching the host with the same glob a scope's `urls` use. Lookalikes such
 as `evilexample.com` and `example.com.evil.com` do not match `*.example.com`, because
 the pattern's literal dot must be present — and the apex `example.com` doesn't either,
 so list it explicitly.
@@ -443,119 +443,237 @@ own), and `SupplementaryGroups=bb-auth` is what lets the write restore the file'
 
 ---
 
-## 12. Access file, sites, API keys & URL scoping
+## 12. Access file: applications, scopes, users & keys
 
 Access is described by a single JSON file (`BB_AUTH_USERS_FILE`, installed as
-`/opt/bb-auth/var/lib/users.json`), loaded at startup and hot-reloaded on `SIGHUP`. It
-is the real access gate (`read_access` / `Access`), and has four sibling sections:
+`/opt/bb-auth/var/lib/users.json`), loaded at startup and hot-reloaded on `SIGHUP`. It is
+the real access gate (`read_access` / `Access`), and since 3.0 it is **application-centric**:
+a grant is written once, on the side of the place.
 
 ```json
-{ "url_groups": {
-    "mcp": ["https://mcp.example.com/mcp", "https://mcp.example.com/mcp/*"]
-  },
-  "sites": [
-    { "name": "signup", "urls": ["https://app.example.com/welcome",
-                                 "https://app.example.com/welcome/*"],
-      "public_auth": true }
-  ],
+{ "version": 3,
+  "applications": [
+    { "name": "app1",
+      "base": ["https://app.example.com/app1"],
+      "login_url": "https://signup.example.com/",
+      "scopes": [
+        { "name": "healthz", "urls": ["https://app.example.com/app1/healthz"],
+          "access": "anonymous" },
+        { "name": "admin", "urls": ["https://app.example.com/app1/admin/*"],
+          "access": "restricted", "groups": ["@admins"], "credentials": ["login"] },
+        { "name": "everything", "urls": ["https://app.example.com/app1",
+                                         "https://app.example.com/app1/*"],
+          "access": "authenticated" } ] } ],
+  "user_groups": { "admins": ["8f14e45f-ceea-467a-9f79-3b4e5c6d7a8b"] },
   "denied": ["spammer@example.com"],
   "users": [
-    { "email": "you@example.com", "authorized_urls": ["*://*/*"] },
-    { "email": "bot@example.com",
-      "authorized_urls": ["@mcp"],
+    { "uuid": "8f14e45f-ceea-467a-9f79-3b4e5c6d7a8b",
+      "emails": ["you@example.com"],
       "api_keys": [
         { "id": "laptop", "key_hash": "<sha256 hex of the bbk_… bearer>",
           "released": "2026-07-08", "duration": "365d",
-          "authorized_urls": ["@mcp"] }
-      ] }
-] }
+          "scopes": ["app1/admin"] } ] } ] }
 ```
 
-The four answer four different questions. `url_groups` names a **reusable set of URLs**,
-`sites` describe **URL areas**, `denied` vetoes **people**, `users` is the **roster**. A
-request is authorized when its credential resolves to an identity and one of exactly two
-grant sources covers the request URL — the user's `authorized_urls`, or a `public_auth`
-site — and the identity is not `denied`. Both grant sources are re-checked on every
-`/auth/validate`.
+The four sections answer four different questions. `applications` describe **places and who
+reaches them**, `user_groups` names a **reusable set of people**, `denied` vetoes **people**,
+`users` is the **roster of identities**. A request is authorized when the URL resolves to a
+scope and that scope admits the credential, and the identity is not `denied`. All of it is
+re-checked on every `/auth/validate`.
 
-At load the file is parsed behind `RwLock<Access>` into the site list (in file order),
-a `denied` set of lowercased emails, and two indices: `by_email` (lowercased email →
-`UserRecord`) and `by_key_hash` (`sha256(bearer)` hex → `ApiKeyRecord`).
-Structurally-invalid JSON is a hard error, so a bad reload keeps the previous table; a
-single malformed key is warned about and skipped so one typo can't drop everyone.
+At load the file is parsed behind `RwLock<Access>` into the applications (each with its
+literal area and its scopes in file order), `denied` in two halves (vetoed uuids and vetoed
+identifiers that resolve to nobody), and three indices: `by_identifier` (lowercased email →
+uuid, many to one), `by_uuid` (uuid → `UserRecord`), and `by_key_hash` (`sha256(bearer)` hex
+→ `ApiKeyRecord`).
 
-Scope errors, by contrast, are **fatal**, not skipped: a dropped `authorized_urls`
-entry would silently narrow — or, if it was the only one, blank out — a grant someone
-believed they had written. So a malformed pattern, an unknown field on a site, a bad
-`url_groups` name or reference, and any residual pre-2.0 `enabled_paths` field, make the
-whole load fail. At startup that is an exit; on `SIGHUP` the live table survives.
-`bb-auth --check-users <file>` runs exactly this parser and exits `0`/`1`, which is how
-the package's `postinst` refuses to restart the service onto a file that would not boot,
-and how `scripts/deploy.sh` refuses to install a staged one.
+**An older file is refused by name.** `sites`, `url_groups`, `users[].authorized_urls` and
+`api_keys[].authorized_urls` are detected and named in the error, which points at
+`bb-auth-adm migrate` (`check_legacy`). Ignoring them would be far worse than failing: the
+new parser would read it as an access table with no applications and a roster that
+reaches nothing, which is a total lockout reported as a successful load.
 
-### URL groups (`url_groups`)
+What is fatal and what is skipped follows one rule: **an error that changes who reaches what
+is fatal; an error whose only effect is to drop one credential warns and skips**. Fatal, so
+that a startup exits and a `SIGHUP` keeps the live table: a malformed pattern, an `access`
+that is absent or misspelled, a membership field on a scope that is not `restricted`, an
+unknown field anywhere in the application/scope tree, a non-literal or overlapping `base`, a
+scope pattern outside its own application's base, a malformed uuid, two rows claiming one
+uuid or one identifier, a key restriction naming a scope that does not exist, a residual
+pre-2.0 `enabled_paths`, and anything wrong about a `@group` reference. Warned and skipped:
+a bad `key_hash` or `released`/`duration`, an identifier that could not be a header value,
+and a dangling reference (a well-formed uuid matching no roster row), which grants nothing
+and which both editors lint. `bb-auth --check-users <file>` runs exactly this parser and
+exits `0`/`1`, which is how the package's `postinst` refuses to restart the service onto a
+file that would not boot, and how `scripts/deploy.sh` refuses to install a staged one.
 
-A group is **abbreviation, never a grant**: `"mcp": [...]` authorizes nobody until some
-URL list names it. All three lists that carry patterns — a user's `authorized_urls`, a
-key's, a site's `urls` — accept the entry `"@mcp"`, and `compile_access` splices in that
-group's compiled patterns (`UrlScope::compile_with_groups`). Expansion happens **once, at
-load**, so `Access`, `decide` and the gate never see a reference: the runtime table is as
-flat as it was before groups existed, and a key that inherits its owner's scope inherits
-patterns, not a reference to re-resolve.
+### Applications, and the URL partition
 
-Names are `[A-Za-z0-9_-]+` and match exactly. Three things are fatal, all for the same
-reason a malformed pattern is — a silently skipped entry changes who reaches what: a bad
-name, a group entry that is itself a reference (groups are flat by construction, so there
-is no recursion or cycle to detect), and an unknown `@name`, whose message names the
-referrer (`bob@x.com: unknown url group '@mcp'`). Every group's patterns are validated
-even when nothing references them, so a broken group cannot lie in wait for the edit that
-first uses it. An empty group is legal and warns.
+An application owns a **literal** URL area: `base` is a list of prefixes with no wildcards
+in them, and every pattern of every scope must lie inside one of them. **No two applications
+may overlap**, anywhere in the file. Together those two rules make applications a partition
+of the URL space: at most one application can ever answer for a URL, so their order in the
+file carries no meaning at all, and `login_url` has a single unambiguous home.
 
-An **older** gate preserves the section on a rewrite (unknown top-level keys round-trip
-through `AccessFile::extra`) but cannot read a reference: `@mcp` fails `compile_pattern`
-and the load fails outright. Fail-closed, and the reason to deploy the binary before a
-file that uses groups.
+Both checks go through one function, `base_covers`, which is why "does this application own
+that URL?" and "does this scope stay inside its own application?" cannot drift apart. It
+compares at a **path boundary**: `https://x.com/app` covers `https://x.com/app` and
+`https://x.com/app/deep`, but **not** `https://x.com/application`. That is the same trap as
+a `*` written with no `/` before it, and a plain `starts_with` would fall straight into it.
 
-### Sites (`public_auth`)
+The area being literal is what makes non-overlap a string comparison instead of a
+glob-intersection test, and it is what makes the partition hold at all: the useful blanket
+patterns (`*://*/*`) would intersect everything. The cost is deliberate and worth stating: an
+application on a wildcard host (`https://*.x.com/`) is not expressible.
 
-A site record describes a **place, never a person**: no field of it may name a user.
-Grants to named users live in exactly one place, `users[].authorized_urls`; expressing
-the same user↔URL relation twice would mean someone removed from the roster could still
-walk in through a site. Everything a site carries is a predicate over an anonymous
-identity, and may only modulate the grant that record itself makes.
+**A URL no application covers is reachable by nobody**, with any credential. With no
+per-user URLs left this is the only fail-closed reading, and it is a real change of posture
+for an operator: a gated location outside every area is a `401` for everyone.
+`--check-users` prints each application's area so it can be compared with what nginx
+actually gates.
 
-`public_auth: true` opens the area to **any** identity Cognito vouches for, enrolled or
-not — an un-enrolled user gets a `204` and the app receives their `X-Auth-Email`, which
-is how an onboarding page enrolls them. Since Cognito self-signup is open, this means
-*anyone who can register*; it is the right grant for a signup area and the wrong one for
-everything else. It reaches only the two Cognito-backed credentials: an unknown `bbk_`
-key stays unknown, because Cognito vouches for no static key of ours and there would be
-no email to hand back. `public_auth: false` (the default) grants nothing and is
-indistinguishable from having no site — the field exists to carry future properties.
+### Scopes, and first match wins
 
-`Sites::resolve` is **first match wins**, in file order: the first record whose `urls`
-cover the request answers for it, even if it grants nothing, so specific sites go before
-broad ones. The rule is fixed now, while `public_auth` is the only property, rather than
-after a second field makes "which record answers?" expensive to change. The alternatives
-are worse: "most specific wins" needs a specificity order over globs that does not exist
-(`https://x.com/*` vs `*://x.com/app1` — which?), and "merge every match" would OR the
-grants together, so a broad site would silently open a narrow one.
+Inside one application, `Access::resolve` hands back the **first** scope whose `urls` cover
+the request, in file order, and that scope answers even if it grants nothing. Order is
+meaning, which is what `bb-auth-adm scope mv` and the GUI's move buttons exist for.
 
-The table only ever **grants**. A URL with no site is not denied, it is simply not open,
-and the per-user scope decides as before. Sites match through `UrlScope::allows` — the
-same matcher a user's scope uses — which is where the missing-header and `..` denials
-live; a second matcher that forgot either would be a bypass around the first.
+First-match is what makes a **carve-out** expressible: a narrower, stricter scope listed
+before a broad one, as `healthz` and `admin` are above. A union of grants cannot express
+that at all, because the broad scope would go on granting. The dangerous half of first-match
+(a broad entry silently shadowing a narrow one) survives, but it can now only bite between
+scopes of the same application: entries an operator sees together, on one screen, in one
+form, and which `bb-auth-adm check` lints.
 
-### Per-site login page, and why logout has none
+### The three access kinds
 
-A site's `login_url` overrides `BB_AUTH_LOGIN_URL` for its area (`login_url_for`); it
-names the login page on `/auth/validate`'s `401`, the fallback for a rejected `rd`, and
-the link on `/auth/session`'s error pages. First-match-wins applies to it too.
+`access` is **required and has no default**, because it decides everything and a typo must
+never resolve to the most open value:
 
-bb-auth never redirects a gated request — it answers `401` and nginx decides. So the site's
-login page reaches nginx as a **response header**, `X-Auth-Login-URL` (`LOGIN_URL_HEADER`),
-lifted by `auth_request_set` into a request variable (which is what stops a later
-`proxy_pass` from clobbering `$upstream_http_*`):
+- **`anonymous`** — no credential at all. The gate answers `204` and names nobody: no
+  identity header, nothing for an application to key on. Note that `denied` does **not**
+  reach here, and the reason is not an oversight: the scope grants with no credential, so a
+  vetoed client would simply omit theirs. A veto bypassed by sending *less* is not a veto.
+- **`authenticated`** — any identity Cognito vouches for, enrolled or not. An un-enrolled
+  user gets a `204` and the app receives their identity, which is how an onboarding page
+  enrolls them. Since Cognito self-signup is open, this means *anyone who can register*: the
+  right grant for a signup area and the wrong one for everything else. It reaches only the
+  two Cognito-backed credentials; an unknown `bbk_` key stays unknown, because Cognito
+  vouches for no static key of ours and there would be no identity to hand back.
+- **`restricted`** — the uuids in `users` and the groups in `groups`, and nobody else.
+
+`users`, `groups` and `credentials` are legal **only** under `restricted`. Ignoring them
+elsewhere would let a scope read as if it restricted access while granting to everyone,
+which is the failing-open shape this format refuses everywhere else too.
+
+### Credential classes (`credentials`)
+
+A `restricted` scope may say which classes of credential exercise it: `login` (a Cognito
+id_token bearer, or the session cookie minted from one) and/or `api_key` (a `bbk_` key).
+Absent means both, and an empty list is a fatal error rather than a scope reachable by
+nothing.
+
+This is a property of the **place**, not of the credential: "this area is reached by a
+browser login" and "this area is reached by a machine key" are statements an operator makes
+about an application. Expressing them here is what let a key stop carrying URLs of its own.
+
+### A scope names people, and that is the only place a grant is written
+
+The rule the older model enforced ("a site describes a place, never a person") was against
+**duplication**, not against a direction: it existed so a user removed from the roster could
+not still walk in through a place. Here the grant is written on the side of the place and
+nowhere else, so the rule holds in the mirror, and it needs two halves to hold:
+
+- `ScopeRecord::members` are **references to roster rows**. A reference to a row that does
+  not exist grants nothing.
+- `remove_user` **sweeps** every scope and every group that named the row it removes, and
+  hands back the list of what it swept.
+
+Without both, a deleted user who re-registers on Cognito would walk back in through a
+dangling reference: the exact hazard the old rule prevented, pointing the other way.
+
+### User groups (`user_groups`)
+
+A group is **abbreviation, never a grant**: `"admins": [...]` authorizes nobody until a
+scope names it as `"@admins"`. Expansion happens **once, at load** (`compile_access`), so
+`Access`, `decide` and the gate never see a reference; a scope's `members` is a flat set of
+uuids by the time anything reads it.
+
+Names are `[A-Za-z0-9_-]+` and match exactly. Fatal, all for the reason a malformed pattern
+is: a bad name, a member that is itself a reference (groups are flat by construction, so
+there is no recursion or cycle to detect), a member that is not a well-formed uuid, and an
+unknown `@name`, whose message names the referrer (`mpa/admin: unknown user group '@nope'`).
+Every group is validated even when nothing references it, so a broken one cannot lie in wait
+for the edit that first uses it. A member that names no roster row only warns.
+
+### Users, identifiers and uuids
+
+A user is a **uuid** (canonical lowercase 8-4-4-4-12) plus a list of `emails` plus its API
+keys, and carries no URL. Every reference in the file is by uuid, and the emails are the
+identifiers Cognito can vouch for: `by_identifier` resolves any of them to the same row,
+many to one. Changing how someone signs in is therefore one edit to one row, instead of a
+sweep over every scope and group that names them; and both editors accept an email wherever
+they accept a uuid, so an operator never has to type one.
+
+Two rows may not claim the same uuid, nor the same identifier. Today a duplicate email would
+silently last-win through a `HashMap` insert, which means the row an operator is reading may
+not be the row in force: it is a fatal load error instead.
+
+### `denied` — the veto
+
+Refused ahead of every grant, on every credential: the id_token and cookie paths, the
+API-key path (its owner), and cookie issuance (`handle_session`). Two kinds of entry:
+
+- a **uuid**, which vetoes the user and every identifier they hold. An email that resolves
+  to a roster row is folded onto its uuid at load, so denying one address cannot leave
+  another standing.
+- a bare **email**, which vetoes an identity the file has never heard of. That is not
+  decoration: an `authenticated` scope admits identities that are in no table, so for them
+  this is the **only** denial that exists.
+
+An entry that is neither is a fatal load error, because a veto that vetoes nobody while
+reading as if it did is the one failure this section cannot afford. For an enrolled user the
+veto is a *suspension* rather than a deletion: the row, its group memberships and its keys
+survive, so re-enabling is one edit.
+
+### Static API keys (`bbk_`)
+
+A programmatic client (e.g. an MCP client that can't run the browser cookie flow)
+authenticates with `Authorization: Bearer bbk_<secret>`. Keys are minted out of band
+(`bb-auth-adm key add`) and only their **SHA-256 hex fingerprint** (`key_hash`) is stored:
+the raw `bbk_…` bearer is shown once and never persisted. `/auth/validate` looks a bearer up
+by `sha256(bearer)` in `by_key_hash`; the lookup itself is the verification (forging a
+matching preimage of a high-entropy random key is infeasible, so no constant-time compare is
+needed).
+
+`decide_api_key` checks three things and stops: the hash resolves, the owner is not denied,
+the key has not expired. What the key may then *reach* is `decide`'s, through
+`Subject::Key`: the scope that answers decides, exactly as it does for a browser login.
+
+- **`key_hash`** — `sha256_hex("bbk_<secret>")`, 64 lowercase hex chars.
+- **`released` / `duration`** — expiry = `released` (`YYYY-MM-DD`) + `duration`, where
+  `duration` is `<n>d` (days), `<n>h` (hours), a bare `<n>` (days), or `0` / `never`.
+- **`scopes`** — a list of `"application/scope"` names, and a **restriction, never a
+  grant**: it can only subtract from what the owner already reaches. Absent means all of
+  them. This is what lets a machine credential carry less authority than the human who owns
+  it while grants stay written in exactly one place. A name that matches no scope is a fatal
+  load error: the restriction would fail closed, but it would fail closed *silently*, and an
+  operator who mistyped one would find out only when the machine stopped working for no
+  visible reason.
+
+### Per-application login page, and why logout has none
+
+An application's `login_url` overrides `BB_AUTH_LOGIN_URL` for its whole area
+(`login_url_for`); it names the login page on `/auth/validate`'s `401`, the fallback for a
+rejected `rd`, and the link on `/auth/session`'s error pages. There is no ambiguity to
+resolve any more: areas do not overlap, so at most one application answers, and it answers
+whether or not any of its scopes covers the URL. A `401` inside an application is exactly
+when its own login page is wanted.
+
+bb-auth never redirects a gated request: it answers `401` and nginx decides. So the login
+page reaches nginx as a **response header**, `X-Auth-Login-URL` (`LOGIN_URL_HEADER`), lifted
+by `auth_request_set` into a request variable (which is what stops a later `proxy_pass` from
+clobbering `$upstream_http_*`):
 
 ```nginx
 map $bb_login $bb_login_safe {          # http{} level
@@ -572,72 +690,36 @@ location @bb_signin { return 302 $bb_login_safe?rd=$scheme://$host$request_uri; 
 ```
 
 `auth_request_set` reads the subrequest's response headers even when it answered `401`,
-which is what makes this work at all. The `map` is not decoration: an unset `$bb_login` —
-an older binary, or a gated location that omits the `auth_request_set` — would make
-`return 302 $bb_login?rd=…` emit a *relative* `Location: ?rd=…`, sending the browser back
-to the gated path it just failed on. A redirect loop. The default arm degrades to the
-global login page instead, i.e. to exactly what a hardcoded `@bb_signin` did before.
+which is what makes this work at all. The `map` is not decoration: an unset `$bb_login` (an
+older binary, or a gated location that omits the `auth_request_set`) would make
+`return 302 $bb_login?rd=…` emit a *relative* `Location: ?rd=…`, sending the browser back to
+the gated path it just failed on. A redirect loop. The default arm degrades to the global
+login page instead, i.e. to exactly what a hardcoded `@bb_signin` did before.
 
-Both the global and the per-site value pass `compile_login_url` at load — printable ASCII,
-absolute `https://`, no userinfo `@`, no backslash. That is what lets the gate emit them
-into a header, a `Location:` and a page with no per-use check; a CR/LF would otherwise be
-a response-splitting gadget, and `h()` panics on a non-ASCII header value. It is **not**
-checked against `BB_AUTH_AUTHORIZED_HOSTS`, and cannot be: `read_access` reads no env,
-which is precisely what lets `--check-users` validate a file with no config and no network.
-Moving that check to startup would turn an operator's typo into a fatal boot under
+Both the global and the per-application value pass `compile_login_url` at load: printable
+ASCII, absolute `https://`, no userinfo `@`, no backslash. That is what lets the gate emit
+them into a header, a `Location:` and a page with no per-use check; a CR/LF would otherwise
+be a response-splitting gadget, and `h()` panics on a non-ASCII header value. It is **not**
+checked against `BB_AUTH_AUTHORIZED_HOSTS`, and cannot be: `read_access` reads no env, which
+is precisely what lets `--check-users` validate a file with no config and no network. Moving
+that check to startup would turn an operator's typo into a fatal boot under
 `Restart=on-failure` that `--check-users` never saw.
 
-There is deliberately **no per-site logout landing page**. The gate can name a login page
-on a `401` because the `401` happens *on* a gated URL, so the site resolves. A logout
-happens at `/auth/logout`, which no site's `urls` cover — nothing resolves, and a
-`logout_url` field would be unreachable in practice. The party that knows which area you
-are leaving is whoever wrote the logout link, so `handle_logout` reads `?rd=` and puts it
-through the same `safe_rd` guard as `/auth/session`. With no `rd` the browser lands on the
-login page — not on the caller's root, which is what `safe_rd` defaults to and is the wrong
-end for a logout.
+There is deliberately **no per-area logout landing page**. The gate can name a login page on
+a `401` because the `401` happens *on* a gated URL, so the application resolves. A logout
+happens at `/auth/logout`, which is inside no application's area: nothing resolves, and a
+`logout_url` field would be unreachable in practice. The party that knows which area you are
+leaving is whoever wrote the logout link, so `handle_logout` reads `?rd=` and puts it through
+the same `safe_rd` guard as `/auth/session`. With no `rd` the browser lands on the login
+page, not on the caller's root, which is what `safe_rd` defaults to and is the wrong end for
+a logout.
 
-### `denied` — the veto
+### URL patterns
 
-Lowercased emails refused ahead of every grant, on every credential: the id_token and
-cookie paths (`authorize`), the API-key path (its owner, `bearer_apikey_email`), and
-cookie issuance (`handle_session`). It is not redundant with deleting the user's row:
-
-- On a `public_auth` site `by_email` is never consulted, so for an un-enrolled identity
-  this is the **only** denial that exists.
-- For an enrolled one it is a *suspension* rather than a deletion: the row, its scope
-  and its keys survive, so re-enabling is one edit. Note that `authorized_urls: []`
-  suspends someone from the roster grant but **not** from a `public_auth` site.
-
-A veto that covered only some credentials would be worse than none, which is why it sits
-at the top of every path rather than inside the roster branch.
-
-### Static API keys (`bbk_`)
-
-A programmatic client (e.g. an MCP client that can't run the browser cookie flow)
-authenticates with `Authorization: Bearer bbk_<secret>`. Keys are minted out of band
-(`bb-auth-adm key add`) and only their **SHA-256 hex fingerprint** (`key_hash`) is
-stored — the raw `bbk_…` bearer is shown once and never persisted. `/auth/validate`
-looks a bearer up by `sha256(bearer)` in `by_key_hash`; the lookup itself is the
-verification (forging a matching preimage of a high-entropy random key is infeasible,
-so no constant-time compare is needed). A key is a self-contained grant tied to a
-user — its `email` / `id` are for logging and revocation, not a second allowlist step
-— and must be unexpired and in URL scope.
-
-- **`key_hash`** — `sha256_hex("bbk_<secret>")`, 64 lowercase hex chars.
-- **`released` / `duration`** — expiry = `released` (`YYYY-MM-DD`) + `duration`, where
-  `duration` is `<n>d` (days), `<n>h` (hours), a bare `<n>` (days), or `0` / `never`
-  (never expires).
-
-### URL scoping
-
-Both users and keys carry an `authorized_urls` list of full `<scheme>://<host>/<path>`
-patterns; the request URL must match one of them. **Access is enumerated, never
-assumed**: there is no "unrestricted" scope. Omitting the field, or `[]`, authorizes
-*nothing* — a listed user with no patterns reaches no URL at all, which makes an empty
-list a usable way to suspend someone. Blanket access is the explicit pattern `*://*/*`,
-something an operator has to mean in order to write. On a key, omitting the field
-inherits the owning user's scope. An entry may also be `"@name"`, a reference to a
-[url group](#url-groups-url_groups) expanded at load.
+A scope's `urls` are full `<scheme>://<host>/<path>` patterns; the request URL must match
+one of them, and all of them must lie inside the application's `base`. **Access is
+enumerated, never assumed**: a scope with no `urls` matches nothing, and blanket coverage is
+the explicit pattern `*://*/*`, something an operator has to mean in order to write.
 
 Two wildcards, legal in every component:
 
@@ -703,50 +785,70 @@ literal bytes rather than a segment boundary — which also fails closed.
 `handle_validate` tries credentials in this order, each additionally URL-scoped:
 
 1. **`Authorization: Bearer bbk_…`** — static API key: looked up by hash, its owner
-   checked against `denied`, then checked for expiry and URL scope
-   (`bearer_apikey_email`). No `public_auth` site applies.
+   checked against `denied`, then checked for expiry (`bearer_apikey`), and only then put
+   to the scope that answers, as `Subject::Key`.
 2. **`Authorization: Bearer <id_token>`** — a Cognito id_token validated exactly as at
-   `/auth/session` (§6), then authorized like a cookie (`authorize`).
-3. **Session cookie** — verified as in §7, then the same `authorize`.
+   `/auth/session` (§6), then authorized like a cookie (`authorize_login`).
+3. **Session cookie** — verified as in §7, then the same `authorize_login`.
+4. **No credential at all** — which an `anonymous` scope grants, and nothing else does.
 
-`authorize` is three steps: `denied` vetoes; otherwise a `public_auth` site covering the
-URL is enough on its own, without consulting the roster; otherwise the roster decides
-(`by_email` plus that user's URL scope), as it always has.
+`decide` is one rule, in this order: resolve the URL to one application and one scope (a
+URL outside every application is reachable by nobody); an `anonymous` scope grants
+immediately, before the veto, because a scope that grants with no credential cannot be
+protected by one; then `denied` vetoes; then the scope's kind decides, and for a
+`restricted` one the credential class, the roster, membership and the key's own restriction
+follow in that order.
 
-A failed bearer falls through to the cookie check, so a stray `Authorization` header
-never blocks an otherwise-valid cookie. Any authorized credential → `204`; otherwise
-`401`.
+A failed bearer falls through to the cookie check, so a stray `Authorization` header never
+blocks an otherwise-valid cookie, and only then is the anonymous case considered, so a
+credential that *does* authorize still names its holder downstream. Any authorized
+credential → `204`; otherwise `401`.
 
-### Identity propagation (`X-Auth-Email`)
+### Identity propagation (`BB_AUTH_IDENTITY_ATTRS`)
 
-Whichever credential wins, it resolves to one value: an email — for an API key, its
-*owning user's*; on a `public_auth` site, possibly someone with no entry anywhere, which
-is exactly what an onboarding app needs in order to enroll them. `respond_authorized`
-returns it on the `204` in `X-Auth-Email`, and the gated nginx location lifts it into the
-proxied request:
+Whichever credential wins, it resolves to one roster row, or to one identifier that is in no
+row at all (on an `authenticated` scope, which is exactly what an onboarding app needs in
+order to enroll them). An API key resolves to its *owning user's* row. `respond_authorized`
+names that identity on the `204`, in one header per configured attribute, and the gated
+nginx location lifts them into the proxied request:
 
 ```nginx
 auth_request_set $bb_email $upstream_http_x_auth_email;
 proxy_set_header X-Auth-Email $bb_email;   # rename to whatever the app reads
+proxy_set_header X-Auth-Uuid  "";          # clear what this location does not set
 ```
 
-The name bb-auth emits is a fixed constant (`IDENTITY_HEADER`): nginx renames it on the
-way through, so there is nothing to configure here. `proxy_set_header` overwrites what
-the client sent, and nginx omits the header when the variable is empty — but only for
-names it lists, so any *other* name the app trusts must be cleared explicitly. All of
-which is worth nothing unless the app is unreachable except through nginx.
+**Which** attributes go out is configuration (`BB_AUTH_IDENTITY_ATTRS`, default `email`);
+the header each one derives is code, through the very function the profile claims use, so
+`email` is `X-Auth-Email` and `uuid` is `X-Auth-Uuid` and the two can never disagree. Three
+consequences:
+
+- **nginx must clear every *possible* identity header, not the configured ones.**
+  `proxy_set_header` overrides only the names it lists, so a name the gate could emit but
+  this installation has turned off is a name a client can send. The set of possible names is
+  finite and code-defined (`IDENTITY_ATTRS`) precisely so that it *can* be cleared, and
+  turning an attribute on later then needs no nginx change at all.
+- **Multiple values of one attribute are joined with a space** (a user with two emails).
+  That is unambiguous by construction, not by convention: every identifier passed
+  `header_safe_email`, which requires printable ASCII, and a space is not printable ASCII. A
+  comma would not do, because an email may legally contain one in its local part.
+- **An attribute with no value omits its header**, rather than sending it empty, because
+  nginx reads an unset variable as no header at all. An identity admitted by an
+  `authenticated` scope has no `uuid` to send.
+
+All of which is worth nothing unless the app is unreachable except through nginx.
 
 Emails are validated as printable ASCII (`header_safe_email`) at the **two** places one
 can enter, which between them cover all three credentials — a CR/LF in an email would
 otherwise be a response-splitting gadget:
 
-- **`read_access`, at load**, for every roster email (warn-and-skip like an empty email —
-  dropping a user is fail-closed). It is the only guard on the API-key path, whose email
-  never passes through a token claim.
-- **`validate_id_token`**, for every email lifted out of a Cognito claim. A `public_auth`
-  site emits identities that are in no table, so load time cannot see them; and since
-  that is the only way an email reaches `make_session`, the cookie inherits the property
-  through the HMAC rather than needing its own check.
+- **`read_access`, at load**, for every roster identifier (warn-and-skip: dropping one is
+  fail-closed). It is the only guard on the API-key path, whose identity never passes
+  through a token claim.
+- **`validate_id_token`**, for every identifier lifted out of a Cognito claim. An
+  `authenticated` scope emits identities that are in no table, so load time cannot see
+  them; and since that is the only way an identifier reaches `make_session`, the cookie
+  inherits the property through the HMAC rather than needing its own check.
 
 Together they are what lets `respond_authorized` build the header with no per-request
 check; its `debug_assert!` pins both halves.
@@ -775,6 +877,9 @@ proxy_set_header X-Auth-Family-Name $bb_family;
   `X-Auth-Custom-Department` (nginx `$upstream_http_x_auth_custom_department`). The two
   can therefore never disagree, and since a claim name is restricted to `[A-Za-z0-9_:-]`
   a derived header is always a valid token — which is why `h()` cannot panic on it.
+- **The reserved set is every *possible* identity header**, not the enabled ones: turning
+  an attribute on tomorrow must not collide with a claim configured yesterday, because that
+  discovery would happen at runtime, on a header an application already trusts.
 - **Every config error is fatal at startup** (`compile_profile_claims`): a bad character,
   an empty part around a separator, a claim the gate consumes itself (`email`,
   `email_verified`, `token_use`, `identities` — they never reach `Claims::extra`), or two

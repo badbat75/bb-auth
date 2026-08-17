@@ -17,7 +17,8 @@ path = "src/lib.rs"
 name = "bb-auth"
 path = "src/bin/bb-auth.rs"
 
-# The access-file admin CLI: CRUD over url_groups / sites / denied / users / api_keys,
+# The access-file admin CLI: CRUD over applications / scopes / user_groups / denied /
+# users / api_keys,
 # validated with the gate's own parser before it writes. Links the lib, none of the gate.
 [[bin]]
 name = "bb-auth-adm"
@@ -122,7 +123,7 @@ assets = [
     ["deploy/users.example.json", "opt/bb-auth/share/", "644"],
 ]
 extended-description = """
-bb-auth validates an AWS Cognito id_token that a browser-side login page already obtained, and issues an HMAC-signed session cookie that nginx enforces on every request through auth_request. It also accepts per-request bearer credentials (a Cognito id_token or a static bbk_ API key) and enforces per-identity URL scopes read from a JSON access file.
+bb-auth validates an AWS Cognito id_token that a browser-side login page already obtained, and issues an HMAC-signed session cookie that nginx enforces on every request through auth_request. It also accepts per-request bearer credentials (a Cognito id_token or a static bbk_ API key) and enforces the access policy of the application scope that owns the request URL, read from a JSON access file.
 .
 The HMAC key and the access file are NOT part of this package. Both are created on first install and preserved by every later upgrade: a changed key would log every user out, and the access file is edited on the host.
 """
@@ -136,7 +137,7 @@ assets = [
     ["target/release/bb-auth-adm", "opt/bb-auth/bin/", "755"],
 ]
 extended-description = """
-CRUD over a bb-auth access file: url_groups, sites, denied, users and API keys, plus `can EMAIL URL`, which answers with the gate's own decision function. Every write is re-parsed with the gate's parser on the exact bytes about to land on disk, replaced atomically, and left with the mode and owner it found.
+CRUD over a bb-auth access file: applications and their scopes, user groups, denied, users and API keys, plus `can EMAIL URL`, which answers with the gate's own decision function. Every write is re-parsed with the gate's parser on the exact bytes about to land on disk, replaced atomically, and left with the mode and owner it found.
 """
 
 # The admin GUI. Installing it is what moves the access file to bb-auth-web:bb-auth,

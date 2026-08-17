@@ -30,19 +30,25 @@
 //! 3. the session cookie.
 //!
 //! A Cognito-signed id_token is unforgeable, but holding one is **not** authorization:
-//! Cognito self-signup is open. A request is authorized when the credential resolves to
-//! an identity and *some* grant in the access file ([`read_access`]) covers the request
-//! URL. There are exactly two grant sources, and both are re-checked on every request:
+//! Cognito self-signup is open. A request is authorized when the URL resolves to a scope
+//! in the access file ([`read_access`]) and that scope admits the credential. The access
+//! file is application-centric: applications partition the URL space, and the scope that
+//! answers is the first one, in file order, whose patterns cover the request
+//! ([`Access::resolve`](bb_auth_core::Access::resolve)). Every scope says what it wants of
+//! an identity ([`AccessKind`]):
 //!
-//! * **the roster** — an entry in `users`, whose [`UrlScope`](bb_auth_core::UrlScope) must cover the URL. This
-//!   is the only grant an API key can use. Deleting a user or a key and reloading denies
-//!   even a still-unexpired cookie.
-//! * **a `public_auth` site** — a URL area open to *any* identity Cognito vouches for,
-//!   enrolled or not ([`SiteRecord`](bb_auth_core::SiteRecord)). Only the two Cognito-backed credentials reach it;
-//!   an unknown API key stays unknown.
+//! * **`anonymous`** — no credential at all. The `204` names nobody.
+//! * **`authenticated`** — any identity Cognito vouches for, enrolled or not. Only the two
+//!   Cognito-backed credentials reach it; an unknown API key stays unknown, because
+//!   Cognito vouches for no static key of ours.
+//! * **`restricted`** — the users and groups the scope lists, and only through the
+//!   credential classes it admits. An API key may narrow itself further to a named set of
+//!   scopes.
 //!
-//! Sites only ever grant. The one thing that takes away is `denied`, a veto by email that
-//! outranks both sources on every credential ([`authorize`]).
+//! **A URL no application covers is reachable by nobody.** Scopes only ever grant; the one
+//! thing that takes away is `denied`, a veto that outranks every grant on every credential
+//! ([`authorize`]). All of it is re-checked on every request, so deleting a user or a key
+//! and reloading denies even a still-unexpired cookie.
 //!
 //! Bearers are stateless — they issue no cookie — and a failed bearer falls through
 //! to the cookie check, so a stray `Authorization` header never blocks a valid cookie.
@@ -52,8 +58,10 @@
 //! All three credentials resolve to the same thing: an email. A `204` hands it back in
 //! [`IDENTITY_HEADER`], which nginx lifts out of the subrequest with `auth_request_set`
 //! and injects into the request it proxies — that is how the application learns who is
-//! calling. On a `public_auth` site that email may name someone with no entry anywhere:
-//! it is an *authenticated* identity, and enrolling it is the application's business.
+//! calling. On an `authenticated` scope that email may name someone with no entry
+//! anywhere: it is an *authenticated* identity, and enrolling it is the application's
+//! business. Which attributes go out is `BB_AUTH_IDENTITY_ATTRS` ([`IdentityAttr`]);
+//! `email` is the default and the header every application already reads.
 //!
 //! The two Cognito-backed credentials can also carry **profile claims** — whichever OIDC
 //! claims `BB_AUTH_PROFILE_CLAIMS` names, each in a header derived from its own name
@@ -91,8 +99,8 @@ use tiny_http::{Header, Request, Response, Server, StatusCode};
 // contract — stays here, in one file, read top to bottom.
 use bb_auth_core::{
     compile_host_pattern, compile_login_url, decide, decide_api_key, header_safe_email,
-    login_url_for, lower_authority, now, read_access, sha256_hex, Access, Decision, KeyDecision,
-    UrlPattern, API_KEY_PREFIX,
+    login_url_for, lower_authority, now, read_access, sha256_hex, Access, AccessKind, ApiKeyRecord,
+    Decision, KeyDecision, Subject, UrlPattern, API_KEY_PREFIX,
 };
 
 type HmacSha256 = Hmac<Sha256>;
@@ -291,7 +299,7 @@ impl HmacKeys {
 ///
 /// **An absent claim omits its header entirely**, never sends it empty. That covers a token
 /// that carries no such claim, a cookie minted before the claim was configured, and every
-/// API key ([`bearer_apikey_email`] — no token to read one from). nginx carries the
+/// API key ([`bearer_apikey`] — no token to read one from). nginx carries the
 /// distinction through unchanged: an unset `$upstream_http_*` drops the header there too.
 ///
 /// These are **self-asserted profile attributes** — any Cognito user, verified email or
@@ -311,6 +319,24 @@ struct ProfileClaim {
 /// key a typed field already took — so configuring one of them would propagate nothing,
 /// silently and forever. Rejecting them at startup turns that into a fatal typo instead.
 const RESERVED_CLAIMS: [&str; 4] = ["email", "email_verified", "token_use", "identities"];
+
+/// Every identity attribute this binary knows how to emit.
+///
+/// The **set** an installation emits is configuration (`BB_AUTH_IDENTITY_ATTRS`); the
+/// derivation from an attribute name to a header is code, exactly as it is for a profile
+/// claim, so an operator names an attribute and never a header.
+///
+/// The set of *possible* names is this array, and it being finite is the security
+/// argument. `proxy_set_header` overrides only the names it lists, so nginx must clear
+/// every header the gate could ever emit, **including the ones this installation has
+/// turned off**: an identity header nginx does not clear is one a client can send. An
+/// operator who turns an attribute on later must add nothing to nginx, because the clear
+/// was already there. See [`IdentityAttr`] and the README's nginx section.
+///
+/// It is also the reason a new attribute is a code change: `phone` will be a fourth
+/// credential's worth of work in `validate_id_token` (the `phone_number` claim and its own
+/// verification), not a string an operator may invent.
+const IDENTITY_ATTRS: [&str; 2] = ["uuid", "email"];
 
 /// Whether `s` is a syntactically valid profile-claim name: non-empty and
 /// `[A-Za-z0-9_:-]` only.
@@ -374,8 +400,16 @@ fn compile_profile_claims(spec: &str) -> Result<Vec<ProfileClaim>, String> {
             ));
         }
         let header = derive_profile_header(claim);
-        for reserved in [IDENTITY_HEADER, LOGIN_URL_HEADER] {
-            if header.eq_ignore_ascii_case(reserved) {
+        // Every *possible* identity header is reserved, not merely the ones this
+        // installation emits: turning an attribute on tomorrow must not collide with a
+        // claim configured today, because that discovery would happen at runtime, on a
+        // header an application already trusts.
+        let reserved = IDENTITY_ATTRS
+            .iter()
+            .map(|a| derive_profile_header(a))
+            .chain(std::iter::once(LOGIN_URL_HEADER.to_string()));
+        for r in reserved {
+            if header.eq_ignore_ascii_case(&r) {
                 return Err(format!(
                     "claim '{claim}' derives '{header}', which is reserved"
                 ));
@@ -391,6 +425,79 @@ fn compile_profile_claims(spec: &str) -> Result<Vec<ProfileClaim>, String> {
             claim: claim.to_string(),
             header,
         });
+    }
+    Ok(out)
+}
+
+/// One configured identity attribute, and the response header derived from its name.
+///
+/// The same split as [`ProfileClaim`], for the same reason: the **set** is configuration
+/// (`BB_AUTH_IDENTITY_ATTRS`, comma-separated, `email` by default), the **derivation** is
+/// code, so an operator names an attribute and no header name is typo-reachable. The
+/// derivation is literally the same function, so `uuid` becomes `X-Auth-Uuid` and `email`
+/// becomes `X-Auth-Email`, which is the header every application behind this gate already
+/// reads.
+///
+/// These are **not** profile claims, and the difference is the whole point of the split.
+/// An identity attribute is what the access file decided a request belongs to: it is
+/// checked, it is what `denied` vetoes, and an application may key its own records on it.
+/// A profile claim is self-asserted decoration nothing may key on.
+///
+/// A multi-valued attribute is emitted **space-separated**, and that is safe by
+/// construction rather than by convention: every identifier passed
+/// [`header_safe_email`], which requires printable ASCII,
+/// and a space is not printable ASCII. A comma would not do, because
+/// [`well_formed_email`](bb_auth_core::well_formed_email) allows one in a local part, and a
+/// list an application cannot split unambiguously is a parsing burden the gate exists to
+/// absorb.
+///
+/// An absent attribute **omits its header** rather than sending it empty, exactly as a
+/// profile claim does: nginx reads an unset variable as no header at all, so
+/// present-and-empty is a distinction the application cannot make. An identity granted by
+/// an `authenticated` scope is in no roster row, so it has no `uuid` to send.
+struct IdentityAttr {
+    /// The attribute name, one of [`IDENTITY_ATTRS`].
+    attr: String,
+    /// The response header derived from it.
+    header: String,
+}
+
+/// Compile `BB_AUTH_IDENTITY_ATTRS` into the identity headers to emit. Default `email`,
+/// which is exactly what every earlier version emitted.
+///
+/// Fatal on every rejection, and fatal on an **empty** list above all: an authorized `204`
+/// that names nobody is an application silently losing its identity, and silence is the
+/// one failure mode this gate does not accept. Unknown names are rejected against
+/// [`IDENTITY_ATTRS`] rather than passed through, so a typo cannot quietly turn an
+/// attribute off.
+fn compile_identity_attrs(spec: &str) -> Result<Vec<IdentityAttr>, String> {
+    // The one place the derivation and the documented constant are checked against each
+    // other. Every application behind this gate reads `X-Auth-Email`, and every nginx
+    // snippet in the README names it literally, so a change to the derivation must not be
+    // allowed to rename it in silence.
+    assert_eq!(derive_profile_header("email"), IDENTITY_HEADER);
+    let mut out: Vec<IdentityAttr> = Vec::new();
+    for attr in spec.split(',').map(str::trim).filter(|s| !s.is_empty()) {
+        if !IDENTITY_ATTRS.contains(&attr) {
+            return Err(format!(
+                "unknown identity attribute '{attr}' (known: {})",
+                IDENTITY_ATTRS.join(", ")
+            ));
+        }
+        if out.iter().any(|a| a.attr == attr) {
+            return Err(format!("identity attribute '{attr}' is listed twice"));
+        }
+        out.push(IdentityAttr {
+            attr: attr.to_string(),
+            header: derive_profile_header(attr),
+        });
+    }
+    if out.is_empty() {
+        return Err(format!(
+            "at least one identity attribute is required (known: {}); a 204 that names \
+             nobody breaks every application behind this gate, in silence",
+            IDENTITY_ATTRS.join(", ")
+        ));
     }
     Ok(out)
 }
@@ -495,6 +602,12 @@ struct Config {
     /// change: a claim dropped here stops being emitted from cookies that still carry it,
     /// and one added here appears at the holder's next login ([`COOKIE_VERSION`]).
     profile_claims: Vec<ProfileClaim>,
+    /// Which identity attributes a `204` names, from `BB_AUTH_IDENTITY_ATTRS`
+    /// (comma-separated). Default `email`, which is what every earlier version emitted.
+    ///
+    /// Order is the operator's, and is the order the headers come out in. Unlike the
+    /// profile claims this may never be empty: see [`compile_identity_attrs`].
+    identity_attrs: Vec<IdentityAttr>,
     /// `BB_AUTH_WORKERS`, the number of blocking request threads. At least 1.
     workers: usize,
 }
@@ -630,6 +743,14 @@ impl Config {
         // Which OIDC profile claims to propagate. Unset or empty = none; every rejection
         // is fatal, because a claim silently dropped here is a header the application
         // waits for forever.
+        // Which identity attributes a 204 names. Default `email`: the header every
+        // application behind this gate already reads.
+        let identity_attrs = compile_identity_attrs(&env_or("BB_AUTH_IDENTITY_ATTRS", "email"))
+            .unwrap_or_else(|e| {
+                eprintln!("[bb-auth] FATAL: BB_AUTH_IDENTITY_ATTRS: {e}");
+                std::process::exit(1);
+            });
+
         let profile_claims = compile_profile_claims(&env_or("BB_AUTH_PROFILE_CLAIMS", ""))
             .unwrap_or_else(|e| {
                 eprintln!("[bb-auth] FATAL: BB_AUTH_PROFILE_CLAIMS: {e}");
@@ -658,6 +779,7 @@ impl Config {
             }),
             original_url_header: env_or("BB_AUTH_ORIGINAL_URL_HEADER", "X-Original-URL"),
             profile_claims,
+            identity_attrs,
             workers: env_or("BB_AUTH_WORKERS", "4").parse().unwrap_or(4).max(1),
         }
     }
@@ -677,7 +799,8 @@ struct JwksCache {
 /// mutable parts are the hot-reloadable access table and the JWKS cache.
 struct State {
     cfg: Config,
-    /// The access gate: sites, the denied veto, allowlisted users and their API keys.
+    /// The access gate: the applications and their scopes, the denied veto, the roster
+    /// and its API keys.
     /// Swapped wholesale on SIGHUP by `reload_access` (POSIX only, hence not linked here).
     access: RwLock<Access>,
     /// Path to re-read on SIGHUP. Only the POSIX reload path needs it.
@@ -712,10 +835,15 @@ fn origin_of(url: &str) -> Option<String> {
 fn load_access(path: &str) -> Access {
     match read_access(path) {
         Ok(a) => {
-            if a.by_email.is_empty() && !a.sites.any_public_auth() {
+            if a.apps.is_empty() {
                 eprintln!(
-                    "[bb-auth] WARNING: access file {path} has no users and no public_auth site \
-                     — nobody can sign in"
+                    "[bb-auth] WARNING: access file {path} has no applications, so every gated \
+                     URL is denied to everyone"
+                );
+            } else if a.by_uuid.is_empty() && !a.any_authenticated_scope() {
+                eprintln!(
+                    "[bb-auth] WARNING: access file {path} has no users and no authenticated \
+                     scope: nobody can sign in"
                 );
             }
             a
@@ -733,11 +861,14 @@ fn load_access(path: &str) -> Access {
 fn reload_access(state: &State) {
     match read_access(&state.access_path) {
         Ok(new) => {
-            let (u, k) = (new.by_email.len(), new.by_key_hash.len());
-            let (s, d) = (new.sites.entries.len(), new.denied.len());
+            let (u, k) = (new.by_uuid.len(), new.by_key_hash.len());
+            let a = new.apps.len();
+            let s: usize = new.apps.iter().map(|x| x.scopes.len()).sum();
+            let d = new.denied_users.len() + new.denied_identifiers.len();
             *state.access.write().unwrap() = new; // fail-safe: atomic swap
             eprintln!(
-                "[bb-auth] access reloaded (SIGHUP): {u} users, {k} api keys, {s} sites, {d} denied"
+                "[bb-auth] access reloaded (SIGHUP): {a} applications, {s} scopes, {u} users, \
+                 {k} api keys, {d} denied"
             );
         }
         Err(e) => eprintln!("[bb-auth] access reload FAILED, keeping current set: {e}"),
@@ -861,16 +992,6 @@ fn decoding_key(state: &State, kid: &str) -> Option<DecodingKey> {
 struct UserIdentity {
     email: String,
     claims: BTreeMap<String, String>,
-}
-
-impl UserIdentity {
-    /// An identity with no claims — the API-key path, which has no token to read any from.
-    fn email_only(email: String) -> Self {
-        UserIdentity {
-            email,
-            claims: BTreeMap::new(),
-        }
-    }
 }
 
 /// The id_token claims bb-auth consumes. `exp`, `aud` and `iss` are enforced by
@@ -1359,56 +1480,111 @@ fn respond_empty(req: Request, status: u16) {
 /// so present-and-empty would be a distinction the application cannot make. That is why
 /// this returns only what it found, and why an empty value cannot reach it
 /// ([`claim_value_ok`] rejects one at both capture and cookie-verification).
-fn profile_headers<'a>(claims: &'a [ProfileClaim], ident: &UserIdentity) -> Vec<(&'a str, String)> {
+fn profile_headers<'a>(
+    claims: &'a [ProfileClaim],
+    carried: &BTreeMap<String, String>,
+) -> Vec<(&'a str, String)> {
     claims
         .iter()
         .filter_map(|pc| {
-            ident
-                .claims
+            carried
                 .get(&pc.claim)
                 .map(|v| (pc.header.as_str(), pct_encode(v)))
         })
         .collect()
 }
 
-/// Respond `204` to an authorized `auth_request`, naming the user in [`IDENTITY_HEADER`]
-/// and, for each configured [`ProfileClaim`] the credential carried, its value in the
-/// header derived from that claim ([`profile_headers`]).
+/// The identity a granted request hands downstream: what the access file decided this
+/// request *is*, resolved once, so every configured [`IdentityAttr`] reads off one value.
 ///
-/// The email always passed [`header_safe_email`], by one of two disjoint routes, so [`h`]
-/// cannot panic here:
+/// `uuid` is `None` for an identity granted by an `authenticated` scope, which is in no
+/// roster row at all: that is the whole point of such a scope, and enrolling them is the
+/// application's business. `emails` then holds the single identifier the credential
+/// carried, so `X-Auth-Email` says the same thing it always did.
+struct Authorized {
+    uuid: Option<String>,
+    emails: Vec<String>,
+    claims: BTreeMap<String, String>,
+}
+
+/// What a granted request carries. An `anonymous` scope authorizes with **no identity at
+/// all**, and the `204` then names nobody: no identity header, no profile header, nothing
+/// for an application to key on. That is not an omission, it is what the scope says.
+enum Granted {
+    Anonymous,
+    Identity(Authorized),
+}
+
+/// The identity headers to emit, in the operator's configured order.
 ///
-/// * it is a key of [`Access::by_email`] — the API-key path reads it off the record, and
-///   the roster branch of [`authorize`] returns the very string that just matched a key by
-///   exact `HashMap` lookup. Every such key was checked by [`read_access`] at load.
-/// * or it came out of [`validate_id_token`], which checks it there — the only route for
-///   an identity granted by a `public_auth` site, which is in no table to have been
+/// Multiple values are joined with a **space**, which is unambiguous by construction: every
+/// identifier passed [`header_safe_email`], which requires printable ASCII, and a space is
+/// not printable ASCII. An attribute with no value **omits its header** rather than sending
+/// an empty one, exactly as a profile claim does, because nginx cannot tell an empty
+/// variable from an absent one.
+fn identity_headers<'a>(attrs: &'a [IdentityAttr], who: &Authorized) -> Vec<(&'a str, String)> {
+    attrs
+        .iter()
+        .filter_map(|a| {
+            let value = match a.attr.as_str() {
+                "uuid" => who.uuid.clone()?,
+                "email" if !who.emails.is_empty() => who.emails.join(" "),
+                _ => return None,
+            };
+            Some((a.header.as_str(), value))
+        })
+        .collect()
+}
+
+/// Respond `204` to an authorized `auth_request`, naming the identity in the configured
+/// [`IdentityAttr`] headers ([`identity_headers`]) and, for each configured
+/// [`ProfileClaim`] the credential carried, its value in the header derived from that
+/// claim ([`profile_headers`]).
+///
+/// An `anonymous` scope authorizes with no identity at all, so the `204` carries no header
+/// whatsoever. Everything below is about the case where there *is* an identity.
+///
+/// Every identifier emitted passed [`header_safe_email`], by one of two disjoint routes,
+/// so [`h`] cannot panic here:
+///
+/// * it came off a roster row, which the API-key path reads through its owner's uuid and
+///   the login path reads through [`Access::uuid_of`](bb_auth_core::Access::uuid_of).
+///   Every identifier on a row was checked by [`read_access`] at load, and one that failed
+///   was skipped there.
+/// * or it came out of [`validate_id_token`], which checks it there: the only route for an
+///   identity granted by an `authenticated` scope, which is in no table to have been
 ///   checked at load. The cookie carries it back unchanged under the HMAC.
 ///
-/// The first assert pins both halves. It is what stands between a case-insensitive
-/// `by_email` lookup added later, or a fourth credential that skips `validate_id_token`,
-/// and a panicking worker thread.
+/// A uuid needs no such argument, being hex and dashes by [`well_formed_uuid`](bb_auth_core::well_formed_uuid).
+/// The first assert pins the lot, and it is what stands between a fourth credential that
+/// skips both routes and a panicking worker thread. It admits the space that joins a
+/// multi-valued attribute, which is the one byte the identifiers themselves can never
+/// contain.
 ///
-/// The profile claims need no such argument: their header names are derived from an
+/// The profile claims need no such argument either: their header names are derived from an
 /// `[A-Za-z0-9_:-]` claim name and their values go through [`pct_encode`], which emits
 /// printable ASCII whatever it is handed — so safety is a property of the construction, not
 /// of where the value came from. The second assert pins *that*: it is what would catch a
 /// later change emitting a raw value, or a header name that stopped being a token.
-fn respond_authorized(req: Request, ident: &UserIdentity, claims: &[ProfileClaim]) {
-    debug_assert!(
-        header_safe_email(&ident.email),
-        "identity must be header-safe: {:?}",
-        ident.email
-    );
-    let mut resp = Response::empty(StatusCode(204)).with_header(h(IDENTITY_HEADER, &ident.email));
-    for (name, enc) in profile_headers(claims, ident) {
-        debug_assert!(
-            !enc.is_empty()
-                && enc.bytes().all(|b| b.is_ascii_graphic())
-                && name.bytes().all(|b| b.is_ascii_graphic()),
-            "encoded claim must be non-empty printable ASCII: {name:?}: {enc:?}"
-        );
-        resp = resp.with_header(h(name, &enc));
+fn respond_authorized(req: Request, granted: &Granted, cfg: &Config) {
+    let mut resp = Response::empty(StatusCode(204));
+    if let Granted::Identity(who) = granted {
+        for (name, value) in identity_headers(&cfg.identity_attrs, who) {
+            debug_assert!(
+                !value.is_empty() && value.bytes().all(|b| b.is_ascii_graphic() || b == b' '),
+                "identity header must be printable: {name:?}: {value:?}"
+            );
+            resp = resp.with_header(h(name, &value));
+        }
+        for (name, enc) in profile_headers(&cfg.profile_claims, &who.claims) {
+            debug_assert!(
+                !enc.is_empty()
+                    && enc.bytes().all(|b| b.is_ascii_graphic())
+                    && name.bytes().all(|b| b.is_ascii_graphic()),
+                "encoded claim must be non-empty printable ASCII: {name:?}: {enc:?}"
+            );
+            resp = resp.with_header(h(name, &enc));
+        }
     }
     let _ = req.respond(resp);
 }
@@ -1502,13 +1678,13 @@ fn original_url(req: &Request, cfg: &Config) -> Option<String> {
 /// so the only one that can never carry a profile claim: every [`ProfileClaim`] header is
 /// omitted for every API key, whatever the configuration.
 ///
-/// A `public_auth` site does **not** rescue an unknown key. That grant is for identities
-/// Cognito vouches for, and Cognito vouches for no static key of ours: an unknown key is
-/// not an un-enrolled user, it is nobody, and there would be no email to hand back.
-fn bearer_apikey_email(access: &Access, token: &str, url: Option<&str>) -> Option<String> {
-    let at = || url.unwrap_or("<none>");
-    match decide_api_key(access, &sha256_hex(token), url, now()) {
-        KeyDecision::Granted(rec) => Some(rec.email.clone()),
+/// An `authenticated` scope does **not** rescue an unknown key. That grant is for
+/// identities Cognito vouches for, and Cognito vouches for no static key of ours: an
+/// unknown key is not an un-enrolled user, it is nobody, and there would be no identity to
+/// hand back.
+fn bearer_apikey<'a>(access: &'a Access, token: &str) -> Option<&'a ApiKeyRecord> {
+    match decide_api_key(access, &sha256_hex(token), now()) {
+        KeyDecision::Granted(rec) => Some(rec),
         KeyDecision::Unknown => {
             eprintln!("[bb-auth] api key rejected: unknown");
             None
@@ -1516,80 +1692,125 @@ fn bearer_apikey_email(access: &Access, token: &str, url: Option<&str>) -> Optio
         KeyDecision::OwnerDenied(rec) => {
             eprintln!(
                 "[bb-auth] api key denied: owner is denied [{} {}]",
-                rec.email, rec.key_id
+                rec.uuid, rec.key_id
             );
             None
         }
         KeyDecision::Expired(rec) => {
             eprintln!(
                 "[bb-auth] api key rejected: expired [{} {}]",
-                rec.email, rec.key_id
-            );
-            None
-        }
-        KeyDecision::OutOfScope(rec) => {
-            eprintln!(
-                "[bb-auth] api key denied: url {} out of scope [{} {}]",
-                at(),
-                rec.email,
-                rec.key_id
+                rec.uuid, rec.key_id
             );
             None
         }
     }
 }
 
-/// Turn an *authenticated* identity into an *authorized* one, or `None`. Shared by the
-/// id_token-bearer and cookie paths — the two credentials Cognito vouches for.
+/// Ask the access file whether this subject may have this URL, and say why not.
 ///
 /// The rule is [`decide`], and it lives in the library because `bb-auth-adm can` asks the
-/// same question of the same code. What stays here is what only a request has: the log
-/// line naming the reason.
+/// same question of the same code. What stays here is what only a request has: the wall
+/// clock, and the log line naming the reason. Keep it that thin, or the two stop agreeing.
 ///
-/// Takes `email` by value and hands it back on success — on *both* grant branches, so the
-/// string returned is the one that came in. On the roster branch that is byte-identical to
-/// the [`Access::by_email`] key (both sides lowercased, `HashMap::get` is exact-match); on
-/// the `public_auth` branch it is whatever [`validate_id_token`] returned.
-/// [`respond_authorized`] relies on exactly that pair of facts.
-fn authorize(access: &Access, email: String, url: Option<&str>) -> Option<String> {
-    match decide(access, &email, url) {
-        Decision::SiteGrant(site) => {
-            eprintln!("[bb-auth] granted via site '{site}' (public_auth): {email}");
-            Some(email)
+/// `who` names the credential in the log: an identifier for a login, a key id and its
+/// owner for a `bbk_`. It is only ever logged, never matched on.
+fn authorize(access: &Access, subject: &Subject, url: Option<&str>, who: &str) -> bool {
+    let at = || url.unwrap_or("<none>");
+    match decide(access, subject, url) {
+        // An anonymous scope is the steady state of a health endpoint, so it is not
+        // logged: a line per poll would bury everything that matters.
+        Decision::Anonymous { .. } => true,
+        Decision::Granted { app, scope } => {
+            // The one grant worth a line: somebody Cognito vouches for, who is in no
+            // roster row, just walked in. That is what an `authenticated` scope is for,
+            // and an operator should be able to see it happening.
+            if let Subject::Identifier(id) = subject {
+                if access.uuid_of(id).is_none() {
+                    eprintln!(
+                        "[bb-auth] granted via {app}/{scope} to an un-enrolled identity: {id}"
+                    );
+                }
+            }
+            true
         }
-        Decision::RosterGrant => Some(email),
         Decision::Vetoed => {
-            eprintln!("[bb-auth] denied: {email} is on the denied list");
-            None
+            eprintln!("[bb-auth] denied: {who} is on the denied list");
+            false
         }
-        Decision::OutOfScope => {
+        Decision::NoApplication => {
+            eprintln!("[bb-auth] denied: no application covers {} [{who}]", at());
+            false
+        }
+        Decision::NoScope { app } => {
             eprintln!(
-                "[bb-auth] denied: url {} out of scope for {email}",
-                url.unwrap_or("<none>")
+                "[bb-auth] denied: application '{app}' has no scope for {} [{who}]",
+                at()
             );
-            None
+            false
         }
-        Decision::NotEnrolled => {
-            eprintln!("[bb-auth] denied: {email} not in users table");
-            None
+        Decision::Unauthenticated { app, scope } => {
+            eprintln!("[bb-auth] denied: {app}/{scope} needs an identity");
+            false
+        }
+        Decision::CredentialRefused { app, scope } => {
+            eprintln!("[bb-auth] denied: {app}/{scope} does not admit this credential [{who}]");
+            false
+        }
+        Decision::NotEnrolled { app, scope } => {
+            eprintln!("[bb-auth] denied: {who} is in no users entry [{app}/{scope}]");
+            false
+        }
+        Decision::NotMember { app, scope } => {
+            eprintln!("[bb-auth] denied: {app}/{scope} does not list {who}");
+            false
+        }
+        Decision::KeyOutOfScope { app, scope } => {
+            eprintln!("[bb-auth] denied: this key may not exercise {app}/{scope} [{who}]");
+            false
         }
     }
 }
 
-/// [`authorize`] for a token-backed credential: the grant decision sees only the email,
-/// and the profile claims ride back untouched on success.
+/// The identity an API key acts as: its owner's row. A key carries no token, so it can
+/// never bring a profile claim with it, whatever the configuration.
+fn key_identity(access: &Access, rec: &ApiKeyRecord) -> Authorized {
+    Authorized {
+        uuid: Some(rec.uuid.clone()),
+        emails: access
+            .by_uuid
+            .get(&rec.uuid)
+            .map(|u| u.emails.clone())
+            .unwrap_or_default(),
+        claims: BTreeMap::new(),
+    }
+}
+
+/// Authorize a Cognito-backed credential (the id_token bearer or the session cookie) and
+/// assemble what a grant hands downstream.
 ///
-/// Splitting it this way is deliberate. The access file has no opinion about profile
-/// claims, so nothing about them may reach [`decide`] — if one could ever change the
-/// answer, `bb-auth-adm can` would stop answering the same question as the gate. This
-/// wrapper is re-assembly, not policy.
-fn authorize_identity(
-    access: &Access,
-    ident: UserIdentity,
-    url: Option<&str>,
-) -> Option<UserIdentity> {
+/// The identifier the credential carried is resolved against the roster **here**, and not
+/// inside [`decide`]: the access file has no opinion about profile claims, so nothing about
+/// them may reach the decision, or `bb-auth-adm can` would stop answering the same question
+/// as the gate. This is re-assembly, not policy.
+///
+/// An identity in no roster row is not an error: an `authenticated` scope exists precisely
+/// to admit one. It simply has no `uuid` to hand downstream, and the identifier it signed
+/// in with is the only email there is.
+fn authorize_login(access: &Access, ident: UserIdentity, url: Option<&str>) -> Option<Granted> {
     let UserIdentity { email, claims } = ident;
-    authorize(access, email, url).map(|email| UserIdentity { email, claims })
+    if !authorize(access, &Subject::Identifier(&email), url, &email) {
+        return None;
+    }
+    let uuid = access.uuid_of(&email).map(str::to_string);
+    let emails = match &uuid {
+        Some(u) => access.by_uuid[u].emails.clone(),
+        None => vec![email],
+    };
+    Some(Granted::Identity(Authorized {
+        uuid,
+        emails,
+        claims,
+    }))
 }
 
 /// `GET /auth/validate` — the nginx `auth_request` endpoint. 204 plus the authorized
@@ -1600,7 +1821,8 @@ fn authorize_identity(
 /// Credentials are tried in the order documented on the crate: `bbk_` API key, raw
 /// id_token, then the session cookie. A key must resolve to a user in the roster and put
 /// the URL inside its [`UrlScope`](bb_auth_core::UrlScope); the two Cognito credentials go through [`authorize`],
-/// which also honours `public_auth` sites and the `denied` veto. Whichever one wins, the
+/// which also honours `anonymous` and `authenticated` scopes and the `denied` veto.
+/// Whichever one wins, the
 /// identity handed back is an email — plus, for the two token-backed credentials, whatever
 /// configured profile claims came with it. See [`respond_authorized`].
 fn handle_validate(req: Request, state: &State) {
@@ -1617,21 +1839,23 @@ fn handle_validate(req: Request, state: &State) {
     if let Some(token) = header_value(&req, "Authorization").and_then(parse_bearer) {
         let granted = if token.starts_with(API_KEY_PREFIX) {
             // A key acts as its user and carries no token, so no claims come with it.
-            bearer_apikey_email(&state.access.read().unwrap(), token, url.as_deref())
-                .map(UserIdentity::email_only)
+            let access = state.access.read().unwrap();
+            bearer_apikey(&access, token).and_then(|rec| {
+                let who = format!("key '{}' of {}", rec.key_id, rec.uuid);
+                authorize(&access, &Subject::Key(rec), url.as_deref(), &who)
+                    .then(|| Granted::Identity(key_identity(&access, rec)))
+            })
         } else {
             match validate_id_token(token, state) {
-                Ok(ident) => {
-                    authorize_identity(&state.access.read().unwrap(), ident, url.as_deref())
-                }
+                Ok(ident) => authorize_login(&state.access.read().unwrap(), ident, url.as_deref()),
                 Err(e) => {
                     eprintln!("[bb-auth] bearer rejected: {e}");
                     None
                 }
             }
         };
-        if let Some(ident) = granted {
-            respond_authorized(req, &ident, &cfg.profile_claims);
+        if let Some(granted) = granted {
+            respond_authorized(req, &granted, cfg);
             return;
         }
     }
@@ -1639,20 +1863,30 @@ fn handle_validate(req: Request, state: &State) {
     let granted = header_value(&req, "Cookie")
         .and_then(|c| cookie_value(c, &cfg.cookie_name).map(str::to_string))
         .and_then(|v| verify_session(&v, &cfg.hmac_keys))
-        .and_then(|ident| authorize_identity(&state.access.read().unwrap(), ident, url.as_deref()));
-    match granted {
-        Some(ident) => respond_authorized(req, &ident, &cfg.profile_claims),
-        None => {
-            // Which login page nginx should send them to. Resolved from the site even
-            // though no site granted anything: `login_url` says where this area's users
-            // sign in, not who may enter.
-            let login = login_url_for(
-                &state.access.read().unwrap(),
-                &cfg.login_url,
-                url.as_deref(),
-            );
-            respond_unauthorized(req, &login)
-        }
+        .and_then(|ident| authorize_login(&state.access.read().unwrap(), ident, url.as_deref()));
+    if let Some(granted) = granted {
+        respond_authorized(req, &granted, cfg);
+        return;
+    }
+
+    // No credential authorized this request. An `anonymous` scope grants anyway, to
+    // anybody, which is what it is for. Asked through [`decide`] rather than [`authorize`]
+    // so the refusal is not logged twice: a request with no credential at all is the
+    // ordinary case on a gated URL, not an event.
+    let (anonymous, login) = {
+        let access = state.access.read().unwrap();
+        (
+            decide(&access, &Subject::Anonymous, url.as_deref()).granted(),
+            // Which login page nginx should send them to. Resolved from the application
+            // even though nothing granted: `login_url` says where this area's users sign
+            // in, not who may enter.
+            login_url_for(&access, &cfg.login_url, url.as_deref()),
+        )
+    };
+    if anonymous {
+        respond_authorized(req, &Granted::Anonymous, cfg);
+    } else {
+        respond_unauthorized(req, &login)
     }
 }
 
@@ -1670,7 +1904,7 @@ fn handle_validate(req: Request, state: &State) {
 /// The cookie is identity, not authorization: it grants nothing on its own, and every
 /// request it accompanies is re-authorized by [`handle_validate`]. So the 403 here is a
 /// courtesy — it tells someone at the login page that they are not enrolled, rather than
-/// letting them bounce off a 401 later. It has to soften once any `public_auth` site
+/// letting them bounce off a 401 later. It has to soften once any `authenticated` scope
 /// exists, because then an un-enrolled identity *does* have somewhere to go and refusing
 /// the cookie would make that site unreachable from a browser. Guessing at `rd` instead
 /// would be worse: it is the post-login destination, not the URL that triggered the login,
@@ -1727,9 +1961,9 @@ fn handle_session(mut req: Request, state: &State) {
     let (vetoed, enrolled, any_open) = {
         let access = state.access.read().unwrap();
         (
-            access.denied.contains(&ident.email),
-            access.by_email.contains_key(&ident.email),
-            access.sites.any_public_auth(),
+            access.vetoes_identifier(&ident.email),
+            access.uuid_of(&ident.email).is_some(),
+            access.any_authenticated_scope(),
         )
     };
     if vetoed || !(enrolled || any_open) {
@@ -1837,25 +2071,45 @@ fn handle_logout(req: Request, state: &State) {
 fn check_users(path: &str) -> ! {
     match read_access(path) {
         Ok(a) => {
-            let open: Vec<&str> = a
-                .sites
-                .entries
-                .iter()
-                .filter(|s| s.public_auth)
-                .map(|s| s.name.as_str())
-                .collect();
+            let scopes: usize = a.apps.iter().map(|x| x.scopes.len()).sum();
             println!(
-                "[bb-auth] {path}: OK — {} users, {} api keys, {} sites, {} denied",
-                a.by_email.len(),
+                "[bb-auth] {path}: OK: {} applications, {scopes} scopes, {} users, {} api keys, \
+                 {} denied",
+                a.apps.len(),
+                a.by_uuid.len(),
                 a.by_key_hash.len(),
-                a.sites.entries.len(),
-                a.denied.len()
+                a.denied_users.len() + a.denied_identifiers.len()
             );
-            if !open.is_empty() {
+            // The two kinds of scope that grant without being listed anywhere are the ones
+            // worth printing: they are what an operator most often did not mean to leave
+            // open, and they are invisible in a roster.
+            let open = |kind: AccessKind| -> Vec<String> {
+                a.apps
+                    .iter()
+                    .flat_map(|x| x.scopes.iter().map(move |s| (x, s)))
+                    .filter(|(_, s)| s.access == kind)
+                    .map(|(x, s)| format!("{}/{}", x.name, s.name))
+                    .collect()
+            };
+            for (kind, what) in [
+                (AccessKind::Anonymous, "anonymous (no credential at all)"),
+                (
+                    AccessKind::Authenticated,
+                    "authenticated (any identity Cognito vouches for, enrolled or not)",
+                ),
+            ] {
+                let names = open(kind);
+                if !names.is_empty() {
+                    println!("[bb-auth] {path}: {what}: {}", names.join(", "));
+                }
+            }
+            // The area every gated URL must fall inside, so an operator can compare it
+            // with what nginx actually gates.
+            for app in &a.apps {
                 println!(
-                    "[bb-auth] {path}: public_auth sites (any authenticated identity, enrolled \
-                     or not): {}",
-                    open.join(", ")
+                    "[bb-auth] {path}: '{}' owns {}",
+                    app.name,
+                    app.base.join(", ")
                 );
             }
             std::process::exit(0);
@@ -1897,16 +2151,25 @@ fn main() {
 
     let listen = cfg.listen.clone();
     let workers = cfg.workers;
-    let user_n = access.by_email.len();
+    let user_n = access.by_uuid.len();
     let key_n = access.by_key_hash.len();
-    let site_n = access.sites.entries.len();
-    let denied_n = access.denied.len();
-    let open_sites: Vec<String> = access
-        .sites
-        .entries
+    let app_n = access.apps.len();
+    let scope_n: usize = access.apps.iter().map(|a| a.scopes.len()).sum();
+    let denied_n = access.denied_users.len() + access.denied_identifiers.len();
+    // The scopes that grant without listing anybody: what an operator most needs to see
+    // once, at startup, because no roster shows them.
+    let open_scopes: Vec<String> = access
+        .apps
         .iter()
-        .filter(|s| s.public_auth)
-        .map(|s| s.name.clone())
+        .flat_map(|a| a.scopes.iter().map(move |s| (a, s)))
+        .filter(|(_, s)| s.access != AccessKind::Restricted)
+        .map(|(a, s)| {
+            let kind = match s.access {
+                AccessKind::Anonymous => "anonymous",
+                _ => "authenticated",
+            };
+            format!("{}/{} ({kind})", a.name, s.name)
+        })
         .collect();
 
     let state = Arc::new(State {
@@ -1931,6 +2194,13 @@ fn main() {
         std::process::exit(1);
     }));
 
+    let identity_attrs = state
+        .cfg
+        .identity_attrs
+        .iter()
+        .map(|a| a.attr.as_str())
+        .collect::<Vec<_>>()
+        .join(",");
     // Claim *names* are configuration, so they belong in the banner; claim *values* are
     // PII and are never logged, here or anywhere.
     let claim_names = if state.cfg.profile_claims.is_empty() {
@@ -1945,9 +2215,9 @@ fn main() {
             .join(",")
     };
     eprintln!(
-        "[bb-auth] listening on {listen} | issuer={} | aud={} | users={user_n} | api_keys={key_n} | sites={site_n} | denied={denied_n} | claims={claim_names} | workers={workers}",
+        "[bb-auth] listening on {listen} | issuer={} | aud={} | apps={app_n} | scopes={scope_n} | users={user_n} | api_keys={key_n} | denied={denied_n} | identity={identity_attrs} | claims={claim_names} | workers={workers}",
         state.cfg.issuer,
-        state.cfg.audiences.join(",")
+        state.cfg.audiences.join(","),
     );
     // A browser silently drops a cookie over ~4 KB, which would look like a login loop
     // rather than an error. Warn while it is still a config question.
@@ -1959,12 +2229,12 @@ fn main() {
             state.cfg.profile_claims.len()
         );
     }
-    if !open_sites.is_empty() {
-        // Cognito self-signup is open, so this really is "anyone who can register".
+    if !open_scopes.is_empty() {
+        // Cognito self-signup is open, so `authenticated` really is "anyone who can
+        // register"; `anonymous` is everyone, credential or not.
         eprintln!(
-            "[bb-auth] WARNING: public_auth sites reachable by ANY authenticated identity, \
-             enrolled or not [{}]",
-            open_sites.join(",")
+            "[bb-auth] WARNING: scopes that grant without listing anybody [{}]",
+            open_scopes.join(",")
         );
     }
     if state.cfg.allow_unverified_social {
@@ -2033,10 +2303,13 @@ mod tests {
         }
     }
 
-    /// An identity with no claims — what every API key resolves to, and every login under
-    /// the default (empty) `BB_AUTH_PROFILE_CLAIMS`.
+    /// An identity with no claims: every login under the default (empty)
+    /// `BB_AUTH_PROFILE_CLAIMS`.
     fn ident(email: &str) -> UserIdentity {
-        UserIdentity::email_only(email.to_string())
+        UserIdentity {
+            email: email.to_string(),
+            claims: BTreeMap::new(),
+        }
     }
     /// An identity carrying an arbitrary claim set.
     fn ident_claims(email: &str, claims: &[(&str, &str)]) -> UserIdentity {
@@ -2353,23 +2626,23 @@ mod tests {
             &[("given_name", "Ada"), ("nickname", "The Countess")],
         );
         assert_eq!(
-            profile_headers(&cfg, &stale),
+            profile_headers(&cfg, &stale.claims),
             vec![("X-Auth-Given-Name", "Ada".to_string())]
         );
         // A configured claim the identity lacks omits its header rather than sending it
         // empty; order follows the config, not the map.
         assert_eq!(
-            profile_headers(&cfg, &ident_full("a@b.com", "Ada", "Byron")),
+            profile_headers(&cfg, &ident_full("a@b.com", "Ada", "Byron").claims),
             vec![
                 ("X-Auth-Given-Name", "Ada".to_string()),
                 ("X-Auth-Family-Name", "Byron".to_string()),
             ]
         );
         // No config, nothing emitted, whatever the identity carries.
-        assert!(profile_headers(&[], &stale).is_empty());
+        assert!(profile_headers(&[], &stale.claims).is_empty());
         // And the value goes out percent-encoded.
         assert_eq!(
-            profile_headers(&cfg, &ident_full("a@b.com", "Niccolò", "de' Medici")),
+            profile_headers(&cfg, &ident_full("a@b.com", "Niccolò", "de' Medici").claims),
             vec![
                 ("X-Auth-Given-Name", "Niccol%C3%B2".to_string()),
                 ("X-Auth-Family-Name", "de%27%20Medici".to_string()),
@@ -2780,106 +3053,239 @@ mod tests {
         a
     }
 
-    #[test]
-    fn authorize_hands_back_the_identity_it_was_given() {
-        let a = access_of(
-            "authorize",
-            r#"{ "sites": [ { "name": "app1", "urls": ["https://app.x.com/app1/*"],
-                              "public_auth": true } ],
-                 "denied": ["spammer@x.com"],
-                 "users": [ { "email": "bob@x.com",
-                              "authorized_urls": ["https://app.x.com/other/*"] } ] }"#,
-        );
-        let other = Some("https://app.x.com/other/x");
-        let app1 = Some("https://app.x.com/app1/x");
+    const BOB: &str = "11111111-1111-4111-8111-111111111111";
 
-        // the roster branch: the string back is the key that matched, header-safe by
-        // construction because `read_access` checked it at load …
-        let got = authorize(&a, "bob@x.com".to_string(), other).unwrap();
-        assert_eq!(got, "bob@x.com");
-        assert!(header_safe_email(&got));
-        // … and the public_auth branch: nobody in any table, the string is the caller's,
-        // header-safe because `validate_id_token` checked it there. Both are the input.
-        let got = authorize(&a, "newcomer@x.com".to_string(), app1).unwrap();
-        assert_eq!(got, "newcomer@x.com");
-        assert!(header_safe_email(&got));
-
-        // and the denials map to None, veto first
-        assert_eq!(authorize(&a, "spammer@x.com".to_string(), app1), None);
-        assert_eq!(
-            authorize(&a, "bob@x.com".to_string(), app1).as_deref(),
-            Some("bob@x.com")
-        );
-        assert_eq!(authorize(&a, "newcomer@x.com".to_string(), other), None);
-        assert_eq!(authorize(&a, "bob@x.com".to_string(), None), None);
+    /// One `authenticated` area, one `restricted` area, one veto, one key.
+    fn gate_access(name: &str) -> Access {
+        let key_hash = sha256_hex("bbk_secret");
+        access_of(
+            name,
+            &format!(
+                r#"{{ "version": 3,
+                     "applications": [
+                       {{ "name": "app1", "base": ["https://app.x.com/app1"], "scopes": [
+                          {{ "name": "open", "urls": ["https://app.x.com/app1/*"],
+                             "access": "authenticated" }} ] }},
+                       {{ "name": "other", "base": ["https://app.x.com/other"], "scopes": [
+                          {{ "name": "team", "urls": ["https://app.x.com/other/*"],
+                             "access": "restricted", "users": ["{BOB}"] }} ] }},
+                       {{ "name": "pub", "base": ["https://app.x.com/pub"], "scopes": [
+                          {{ "name": "health", "urls": ["https://app.x.com/pub/*"],
+                             "access": "anonymous" }} ] }} ],
+                     "denied": ["spammer@x.com"],
+                     "users": [ {{ "uuid": "{BOB}", "emails": ["bob@x.com", "bob@old.com"],
+                        "api_keys": [ {{ "id": "laptop", "key_hash": "{key_hash}",
+                                         "released": "2026-01-01", "duration": "never" }} ] }} ] }}"#
+            ),
+        )
     }
 
     #[test]
-    fn authorize_identity_passes_claims_through_untouched() {
+    fn authorize_login_resolves_the_identity_it_hands_downstream() {
+        let a = gate_access("authorize");
+        let other = Some("https://app.x.com/other/x");
+        let app1 = Some("https://app.x.com/app1/x");
+
+        // Enrolled: the identity carries the uuid and every identifier the row has, not
+        // just the one that signed in. That is what makes `X-Auth-Email` stable.
+        let got = authorize_login(&a, ident("bob@old.com"), other).unwrap();
+        match got {
+            Granted::Identity(who) => {
+                assert_eq!(who.uuid.as_deref(), Some(BOB));
+                assert_eq!(who.emails, vec!["bob@x.com", "bob@old.com"]);
+                assert!(who.emails.iter().all(|e| header_safe_email(e)));
+            }
+            Granted::Anonymous => panic!("a credential must not resolve to an anonymous grant"),
+        }
+
+        // An `authenticated` scope: nobody in any table, so no uuid, and the only email
+        // there is is the one the token vouched for. Header-safe because
+        // `validate_id_token` checked it there.
+        let got = authorize_login(&a, ident("newcomer@x.com"), app1).unwrap();
+        match got {
+            Granted::Identity(who) => {
+                assert_eq!(who.uuid, None);
+                assert_eq!(who.emails, vec!["newcomer@x.com"]);
+            }
+            Granted::Anonymous => panic!("a credential must not resolve to an anonymous grant"),
+        }
+
+        // And the denials. The veto comes first, then membership, then the missing header.
+        assert!(authorize_login(&a, ident("spammer@x.com"), app1).is_none());
+        assert!(authorize_login(&a, ident("newcomer@x.com"), other).is_none());
+        assert!(authorize_login(&a, ident("bob@x.com"), None).is_none());
+        // Nothing outside every application is reachable, by anyone.
+        assert!(
+            authorize_login(&a, ident("bob@x.com"), Some("https://app.x.com/elsewhere")).is_none()
+        );
+    }
+
+    #[test]
+    fn authorize_login_passes_claims_through_untouched() {
         // The profile claims must survive the grant decision without influencing it: the
         // access file has no opinion about them, and `bb-auth-adm can` has to keep
         // answering the same question the gate does.
-        let a = access_of(
-            "authorize-identity",
-            r#"{ "sites": [ { "name": "app1", "urls": ["https://app.x.com/app1/*"],
-                              "public_auth": true } ],
-                 "denied": ["spammer@x.com"],
-                 "users": [ { "email": "bob@x.com",
-                              "authorized_urls": ["https://app.x.com/other/*"] } ] }"#,
+        let a = gate_access("authorize-claims");
+        let carried = |g: Option<Granted>| match g {
+            Some(Granted::Identity(who)) => who.claims,
+            _ => panic!("expected a granted identity"),
+        };
+        assert_eq!(
+            carried(authorize_login(
+                &a,
+                ident_full("bob@x.com", "Bob", "Rossi"),
+                Some("https://app.x.com/other/x")
+            )),
+            ident_full("bob@x.com", "Bob", "Rossi").claims
         );
-        let other = Some("https://app.x.com/other/x");
-        let app1 = Some("https://app.x.com/app1/x");
+        // The same, where the identity is in no table at all.
+        assert_eq!(
+            carried(authorize_login(
+                &a,
+                ident_full("new@x.com", "Niccolò", "de' Medici"),
+                Some("https://app.x.com/app1/x")
+            )),
+            ident_full("new@x.com", "Niccolò", "de' Medici").claims
+        );
+        // And a claim never rescues a denial.
+        assert!(authorize_login(
+            &a,
+            ident_full("spammer@x.com", "S", "P"),
+            Some("https://app.x.com/app1/x")
+        )
+        .is_none());
+    }
 
-        // the roster branch …
-        assert_eq!(
-            authorize_identity(&a, ident_full("bob@x.com", "Bob", "Rossi"), other),
-            Some(ident_full("bob@x.com", "Bob", "Rossi"))
+    #[test]
+    fn bearer_apikey_resolves_to_its_owner() {
+        // The gate hashes the bearer; the file holds only the hash. A key acts as its
+        // user, so the identity handed back is the owner's row: the one identity on this
+        // path that never passed through a token claim, and so is guarded at load instead.
+        let a = gate_access("apikey");
+        let rec = bearer_apikey(&a, "bbk_secret").unwrap();
+        assert_eq!(rec.uuid, BOB);
+
+        let who = key_identity(&a, rec);
+        assert_eq!(who.uuid.as_deref(), Some(BOB));
+        assert_eq!(who.emails, vec!["bob@x.com", "bob@old.com"]);
+        // A key has no token, so it can never carry a profile claim.
+        assert!(who.claims.is_empty());
+
+        assert!(bearer_apikey(&a, "bbk_nope").is_none());
+    }
+
+    #[test]
+    fn a_key_is_refused_where_the_scope_admits_only_a_login() {
+        let a = access_of(
+            "key-class",
+            &format!(
+                r#"{{ "version": 3,
+                     "applications": [ {{ "name": "app", "base": ["https://x.com/a"],
+                       "scopes": [ {{ "name": "s", "urls": ["https://x.com/a/*"],
+                         "access": "restricted", "users": ["{BOB}"],
+                         "credentials": ["login"] }} ] }} ],
+                     "users": [ {{ "uuid": "{BOB}", "emails": ["bob@x.com"],
+                       "api_keys": [ {{ "id": "k", "key_hash": "{}",
+                                        "released": "2026-01-01", "duration": "never" }} ] }} ] }}"#,
+                sha256_hex("bbk_secret")
+            ),
         );
-        // … and the public_auth branch, where the identity is in no table at all
+        let url = Some("https://x.com/a/thing");
+        let rec = bearer_apikey(&a, "bbk_secret").unwrap();
+        assert!(!authorize(&a, &Subject::Key(rec), url, "key"));
+        // The same person, through a browser login, is admitted.
+        assert!(authorize_login(&a, ident("bob@x.com"), url).is_some());
+    }
+
+    #[test]
+    fn an_anonymous_scope_grants_with_no_credential_at_all() {
+        let a = gate_access("anon");
+        let url = Some("https://app.x.com/pub/healthz");
+        assert!(decide(&a, &Subject::Anonymous, url).granted());
+        // And it grants ahead of the veto, because a vetoed client would simply send
+        // nothing and be granted anyway.
+        assert!(decide(&a, &Subject::Identifier("spammer@x.com"), url).granted());
+        // Elsewhere, no credential is no entry.
+        assert!(!decide(&a, &Subject::Anonymous, Some("https://app.x.com/app1/x")).granted());
+    }
+
+    // --- the identity headers ------------------------------------------------
+
+    fn attrs(spec: &str) -> Vec<IdentityAttr> {
+        compile_identity_attrs(spec).unwrap()
+    }
+
+    /// The refusal, without asking the `Ok` side for a `Debug` it deliberately lacks.
+    fn refusal<T>(r: Result<T, String>) -> String {
+        match r {
+            Ok(_) => panic!("expected a refusal"),
+            Err(e) => e,
+        }
+    }
+
+    #[test]
+    fn compile_identity_attrs_defaults_to_email_and_derives_its_header() {
+        let a = attrs("email");
+        assert_eq!(a.len(), 1);
+        assert_eq!(a[0].header, IDENTITY_HEADER);
+        // The derivation is the profile claims' own, so the two can never disagree.
+        assert_eq!(attrs("uuid,email")[0].header, "X-Auth-Uuid");
+    }
+
+    #[test]
+    fn compile_identity_attrs_refuses_the_unknown_the_repeated_and_the_empty() {
+        for spec in ["", "  ", ",,"] {
+            let e = refusal(compile_identity_attrs(spec));
+            assert!(e.contains("at least one"), "{spec:?}: {e}");
+        }
+        assert!(refusal(compile_identity_attrs("phone")).contains("unknown identity attribute"));
+        assert!(refusal(compile_identity_attrs("email,email")).contains("listed twice"));
+    }
+
+    #[test]
+    fn identity_headers_join_with_a_space_and_omit_what_is_absent() {
+        let who = Authorized {
+            uuid: Some(BOB.to_string()),
+            emails: vec!["bob@x.com".into(), "bob@old.com".into()],
+            claims: BTreeMap::new(),
+        };
         assert_eq!(
-            authorize_identity(&a, ident_full("new@x.com", "Niccolò", "de' Medici"), app1),
-            Some(ident_full("new@x.com", "Niccolò", "de' Medici"))
+            identity_headers(&attrs("uuid,email"), &who),
+            vec![
+                ("X-Auth-Uuid", BOB.to_string()),
+                (IDENTITY_HEADER, "bob@x.com bob@old.com".to_string()),
+            ]
         );
-        // a claim never rescues a denial
+        // A space can never appear inside an identifier, which is what makes the join
+        // unambiguous; a comma could, so it is not used.
+        assert!(who.emails.iter().all(|e| header_safe_email(e)));
+
+        // An identity granted by an `authenticated` scope has no uuid: the header is
+        // omitted, never sent empty, because nginx cannot tell those apart.
+        let stranger = Authorized {
+            uuid: None,
+            emails: vec!["new@x.com".into()],
+            claims: BTreeMap::new(),
+        };
         assert_eq!(
-            authorize_identity(&a, ident_full("spammer@x.com", "S", "P"), app1),
-            None
+            identity_headers(&attrs("uuid,email"), &stranger),
+            vec![(IDENTITY_HEADER, "new@x.com".to_string())]
         );
+        // Order follows the configuration, not the struct.
         assert_eq!(
-            authorize_identity(&a, ident_full("new@x.com", "N", "X"), other),
-            None
-        );
-        assert_eq!(
-            authorize_identity(&a, ident_full("bob@x.com", "B", "R"), None),
-            None
+            identity_headers(&attrs("email,uuid"), &who)[0].0,
+            IDENTITY_HEADER
         );
     }
 
     #[test]
-    fn bearer_apikey_email_returns_the_owner() {
-        // The gate hashes the bearer; the file holds only the hash. A key acts as its
-        // user, so the identity handed back is the owner's — the one email on this path
-        // that never passed through a token claim, and so is guarded at load instead.
-        let key = "bbk_secret";
-        let json = format!(
-            r#"{{ "users": [ {{ "email": "bot@x.com",
-                   "authorized_urls": ["https://mcp.x.com/mcp/*"],
-                   "api_keys": [ {{ "id": "laptop", "key_hash": "{}",
-                                    "released": "2026-01-01", "duration": "never" }} ] }} ] }}"#,
-            sha256_hex(key)
-        );
-        let a = access_of("apikey", &json);
-        let in_scope = Some("https://mcp.x.com/mcp/tools");
-
-        let got = bearer_apikey_email(&a, key, in_scope).unwrap();
-        assert_eq!(got, "bot@x.com");
-        assert!(header_safe_email(&got));
-
-        assert_eq!(bearer_apikey_email(&a, "bbk_nope", in_scope), None);
-        assert_eq!(
-            bearer_apikey_email(&a, key, Some("https://mcp.x.com/other")),
-            None
-        );
-        assert_eq!(bearer_apikey_email(&a, key, None), None); // no header => denied
+    fn a_profile_claim_may_not_collide_with_an_identity_header_even_a_disabled_one() {
+        // `uuid` is off by default, and that is exactly why the collision has to be
+        // refused now: turning it on later would otherwise silently overwrite a claim an
+        // application already trusts.
+        for claim in ["uuid", "email"] {
+            let e = refusal(compile_profile_claims(claim));
+            assert!(!e.is_empty(), "{claim} must be refused");
+        }
     }
 }

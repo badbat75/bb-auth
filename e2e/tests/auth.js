@@ -37,7 +37,7 @@ async function run(ctx, t) {
 
   // --- a GET never mutates ----------------------------------------------------------
   const before = bytes(ctx);
-  const rGet = await api(ctx, '/admin/sites/app1-onboarding/move');
+  const rGet = await api(ctx, '/admin/apps/app1/scopes/admin/move');
   t.eq('GET on a POST-only route is a 405', rGet.status, 405);
   t.check('and writes nothing', bytes(ctx) === before, 'file changed under a GET');
 

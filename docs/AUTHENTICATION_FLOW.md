@@ -104,14 +104,15 @@ Inside bb-auth (`handle_session`):
      accepted when it carries a federated `identities` entry (a social login),
      optionally narrowed to `BB_AUTH_SOCIAL_PROVIDERS`. Native users stay strict.
    - extract and lowercase the `email` claim, and require it to be printable ASCII
-     (`header_safe_email`) — it will be handed to the app in `X-Auth-Email`, and on a
-     `public_auth` site no table has vetted it.
+     (`header_safe_email`) — it will be handed to the app in `X-Auth-Email`, and on an
+     `authenticated` scope no table has vetted it.
    - capture each `BB_AUTH_PROFILE_CLAIMS` claim the token asserts (`clean_claim`:
      trimmed, ≤ 256 bytes, no control characters, case preserved). A value that fails any
      of that is dropped on its own; it never costs the token. Unconfigured claims — the
      default, since the list is empty unless set — are not even looked at.
-3. **Access-table check:** `email` must not be in `denied`, and must be either present in
-   the roster (`by_email`) or able to go somewhere — i.e. some site grants `public_auth`.
+3. **Access-table check:** `email` must not be vetoed (`vetoes_identifier`, which covers
+   both the address and the user it resolves to), and must be either present in the roster
+   (`by_identifier`) or able to go somewhere, i.e. some scope anywhere is `authenticated`.
    The cookie is identity, not authorization: it grants nothing on its own, and every
    request it accompanies is re-authorized. This `403` is a courtesy, so someone who is
    not enrolled hears it at the login page instead of bouncing off a `401` later.
@@ -136,7 +137,7 @@ Outcomes the user can see:
 |--------|--------|------------|
 | Missing/empty `id_token` | `400` | “Missing token.” |
 | Token invalid/expired/claims wrong | `401` | “The access token is invalid or has expired.” |
-| Token valid but the email is `denied`, or is unknown with no `public_auth` site to reach | `403` | “This email address is not allowed to sign in.” |
+| Token valid but the email is `denied`, or is unknown with no `authenticated` scope to reach | `403` | “This email address is not allowed to sign in.” |
 | Success | `302 → rd` | (cookie set, back to the app) |
 
 ---
@@ -156,16 +157,19 @@ would be `/internal/auth-gate`. For programmatic clients it also forwards the
          [+ Authorization: Bearer … for API clients])
  bb-auth (handle_validate), first credential that authorizes wins:
    a. Authorization: Bearer bbk_…  → static API key: sha256(bearer) in by_key_hash,
-      owner not denied, unexpired, request URL in the key's scope. No site applies.
-      Email only — no token, so no profile claims.
-   b. Authorization: Bearer <id_token>  → validated as in Phase 3, then authorize()
+      owner not denied, unexpired. Acts as its owner's row; no token, so no claims.
+   b. Authorization: Bearer <id_token>  → validated as in Phase 3, then decide()
    c. session cookie → verify_session: split up to 6 parts; version==bb4 → key by id;
-      HMAC verify_slice (constant-time); exp>now; then the lowercased email and the
-      claims blob it carries → authorize()   (bb1/bb2/bb3 are not accepted)
-   authorize(email, url): denied? → 401.  Else a site covering `url` with
-      public_auth → granted, roster not consulted.  Else roster: email in by_email
-      and url in that user's scope.  The profile claims take no part in this.
-   └─ 204 + X-Auth-Email: <the authorized user> if any of a/b/c authorizes, else 401
+      HMAC verify_slice (constant-time); exp>now; then the lowercased identifier and
+      the claims blob it carries → decide()  (bb1/bb2/bb3 are not accepted)
+   d. no credential at all, which only an `anonymous` scope grants
+   decide(subject, url): resolve url → one application (areas do not overlap) → the
+      first scope, in file order, whose urls cover it. anonymous → granted, ahead of
+      the veto. Else denied? → 401. Else authenticated → any Cognito identity;
+      restricted → the credential class, then the roster, then membership, then the
+      key's own `scopes` restriction. The profile claims take no part in this.
+   └─ 204 naming the identity in one header per configured attribute (default
+      X-Auth-Email) if any of a/b/c/d authorizes, else 401
       (+ one header per configured profile claim, percent-encoded, when known)
  nginx: auth_request_set $bb_email $upstream_http_x_auth_email   [+ one per claim]
  nginx ──proxy to upstream app (X-Auth-Email: … [+ the claims])──▶ browser (the app's response)
@@ -176,22 +180,25 @@ A few things are worth emphasizing:
 - **The access table is re-checked on every request**, not just at login. Removing
   a user (or one of their API keys), or adding them to `denied`, and reloading/restarting
   bb-auth revokes access immediately, even for a still-unexpired, correctly-signed cookie
-  or API key. On a `public_auth` site the roster is never consulted, so there `denied` is
-  the only lever — removing the row changes nothing.
+  or API key. On an `authenticated` scope the roster is never consulted, so there `denied`
+  is the only lever: removing the row changes nothing.
 - **Bearer credentials fall through to the cookie**, so a stray `Authorization`
   header never blocks a valid cookie. Static `bbk_` API keys (see
   [`ARCHITECTURE.md`](./ARCHITECTURE.md) §12) let non-browser clients (e.g. MCP)
-  authenticate without the cookie flow; every credential is also confined to its
-  `authorized_urls` patterns, and a restricted scope with `X-Original-URL` missing is
-  denied (`401`).
-- **A `public_auth` site grants on identity alone.** Anyone Cognito vouches for reaches
-  it, enrolled or not — and since self-signup is open, that means anyone who can register.
-  It is how an onboarding area gets an `X-Auth-Email` for someone it is about to enroll.
-  An unknown `bbk_` key is not rescued by it: Cognito vouches for no key of ours.
-- **The gate names the user; the app trusts nginx for it.** A `204` carries the
-  authorized email in `X-Auth-Email`, the gated location lifts it with
-  `auth_request_set` and passes it upstream. An API key resolves to its *owning
-  user's* email. The app must not decode the credential itself: the cookie is not a
+  authenticate without the cookie flow; a key acts as its owner and may narrow itself
+  further to a named set of scopes, and a request with `X-Original-URL` missing resolves to
+  no application and is denied (`401`).
+- **An `authenticated` scope grants on identity alone.** Anyone Cognito vouches for
+  reaches it, enrolled or not, and since self-signup is open that means anyone who can
+  register. It is how an onboarding area gets an `X-Auth-Email` for someone it is about to
+  enroll. An unknown `bbk_` key is not rescued by it: Cognito vouches for no key of ours.
+  An `anonymous` scope goes further and asks for nothing at all, and its `204` names
+  nobody.
+- **The gate names the identity; the app trusts nginx for it.** A `204` carries it in the
+  headers `BB_AUTH_IDENTITY_ATTRS` names (default `email`, hence `X-Auth-Email`), the gated
+  location lifts them with `auth_request_set` and passes them upstream. nginx must clear
+  every header the gate *could* emit, not only the ones this installation enabled. An API
+  key resolves to its *owning user's* row. The app must not decode the credential itself: the cookie is not a
   JWT and an API key carries no token, and a valid `id_token` proves identity, never
   authorization. This holds only while the app is unreachable except through nginx.
 - **It can also name them, optionally.** `BB_AUTH_PROFILE_CLAIMS` lists OIDC claims to

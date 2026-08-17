@@ -16,7 +16,7 @@ const { doc, bytes, writeDoc, newPage, submit, mainText, resubmit, formBytes } =
 // bb-auth-adm session over SSH does to a form somebody left open.
 function oobEdit(ctx, tag) {
   const d = doc(ctx);
-  d.users.find((u) => u.email === 'you@example.com').notes = `oob ${tag} ${Date.now()}`;
+  d.users.find((u) => (u.emails || []).includes('you@example.com')).notes = `oob ${tag} ${Date.now()}`;
   writeDoc(ctx, d);
 }
 
@@ -24,8 +24,8 @@ async function run(ctx, t) {
   const { context, page } = await newPage(ctx);
   try {
     // --- the generic 409, English ------------------------------------------------
-    await page.goto(ctx.base + '/users/friend%40example.com/edit?lang=en');
-    await page.fill('textarea[name=urls]', 'https://app.example.com/typed-not-saved/*');
+    await page.goto(ctx.base + '/apps/app1/scopes/admin/edit?lang=en');
+    await page.fill('textarea[name=urls]', 'https://app.example.com/app1/typed-not-saved/*');
     oobEdit(ctx, 'en');
     const r409 = await submit(page);
     t.eq('a stale rev is a 409', r409.status(), 409);
@@ -33,18 +33,18 @@ async function run(ctx, t) {
     t.check('the generic 409 blames the file, not the admin', en.includes('The file changed'), en.slice(0, 300));
     t.check('it carries the Back-button recovery hint', en.includes('Back button'), en.slice(0, 400));
     t.check('and offers to reload the form',
-      (await page.locator('main a[href*="friend%40example.com/edit"]').count()) >= 1);
+      (await page.locator('main a[href*="scopes/admin/edit"]').count()) >= 1);
     t.check('the conflicting edit was not applied', !bytes(ctx).includes('typed-not-saved'));
     await t.shot(page, 'generic-409-en');
 
     // The hint must be true: Back returns to the form as it was filled in.
     await page.goBack();
     t.eq('the Back button restores the typed input (bfcache)',
-      await page.locator('textarea[name=urls]').inputValue(), 'https://app.example.com/typed-not-saved/*');
+      await page.locator('textarea[name=urls]').inputValue(), 'https://app.example.com/app1/typed-not-saved/*');
 
     // --- the generic 409, Italian ------------------------------------------------
-    await page.goto(ctx.base + '/users/friend%40example.com/edit?lang=it');
-    await page.fill('textarea[name=urls]', 'https://app.example.com/typed-it/*');
+    await page.goto(ctx.base + '/apps/app1/scopes/admin/edit?lang=it');
+    await page.fill('textarea[name=urls]', 'https://app.example.com/app1/typed-it/*');
     oobEdit(ctx, 'it');
     t.eq('the Italian 409 is still a 409', (await submit(page)).status(), 409);
     const it = await mainText(page);
@@ -60,26 +60,26 @@ async function run(ctx, t) {
     // history navigation is not reliably stale: on a re-fetch the browser restores the
     // *visible* fields but the hidden rev is re-rendered fresh by the server. What is
     // deterministically stale is the exact bytes the first submit posted.
-    await page.goto(ctx.base + '/groups/mcp/edit?lang=en');
-    const urls = await page.locator('textarea[name=urls]').inputValue();
-    await page.fill('textarea[name=urls]', urls + '\nhttps://added.example.com/*');
+    await page.goto(ctx.base + '/groups/admins/edit?lang=en');
+    const members = await page.locator('textarea[name=members]').inputValue();
+    await page.fill('textarea[name=members]', members + '\nbot@example.com');
     const staleFields = await formBytes(page); // rev as rendered + the typed content
     await submit(page);
     t.check('the save itself lands via PRG', page.url().endsWith('?msg=group-saved'), page.url());
-    const rStale = await resubmit(page, '/admin/groups/mcp/edit', staleFields);
+    const rStale = await resubmit(page, '/admin/groups/admins/edit', staleFields);
     t.eq('replaying the saved form\'s exact bytes is the generic 409', rStale.status(), 409);
     t.check('with the generic copy', (await mainText(page)).includes('The file changed'));
 
     // --- the mint-specific 409, English -----------------------------------------
-    const mintUrl = '/admin/users/bot%40example.com/keys/+add';
-    await page.goto(ctx.base + '/users/bot%40example.com/keys/+add?lang=en');
+    const mintUrl = '/admin/users/b3f1c8a2-4e77-4f1a-9c0d-1e2f3a4b5c6d/keys/+add';
+    await page.goto(ctx.base + '/users/b3f1c8a2-4e77-4f1a-9c0d-1e2f3a4b5c6d/keys/+add?lang=en');
     await page.fill('input[name=id]', 'demo');
     await page.fill('input[name=duration]', '30d');
     const mintFields = await formBytes(page); // the exact bytes a reload would re-POST
     await submit(page);
     t.check('the mint reveals the bearer once', (await mainText(page)).includes('Authorization: Bearer bbk_'));
     const keyCount = (id) =>
-      doc(ctx).users.find((u) => u.email === 'bot@example.com').api_keys.filter((k) => k.id === id).length;
+      doc(ctx).users.find((u) => (u.emails || []).includes('bot@example.com')).api_keys.filter((k) => k.id === id).length;
     t.eq('one key named demo exists', keyCount('demo'), 1);
 
     const rMint = await resubmit(page, mintUrl, mintFields); // = reloading the reveal page
@@ -97,7 +97,7 @@ async function run(ctx, t) {
     await t.shot(page, 'mint-409-en');
 
     // --- the mint-specific 409, Italian ------------------------------------------
-    await page.goto(ctx.base + '/users/bot%40example.com/keys/+add?lang=it');
+    await page.goto(ctx.base + '/users/b3f1c8a2-4e77-4f1a-9c0d-1e2f3a4b5c6d/keys/+add?lang=it');
     await page.fill('input[name=id]', 'demo-it');
     await page.fill('input[name=duration]', '30d');
     const mintFieldsIt = await formBytes(page);

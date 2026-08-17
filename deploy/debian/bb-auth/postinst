@@ -42,11 +42,14 @@ configure)
     fi
 
     # --- the access file, once, and EMPTY ---
-    # Deliberately not a copy of share/users.example.json, which grants '*://*/*' to
-    # you@example.com. An empty roster authorizes nobody, which is the only safe thing
-    # an unattended install can write, and it parses.
+    # Deliberately not a copy of share/users.example.json, which grants a whole area to
+    # you@example.com. A file with no applications authorizes nobody, which is the only
+    # safe thing an unattended install can write, and it parses.
+    #
+    # The "version" is not optional: a file without one is a fatal load error, which is
+    # what makes an older file impossible to mistake for this one.
     if [ ! -e "$USERS_FILE" ]; then
-        printf '{\n  "users": []\n}\n' > "$USERS_FILE"
+        printf '{\n  "version": 3,\n  "applications": [],\n  "users": []\n}\n' > "$USERS_FILE"
         chown root:bb-auth "$USERS_FILE"
         chmod 0640 "$USERS_FILE"
     fi
@@ -99,8 +102,12 @@ configure)
         echo "bb-auth: installed, not started."
         echo "bb-auth:   1. fill in $ENV_FILE (issuer, client id, authorized hosts,"
         echo "bb-auth:      login URL). The HMAC key is already there and must stay."
-        echo "bb-auth:   2. $USERS_FILE is empty: nobody is authorized. Add someone with"
-        echo "bb-auth:      bb-auth-adm -f $USERS_FILE user add you@example.com --url 'https://app.example.com/*'"
+        echo "bb-auth:   2. $USERS_FILE is empty: nobody is authorized. Describe a place,"
+        echo "bb-auth:      then say who reaches it:"
+        echo "bb-auth:      bb-auth-adm -f $USERS_FILE app add app1 --base 'https://app.example.com/app1'"
+        echo "bb-auth:      bb-auth-adm -f $USERS_FILE user add you@example.com"
+        echo "bb-auth:      bb-auth-adm -f $USERS_FILE scope add app1 all --url 'https://app.example.com/app1/*' \\"
+        echo "bb-auth:          --access restricted --user you@example.com"
         echo "bb-auth:   3. systemctl enable --now bb-auth"
     elif [ "$FAIL" = 1 ]; then
         echo "bb-auth: NOT restarted. The running process is still serving." >&2

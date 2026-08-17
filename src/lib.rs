@@ -22,12 +22,20 @@
 //! # What is in an access file
 //!
 //! Four sibling sections answering four different questions ([`AccessFile`]):
-//! `url_groups` names a reusable set of URLs ([`UrlGroups`]), `sites` describe URL areas
-//! ([`Sites`]), `denied` vetoes people, `users` is the roster.
-//! Access is **enumerated, never assumed**: an absent or empty `authorized_urls` grants
-//! nothing, and a URL no site covers is not open. There are exactly two grant sources —
-//! the roster's [`UrlScope`] and a `public_auth` [`SiteRecord`] — and one veto that
-//! outranks both, on every credential. [`decide`] is that rule.
+//! `applications` describe places and who may reach them ([`AppRecord`], [`ScopeRecord`]),
+//! `user_groups` names a reusable set of people, `denied` vetoes people, `users` is the
+//! roster of identities.
+//!
+//! The model is **application-centric**, and that is the whole shape of it: a grant is
+//! written once, on the side of the place. An application owns a literal URL area and a
+//! list of named scopes; a scope owns URL patterns and one access policy; a user owns a
+//! UUID, identifiers and keys, and no URL at all. Asking "who reaches this application?"
+//! and "what does this application expose?" are both one lookup, which is what the
+//! previous user-centric shape made a scan of the whole roster.
+//!
+//! Access is **enumerated, never assumed**: a URL no application covers is reachable by
+//! nobody, a scope that lists nobody grants to nobody, and the veto in `denied` outranks
+//! every grant on every credential. [`decide`] is that rule, and it is the only one.
 
 use std::collections::{BTreeMap, HashMap, HashSet};
 
@@ -224,36 +232,24 @@ pub fn compile_host_pattern(raw: &str) -> Result<UrlPattern, String> {
     })
 }
 
-/// Compiled [`AccessFile::url_groups`]: a group name → the patterns it stands for.
+/// The user group a scope's `groups` entry references (`"@admins"` ⇒ `Some("admins")`),
+/// or `None` for anything else.
 ///
-/// A group is abbreviation, nothing more. Any URL-pattern list — a user's or a key's
-/// `authorized_urls`, a site's `urls` — may name one with `@name`, and
-/// [`UrlScope::compile_with_groups`] splices that group's patterns in at load. Nothing
-/// downstream of [`compile_access`] ever sees a reference: [`Access`], [`decide`] and the
-/// gate work on flat patterns exactly as they did before groups existed.
-///
-/// A [`BTreeMap`] because group order carries no meaning — sorted is the one order that
-/// survives a round-trip through `bb-auth-adm` unchanged.
-pub type UrlGroups = BTreeMap<String, Vec<UrlPattern>>;
-
-/// The group a URL-pattern list entry references (`"@mcp"` ⇒ `Some("mcp")`), or `None`
-/// for a plain pattern.
-///
-/// The one place the `@` sigil is spelled out. `bb-auth-adm` calls it to find who
-/// references what, so the tool and the gate cannot come to disagree about which entries
-/// are references — the same reason there is one matcher and one parser.
+/// The one place the `@` sigil is spelled out. Both editors call it to find who references
+/// what, so a tool and the gate cannot come to disagree about which entries are
+/// references: the same reason there is one matcher and one parser.
 pub fn group_ref(entry: &str) -> Option<&str> {
     entry.trim().strip_prefix('@')
 }
 
 /// A set of URL patterns, and the single matcher every URL check in bb-auth goes
-/// through: a user's `authorized_urls`, a key's, and a site's `urls`.
+/// through: today that is a scope's `urls`, and nothing else has its own.
 ///
-/// There is no "unrestricted" variant. An absent or empty list grants **nothing** —
-/// access is enumerated, never assumed. Blanket access is spelled out as the pattern
+/// There is no "unrestricted" variant. An absent or empty list matches **nothing**:
+/// access is enumerated, never assumed. Blanket coverage is spelled out as the pattern
 /// `*://*/*`, which an operator has to mean in order to write.
 ///
-/// Sharing one type is not tidiness: [`UrlScope::allows`] is where the missing-header
+/// Having one type is not tidiness: [`UrlScope::allows`] is where the missing-header
 /// and `..` denials live, and a second matcher that forgot either would be a bypass
 /// around the first.
 #[derive(Clone)]
@@ -270,37 +266,24 @@ impl UrlScope {
         }
     }
 
-    /// Compile a JSON `authorized_urls` list with no [`UrlGroups`] in scope — so every
-    /// `@name` entry in it is, correctly, an unknown group. [`compile_access`] always
-    /// goes through [`UrlScope::compile_with_groups`]; this is for callers that have a
-    /// list and no file, such as `bb-auth-adm`'s site-shadowing lint.
+    /// Compile a scope's `urls` list. Blank entries are dropped; a malformed pattern is
+    /// an error, never a silently skipped entry, because a vanished pattern changes which
+    /// requests the scope answers for.
+    ///
+    /// The message names only the pattern; the caller prefixes the application and the
+    /// scope, which is what makes it say `mpa/admin: url pattern '…': …`.
     pub fn compile(list: &[String]) -> Result<UrlScope, String> {
-        UrlScope::compile_with_groups(list, &UrlGroups::new())
-    }
-
-    /// Compile a URL-pattern list, expanding `@name` entries against `groups`.
-    ///
-    /// The expansion is a splice: a reference contributes that group's already-compiled
-    /// patterns and nothing else, so the result is as flat as a list that never mentioned
-    /// a group, and the three lists that can carry a reference (a user's scope, a key's,
-    /// a site's `urls`) all reach it through here.
-    ///
-    /// An unknown reference is an **error**, never a dropped entry — the same reflex as a
-    /// malformed pattern, because a silently skipped entry changes who can reach what.
-    /// The message names only the group; the caller prefixes the referrer, which is what
-    /// makes it say `bob@x.com: unknown url group '@mcp'`.
-    pub fn compile_with_groups(list: &[String], groups: &UrlGroups) -> Result<UrlScope, String> {
         let mut patterns = Vec::with_capacity(list.len());
         for raw in list.iter().map(|s| s.trim()).filter(|s| !s.is_empty()) {
-            match group_ref(raw) {
-                Some(name) => match groups.get(name) {
-                    Some(g) => patterns.extend(g.iter().cloned()),
-                    None => return Err(format!("unknown url group '@{name}'")),
-                },
-                None => patterns.push(compile_pattern(raw)?),
-            }
+            patterns.push(compile_pattern(raw)?);
         }
         Ok(UrlScope { patterns })
+    }
+
+    /// The compiled patterns, for the containment check that keeps a scope inside its
+    /// application's area (see `base_covers`).
+    pub fn patterns(&self) -> &[UrlPattern] {
+        &self.patterns
     }
 
     /// Whether this scope authorizes nothing at all. Used to warn at load time, and by
@@ -326,193 +309,430 @@ impl UrlScope {
 // The runtime access table
 // ---------------------------------------------------------------------------
 
-/// A resolved site: a URL area, plus the properties that hold for it.
+/// Which credential classes a [`ScopeRecord`] admits. Absent in the file means both.
 ///
-/// A site record describes a **place**, never a person. No field of it may ever name a
-/// user — grants to named users live in exactly one place, `users[].authorized_urls`,
-/// and expressing the same user↔URL relation twice would mean a user removed from the
-/// roster could still walk in through a site. Everything here is a predicate over an
-/// anonymous identity, and may only modulate the grant this record itself makes.
-pub struct SiteRecord {
-    /// Human label, for logging. `"?"` when the file omits it.
+/// The class is a property of the *place*, not of the credential: "this area is reached
+/// by a browser login" and "this area is reached by a machine key" are statements an
+/// operator makes about an application, and expressing them here is what let the key
+/// stop carrying URLs of its own.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub struct CredentialSet {
+    /// A Cognito id_token bearer, or the session cookie minted from one.
+    pub login: bool,
+    /// A static `bbk_` key.
+    pub api_key: bool,
+}
+
+impl Default for CredentialSet {
+    /// Both: an absent `credentials` restricts nothing.
+    fn default() -> Self {
+        CredentialSet {
+            login: true,
+            api_key: true,
+        }
+    }
+}
+
+/// What a scope asks of the identity behind a request. Compiled from `access`, which is a
+/// **required** word in the file with no default: this field decides everything, so a typo
+/// must never resolve to the most open value.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub enum AccessKind {
+    /// No credential at all. The gate answers `204` with no identity header.
+    Anonymous,
+    /// Any identity Cognito vouches for, enrolled in `users` or not. This is how someone
+    /// who has just registered reaches an onboarding area, and since self-signup is open
+    /// it means anyone who can register.
+    Authenticated,
+    /// The listed users and groups, and nobody else.
+    Restricted,
+}
+
+/// A resolved scope: a URL area inside an application, and the one policy that holds for
+/// it.
+///
+/// A scope names people, which the sites it replaces were forbidden to do. That rule
+/// forbade *duplication*, not direction: it existed so a user removed from the roster
+/// could not still walk in through a place. Here the grant is written on the side of the
+/// place and nowhere else, so the rule holds in the mirror: [`ScopeRecord::members`] are
+/// references to roster rows, and a reference to a row that does not exist grants nothing.
+pub struct ScopeRecord {
+    /// Human label, for logging and for `app/scope`. Never empty.
     pub name: String,
-    /// The URLs this record speaks for.
+    /// The URLs this scope speaks for. Always inside its application's `base`.
     pub urls: UrlScope,
-    /// Grant the site to **any** identity Cognito vouches for, enrolled in `users` or
-    /// not. `false` (the default) grants nothing and is indistinguishable from having
-    /// no site at all — it exists to carry future properties.
-    pub public_auth: bool,
+    /// What this scope asks of an identity.
+    pub access: AccessKind,
+    /// The uuids admitted by an [`AccessKind::Restricted`] scope, with `user_groups`
+    /// already expanded, so nothing downstream ever learns that groups exist. Empty for
+    /// the other two kinds, where it is not consulted.
+    pub members: HashSet<String>,
+    /// Which credential classes may exercise this grant. Only meaningful under
+    /// [`AccessKind::Restricted`]; the file refuses it on the other two.
+    pub credentials: CredentialSet,
+}
+
+/// A resolved application: a literal URL area, the login page for it, and its scopes in
+/// file order.
+///
+/// Applications **partition** the URL space. Every `base` is a literal prefix, no two of
+/// them overlap (see `base_covers`), and every pattern of every scope lies inside one of
+/// them. So at most one application can ever answer for a URL, which is what makes "a URL
+/// belongs to one application" a property of the file rather than a convention, and what
+/// gives `login_url` a single unambiguous home.
+pub struct AppRecord {
+    /// `[A-Za-z0-9_-]+`, unique in the file, and the left half of `app/scope`.
+    pub name: String,
+    /// Literal URL prefixes, authority lowercased. Never empty.
+    pub base: Vec<String>,
     /// Login page for this area, overriding `BB_AUTH_LOGIN_URL`. `None` = use the global.
     /// Reaches nginx through `X-Auth-Login-URL`; also names the fallback for a rejected
     /// `rd` and the link on `/auth/session`'s error pages. See [`login_url_for`].
     pub login_url: Option<String>,
+    /// **First match wins**, in file order: the first scope whose `urls` cover the request
+    /// answers for it, even if it grants nothing. That is what makes a carve-out
+    /// expressible, a narrower and stricter scope listed before a broad one, which a union
+    /// of grants cannot express at all. It also means a broad scope listed first shadows
+    /// everything after it, so the editors lint the order.
+    pub scopes: Vec<ScopeRecord>,
 }
 
-/// The site table, in file order. **First match wins**: [`Sites::resolve`] hands back the
-/// first record whose `urls` cover the request, and that record is then the authority for
-/// it — a broad site listed first shadows a narrower one after it, so specific sites go
-/// first.
+/// Whether the literal prefix `base` covers `s`: equal, or `s` continues past `base` at a
+/// path boundary.
 ///
-/// The ordering rule matters more than one boolean warrants, and that is the point: it is
-/// fixed now, while `public_auth` is the only property, rather than after a second field
-/// makes "which record answers?" expensive to change. The alternatives are worse.
-/// "Most specific wins" needs a specificity order over globs that does not exist
-/// (`https://x.com/*` vs `*://x.com/app1` — which?). "Merge every match" would OR the
-/// grants together, so a broad site silently opens a narrow one.
-///
-/// The table only ever **grants**. A URL with no site is not denied, it is simply not
-/// open, and the per-user scope decides as before. The only thing that takes access away
-/// is [`Access::denied`].
-pub struct Sites {
-    pub entries: Vec<SiteRecord>,
-}
-
-impl Sites {
-    /// The site that speaks for `url`, or `None`. Missing header and `..` fall out of
-    /// [`UrlScope::allows`], which is why sites reuse it rather than matching directly.
-    pub fn resolve(&self, url: Option<&str>) -> Option<&SiteRecord> {
-        self.entries.iter().find(|s| s.urls.allows(url))
+/// The boundary is the whole point. A plain `starts_with` would let the area
+/// `https://x.com/app` swallow `https://x.com/application`, which is the same trap as a
+/// `*` written with no `/` before it. One function serves both jobs that need the rule,
+/// so the check that two applications do not overlap and the check that a scope stays
+/// inside its own application can never drift apart.
+pub fn base_covers(base: &str, s: &str) -> bool {
+    if !s.starts_with(base) {
+        return false;
     }
-
-    /// Whether any site grants `public_auth`. `/auth/session` needs this to know whether
-    /// an un-enrolled identity has anywhere to go; nothing else may branch on it.
-    pub fn any_public_auth(&self) -> bool {
-        self.entries.iter().any(|s| s.public_auth)
-    }
+    s.len() == base.len() || base.ends_with('/') || s.as_bytes()[base.len()] == b'/'
 }
 
-/// The login page for `url`: the site that speaks for it, or `global` (`BB_AUTH_LOGIN_URL`).
+/// The request URL a lookup may be attempted with, or `None`.
 ///
-/// First-match-wins applies here too — a broad site listed first answers with *its*
-/// `login_url` (or, declaring none, with the global) even when a narrower site after it
-/// declares one. Same rule, same fix: specific sites go first.
+/// Both levels of resolution deny the same two things, so they say it once here: a missing
+/// URL (the reverse proxy did not send the header, and every credential is scoped, so
+/// there is nothing to check against) and a URL containing `..` (nginx's `$uri` is already
+/// normalised, so this only fires on a misconfigured proxy, and it fires closed).
+/// [`UrlScope::allows`] repeats the rule for patterns; this is the same rule for the
+/// literal base level, rather than a second one that could drift.
+fn sane_url(url: Option<&str>) -> Option<&str> {
+    url.filter(|u| !u.contains(".."))
+}
+
+/// The login page for `url`: the application whose area covers it, or `global`
+/// (`BB_AUTH_LOGIN_URL`).
 ///
-/// Every value returned passed [`compile_login_url`] — the site's at load, the global at
-/// startup — so callers may put it in a header or a redirect without checking.
+/// There is no ambiguity to resolve here any more. Areas do not overlap, so at most one
+/// application answers, and it answers whether or not any of its scopes covers the URL:
+/// a `401` inside an application is exactly when its own login page is wanted.
+///
+/// Every value returned passed [`compile_login_url`] (the application's at load, the
+/// global at startup), so callers may put it in a header or a redirect without checking.
 pub fn login_url_for(access: &Access, global: &str, url: Option<&str>) -> String {
     access
-        .sites
-        .resolve(url)
-        .and_then(|s| s.login_url.as_deref())
+        .app_for(url)
+        .and_then(|a| a.login_url.as_deref())
         .unwrap_or(global)
         .to_string()
 }
 
-/// A resolved allowlisted user, keyed by lowercased email in [`Access::by_email`].
+/// A resolved roster row, keyed by uuid in [`Access::by_uuid`].
+///
+/// A user carries no URL. What they reach is written on the side of the place, in the
+/// scopes that list their uuid, which is the whole inversion in one sentence.
 pub struct UserRecord {
-    pub scope: UrlScope,
+    /// The canonical identity, and what every reference in the file names.
+    pub uuid: String,
+    /// The identifiers Cognito can vouch for, lowercased, in file order. The first is the
+    /// primary: it is what a single-valued view of this user shows.
+    pub emails: Vec<String>,
 }
 
 /// A resolved API key, keyed by the bearer's SHA-256 hex in [`Access::by_key_hash`].
 pub struct ApiKeyRecord {
-    /// Owning user, for logging and for the [`Access::denied`] veto.
-    pub email: String,
+    /// Owning user's uuid, for the veto and for the identity handed downstream. A key
+    /// *acts as* its user, and it is the only credential with no token to decode.
+    pub uuid: String,
     /// Human label, for logging and revocation. Not part of the credential.
     pub key_id: String,
     /// Unix seconds; `None` = never expires.
     pub expires: Option<u64>,
-    /// The key's own scope, or the owner's if it declared none.
-    pub scope: UrlScope,
+    /// The `app/scope` names this key may exercise, or `None` for all of its owner's.
+    ///
+    /// A **restriction, never a grant**: it can only subtract from what the owner already
+    /// reaches, which is what keeps grants written in exactly one place while still
+    /// letting a machine credential carry less authority than the human who owns it.
+    pub scopes: Option<HashSet<String>>,
 }
 
 /// The runtime access table, built from the access file by [`read_access`].
 pub struct Access {
-    /// URL areas and their properties. Grants only; see [`Sites`].
-    pub sites: Sites,
-    /// Lowercased emails vetoed on **every** credential and every grant, checked before
-    /// anything else ([`decide`], [`decide_api_key`], and the gate's `/auth/session`).
+    /// The applications, in file order. They partition the URL space; see [`AppRecord`].
+    pub apps: Vec<AppRecord>,
+    /// Uuids vetoed on **every** credential and every grant, checked ahead of every one
+    /// of them ([`decide`], [`decide_api_key`], and the gate's `/auth/session`).
     ///
-    /// It is not redundant with deleting the user's row. On a `public_auth` site
-    /// `by_email` is never consulted, so for an un-enrolled identity this is the only
-    /// denial that exists. And for an enrolled one it is a suspension rather than a
-    /// deletion: the row, its scope and its keys survive, so re-enabling is one edit.
-    pub denied: HashSet<String>,
-    /// Lowercased email → user.
-    pub by_email: HashMap<String, UserRecord>,
+    /// It is not redundant with deleting the row: for an enrolled user it is a suspension
+    /// rather than a deletion, so their identifiers, group memberships and keys survive
+    /// the lockout and re-enabling is one edit.
+    pub denied_users: HashSet<String>,
+    /// Vetoed identifiers that resolve to no roster row, lowercased.
+    ///
+    /// This is the only denial that exists for a stranger, and strangers are exactly who
+    /// an [`AccessKind::Authenticated`] scope lets in. An identifier that *does* resolve
+    /// is folded into [`Access::denied_users`] at load, so denying one email of a user
+    /// vetoes the user and every other identifier they have.
+    pub denied_identifiers: HashSet<String>,
+    /// Lowercased identifier → uuid, many to one. What turns a token claim into an
+    /// identity.
+    pub by_identifier: HashMap<String, String>,
+    /// uuid → roster row.
+    pub by_uuid: HashMap<String, UserRecord>,
     /// `sha256(bearer)` hex → key. The raw key is never stored, and this lookup **is**
     /// the verification: finding a matching row would require a SHA-256 second preimage,
     /// so a high-entropy key needs neither a salt nor a constant-time compare.
     pub by_key_hash: HashMap<String, ApiKeyRecord>,
 }
 
+impl Access {
+    /// The application and scope that speak for `url`, or `None`.
+    ///
+    /// Two levels, two different rules, on purpose. Applications **partition** the URL
+    /// space, so at most one can answer and the order they are written in carries no
+    /// meaning. Scopes inside one application are **first match wins** in file order,
+    /// which is what makes a carve-out expressible. The dangerous half of first-match,
+    /// a broad entry shadowing a narrow one, can now only bite between scopes of the same
+    /// application: entries an operator sees together, on one screen, in one form.
+    pub fn resolve(&self, url: Option<&str>) -> Option<(&AppRecord, &ScopeRecord)> {
+        let app = self.app_for(url)?;
+        let scope = app.scopes.iter().find(|s| s.urls.allows(url))?;
+        Some((app, scope))
+    }
+
+    /// The application whose area covers `url`, or `None`. What names the login page on a
+    /// `401`, which is why it does not care whether any scope matched.
+    pub fn app_for(&self, url: Option<&str>) -> Option<&AppRecord> {
+        let u = sane_url(url)?;
+        self.apps
+            .iter()
+            .find(|a| a.base.iter().any(|b| base_covers(b, u)))
+    }
+
+    /// Whether any scope anywhere grants on identity alone. `/auth/session` needs it to
+    /// know whether an un-enrolled identity has anywhere to go at all; nothing else may
+    /// branch on it.
+    pub fn any_authenticated_scope(&self) -> bool {
+        self.apps.iter().any(|a| {
+            a.scopes
+                .iter()
+                .any(|s| s.access == AccessKind::Authenticated)
+        })
+    }
+
+    /// Every scope that lists `uuid`, for "what does this user reach?" in the two editors.
+    ///
+    /// Membership only: it says nothing about the scopes that would grant this user access
+    /// anyway by being anonymous or authenticated, and nothing about whether an earlier
+    /// scope in the same application shadows the one found. Both are the caller's lint,
+    /// because both are advice to an operator rather than part of the decision.
+    pub fn scopes_for(&self, uuid: &str) -> Vec<(&AppRecord, &ScopeRecord)> {
+        self.apps
+            .iter()
+            .flat_map(|a| a.scopes.iter().map(move |s| (a, s)))
+            .filter(|(_, s)| s.members.contains(uuid))
+            .collect()
+    }
+
+    /// The uuid this identifier resolves to, matched as the file stores it.
+    pub fn uuid_of(&self, identifier: &str) -> Option<&str> {
+        self.by_identifier
+            .get(&norm_email(identifier))
+            .map(|s| s.as_str())
+    }
+
+    /// Whether `denied` vetoes this identifier: the identifier itself, or the user it
+    /// resolves to.
+    ///
+    /// One implementation, because [`decide`] and the gate's `/auth/session` both ask it
+    /// and a veto that covered one door and not the other would be worse than none.
+    pub fn vetoes_identifier(&self, identifier: &str) -> bool {
+        let id = norm_email(identifier);
+        self.denied_identifiers.contains(&id)
+            || self
+                .by_identifier
+                .get(&id)
+                .is_some_and(|u| self.denied_users.contains(u))
+    }
+}
+
 // ---------------------------------------------------------------------------
 // The authorization decision
 // ---------------------------------------------------------------------------
 
-/// What the access table says about one (identity, URL) pair — the whole grant model,
-/// as a value. [`decide`] produces it; the gate turns it into a 204/401 and a log line,
-/// and `bb-auth-adm can` prints it, so an operator can ask "would this work?" of the
-/// same code that will answer the real request.
+/// The subject of a request, as the credential already resolved it.
+///
+/// The credential **class** is implied by the variant, which is why a scope's
+/// [`CredentialSet`] needs no second parameter and cannot be consulted with the wrong one.
+pub enum Subject<'a> {
+    /// No credential at all. Only an [`AccessKind::Anonymous`] scope grants.
+    Anonymous,
+    /// An identifier Cognito vouched for (an email today). It may be in no roster row,
+    /// which is exactly what an [`AccessKind::Authenticated`] scope is for.
+    Identifier(&'a str),
+    /// A `bbk_` key that already passed [`decide_api_key`].
+    Key(&'a ApiKeyRecord),
+}
+
+/// What the access table says about one (subject, URL) pair: the whole grant model as a
+/// value. [`decide`] produces it; the gate turns it into a 204/401 and a log line, and
+/// `bb-auth-adm can` prints it, so an operator can ask "would this work?" of the same code
+/// that will answer the real request.
+///
+/// Every refusal names where it happened, because with the URL space partitioned the
+/// useful question is no longer "was it granted?" but "which scope answered, and what did
+/// it want?".
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Decision {
-    /// A `public_auth` site covers the URL: an authenticated identity is enough, and the
-    /// roster was not consulted at all. Carries the site's name.
-    SiteGrant(String),
-    /// The roster covers it: enrolled, and the URL is inside `authorized_urls`.
-    RosterGrant,
-    /// `denied` vetoes this email — ahead of every grant, on every credential.
+    /// An `anonymous` scope covers the URL: no credential was needed and none was
+    /// consulted.
+    Anonymous { app: String, scope: String },
+    /// The scope that answered admits this subject.
+    Granted { app: String, scope: String },
+    /// `denied` vetoes this subject, ahead of every grant and on every credential.
     Vetoed,
-    /// Enrolled, but the URL is outside their scope (an empty scope lands here too).
-    OutOfScope,
-    /// Not in the roster, and no `public_auth` site speaks for this URL.
-    NotEnrolled,
+    /// No application's area covers this URL, so nobody reaches it. With no per-user URLs
+    /// left, this is the only fail-closed reading, and it is the posture change an
+    /// operator has to be told about: a gated location outside every application is a
+    /// `401` for everyone, including the person who wrote the file.
+    NoApplication,
+    /// The application answers for this URL but none of its scopes covers it.
+    NoScope { app: String },
+    /// The scope wants an identity and the request carried no credential.
+    Unauthenticated { app: String, scope: String },
+    /// The scope does not admit this class of credential.
+    CredentialRefused { app: String, scope: String },
+    /// A `restricted` scope, and this identifier is in no roster row.
+    NotEnrolled { app: String, scope: String },
+    /// Enrolled, but this scope does not list them.
+    NotMember { app: String, scope: String },
+    /// The owner is admitted, but this key's own `scopes` restriction excludes the scope
+    /// that answered.
+    KeyOutOfScope { app: String, scope: String },
 }
 
 impl Decision {
     /// Whether this decision authorizes the request.
     pub fn granted(&self) -> bool {
-        matches!(self, Decision::SiteGrant(_) | Decision::RosterGrant)
+        matches!(self, Decision::Anonymous { .. } | Decision::Granted { .. })
     }
 }
 
-/// Turn an *authenticated* identity into an *authorized* one, or say why not. The rule
-/// behind both Cognito-backed credentials (the id_token bearer and the session cookie).
+/// Turn an authenticated (or absent) credential into an authorized one, or say why not.
+/// The one rule behind all three credentials.
 ///
-/// Three steps, in this order:
+/// The order is the model:
 ///
-/// 1. [`Access::denied`] vetoes, ahead of every grant and on every credential.
-/// 2. If a site speaks for this URL and grants `public_auth`, the identity is enough —
-///    the roster is not consulted, which is the entire point: this is how someone who is
-///    not enrolled yet gets in. The first matching site answers even if it grants
-///    nothing; see [`Sites`].
-/// 3. Otherwise the roster decides, as it always has: listed, and the URL in scope.
-///
-/// `email` must already be lowercased ([`Access::by_email`] is keyed that way and the
-/// lookup is exact) — the gate lowercases it as it comes out of the token claim.
-pub fn decide(access: &Access, email: &str, url: Option<&str>) -> Decision {
-    if access.denied.contains(email) {
+/// 1. Resolve the URL to one application and one scope. Nothing outside an application is
+///    reachable, by anyone, with any credential.
+/// 2. An [`AccessKind::Anonymous`] scope grants immediately, **before** the veto. That is
+///    deliberate: the scope grants with no credential at all, so a vetoed client would
+///    simply omit theirs and walk in anyway. A veto that is bypassed by sending *less* is
+///    not a veto, and offering it would be worse than not offering it, because an operator
+///    would believe it.
+/// 3. The veto, on every remaining credential.
+/// 4. [`AccessKind::Authenticated`]: any identity Cognito vouches for, enrolled or not. A
+///    key is refused here rather than admitted, because Cognito vouches for no static key
+///    of ours and this grant is about who Cognito says you are.
+/// 5. [`AccessKind::Restricted`]: the credential class, then the roster, then membership,
+///    then the key's own restriction.
+pub fn decide(access: &Access, subject: &Subject, url: Option<&str>) -> Decision {
+    let (app, scope) = match access.resolve(url) {
+        Some(found) => found,
+        None => {
+            return match access.app_for(url) {
+                Some(a) => Decision::NoScope {
+                    app: a.name.clone(),
+                },
+                None => Decision::NoApplication,
+            }
+        }
+    };
+    let at = || (app.name.clone(), scope.name.clone());
+    let (a, s) = at();
+
+    if scope.access == AccessKind::Anonymous {
+        return Decision::Anonymous { app: a, scope: s };
+    }
+
+    let vetoed = match subject {
+        Subject::Anonymous => false,
+        Subject::Identifier(id) => access.vetoes_identifier(id),
+        Subject::Key(rec) => access.denied_users.contains(&rec.uuid),
+    };
+    if vetoed {
         return Decision::Vetoed;
     }
-    if let Some(site) = access.sites.resolve(url) {
-        if site.public_auth {
-            return Decision::SiteGrant(site.name.clone());
+
+    match scope.access {
+        // Handled above, before the veto.
+        AccessKind::Anonymous => Decision::Anonymous { app: a, scope: s },
+        AccessKind::Authenticated => match subject {
+            Subject::Identifier(_) => Decision::Granted { app: a, scope: s },
+            Subject::Key(_) => Decision::CredentialRefused { app: a, scope: s },
+            Subject::Anonymous => Decision::Unauthenticated { app: a, scope: s },
+        },
+        AccessKind::Restricted => {
+            let uuid = match subject {
+                Subject::Anonymous => return Decision::Unauthenticated { app: a, scope: s },
+                Subject::Identifier(_) if !scope.credentials.login => {
+                    return Decision::CredentialRefused { app: a, scope: s }
+                }
+                Subject::Key(_) if !scope.credentials.api_key => {
+                    return Decision::CredentialRefused { app: a, scope: s }
+                }
+                Subject::Identifier(id) => match access.uuid_of(id) {
+                    Some(u) => u,
+                    None => return Decision::NotEnrolled { app: a, scope: s },
+                },
+                Subject::Key(rec) => rec.uuid.as_str(),
+            };
+            if !scope.members.contains(uuid) {
+                return Decision::NotMember { app: a, scope: s };
+            }
+            if let Subject::Key(rec) = subject {
+                if rec
+                    .scopes
+                    .as_ref()
+                    .is_some_and(|allowed| !allowed.contains(&format!("{a}/{s}")))
+                {
+                    return Decision::KeyOutOfScope { app: a, scope: s };
+                }
+            }
+            Decision::Granted { app: a, scope: s }
         }
-    }
-    match access.by_email.get(email) {
-        Some(rec) if rec.scope.allows(url) => Decision::RosterGrant,
-        Some(_) => Decision::OutOfScope,
-        None => Decision::NotEnrolled,
     }
 }
 
-/// What the access table says about one (API key, URL) pair. The granted variant hands
-/// back the record, whose `email` is the identity the application downstream sees — a key
-/// *acts as* its user, and it is the only credential with no token to decode.
+/// What the access table says about a `bbk_` bearer, before any URL is considered.
 ///
-/// No `Debug`, deliberately — deriving it would force one onto [`ApiKeyRecord`] and
+/// No `Debug`, deliberately: deriving it would force one onto [`ApiKeyRecord`] and
 /// [`Access`], and a table of live credentials is not something a stray `{:?}` should be
 /// able to spill into a log.
 pub enum KeyDecision<'a> {
     Granted(&'a ApiKeyRecord),
-    /// No row for this hash. A `public_auth` site does **not** rescue it: that grant is
-    /// for identities Cognito vouches for, and Cognito vouches for no static key of ours.
-    /// An unknown key is not an un-enrolled user, it is nobody — there would be no email
-    /// to hand back.
+    /// No row for this hash. An [`AccessKind::Authenticated`] scope does **not** rescue
+    /// it: that grant is for identities Cognito vouches for, and Cognito vouches for no
+    /// static key of ours. An unknown key is not an un-enrolled user, it is nobody, and
+    /// there would be no identity to hand back.
     Unknown,
-    /// The owning user is on [`Access::denied`].
+    /// The owning user is vetoed ([`Access::denied_users`]).
     OwnerDenied(&'a ApiKeyRecord),
     Expired(&'a ApiKeyRecord),
-    OutOfScope(&'a ApiKeyRecord),
 }
 
 impl KeyDecision<'_> {
@@ -521,30 +741,28 @@ impl KeyDecision<'_> {
     }
 }
 
-/// Resolve an API key against the access table, by the SHA-256 hex of the bearer.
+/// Resolve an API key against the access table, by the SHA-256 hex of the bearer: the
+/// lookup, the owner's veto, and the expiry. That is its whole job.
 ///
-/// Taking the *hash* rather than the raw key is what lets `bb-auth-adm` evaluate a key it
-/// has never seen — the file stores only the hash — through the same code the gate runs.
-/// The gate hashes the bearer and calls this; nothing is ever indexed by what the client
-/// sent in the clear.
-pub fn decide_api_key<'a>(
-    access: &'a Access,
-    key_hash: &str,
-    url: Option<&str>,
-    now: u64,
-) -> KeyDecision<'a> {
+/// What the key may then *reach* is [`decide`]'s, through [`Subject::Key`]: the scope that
+/// answers is what decides, exactly as it does for a browser login, and a key's own
+/// `scopes` restriction is applied there because it is expressed in terms of the scope
+/// that answered.
+///
+/// Taking the *hash* rather than the raw key is what lets an editor evaluate a key it has
+/// never seen (the file stores only the hash) through the same code the gate runs. The
+/// gate hashes the bearer and calls this; nothing is ever indexed by what the client sent
+/// in the clear.
+pub fn decide_api_key<'a>(access: &'a Access, key_hash: &str, now: u64) -> KeyDecision<'a> {
     let rec = match access.by_key_hash.get(key_hash) {
         Some(r) => r,
         None => return KeyDecision::Unknown,
     };
-    if access.denied.contains(&rec.email) {
+    if access.denied_users.contains(&rec.uuid) {
         return KeyDecision::OwnerDenied(rec);
     }
     if rec.expires.is_some_and(|e| now >= e) {
         return KeyDecision::Expired(rec);
-    }
-    if !rec.scope.allows(url) {
-        return KeyDecision::OutOfScope(rec);
     }
     KeyDecision::Granted(rec)
 }
@@ -557,30 +775,35 @@ pub fn decide_api_key<'a>(
 /// and hot-reloaded on SIGHUP.
 ///
 /// ```json
-/// { "url_groups": { "mcp": ["https://mcp.x.com/mcp", "https://mcp.x.com/mcp/*"] },
-///   "sites": [
-///     { "name": "app1", "urls": ["https://app.x.com/app1",
-///                                "https://app.x.com/app1/*"], "public_auth": true }
-///   ],
+/// { "version": 3,
+///   "applications": [
+///     { "name": "app1",
+///       "base": ["https://app.x.com/app1"],
+///       "login_url": "https://signup.x.com/",
+///       "scopes": [
+///         { "name": "healthz", "urls": ["https://app.x.com/app1/healthz"],
+///           "access": "anonymous" },
+///         { "name": "admin", "urls": ["https://app.x.com/app1/admin/*"],
+///           "access": "restricted", "groups": ["@admins"], "credentials": ["login"] },
+///         { "name": "onboarding", "urls": ["https://app.x.com/app1/*"],
+///           "access": "authenticated" } ] } ],
+///   "user_groups": { "admins": ["8f14e45f-ceea-467a-9f79-3b4e5c6d7a8b"] },
 ///   "denied": ["spammer@x.com"],
 ///   "users": [
-///     { "email": "bob@x.com",
-///       "authorized_urls": ["@mcp"],
+///     { "uuid": "8f14e45f-ceea-467a-9f79-3b4e5c6d7a8b",
+///       "emails": ["bob@x.com"],
 ///       "api_keys": [
 ///         { "id": "laptop", "key_hash": "<sha256 hex of the bbk_… bearer>",
 ///           "released": "2026-07-08", "duration": "365d",
-///           "authorized_urls": ["@mcp"] }
-///       ] },
-///     { "email": "alice@x.com", "authorized_urls": ["*://*/*"] }
-/// ] }
+///           "scopes": ["app1/admin"] } ] } ] }
 /// ```
 ///
-/// The four sections are siblings and answer four different questions: `url_groups` names
-/// a reusable set of URLs, `sites` describe URL areas, `denied` vetoes people, `users` is
-/// the roster. Access is enumerated, never assumed, from either of the two grant sources:
-/// a user with no `authorized_urls` reaches nothing, and a URL with no site is not open.
-/// "Everything" is the explicit pattern `*://*/*`. Validate a file before shipping it with
-/// `bb-auth --check-users <file>`, or `bb-auth-adm check` — the same parser,
+/// The four sections are siblings and answer four different questions: `applications`
+/// describe places and who may reach them, `user_groups` names a reusable set of people,
+/// `denied` vetoes people, `users` is the roster of identities. Access is enumerated,
+/// never assumed: a URL no application covers is reachable by nobody, and a `restricted`
+/// scope that lists nobody grants to nobody. Validate a file before shipping it with
+/// `bb-auth --check-users <file>`, or `bb-auth-adm check`: the same parser,
 /// [`read_access`].
 ///
 /// This type is also the **document model** `bb-auth-adm` edits, hence [`Serialize`] and
@@ -593,90 +816,151 @@ pub fn decide_api_key<'a>(
 /// are contracts with an operator-owned env file that a deploy never rewrites.
 #[derive(Deserialize, Serialize, Default)]
 pub struct AccessFile {
-    /// Named URL-pattern groups: `"mcp": ["https://mcp.x.com/mcp/*"]`. Any URL-pattern
-    /// list — a user's or a key's `authorized_urls`, a site's `urls` — names one as
-    /// `"@mcp"`, and [`compile_access`] splices its patterns in at load ([`UrlGroups`]).
+    /// The format this file is written in. **Required**, and the only accepted value is
+    /// `3`.
     ///
-    /// Deliberately shallow, and deliberately strict: a name is `[A-Za-z0-9_-]+` matched
-    /// exactly (case-sensitive), a group may not reference another group, an unknown
-    /// reference is fatal, and every group's patterns are validated even when nothing
-    /// references them. All of it is the same reflex as a malformed pattern — an entry
-    /// that silently vanished would change who can reach what. Duplicate JSON keys are
-    /// serde's last-wins, as everywhere else in this file.
-    ///
-    /// First, so a document reads its definitions before their uses. An **older** binary
-    /// preserves the section (it lands in `extra`) but does not understand it: each
-    /// `@name` entry fails [`compile_pattern`], which is a fatal load rather than a
-    /// partial grant. Fail-closed — and the reason to deploy the binary before the file.
-    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
-    pub url_groups: BTreeMap<String, Vec<String>>,
+    /// It is here so that a version mismatch is a sentence rather than a puzzle. The
+    /// older file this format replaces carries no `version` at all and fails on its own
+    /// sections anyway (see [`AccessFile::sites`]), but "this file predates bb-auth 3.0,
+    /// convert it with `bb-auth-adm migrate`" is a different quality of error from a type
+    /// mismatch three levels down, and every future migration gets the same courtesy for
+    /// free.
+    #[serde(default)]
+    pub version: u32,
+    /// The places, and who reaches them. See [`AppRecord`].
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
-    pub sites: Vec<SiteSpec>,
-    /// Lowercased on load. See [`Access::denied`].
+    pub applications: Vec<AppSpec>,
+    /// Named sets of roster uuids: `"admins": ["8f14e45f-…"]`, written `"@admins"` in a
+    /// scope's `groups`.
+    ///
+    /// Abbreviation, never a grant: defining one authorizes nobody until a scope names it.
+    /// Deliberately shallow and deliberately strict, the reflex the older `url_groups`
+    /// carried: a name is `[A-Za-z0-9_-]+` matched exactly, a group may not reference
+    /// another group, an unknown reference is fatal, and every group is validated even
+    /// when nothing references it (a group that only breaks the day someone first uses it
+    /// is a trap `--check-users` never saw). Duplicate JSON keys are serde's last-wins, as
+    /// everywhere else in this file.
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    pub user_groups: BTreeMap<String, Vec<String>>,
+    /// Uuids and bare identifiers, vetoed ahead of every grant. See
+    /// [`Access::denied_users`] and [`Access::denied_identifiers`].
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub denied: Vec<String>,
     #[serde(default)]
     pub users: Vec<UserSpec>,
-    /// Unknown top-level keys, preserved verbatim across an edit — `_comment` above all.
+    /// The pre-3.0 sites section. Its mere presence is a fatal parse error naming the
+    /// converter, exactly as [`UserSpec::enabled_paths`] is: a new binary that silently
+    /// ignored it would read an older file as an empty access table, which is a total
+    /// lockout dressed up as a successful load.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub sites: Option<Value>,
+    /// The pre-3.0 url_groups section. Fatal if present, for the reason [`AccessFile::sites`]
+    /// is.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub url_groups: Option<Value>,
+    /// Unknown top-level keys, preserved verbatim across an edit: `_comment` above all.
     #[serde(flatten)]
     pub extra: Map<String, Value>,
 }
 
-/// One site entry. Compiles to a [`SiteRecord`].
+/// One application: a literal URL area, its login page, and its scopes. Compiles to an
+/// [`AppRecord`].
 ///
-/// Unlike every other spec here, **unknown fields are a hard error** — and so this is the
-/// one spec with no `extra` map. The others carry documentation (`_comment`, `notes`) and
-/// describe people, where an ignored typo denies at worst. A site's fields are grants and
-/// restrictions on a grant, so the day `public_auth` gains a `require_email_domain`
-/// companion, a typo in the companion would be silently dropped and leave `public_auth:
-/// true` standing naked — failing *open*. `bb-auth --check-users` catches it instead,
-/// before the restart. Same reasoning as [`UserSpec::enabled_paths`], applied ahead of the
-/// field that will need it.
+/// **Unknown fields are a hard error** here and on [`ScopeSpec`], which is why neither
+/// carries an `extra` map and both spell `notes` out as a field. The specs that describe
+/// people ignore extras, where an ignored typo denies at worst. These two describe grants
+/// and restrictions on grants, so a typo in a future companion field would be dropped in
+/// silence and leave the field it was meant to restrict standing alone, failing *open*.
+/// `bb-auth --check-users` catches it instead, before the restart.
 #[derive(Deserialize, Serialize, Default)]
 #[serde(deny_unknown_fields)]
-pub struct SiteSpec {
-    /// For logs. Absent or empty ⇒ `"?"`.
+pub struct AppSpec {
+    /// `[A-Za-z0-9_-]+`, unique in the file. No `/`, so `app/scope` is unambiguous.
     #[serde(default)]
     pub name: String,
-    /// Full `<scheme>://<host>/<path>` patterns, like `authorized_urls`. A malformed one
-    /// is fatal; an empty list makes the record match nothing.
+    /// The literal URL prefixes this application owns. No wildcards: an area is compared
+    /// by string, which is what makes non-overlap cheap to check and impossible to argue
+    /// with. Every scope pattern must lie inside one of them.
     #[serde(default)]
-    pub urls: Vec<String>,
-    /// See [`SiteRecord::public_auth`]. Always written out, even when false: it is the
-    /// site's security-relevant property, and an operator reading the file should not have
-    /// to know that its absence means "closed".
-    #[serde(default)]
-    pub public_auth: bool,
-    /// Absolute `https://` login page for this area. Absent ⇒ `BB_AUTH_LOGIN_URL`.
-    /// Malformed ⇒ fatal, like a URL pattern. See [`compile_login_url`].
+    pub base: Vec<String>,
+    /// Absolute `https://` login page for this area. Absent means `BB_AUTH_LOGIN_URL`.
+    /// Malformed is fatal, like a URL pattern. See [`compile_login_url`].
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub login_url: Option<String>,
+    /// **Order is meaning**: first match wins. See [`AppRecord::scopes`].
+    #[serde(default)]
+    pub scopes: Vec<ScopeSpec>,
+    /// Operator documentation, round-tripped.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub notes: Option<String>,
 }
 
-/// A site's name as everything that speaks of one spells it: trimmed, and `"?"` when the
-/// file leaves it out. [`compile_access`] stamps it into [`SiteRecord::name`] for the
-/// gate's logs, and every tool that lists or reports a site says the same thing.
-pub fn site_name(s: &SiteSpec) -> String {
-    match s.name.trim() {
-        "" => "?".to_string(),
-        n => n.to_string(),
-    }
+/// One scope inside an application. Compiles to a [`ScopeRecord`].
+#[derive(Deserialize, Serialize, Default)]
+#[serde(deny_unknown_fields)]
+pub struct ScopeSpec {
+    /// `[A-Za-z0-9_-]+`, unique within its application, and the right half of `app/scope`.
+    #[serde(default)]
+    pub name: String,
+    /// Full `<scheme>://<host>/<path>` patterns, all inside the application's `base`. A
+    /// malformed one is fatal; an empty list makes the scope match nothing.
+    #[serde(default)]
+    pub urls: Vec<String>,
+    /// `anonymous`, `authenticated` or `restricted`. **Required, with no default**: see
+    /// [`AccessKind`]. Always written out, because it is the security-relevant property of
+    /// the record and an operator reading the file should never have to know what an
+    /// absent field would have meant.
+    #[serde(default)]
+    pub access: String,
+    /// Roster uuids admitted by a `restricted` scope. Present on any other kind is fatal.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub users: Option<Vec<String>>,
+    /// `"@name"` references into `user_groups`. Present on a non-`restricted` scope is
+    /// fatal.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub groups: Option<Vec<String>>,
+    /// `login` and/or `api_key`; absent means both. Present on a non-`restricted` scope is
+    /// fatal. See [`CredentialSet`].
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub credentials: Option<Vec<String>>,
+    /// Operator documentation, round-tripped.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub notes: Option<String>,
 }
 
-/// One user entry. Extra fields are ignored (and preserved on a rewrite), with one
-/// deliberate exception.
+/// One roster entry: an identity, its identifiers, and its keys. Extra fields are ignored
+/// (and preserved on a rewrite), with two deliberate exceptions.
+///
+/// A user carries no URL. What they reach is written in the scopes that list their uuid,
+/// which is what makes deleting a row a complete revocation again: there is no second
+/// place expressing the same relation.
 #[derive(Deserialize, Serialize, Default)]
 pub struct UserSpec {
-    pub email: String,
-    /// Absent **or** empty ⇒ this user reaches nothing ([`UrlScope::deny_all`]).
-    /// Blanket access is the explicit pattern `*://*/*`.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub authorized_urls: Option<Vec<String>>,
+    /// The canonical identity: a lowercase 8-4-4-4-12 UUID, unique in the file, and what
+    /// every reference to this user names.
+    ///
+    /// References are by uuid rather than by email precisely because references are now
+    /// scattered: a scope's `users`, any number of `user_groups`, `denied`. An identifier
+    /// changes; the identity does not, so a rename touches one line instead of N.
+    #[serde(default)]
+    pub uuid: String,
+    /// The identifiers Cognito can vouch for, in file order. The first is the primary.
+    ///
+    /// A list rather than a field because one person can hold more than one address, and
+    /// all of them resolve to this same row. An entry that is not [`header_safe_email`] is
+    /// warned about and skipped: dropping an identifier is fail-closed.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub emails: Vec<String>,
     /// The pre-2.0 path-prefix field. Its mere presence is a fatal parse error rather
     /// than an ignored extra: under the old semantics an unscoped user reached
     /// everything, so silently dropping it would fail *open*. See [`compile_access`].
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub enabled_paths: Option<Value>,
+    /// The pre-3.0 per-user scope. Fatal if present, for the same reason: a new binary
+    /// that ignored it would silently read an older roster as a set of users who reach
+    /// nothing.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub authorized_urls: Option<Value>,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub api_keys: Vec<ApiKeySpec>,
     /// `notes` and anything else an operator wrote here. Round-tripped untouched.
@@ -685,7 +969,7 @@ pub struct UserSpec {
 }
 
 /// One static API key belonging to a [`UserSpec`]. The `bbk_` bearer itself never
-/// appears here — only `key_hash`. Mint keys with `bb-auth-adm key add`.
+/// appears here, only `key_hash`. Mint keys with `bb-auth-adm key add`.
 #[derive(Deserialize, Serialize, Default)]
 pub struct ApiKeySpec {
     #[serde(default)]
@@ -700,12 +984,18 @@ pub struct ApiKeySpec {
     /// `<n>d`, `<n>h`, a bare `<n>` (days), or `never`/`0`/`-`. See [`parse_duration`].
     #[serde(default)]
     pub duration: String,
-    /// Absent ⇒ inherit the owning user's scope; present (even empty) ⇒ this key's own.
+    /// The `"app/scope"` names this key may exercise. Absent means every scope its owner
+    /// is admitted to; present names an unknown application or scope is fatal.
+    ///
+    /// A restriction, never a grant: see [`ApiKeyRecord::scopes`].
     #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub authorized_urls: Option<Vec<String>>,
+    pub scopes: Option<Vec<String>>,
     /// Fatal if present, exactly as on [`UserSpec::enabled_paths`].
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub enabled_paths: Option<Value>,
+    /// The pre-3.0 per-key scope. Fatal if present, as on [`UserSpec::authorized_urls`].
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub authorized_urls: Option<Value>,
     #[serde(flatten)]
     pub extra: Map<String, Value>,
 }
@@ -741,12 +1031,12 @@ pub fn header_safe_email(email: &str) -> bool {
 /// carries a TLD. That rejects `not an email` and `bob@example,com` while accepting any
 /// address Cognito would ever emit.
 ///
-/// This is an **edit-path** check ([`add_user`], [`rename_user`], [`add_denied`]) and only
-/// there — [`compile_access`] must never learn it, because a live file that loads today
-/// has to keep loading (a fatal startup under `Restart=on-failure` is a boot loop). A
-/// malformed roster email is fail-closed anyway — it matches no Cognito claim — but a
-/// typo'd one is a dead row discovered only when the human it was meant for cannot get
-/// in, so the two editors refuse to *create* one.
+/// This is an **edit-path** check ([`add_user`], [`add_user_email`], [`add_denied`]) and
+/// only there: [`compile_access`] must never learn it, because a live file that loads
+/// today has to keep loading (a fatal startup under `Restart=on-failure` is a boot loop).
+/// A malformed identifier is fail-closed anyway, since it matches no Cognito claim, but a
+/// typo'd one is a dead identifier discovered only when the human it was meant for cannot
+/// get in, so the two editors refuse to *create* one.
 pub fn well_formed_email(email: &str) -> bool {
     if !header_safe_email(email) {
         return false;
@@ -765,6 +1055,26 @@ pub fn well_formed_email(email: &str) -> bool {
                 && !label.starts_with('-')
                 && !label.ends_with('-')
         })
+}
+
+/// Is `s` a UUID in the one spelling this file format accepts: canonical lowercase
+/// 8-4-4-4-12 hex?
+///
+/// Deliberately strict about case and shape rather than lenient. A uuid is compared by
+/// string in five different places (a scope's `users`, a group's members, `denied`, the
+/// roster index, a key's owner), and a second accepted spelling would mean two strings
+/// that name the same identity and do not compare equal, which is a dangling reference
+/// that looks correct in a diff. The version and variant nibbles are not checked: they say
+/// how the value was generated, and nothing here depends on that.
+pub fn well_formed_uuid(s: &str) -> bool {
+    let b = s.as_bytes();
+    if b.len() != 36 {
+        return false;
+    }
+    b.iter().enumerate().all(|(i, c)| match i {
+        8 | 13 | 18 | 23 => *c == b'-',
+        _ => c.is_ascii_digit() || (b'a'..=b'f').contains(c),
+    })
 }
 
 /// SHA-256 of `s`, lowercase hex. Fingerprints an API key for storage/lookup.
@@ -900,187 +1210,583 @@ pub fn read_access(path: &str) -> Result<Access, String> {
     compile_access(&read_access_file(path)?)
 }
 
-/// Compile the `url_groups` section: validate every name and every pattern, once, up
-/// front. Errors are prefixed `url_groups '<name>': …`.
+/// The one spelling a name may have, anywhere in this file: non-empty `[A-Za-z0-9_-]`.
 ///
-/// Unreferenced groups are compiled too, and a bad one is just as fatal — a group that
-/// only breaks the day someone first references it is a trap laid for a future edit, and
-/// the whole point of `--check-users` is that the file is checked before it is live.
+/// No `/`, which is what lets `app/scope` be a name in its own right: the string a log
+/// line prints, a key's restriction lists, and an editor addresses a scope by.
+fn valid_name(name: &str) -> bool {
+    !name.is_empty()
+        && name
+            .bytes()
+            .all(|b| b.is_ascii_alphanumeric() || b == b'_' || b == b'-')
+}
+
+/// Validate and normalise one application `base`: a **literal** URL prefix.
+///
+/// Literal is the load-bearing word. An area is compared by string ([`base_covers`]), and
+/// that is what makes "do these two applications overlap?" a question with a cheap and
+/// certain answer. Two glob patterns would need an intersection test, and the useful
+/// blanket patterns (`*://*/*`) would intersect everything, so the partition could never
+/// hold. An application on a wildcard host is therefore not expressible, which is a
+/// deliberate cost, not an oversight.
+fn compile_base(raw: &str) -> Result<String, String> {
+    let e = |m: &str| Err(format!("base '{raw}': {m}"));
+    let b = raw.trim();
+    if b.is_empty() {
+        return e("empty");
+    }
+    if !b.bytes().all(|c| c.is_ascii_graphic()) {
+        return e("must be printable ASCII (no spaces, no control bytes)");
+    }
+    if b.contains('*') || b.contains('&') {
+        return e("must be literal: a base carries no wildcards, it is the area a scope's patterns live inside");
+    }
+    if b.contains("..") {
+        return e("'..' is not allowed");
+    }
+    let sep = match b.find("://") {
+        Some(i) if i > 0 => i,
+        Some(_) => return e("empty scheme"),
+        None => return e("must be <scheme>://<host>[/<path>]"),
+    };
+    let rest = &b[sep + 3..];
+    let host_end = rest.find('/').unwrap_or(rest.len());
+    if host_end == 0 {
+        return e("empty host");
+    }
+    if rest[..host_end].contains('@') {
+        return e("userinfo '@' is not allowed in the host");
+    }
+    Ok(lower_authority(b))
+}
+
+/// Compile the `user_groups` section: validate every name and every member, once, up
+/// front. Errors are prefixed `user_groups '<name>': …`.
+///
+/// Unreferenced groups are compiled too, and a bad one is just as fatal: a group that only
+/// breaks the day someone first references it is a trap laid for a future edit, and the
+/// whole point of `--check-users` is that the file is checked before it is live.
 ///
 /// Groups are flat by construction: an entry that is itself a reference is rejected here,
-/// so [`UrlScope::compile_with_groups`] can splice with no recursion, no cycle detection
-/// and no order dependence between definitions.
-fn compile_url_groups(raw: &BTreeMap<String, Vec<String>>) -> Result<UrlGroups, String> {
-    let mut out = UrlGroups::new();
+/// so a scope can splice one in with no recursion, no cycle detection and no order
+/// dependence between definitions.
+///
+/// A member that names no roster row only **warns**. It grants nothing, which is
+/// fail-closed, and the two editors lint it: a fatal error there would mean removing a
+/// user could brick the gate on its next reload.
+fn compile_user_groups(
+    raw: &BTreeMap<String, Vec<String>>,
+    by_uuid: &HashMap<String, UserRecord>,
+) -> Result<BTreeMap<String, Vec<String>>, String> {
+    let mut out = BTreeMap::new();
     for (name, list) in raw {
-        if name.is_empty()
-            || !name
-                .bytes()
-                .all(|b| b.is_ascii_alphanumeric() || b == b'_' || b == b'-')
-        {
+        if !valid_name(name) {
             return Err(format!(
-                "url_groups '{name}': a group name must be non-empty and [A-Za-z0-9_-]"
+                "user_groups '{name}': a group name must be non-empty and [A-Za-z0-9_-]"
             ));
         }
-        let mut patterns = Vec::with_capacity(list.len());
+        let mut members: Vec<String> = Vec::with_capacity(list.len());
         for entry in list.iter().map(|s| s.trim()).filter(|s| !s.is_empty()) {
             if let Some(g) = group_ref(entry) {
                 return Err(format!(
-                    "url_groups '{name}': '@{g}' — a group cannot reference another group"
+                    "user_groups '{name}': '@{g}': a group cannot reference another group"
                 ));
             }
-            patterns.push(compile_pattern(entry).map_err(|e| format!("url_groups '{name}': {e}"))?);
+            let uuid = entry.to_ascii_lowercase();
+            if !well_formed_uuid(&uuid) {
+                return Err(format!(
+                    "user_groups '{name}': '{entry}' is not a uuid (a group lists users by \
+                     uuid, in the canonical lowercase 8-4-4-4-12 form)"
+                ));
+            }
+            if !by_uuid.contains_key(&uuid) {
+                eprintln!(
+                    "[bb-auth] WARNING: user group '{name}' lists {uuid}, which is in no users \
+                     entry: that member grants nothing"
+                );
+            }
+            if !members.contains(&uuid) {
+                members.push(uuid);
+            }
         }
-        if patterns.is_empty() {
+        if members.is_empty() {
             eprintln!(
-                "[bb-auth] WARNING: url group '{name}' has no urls — a reference to it grants \
-                 nothing"
+                "[bb-auth] WARNING: user group '{name}' has no members: a scope naming it admits \
+                 nobody through it"
             );
         }
-        out.insert(name.clone(), patterns);
+        out.insert(name.clone(), members);
     }
     Ok(out)
 }
 
-/// Compile a parsed access file into the runtime table. An unknown field on a [`SiteSpec`],
-/// a residual `enabled_paths`, a malformed URL pattern or a dangling `@group` reference are
-/// hard errors (so a SIGHUP reload keeps the old table); an individual malformed *key* is
-/// warned about and skipped so one bad `key_hash` can't drop every user.
+/// Refuse a file written for an older bb-auth, by name and with the way out.
 ///
-/// Scope errors are deliberately fatal rather than skip-with-warning: a dropped
-/// scope entry silently changes who can reach what. `bb-auth --check-users` exists
-/// so a deploy can catch that before restarting the service, and `bb-auth-adm` runs it on
-/// every edit *before* writing, so it cannot save a file that would brick the gate.
-///
-/// Emails are additionally required to be [`header_safe_email`], since every one of
-/// them can end up in `X-Auth-Email`.
-pub fn compile_access(file: &AccessFile) -> Result<Access, String> {
-    // Expanded here and nowhere else: every scope below is flat by the time it is stored,
-    // so `decide` and the gate never learn that groups exist.
-    let groups = compile_url_groups(&file.url_groups)?;
-
-    // Sites, in file order — `Sites::resolve` is first-match-wins, so the order is part
-    // of the meaning. A malformed pattern is fatal, exactly as in a user's scope.
-    let mut entries = Vec::with_capacity(file.sites.len());
-    for s in &file.sites {
-        let name = site_name(s);
-        let urls = UrlScope::compile_with_groups(&s.urls, &groups)
-            .map_err(|e| format!("site '{name}': {e}"))?;
-        if urls.is_empty() {
-            eprintln!("[bb-auth] WARNING: site '{name}' has no urls — it matches nothing");
-        }
-        let login_url = match &s.login_url {
-            Some(u) => Some(compile_login_url(u).map_err(|e| format!("site '{name}': {e}"))?),
-            None => None,
-        };
-        entries.push(SiteRecord {
-            name,
-            urls,
-            public_auth: s.public_auth,
-            login_url,
-        });
+/// Every one of these fields would otherwise be *ignored*, and that is the danger: an
+/// older file read by this binary would compile to an access table with no applications
+/// and a roster that reaches nothing, which is a total lockout reported as a successful
+/// load. The same reflex the pre-2.0 `enabled_paths` field has carried since 2.0, extended
+/// to the sections 3.0 replaces.
+fn check_legacy(file: &AccessFile) -> Result<(), String> {
+    let stale = |what: &str| {
+        Err(format!(
+            "'{what}' is a pre-3.0 access file field. This binary reads version \
+             {ACCESS_FILE_VERSION} (applications and scopes); convert the file with: \
+             bb-auth-adm migrate"
+        ))
+    };
+    if file.sites.is_some() {
+        return stale("sites");
     }
-    let sites = Sites { entries };
-
-    let denied: HashSet<String> = file
-        .denied
-        .iter()
-        .map(|e| e.trim().to_ascii_lowercase())
-        .filter(|e| !e.is_empty())
-        .collect();
-
-    let mut by_email = HashMap::new();
-    let mut by_key_hash = HashMap::new();
+    if file.url_groups.is_some() {
+        return stale("url_groups");
+    }
     for u in &file.users {
-        let email = u.email.trim().to_ascii_lowercase();
-        if email.is_empty() {
-            eprintln!("[bb-auth] WARNING: users entry with empty email, skipping");
-            continue;
-        }
-        if !header_safe_email(&email) {
-            // Warn-and-skip like an empty email: dropping a user denies them, which is
-            // fail-closed. `{email:?}` escapes the very control bytes we are rejecting,
-            // so a crafted file cannot forge log lines on its way out.
-            eprintln!("[bb-auth] WARNING: users entry {email:?} is not printable ASCII, skipping");
-            continue;
-        }
+        let who = if u.uuid.trim().is_empty() {
+            "users entry".to_string()
+        } else {
+            u.uuid.trim().to_string()
+        };
         if u.enabled_paths.is_some() {
             return Err(format!(
-                "{email}: 'enabled_paths' is no longer supported; use 'authorized_urls' \
-                 with full <scheme>://<host>/<path> patterns"
+                "{who}: 'enabled_paths' is no longer supported; access is granted by an \
+                 application scope that lists this user"
             ));
         }
-        let user_scope = match &u.authorized_urls {
-            Some(list) => {
-                UrlScope::compile_with_groups(list, &groups).map_err(|e| format!("{email}: {e}"))?
-            }
-            None => UrlScope::deny_all(),
-        };
-        if user_scope.is_empty() {
-            eprintln!(
-                "[bb-auth] WARNING: {email} has no authorized_urls — every request from this \
-                 user is denied (use [\"*://*/*\"] to grant every URL)"
-            );
-        }
-        if denied.contains(&email) {
-            eprintln!(
-                "[bb-auth] WARNING: {email} is listed in users and in denied — denied wins, \
-                 on every credential and every site"
-            );
+        if u.authorized_urls.is_some() {
+            return Err(format!("{who}: {}", stale("authorized_urls").unwrap_err()));
         }
         for k in &u.api_keys {
-            if k.enabled_paths.is_some() {
+            if k.enabled_paths.is_some() || k.authorized_urls.is_some() {
                 return Err(format!(
-                    "{email} key '{}': 'enabled_paths' is no longer supported; use 'authorized_urls'",
+                    "{who} key '{}': a key carries no urls of its own; it names the scopes it \
+                     may exercise. Convert the file with: bb-auth-adm migrate",
                     k.id
                 ));
             }
+        }
+    }
+    if file.version != ACCESS_FILE_VERSION {
+        return Err(match file.version {
+            0 => format!(
+                "this file has no 'version'. bb-auth {ACCESS_FILE_VERSION}.x access files \
+                 declare \"version\": {ACCESS_FILE_VERSION}"
+            ),
+            v => format!(
+                "this file declares version {v}; this binary reads version \
+                 {ACCESS_FILE_VERSION}"
+            ),
+        });
+    }
+    Ok(())
+}
+
+/// The one access-file format this binary reads. See [`AccessFile::version`].
+pub const ACCESS_FILE_VERSION: u32 = 3;
+
+/// Compile a parsed access file into the runtime table.
+///
+/// The order below is not arbitrary: the roster is built first because everything else
+/// references it, groups next because scopes splice them, applications next, then keys
+/// (whose restrictions name scopes that must exist), and `denied` last, so an identifier
+/// can be folded onto the uuid it belongs to.
+///
+/// **What is fatal and what is skipped** is the one rule to keep. An error that silently
+/// changes who reaches what is fatal: a bad `access`, a URL pattern, a base that overlaps
+/// another application's, a scope reaching outside its own area, an unknown `@group`, a
+/// duplicate identity, a key restriction naming no scope. An error whose only effect is to
+/// drop one credential warns and skips it: an unusable email, a malformed `key_hash`, a
+/// bad `released`/`duration`, a reference to a user who is not there. The first kind fails
+/// closed *loudly*, before the restart, which is what `bb-auth --check-users` is for and
+/// what makes a SIGHUP reload keep the old table; the second fails closed quietly, because
+/// dropping one credential is exactly what an operator would want it to do.
+///
+/// Emails are additionally required to be [`header_safe_email`], since every one of them
+/// can end up in an identity header.
+pub fn compile_access(file: &AccessFile) -> Result<Access, String> {
+    check_legacy(file)?;
+
+    // The roster first: everything below references it, and the dangling-reference
+    // warnings need to know which uuids exist.
+    let mut by_uuid: HashMap<String, UserRecord> = HashMap::new();
+    let mut by_identifier: HashMap<String, String> = HashMap::new();
+    for u in &file.users {
+        let uuid = u.uuid.trim().to_ascii_lowercase();
+        if !well_formed_uuid(&uuid) {
+            return Err(format!(
+                "users entry '{}': not a uuid (canonical lowercase 8-4-4-4-12; mint one with \
+                 bb-auth-adm user add)",
+                u.uuid.trim()
+            ));
+        }
+        if by_uuid.contains_key(&uuid) {
+            return Err(format!("{uuid} is declared by two users entries"));
+        }
+        let mut emails = Vec::with_capacity(u.emails.len());
+        for raw in &u.emails {
+            let e = norm_email(raw);
+            if e.is_empty() {
+                eprintln!("[bb-auth] WARNING: {uuid}: empty email, skipping");
+                continue;
+            }
+            if !header_safe_email(&e) {
+                // Warn and skip: dropping an identifier denies through it, which is
+                // fail-closed. `{e:?}` escapes the very control bytes being rejected, so a
+                // crafted file cannot forge log lines on its way out.
+                eprintln!(
+                    "[bb-auth] WARNING: {uuid}: email {e:?} is not printable ASCII, skipping"
+                );
+                continue;
+            }
+            // Fatal, not last-wins: two rows claiming one identifier means the row an
+            // operator is reading may not be the row in force, which silently changes who
+            // reaches what.
+            if let Some(other) = by_identifier.get(&e) {
+                return Err(format!(
+                    "email '{e}' is declared by two users: {other} and {uuid}"
+                ));
+            }
+            by_identifier.insert(e.clone(), uuid.clone());
+            emails.push(e);
+        }
+        if emails.is_empty() {
+            eprintln!(
+                "[bb-auth] WARNING: {uuid} has no emails: no credential can ever resolve to \
+                 this user"
+            );
+        }
+        by_uuid.insert(
+            uuid.clone(),
+            UserRecord {
+                uuid: uuid.clone(),
+                emails,
+            },
+        );
+    }
+
+    // Expanded here and nowhere else: every scope below holds plain uuids by the time it
+    // is stored, so `decide` and the gate never learn that groups exist.
+    let groups = compile_user_groups(&file.user_groups, &by_uuid)?;
+
+    let mut apps: Vec<AppRecord> = Vec::with_capacity(file.applications.len());
+    // (base, owning application) for every base seen so far: the partition check.
+    let mut areas: Vec<(String, String)> = Vec::new();
+    for a in &file.applications {
+        let name = a.name.trim().to_string();
+        if !valid_name(&name) {
+            return Err(format!(
+                "application '{name}': a name must be non-empty and [A-Za-z0-9_-]"
+            ));
+        }
+        if apps.iter().any(|x| x.name == name) {
+            return Err(format!("two applications are named '{name}'"));
+        }
+        let mut base = Vec::with_capacity(a.base.len());
+        for raw in &a.base {
+            let b = compile_base(raw).map_err(|e| format!("application '{name}': {e}"))?;
+            if let Some((other, owner)) = areas
+                .iter()
+                .find(|(o, _)| base_covers(o, &b) || base_covers(&b, o))
+            {
+                return Err(format!(
+                    "application '{name}': base '{b}' overlaps '{other}' (application \
+                     '{owner}'). A URL belongs to one application: areas may not contain \
+                     one another"
+                ));
+            }
+            areas.push((b.clone(), name.clone()));
+            base.push(b);
+        }
+        if base.is_empty() {
+            return Err(format!(
+                "application '{name}': no base, so it owns no URLs and nothing in it is \
+                 reachable"
+            ));
+        }
+        let login_url = match &a.login_url {
+            Some(u) => {
+                Some(compile_login_url(u).map_err(|e| format!("application '{name}': {e}"))?)
+            }
+            None => None,
+        };
+
+        let mut scopes: Vec<ScopeRecord> = Vec::with_capacity(a.scopes.len());
+        for s in &a.scopes {
+            let sname = s.name.trim().to_string();
+            let at = format!("{name}/{sname}");
+            if !valid_name(&sname) {
+                return Err(format!(
+                    "application '{name}': scope name '{sname}' must be non-empty and \
+                     [A-Za-z0-9_-]"
+                ));
+            }
+            if scopes.iter().any(|x| x.name == sname) {
+                return Err(format!(
+                    "application '{name}': two scopes are named '{sname}'"
+                ));
+            }
+            let access = match s.access.trim() {
+                "anonymous" => AccessKind::Anonymous,
+                "authenticated" => AccessKind::Authenticated,
+                "restricted" => AccessKind::Restricted,
+                "" => {
+                    return Err(format!(
+                        "{at}: 'access' is required and has no default; it must be \
+                         \"anonymous\", \"authenticated\" or \"restricted\""
+                    ))
+                }
+                other => {
+                    return Err(format!(
+                        "{at}: unknown access '{other}'; it must be \"anonymous\", \
+                         \"authenticated\" or \"restricted\""
+                    ))
+                }
+            };
+            // The three membership fields belong to `restricted` and to nothing else.
+            // Ignoring them elsewhere would let a scope read as if it restricted access
+            // while granting to everyone, which is the failing-open shape this format
+            // refuses everywhere.
+            if access != AccessKind::Restricted {
+                let stray = if s.users.is_some() {
+                    Some("users")
+                } else if s.groups.is_some() {
+                    Some("groups")
+                } else if s.credentials.is_some() {
+                    Some("credentials")
+                } else {
+                    None
+                };
+                if let Some(f) = stray {
+                    return Err(format!(
+                        "{at}: '{f}' means nothing on an access of \"{}\"; it belongs to \
+                         \"restricted\"",
+                        s.access.trim()
+                    ));
+                }
+            }
+
+            let urls = UrlScope::compile(&s.urls).map_err(|e| format!("{at}: {e}"))?;
+            for p in urls.patterns() {
+                let raw = String::from_utf8_lossy(p.as_bytes()).into_owned();
+                if !base.iter().any(|b| base_covers(b, &raw)) {
+                    return Err(format!(
+                        "{at}: '{raw}' is outside this application's base ({}). A scope may \
+                         only speak for URLs its application owns",
+                        base.join(", ")
+                    ));
+                }
+            }
+            if urls.is_empty() {
+                eprintln!("[bb-auth] WARNING: {at} has no urls: it matches nothing");
+            }
+
+            let credentials = match &s.credentials {
+                None => CredentialSet::default(),
+                Some(list) => {
+                    let mut set = CredentialSet {
+                        login: false,
+                        api_key: false,
+                    };
+                    for c in list.iter().map(|c| c.trim()).filter(|c| !c.is_empty()) {
+                        match c {
+                            "login" => set.login = true,
+                            "api_key" => set.api_key = true,
+                            other => {
+                                return Err(format!(
+                                    "{at}: unknown credential '{other}'; it must be \"login\" \
+                                     (an id_token or the session cookie) or \"api_key\""
+                                ))
+                            }
+                        }
+                    }
+                    if !set.login && !set.api_key {
+                        return Err(format!(
+                            "{at}: an empty 'credentials' admits no credential at all, so the \
+                             scope is unreachable. Remove the field to admit both"
+                        ));
+                    }
+                    set
+                }
+            };
+
+            let mut members: HashSet<String> = HashSet::new();
+            if access == AccessKind::Restricted {
+                for entry in s.users.iter().flatten() {
+                    let entry = entry.trim();
+                    if entry.is_empty() {
+                        continue;
+                    }
+                    let uuid = entry.to_ascii_lowercase();
+                    if !well_formed_uuid(&uuid) {
+                        return Err(format!(
+                            "{at}: '{entry}' is not a uuid (a scope lists users by uuid, in the \
+                             canonical lowercase 8-4-4-4-12 form)"
+                        ));
+                    }
+                    if !by_uuid.contains_key(&uuid) {
+                        eprintln!(
+                            "[bb-auth] WARNING: {at} lists {uuid}, which is in no users entry: \
+                             that reference grants nothing"
+                        );
+                    }
+                    members.insert(uuid);
+                }
+                for entry in s.groups.iter().flatten() {
+                    let entry = entry.trim();
+                    if entry.is_empty() {
+                        continue;
+                    }
+                    let g = group_ref(entry).ok_or_else(|| {
+                        format!("{at}: '{entry}': a group reference is written '@name'")
+                    })?;
+                    match groups.get(g) {
+                        Some(list) => members.extend(list.iter().cloned()),
+                        None => return Err(format!("{at}: unknown user group '@{g}'")),
+                    }
+                }
+                if members.is_empty() {
+                    eprintln!(
+                        "[bb-auth] WARNING: {at} is restricted and lists nobody: it admits no \
+                         one (an anonymous or authenticated scope is how an area is opened)"
+                    );
+                }
+            }
+
+            scopes.push(ScopeRecord {
+                name: sname,
+                urls,
+                access,
+                members,
+                credentials,
+            });
+        }
+        if scopes.is_empty() {
+            eprintln!(
+                "[bb-auth] WARNING: application '{name}' has no scopes: every URL in its area \
+                 is denied to everyone"
+            );
+        }
+        apps.push(AppRecord {
+            name,
+            base,
+            login_url,
+            scopes,
+        });
+    }
+
+    // Keys last: a key's restriction names scopes, so the scopes have to exist first.
+    let known_scopes: HashSet<String> = apps
+        .iter()
+        .flat_map(|a| a.scopes.iter().map(|s| format!("{}/{}", a.name, s.name)))
+        .collect();
+    let mut by_key_hash = HashMap::new();
+    for u in &file.users {
+        let uuid = u.uuid.trim().to_ascii_lowercase();
+        for k in &u.api_keys {
+            let key_id = if k.id.trim().is_empty() {
+                "?".to_string()
+            } else {
+                k.id.trim().to_string()
+            };
             let hash = k.key_hash.trim().to_ascii_lowercase();
             if hash.len() != 64 || !hash.bytes().all(|b| b.is_ascii_hexdigit()) {
-                eprintln!(
-                    "[bb-auth] WARNING: {email} key '{}': invalid key_hash, skipping",
-                    k.id
-                );
+                eprintln!("[bb-auth] WARNING: {uuid} key '{key_id}': invalid key_hash, skipping");
                 continue;
             }
             let expires = match key_expiry(&k.released, &k.duration) {
                 Some(e) => e,
                 None => {
                     eprintln!(
-                        "[bb-auth] WARNING: {email} key '{}': bad released/duration, skipping",
-                        k.id
+                        "[bb-auth] WARNING: {uuid} key '{key_id}': bad released/duration, skipping"
                     );
                     continue;
                 }
             };
-            let scope = match &k.authorized_urls {
-                Some(list) => UrlScope::compile_with_groups(list, &groups)
-                    .map_err(|e| format!("{email} key '{}': {e}", k.id))?,
-                // The owner's scope, already expanded — a key inherits patterns, never a
-                // reference to re-resolve.
-                None => user_scope.clone(),
-            };
-            let key_id = if k.id.trim().is_empty() {
-                "?".to_string()
-            } else {
-                k.id.trim().to_string()
+            // Fatal, unlike the two above: a restriction naming a scope that does not
+            // exist fails closed, but it fails closed *silently*, and an operator who
+            // mistyped one would find out only when the machine using the key stopped
+            // working for no visible reason.
+            let scopes = match &k.scopes {
+                None => None,
+                Some(list) => {
+                    let mut set = HashSet::new();
+                    for r in list.iter().map(|r| r.trim()).filter(|r| !r.is_empty()) {
+                        if !known_scopes.contains(r) {
+                            return Err(format!(
+                                "{uuid} key '{key_id}': '{r}' names no scope (a restriction is \
+                                 written \"application/scope\")"
+                            ));
+                        }
+                        set.insert(r.to_string());
+                    }
+                    Some(set)
+                }
             };
             by_key_hash.insert(
                 hash,
                 ApiKeyRecord {
-                    email: email.clone(),
+                    uuid: uuid.clone(),
                     key_id,
                     expires,
-                    scope,
+                    scopes,
                 },
             );
         }
-        by_email.insert(email, UserRecord { scope: user_scope });
     }
+
+    // `denied` last, so an identifier can be resolved against the roster and folded into
+    // the uuid set: denying one email of a user must veto the user, not one way in.
+    let mut denied_users: HashSet<String> = HashSet::new();
+    let mut denied_identifiers: HashSet<String> = HashSet::new();
+    for raw in &file.denied {
+        let d = raw.trim();
+        if d.is_empty() {
+            continue;
+        }
+        let lower = d.to_ascii_lowercase();
+        if well_formed_uuid(&lower) {
+            if !by_uuid.contains_key(&lower) {
+                eprintln!(
+                    "[bb-auth] WARNING: denied lists {lower}, which is in no users entry: a \
+                     stranger has no uuid, so this vetoes nobody"
+                );
+            }
+            denied_users.insert(lower);
+            continue;
+        }
+        // A veto that vetoes nobody while reading as if it did is the one failure this
+        // section cannot afford, so an entry that is neither a uuid nor an identifier is
+        // refused rather than kept as a string nothing will ever equal.
+        if !d.contains('@') {
+            return Err(format!(
+                "denied '{d}': not a uuid and not an email. A veto names a user by uuid, or \
+                 an identity the roster does not know by its email"
+            ));
+        }
+        match by_identifier.get(&lower) {
+            Some(uuid) => {
+                denied_users.insert(uuid.clone());
+            }
+            None => {
+                denied_identifiers.insert(lower);
+            }
+        }
+    }
+    for uuid in &denied_users {
+        if by_uuid.contains_key(uuid) {
+            eprintln!(
+                "[bb-auth] WARNING: {uuid} is in users and in denied: denied wins, on every \
+                 credential and every scope"
+            );
+        }
+    }
+
     Ok(Access {
-        sites,
-        denied,
-        by_email,
+        apps,
+        denied_users,
+        denied_identifiers,
+        by_identifier,
+        by_uuid,
         by_key_hash,
     })
 }
@@ -1256,79 +1962,154 @@ pub fn request_url(url: &str) -> String {
     lower_authority(url.split(['?', '#']).next().unwrap_or(""))
 }
 
-/// The roster position of `email`, matched as [`norm_email`] matches.
-pub fn user_pos(doc: &AccessFile, email: &str) -> Option<usize> {
-    let want = norm_email(email);
-    doc.users.iter().position(|u| norm_email(&u.email) == want)
+/// The roster position of a user named by **either** key: their uuid, or any of their
+/// emails.
+///
+/// Both, on purpose. The file references a user by uuid and only by uuid, but an operator
+/// types an email, and a tool that made them paste a uuid to remove a person would be a
+/// tool nobody uses. The uuid is tried first: it is the identity, and an email is only a
+/// way to find it.
+pub fn user_pos(doc: &AccessFile, key: &str) -> Option<usize> {
+    let want = norm_email(key);
+    doc.users
+        .iter()
+        .position(|u| u.uuid.trim().to_ascii_lowercase() == want)
+        .or_else(|| {
+            doc.users
+                .iter()
+                .position(|u| u.emails.iter().any(|e| norm_email(e) == want))
+        })
 }
 
-/// The roster row for `email`, to edit in place.
-pub fn user_mut<'a>(doc: &'a mut AccessFile, email: &str) -> Result<&'a mut UserSpec, String> {
-    match user_pos(doc, email) {
+/// The roster row named by uuid or email, to edit in place.
+pub fn user_mut<'a>(doc: &'a mut AccessFile, key: &str) -> Result<&'a mut UserSpec, String> {
+    match user_pos(doc, key) {
         Some(i) => Ok(&mut doc.users[i]),
         None => Err(format!(
             "no user '{}' (add them with: user add {})",
-            email.trim(),
-            email.trim()
+            key.trim(),
+            key.trim()
         )),
     }
 }
 
-/// One of `email`'s API keys, by its `id` (trimmed, case-sensitive — an id is a label, not
-/// an address).
+/// How a user is named back to an operator: their primary email if they have one, else
+/// their uuid. Every message about a user goes through here, so a row with no email is
+/// still nameable instead of being reported as an empty string.
+pub fn user_label(u: &UserSpec) -> String {
+    match u
+        .emails
+        .iter()
+        .map(|e| norm_email(e))
+        .find(|e| !e.is_empty())
+    {
+        Some(e) => e,
+        None => u.uuid.trim().to_ascii_lowercase(),
+    }
+}
+
+/// One user's API keys, by `id` (trimmed, case-sensitive: an id is a label, not an
+/// address).
 pub fn key_mut<'a>(
     doc: &'a mut AccessFile,
-    email: &str,
+    key: &str,
     id: &str,
 ) -> Result<&'a mut ApiKeySpec, String> {
-    let owner = norm_email(email);
-    let u = user_mut(doc, email)?;
+    let u = user_mut(doc, key)?;
+    let owner = user_label(u);
     match u.api_keys.iter().position(|k| k.id.trim() == id.trim()) {
         Some(i) => Ok(&mut u.api_keys[i]),
         None => Err(format!("{owner}: no api key '{id}'")),
     }
 }
 
-/// The position of the site named `name`. A position, not a reference, because site order
-/// is meaning ([`Sites`]) and every caller ends up needing the index.
-pub fn site_pos(doc: &AccessFile, name: &str) -> Option<usize> {
-    doc.sites.iter().position(|s| s.name.trim() == name.trim())
+/// The position of the application named `name`.
+pub fn app_pos(doc: &AccessFile, name: &str) -> Option<usize> {
+    doc.applications
+        .iter()
+        .position(|a| a.name.trim() == name.trim())
 }
 
-/// A url group's pattern list, to edit in place.
-pub fn url_group_mut<'a>(
+/// The application named `name`, to edit in place.
+pub fn app_mut<'a>(doc: &'a mut AccessFile, name: &str) -> Result<&'a mut AppSpec, String> {
+    match app_pos(doc, name) {
+        Some(i) => Ok(&mut doc.applications[i]),
+        None => Err(format!("no application '{}'", name.trim())),
+    }
+}
+
+/// The position of `scope` inside `app`. A position, not a reference, because scope order
+/// is meaning ([`AppRecord::scopes`]) and every caller ends up needing the index.
+pub fn scope_pos(app: &AppSpec, scope: &str) -> Option<usize> {
+    app.scopes
+        .iter()
+        .position(|s| s.name.trim() == scope.trim())
+}
+
+/// One scope of one application, to edit in place.
+pub fn scope_mut<'a>(
+    doc: &'a mut AccessFile,
+    app: &str,
+    scope: &str,
+) -> Result<&'a mut ScopeSpec, String> {
+    let a = app_mut(doc, app)?;
+    match scope_pos(a, scope) {
+        Some(i) => Ok(&mut a.scopes[i]),
+        None => Err(format!("{}/{}: no such scope", app.trim(), scope.trim())),
+    }
+}
+
+/// A user group's member list, to edit in place.
+pub fn user_group_mut<'a>(
     doc: &'a mut AccessFile,
     name: &str,
 ) -> Result<&'a mut Vec<String>, String> {
     let name = name.trim();
-    doc.url_groups
+    doc.user_groups
         .get_mut(name)
-        .ok_or_else(|| format!("no url group '@{name}'"))
+        .ok_or_else(|| format!("no user group '@{name}'"))
 }
 
-/// Everything that names `@name`: users by email, keys as `email/id`, sites as
-/// `site 'NAME'`.
+/// Every scope that names `@name`, as `application/scope`.
 ///
-/// [`group_ref`] is what decides whether an entry is a reference, so this cannot drift from
-/// what [`compile_access`] expands. The gate would refuse a file with a dangling reference
-/// anyway — [`AccessWrite::prepare`] compiles before anything is written — and this is what
-/// turns that refusal into a list of places to go and fix.
-pub fn url_group_refs(doc: &AccessFile, name: &str) -> Vec<String> {
-    let names = |urls: &[String]| urls.iter().any(|u| group_ref(u) == Some(name));
+/// [`group_ref`] is what decides whether an entry is a reference, so this cannot drift
+/// from what [`compile_access`] expands. The gate would refuse a file with a dangling
+/// reference anyway ([`AccessWrite::prepare`] compiles before anything is written), and
+/// this is what turns that refusal into a list of places to go and fix.
+pub fn user_group_refs(doc: &AccessFile, name: &str) -> Vec<String> {
     let mut out = Vec::new();
-    for s in &doc.sites {
-        if names(&s.urls) {
-            out.push(format!("site '{}'", site_name(s)));
+    for a in &doc.applications {
+        for s in &a.scopes {
+            if s.groups
+                .iter()
+                .flatten()
+                .any(|g| group_ref(g) == Some(name.trim()))
+            {
+                out.push(format!("{}/{}", a.name.trim(), s.name.trim()));
+            }
         }
     }
-    for u in &doc.users {
-        if u.authorized_urls.as_deref().is_some_and(names) {
-            out.push(norm_email(&u.email));
-        }
-        for k in &u.api_keys {
-            if k.authorized_urls.as_deref().is_some_and(names) {
-                out.push(format!("{}/{}", norm_email(&u.email), k.id.trim()));
+    out
+}
+
+/// Every place that names `uuid`: scopes as `application/scope`, groups as `@name`.
+///
+/// What [`remove_user`] sweeps, and what an editor shows before it does. A dangling
+/// reference only warns at load, so nothing breaks if one survives; leaving one behind
+/// would still be an editor quietly writing a file it knows is wrong.
+pub fn user_refs(doc: &AccessFile, uuid: &str) -> Vec<String> {
+    let want = norm_email(uuid);
+    let mut out = Vec::new();
+    for a in &doc.applications {
+        for s in &a.scopes {
+            if s.users.iter().flatten().any(|u| norm_email(u) == want) {
+                out.push(format!("{}/{}", a.name.trim(), s.name.trim()));
             }
+        }
+    }
+    for (name, members) in &doc.user_groups {
+        if members.iter().any(|m| norm_email(m) == want) {
+            out.push(format!("@{name}"));
         }
     }
     out
@@ -1405,53 +2186,129 @@ fn check_new_email(email: &str) -> Result<(), String> {
     ))
 }
 
-/// Enrol `user`, whose email is normalised on the way in and must look like an email
-/// ([`well_formed_email`]) — a typo here is a dead row that fails closed and is found only
-/// by the human it locks out. Refuses a second row for an
-/// address that is already on the roster: the gate builds a `HashMap`, so a duplicate is
-/// not an error there — the last row silently wins, and the one an operator is reading may
-/// not be the one in force.
+/// A fresh identity: 122 random bits from the OS CSPRNG, in the canonical lowercase
+/// 8-4-4-4-12 form (a version 4 UUID).
+///
+/// Minted here rather than typed by an operator, because the value has no meaning to
+/// read: it exists to be stable, unique and never reused. The same entropy source that
+/// mints an API key, and no new dependency for a value that is sixteen bytes and a
+/// format string.
+pub fn mint_uuid() -> Result<String, String> {
+    let mut b = [0u8; 16];
+    getrandom::getrandom(&mut b).map_err(|e| format!("no entropy from the OS: {e}"))?;
+    b[6] = (b[6] & 0x0f) | 0x40; // version 4
+    b[8] = (b[8] & 0x3f) | 0x80; // variant 1
+    let h: String = b.iter().map(|x| format!("{x:02x}")).collect();
+    Ok(format!(
+        "{}-{}-{}-{}-{}",
+        &h[0..8],
+        &h[8..12],
+        &h[12..16],
+        &h[16..20],
+        &h[20..32]
+    ))
+}
+
+/// Enrol `user`. A uuid is minted when the row carries none, every email is normalised on
+/// the way in and must look like one ([`well_formed_email`]): a typo here is a dead
+/// identifier that fails closed and is found only by the human it locks out.
+///
+/// Refuses a row whose uuid or any of whose emails is already in the file. The gate is
+/// fatal on both, so this is the same refusal made earlier and with a better sentence.
 pub fn add_user(doc: &mut AccessFile, mut user: UserSpec) -> Result<(), String> {
-    user.email = norm_email(&user.email);
-    check_new_email(&user.email)?;
-    if user_pos(doc, &user.email).is_some() {
-        return Err(format!(
-            "{} is already in users (edit them: user set {})",
-            user.email, user.email
-        ));
+    user.uuid = match user.uuid.trim() {
+        "" => mint_uuid()?,
+        u => {
+            let u = u.to_ascii_lowercase();
+            if !well_formed_uuid(&u) {
+                return Err(format!(
+                    "'{u}' is not a uuid (canonical lowercase 8-4-4-4-12); leave it out and one \
+                     is minted"
+                ));
+            }
+            u
+        }
+    };
+    if user_pos(doc, &user.uuid).is_some() {
+        return Err(format!("{} is already in users", user.uuid));
     }
+    let mut emails = Vec::with_capacity(user.emails.len());
+    for raw in &user.emails {
+        let e = norm_email(raw);
+        check_new_email(&e)?;
+        if user_pos(doc, &e).is_some() {
+            return Err(format!("{e} already belongs to another user"));
+        }
+        if emails.contains(&e) {
+            return Err(format!("{e} is listed twice"));
+        }
+        emails.push(e);
+    }
+    user.emails = emails;
     doc.users.push(user);
     Ok(())
 }
 
-/// Give `email`'s row a new address, which must look like one ([`well_formed_email`]).
+/// Give a user another identifier, which must look like an email ([`well_formed_email`])
+/// and must belong to nobody yet. `Ok(false)` means they already had it.
 ///
-/// The collision is checked before the row is even located: "that address is taken" is the
-/// more useful complaint of the two, and it is the one an operator hears today. Both checks
-/// run only when the address actually changes — a rename to itself (which is how an editor
-/// saves an unrelated field) must not trip over a legacy row whose address would be refused
-/// today.
-pub fn rename_user(doc: &mut AccessFile, email: &str, new_email: &str) -> Result<(), String> {
-    let new = norm_email(new_email);
-    if new != norm_email(email) {
-        check_new_email(&new)?;
-        if user_pos(doc, &new).is_some() {
-            return Err(format!("{new} is already in users"));
-        }
+/// This is what a "rename" became. An identity is the uuid and never changes, so changing
+/// how someone signs in is adding an identifier and dropping the old one: two edits the
+/// gate validates one by one, and nothing in the file has to be re-pointed either time.
+pub fn add_user_email(doc: &mut AccessFile, key: &str, email: &str) -> Result<bool, String> {
+    let e = norm_email(email);
+    match user_pos(doc, &e) {
+        Some(i) if Some(i) == user_pos(doc, key) => return Ok(false),
+        Some(_) => return Err(format!("{e} already belongs to another user")),
+        None => {}
     }
-    user_mut(doc, email)?.email = new;
-    Ok(())
+    check_new_email(&e)?;
+    user_mut(doc, key)?.emails.push(e);
+    Ok(true)
 }
 
-/// Drop `email`'s row, and with it every key it owned — a key is a grant *tied to a user*,
-/// and an orphan would be a credential with nobody to answer for it. The removed row comes
+/// Drop one identifier from a user. Refuses the last one: a row nobody can sign in as is
+/// a row that only looks like a grant, and the way to retire a user is to remove or veto
+/// them.
+pub fn remove_user_email(doc: &mut AccessFile, key: &str, email: &str) -> Result<bool, String> {
+    let want = norm_email(email);
+    let u = user_mut(doc, key)?;
+    if !u.emails.iter().any(|e| norm_email(e) == want) {
+        return Ok(false);
+    }
+    if u.emails.len() == 1 {
+        return Err(format!(
+            "{want} is this user's only email; removing it would leave a row no credential can \
+             ever resolve to"
+        ));
+    }
+    u.emails.retain(|e| norm_email(e) != want);
+    Ok(true)
+}
+
+/// Drop a user's row, every key it owned, and every reference to it. The removed row comes
 /// back so a caller can say what went with it.
 ///
-/// Removing a user does **not** keep them off a `public_auth` site: there the roster is
-/// never consulted. That is what [`Access::denied`] is for.
-pub fn remove_user(doc: &mut AccessFile, email: &str) -> Result<UserSpec, String> {
-    let i = user_pos(doc, email).ok_or_else(|| format!("no user '{}'", norm_email(email)))?;
-    Ok(doc.users.remove(i))
+/// The sweep is the point, and it is new: with grants written on the side of the place, a
+/// row can be named by any number of scopes and groups. A leftover reference grants
+/// nothing (the gate warns and moves on), but an editor that knowingly left one would be
+/// writing a file it knows is wrong, and the next person to read that scope would see a
+/// member who does not exist.
+pub fn remove_user(doc: &mut AccessFile, key: &str) -> Result<(UserSpec, Vec<String>), String> {
+    let i = user_pos(doc, key).ok_or_else(|| format!("no user '{}'", key.trim()))?;
+    let uuid = doc.users[i].uuid.trim().to_ascii_lowercase();
+    let swept = user_refs(doc, &uuid);
+    for a in &mut doc.applications {
+        for s in &mut a.scopes {
+            if let Some(list) = s.users.as_mut() {
+                list.retain(|u| norm_email(u) != uuid);
+            }
+        }
+    }
+    for members in doc.user_groups.values_mut() {
+        members.retain(|m| norm_email(m) != uuid);
+    }
+    Ok((doc.users.remove(i), swept))
 }
 
 /// A freshly minted `bbk_` bearer, sealed until the file that carries its hash is on disk.
@@ -1489,12 +2346,12 @@ impl SealedKey {
 /// `key rotate`, so two of them make a revocation ambiguous.
 pub fn add_api_key(
     doc: &mut AccessFile,
-    email: &str,
+    key_owner: &str,
     mut key: ApiKeySpec,
 ) -> Result<SealedKey, String> {
     let id = key.id.trim().to_string();
-    let owner = norm_email(email);
-    let u = user_mut(doc, email)?;
+    let u = user_mut(doc, key_owner)?;
+    let owner = user_label(u);
     if u.api_keys.iter().any(|k| k.id.trim() == id) {
         return Err(format!(
             "{owner} already has a key '{id}' (replace its secret: key rotate {owner} {id})"
@@ -1518,9 +2375,13 @@ pub fn rotate_api_key(doc: &mut AccessFile, email: &str, id: &str) -> Result<Sea
 }
 
 /// Revoke one key by id, handing back the row that went.
-pub fn remove_api_key(doc: &mut AccessFile, email: &str, id: &str) -> Result<ApiKeySpec, String> {
-    let owner = norm_email(email);
-    let u = user_mut(doc, email)?;
+pub fn remove_api_key(
+    doc: &mut AccessFile,
+    key_owner: &str,
+    id: &str,
+) -> Result<ApiKeySpec, String> {
+    let u = user_mut(doc, key_owner)?;
+    let owner = user_label(u);
     let i = u
         .api_keys
         .iter()
@@ -1529,123 +2390,238 @@ pub fn remove_api_key(doc: &mut AccessFile, email: &str, id: &str) -> Result<Api
     Ok(u.api_keys.remove(i))
 }
 
-/// Insert a site at `at` (`None` = last, out of range = last), and hand back where it
-/// landed. A name is required and must be free: it is how every other command addresses
-/// the record.
+/// Add an application. A name is required and must be free: it is how every other command
+/// addresses the record, and it is the left half of every `application/scope`.
 ///
-/// A site describes a **place**, never a person — there is no argument here that names a
-/// user, and there never may be one ([`SiteRecord`]).
-pub fn add_site(
-    doc: &mut AccessFile,
-    mut site: SiteSpec,
-    at: Option<usize>,
-) -> Result<usize, String> {
-    site.name = site.name.trim().to_string();
-    if site.name.is_empty() {
-        return Err("a site needs a name".into());
+/// Application order carries no meaning (areas do not overlap, so at most one can ever
+/// answer), which is why this appends and there is no move.
+pub fn add_application(doc: &mut AccessFile, mut app: AppSpec) -> Result<(), String> {
+    app.name = app.name.trim().to_string();
+    if !valid_name(&app.name) {
+        return Err("an application needs a name of [A-Za-z0-9_-]".into());
     }
-    if site_pos(doc, &site.name).is_some() {
+    if app_pos(doc, &app.name).is_some() {
         return Err(format!(
-            "site '{}' already exists (edit it: site set {})",
-            site.name, site.name
+            "application '{}' already exists (edit it: app set {})",
+            app.name, app.name
         ));
     }
-    let at = at.unwrap_or(doc.sites.len()).min(doc.sites.len());
-    doc.sites.insert(at, site);
+    doc.applications.push(app);
+    Ok(())
+}
+
+/// Rename an application, refusing a name another one already answers to.
+///
+/// Every key restriction that named `application/scope` is re-pointed with it: a
+/// restriction is written as a string, and leaving one behind would silently narrow a key
+/// to a scope that no longer exists.
+pub fn rename_application(doc: &mut AccessFile, name: &str, new_name: &str) -> Result<(), String> {
+    let i = app_pos(doc, name).ok_or_else(|| format!("no application '{}'", name.trim()))?;
+    let new = new_name.trim().to_string();
+    if !valid_name(&new) {
+        return Err("an application name must be [A-Za-z0-9_-]".into());
+    }
+    if app_pos(doc, &new).is_some_and(|j| j != i) {
+        return Err(format!("application '{new}' already exists"));
+    }
+    let old = doc.applications[i].name.trim().to_string();
+    doc.applications[i].name = new.clone();
+    for u in &mut doc.users {
+        for k in &mut u.api_keys {
+            for r in k.scopes.iter_mut().flatten() {
+                if let Some(rest) = r.trim().strip_prefix(&format!("{old}/")) {
+                    *r = format!("{new}/{rest}");
+                }
+            }
+        }
+    }
+    Ok(())
+}
+
+/// Drop an application, handing back the record that went. Everything inside it goes with
+/// it, so this can take away every way into a URL area at once.
+pub fn remove_application(doc: &mut AccessFile, name: &str) -> Result<AppSpec, String> {
+    let i = app_pos(doc, name).ok_or_else(|| format!("no application '{}'", name.trim()))?;
+    Ok(doc.applications.remove(i))
+}
+
+/// Insert a scope into an application at `at` (`None` = last, out of range = last), and
+/// hand back where it landed.
+///
+/// Position is not decoration: scopes are first match wins, so where a scope lands decides
+/// which requests it ever sees.
+pub fn add_scope(
+    doc: &mut AccessFile,
+    app: &str,
+    mut scope: ScopeSpec,
+    at: Option<usize>,
+) -> Result<usize, String> {
+    scope.name = scope.name.trim().to_string();
+    if !valid_name(&scope.name) {
+        return Err("a scope needs a name of [A-Za-z0-9_-]".into());
+    }
+    let a = app_mut(doc, app)?;
+    if scope_pos(a, &scope.name).is_some() {
+        return Err(format!(
+            "{}/{} already exists (edit it: scope set {} {})",
+            a.name.trim(),
+            scope.name,
+            a.name.trim(),
+            scope.name
+        ));
+    }
+    let at = at.unwrap_or(a.scopes.len()).min(a.scopes.len());
+    a.scopes.insert(at, scope);
     Ok(at)
 }
 
-/// Rename a site, refusing a name another record already answers to.
-pub fn rename_site(doc: &mut AccessFile, name: &str, new_name: &str) -> Result<(), String> {
-    let i = site_pos(doc, name).ok_or_else(|| format!("no site '{}'", name.trim()))?;
+/// Rename a scope, refusing a name its application already answers to, and re-pointing
+/// every key restriction that named it.
+pub fn rename_scope(
+    doc: &mut AccessFile,
+    app: &str,
+    name: &str,
+    new_name: &str,
+) -> Result<(), String> {
     let new = new_name.trim().to_string();
-    if site_pos(doc, &new).is_some_and(|j| j != i) {
-        return Err(format!("site '{new}' already exists"));
+    if !valid_name(&new) {
+        return Err("a scope name must be [A-Za-z0-9_-]".into());
     }
-    doc.sites[i].name = new;
+    let a = app_mut(doc, app)?;
+    let app_name = a.name.trim().to_string();
+    let i =
+        scope_pos(a, name).ok_or_else(|| format!("{app_name}/{}: no such scope", name.trim()))?;
+    if scope_pos(a, &new).is_some_and(|j| j != i) {
+        return Err(format!("{app_name}/{new} already exists"));
+    }
+    let old = a.scopes[i].name.trim().to_string();
+    a.scopes[i].name = new.clone();
+    let (was, now) = (format!("{app_name}/{old}"), format!("{app_name}/{new}"));
+    for u in &mut doc.users {
+        for k in &mut u.api_keys {
+            for r in k.scopes.iter_mut().flatten() {
+                if r.trim() == was {
+                    *r = now.clone();
+                }
+            }
+        }
+    }
     Ok(())
 }
 
-/// Move the site at `from` to position `to`; a position that does not exist is a no-op.
+/// Move a scope inside its application, from `from` to `to`; a position that does not
+/// exist is a no-op.
 ///
-/// Order is meaning: [`Sites::resolve`] is first-match-wins, so this changes which record
-/// answers for a URL — and therefore who gets in, and which login page a `401` names.
-pub fn move_site(doc: &mut AccessFile, from: usize, to: usize) {
-    if from >= doc.sites.len() || to >= doc.sites.len() {
-        return;
+/// Order is meaning: scopes are first match wins, so this changes which scope answers for
+/// a URL, and therefore who gets in. It is the one edit that changes behaviour without
+/// changing a single field.
+pub fn move_scope(doc: &mut AccessFile, app: &str, from: usize, to: usize) -> Result<(), String> {
+    let a = app_mut(doc, app)?;
+    if from >= a.scopes.len() || to >= a.scopes.len() {
+        return Ok(());
     }
-    let s = doc.sites.remove(from);
-    doc.sites.insert(to, s);
+    let s = a.scopes.remove(from);
+    a.scopes.insert(to, s);
+    Ok(())
 }
 
-/// Drop a site, handing back the record that went — a `public_auth` one takes an unenrolled
-/// identity's only way in with it.
-pub fn remove_site(doc: &mut AccessFile, name: &str) -> Result<SiteSpec, String> {
-    let i = site_pos(doc, name).ok_or_else(|| format!("no site '{}'", name.trim()))?;
-    Ok(doc.sites.remove(i))
+/// Drop one scope, handing back the record that went.
+pub fn remove_scope(doc: &mut AccessFile, app: &str, name: &str) -> Result<ScopeSpec, String> {
+    let a = app_mut(doc, app)?;
+    let app_name = a.name.trim().to_string();
+    let i =
+        scope_pos(a, name).ok_or_else(|| format!("{app_name}/{}: no such scope", name.trim()))?;
+    Ok(a.scopes.remove(i))
 }
 
-/// Define a url group. A group is abbreviation, not a grant: defining one authorizes nobody
-/// until some urls list names it `@name`.
+/// Define a user group. A group is abbreviation, not a grant: defining one authorizes
+/// nobody until a scope names it `@name`.
 ///
 /// There is deliberately no rename: a reference names a group by its exact spelling, so
-/// renaming one would silently re-point every list that used it. Add the new name, move the
-/// references, drop the old one — three edits the gate re-validates one by one.
-pub fn add_url_group(doc: &mut AccessFile, name: &str, urls: Vec<String>) -> Result<(), String> {
+/// renaming one would silently re-point every scope that used it. Add the new name, move
+/// the references, drop the old one: three edits the gate re-validates one by one.
+pub fn add_user_group(
+    doc: &mut AccessFile,
+    name: &str,
+    members: Vec<String>,
+) -> Result<(), String> {
     let name = name.trim().to_string();
-    if name.is_empty() {
-        return Err("a url group needs a name".into());
+    if !valid_name(&name) {
+        return Err("a user group needs a name of [A-Za-z0-9_-]".into());
     }
-    if doc.url_groups.contains_key(&name) {
+    if doc.user_groups.contains_key(&name) {
         return Err(format!(
-            "url group '@{name}' already exists (edit it: url-group set {name})"
+            "user group '@{name}' already exists (edit it: group set {name})"
         ));
     }
-    doc.url_groups.insert(name, urls);
+    doc.user_groups.insert(name, members);
     Ok(())
 }
 
-/// Drop a url group, refusing while anything still references it — the gate would reject
-/// the resulting file ([`UrlScope::compile_with_groups`]), and the refusal here says which
-/// lists to fix instead of leaving a write to fail.
-pub fn remove_url_group(doc: &mut AccessFile, name: &str) -> Result<Vec<String>, String> {
+/// Drop a user group, refusing while a scope still references it: the gate would reject
+/// the resulting file, and the refusal here says which scopes to fix instead of leaving a
+/// write to fail.
+pub fn remove_user_group(doc: &mut AccessFile, name: &str) -> Result<Vec<String>, String> {
     let name = name.trim().to_string();
-    if !doc.url_groups.contains_key(&name) {
-        return Err(format!("no url group '@{name}'"));
+    if !doc.user_groups.contains_key(&name) {
+        return Err(format!("no user group '@{name}'"));
     }
-    let refs = url_group_refs(doc, &name);
+    let refs = user_group_refs(doc, &name);
     if !refs.is_empty() {
         return Err(format!(
-            "url group '@{name}' is still referenced by {} — the gate would reject the file. \
-             Change those lists first, then remove the group.",
+            "user group '@{name}' is still referenced by {}: the gate would reject the file. \
+             Change those scopes first, then remove the group.",
             refs.join(", ")
         ));
     }
-    Ok(doc.url_groups.remove(&name).unwrap_or_default())
+    Ok(doc.user_groups.remove(&name).unwrap_or_default())
 }
 
-/// Veto `email`, normalised. `Ok(false)` = it was already there, and nothing changed;
-/// `Err` = it does not look like an email ([`well_formed_email`]) — a malformed veto is
-/// worse than a malformed roster row, because it fails *open*: it vetoes nobody while
-/// reading as if it did. The already-there check comes first, so a legacy entry can be
-/// named without tripping the shape check.
+/// Veto whoever `who` names: a uuid, an enrolled user's email, or the email of an identity
+/// the roster has never heard of. `Ok(false)` means it was already vetoed.
 ///
-/// Not the same as deleting the user's row: on a `public_auth` site the roster is never
-/// consulted, so for an un-enrolled identity this is the only denial there is — and for an
-/// enrolled one it is a suspension, since their scope and keys survive it.
-pub fn add_denied(doc: &mut AccessFile, email: &str) -> Result<bool, String> {
-    let e = norm_email(email);
-    if doc.denied.iter().any(|d| norm_email(d) == e) {
+/// An enrolled user is always written down as their **uuid**, whichever way they were
+/// named. That is what makes the veto cover every identifier they have, now and later: an
+/// email written here would go on vetoing one way in while the person kept another.
+///
+/// A stranger is written down as the email itself, and that is the whole reason `denied`
+/// still accepts one. An `authenticated` scope admits identities in no table, so for them
+/// this is the only denial that exists.
+///
+/// `Err` if the value is neither, because a veto that vetoes nobody while reading as if it
+/// did is the one failure this section cannot afford.
+pub fn add_denied(doc: &mut AccessFile, who: &str) -> Result<bool, String> {
+    let want = norm_email(who);
+    let entry = match user_pos(doc, &want) {
+        Some(i) => doc.users[i].uuid.trim().to_ascii_lowercase(),
+        None if well_formed_uuid(&want) => want,
+        None => {
+            check_new_email(&want)?;
+            want
+        }
+    };
+    if doc.denied.iter().any(|d| norm_email(d) == entry) {
         return Ok(false);
     }
-    check_new_email(&e)?;
-    doc.denied.push(e);
+    doc.denied.push(entry);
     Ok(true)
 }
 
-/// Lift the veto on every listed email, returning how many rows went.
-pub fn remove_denied(doc: &mut AccessFile, emails: &[String]) -> usize {
-    let want: Vec<String> = emails.iter().map(|e| norm_email(e)).collect();
+/// Lift the veto on everyone listed, by uuid or by email, returning how many rows went.
+///
+/// An email is resolved the same way [`add_denied`] resolves one, so a veto added as
+/// `bob@x.com` and written down as his uuid is lifted by naming either.
+pub fn remove_denied(doc: &mut AccessFile, who: &[String]) -> usize {
+    let want: Vec<String> = who
+        .iter()
+        .map(|w| {
+            let w = norm_email(w);
+            match user_pos(doc, &w) {
+                Some(i) => doc.users[i].uuid.trim().to_ascii_lowercase(),
+                None => w,
+            }
+        })
+        .collect();
     let before = doc.denied.len();
     doc.denied.retain(|d| !want.contains(&norm_email(d)));
     before - doc.denied.len()
@@ -1937,743 +2913,22 @@ mod tests {
         a
     }
 
-    /// `read_access(path).unwrap_err()` without forcing `Debug` onto `Access`.
-    fn users_err(path: &std::path::Path) -> String {
-        match read_access(path.to_str().unwrap()) {
-            Ok(_) => panic!("expected {} to be rejected", path.display()),
+    /// The message the gate would refuse `json` with. Matched rather than unwrapped,
+    /// because [`Access`] has no `Debug` on purpose.
+    fn access_err(name: &str, json: &str) -> String {
+        let tmp = users_tmp(name, json);
+        let r = read_access(tmp.to_str().unwrap());
+        let _ = std::fs::remove_file(&tmp);
+        match r {
+            Ok(_) => panic!("{name}: expected the gate to refuse this file"),
             Err(e) => e,
         }
     }
 
-    /// The same, straight from a JSON literal.
-    fn access_err(name: &str, json: &str) -> String {
-        let tmp = users_tmp(name, json);
-        let e = users_err(&tmp);
-        let _ = std::fs::remove_file(&tmp);
-        e
-    }
-
-    #[test]
-    fn read_access_parses_authorized_urls() {
-        let hash = sha256_hex("bbk_secret");
-        let other = sha256_hex("bbk_two");
-        let json = format!(
-            r#"{{
-              "users": [
-                {{ "email": "Alice@Example.com" }},
-                {{ "email": "carol@x.com", "authorized_urls": ["*://*/*"] }},
-                {{ "email": "bob@x.com", "authorized_urls": ["https://mcp.x.com/mcp/*"],
-                   "api_keys": [
-                     {{ "id": "laptop", "key_hash": "{hash}", "released": "1970-01-01",
-                        "duration": "1d",
-                        "authorized_urls": ["https://mcp.x.com/mcp/foo/*"], "notes": "ignored" }},
-                     {{ "id": "nolimit", "key_hash": "{other}", "released": "2026-01-01",
-                        "duration": "never" }}
-                   ] }}
-              ]
-            }}"#
-        );
-        let tmp = users_tmp("ok", &json);
-        let u = read_access(tmp.to_str().unwrap()).unwrap();
-
-        // no `sites` / `denied` sections => today's behaviour, bit for bit
-        assert!(u.sites.entries.is_empty());
-        assert!(!u.sites.any_public_auth());
-        assert!(u.sites.resolve(Some("https://mcp.x.com/mcp")).is_none());
-        assert!(u.denied.is_empty());
-
-        assert!(u.by_email.contains_key("alice@example.com")); // lowercased
-        assert!(u.by_email.contains_key("bob@x.com"));
-        // listed but with no authorized_urls => reaches nothing
-        assert!(u.by_email["alice@example.com"].scope.is_empty());
-        assert!(!u.by_email["alice@example.com"]
-            .scope
-            .allows(Some("https://anything/")));
-        // the explicit blanket grant
-        assert!(u.by_email["carol@x.com"]
-            .scope
-            .allows(Some("https://anything/at/all")));
-        assert_eq!(u.by_key_hash.len(), 2);
-
-        let rec = u.by_key_hash.get(&hash).unwrap();
-        assert_eq!(rec.email, "bob@x.com");
-        assert_eq!(rec.key_id, "laptop");
-        assert_eq!(rec.expires, Some(86_400)); // 1970-01-01 + 1d
-        assert!(rec.scope.allows(Some("https://mcp.x.com/mcp/foo/bar")));
-        assert!(!rec.scope.allows(Some("https://mcp.x.com/mcp/other"))); // narrower than user
-
-        // key with no authorized_urls inherits the user's scope
-        let inherit = u.by_key_hash.get(&other).unwrap();
-        assert_eq!(inherit.expires, None);
-        assert!(inherit.scope.allows(Some("https://mcp.x.com/mcp/anything")));
-        assert!(!inherit.scope.allows(Some("https://mcp.x.com/nope")));
-
-        let _ = std::fs::remove_file(&tmp);
-    }
-
-    #[test]
-    fn read_access_rejects_enabled_paths() {
-        // A pre-2.0 file must fail loudly: silently ignoring the field would leave
-        // the user unscoped (fail-open).
-        let tmp = users_tmp(
-            "legacy",
-            r#"{ "users": [ { "email": "bob@x.com", "enabled_paths": ["/mcp/"] } ] }"#,
-        );
-        let err = users_err(&tmp);
-        assert!(err.contains("enabled_paths"), "{err}");
-        assert!(err.contains("authorized_urls"), "{err}");
-        let _ = std::fs::remove_file(&tmp);
-
-        // …including when it hides on a key rather than the user
-        let hash = sha256_hex("bbk_x");
-        let tmp = users_tmp(
-            "legacy-key",
-            &format!(
-                r#"{{ "users": [ {{ "email": "bob@x.com", "api_keys": [
-                     {{ "id": "k", "key_hash": "{hash}", "released": "2026-01-01",
-                        "duration": "never", "enabled_paths": ["/mcp/"] }} ] }} ] }}"#
-            ),
-        );
-        let err = users_err(&tmp);
-        assert!(err.contains("enabled_paths"), "{err}");
-        let _ = std::fs::remove_file(&tmp);
-    }
-
-    #[test]
-    fn read_access_rejects_malformed_url() {
-        let tmp = users_tmp(
-            "badurl",
-            r#"{ "users": [ { "email": "bob@x.com", "authorized_urls": ["/mcp/"] } ] }"#,
-        );
-        let err = users_err(&tmp);
-        assert!(err.contains("bob@x.com"), "{err}");
-        assert!(err.contains("<scheme>://<host>/<path>"), "{err}");
-        let _ = std::fs::remove_file(&tmp);
-    }
-
-    #[test]
-    fn read_access_skips_header_unsafe_email() {
-        // A CR in an email is a response-splitting gadget once it reaches
-        // X-Auth-Email, so the entry is dropped — and with it every key it owns,
-        // which would otherwise resolve to an email that never passed the guard.
-        let hash = sha256_hex("bbk_evil");
-        let json = format!(
-            r#"{{ "users": [
-                {{ "email": "ok@x.com", "authorized_urls": ["https://x.com/*"] }},
-                {{ "email": "béatrice@x.com", "authorized_urls": ["https://x.com/*"] }},
-                {{ "email": "bad\r\nX-Admin: 1@x.com",
-                   "authorized_urls": ["https://x.com/*"],
-                   "api_keys": [ {{ "id": "k", "key_hash": "{hash}",
-                                    "released": "2026-01-01", "duration": "never" }} ] }}
-              ] }}"#
-        );
-        let tmp = users_tmp("unsafe-email", &json);
-        let u = read_access(tmp.to_str().unwrap()).unwrap();
-
-        assert!(u.by_email.contains_key("ok@x.com"));
-        assert_eq!(u.by_email.len(), 1, "both unsafe entries must be skipped");
-        assert!(
-            u.by_key_hash.is_empty(),
-            "a skipped user must not leave a live key behind"
-        );
-        let _ = std::fs::remove_file(&tmp);
-    }
-
-    // --- sites + denied -----------------------------------------------------
-
-    /// One `public_auth` site over /app1, one plain user confined to /other.
-    pub(crate) const SITES_JSON: &str = r#"{
-      "sites": [
-        { "name": "app1",
-          "urls": ["https://app.x.com/app1", "https://app.x.com/app1/*"],
-          "public_auth": true }
-      ],
-      "denied": ["  Spammer@X.com  ", ""],
-      "users": [
-        { "email": "bob@x.com", "authorized_urls": ["https://app.x.com/other/*"] },
-        { "email": "spammer@x.com", "authorized_urls": ["*://*/*"] }
-      ]
-    }"#;
-
-    #[test]
-    fn read_access_parses_sites_and_denied() {
-        let a = access_of("sites", SITES_JSON);
-
-        assert_eq!(a.sites.entries.len(), 1);
-        assert!(a.sites.any_public_auth());
-        let site = a.sites.resolve(Some("https://app.x.com/app1/x")).unwrap();
-        assert_eq!(site.name, "app1");
-        assert!(site.public_auth);
-        // bare /app1 needs its own pattern — a non-terminal `*` never crosses `/`
-        assert_eq!(
-            a.sites
-                .resolve(Some("https://app.x.com/app1"))
-                .unwrap()
-                .name,
-            "app1"
-        );
-        assert!(a.sites.resolve(Some("https://app.x.com/app2")).is_none());
-
-        // `denied` is trimmed + lowercased, and empties are dropped
-        assert!(a.denied.contains("spammer@x.com"));
-        assert_eq!(a.denied.len(), 1);
-    }
-
-    #[test]
-    fn public_auth_site_grants_an_unenrolled_identity() {
-        let a = access_of("sites-grant", SITES_JSON);
-        let app1 = Some("https://app.x.com/app1/thing");
-
-        // nobody's in the table, and that is the whole point
-        assert!(!a.by_email.contains_key("newcomer@x.com"));
-        assert_eq!(
-            decide(&a, "newcomer@x.com", app1),
-            Decision::SiteGrant("app1".into())
-        );
-        // off the site, the roster decides as before
-        assert_eq!(
-            decide(&a, "newcomer@x.com", Some("https://app.x.com/other/x")),
-            Decision::NotEnrolled
-        );
-        assert_eq!(
-            decide(&a, "bob@x.com", Some("https://app.x.com/other/x")),
-            Decision::RosterGrant
-        );
-        // an enrolled user out of their own scope still walks into the open site
-        assert!(decide(&a, "bob@x.com", app1).granted());
-    }
-
-    #[test]
-    fn denied_outranks_every_grant() {
-        let a = access_of("sites-denied", SITES_JSON);
-        // spammer is enrolled with `*://*/*` — the veto beats the roster …
-        assert_eq!(
-            decide(&a, "spammer@x.com", Some("https://app.x.com/other/x")),
-            Decision::Vetoed
-        );
-        // … and it beats a public_auth site, which never consults the roster at all
-        assert_eq!(
-            decide(&a, "spammer@x.com", Some("https://app.x.com/app1")),
-            Decision::Vetoed
-        );
-    }
-
-    #[test]
-    fn public_auth_site_never_rescues_an_unknown_api_key() {
-        // A key is not an identity Cognito vouches for: unknown stays unknown, even on an
-        // open site. And a known key dies with its owner's veto.
-        let hash = sha256_hex("bbk_spam");
-        let json = format!(
-            r#"{{ "sites": [ {{ "name": "app1", "urls": ["https://app.x.com/app1/*"],
-                                "public_auth": true }} ],
-                  "denied": ["spammer@x.com"],
-                  "users": [ {{ "email": "spammer@x.com", "authorized_urls": ["*://*/*"],
-                     "api_keys": [ {{ "id": "k", "key_hash": "{hash}",
-                                      "released": "2026-01-01", "duration": "never" }} ] }} ] }}"#
-        );
-        let a = access_of("sites-apikey", &json);
-        let app1 = Some("https://app.x.com/app1/x");
-
-        assert!(matches!(
-            decide_api_key(&a, &sha256_hex("bbk_unknown"), app1, now()),
-            KeyDecision::Unknown
-        ));
-        assert!(matches!(
-            decide_api_key(&a, &hash, app1, now()),
-            KeyDecision::OwnerDenied(_)
-        ));
-    }
-
-    #[test]
-    fn api_key_expiry_and_scope() {
-        let hash = sha256_hex("bbk_k");
-        let json = format!(
-            r#"{{ "users": [ {{ "email": "bob@x.com",
-                   "authorized_urls": ["https://mcp.x.com/mcp/*"],
-                   "api_keys": [ {{ "id": "laptop", "key_hash": "{hash}",
-                                    "released": "1970-01-01", "duration": "1d" }} ] }} ] }}"#
-        );
-        let a = access_of("key-expiry", &json);
-        let in_scope = Some("https://mcp.x.com/mcp/tools");
-
-        // one second before the 1970-01-02 expiry it is live, one second after it is not
-        assert!(decide_api_key(&a, &hash, in_scope, 86_399).granted());
-        assert!(matches!(
-            decide_api_key(&a, &hash, in_scope, 86_400),
-            KeyDecision::Expired(_)
-        ));
-        // and it inherits the owner's scope, which does not reach here
-        assert!(matches!(
-            decide_api_key(&a, &hash, Some("https://mcp.x.com/other"), 0),
-            KeyDecision::OutOfScope(_)
-        ));
-        // a granted key hands back its owner — the identity the application sees
-        match decide_api_key(&a, &hash, in_scope, 0) {
-            KeyDecision::Granted(rec) => assert_eq!(rec.email, "bob@x.com"),
-            _ => panic!("expected the key to be granted"),
-        }
-    }
-
-    #[test]
-    fn site_resolve_is_first_match_wins() {
-        // A broad site listed first answers for everything under it — including the
-        // narrower public_auth site after it, which therefore never opens. Order is
-        // meaning; specific sites go first.
-        let json = r#"{ "sites": [
-            { "name": "everything", "urls": ["https://app.x.com/*"] },
-            { "name": "app1", "urls": ["https://app.x.com/app1/*"], "public_auth": true }
-          ] }"#;
-        let a = access_of("sites-order", json);
-        assert_eq!(
-            a.sites
-                .resolve(Some("https://app.x.com/app1/x"))
-                .unwrap()
-                .name,
-            "everything"
-        );
-        assert_eq!(
-            decide(&a, "newcomer@x.com", Some("https://app.x.com/app1/x")),
-            Decision::NotEnrolled
-        );
-
-        // reversed, app1 answers for itself and grants
-        let json = r#"{ "sites": [
-            { "name": "app1", "urls": ["https://app.x.com/app1/*"], "public_auth": true },
-            { "name": "everything", "urls": ["https://app.x.com/*"] }
-          ] }"#;
-        let a = access_of("sites-order2", json);
-        assert_eq!(
-            a.sites
-                .resolve(Some("https://app.x.com/app1/x"))
-                .unwrap()
-                .name,
-            "app1"
-        );
-        assert!(decide(&a, "newcomer@x.com", Some("https://app.x.com/app1/x")).granted());
-        // and `everything` still answers — granting nothing — for the rest
-        assert_eq!(
-            a.sites.resolve(Some("https://app.x.com/z")).unwrap().name,
-            "everything"
-        );
-        assert!(!decide(&a, "newcomer@x.com", Some("https://app.x.com/z")).granted());
-    }
-
-    #[test]
-    fn site_resolve_rejects_traversal_and_a_missing_url() {
-        // Sites match through UrlScope::allows precisely so these two denials cannot be
-        // forgotten on this path: a `..` URL resolving to a public_auth site would be a
-        // traversal straight past every scope.
-        let a = access_of("sites-traversal", SITES_JSON);
-        assert!(a
-            .sites
-            .resolve(Some("https://app.x.com/app1/../admin"))
-            .is_none());
-        assert!(a.sites.resolve(None).is_none());
-        assert!(!decide(
-            &a,
-            "newcomer@x.com",
-            Some("https://app.x.com/app1/../admin")
-        )
-        .granted());
-        assert!(!decide(&a, "newcomer@x.com", None).granted());
-    }
-
-    #[test]
-    fn a_site_that_grants_nothing_is_invisible() {
-        // public_auth:false == no site at all, today. It exists to carry future fields.
-        let a = access_of(
-            "site-inert",
-            r#"{ "sites": [ { "name": "app1", "urls": ["https://app.x.com/app1/*"] } ],
-                 "users": [ { "email": "b@x.com", "authorized_urls": ["https://app.x.com/app1/*"] } ] }"#,
-        );
-        assert!(!a.sites.any_public_auth());
-        assert!(!decide(&a, "newcomer@x.com", Some("https://app.x.com/app1/x")).granted());
-        // the roster is untouched by the site's presence
-        assert!(decide(&a, "b@x.com", Some("https://app.x.com/app1/x")).granted());
-    }
-
-    #[test]
-    fn read_access_rejects_a_malformed_site_url() {
-        // Fatal, exactly like a user's scope: a dropped site pattern silently changes who
-        // reaches what.
-        let err = access_err(
-            "site-badurl",
-            r#"{ "sites": [ { "name": "app1", "urls": ["/app1/*"] } ] }"#,
-        );
-        assert!(err.contains("app1"), "{err}");
-        assert!(err.contains("<scheme>://<host>/<path>"), "{err}");
-    }
-
-    #[test]
-    fn read_access_rejects_an_unknown_site_field() {
-        // The day `public_auth` gains a `require_email_domain` companion, a typo in it
-        // must not silently leave `public_auth: true` standing alone.
-        let err = access_err(
-            "site-typo",
-            r#"{ "sites": [ { "name": "app1", "urls": ["https://app.x.com/app1/*"],
-                              "public_auth": true, "require_email_domains": "x.com" } ] }"#,
-        );
-        assert!(err.contains("require_email_domains"), "{err}");
-
-        // …while the sections that describe people keep ignoring extras
-        let a = access_of(
-            "user-extra",
-            r#"{ "_comment": "hi", "users": [ { "email": "b@x.com", "notes": "ok",
-                 "authorized_urls": ["https://x.com/*"] } ] }"#,
-        );
-        assert!(a.by_email.contains_key("b@x.com"));
-    }
-
-    #[test]
-    fn read_access_rejects_a_malformed_site_login_url() {
-        let err = access_err(
-            "site-badlogin",
-            r#"{ "sites": [ { "name": "app1", "urls": ["https://app.x.com/app1/*"],
-                              "login_url": "http://login.x.com/" } ] }"#,
-        );
-        assert!(err.contains("app1"), "{err}");
-        assert!(err.contains("https://"), "{err}");
-    }
-
-    #[test]
-    fn login_url_falls_back_through_site_then_global() {
-        let json = r#"{ "sites": [
-            { "name": "app1", "urls": ["https://app.x.com/app1/*"], "public_auth": true,
-              "login_url": "https://signup.x.com/" },
-            { "name": "plain", "urls": ["https://app.x.com/plain/*"] }
-          ] }"#;
-        let a = access_of("sites-login", json);
-        let global = "https://login.x.com/";
-
-        // the site that speaks for the URL names its own login page …
-        assert_eq!(
-            login_url_for(&a, global, Some("https://app.x.com/app1/x")),
-            "https://signup.x.com/"
-        );
-        // … a site declaring none falls back to the global …
-        assert_eq!(
-            login_url_for(&a, global, Some("https://app.x.com/plain/x")),
-            global
-        );
-        // … and so does a URL no site covers, or no URL at all
-        assert_eq!(
-            login_url_for(&a, global, Some("https://app.x.com/elsewhere")),
-            global
-        );
-        assert_eq!(login_url_for(&a, global, None), global);
-
-        // Every value is header-safe by construction — respond_unauthorized asserts it.
-        for u in ["https://app.x.com/app1/x", "https://app.x.com/elsewhere"] {
-            let l = login_url_for(&a, global, Some(u));
-            assert!(l.bytes().all(|b| b.is_ascii_graphic()), "{l}");
-        }
-    }
-
-    // --- url groups ---------------------------------------------------------
-
-    #[test]
-    fn url_groups_expand_in_user_scope() {
-        let a = access_of(
-            "groups-user",
-            r#"{ "url_groups": { "mcp": ["https://mcp.x.com/mcp", "https://mcp.x.com/mcp/*"] },
-                 "users": [ { "email": "bob@x.com",
-                              "authorized_urls": ["@mcp", "https://other.x.com/*"] } ] }"#,
-        );
-        let s = &a.by_email["bob@x.com"].scope;
-        assert!(s.allows(Some("https://mcp.x.com/mcp")));
-        assert!(s.allows(Some("https://mcp.x.com/mcp/tools")));
-        assert!(s.allows(Some("https://other.x.com/a"))); // the plain entry beside it
-        assert!(!s.allows(Some("https://mcp.x.com/elsewhere")));
-        assert_eq!(
-            decide(&a, "bob@x.com", Some("https://mcp.x.com/mcp/tools")),
-            Decision::RosterGrant
-        );
-        assert_eq!(
-            decide(&a, "bob@x.com", Some("https://mcp.x.com/elsewhere")),
-            Decision::OutOfScope
-        );
-    }
-
-    #[test]
-    fn url_groups_expand_in_a_key_scope_and_in_what_it_inherits() {
-        let own = sha256_hex("bbk_own");
-        let inherited = sha256_hex("bbk_inherit");
-        let a = access_of(
-            "groups-key",
-            &format!(
-                r#"{{ "url_groups": {{ "mcp": ["https://mcp.x.com/mcp/*"],
-                                       "admin": ["https://mcp.x.com/admin/*"] }},
-                      "users": [ {{ "email": "bob@x.com", "authorized_urls": ["@mcp"],
-                        "api_keys": [
-                          {{ "id": "own", "key_hash": "{own}", "released": "2026-01-01",
-                             "duration": "never", "authorized_urls": ["@admin"] }},
-                          {{ "id": "inherit", "key_hash": "{inherited}",
-                             "released": "2026-01-01", "duration": "never" }}
-                        ] }} ] }}"#
-            ),
-        );
-        // its own list expands independently of the owner's
-        let k = &a.by_key_hash[&own].scope;
-        assert!(k.allows(Some("https://mcp.x.com/admin/x")));
-        assert!(!k.allows(Some("https://mcp.x.com/mcp/x")));
-        // and a key with no list inherits the owner's *expanded* scope
-        let i = &a.by_key_hash[&inherited].scope;
-        assert!(i.allows(Some("https://mcp.x.com/mcp/x")));
-        assert!(!i.allows(Some("https://mcp.x.com/admin/x")));
-        assert!(decide_api_key(&a, &inherited, Some("https://mcp.x.com/mcp/x"), now()).granted());
-    }
-
-    #[test]
-    fn url_groups_expand_in_a_site() {
-        let a = access_of(
-            "groups-site",
-            r#"{ "url_groups": { "onboarding": ["https://app.x.com/welcome",
-                                                "https://app.x.com/welcome/*"] },
-                 "sites": [ { "name": "signup", "urls": ["@onboarding"],
-                              "public_auth": true } ] }"#,
-        );
-        // an un-enrolled identity walks in, exactly as with the patterns spelled out
-        assert_eq!(
-            decide(
-                &a,
-                "newcomer@x.com",
-                Some("https://app.x.com/welcome/step1")
-            ),
-            Decision::SiteGrant("signup".into())
-        );
-        assert_eq!(
-            decide(&a, "newcomer@x.com", Some("https://app.x.com/welcome")),
-            Decision::SiteGrant("signup".into())
-        );
-        assert_eq!(
-            decide(&a, "newcomer@x.com", Some("https://app.x.com/elsewhere")),
-            Decision::NotEnrolled
-        );
-    }
-
-    #[test]
-    fn url_groups_unknown_reference_is_fatal_and_names_the_referrer() {
-        // Fatal like a malformed pattern: a dropped entry silently changes who reaches
-        // what, and the message has to say which list to go and fix.
-        let err = access_err(
-            "groups-unknown-user",
-            r#"{ "users": [ { "email": "bob@x.com", "authorized_urls": ["@mcp"] } ] }"#,
-        );
-        assert!(err.contains("bob@x.com"), "{err}");
-        assert!(err.contains("unknown url group '@mcp'"), "{err}");
-
-        let err = access_err(
-            "groups-unknown-site",
-            r#"{ "sites": [ { "name": "mpa", "urls": ["@x"] } ] }"#,
-        );
-        assert!(err.contains("site 'mpa'"), "{err}");
-        assert!(err.contains("unknown url group '@x'"), "{err}");
-
-        let hash = sha256_hex("bbk_g");
-        let err = access_err(
-            "groups-unknown-key",
-            &format!(
-                r#"{{ "users": [ {{ "email": "bob@x.com", "api_keys": [
-                     {{ "id": "laptop", "key_hash": "{hash}", "released": "2026-01-01",
-                        "duration": "never", "authorized_urls": ["@mcp"] }} ] }} ] }}"#
-            ),
-        );
-        assert!(err.contains("bob@x.com key 'laptop'"), "{err}");
-        assert!(err.contains("unknown url group '@mcp'"), "{err}");
-    }
-
-    #[test]
-    fn url_groups_nested_reference_is_fatal() {
-        // Flat by construction: no recursion, no cycles, no order between definitions.
-        let err = access_err(
-            "groups-nested",
-            r#"{ "url_groups": { "a": ["https://x.com/*"], "b": ["@a"] } }"#,
-        );
-        assert!(err.contains("url_groups 'b'"), "{err}");
-        assert!(err.contains("cannot reference another group"), "{err}");
-    }
-
-    #[test]
-    fn url_groups_bad_name_is_fatal() {
-        for json in [
-            r#"{ "url_groups": { "bad name": ["https://x.com/*"] } }"#,
-            r#"{ "url_groups": { "": ["https://x.com/*"] } }"#,
-            r#"{ "url_groups": { "mcp/x": ["https://x.com/*"] } }"#,
-        ] {
-            let err = access_err("groups-badname", json);
-            assert!(err.contains("url_groups"), "{err}");
-            assert!(err.contains("[A-Za-z0-9_-]"), "{err}");
-        }
-        assert!(compile_access(
-            &serde_json::from_str(r#"{ "url_groups": { "mcp-v2_1": ["https://x.com/*"] } }"#)
-                .unwrap()
-        )
-        .is_ok());
-    }
-
-    #[test]
-    fn url_groups_are_validated_even_when_unreferenced() {
-        // A group that only breaks the day someone first references it is a trap laid
-        // for a future edit — `--check-users` has to see it now.
-        let err = access_err(
-            "groups-unreferenced-bad",
-            r#"{ "url_groups": { "mcp": ["/mcp/"] },
-                 "users": [ { "email": "b@x.com", "authorized_urls": ["*://*/*"] } ] }"#,
-        );
-        assert!(err.contains("url_groups 'mcp'"), "{err}");
-        assert!(err.contains("<scheme>://<host>/<path>"), "{err}");
-    }
-
-    #[test]
-    fn url_groups_empty_group_grants_nothing() {
-        let a = access_of(
-            "groups-empty",
-            r#"{ "url_groups": { "todo": [] },
-                 "users": [ { "email": "b@x.com", "authorized_urls": ["@todo"] } ] }"#,
-        );
-        assert!(a.by_email["b@x.com"].scope.is_empty());
-        assert_eq!(
-            decide(&a, "b@x.com", Some("https://x.com/a")),
-            Decision::OutOfScope
-        );
-    }
-
-    #[test]
-    fn url_groups_absent_changes_nothing() {
-        // The regression that matters: a file that mentions no group compiles, decides
-        // and serializes exactly as it did before groups existed.
-        let a = access_of("groups-absent", SITES_JSON);
-        assert_eq!(
-            decide(&a, "bob@x.com", Some("https://app.x.com/other/x")),
-            Decision::RosterGrant
-        );
-        assert_eq!(
-            decide(&a, "newcomer@x.com", Some("https://app.x.com/app1")),
-            Decision::SiteGrant("app1".into())
-        );
-
-        let doc: AccessFile = serde_json::from_str(SITES_JSON).unwrap();
-        assert!(doc.url_groups.is_empty());
-        let out = serde_json::to_string(&doc).unwrap();
-        assert!(!out.contains("url_groups"), "{out}");
-    }
-
-    #[test]
-    fn url_groups_round_trip_through_the_document_model() {
-        let json = r#"{ "url_groups": { "mcp": ["https://mcp.x.com/mcp/*"],
-                                        "admin": ["https://x.com/admin/*"] },
-                        "users": [ { "email": "bob@x.com", "authorized_urls": ["@mcp"] } ] }"#;
-        let doc: AccessFile = serde_json::from_str(json).unwrap();
-        assert_eq!(
-            doc.url_groups["mcp"],
-            vec!["https://mcp.x.com/mcp/*".to_string()]
-        );
-
-        let out = serde_json::to_string(&doc).unwrap();
-        // definitions before uses, and sorted: a BTreeMap has no order to lose
-        assert!(out.starts_with(r#"{"url_groups":{"admin":"#), "{out}");
-        // a reference is stored as written — nothing expands it on the way to disk
-        assert!(out.contains(r#""authorized_urls":["@mcp"]"#), "{out}");
-        let back: AccessFile = serde_json::from_str(&out).unwrap();
-        assert_eq!(back.url_groups, doc.url_groups);
-        assert!(compile_access(&back).is_ok());
-
-        // What an older binary makes of the same file: it keeps the section (unknown
-        // top-level keys land in `extra`) and refuses to load, because a reference is
-        // not a URL pattern. Fail-closed, never a partial grant.
-        assert!(compile_pattern("@mcp").is_err());
-    }
-
-    // --- the document model (what bb-auth-adm edits) -------------------------
-
-    #[test]
-    fn access_file_round_trips_and_preserves_operator_notes() {
-        // An edit must not eat the documentation an operator wrote. Unknown keys on the
-        // root, on a user and on a key survive a parse → serialize cycle; the gate
-        // ignores them, `bb-auth-adm` hands them back.
-        let json = r#"{
-          "_comment": ["a note to the next operator"],
-          "sites": [ { "name": "app1", "urls": ["https://app.x.com/app1/*"],
-                       "public_auth": true } ],
-          "denied": ["spammer@x.com"],
-          "users": [ { "email": "bob@x.com", "authorized_urls": ["https://x.com/*"],
-                       "notes": "keep me",
-                       "api_keys": [ { "id": "laptop", "key_hash": "aa", "released": "2026-01-01",
-                                       "duration": "365d", "notes": "and me" } ] } ]
-        }"#;
-        let doc: AccessFile = serde_json::from_str(json).unwrap();
-        assert_eq!(doc.extra["_comment"][0], "a note to the next operator");
-        assert_eq!(doc.users[0].extra["notes"], "keep me");
-        assert_eq!(doc.users[0].api_keys[0].extra["notes"], "and me");
-
-        let out = serde_json::to_string(&doc).unwrap();
-        let back: Value = serde_json::from_str(&out).unwrap();
-        assert_eq!(back["_comment"][0], "a note to the next operator");
-        assert_eq!(back["users"][0]["notes"], "keep me");
-        assert_eq!(back["users"][0]["api_keys"][0]["notes"], "and me");
-        // a site's public_auth is always written out, even when false — it is the
-        // security-relevant field, and its absence must not have to be inferred
-        assert_eq!(back["sites"][0]["public_auth"], true);
-        // and nothing we did not put there appears: no nulls for absent options
-        assert!(back["users"][0].get("enabled_paths").is_none());
-        assert!(back["sites"][0].get("login_url").is_none());
-
-        // An empty roster serializes to `"users": []`, never to a missing key: the file
-        // is still a well-formed access file that the gate will load (granting nobody).
-        let empty = serde_json::to_string(&AccessFile::default()).unwrap();
-        assert_eq!(empty, r#"{"users":[]}"#);
-        assert!(compile_access(&serde_json::from_str(&empty).unwrap()).is_ok());
-    }
-
-    #[test]
-    fn compile_access_is_what_check_users_runs() {
-        // The point of the document model: what a tool is about to write can be handed to
-        // the very parser the gate will use, before it hits the disk.
-        let mut doc = AccessFile::default();
-        doc.users.push(UserSpec {
-            email: "bob@x.com".into(),
-            authorized_urls: Some(vec!["https://x.com/*".into()]),
-            ..Default::default()
-        });
-        assert!(compile_access(&doc)
-            .unwrap()
-            .by_email
-            .contains_key("bob@x.com"));
-
-        // …and a malformed scope is caught there, not at the next restart
-        doc.users[0].authorized_urls = Some(vec!["/x".into()]);
-        match compile_access(&doc) {
-            Ok(_) => panic!("a malformed scope must not compile"),
-            Err(e) => assert!(e.contains("bob@x.com"), "{e}"),
-        }
-    }
-
-    // --- editing an access file ---------------------------------------------
-
-    /// One user, one key, one group, two sites — every shape an edit can reach, with the
-    /// trimming and casing an operator's hand leaves behind.
-    const EDIT_JSON: &str = r#"{
-      "_comment": "hands off",
-      "url_groups": { "mcp": ["https://mcp.x.com/mcp/*"] },
-      "sites": [
-        { "name": "app1", "urls": ["https://app.x.com/app1/*"], "public_auth": true },
-        { "name": " spaced ", "urls": ["https://app.x.com/two/*"] }
-      ],
-      "denied": ["spammer@x.com"],
-      "users": [
-        { "email": "Bob@X.com", "authorized_urls": ["@mcp"],
-          "api_keys": [ { "id": " laptop ", "key_hash": "aa", "released": "2026-01-01",
-                          "duration": "365d" } ] }
-      ]
-    }"#;
-
-    /// The document model straight from JSON — the edits that never touch a file.
     fn doc_of(json: &str) -> AccessFile {
-        serde_json::from_str(json).unwrap()
+        serde_json::from_str(json).expect("fixture parses")
     }
 
-    /// `unwrap_err` for the mutations whose success value has no `Debug`. None of the specs
-    /// derive one, and [`Access`] deliberately does not either.
     fn err_of<T>(r: Result<T, String>) -> String {
         match r {
             Ok(_) => panic!("expected a refusal"),
@@ -2681,498 +2936,1020 @@ mod tests {
         }
     }
 
-    #[test]
-    fn the_lookups_trim_and_lowercase_like_the_gate() {
-        let mut doc = doc_of(EDIT_JSON);
-        assert_eq!(norm_email("  Bob@X.com "), "bob@x.com");
-        assert_eq!(user_pos(&doc, " BOB@x.com "), Some(0));
-        assert_eq!(user_pos(&doc, "nobody@x.com"), None);
-        // the lookup normalises; the row keeps whatever spelling the file gave it
-        assert_eq!(user_mut(&mut doc, "BOB@X.com").unwrap().email, "Bob@X.com");
-        assert!(err_of(user_mut(&mut doc, " ghost@x.com ")).contains("no user 'ghost@x.com'"));
+    const BOB: &str = "11111111-1111-4111-8111-111111111111";
+    const CAROL: &str = "22222222-2222-4222-8222-222222222222";
+    const BEARER: &str = "bbk_testkeytestkeytestkey";
 
-        // a key id is a label, not an address: trimmed, but matched case-sensitively
+    /// Two applications, every access kind, a carve-out that only works because scopes
+    /// are first match wins, and a key narrower than its owner.
+    fn fixture() -> String {
+        r#"{
+          "version": 3,
+          "applications": [
+            { "name": "mpa",
+              "base": ["https://app.x.com/mpa"],
+              "login_url": "https://signup.x.com/",
+              "scopes": [
+                { "name": "healthz", "urls": ["https://app.x.com/mpa/healthz"],
+                  "access": "anonymous" },
+                { "name": "admin", "urls": ["https://app.x.com/mpa/admin/*"],
+                  "access": "restricted", "groups": ["@admins"], "credentials": ["login"] },
+                { "name": "onboarding", "urls": ["https://app.x.com/mpa/*"],
+                  "access": "authenticated" } ] },
+            { "name": "mcp",
+              "base": ["https://ai.x.com/mcp"],
+              "scopes": [
+                { "name": "logs", "urls": ["https://ai.x.com/mcp/logs/*"],
+                  "access": "restricted", "users": ["BOBUUID"] },
+                { "name": "api", "urls": ["https://ai.x.com/mcp/*"],
+                  "access": "restricted", "users": ["BOBUUID"],
+                  "credentials": ["api_key"] } ] } ],
+          "user_groups": { "admins": ["BOBUUID"] },
+          "denied": ["spammer@x.com"],
+          "users": [
+            { "uuid": "BOBUUID", "emails": ["bob@x.com", "bob@old.com"],
+              "api_keys": [ { "id": "laptop", "key_hash": "KEYHASH",
+                              "released": "2026-01-01", "duration": "never",
+                              "scopes": ["mcp/api"] } ] },
+            { "uuid": "CAROLUUID", "emails": ["carol@x.com"] } ] }"#
+            .replace("BOBUUID", BOB)
+            .replace("CAROLUUID", CAROL)
+            .replace("KEYHASH", &sha256_hex(BEARER))
+    }
+
+    fn fixture_key(a: &Access) -> &ApiKeyRecord {
+        match decide_api_key(a, &sha256_hex(BEARER), 1_000) {
+            KeyDecision::Granted(r) => r,
+            _ => panic!("the fixture key must resolve"),
+        }
+    }
+
+    // --- the URL partition --------------------------------------------------
+
+    #[test]
+    fn base_covers_stops_at_a_path_boundary() {
+        assert!(base_covers("https://x.com/app", "https://x.com/app"));
+        assert!(base_covers(
+            "https://x.com/app",
+            "https://x.com/app/deep/er"
+        ));
+        // The whole reason this is not a `starts_with`: two different areas.
+        assert!(!base_covers(
+            "https://x.com/app",
+            "https://x.com/application"
+        ));
+        assert!(!base_covers("https://x.com/app", "https://x.com/ap"));
+        // A base already ending in `/` needs no boundary of its own.
+        assert!(base_covers("https://x.com/", "https://x.com/anything"));
+        // Host boundaries are the same rule.
+        assert!(!base_covers("https://x.com", "https://x.commerce.com/"));
+    }
+
+    #[test]
+    fn application_areas_may_not_overlap() {
+        let e = access_err(
+            "overlap",
+            r#"{ "version": 3, "applications": [
+                 { "name": "a", "base": ["https://x.com/app"], "scopes": [] },
+                 { "name": "b", "base": ["https://x.com/app/inner"], "scopes": [] } ] }"#,
+        );
+        assert!(e.contains("overlaps"), "{e}");
+        assert!(
+            e.contains("'a'"),
+            "the message must name the other application: {e}"
+        );
+
+        // Neighbours that merely share a prefix are fine, which is the boundary rule
+        // doing its job.
+        let a = access_of(
+            "no-overlap",
+            r#"{ "version": 3, "applications": [
+                 { "name": "a", "base": ["https://x.com/app"], "scopes": [] },
+                 { "name": "b", "base": ["https://x.com/application"], "scopes": [] } ] }"#,
+        );
+        assert_eq!(a.apps.len(), 2);
+    }
+
+    #[test]
+    fn a_base_must_be_literal() {
+        for bad in [
+            "https://*.x.com/",
+            "https://x.com/a&b",
+            "https://x.com/../etc",
+            "x.com/app",
+        ] {
+            let json = format!(
+                r#"{{ "version": 3, "applications": [
+                     {{ "name": "a", "base": ["{bad}"], "scopes": [] }} ] }}"#
+            );
+            let e = access_err("bad-base", &json);
+            assert!(e.contains("base"), "{bad}: {e}");
+        }
+    }
+
+    #[test]
+    fn a_scope_may_not_reach_outside_its_application() {
+        let e = access_err(
+            "outside",
+            r#"{ "version": 3, "applications": [
+                 { "name": "a", "base": ["https://x.com/app"],
+                   "scopes": [ { "name": "s", "urls": ["https://x.com/other/*"],
+                                 "access": "authenticated" } ] } ] }"#,
+        );
+        assert!(e.contains("outside this application's base"), "{e}");
+        assert!(e.contains("a/s"), "the message must name the scope: {e}");
+    }
+
+    #[test]
+    fn an_application_needs_a_base() {
+        let e = access_err(
+            "no-base",
+            r#"{ "version": 3, "applications": [ { "name": "a", "scopes": [] } ] }"#,
+        );
+        assert!(e.contains("no base"), "{e}");
+    }
+
+    // --- resolution ---------------------------------------------------------
+
+    #[test]
+    fn scopes_resolve_first_match_wins() {
+        let a = access_of("first-match", &fixture());
+        // The carve-out answers, even though the broad scope after it also covers this.
+        let (app, s) = a.resolve(Some("https://ai.x.com/mcp/logs/today")).unwrap();
+        assert_eq!((app.name.as_str(), s.name.as_str()), ("mcp", "logs"));
+        let (_, s) = a.resolve(Some("https://ai.x.com/mcp/tool")).unwrap();
+        assert_eq!(s.name, "api");
+    }
+
+    #[test]
+    fn reordering_scopes_changes_who_answers() {
+        // The same two scopes, broad one first: the carve-out is now unreachable. Order
+        // is meaning, which is why an editor lints it and offers a move.
+        let a = access_of(
+            "shadowed",
+            r#"{ "version": 3, "applications": [
+                 { "name": "mcp", "base": ["https://ai.x.com/mcp"], "scopes": [
+                   { "name": "api", "urls": ["https://ai.x.com/mcp/*"],
+                     "access": "authenticated" },
+                   { "name": "logs", "urls": ["https://ai.x.com/mcp/logs/*"],
+                     "access": "anonymous" } ] } ] }"#,
+        );
+        let (_, s) = a.resolve(Some("https://ai.x.com/mcp/logs/today")).unwrap();
+        assert_eq!(s.name, "api", "the broad scope listed first answers");
+    }
+
+    #[test]
+    fn resolution_rejects_a_missing_url_and_traversal() {
+        let a = access_of("traversal", &fixture());
+        assert!(a.resolve(None).is_none());
+        assert!(a.app_for(None).is_none());
+        assert!(a
+            .resolve(Some("https://app.x.com/mpa/../mpa/healthz"))
+            .is_none());
         assert_eq!(
-            key_mut(&mut doc, "bob@x.com", " laptop ")
-                .unwrap()
-                .id
-                .trim(),
-            "laptop"
+            decide(&a, &Subject::Anonymous, None),
+            Decision::NoApplication
         );
-        assert!(key_mut(&mut doc, "bob@x.com", "LAPTOP").is_err());
-        assert!(
-            err_of(key_mut(&mut doc, "BOB@x.com", "nope")).contains("bob@x.com: no api key 'nope'")
-        );
+    }
 
-        assert_eq!(site_pos(&doc, "spaced"), Some(1));
-        assert_eq!(site_name(&doc.sites[1]), "spaced");
-        assert_eq!(site_name(&SiteSpec::default()), "?");
-        assert_eq!(url_group_mut(&mut doc, " mcp ").unwrap().len(), 1);
-        assert!(err_of(url_group_mut(&mut doc, "nope")).contains("no url group '@nope'"));
+    // --- the ten decisions --------------------------------------------------
+
+    #[test]
+    fn anonymous_scope_grants_with_no_credential() {
+        let a = access_of("anon", &fixture());
+        let d = decide(
+            &a,
+            &Subject::Anonymous,
+            Some("https://app.x.com/mpa/healthz"),
+        );
+        assert_eq!(
+            d,
+            Decision::Anonymous {
+                app: "mpa".into(),
+                scope: "healthz".into()
+            }
+        );
+        assert!(d.granted());
     }
 
     #[test]
-    fn edit_urls_sets_adds_deduplicates_removes_and_clears() {
-        let a = || "https://x.com/a/*".to_string();
-        let b = || "https://x.com/b/*".to_string();
-        let no: Vec<String> = Vec::new();
-
-        // a full replacement wins over what was there
-        let mut urls = Some(vec![a()]);
-        assert!(edit_urls(
-            &mut urls,
-            vec![b()],
-            no.clone(),
-            no.clone(),
-            false
-        ));
-        assert_eq!(urls, Some(vec![b()]));
-        // add appends, and says so — or says nothing changed, which is what "no-op" means
-        assert!(edit_urls(
-            &mut urls,
-            no.clone(),
-            vec![a()],
-            no.clone(),
-            false
-        ));
-        assert_eq!(urls, Some(vec![b(), a()]));
-        assert!(!edit_urls(
-            &mut urls,
-            no.clone(),
-            vec![a()],
-            no.clone(),
-            false
-        ));
-        assert!(!edit_urls(
-            &mut urls,
-            no.clone(),
-            no.clone(),
-            vec!["https://x.com/z/*".to_string()],
-            false
-        ));
-        assert!(edit_urls(
-            &mut urls,
-            no.clone(),
-            no.clone(),
-            vec![b()],
-            false
-        ));
-        assert_eq!(urls, Some(vec![a()]));
-
-        // cleared is *absent*: deny-all for a user, "inherit the owner's" for a key
-        assert!(edit_urls(
-            &mut urls,
-            no.clone(),
-            no.clone(),
-            no.clone(),
-            true
-        ));
-        assert_eq!(urls, None);
-        assert!(edit_urls(
-            &mut urls,
-            no.clone(),
-            vec![a()],
-            no.clone(),
-            true
-        ));
-        assert_eq!(urls, Some(vec![a()]));
-
-        // a plain list has no absent state to fall back to, so cleared is empty
-        let mut list = vec![a()];
-        assert!(edit_url_list(
-            &mut list,
-            no.clone(),
-            no.clone(),
-            no.clone(),
-            true
-        ));
-        assert!(list.is_empty());
-        assert!(edit_url_list(&mut list, vec![b()], no.clone(), no, false));
-        assert_eq!(list, vec![b()]);
+    fn anonymous_grants_ahead_of_the_veto() {
+        // Not an oversight: the scope grants with no credential at all, so a vetoed
+        // client would simply omit theirs. A veto bypassed by sending less is not a veto.
+        let a = access_of("anon-veto", &fixture());
+        let d = decide(
+            &a,
+            &Subject::Identifier("spammer@x.com"),
+            Some("https://app.x.com/mpa/healthz"),
+        );
+        assert!(d.granted(), "{d:?}");
     }
 
     #[test]
-    fn open_access_file_refuses_a_file_the_gate_would_reject() {
-        // An edit has to start from a file that works, or a tool would cheerfully fix one
-        // problem while carrying a fatal one to the disk.
-        let path = users_tmp(
-            "edit-open-bad",
-            r#"{ "users": [ { "email": "b@x.com", "authorized_urls": ["@nope"] } ] }"#,
+    fn authenticated_scope_grants_an_unenrolled_identity() {
+        let a = access_of("authn", &fixture());
+        assert!(a.uuid_of("newcomer@x.com").is_none());
+        let d = decide(
+            &a,
+            &Subject::Identifier("newcomer@x.com"),
+            Some("https://app.x.com/mpa/welcome"),
         );
-        let err = err_of(open_access_file(path.to_str().unwrap()));
-        assert!(
-            err.contains("the gate would reject this file as it stands"),
-            "{err}"
+        assert_eq!(
+            d,
+            Decision::Granted {
+                app: "mpa".into(),
+                scope: "onboarding".into()
+            }
         );
-        assert!(err.contains("unknown url group '@nope'"), "{err}");
-        let _ = std::fs::remove_file(&path);
     }
+
+    #[test]
+    fn authenticated_scope_never_admits_a_key() {
+        let a = access_of("authn-key", &fixture());
+        let k = fixture_key(&a);
+        let d = decide(&a, &Subject::Key(k), Some("https://app.x.com/mpa/welcome"));
+        assert!(matches!(d, Decision::CredentialRefused { .. }), "{d:?}");
+    }
+
+    #[test]
+    fn restricted_scope_grants_a_member_and_refuses_everyone_else() {
+        let a = access_of("restricted", &fixture());
+        let url = Some("https://app.x.com/mpa/admin/panel");
+        assert!(decide(&a, &Subject::Identifier("bob@x.com"), url).granted());
+        // Carol is enrolled but not in @admins.
+        assert!(matches!(
+            decide(&a, &Subject::Identifier("carol@x.com"), url),
+            Decision::NotMember { .. }
+        ));
+        // A stranger is in no roster row at all.
+        assert!(matches!(
+            decide(&a, &Subject::Identifier("nobody@x.com"), url),
+            Decision::NotEnrolled { .. }
+        ));
+        // And no credential means no identity to check.
+        assert!(matches!(
+            decide(&a, &Subject::Anonymous, url),
+            Decision::Unauthenticated { .. }
+        ));
+    }
+
+    #[test]
+    fn the_credential_class_is_a_property_of_the_place() {
+        let a = access_of("classes", &fixture());
+        let k = fixture_key(&a);
+        // mcp/api admits api_key only, mpa/admin admits login only. The same member, both
+        // times, and the scope is what differs.
+        assert!(matches!(
+            decide(
+                &a,
+                &Subject::Identifier("bob@x.com"),
+                Some("https://ai.x.com/mcp/tool")
+            ),
+            Decision::CredentialRefused { .. }
+        ));
+        assert!(decide(&a, &Subject::Key(k), Some("https://ai.x.com/mcp/tool")).granted());
+        assert!(matches!(
+            decide(
+                &a,
+                &Subject::Key(k),
+                Some("https://app.x.com/mpa/admin/panel")
+            ),
+            Decision::CredentialRefused { .. }
+        ));
+    }
+
+    #[test]
+    fn a_key_restriction_subtracts_from_its_owner() {
+        let a = access_of("key-scope", &fixture());
+        let k = fixture_key(&a);
+        // Bob reaches mcp/logs; his key does not, because it named only mcp/api.
+        assert!(decide(
+            &a,
+            &Subject::Identifier("bob@x.com"),
+            Some("https://ai.x.com/mcp/logs/x")
+        )
+        .granted());
+        assert!(matches!(
+            decide(&a, &Subject::Key(k), Some("https://ai.x.com/mcp/logs/x")),
+            Decision::KeyOutOfScope { .. }
+        ));
+    }
+
+    #[test]
+    fn a_key_with_no_restriction_reaches_what_its_owner_reaches() {
+        let json = fixture().replace(r#""scopes": ["mcp/api"]"#, r#""notes": "unrestricted""#);
+        let a = access_of("key-unrestricted", &json);
+        let k = fixture_key(&a);
+        assert!(decide(&a, &Subject::Key(k), Some("https://ai.x.com/mcp/logs/x")).granted());
+    }
+
+    #[test]
+    fn nothing_outside_an_application_is_reachable() {
+        let a = access_of("no-app", &fixture());
+        for url in [
+            "https://elsewhere.com/",
+            // Boundary again: a neighbouring path is not inside the area.
+            "https://app.x.com/mpa-extra/thing",
+        ] {
+            assert_eq!(
+                decide(&a, &Subject::Identifier("bob@x.com"), Some(url)),
+                Decision::NoApplication,
+                "{url}"
+            );
+        }
+    }
+
+    #[test]
+    fn an_application_with_no_scope_for_the_url_says_so() {
+        let a = access_of("no-scope", &fixture());
+        // Inside mpa's area, but /mpa/* does not match the bare /mpa.
+        assert_eq!(
+            decide(
+                &a,
+                &Subject::Identifier("bob@x.com"),
+                Some("https://app.x.com/mpa")
+            ),
+            Decision::NoScope { app: "mpa".into() }
+        );
+    }
+
+    // --- the veto -----------------------------------------------------------
+
+    #[test]
+    fn denied_vetoes_a_stranger_by_email() {
+        let a = access_of("veto-stranger", &fixture());
+        assert!(a.denied_identifiers.contains("spammer@x.com"));
+        assert_eq!(
+            decide(
+                &a,
+                &Subject::Identifier("spammer@x.com"),
+                Some("https://app.x.com/mpa/welcome")
+            ),
+            Decision::Vetoed
+        );
+    }
+
+    #[test]
+    fn denying_one_email_vetoes_the_whole_user() {
+        // Written as an email, folded onto the uuid at load: the other identifier, the
+        // group membership and the key all go with it.
+        let a = access_of(
+            "veto-fold",
+            &fixture().replace(
+                r#""denied": ["spammer@x.com"]"#,
+                r#""denied": ["bob@old.com"]"#,
+            ),
+        );
+        assert!(a.denied_users.contains(BOB));
+        for url in [
+            "https://app.x.com/mpa/admin/panel",
+            "https://ai.x.com/mcp/logs/x",
+        ] {
+            assert_eq!(
+                decide(&a, &Subject::Identifier("bob@x.com"), Some(url)),
+                Decision::Vetoed,
+                "{url}"
+            );
+        }
+        // And the key it owns, on the path that never sees a token.
+        assert!(matches!(
+            decide_api_key(&a, &sha256_hex(BEARER), 1_000),
+            KeyDecision::OwnerDenied(_)
+        ));
+    }
+
+    #[test]
+    fn a_denied_entry_must_be_a_uuid_or_an_email() {
+        let e = access_err(
+            "veto-junk",
+            r#"{ "version": 3, "denied": ["11111111-1111-4111-8111-11111111111"] }"#,
+        );
+        assert!(e.contains("not a uuid and not an email"), "{e}");
+    }
+
+    // --- keys ---------------------------------------------------------------
+
+    #[test]
+    fn an_unknown_key_is_nobody() {
+        let a = access_of("key-unknown", &fixture());
+        assert!(matches!(
+            decide_api_key(&a, &sha256_hex("bbk_nope"), 1_000),
+            KeyDecision::Unknown
+        ));
+    }
+
+    #[test]
+    fn an_expired_key_is_refused_before_any_url() {
+        let a = access_of(
+            "key-expired",
+            &fixture().replace(r#""duration": "never""#, r#""duration": "1d""#),
+        );
+        let released = parse_date_epoch("2026-01-01").unwrap();
+        assert!(matches!(
+            decide_api_key(&a, &sha256_hex(BEARER), released + 86_401),
+            KeyDecision::Expired(_)
+        ));
+        assert!(decide_api_key(&a, &sha256_hex(BEARER), released + 3_600).granted());
+    }
+
+    #[test]
+    fn a_key_restriction_naming_no_scope_is_fatal() {
+        let e = access_err(
+            "key-bad-scope",
+            &fixture().replace(r#""scopes": ["mcp/api"]"#, r#""scopes": ["mcp/apy"]"#),
+        );
+        assert!(e.contains("names no scope"), "{e}");
+    }
+
+    #[test]
+    fn a_bad_key_hash_only_skips_that_key() {
+        let a = access_of(
+            "key-bad-hash",
+            &fixture().replace(&sha256_hex(BEARER), "not-a-hash"),
+        );
+        assert!(a.by_key_hash.is_empty());
+        // The roster it hangs off is untouched: one bad key must not drop a user.
+        assert!(a.by_uuid.contains_key(BOB));
+    }
+
+    // --- the roster ---------------------------------------------------------
+
+    #[test]
+    fn identifiers_resolve_many_to_one() {
+        let a = access_of("identifiers", &fixture());
+        assert_eq!(a.uuid_of("bob@x.com"), Some(BOB));
+        assert_eq!(
+            a.uuid_of("BOB@OLD.COM"),
+            Some(BOB),
+            "matched case-insensitively"
+        );
+        assert_eq!(a.by_uuid[BOB].emails, vec!["bob@x.com", "bob@old.com"]);
+    }
+
+    #[test]
+    fn two_users_may_not_share_an_identifier() {
+        let e = access_err(
+            "dup-email",
+            &fixture().replace(r#""emails": ["carol@x.com"]"#, r#""emails": ["bob@x.com"]"#),
+        );
+        assert!(e.contains("declared by two users"), "{e}");
+    }
+
+    #[test]
+    fn two_users_may_not_share_a_uuid() {
+        let e = access_err("dup-uuid", &fixture().replace(CAROL, BOB));
+        assert!(e.contains("declared by two users entries"), "{e}");
+    }
+
+    #[test]
+    fn a_malformed_uuid_is_fatal_wherever_it_appears() {
+        for (what, json) in [
+            (
+                "roster",
+                r#"{ "version": 3, "users": [ { "uuid": "nope", "emails": ["a@x.com"] } ] }"#,
+            ),
+            (
+                "group",
+                r#"{ "version": 3, "user_groups": { "g": ["nope"] } }"#,
+            ),
+            (
+                "scope",
+                r#"{ "version": 3, "applications": [ { "name": "a",
+                     "base": ["https://x.com/a"], "scopes": [ { "name": "s",
+                       "urls": ["https://x.com/a/*"], "access": "restricted",
+                       "users": ["nope"] } ] } ] }"#,
+            ),
+        ] {
+            let e = access_err("bad-uuid", json);
+            assert!(e.contains("not a uuid"), "{what}: {e}");
+        }
+    }
+
+    #[test]
+    fn an_email_that_could_not_be_a_header_is_skipped_not_fatal() {
+        let a = access_of(
+            "unsafe-email",
+            &fixture().replace(r#""carol@x.com""#, r#""carol@x.com\r\nX-Admin: yes""#),
+        );
+        assert!(a.uuid_of("carol@x.com").is_none());
+        assert!(a.by_uuid.contains_key(CAROL), "the row survives");
+    }
+
+    // --- user groups --------------------------------------------------------
+
+    #[test]
+    fn a_group_expands_once_and_nothing_downstream_sees_it() {
+        let a = access_of("groups", &fixture());
+        let (_, admin) = a.resolve(Some("https://app.x.com/mpa/admin/x")).unwrap();
+        assert!(admin.members.contains(BOB));
+    }
+
+    #[test]
+    fn an_unknown_group_is_fatal_and_names_the_referrer() {
+        let e = access_err("group-unknown", &fixture().replace("@admins", "@nope"));
+        assert!(e.contains("unknown user group '@nope'"), "{e}");
+        assert!(e.contains("mpa/admin"), "{e}");
+    }
+
+    #[test]
+    fn a_group_may_not_reference_a_group() {
+        let e = access_err(
+            "group-nested",
+            r#"{ "version": 3, "user_groups": { "a": ["@b"], "b": [] } }"#,
+        );
+        assert!(e.contains("cannot reference another group"), "{e}");
+    }
+
+    #[test]
+    fn a_group_is_validated_even_when_nothing_references_it() {
+        // A group that only breaks the day someone first uses it is a trap
+        // `--check-users` never saw.
+        let e = access_err(
+            "group-unused",
+            r#"{ "version": 3, "user_groups": { "unused": ["not-a-uuid"] } }"#,
+        );
+        assert!(e.contains("not a uuid"), "{e}");
+    }
+
+    #[test]
+    fn a_dangling_reference_grants_nothing() {
+        let a = access_of(
+            "dangling",
+            r#"{ "version": 3,
+                 "applications": [ { "name": "a", "base": ["https://x.com/a"], "scopes": [
+                   { "name": "s", "urls": ["https://x.com/a/*"], "access": "restricted",
+                     "users": ["33333333-3333-4333-8333-333333333333"] } ] } ],
+                 "users": [ { "uuid": "11111111-1111-4111-8111-111111111111",
+                              "emails": ["bob@x.com"] } ] }"#,
+        );
+        assert!(matches!(
+            decide(
+                &a,
+                &Subject::Identifier("bob@x.com"),
+                Some("https://x.com/a/thing")
+            ),
+            Decision::NotMember { .. }
+        ));
+    }
+
+    // --- the access word ----------------------------------------------------
+
+    #[test]
+    fn access_is_required_and_has_no_default() {
+        let e = access_err(
+            "no-access",
+            r#"{ "version": 3, "applications": [ { "name": "a",
+                 "base": ["https://x.com/a"], "scopes": [
+                   { "name": "s", "urls": ["https://x.com/a/*"] } ] } ] }"#,
+        );
+        assert!(e.contains("'access' is required"), "{e}");
+
+        let e = access_err(
+            "bad-access",
+            r#"{ "version": 3, "applications": [ { "name": "a",
+                 "base": ["https://x.com/a"], "scopes": [
+                   { "name": "s", "urls": ["https://x.com/a/*"],
+                     "access": "anonimous" } ] } ] }"#,
+        );
+        assert!(e.contains("unknown access 'anonimous'"), "{e}");
+    }
+
+    #[test]
+    fn membership_fields_belong_only_to_restricted() {
+        for field in [
+            r#""users": []"#,
+            r#""groups": []"#,
+            r#""credentials": ["login"]"#,
+        ] {
+            let json = format!(
+                r#"{{ "version": 3, "applications": [ {{ "name": "a",
+                     "base": ["https://x.com/a"], "scopes": [
+                       {{ "name": "s", "urls": ["https://x.com/a/*"],
+                          "access": "authenticated", {field} }} ] }} ] }}"#
+            );
+            let e = access_err("stray-field", &json);
+            assert!(e.contains("belongs to \"restricted\""), "{field}: {e}");
+        }
+    }
+
+    #[test]
+    fn an_empty_credentials_list_is_fatal() {
+        let e = access_err(
+            "no-creds",
+            r#"{ "version": 3, "applications": [ { "name": "a",
+                 "base": ["https://x.com/a"], "scopes": [
+                   { "name": "s", "urls": ["https://x.com/a/*"],
+                     "access": "restricted", "credentials": [] } ] } ] }"#,
+        );
+        assert!(e.contains("unreachable"), "{e}");
+    }
+
+    #[test]
+    fn an_unknown_field_in_a_scope_is_fatal() {
+        // The one place a typo could fail open, so it is the one place extras are refused.
+        let e = access_err(
+            "unknown-field",
+            r#"{ "version": 3, "applications": [ { "name": "a",
+                 "base": ["https://x.com/a"], "scopes": [
+                   { "name": "s", "urls": ["https://x.com/a/*"],
+                     "access": "restricted", "public_auth": true } ] } ] }"#,
+        );
+        assert!(e.contains("public_auth"), "{e}");
+    }
+
+    // --- the format version -------------------------------------------------
+
+    #[test]
+    fn a_pre_3_0_file_is_refused_by_name_and_points_at_the_converter() {
+        for json in [
+            r#"{ "sites": [] }"#,
+            r#"{ "url_groups": {} }"#,
+            r#"{ "version": 3, "users": [ { "uuid": "11111111-1111-4111-8111-111111111111",
+                 "authorized_urls": ["*://*/*"] } ] }"#,
+            r#"{ "version": 3, "users": [ { "uuid": "11111111-1111-4111-8111-111111111111",
+                 "api_keys": [ { "id": "k", "authorized_urls": [] } ] } ] }"#,
+        ] {
+            let e = access_err("legacy", json);
+            assert!(e.contains("bb-auth-adm migrate"), "{json}: {e}");
+        }
+    }
+
+    #[test]
+    fn enabled_paths_is_still_refused() {
+        let e = access_err(
+            "enabled-paths",
+            r#"{ "version": 3, "users": [ { "uuid": "11111111-1111-4111-8111-111111111111",
+                 "enabled_paths": ["/x"] } ] }"#,
+        );
+        assert!(e.contains("enabled_paths"), "{e}");
+    }
+
+    #[test]
+    fn the_version_must_be_the_one_this_binary_reads() {
+        let e = access_err("no-version", r#"{ "users": [] }"#);
+        assert!(e.contains("no 'version'"), "{e}");
+        let e = access_err("future", r#"{ "version": 5 }"#);
+        assert!(e.contains("declares version 5"), "{e}");
+    }
+
+    // --- the login page -----------------------------------------------------
+
+    #[test]
+    fn login_url_falls_back_through_the_application_then_the_global() {
+        let a = access_of("login-url", &fixture());
+        let g = "https://global.example/";
+        // Inside mpa, even on a URL no scope covers: a 401 there still wants mpa's page.
+        assert_eq!(
+            login_url_for(&a, g, Some("https://app.x.com/mpa")),
+            "https://signup.x.com/"
+        );
+        // mcp declares none, and nothing at all is outside every application.
+        assert_eq!(login_url_for(&a, g, Some("https://ai.x.com/mcp/tool")), g);
+        assert_eq!(login_url_for(&a, g, None), g);
+    }
+
+    #[test]
+    fn a_malformed_login_url_is_fatal() {
+        let e = access_err(
+            "bad-login",
+            &fixture().replace("https://signup.x.com/", "http://signup.x.com/"),
+        );
+        assert!(e.contains("absolute https"), "{e}");
+    }
+
+    // --- the round trip -----------------------------------------------------
+
+    #[test]
+    fn the_document_round_trips_and_preserves_operator_notes() {
+        let json = fixture();
+        let doc = doc_of(&json);
+        let out = render_access_file(&doc).unwrap();
+        let back = doc_of(&out);
+        assert_eq!(back.version, ACCESS_FILE_VERSION);
+        assert_eq!(back.applications.len(), 2);
+        assert_eq!(back.users.len(), 2);
+        assert_eq!(
+            back.applications[0].scopes[1].groups.as_deref(),
+            Some(&["@admins".to_string()][..])
+        );
+        assert!(out.ends_with('\n'));
+        // An older field is absent rather than serialized as null.
+        assert!(!out.contains("authorized_urls"), "{out}");
+        assert!(!out.contains("\"sites\""), "{out}");
+    }
+
+    #[test]
+    fn operator_notes_on_a_user_survive_an_edit() {
+        let json = fixture().replace(
+            r#""emails": ["carol@x.com"]"#,
+            r#""emails": ["carol@x.com"], "notes": "on leave""#,
+        );
+        let doc = doc_of(&json);
+        let out = render_access_file(&doc).unwrap();
+        assert!(out.contains("on leave"), "{out}");
+    }
+
+    // --- uuids --------------------------------------------------------------
+
+    #[test]
+    fn well_formed_uuid_is_strict_about_one_spelling() {
+        const MIXED: &str = "b3f1c8a2-4e77-4f1a-9c0d-1e2f3a4b5c6d";
+        assert!(well_formed_uuid(BOB));
+        assert!(well_formed_uuid(MIXED));
+        // One spelling only: two strings naming the same identity that do not compare
+        // equal would be a dangling reference that looks right in a diff.
+        assert!(!well_formed_uuid(&MIXED.to_ascii_uppercase()));
+        assert!(!well_formed_uuid(&BOB.replace('-', "")));
+        assert!(!well_formed_uuid(""));
+        assert!(!well_formed_uuid("11111111-1111-4111-8111-11111111111g"));
+    }
+
+    #[test]
+    fn mint_uuid_makes_one_this_file_accepts() {
+        let a = mint_uuid().unwrap();
+        let b = mint_uuid().unwrap();
+        assert!(well_formed_uuid(&a), "{a}");
+        assert_ne!(a, b);
+        assert_eq!(&a[14..15], "4", "version 4");
+    }
+
+    // --- editing the document -----------------------------------------------
+
+    #[test]
+    fn add_user_mints_a_uuid_and_refuses_a_taken_email() {
+        let mut doc = doc_of(&fixture());
+        add_user(
+            &mut doc,
+            UserSpec {
+                emails: vec!["dave@x.com".into()],
+                ..Default::default()
+            },
+        )
+        .unwrap();
+        let dave = &doc.users[2];
+        assert!(well_formed_uuid(&dave.uuid));
+
+        let e = err_of(add_user(
+            &mut doc,
+            UserSpec {
+                emails: vec!["BOB@x.com".into()],
+                ..Default::default()
+            },
+        ));
+        assert!(e.contains("already belongs to another user"), "{e}");
+    }
+
+    #[test]
+    fn add_user_refuses_a_value_that_could_never_be_an_email() {
+        let mut doc = doc_of(&fixture());
+        let e = err_of(add_user(
+            &mut doc,
+            UserSpec {
+                emails: vec!["not an email".into()],
+                ..Default::default()
+            },
+        ));
+        assert!(e.contains("does not look like an email"), "{e}");
+    }
+
+    #[test]
+    fn a_user_is_found_by_uuid_or_by_any_of_their_emails() {
+        let doc = doc_of(&fixture());
+        assert_eq!(user_pos(&doc, BOB), Some(0));
+        assert_eq!(user_pos(&doc, "bob@old.com"), Some(0));
+        assert_eq!(user_pos(&doc, "carol@x.com"), Some(1));
+        assert_eq!(user_pos(&doc, "nobody@x.com"), None);
+    }
+
+    #[test]
+    fn identifiers_are_added_and_dropped_but_never_all_of_them() {
+        let mut doc = doc_of(&fixture());
+        assert!(add_user_email(&mut doc, BOB, "bob@new.com").unwrap());
+        assert!(
+            !add_user_email(&mut doc, BOB, "BOB@NEW.COM").unwrap(),
+            "idempotent"
+        );
+        let e = err_of(add_user_email(&mut doc, CAROL, "bob@new.com"));
+        assert!(e.contains("already belongs"), "{e}");
+
+        assert!(remove_user_email(&mut doc, BOB, "bob@new.com").unwrap());
+        let e = err_of(remove_user_email(&mut doc, CAROL, "carol@x.com"));
+        assert!(e.contains("only email"), "{e}");
+    }
+
+    #[test]
+    fn remove_user_sweeps_every_reference_to_them() {
+        let mut doc = doc_of(&fixture());
+        let (gone, swept) = remove_user(&mut doc, "bob@x.com").unwrap();
+        assert_eq!(gone.uuid, BOB);
+        assert!(swept.contains(&"mcp/logs".to_string()), "{swept:?}");
+        assert!(swept.contains(&"@admins".to_string()), "{swept:?}");
+        // And the file that comes out has no dangling reference left in it.
+        assert!(user_refs(&doc, BOB).is_empty());
+        let rendered = render_access_file(&doc).unwrap();
+        assert!(!rendered.contains(BOB), "{rendered}");
+    }
+
+    #[test]
+    fn renaming_an_application_repoints_the_keys_that_named_it() {
+        let mut doc = doc_of(&fixture());
+        rename_application(&mut doc, "mcp", "gateway").unwrap();
+        assert_eq!(
+            doc.users[0].api_keys[0].scopes.as_deref(),
+            Some(&["gateway/api".to_string()][..])
+        );
+        // And the result still compiles, which is what the re-pointing is for.
+        AccessWrite::prepare(&doc).unwrap();
+    }
+
+    #[test]
+    fn renaming_a_scope_repoints_the_keys_that_named_it() {
+        let mut doc = doc_of(&fixture());
+        rename_scope(&mut doc, "mcp", "api", "tools").unwrap();
+        assert_eq!(
+            doc.users[0].api_keys[0].scopes.as_deref(),
+            Some(&["mcp/tools".to_string()][..])
+        );
+        AccessWrite::prepare(&doc).unwrap();
+    }
+
+    #[test]
+    fn moving_a_scope_changes_who_answers_without_changing_a_field() {
+        let mut doc = doc_of(&fixture());
+        move_scope(&mut doc, "mcp", 0, 1).unwrap();
+        let a = AccessWrite::prepare(&doc).unwrap();
+        let (_, s) = a
+            .access()
+            .resolve(Some("https://ai.x.com/mcp/logs/x"))
+            .unwrap();
+        assert_eq!(s.name, "api", "the broad scope now answers first");
+    }
+
+    #[test]
+    fn scope_and_application_names_must_be_free() {
+        let mut doc = doc_of(&fixture());
+        let e = err_of(add_application(
+            &mut doc,
+            AppSpec {
+                name: "mpa".into(),
+                ..Default::default()
+            },
+        ));
+        assert!(e.contains("already exists"), "{e}");
+        let e = err_of(add_scope(
+            &mut doc,
+            "mpa",
+            ScopeSpec {
+                name: "admin".into(),
+                ..Default::default()
+            },
+            None,
+        ));
+        assert!(e.contains("already exists"), "{e}");
+    }
+
+    #[test]
+    fn a_group_cannot_be_removed_while_a_scope_names_it() {
+        let mut doc = doc_of(&fixture());
+        let e = err_of(remove_user_group(&mut doc, "admins"));
+        assert!(e.contains("mpa/admin"), "{e}");
+        // Drop the reference and it goes.
+        doc.applications[0].scopes[1].groups = None;
+        assert_eq!(remove_user_group(&mut doc, "admins").unwrap(), vec![BOB]);
+    }
+
+    #[test]
+    fn denying_an_enrolled_user_writes_their_uuid() {
+        let mut doc = doc_of(&fixture());
+        assert!(add_denied(&mut doc, "bob@old.com").unwrap());
+        assert!(doc.denied.contains(&BOB.to_string()), "{:?}", doc.denied);
+        assert!(
+            !add_denied(&mut doc, BOB).unwrap(),
+            "already vetoed, by either name"
+        );
+        assert_eq!(remove_denied(&mut doc, &["bob@x.com".to_string()]), 1);
+    }
+
+    #[test]
+    fn denying_a_stranger_keeps_the_email() {
+        let mut doc = doc_of(&fixture());
+        assert!(add_denied(&mut doc, "Nuisance@X.com").unwrap());
+        assert!(doc.denied.contains(&"nuisance@x.com".to_string()));
+        let e = err_of(add_denied(&mut doc, "not an email"));
+        assert!(e.contains("does not look like an email"), "{e}");
+    }
+
+    // --- the write order ----------------------------------------------------
 
     #[test]
     fn access_write_refuses_a_document_the_gate_would_reject() {
-        let path = users_tmp("edit-reject", EDIT_JSON);
-        let p = path.to_str().unwrap().to_string();
-        let before = std::fs::read_to_string(&path).unwrap();
-
-        let (mut doc, _) = open_access_file(&p).unwrap();
-        doc.users[0].authorized_urls = Some(vec!["@nope".into()]);
-        let err = err_of(AccessWrite::prepare(&doc));
-        assert!(err.starts_with("refusing to write:"), "{err}");
-        assert!(err.contains("unknown url group '@nope'"), "{err}");
-
-        // The check is ahead of the disk in every sense: the file is byte-for-byte what it
-        // was, and not even a backup was taken.
-        assert_eq!(std::fs::read_to_string(&path).unwrap(), before);
-        assert!(!std::path::Path::new(&format!("{p}.bak")).exists());
-        let _ = std::fs::remove_file(&path);
+        let mut doc = doc_of(&fixture());
+        doc.applications[0].scopes[0].access = "anonimous".into();
+        let e = err_of(AccessWrite::prepare(&doc));
+        assert!(e.contains("refusing to write"), "{e}");
     }
 
     #[test]
     fn access_write_commits_exactly_the_bytes_it_compiled() {
-        let path = users_tmp("edit-commit", EDIT_JSON);
-        let p = path.to_str().unwrap().to_string();
-        let before = std::fs::read_to_string(&path).unwrap();
-
-        let (mut doc, _) = open_access_file(&p).unwrap();
+        let path = users_tmp("commit", &fixture());
+        let mut doc = doc_of(&fixture());
         add_user(
             &mut doc,
             UserSpec {
-                email: "  Carol@X.com  ".into(),
-                authorized_urls: Some(vec!["https://x.com/c/*".into()]),
+                emails: vec!["dave@x.com".into()],
                 ..Default::default()
             },
         )
         .unwrap();
-
-        let write = AccessWrite::prepare(&doc).unwrap();
-        assert_eq!(write.access().by_email.len(), 2); // the counts a caller reports
-        let written = write.commit(&p).unwrap();
-
-        // what landed is the byte string that was compiled, newline-terminated
-        let on_disk = std::fs::read_to_string(&path).unwrap();
-        assert_eq!(on_disk, write.json());
-        assert!(on_disk.ends_with("}\n"));
-        // it parses back to the same document — the operator's `_comment` included — and
-        // re-rendering it is a fixed point, so a show/save round-trip changes no bytes
-        let back: AccessFile = serde_json::from_str(&on_disk).unwrap();
-        assert_eq!(back.extra["_comment"], "hands off");
-        assert_eq!(render_access_file(&back).unwrap(), on_disk);
-        assert!(compile_access(&back)
-            .unwrap()
-            .by_email
-            .contains_key("carol@x.com"));
-        // and the file it replaced is one step back
-        assert_eq!(std::fs::read_to_string(&written.backup).unwrap(), before);
-
+        let w = AccessWrite::prepare(&doc).unwrap();
+        let expected = w.json().to_string();
+        let receipt = w.commit(path.to_str().unwrap()).unwrap();
+        assert_eq!(std::fs::read_to_string(&path).unwrap(), expected);
+        assert!(receipt.backup.exists());
+        let _ = std::fs::remove_file(&receipt.backup);
         let _ = std::fs::remove_file(&path);
-        let _ = std::fs::remove_file(&written.backup);
+    }
+
+    #[test]
+    fn open_access_file_refuses_a_file_the_gate_would_reject() {
+        let path = users_tmp("open-bad", r#"{ "version": 3, "denied": ["nope"] }"#);
+        let e = err_of(open_access_file(path.to_str().unwrap()));
+        assert!(e.contains("the gate would reject this file"), "{e}");
+        let _ = std::fs::remove_file(&path);
     }
 
     #[test]
     fn add_api_key_seals_the_bearer_until_the_file_carries_its_hash() {
-        let path = users_tmp(
-            "edit-mint",
-            r#"{ "users": [ { "email": "bob@x.com", "authorized_urls": ["https://x.com/*"] } ] }"#,
-        );
-        let p = path.to_str().unwrap().to_string();
-        let (mut doc, _) = open_access_file(&p).unwrap();
-
+        let path = users_tmp("seal", &fixture());
+        let mut doc = doc_of(&fixture());
         let sealed = add_api_key(
             &mut doc,
-            " BOB@x.com ",
+            "carol@x.com",
             ApiKeySpec {
-                id: " laptop ".into(),
-                released: "2026-01-01".into(),
-                duration: "365d".into(),
+                id: "ci".into(),
+                released: "2026-08-17".into(),
+                duration: "30d".into(),
                 ..Default::default()
             },
         )
         .unwrap();
-        // the document carries the hash; the bearer is still in nobody's hands
-        let hash = doc.users[0].api_keys[0].key_hash.clone();
-        assert_eq!(hash.len(), 64);
-        assert_eq!(doc.users[0].api_keys[0].id, "laptop");
+        let w = AccessWrite::prepare(&doc).unwrap();
+        let receipt = w.commit(path.to_str().unwrap()).unwrap();
+        // The receipt is what unseals it: a dry run has no bearer to leak.
+        let bearer = sealed.reveal(&receipt);
+        assert!(bearer.starts_with(API_KEY_PREFIX));
+        let a = read_access(path.to_str().unwrap()).unwrap();
+        assert!(a.by_key_hash.contains_key(&sha256_hex(&bearer)));
+        let _ = std::fs::remove_file(&receipt.backup);
+        let _ = std::fs::remove_file(&path);
+    }
 
-        // a second key with that id is refused, and mints nothing
-        let err = err_of(add_api_key(
+    #[test]
+    fn add_api_key_refuses_a_duplicate_id() {
+        let mut doc = doc_of(&fixture());
+        let e = err_of(add_api_key(
             &mut doc,
-            "bob@x.com",
+            BOB,
             ApiKeySpec {
                 id: "laptop".into(),
                 ..Default::default()
             },
         ));
-        assert!(
-            err.contains("bob@x.com already has a key 'laptop'"),
-            "{err}"
-        );
-        assert_eq!(doc.users[0].api_keys.len(), 1);
-
-        // Only a completed write opens it — `reveal` takes the receipt, so there is no
-        // order in which a caller holds the bearer and the file does not hold its hash.
-        let written = AccessWrite::prepare(&doc).unwrap().commit(&p).unwrap();
-        let bearer = sealed.reveal(&written);
-        assert!(bearer.starts_with(API_KEY_PREFIX));
-        assert_eq!(sha256_hex(&bearer), hash);
-        // and the gate, reading what was written, grants that very bearer
-        let access = read_access(&p).unwrap();
-        assert!(decide_api_key(&access, &hash, Some("https://x.com/a"), 0).granted());
-
-        let _ = std::fs::remove_file(&path);
-        let _ = std::fs::remove_file(&written.backup);
+        assert!(e.contains("already has a key 'laptop'"), "{e}");
     }
 
     #[test]
     fn rotate_api_key_replaces_the_hash_and_redates_the_row() {
-        let mut doc = doc_of(EDIT_JSON);
+        let mut doc = doc_of(&fixture());
         let before = doc.users[0].api_keys[0].key_hash.clone();
-        let _sealed = rotate_api_key(&mut doc, "BOB@X.com", " laptop ").unwrap();
-
-        let k = &doc.users[0].api_keys[0];
-        assert_ne!(k.key_hash, before);
-        assert_eq!(k.key_hash.len(), 64);
-        assert_eq!(k.released, format_date(now())); // the window restarts today
-        assert_eq!(k.duration, "365d"); // same row, same window, same scope
-        assert_eq!(k.id.trim(), "laptop");
-        assert!(rotate_api_key(&mut doc, "bob@x.com", "nope").is_err());
-        assert!(rotate_api_key(&mut doc, "ghost@x.com", "laptop").is_err());
+        let _sealed = rotate_api_key(&mut doc, "bob@x.com", "laptop").unwrap();
+        assert_ne!(doc.users[0].api_keys[0].key_hash, before);
+        assert_eq!(doc.users[0].api_keys[0].released, format_date(now()));
     }
 
     #[test]
-    fn add_user_and_add_site_refuse_a_duplicate() {
-        let mut doc = doc_of(EDIT_JSON);
-        // The gate builds a HashMap, so a duplicate is not an error there — the last row
-        // silently wins, and the one an operator is reading may not be the one in force.
-        let err = err_of(add_user(
-            &mut doc,
-            UserSpec {
-                email: "  BOB@x.com ".into(),
-                ..Default::default()
-            },
-        ));
-        assert!(err.contains("bob@x.com is already in users"), "{err}");
-        assert_eq!(doc.users.len(), 1);
-        add_user(
-            &mut doc,
-            UserSpec {
-                email: " Carol@X.com ".into(),
-                ..Default::default()
-            },
-        )
-        .unwrap();
-        assert_eq!(doc.users[1].email, "carol@x.com"); // normalised on the way in
-
-        let named = |n: &str| SiteSpec {
-            name: n.into(),
-            ..Default::default()
-        };
-        assert!(err_of(add_site(&mut doc, named("  "), None)).contains("a site needs a name"));
-        assert!(err_of(add_site(&mut doc, named(" app1 "), None))
-            .contains("site 'app1' already exists"));
-        // a position: `None` is last, out of range is last, and the name is trimmed
-        assert_eq!(add_site(&mut doc, named(" first "), Some(0)).unwrap(), 0);
-        assert_eq!(doc.sites[0].name, "first");
-        assert_eq!(add_site(&mut doc, named("last"), Some(99)).unwrap(), 3);
-        assert_eq!(site_pos(&doc, "last"), Some(3));
+    fn scopes_for_lists_where_a_user_is_named() {
+        let a = access_of("scopes-for", &fixture());
+        let mine: Vec<String> = a
+            .scopes_for(BOB)
+            .iter()
+            .map(|(app, s)| format!("{}/{}", app.name, s.name))
+            .collect();
+        assert_eq!(mine, vec!["mpa/admin", "mcp/logs", "mcp/api"]);
+        assert!(a.scopes_for(CAROL).is_empty());
     }
 
     #[test]
-    fn rename_user_refuses_a_collision_before_it_looks_for_the_row() {
-        let mut doc = doc_of(EDIT_JSON);
-        add_user(
-            &mut doc,
-            UserSpec {
-                email: "carol@x.com".into(),
-                ..Default::default()
-            },
-        )
-        .unwrap();
-        // "that address is taken" is the more useful of the two complaints, so it comes
-        // first — even when the row being renamed does not exist either.
-        let err = err_of(rename_user(&mut doc, "ghost@x.com", "Carol@X.com"));
-        assert!(err.contains("carol@x.com is already in users"), "{err}");
-        assert!(err_of(rename_user(&mut doc, "ghost@x.com", "ghost2@x.com"))
-            .contains("no user 'ghost@x.com'"));
-
-        rename_user(&mut doc, "BOB@x.com", "  Bobby@X.com ").unwrap();
-        assert_eq!(doc.users[0].email, "bobby@x.com");
-        assert_eq!(doc.users[0].api_keys.len(), 1); // the row keeps its keys and its scope
-        rename_user(&mut doc, "bobby@x.com", "bobby@x.com").unwrap(); // to itself: allowed
-    }
-
-    #[test]
-    fn remove_user_hands_back_the_row_and_the_keys_that_went_with_it() {
-        let mut doc = doc_of(EDIT_JSON);
-        let u = remove_user(&mut doc, " BOB@X.com ").unwrap();
-        // a key is a grant tied to a user; an orphan would answer to nobody
-        assert_eq!(u.api_keys.len(), 1);
-        assert!(doc.users.is_empty());
-        assert!(err_of(remove_user(&mut doc, "bob@x.com")).contains("no user 'bob@x.com'"));
-        // …and the removal is not a lockout: that site is public_auth, so `denied` is the
-        // only thing that would keep them out of it.
-        assert!(compile_access(&doc).unwrap().sites.any_public_auth());
-    }
-
-    #[test]
-    fn remove_site_and_remove_api_key_hand_back_what_went() {
-        let mut doc = doc_of(EDIT_JSON);
-        let s = remove_site(&mut doc, " app1 ").unwrap();
-        assert!(s.public_auth); // the caller has to be able to say what it opened
-        assert_eq!(doc.sites.len(), 1);
-        assert!(err_of(remove_site(&mut doc, "app1")).contains("no site 'app1'"));
-
-        let k = remove_api_key(&mut doc, "BOB@X.com", " laptop ").unwrap();
-        assert_eq!(k.id.trim(), "laptop");
-        assert!(doc.users[0].api_keys.is_empty());
-        assert!(err_of(remove_api_key(&mut doc, "bob@x.com", "laptop"))
-            .contains("bob@x.com: no api key 'laptop'"));
-    }
-
-    #[test]
-    fn remove_url_group_refuses_while_something_references_it() {
-        let mut doc = doc_of(EDIT_JSON);
-        assert_eq!(url_group_refs(&doc, "mcp"), vec!["bob@x.com".to_string()]);
-        let err = err_of(remove_url_group(&mut doc, " mcp "));
-        assert!(err.contains("still referenced by bob@x.com"), "{err}");
-        assert!(doc.url_groups.contains_key("mcp"));
-
-        // the scanner names sites and keys too — a refusal is only useful if it says where
-        doc.sites[0].urls.push("@mcp".into());
-        doc.users[0].api_keys[0].authorized_urls = Some(vec!["@mcp".into()]);
-        assert_eq!(
-            url_group_refs(&doc, "mcp"),
-            vec![
-                "site 'app1'".to_string(),
-                "bob@x.com".to_string(),
-                "bob@x.com/laptop".to_string()
-            ]
+    fn any_authenticated_scope_is_what_session_asks() {
+        let a = access_of("any-authn", &fixture());
+        assert!(a.any_authenticated_scope());
+        let b = access_of(
+            "no-authn",
+            r#"{ "version": 3, "applications": [ { "name": "a",
+                 "base": ["https://x.com/a"], "scopes": [
+                   { "name": "s", "urls": ["https://x.com/a/*"],
+                     "access": "restricted" } ] } ] }"#,
         );
-
-        // once nothing names it, it goes — and its patterns come back
-        doc.sites[0].urls.pop();
-        doc.users[0].api_keys[0].authorized_urls = None;
-        doc.users[0].authorized_urls = Some(vec!["https://x.com/*".into()]);
-        assert_eq!(
-            remove_url_group(&mut doc, "mcp").unwrap(),
-            vec!["https://mcp.x.com/mcp/*".to_string()]
-        );
-        assert!(err_of(remove_url_group(&mut doc, "mcp")).contains("no url group '@mcp'"));
-
-        // adding one back is refused while the name is taken, and needs a name at all
-        add_url_group(&mut doc, " mcp ", vec!["https://mcp.x.com/mcp/*".into()]).unwrap();
-        assert!(err_of(add_url_group(&mut doc, "mcp", vec![])).contains("already exists"));
-        assert!(err_of(add_url_group(&mut doc, "  ", vec![])).contains("a url group needs a name"));
-    }
-
-    #[test]
-    fn move_site_reorders_and_ignores_a_position_that_does_not_exist() {
-        // Order is meaning: first match wins, so a move changes who answers for a URL.
-        let mut doc = doc_of(
-            r#"{ "sites": [
-                   { "name": "app1", "urls": ["https://app.x.com/app1/*"], "public_auth": true },
-                   { "name": "broad", "urls": ["https://app.x.com/*"] } ] }"#,
-        );
-        let at = Some("https://app.x.com/app1/x");
-        assert!(decide(&compile_access(&doc).unwrap(), "new@x.com", at).granted());
-
-        move_site(&mut doc, 1, 0); // the broad record now answers, and it grants nothing
-        assert_eq!(site_name(&doc.sites[0]), "broad");
-        assert!(!decide(&compile_access(&doc).unwrap(), "new@x.com", at).granted());
-
-        // a position that does not exist is a no-op, never a panic and never a reshuffle
-        move_site(&mut doc, 9, 0);
-        move_site(&mut doc, 0, 9);
-        assert_eq!(site_name(&doc.sites[0]), "broad");
-    }
-
-    #[test]
-    fn denied_edits_normalize_the_email() {
-        let mut doc = doc_of(EDIT_JSON);
-        assert!(add_denied(&mut doc, "  NEW@X.com  ").unwrap());
-        assert_eq!(
-            doc.denied,
-            vec!["spammer@x.com".to_string(), "new@x.com".to_string()]
-        );
-        // already vetoed, in any spelling — and an empty entry is not a veto
-        assert!(!add_denied(&mut doc, "New@x.com").unwrap());
-        assert!(add_denied(&mut doc, "   ").is_err());
-        assert_eq!(doc.denied.len(), 2);
-
-        assert_eq!(
-            remove_denied(&mut doc, &["NEW@x.com".into(), "nobody@x.com".into()]),
-            1
-        );
-        assert_eq!(remove_denied(&mut doc, &["nobody@x.com".into()]), 0);
-        assert_eq!(doc.denied, vec!["spammer@x.com".to_string()]);
-    }
-
-    #[test]
-    fn well_formed_email_accepts_cognito_shapes_and_rejects_typos() {
-        for good in [
-            "bob@example.com",
-            "a+tag@sub.example.co.uk",
-            "n.o'brien@x.com",
-            "UPPER@X.COM",
-            "a!#$%&'*/=?^_`{|}~-b@x-1.example.com",
-        ] {
-            assert!(well_formed_email(good), "{good:?} must be accepted");
-        }
-        for bad in [
-            "",
-            "not an email",         // whitespace, no @
-            "bob",                  // no @
-            "bob@",                 // empty domain
-            "@example.com",         // empty local part
-            "bob@example,com",      // the classic comma typo: one label, no dot
-            "bob@example",          // no TLD — Cognito always emits one
-            "bob@example.com.",     // trailing dot = empty label
-            "bob@.example.com",     // leading dot = empty label
-            "bob@exa mple.com",     // whitespace
-            "bob@@example.com",     // two @
-            "a@b@example.com",      // two @
-            "bob@-bad.example.com", // label starting with '-'
-            "bob@bad-.example.com", // label ending with '-'
-            "bob@exam_ple.com",     // '_' is local-part vocabulary, not a domain's
-            "béatrice@x.com",       // non-ASCII: header_safe_email already forbids it
-            "bad\r\nX: 1@x.com",
-        ] {
-            assert!(!well_formed_email(bad), "{bad:?} must be rejected");
-        }
-    }
-
-    #[test]
-    fn mutations_refuse_a_malformed_new_email_but_never_a_legacy_row() {
-        let mut doc = doc_of(EDIT_JSON);
-
-        // The three doors an email enters through, all refused in the same sentence.
-        let err = err_of(add_user(
-            &mut doc,
-            UserSpec {
-                email: "not an email".into(),
-                ..Default::default()
-            },
-        ));
-        assert!(err.contains("'not an email'"), "{err}");
-        assert!(err.contains("does not look like an email address"), "{err}");
-        assert_eq!(doc.users.len(), 1, "nothing was enrolled");
-
-        let err = err_of(rename_user(&mut doc, "bob@x.com", "bob@example,com"));
-        assert!(err.contains("'bob@example,com'"), "{err}");
-        assert_eq!(doc.users[0].email, "Bob@X.com", "the row is untouched");
-
-        let err = err_of(add_denied(&mut doc, "spam mer"));
-        assert!(err.contains("does not look like an email address"), "{err}");
-        assert_eq!(doc.denied, vec!["spammer@x.com".to_string()]);
-
-        // A legacy row whose address would be refused today is not a hostage: a rename to
-        // itself (how an editor saves an unrelated field) and a re-deny both still answer.
-        doc.users[0].email = "legacy row".into();
-        rename_user(&mut doc, "legacy row", " Legacy ROW ").unwrap();
-        assert_eq!(doc.users[0].email, "legacy row");
-        doc.denied.push("legacy veto".into());
-        assert!(
-            !add_denied(&mut doc, "legacy veto").unwrap(),
-            "already there, not an error"
-        );
+        assert!(!b.any_authenticated_scope());
     }
 }

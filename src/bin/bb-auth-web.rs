@@ -164,12 +164,13 @@
 //! [`CSS`] for the two-arm dark rule that makes an explicit choice win over the OS.
 
 use bb_auth_core::{
-    add_api_key, add_denied, add_site, add_url_group, add_user, decide, edit_urls, format_date,
-    key_expiry, key_mut, move_site, norm_email, now, open_access_file, remove_api_key,
-    remove_denied, remove_site, remove_url_group, remove_user, rename_site, rename_user,
-    request_url, rotate_api_key, sha256_hex, site_name, site_pos, url_group_mut, url_group_refs,
-    user_mut, user_pos, Access, AccessFile, AccessWrite, ApiKeySpec, Decision, SealedKey, SiteSpec,
-    UserSpec, Written,
+    add_api_key, add_application, add_denied, add_scope, add_user, add_user_email, add_user_group,
+    app_mut, app_pos, decide, edit_urls, format_date, group_ref, key_expiry, key_mut, move_scope,
+    norm_email, now, open_access_file, remove_api_key, remove_application, remove_denied,
+    remove_scope, remove_user, remove_user_email, remove_user_group, rename_application,
+    rename_scope, request_url, rotate_api_key, scope_mut, scope_pos, sha256_hex, user_group_mut,
+    user_group_refs, user_label, user_pos, user_refs, Access, AccessFile, AccessWrite, ApiKeySpec,
+    AppSpec, Decision, ScopeSpec, SealedKey, Subject, UserSpec, Written,
 };
 use maud::{html, Markup, PreEscaped, DOCTYPE};
 use std::io::Read;
@@ -623,7 +624,7 @@ fn parse_theme(s: &str) -> Option<Theme> {
 /// without translating it does not fall back at runtime, it fails to compile. And because
 /// each arm names both spellings on one line, no key can be half-translated either.
 ///
-/// [`K::Dashboard`], [`K::Groups`], [`K::Sites`], [`K::Users`], [`K::Denied`] and [`K::Can`]
+/// [`K::Dashboard`], [`K::Groups`], [`K::Apps`], [`K::Users`], [`K::Denied`] and [`K::Can`]
 /// are the nav labels and page headings: descriptive prose *about* a section, not that
 /// section's name. The name itself stays untranslated wherever it appears as itself,
 /// namely `authorized_urls`, `public_auth`, `login_url`, `api_keys`, `released`, `duration`,
@@ -634,7 +635,8 @@ fn parse_theme(s: &str) -> Option<Theme> {
 enum K {
     Dashboard,
     Groups,
-    Sites,
+    Apps,
+    Scopes,
     Users,
     Denied,
     Can,
@@ -655,24 +657,28 @@ enum K {
     WarnEnrolledAndDenied,
     ReferencedBy,
     ReferencedByNothing,
-    Patterns,
-    Inherits,
     ReachesNothing,
     NoSuchUser,
     UsersIntro,
     GroupsIntro,
-    SitesIntro,
+    AppsIntro,
+    ScopesIntro,
     DeniedIntro,
-    AlsoEnrolled,
     CanIntro,
     Submit,
     Authorized,
     VerdictDenied,
-    WhySiteGrant,
-    WhyRosterGrant,
+    // --- the ten decisions, in the order `Decision` declares them ---
+    WhyAnonymousGrant,
+    WhyGranted,
     WhyVetoed,
-    WhyOutOfScope,
+    WhyNoApplication,
+    WhyNoScope,
+    WhyUnauthenticated,
+    WhyCredentialRefused,
     WhyNotEnrolled,
+    WhyNotMember,
+    WhyKeyOutOfScope,
     AppSees,
     NoIdentityTitle,
     NoIdentityBody,
@@ -703,22 +709,47 @@ enum K {
     Cancel,
     MoveUp,
     MoveDown,
-    ScopeHelp,
-    ScopeEmptyMeans,
     KeyScopeInherit,
-    KeyScopeOwn,
-    KeyScopeOwnEmpty,
-    SiteUrlsHelp,
-    PublicAuthWarn,
-    GroupUrlsHelp,
+    KeyScopesHelp,
+    ScopeUrlsHelp,
+    AnonymousWarn,
+    AuthenticatedWarn,
+    GroupMembersHelp,
     GroupNoRename,
-    NewEmail,
     NewName,
+    // --- the words the application-centric file is made of ---
+    Base,
+    BaseHelp,
+    LoginUrl,
+    LoginUrlHelp,
+    AccessWord,
+    AccessAnonymous,
+    AccessAuthenticated,
+    AccessRestricted,
+    AccessHelp,
+    Credentials,
+    CredentialsHelp,
+    CredLogin,
+    CredApiKey,
+    Members,
+    MembersHelp,
+    Uuid,
+    Emails,
+    AddEmail,
+    ConfirmEmailRm,
+    NoScopes,
+    InNoScope,
+    WarnShadowed,
+    WarnNoMembers,
+    /// A scope's or a group's member that resolves to no roster row: a dangling uuid, shown
+    /// for what it is rather than silently hidden.
+    UnknownMember,
     // --- what a destructive page warns about ---
     ConfirmUserRm,
     ConfirmKeyRm,
     ConfirmKeyRotate,
-    ConfirmSiteRm,
+    ConfirmAppRm,
+    ConfirmScopeRm,
     ConfirmGroupRm,
     ConfirmDenyRm,
     // --- the minted bearer ---
@@ -732,7 +763,8 @@ enum K {
     BadKeyWindow,
     AlreadyDenied,
     NoSuchKey,
-    NoSuchSite,
+    NoSuchApp,
+    NoSuchScope,
     NoSuchGroup,
     NoSuchDenied,
     // --- whole-request refusals ---
@@ -754,10 +786,13 @@ enum K {
     MsgUserRemoved,
     MsgKeySaved,
     MsgKeyRemoved,
-    MsgSiteAdded,
-    MsgSiteSaved,
-    MsgSiteRemoved,
-    MsgSiteMoved,
+    MsgAppAdded,
+    MsgScopeAdded,
+    MsgAppSaved,
+    MsgScopeSaved,
+    MsgAppRemoved,
+    MsgScopeRemoved,
+    MsgScopeMoved,
     MsgGroupAdded,
     MsgGroupSaved,
     MsgGroupRemoved,
@@ -778,8 +813,9 @@ fn m(lang: Lang, en: &'static str, it: &'static str) -> &'static str {
 fn t(lang: Lang, key: K) -> &'static str {
     match key {
         K::Dashboard => m(lang, "Dashboard", "Cruscotto"),
-        K::Groups => m(lang, "URL groups", "Gruppi di URL"),
-        K::Sites => m(lang, "Sites", "Siti"),
+        K::Groups => m(lang, "User groups", "Gruppi di utenti"),
+        K::Apps => m(lang, "Applications", "Applicazioni"),
+        K::Scopes => m(lang, "Scopes", "Ambiti"),
         K::Users => m(lang, "Users", "Utenti"),
         K::Denied => m(lang, "Denied", "Bloccati"),
         K::Can => m(lang, "Access check", "Verifica accesso"),
@@ -802,8 +838,8 @@ fn t(lang: Lang, key: K) -> &'static str {
         K::NoWarnings => m(lang, "nothing to report", "nulla da segnalare"),
         K::WarnNoScope => m(
             lang,
-            "reaches nothing — no authorized_urls",
-            "non raggiunge nulla — nessun authorized_urls",
+            "reaches nothing: no scope lists them",
+            "non raggiunge nulla: nessuno scope lo elenca",
         ),
         K::WarnEnrolledAndDenied => m(
             lang,
@@ -812,38 +848,69 @@ fn t(lang: Lang, key: K) -> &'static str {
         ),
         K::ReferencedBy => m(lang, "referenced by", "referenziato da"),
         K::ReferencedByNothing => m(lang, "referenced by nothing", "referenziato da nulla"),
-        K::Patterns => m(lang, "patterns", "pattern"),
-        K::Inherits => m(lang, "inherits the user's", "eredita quello dell'utente"),
+        K::Base => m(lang, "base", "base"),
+        K::Members => m(lang, "members", "membri"),
+        K::Uuid => m(lang, "uuid", "uuid"),
+        K::Emails => m(lang, "emails", "email"),
+        K::AccessWord => m(lang, "access", "accesso"),
+        K::Credentials => m(lang, "credentials", "credenziali"),
+        K::LoginUrl => m(lang, "login_url", "login_url"),
+        K::CredLogin => m(lang, "login", "login"),
+        K::CredApiKey => m(lang, "api_key", "api_key"),
+        K::AccessAnonymous => m(lang, "anonymous", "anonimo"),
+        K::AccessAuthenticated => m(lang, "authenticated", "autenticato"),
+        K::AccessRestricted => m(lang, "restricted", "ristretto"),
+        K::NoScopes => m(lang, "no scopes", "nessuno scope"),
+        K::AddEmail => m(lang, "Add an email", "Aggiungi un\u{2019}email"),
+        K::InNoScope => m(
+            lang,
+            "in no scope: this user reaches nothing",
+            "in nessuno scope: questo utente non raggiunge nulla",
+        ),
         K::ReachesNothing => m(lang, "reaches nothing", "non raggiunge nulla"),
         K::NoSuchUser => m(lang, "no such user", "utente inesistente"),
         K::UsersIntro => m(
             lang,
-            "The roster: who is enrolled, and what they may reach.",
-            "Il roster: chi è iscritto e cosa può raggiungere.",
+            "The roster: an identity, the emails that resolve to it, and its keys. What a \
+             user reaches is written on the side of the place, in the scopes that list them.",
+            "Il roster: un\u{2019}identità, le email che vi si risolvono e le sue chiavi. Ciò \
+             che un utente raggiunge è scritto dalla parte del posto, negli scope che lo \
+             elencano.",
         ),
         K::GroupsIntro => m(
             lang,
-            "Named sets of URL patterns. A group is abbreviation, never a grant: defining \
-             one authorizes nobody until some list names it.",
-            "Insiemi di pattern di URL con un nome. Un gruppo è un'abbreviazione, mai una \
-             concessione: definirne uno non autorizza nessuno finché una lista non lo nomina.",
+            "Named sets of people. A group is abbreviation, never a grant: defining one \
+             authorizes nobody until a scope names it.",
+            "Insiemi di persone con un nome. Un gruppo è un\u{2019}abbreviazione, mai una \
+             concessione: definirne uno non autorizza nessuno finché uno scope non lo nomina.",
         ),
-        K::SitesIntro => m(
+        K::AppsIntro => m(
             lang,
-            "URL areas, in file order. First match wins: the first site whose urls cover a \
-             request answers for it, even if it grants nothing. Specific sites go first.",
-            "Aree di URL, nell'ordine del file. Vince la prima corrispondenza: risponde il \
-             primo site le cui urls coprono la richiesta, anche se non concede nulla. I \
-             site specifici vanno prima.",
+            "The places, and who reaches them. Every grant in the file is written here. \
+             Applications partition the URL space: no two areas overlap, and a URL no \
+             application covers is reachable by nobody.",
+            "I posti, e chi li raggiunge. Ogni concessione del file è scritta qui. Le \
+             applicazioni partizionano lo spazio degli URL: due aree non si sovrappongono \
+             mai, e un URL che nessuna applicazione copre non è raggiungibile da nessuno.",
+        ),
+        K::ScopesIntro => m(
+            lang,
+            "In file order, and the order is the meaning: first match wins, so the first \
+             scope whose urls cover a request answers for it, even if it grants nothing. \
+             Put the narrow, stricter scope first.",
+            "Nell\u{2019}ordine del file, e l\u{2019}ordine è il significato: vince la prima \
+             corrispondenza, quindi risponde il primo scope le cui urls coprono la richiesta, \
+             anche se non concede nulla. Lo scope stretto e severo va prima.",
         ),
         K::DeniedIntro => m(
             lang,
-            "A veto by email. It outranks every grant, on every credential — and it is not \
-             the same as deleting the user's row.",
-            "Un veto per email. Batte ogni concessione, su ogni credenziale — e non equivale \
-             a cancellare la riga dell'utente.",
+            "A veto. It outranks every grant, on every credential, and it is not the same as \
+             deleting the user\u{2019}s row. An enrolled user is vetoed by uuid, so every \
+             email they hold goes with it; a stranger is vetoed by the email itself.",
+            "Un veto. Batte ogni concessione, su ogni credenziale, e non equivale a cancellare \
+             la riga dell\u{2019}utente. Un utente iscritto si veta per uuid, quindi ci vanno \
+             dietro tutte le sue email; uno sconosciuto si veta con l\u{2019}email stessa.",
         ),
-        K::AlsoEnrolled => m(lang, "also in users", "anche in users"),
         K::CanIntro => m(
             lang,
             "Would this credential reach this URL? Answered by the gate's own decision \
@@ -854,32 +921,58 @@ fn t(lang: Lang, key: K) -> &'static str {
         K::Submit => m(lang, "Check", "Verifica"),
         K::Authorized => m(lang, "AUTHORIZED", "AUTORIZZATO"),
         K::VerdictDenied => m(lang, "DENIED", "NEGATO"),
-        K::WhySiteGrant => m(
+        K::WhyAnonymousGrant => m(
             lang,
-            "is public_auth: any identity Cognito vouches for reaches this URL, enrolled or \
-             not. The roster is not consulted.",
-            "è public_auth: ogni identità garantita da Cognito raggiunge questo URL, iscritta \
-             o no. Il roster non viene consultato.",
+            "is anonymous: it grants with no credential at all, so this URL is open to \
+             everyone and the 204 names nobody.",
+            "è anonimo: concede senza alcuna credenziale, quindi questo URL è aperto a tutti \
+             e il 204 non nomina nessuno.",
         ),
-        K::WhyRosterGrant => m(
+        K::WhyGranted => m(
             lang,
-            "is enrolled, and this URL is inside their authorized_urls.",
-            "è iscritto e questo URL è dentro i suoi authorized_urls.",
+            "admits this credential.",
+            "ammette questa credenziale.",
         ),
         K::WhyVetoed => m(
             lang,
             "is on the denied list, which outranks every grant.",
             "è nella lista denied, che batte ogni concessione.",
         ),
-        K::WhyOutOfScope => m(
+        K::WhyNoApplication => m(
             lang,
-            "is outside their authorized_urls, and no public_auth site covers it.",
-            "è fuori dai loro authorized_urls, e nessun site public_auth lo copre.",
+            "is inside no application\u{2019}s area, so nobody reaches it, with any credential.",
+            "non è dentro l\u{2019}area di nessuna applicazione, quindi non lo raggiunge \
+             nessuno, con nessuna credenziale.",
+        ),
+        K::WhyNoScope => m(
+            lang,
+            "owns this URL but has no scope covering it.",
+            "possiede questo URL ma non ha uno scope che lo copra.",
+        ),
+        K::WhyUnauthenticated => m(
+            lang,
+            "wants an identity, and the request carried no credential.",
+            "vuole un\u{2019}identità, e la richiesta non portava credenziali.",
+        ),
+        K::WhyCredentialRefused => m(
+            lang,
+            "does not admit this class of credential.",
+            "non ammette questa classe di credenziale.",
         ),
         K::WhyNotEnrolled => m(
             lang,
-            "is not in users, and no public_auth site covers this URL.",
-            "non è in users, e nessun site public_auth copre questo URL.",
+            "is in no users entry, and this scope admits only the people it lists.",
+            "non è in nessuna voce users, e questo scope ammette solo le persone che elenca.",
+        ),
+        K::WhyNotMember => m(
+            lang,
+            "does not list this user.",
+            "non elenca questo utente.",
+        ),
+        K::WhyKeyOutOfScope => m(
+            lang,
+            "is not among the scopes this key restricted itself to.",
+            "non è tra gli scope a cui questa chiave si è ristretta.",
         ),
         K::AppSees => m(lang, "the application sees", "l'applicazione vede"),
         K::NoIdentityTitle => m(lang, "No identity header", "Nessun header di identità"),
@@ -941,52 +1034,106 @@ fn t(lang: Lang, key: K) -> &'static str {
         K::Cancel => m(lang, "cancel", "annulla"),
         K::MoveUp => m(lang, "move up", "sposta su"),
         K::MoveDown => m(lang, "move down", "sposta giù"),
-        K::ScopeHelp => m(
-            lang,
-            "One URL pattern per line. A group reference is a line of its own, written \
-             '@name' exactly as in the file. Blank lines are dropped.",
-            "Un pattern di URL per riga. Un riferimento a un gruppo è una riga a sé, scritta \
-             '@nome' esattamente come nel file. Le righe vuote vengono scartate.",
-        ),
-        K::ScopeEmptyMeans => m(
-            lang,
-            "Empty reaches nothing — access is enumerated, never assumed. Everything is the \
-             explicit pattern",
-            "Vuoto non raggiunge nulla — l'accesso si enumera, non si presume. Tutto è il \
-             pattern esplicito",
-        ),
         K::KeyScopeInherit => m(
             lang,
-            "inherit the user's scope",
-            "eredita lo scope dell'utente",
+            "everything its owner reaches",
+            "tutto ciò che raggiunge il proprietario",
         ),
-        K::KeyScopeOwn => m(lang, "its own scope", "scope proprio"),
-        K::KeyScopeOwnEmpty => m(
+        K::KeyScopesHelp => m(
             lang,
-            "An own scope with no patterns is not the same as inheriting: it reaches nothing.",
-            "Uno scope proprio senza pattern non equivale a ereditare: non raggiunge nulla.",
+            "One 'application/scope' per line, and a restriction rather than a grant: it can \
+             only subtract from what the owner already reaches. Empty means all of them.",
+            "Un 'applicazione/scope' per riga, ed è una restrizione, non una concessione: può \
+             solo sottrarre a ciò che il proprietario già raggiunge. Vuoto vuol dire tutti.",
         ),
-        K::SiteUrlsHelp => m(
+        K::ScopeUrlsHelp => m(
             lang,
-            "The URL area this record answers for. First match wins, so a broad site listed \
-             early silences the ones below it.",
-            "L'area di URL per cui risponde questo record. Vince la prima corrispondenza, \
-             quindi un site ampio messo presto zittisce quelli sotto.",
+            "One URL pattern per line. Every one of them must lie inside the application's \
+             base, and first match wins, so a broad scope listed early silences the ones \
+             below it.",
+            "Un pattern di URL per riga. Ognuno deve stare dentro la base \
+             dell\u{2019}applicazione, e vince la prima corrispondenza, quindi uno scope ampio \
+             messo presto zittisce quelli sotto.",
         ),
-        K::PublicAuthWarn => m(
+        K::BaseHelp => m(
+            lang,
+            "One literal URL prefix per line, with no wildcards: this is the area the \
+             application owns. No two applications may overlap, and every scope pattern must \
+             lie inside one of these.",
+            "Un prefisso di URL letterale per riga, senza wildcard: è l\u{2019}area che \
+             l\u{2019}applicazione possiede. Due applicazioni non possono sovrapporsi, e ogni \
+             pattern di scope deve stare dentro uno di questi.",
+        ),
+        K::LoginUrlHelp => m(
+            lang,
+            "The sign-in page for this whole area, overriding BB_AUTH_LOGIN_URL. Absolute \
+             https. Empty uses the global one.",
+            "La pagina di accesso per tutta quest\u{2019}area, che sostituisce \
+             BB_AUTH_LOGIN_URL. Https assoluto. Vuoto usa quella globale.",
+        ),
+        K::AccessHelp => m(
+            lang,
+            "What this scope asks of an identity. It is required and has no default, because \
+             it decides everything.",
+            "Cosa chiede questo scope a un\u{2019}identità. È obbligatorio e non ha default, \
+             perché decide tutto.",
+        ),
+        K::CredentialsHelp => m(
+            lang,
+            "Which classes of credential may exercise this grant. Neither ticked means both, \
+             which is what an absent field says in the file.",
+            "Quali classi di credenziale possono esercitare questa concessione. Nessuna delle \
+             due spuntate vuol dire entrambe, che è ciò che dice un campo assente nel file.",
+        ),
+        K::MembersHelp => m(
+            lang,
+            "One per line: an email or a uuid for a person, '@name' for a group. An email is \
+             resolved to the uuid the file stores.",
+            "Uno per riga: un\u{2019}email o un uuid per una persona, '@nome' per un gruppo. \
+             Un\u{2019}email viene risolta nell\u{2019}uuid che il file memorizza.",
+        ),
+        K::AnonymousWarn => m(
+            lang,
+            "no credential at all is asked for: these urls are open to everyone, and the 204 \
+             names nobody. Note that denied does not reach here, because a vetoed client would \
+             simply send nothing.",
+            "non viene chiesta alcuna credenziale: questi urls sono aperti a tutti, e il 204 \
+             non nomina nessuno. Nota che denied non arriva fin qui, perché un client vetato \
+             basterebbe che non mandasse nulla.",
+        ),
+        K::AuthenticatedWarn => m(
             lang,
             "any identity Cognito vouches for reaches these urls, enrolled or not, and the \
              roster is not consulted. Self-signup is open, so that means anyone who can \
              register: the right grant for an onboarding area, the wrong one for anything else.",
             "ogni identità garantita da Cognito raggiunge questi urls, iscritta o no, e il \
              roster non viene consultato. La registrazione è aperta, quindi vuol dire chiunque \
-             possa registrarsi: la concessione giusta per un'area di onboarding, sbagliata per \
-             tutto il resto.",
+             possa registrarsi: la concessione giusta per un\u{2019}area di onboarding, \
+             sbagliata per tutto il resto.",
         ),
-        K::GroupUrlsHelp => m(
+        K::WarnShadowed => m(
             lang,
-            "The patterns this name stands for. A group cannot reference another group.",
-            "I pattern per cui sta questo nome. Un gruppo non può referenziarne un altro.",
+            "unreachable: an earlier scope of this application already covers every url it \
+             has",
+            "irraggiungibile: uno scope precedente di questa applicazione copre già ogni url \
+             che ha",
+        ),
+        K::WarnNoMembers => m(
+            lang,
+            "restricted and lists nobody: it admits no one",
+            "ristretto e non elenca nessuno: non ammette nessuno",
+        ),
+        K::UnknownMember => m(
+            lang,
+            "matches no roster row",
+            "non corrisponde a nessuna riga del roster",
+        ),
+        K::GroupMembersHelp => m(
+            lang,
+            "The people this name stands for, one per line, by email or uuid. A group cannot \
+             reference another group.",
+            "Le persone per cui sta questo nome, una per riga, per email o uuid. Un gruppo non \
+             può referenziarne un altro.",
         ),
         K::GroupNoRename => m(
             lang,
@@ -996,7 +1143,6 @@ fn t(lang: Lang, key: K) -> &'static str {
              esatta grafia. Aggiungi il nuovo nome, sposta i riferimenti, poi rimuovi il \
              vecchio.",
         ),
-        K::NewEmail => m(lang, "email (rename)", "email (rinomina)"),
         K::NewName => m(lang, "name (rename)", "nome (rinomina)"),
 
         K::ConfirmUserRm => m(
@@ -1021,7 +1167,21 @@ fn t(lang: Lang, key: K) -> &'static str {
             "Viene generato un nuovo bearer, mostrato una volta sola, qui. Il vecchio smette \
              di funzionare al prossimo reload — ed è per questo che è la risposta a una fuga.",
         ),
-        K::ConfirmSiteRm => m(
+        K::ConfirmScopeRm => m(
+            lang,
+            "Removing this scope takes away every grant it made, and the scope after it \
+             starts answering for the urls it covered.",
+            "Rimuovere questo scope toglie ogni concessione che faceva, e lo scope successivo \
+             comincia a rispondere per gli urls che copriva.",
+        ),
+        K::ConfirmEmailRm => m(
+            lang,
+            "This address stops signing in as this user. The identity, its groups and its \
+             keys stay exactly as they are.",
+            "Questo indirizzo smette di accedere come questo utente. L\u{2019}identita, i suoi \
+             gruppi e le sue chiavi restano esattamente come sono.",
+        ),
+        K::ConfirmAppRm => m(
             lang,
             "If it was public_auth, the identities it let in with no roster entry now reach \
              nothing.",
@@ -1081,7 +1241,8 @@ fn t(lang: Lang, key: K) -> &'static str {
             "quell'email è già in denied",
         ),
         K::NoSuchKey => m(lang, "no such api key", "api key inesistente"),
-        K::NoSuchSite => m(lang, "no such site", "site inesistente"),
+        K::NoSuchApp => m(lang, "no such application", "applicazione inesistente"),
+        K::NoSuchScope => m(lang, "no such scope", "scope inesistente"),
         K::NoSuchGroup => m(lang, "no such url group", "url group inesistente"),
         K::NoSuchDenied => m(
             lang,
@@ -1153,10 +1314,13 @@ fn t(lang: Lang, key: K) -> &'static str {
         K::MsgUserRemoved => m(lang, "user removed", "utente rimosso"),
         K::MsgKeySaved => m(lang, "api key saved", "api key salvata"),
         K::MsgKeyRemoved => m(lang, "api key removed", "api key rimossa"),
-        K::MsgSiteAdded => m(lang, "site added", "site aggiunto"),
-        K::MsgSiteSaved => m(lang, "site saved", "site salvato"),
-        K::MsgSiteRemoved => m(lang, "site removed", "site rimosso"),
-        K::MsgSiteMoved => m(lang, "site moved", "site spostato"),
+        K::MsgAppAdded => m(lang, "application added", "applicazione aggiunta"),
+        K::MsgAppSaved => m(lang, "application saved", "applicazione salvata"),
+        K::MsgAppRemoved => m(lang, "application removed", "applicazione rimossa"),
+        K::MsgScopeAdded => m(lang, "scope added", "scope aggiunto"),
+        K::MsgScopeSaved => m(lang, "scope saved", "scope salvato"),
+        K::MsgScopeRemoved => m(lang, "scope removed", "scope rimosso"),
+        K::MsgScopeMoved => m(lang, "scope moved", "scope spostato"),
         K::MsgGroupAdded => m(lang, "url group added", "url group aggiunto"),
         K::MsgGroupSaved => m(lang, "url group saved", "url group salvato"),
         K::MsgGroupRemoved => m(lang, "url group removed", "url group rimosso"),
@@ -1178,10 +1342,13 @@ enum Msg {
     UserRemoved,
     KeySaved,
     KeyRemoved,
-    SiteAdded,
-    SiteSaved,
-    SiteRemoved,
-    SiteMoved,
+    AppAdded,
+    AppSaved,
+    AppRemoved,
+    ScopeAdded,
+    ScopeSaved,
+    ScopeRemoved,
+    ScopeMoved,
     GroupAdded,
     GroupSaved,
     GroupRemoved,
@@ -1199,10 +1366,13 @@ impl Msg {
             Msg::UserRemoved => "user-removed",
             Msg::KeySaved => "key-saved",
             Msg::KeyRemoved => "key-removed",
-            Msg::SiteAdded => "site-added",
-            Msg::SiteSaved => "site-saved",
-            Msg::SiteRemoved => "site-removed",
-            Msg::SiteMoved => "site-moved",
+            Msg::AppAdded => "app-added",
+            Msg::AppSaved => "app-saved",
+            Msg::AppRemoved => "app-removed",
+            Msg::ScopeAdded => "scope-added",
+            Msg::ScopeSaved => "scope-saved",
+            Msg::ScopeRemoved => "scope-removed",
+            Msg::ScopeMoved => "scope-moved",
             Msg::GroupAdded => "group-added",
             Msg::GroupSaved => "group-saved",
             Msg::GroupRemoved => "group-removed",
@@ -1219,10 +1389,13 @@ impl Msg {
             Msg::UserRemoved,
             Msg::KeySaved,
             Msg::KeyRemoved,
-            Msg::SiteAdded,
-            Msg::SiteSaved,
-            Msg::SiteRemoved,
-            Msg::SiteMoved,
+            Msg::AppAdded,
+            Msg::AppSaved,
+            Msg::AppRemoved,
+            Msg::ScopeAdded,
+            Msg::ScopeSaved,
+            Msg::ScopeRemoved,
+            Msg::ScopeMoved,
             Msg::GroupAdded,
             Msg::GroupSaved,
             Msg::GroupRemoved,
@@ -1242,10 +1415,13 @@ impl Msg {
                 Msg::UserRemoved => K::MsgUserRemoved,
                 Msg::KeySaved => K::MsgKeySaved,
                 Msg::KeyRemoved => K::MsgKeyRemoved,
-                Msg::SiteAdded => K::MsgSiteAdded,
-                Msg::SiteSaved => K::MsgSiteSaved,
-                Msg::SiteRemoved => K::MsgSiteRemoved,
-                Msg::SiteMoved => K::MsgSiteMoved,
+                Msg::AppAdded => K::MsgAppAdded,
+                Msg::AppSaved => K::MsgAppSaved,
+                Msg::AppRemoved => K::MsgAppRemoved,
+                Msg::ScopeAdded => K::MsgScopeAdded,
+                Msg::ScopeSaved => K::MsgScopeSaved,
+                Msg::ScopeRemoved => K::MsgScopeRemoved,
+                Msg::ScopeMoved => K::MsgScopeMoved,
                 Msg::GroupAdded => K::MsgGroupAdded,
                 Msg::GroupSaved => K::MsgGroupSaved,
                 Msg::GroupRemoved => K::MsgGroupRemoved,
@@ -1384,7 +1560,7 @@ impl Config {
 
 /// A page. The four section routes are the access file's four sections, which is the whole
 /// navigation: what the file has, the GUI has a tab for. Everything else is a form, a
-/// confirmation, or the one `POST`-only route ([`Route::SiteMove`]).
+/// confirmation, or the one `POST`-only route ([`Route::ScopeMove`]).
 ///
 /// A route that mutates is reached by `POST` on **the same path** that renders its form by
 /// `GET`, which is what makes "re-render this form with the library's refusal" a matter of
@@ -1393,27 +1569,41 @@ impl Config {
 #[derive(Clone, PartialEq, Eq, Debug)]
 enum Route {
     Dashboard,
+    /// The applications, which is where every grant in the file is written.
+    Apps,
+    /// One application and its scopes, in file order.
+    App(String),
+    /// The user groups.
     Groups,
-    Sites,
     Denied,
     Users,
-    /// One roster row.
+    /// One roster row, addressed by its uuid: the identity is what the file references,
+    /// and an email can be added or dropped without the page moving.
     User(String),
     Can,
+
+    AppAdd,
+    AppEdit(String),
+    AppRm(String),
+    /// A scope is named by its application and its own name, which is exactly how the file
+    /// and both editors name it: `app/scope`.
+    ScopeAdd(String),
+    ScopeEdit(String, String),
+    ScopeRm(String, String),
+    /// `POST` only: a per-row button, so there is nothing to render on a `GET`.
+    ScopeMove(String, String),
 
     UserAdd,
     UserEdit(String),
     UserRm(String),
+    /// An identifier is added and dropped on its own, because that is what replaced a
+    /// rename: the identity never changes.
+    EmailAdd(String),
+    EmailRm(String, String),
     KeyAdd(String),
     KeyEdit(String, String),
     KeyRotate(String, String),
     KeyRm(String, String),
-
-    SiteAdd,
-    SiteEdit(String),
-    SiteRm(String),
-    /// `POST` only: a per-row button, so there is nothing to render on a `GET`.
-    SiteMove(String),
 
     GroupAdd,
     GroupEdit(String),
@@ -1440,25 +1630,31 @@ impl Route {
         let seg = pct_encode_segment;
         match self {
             Route::Dashboard => "/".to_string(),
+            Route::Apps => "/apps".to_string(),
+            Route::App(a) => format!("/apps/{}", seg(a)),
             Route::Groups => "/groups".to_string(),
-            Route::Sites => "/sites".to_string(),
             Route::Denied => "/denied".to_string(),
             Route::Users => "/users".to_string(),
-            Route::User(e) => format!("/users/{}", seg(e)),
+            Route::User(u) => format!("/users/{}", seg(u)),
             Route::Can => "/can".to_string(),
 
-            Route::UserAdd => format!("/users/{ACTION_ADD}"),
-            Route::UserEdit(e) => format!("/users/{}/edit", seg(e)),
-            Route::UserRm(e) => format!("/users/{}/rm", seg(e)),
-            Route::KeyAdd(e) => format!("/users/{}/keys/{ACTION_ADD}", seg(e)),
-            Route::KeyEdit(e, i) => format!("/users/{}/keys/{}/edit", seg(e), seg(i)),
-            Route::KeyRotate(e, i) => format!("/users/{}/keys/{}/rotate", seg(e), seg(i)),
-            Route::KeyRm(e, i) => format!("/users/{}/keys/{}/rm", seg(e), seg(i)),
+            Route::AppAdd => format!("/apps/{ACTION_ADD}"),
+            Route::AppEdit(a) => format!("/apps/{}/edit", seg(a)),
+            Route::AppRm(a) => format!("/apps/{}/rm", seg(a)),
+            Route::ScopeAdd(a) => format!("/apps/{}/scopes/{ACTION_ADD}", seg(a)),
+            Route::ScopeEdit(a, s) => format!("/apps/{}/scopes/{}/edit", seg(a), seg(s)),
+            Route::ScopeRm(a, s) => format!("/apps/{}/scopes/{}/rm", seg(a), seg(s)),
+            Route::ScopeMove(a, s) => format!("/apps/{}/scopes/{}/move", seg(a), seg(s)),
 
-            Route::SiteAdd => format!("/sites/{ACTION_ADD}"),
-            Route::SiteEdit(n) => format!("/sites/{}/edit", seg(n)),
-            Route::SiteRm(n) => format!("/sites/{}/rm", seg(n)),
-            Route::SiteMove(n) => format!("/sites/{}/move", seg(n)),
+            Route::UserAdd => format!("/users/{ACTION_ADD}"),
+            Route::UserEdit(u) => format!("/users/{}/edit", seg(u)),
+            Route::UserRm(u) => format!("/users/{}/rm", seg(u)),
+            Route::EmailAdd(u) => format!("/users/{}/emails/{ACTION_ADD}", seg(u)),
+            Route::EmailRm(u, e) => format!("/users/{}/emails/{}/rm", seg(u), seg(e)),
+            Route::KeyAdd(u) => format!("/users/{}/keys/{ACTION_ADD}", seg(u)),
+            Route::KeyEdit(u, i) => format!("/users/{}/keys/{}/edit", seg(u), seg(i)),
+            Route::KeyRotate(u, i) => format!("/users/{}/keys/{}/rotate", seg(u), seg(i)),
+            Route::KeyRm(u, i) => format!("/users/{}/keys/{}/rm", seg(u), seg(i)),
 
             Route::GroupAdd => format!("/groups/{ACTION_ADD}"),
             Route::GroupEdit(n) => format!("/groups/{}/edit", seg(n)),
@@ -1480,6 +1676,8 @@ impl Route {
             | Route::UserAdd
             | Route::UserEdit(_)
             | Route::UserRm(_)
+            | Route::EmailAdd(_)
+            | Route::EmailRm(..)
             | Route::KeyAdd(_)
             | Route::KeyEdit(..)
             | Route::KeyRotate(..)
@@ -1487,9 +1685,14 @@ impl Route {
             | Route::Denied
             | Route::DenyAdd
             | Route::DenyRm(_) => Route::Users,
-            Route::SiteAdd | Route::SiteEdit(_) | Route::SiteRm(_) | Route::SiteMove(_) => {
-                Route::Sites
-            }
+            Route::App(_)
+            | Route::AppAdd
+            | Route::AppEdit(_)
+            | Route::AppRm(_)
+            | Route::ScopeAdd(_)
+            | Route::ScopeEdit(..)
+            | Route::ScopeRm(..)
+            | Route::ScopeMove(..) => Route::Apps,
             Route::GroupAdd | Route::GroupEdit(_) | Route::GroupRm(_) => Route::Groups,
             other => other.clone(),
         }
@@ -1499,16 +1702,25 @@ impl Route {
     /// back: the page this route was reached *from*.
     fn parent(&self) -> Route {
         match self {
-            Route::UserEdit(e)
-            | Route::UserRm(e)
-            | Route::KeyAdd(e)
-            | Route::KeyEdit(e, _)
-            | Route::KeyRotate(e, _)
-            | Route::KeyRm(e, _) => Route::User(e.clone()),
+            Route::UserEdit(u)
+            | Route::UserRm(u)
+            | Route::EmailAdd(u)
+            | Route::EmailRm(u, _)
+            | Route::KeyAdd(u)
+            | Route::KeyEdit(u, _)
+            | Route::KeyRotate(u, _)
+            | Route::KeyRm(u, _) => Route::User(u.clone()),
             Route::UserAdd => Route::Users,
-            Route::SiteAdd | Route::SiteEdit(_) | Route::SiteRm(_) | Route::SiteMove(_) => {
-                Route::Sites
-            }
+            // A scope's form was reached from its application's page, which is the only
+            // place a scope is ever listed: order is meaning there, so it is where an
+            // operator needs to land back.
+            Route::ScopeAdd(a)
+            | Route::ScopeEdit(a, _)
+            | Route::ScopeRm(a, _)
+            | Route::ScopeMove(a, _)
+            | Route::AppEdit(a)
+            | Route::AppRm(a) => Route::App(a.clone()),
+            Route::AppAdd => Route::Apps,
             Route::GroupAdd | Route::GroupEdit(_) | Route::GroupRm(_) => Route::Groups,
             Route::DenyAdd | Route::DenyRm(_) => Route::Denied,
             other => other.clone(),
@@ -1523,8 +1735,8 @@ impl Route {
         match self {
             Route::Denied | Route::DenyAdd | Route::DenyRm(_) => "denied",
             _ => match self.tab() {
-                Route::Groups => "url_groups",
-                Route::Sites => "sites",
+                Route::Groups => "user_groups",
+                Route::Apps => "applications",
                 Route::Users => "users",
                 Route::Can => "can",
                 _ => "bb-auth-web",
@@ -1568,19 +1780,25 @@ fn route(path: &str, base: &str) -> Option<Route> {
 
         ["users"] => Some(Route::Users),
         ["users", ACTION_ADD] => Some(Route::UserAdd),
-        ["users", e] if !e.is_empty() => Some(Route::User(s(e))),
-        ["users", e, "edit"] if !e.is_empty() => Some(Route::UserEdit(s(e))),
-        ["users", e, "rm"] if !e.is_empty() => Some(Route::UserRm(s(e))),
-        ["users", e, "keys", ACTION_ADD] if !e.is_empty() => Some(Route::KeyAdd(s(e))),
-        ["users", e, "keys", i, "edit"] if !e.is_empty() => Some(Route::KeyEdit(s(e), s(i))),
-        ["users", e, "keys", i, "rotate"] if !e.is_empty() => Some(Route::KeyRotate(s(e), s(i))),
-        ["users", e, "keys", i, "rm"] if !e.is_empty() => Some(Route::KeyRm(s(e), s(i))),
+        ["users", u] if !u.is_empty() => Some(Route::User(s(u))),
+        ["users", u, "edit"] if !u.is_empty() => Some(Route::UserEdit(s(u))),
+        ["users", u, "rm"] if !u.is_empty() => Some(Route::UserRm(s(u))),
+        ["users", u, "emails", ACTION_ADD] if !u.is_empty() => Some(Route::EmailAdd(s(u))),
+        ["users", u, "emails", e, "rm"] if !u.is_empty() => Some(Route::EmailRm(s(u), s(e))),
+        ["users", u, "keys", ACTION_ADD] if !u.is_empty() => Some(Route::KeyAdd(s(u))),
+        ["users", u, "keys", i, "edit"] if !u.is_empty() => Some(Route::KeyEdit(s(u), s(i))),
+        ["users", u, "keys", i, "rotate"] if !u.is_empty() => Some(Route::KeyRotate(s(u), s(i))),
+        ["users", u, "keys", i, "rm"] if !u.is_empty() => Some(Route::KeyRm(s(u), s(i))),
 
-        ["sites"] => Some(Route::Sites),
-        ["sites", ACTION_ADD] => Some(Route::SiteAdd),
-        ["sites", n, "edit"] if !n.is_empty() => Some(Route::SiteEdit(s(n))),
-        ["sites", n, "rm"] if !n.is_empty() => Some(Route::SiteRm(s(n))),
-        ["sites", n, "move"] if !n.is_empty() => Some(Route::SiteMove(s(n))),
+        ["apps"] => Some(Route::Apps),
+        ["apps", ACTION_ADD] => Some(Route::AppAdd),
+        ["apps", a] if !a.is_empty() => Some(Route::App(s(a))),
+        ["apps", a, "edit"] if !a.is_empty() => Some(Route::AppEdit(s(a))),
+        ["apps", a, "rm"] if !a.is_empty() => Some(Route::AppRm(s(a))),
+        ["apps", a, "scopes", ACTION_ADD] if !a.is_empty() => Some(Route::ScopeAdd(s(a))),
+        ["apps", a, "scopes", n, "edit"] if !a.is_empty() => Some(Route::ScopeEdit(s(a), s(n))),
+        ["apps", a, "scopes", n, "rm"] if !a.is_empty() => Some(Route::ScopeRm(s(a), s(n))),
+        ["apps", a, "scopes", n, "move"] if !a.is_empty() => Some(Route::ScopeMove(s(a), s(n))),
 
         ["groups"] => Some(Route::Groups),
         ["groups", ACTION_ADD] => Some(Route::GroupAdd),
@@ -1980,7 +2198,7 @@ fn shell(v: &View, title: &str, content: Markup) -> Markup {
     let tabs = [
         (Route::Dashboard, v.t(K::Dashboard)),
         (Route::Groups, v.t(K::Groups)),
-        (Route::Sites, v.t(K::Sites)),
+        (Route::Apps, v.t(K::Apps)),
         (Route::Users, v.t(K::Users)),
         (Route::Can, v.t(K::Can)),
     ];
@@ -2362,56 +2580,70 @@ fn expiry_markup(lang: Lang, e: &Expiry) -> Markup {
 // ---------------------------------------------------------------------------
 
 /// The emails on `denied`, normalised — every page that marks one needs this set.
-fn denied_set(doc: &AccessFile) -> Vec<String> {
-    doc.denied.iter().map(|d| norm_email(d)).collect()
-}
-
-/// Whether a scope grants nothing: absent, empty, or nothing but blank entries (which
-/// `compile_access` drops).
-fn scope_is_empty(urls: Option<&Vec<String>>) -> bool {
-    urls.is_none_or(|l| l.iter().all(|u| u.trim().is_empty()))
+/// How a uuid appears to an operator wherever a members list is rendered, or wherever a
+/// route's own uuid needs a friendly heading: the roster's own label if the row still
+/// exists, else the uuid itself — a dangling reference is shown for what it is rather than
+/// hidden.
+fn label_of(doc: &AccessFile, key: &str) -> String {
+    let key = key.trim().to_ascii_lowercase();
+    match user_pos(doc, &key) {
+        Some(i) => user_label(&doc.users[i]),
+        None => key,
+    }
 }
 
 /// `/` — the counts, what expires next, and everything the file says that an operator would
 /// rather hear now than at 3am.
 ///
-/// The warnings are computed from library data only ([`url_group_refs`], the scopes, the
-/// `denied` list). `bb-auth-adm check`'s site-shadowing lint deliberately stays in the CLI:
-/// it is a heuristic with an operator to explain itself to, and duplicating it here would
-/// mean two implementations of a judgement call.
-fn page_dashboard(v: &View, doc: &AccessFile) -> Markup {
+/// The warnings are computed from library data only: [`Access::scopes_for`], the compiled
+/// scopes (for shadowing and empty-membership), [`user_group_refs`] and [`Access::denied_users`].
+/// Shadowing is a heuristic an earlier version of this doc comment kept out of the GUI on
+/// the grounds that it needed an operator to explain itself to; it earns its place here
+/// because the alternative — a scope that answers for nothing and nobody notices — is worse.
+fn page_dashboard(v: &View, doc: &AccessFile, access: &Access) -> Markup {
     let n = now();
+    let scope_count: usize = doc.applications.iter().map(|a| a.scopes.len()).sum();
     let key_count: usize = doc.users.iter().map(|u| u.api_keys.len()).sum();
 
     // Every key in the file, soonest expiry first.
-    let mut keys: Vec<(String, &ApiKeySpec, Expiry)> = doc
+    let mut keys: Vec<(&UserSpec, &ApiKeySpec, Expiry)> = doc
         .users
         .iter()
-        .flat_map(|u| {
-            u.api_keys
-                .iter()
-                .map(move |k| (norm_email(&u.email), k, expiry_of(k, n)))
-        })
+        .flat_map(|u| u.api_keys.iter().map(move |k| (u, k, expiry_of(k, n))))
         .collect();
     keys.sort_by_key(|(_, _, e)| e.rank());
 
-    let denied = denied_set(doc);
     let mut warnings: Vec<Markup> = Vec::new();
-    for u in &doc.users {
-        if scope_is_empty(u.authorized_urls.as_ref()) {
-            let email = norm_email(&u.email);
-            warnings.push(html! { code { (email) } " " (v.t(K::WarnNoScope)) });
+    for (ai, a) in doc.applications.iter().enumerate() {
+        for (si, s) in a.scopes.iter().enumerate() {
+            if scope_shadowed(access, ai, &s.urls, si) {
+                warnings.push(html! {
+                    code { (a.name.trim()) "/" (s.name.trim()) } " " (v.t(K::WarnShadowed))
+                });
+            }
         }
     }
-    for name in doc.url_groups.keys() {
-        if url_group_refs(doc, name).is_empty() {
+    for a in &access.apps {
+        for s in &a.scopes {
+            if s.access == bb_auth_core::AccessKind::Restricted && s.members.is_empty() {
+                warnings.push(html! {
+                    code { (a.name) "/" (s.name) } " " (v.t(K::WarnNoMembers))
+                });
+            }
+        }
+    }
+    for u in &doc.users {
+        let uuid = u.uuid.trim().to_ascii_lowercase();
+        if access.scopes_for(&uuid).is_empty() {
+            warnings.push(html! { code { (user_label(u)) } " " (v.t(K::WarnNoScope)) });
+        }
+        if access.denied_users.contains(&uuid) {
+            warnings.push(html! { code { (user_label(u)) } " " (v.t(K::WarnEnrolledAndDenied)) });
+        }
+    }
+    for name in doc.user_groups.keys() {
+        if user_group_refs(doc, name).is_empty() {
             warnings.push(html! { code { "@" (name) } " " (v.t(K::ReferencedByNothing)) });
-        }
-    }
-    for u in &doc.users {
-        let email = norm_email(&u.email);
-        if denied.contains(&email) {
-            warnings.push(html! { code { (email) } " " (v.t(K::WarnEnrolledAndDenied)) });
         }
     }
 
@@ -2422,10 +2654,11 @@ fn page_dashboard(v: &View, doc: &AccessFile) -> Markup {
         h2 { (v.t(K::Counts)) }
         div class="cards" {
             @for (label, count, route) in [
+                ("applications", doc.applications.len(), Some(Route::Apps)),
+                ("scopes", scope_count, None),
                 ("users", doc.users.len(), Some(Route::Users)),
                 ("api_keys", key_count, None),
-                ("sites", doc.sites.len(), Some(Route::Sites)),
-                ("url_groups", doc.url_groups.len(), Some(Route::Groups)),
+                ("user_groups", doc.user_groups.len(), Some(Route::Groups)),
                 ("denied", doc.denied.len(), Some(Route::Denied)),
             ] {
                 @if let Some(r) = &route {
@@ -2454,10 +2687,11 @@ fn page_dashboard(v: &View, doc: &AccessFile) -> Markup {
                         th { (v.t(K::ColExpiry)) }
                     } }
                     tbody {
-                        @for (email, k, e) in &keys {
+                        @for (u, k, e) in &keys {
+                            @let uuid = u.uuid.trim().to_ascii_lowercase();
                             tr {
                                 td data-label=(v.t(K::ColOwner)) {
-                                    a href=(v.href(&Route::User(email.clone()))) { (email) }
+                                    a href=(v.href(&Route::User(uuid))) { (user_label(u)) }
                                 }
                                 td class="mono" data-label="id" { (k.id.trim()) }
                                 td data-label=(v.t(K::ColExpiry)) { (expiry_markup(v.lang, e)) }
@@ -2479,9 +2713,27 @@ fn page_dashboard(v: &View, doc: &AccessFile) -> Markup {
     }
 }
 
+/// Does an earlier scope of the same application already cover every URL this one has?
+///
+/// A heuristic, not an enumeration of every possible request: each of this scope's own raw
+/// patterns is asked of an earlier scope's *compiled* matcher, so `https://x.com/*` is
+/// correctly seen to shadow `https://x.com/admin/*` even though the two strings differ. It
+/// can miss a shadow built from several earlier scopes whose patterns only jointly cover
+/// this one pattern-by-pattern rather than each covering it outright; that is the price of
+/// staying a straight read of compiled data rather than a second matcher.
+fn scope_shadowed(access: &Access, app_idx: usize, urls: &[String], scope_idx: usize) -> bool {
+    let earlier = &access.apps[app_idx].scopes[..scope_idx];
+    !urls.is_empty()
+        && !earlier.is_empty()
+        && urls
+            .iter()
+            .map(|u| u.trim())
+            .filter(|u| !u.is_empty())
+            .all(|u| earlier.iter().any(|s| s.urls.allows(Some(u))))
+}
+
 /// `/users` — the roster.
-fn page_users(v: &View, doc: &AccessFile) -> Markup {
-    let denied = denied_set(doc);
+fn page_users(v: &View, doc: &AccessFile, access: &Access) -> Markup {
     html! {
         h1 { (section_heading(v.t(K::Users), "users")) }
         p class="lede" { (v.t(K::UsersIntro)) }
@@ -2492,34 +2744,23 @@ fn page_users(v: &View, doc: &AccessFile) -> Markup {
             } @else {
                 table {
                     thead { tr {
-                        th { "email" }
-                        th { "authorized_urls" }
+                        th { (v.t(K::Emails)) }
                         th { "api_keys" }
                         th {}
                     } }
                     tbody {
                         @for u in &doc.users {
-                            @let email = norm_email(&u.email);
+                            @let uuid = u.uuid.trim().to_ascii_lowercase();
                             tr {
-                                td data-label="email" {
-                                    a href=(v.href(&Route::User(email.clone()))) { (email) }
-                                    @if denied.contains(&email) {
+                                td data-label=(v.t(K::Emails)) {
+                                    a href=(v.href(&Route::User(uuid.clone()))) { (user_label(u)) }
+                                    @if access.denied_users.contains(&uuid) {
                                         " " (tag("bad", "denied"))
-                                    }
-                                }
-                                // Raw entries, so an `@group` reference counts as the one
-                                // line it is in the file.
-                                td data-label="authorized_urls" {
-                                    @if scope_is_empty(u.authorized_urls.as_ref()) {
-                                        span class="bad" { (v.t(K::ReachesNothing)) }
-                                    } @else {
-                                        (u.authorized_urls.as_ref().map_or(0, Vec::len))
                                     }
                                 }
                                 td data-label="api_keys" { (u.api_keys.len()) }
                                 td class="pills" {
-                                    (act(v, &Route::UserEdit(email.clone()), v.t(K::Edit)))
-                                    (act_rm(v, &Route::UserRm(email.clone()), v.t(K::Remove)))
+                                    (act_rm(v, &Route::UserRm(uuid.clone()), v.t(K::Remove)))
                                 }
                             }
                         }
@@ -2541,48 +2782,77 @@ fn page_users(v: &View, doc: &AccessFile) -> Markup {
     }
 }
 
-/// `/users/{email}` — one roster row, as the file stores it.
-fn page_user(v: &View, doc: &AccessFile, email: &str) -> (u16, Markup) {
-    let u: &UserSpec = match user_pos(doc, email).map(|i| &doc.users[i]) {
+/// `/users/{uuid}` — one roster row, as the file stores it, plus the scopes computed from
+/// [`Access::scopes_for`]: membership only, so a user reached by an `anonymous` or
+/// `authenticated` scope is not listed here even though they get in — that is a property of
+/// the scope, not of them.
+fn page_user(v: &View, doc: &AccessFile, access: &Access, key: &str) -> (u16, Markup) {
+    let u: &UserSpec = match user_pos(doc, key).map(|i| &doc.users[i]) {
         Some(u) => u,
-        None => {
-            return (
-                404,
-                page_missing(v, v.t(K::NoSuchUser), email, &Route::Users),
-            )
-        }
+        None => return (404, page_missing(v, v.t(K::NoSuchUser), key, &Route::Users)),
     };
     let n = now();
-    let normalised = norm_email(&u.email);
-    let denied = denied_set(doc).contains(&normalised);
+    let uuid = u.uuid.trim().to_ascii_lowercase();
+    let denied = access.denied_users.contains(&uuid);
     let notes = u.extra.get("notes").and_then(|n| n.as_str());
+    let scopes = access.scopes_for(&uuid);
 
     (
         200,
         html! {
             h1 {
-                (normalised)
+                (user_label(u))
                 @if denied { " " (tag("bad", "denied")) }
             }
             p class="lede" {
                 a href=(v.href(&Route::Users)) { "← " (v.t(K::Back)) }
             }
             p class="pills" {
-                (act(v, &Route::UserEdit(normalised.clone()), v.t(K::Edit)))
-                (act_rm(v, &Route::UserRm(normalised.clone()), v.t(K::Remove)))
+                (act_rm(v, &Route::UserRm(uuid.clone()), v.t(K::Remove)))
             }
 
             @if let Some(notes) = notes {
                 div class="panel" { span class="muted mono" { "notes " } (notes) }
             }
 
-            h2 { "authorized_urls" }
+            h2 { (v.t(K::Uuid)) }
+            div class="panel" { span class="mono" { (uuid) } }
+
+            h2 { (v.t(K::Emails)) }
+            p class="primary" {
+                (act(v, &Route::EmailAdd(uuid.clone()), &format!("+ {}", v.t(K::AddEmail))))
+            }
             div class="panel" {
-                (url_list(v.lang, u.authorized_urls.as_ref(), t(v.lang, K::ReachesNothing)))
+                ul class="plain" {
+                    @for e in &u.emails {
+                        @let email = norm_email(e);
+                        li class="pills" {
+                            code { (email) }
+                            (act_rm(v, &Route::EmailRm(uuid.clone(), email.clone()), v.t(K::Remove)))
+                        }
+                    }
+                }
+            }
+
+            h2 { (section_heading(v.t(K::Scopes), "scopes")) }
+            div class="panel" {
+                @if scopes.is_empty() {
+                    span class="bad" { (v.t(K::InNoScope)) }
+                } @else {
+                    ul class="plain" {
+                        @for (a, s) in &scopes {
+                            li {
+                                a href=(v.href(&Route::App(a.name.clone()))) {
+                                    code { (a.name) "/" (s.name) }
+                                }
+                            }
+                        }
+                    }
+                }
             }
 
             h2 { "api_keys" }
-            p class="primary" { (act(v, &Route::KeyAdd(normalised.clone()), &format!("+ {}", v.t(K::Add)))) }
+            p class="primary" { (act(v, &Route::KeyAdd(uuid.clone()), &format!("+ {}", v.t(K::Add)))) }
             div class="panel" {
                 @if u.api_keys.is_empty() {
                     span class="muted" { (v.t(K::None)) }
@@ -2593,7 +2863,7 @@ fn page_user(v: &View, doc: &AccessFile, email: &str) -> (u16, Markup) {
                             th { "released" }
                             th { "duration" }
                             th { (v.t(K::ColExpiry)) }
-                            th { "authorized_urls" }
+                            th { (v.t(K::Scopes)) }
                             th {}
                         } }
                         tbody {
@@ -2606,19 +2876,15 @@ fn page_user(v: &View, doc: &AccessFile, email: &str) -> (u16, Markup) {
                                     td data-label=(v.t(K::ColExpiry)) {
                                         (expiry_markup(v.lang, &expiry_of(k, n)))
                                     }
-                                    td data-label="authorized_urls" {
-                                        (url_list(
-                                            v.lang,
-                                            k.authorized_urls.as_ref(),
-                                            t(v.lang, K::Inherits),
-                                        ))
+                                    td data-label=(v.t(K::Scopes)) {
+                                        (url_list(v.lang, k.scopes.as_ref(), t(v.lang, K::KeyScopeInherit)))
                                     }
                                     td class="pills" {
-                                        (act(v, &Route::KeyEdit(normalised.clone(), id.clone()),
+                                        (act(v, &Route::KeyEdit(uuid.clone(), id.clone()),
                                              v.t(K::Edit)))
-                                        (act(v, &Route::KeyRotate(normalised.clone(), id.clone()),
+                                        (act(v, &Route::KeyRotate(uuid.clone(), id.clone()),
                                              v.t(K::Rotate)))
-                                        (act_rm(v, &Route::KeyRm(normalised.clone(), id.clone()),
+                                        (act_rm(v, &Route::KeyRm(uuid.clone(), id.clone()),
                                              v.t(K::Remove)))
                                     }
                                 }
@@ -2631,17 +2897,19 @@ fn page_user(v: &View, doc: &AccessFile, email: &str) -> (u16, Markup) {
     )
 }
 
-/// `/groups` — each `url_groups` entry and everything that names it.
+/// `/groups` — each `user_groups` entry, who it references, and everything that names it.
+/// Members are people now: an email where a roster row still resolves it, the raw uuid
+/// where none does, and flagged when it matches nobody at all.
 fn page_groups(v: &View, doc: &AccessFile) -> Markup {
     html! {
-        h1 { (section_heading(v.t(K::Groups), "url_groups")) }
+        h1 { (section_heading(v.t(K::Groups), "user_groups")) }
         p class="lede" { (v.t(K::GroupsIntro)) }
         p class="primary" { (act(v, &Route::GroupAdd, &format!("+ {}", v.t(K::Add)))) }
-        @if doc.url_groups.is_empty() {
+        @if doc.user_groups.is_empty() {
             div class="panel" { span class="muted" { (v.t(K::None)) } }
         } @else {
-            @for (name, urls) in &doc.url_groups {
-                @let refs = url_group_refs(doc, name);
+            @for (name, members) in &doc.user_groups {
+                @let refs = user_group_refs(doc, name);
                 div class="panel" {
                     h2 class="tight" {
                         code { "@" (name) }
@@ -2662,32 +2930,28 @@ fn page_groups(v: &View, doc: &AccessFile) -> Markup {
                             }
                         }
                     }
-                    p class="muted" { (v.t(K::Patterns)) }
-                    ul class="plain mono" { @for u in urls { li { (u) } } }
-                }
-            }
-        }
-    }
-}
-
-/// `/sites` — the site table, **numbered, in file order**.
-///
-/// An ordered list and not a grid, because the number *is* the meaning: `Sites::resolve` is
-/// first-match-wins, so position 1 shadows position 2 for any URL both cover. A layout that
-/// let the eye wander would be hiding the one property this section has.
-fn page_sites(v: &View, doc: &AccessFile) -> Markup {
-    let last = doc.sites.len().saturating_sub(1);
-    html! {
-        h1 { (section_heading(v.t(K::Sites), "sites")) }
-        p class="lede" { (v.t(K::SitesIntro)) }
-        p class="primary" { (act(v, &Route::SiteAdd, &format!("+ {}", v.t(K::Add)))) }
-        div class="panel" {
-            @if doc.sites.is_empty() {
-                span class="muted" { (v.t(K::None)) }
-            } @else {
-                ol class="sites" {
-                    @for (i, s) in doc.sites.iter().enumerate() {
-                        li { (site_block(v, s, i, last)) }
+                    p class="muted" { (v.t(K::Members)) }
+                    @if members.is_empty() {
+                        p class="muted" { (v.t(K::None)) }
+                    } @else {
+                        ul class="plain" {
+                            @for m in members {
+                                @let uuid = m.trim().to_ascii_lowercase();
+                                li {
+                                    @match user_pos(doc, &uuid) {
+                                        Some(i) => {
+                                            a href=(v.href(&Route::User(uuid.clone()))) {
+                                                code { (user_label(&doc.users[i])) }
+                                            }
+                                        }
+                                        None => {
+                                            code class="bad" { (uuid) }
+                                            " " (tag("bad", v.t(K::UnknownMember)))
+                                        }
+                                    }
+                                }
+                            }
+                        }
                     }
                 }
             }
@@ -2695,21 +2959,110 @@ fn page_sites(v: &View, doc: &AccessFile) -> Markup {
     }
 }
 
-/// One `POST` button that moves a site one place. Order is meaning — `Sites::resolve` is
-/// first-match-wins — so this is a mutation like any other: same `rev`, same audit line,
-/// and a `303` back to this page. It is a button and not a link because a `GET` never
-/// mutates, and it is per row because two buttons beat a position field an operator has to
-/// count out.
+/// `/apps` — the applications, with their base and scope count.
+fn page_apps(v: &View, doc: &AccessFile) -> Markup {
+    html! {
+        h1 { (section_heading(v.t(K::Apps), "applications")) }
+        p class="lede" { (v.t(K::AppsIntro)) }
+        p class="primary" { (act(v, &Route::AppAdd, &format!("+ {}", v.t(K::Add)))) }
+        div class="panel" {
+            @if doc.applications.is_empty() {
+                span class="muted" { (v.t(K::None)) }
+            } @else {
+                table {
+                    thead { tr {
+                        th { "name" }
+                        th { (v.t(K::Base)) }
+                        th { (v.t(K::Scopes)) }
+                        th {}
+                    } }
+                    tbody {
+                        @for a in &doc.applications {
+                            tr {
+                                td data-label="name" {
+                                    a href=(v.href(&Route::App(a.name.trim().to_string()))) {
+                                        code { (a.name.trim()) }
+                                    }
+                                }
+                                td data-label=(v.t(K::Base)) { (url_list(v.lang, Some(&a.base), "")) }
+                                td data-label=(v.t(K::Scopes)) { (a.scopes.len()) }
+                                td class="pills" {
+                                    (act_rm(v, &Route::AppRm(a.name.trim().to_string()), v.t(K::Remove)))
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+        }
+    }
+}
+
+/// `/apps/{app}` — one application: its base, its login page, and its scopes **in file
+/// order**, the number carrying the meaning first-match-wins gives it.
+fn page_app(v: &View, doc: &AccessFile, name: &str) -> (u16, Markup) {
+    let a = match app_pos(doc, name).map(|i| &doc.applications[i]) {
+        Some(a) => a,
+        None => return (404, page_missing(v, v.t(K::NoSuchApp), name, &Route::Apps)),
+    };
+    let last = a.scopes.len().saturating_sub(1);
+    let app_name = a.name.trim().to_string();
+    (
+        200,
+        html! {
+            h1 { (app_name) }
+            p class="lede" { a href=(v.href(&Route::Apps)) { "← " (v.t(K::Back)) } }
+            p class="pills" {
+                (act(v, &Route::AppEdit(app_name.clone()), v.t(K::Edit)))
+                (act_rm(v, &Route::AppRm(app_name.clone()), v.t(K::Remove)))
+            }
+
+            @if let Some(notes) = &a.notes {
+                div class="panel" { span class="muted mono" { "notes " } (notes) }
+            }
+
+            h2 { (v.t(K::Base)) }
+            div class="panel" { (url_list(v.lang, Some(&a.base), "")) }
+            @if let Some(l) = &a.login_url {
+                p class="muted" { (v.t(K::LoginUrl)) " " span class="mono" { (l) } }
+            }
+
+            h2 { (section_heading(v.t(K::Scopes), "scopes")) }
+            p class="lede sub" { (v.t(K::ScopesIntro)) }
+            p class="primary" {
+                (act(v, &Route::ScopeAdd(app_name.clone()), &format!("+ {}", v.t(K::Add))))
+            }
+            div class="panel" {
+                @if a.scopes.is_empty() {
+                    span class="muted" { (v.t(K::NoScopes)) }
+                } @else {
+                    ol class="sites" {
+                        @for (i, s) in a.scopes.iter().enumerate() {
+                            li { (scope_block(v, doc, &app_name, s, i, last)) }
+                        }
+                    }
+                }
+            }
+        },
+    )
+}
+
+/// One `POST` button that moves a scope one place inside its application. Order is meaning
+/// — `AppRecord::scopes` is first-match-wins — so this is a mutation like any other: same
+/// `rev`, same audit line, and a `303` back to this page. It is a button and not a link
+/// because a `GET` never mutates, and it is per row because two buttons beat a position
+/// field an operator has to count out.
 fn move_button(
     v: &View,
-    name: &str,
+    app: &str,
+    scope: &str,
     dir: &str,
     label: &str,
     glyph: &str,
     disabled: bool,
 ) -> Markup {
     html! {
-        form method="post" action=(v.href(&Route::SiteMove(name.to_string()))) {
+        form method="post" action=(v.href(&Route::ScopeMove(app.to_string(), scope.to_string()))) {
             input type="hidden" name="rev" value=(v.rev);
             input type="hidden" name="dir" value=(dir);
             button type="submit" class="pill" title=(label) disabled[disabled] { (glyph) }
@@ -2717,34 +3070,74 @@ fn move_button(
     }
 }
 
-fn site_block(v: &View, s: &SiteSpec, i: usize, last: usize) -> Markup {
-    let name = site_name(s);
+/// One scope, as one item of the ordered list [`page_app`] renders: its access kind, its
+/// urls, its members (people, resolved where the roster still can) and its move buttons.
+fn scope_block(
+    v: &View,
+    doc: &AccessFile,
+    app: &str,
+    s: &ScopeSpec,
+    i: usize,
+    last: usize,
+) -> Markup {
+    let name = s.name.trim().to_string();
+    let access = s.access.trim();
+    let access_label = match access {
+        "anonymous" => v.t(K::AccessAnonymous),
+        "authenticated" => v.t(K::AccessAuthenticated),
+        "restricted" => v.t(K::AccessRestricted),
+        other => other,
+    };
     html! {
         div {
             strong { (name) }
             " "
-            @if s.public_auth {
-                (tag("warn", "public_auth"))
-            } @else {
-                (tag("", "public_auth: false"))
-            }
+            (tag(if access == "restricted" { "" } else { "warn" }, access_label))
             " "
             span class="pills" {
-                (act(v, &Route::SiteEdit(name.clone()), v.t(K::Edit)))
-                (act_rm(v, &Route::SiteRm(name.clone()), v.t(K::Remove)))
-                (move_button(v, &name, "up", v.t(K::MoveUp), "↑", i == 0))
-                (move_button(v, &name, "down", v.t(K::MoveDown), "↓", i >= last))
+                (act(v, &Route::ScopeEdit(app.to_string(), name.clone()), v.t(K::Edit)))
+                (act_rm(v, &Route::ScopeRm(app.to_string(), name.clone()), v.t(K::Remove)))
+                (move_button(v, app, &name, "up", v.t(K::MoveUp), "↑", i == 0))
+                (move_button(v, app, &name, "down", v.t(K::MoveDown), "↓", i >= last))
             }
-        }
-        @if let Some(l) = &s.login_url {
-            div class="muted" { "login_url " span class="mono" { (l) } }
         }
         @if s.urls.is_empty() {
             div class="bad" { "urls: [] — " (v.t(K::ReachesNothing)) }
         } @else {
             ul class="plain mono" { @for u in &s.urls { li { (u) } } }
         }
+        @match access {
+            "anonymous" => div class="muted" { (v.t(K::AnonymousWarn)) },
+            "authenticated" => div class="muted" { (v.t(K::AuthenticatedWarn)) },
+            "restricted" => {
+                @let members = scope_members_display(doc, s);
+                div class="muted" {
+                    (v.t(K::Members)) ": "
+                    @if members.is_empty() {
+                        span class="bad" { (v.t(K::WarnNoMembers)) }
+                    } @else {
+                        @for (i, m) in members.iter().enumerate() {
+                            @if i > 0 { ", " }
+                            code { (m) }
+                        }
+                    }
+                }
+                @if let Some(creds) = &s.credentials {
+                    div class="muted" { (v.t(K::Credentials)) ": " (creds.join(", ")) }
+                }
+            }
+            _ => {}
+        }
     }
+}
+
+/// A scope's `users` (resolved to a label where the roster still can) and `groups` (`@name`,
+/// shown exactly as the file spells it), for display only. See [`parse_members`] for the
+/// inverse, on submit.
+fn scope_members_display(doc: &AccessFile, s: &ScopeSpec) -> Vec<String> {
+    let mut out: Vec<String> = s.users.iter().flatten().map(|u| label_of(doc, u)).collect();
+    out.extend(s.groups.iter().flatten().map(|g| g.trim().to_string()));
+    out
 }
 
 /// `/denied`: the veto list, standing on its own for a direct link and for the add/remove
@@ -2760,8 +3153,9 @@ fn page_denied(v: &View, doc: &AccessFile) -> Markup {
 }
 
 /// The `denied` panel's body: the empty state, or the list itself, one row per vetoed
-/// email. Factored out of [`page_denied`] because [`page_users`] renders the identical
-/// panel as its own second section, and the two must never be free to drift apart.
+/// entry — a uuid names the user it vetoes, a bare email names a stranger. Factored out of
+/// [`page_denied`] because [`page_users`] renders the identical panel as its own second
+/// section, and the two must never be free to drift apart.
 fn denied_list(v: &View, doc: &AccessFile) -> Markup {
     html! {
         div class="panel" {
@@ -2770,15 +3164,18 @@ fn denied_list(v: &View, doc: &AccessFile) -> Markup {
             } @else {
                 ul class="plain" {
                     @for d in &doc.denied {
-                        @let email = norm_email(d);
+                        @let raw = d.trim().to_ascii_lowercase();
                         li class="pills" {
-                            code { (email) }
-                            @if user_pos(doc, &email).is_some() {
-                                a href=(v.href(&Route::User(email.clone()))) {
-                                    (tag("", t(v.lang, K::AlsoEnrolled)))
+                            @match user_pos(doc, &raw) {
+                                Some(i) => {
+                                    @let u = &doc.users[i];
+                                    a href=(v.href(&Route::User(u.uuid.trim().to_ascii_lowercase()))) {
+                                        code { (user_label(u)) }
+                                    }
                                 }
+                                None => { code { (norm_email(&raw)) } }
                             }
-                            (act_rm(v, &Route::DenyRm(email.clone()), v.t(K::Remove)))
+                            (act_rm(v, &Route::DenyRm(raw.clone()), v.t(K::Remove)))
                         }
                     }
                 }
@@ -2789,16 +3186,15 @@ fn denied_list(v: &View, doc: &AccessFile) -> Markup {
 
 /// `/can` — the tester. A `GET` form, and the gate's own [`decide`] behind it.
 ///
-/// Only the two Cognito-backed credentials are asked about here: an id_token bearer and a
-/// session cookie resolve to nothing but an email, which is exactly what the form collects.
-/// (`bb-auth-adm can --key ID` also evaluates a `bbk_` key. It stays on the terminal for
-/// now: naming a key means picking one, which is a second field and a listing, and a key's
-/// verdict is one `bb-auth-adm` invocation away on the host that has the file.)
+/// An email left blank tests [`Subject::Anonymous`] rather than refusing to answer: that is
+/// the only way to check what an `anonymous` scope actually opens. (`bb-auth-adm can --key
+/// ID` also evaluates a `bbk_` key. It stays on the terminal for now: naming a key means
+/// picking one, which is a second field and a listing, and a key's verdict is one
+/// `bb-auth-adm` invocation away on the host that has the file.)
 fn page_can(v: &View, access: &Access, query: &str) -> Markup {
     let email_in = query_param(query, "email").unwrap_or_default();
     let url_in = query_param(query, "url").unwrap_or_default();
-    let asked = !email_in.trim().is_empty() && !url_in.trim().is_empty();
-    let email = norm_email(&email_in);
+    let asked = !url_in.trim().is_empty();
     let url = request_url(&url_in);
 
     html! {
@@ -2823,7 +3219,7 @@ fn page_can(v: &View, access: &Access, query: &str) -> Markup {
             }
         }
         @if asked {
-            @let (granted, verdict_markup) = verdict(v, access, &email, &url);
+            @let (granted, verdict_markup) = verdict(v, access, &email_in, &url);
             div class=@if granted { "panel ok" } @else { "panel bad" } { (verdict_markup) }
         }
     }
@@ -2832,26 +3228,48 @@ fn page_can(v: &View, access: &Access, query: &str) -> Markup {
 /// One verdict, with the reason the gate would have. The wording follows `bb-auth-adm can`'s:
 /// same decision, same explanation, so an operator who has read one recognises the other.
 /// Returns whether the request was granted alongside the markup, so the caller can carry that
-/// same boolean onto the panel wrapping it (an `--ok` or `--bad` left bar).
-fn verdict(v: &View, access: &Access, email: &str, url: &str) -> (bool, Markup) {
-    let decision = decide(access, email, Some(url));
+/// same boolean onto the panel wrapping it (an `ok` or `bad` left bar).
+fn verdict(v: &View, access: &Access, email_in: &str, url: &str) -> (bool, Markup) {
+    let email = norm_email(email_in);
+    let subject = if email.is_empty() {
+        Subject::Anonymous
+    } else {
+        Subject::Identifier(&email)
+    };
+    let decision = decide(access, &subject, Some(url));
     let granted = decision.granted();
+    let at = |app: &str, scope: &str| html! { code { (app) "/" (scope) } };
     let markup = html! {
-        p class=@if decision.granted() { "verdict yes" } @else { "verdict no" } {
-            @if decision.granted() { (v.t(K::Authorized)) } @else { (v.t(K::VerdictDenied)) }
+        p class=@if granted { "verdict yes" } @else { "verdict no" } {
+            @if granted { (v.t(K::Authorized)) } @else { (v.t(K::VerdictDenied)) }
         }
         p {
             @match &decision {
-                Decision::SiteGrant(site) => {
-                    "site " code { (site) } " " (v.t(K::WhySiteGrant))
+                Decision::Anonymous { app, scope } => {
+                    (at(app, scope)) " " (v.t(K::WhyAnonymousGrant))
                 }
-                Decision::RosterGrant => { code { (email) } " " (v.t(K::WhyRosterGrant)) }
+                Decision::Granted { app, scope } => { (at(app, scope)) " " (v.t(K::WhyGranted)) }
                 Decision::Vetoed => { code { (email) } " " (v.t(K::WhyVetoed)) }
-                Decision::OutOfScope => { code { (url) } " " (v.t(K::WhyOutOfScope)) }
-                Decision::NotEnrolled => { code { (email) } " " (v.t(K::WhyNotEnrolled)) }
+                Decision::NoApplication => { code { (url) } " " (v.t(K::WhyNoApplication)) }
+                Decision::NoScope { app } => { code { (app) } " " (v.t(K::WhyNoScope)) }
+                Decision::Unauthenticated { app, scope } => {
+                    (at(app, scope)) " " (v.t(K::WhyUnauthenticated))
+                }
+                Decision::CredentialRefused { app, scope } => {
+                    (at(app, scope)) " " (v.t(K::WhyCredentialRefused))
+                }
+                Decision::NotEnrolled { app, scope } => {
+                    (at(app, scope)) " " (v.t(K::WhyNotEnrolled))
+                }
+                Decision::NotMember { app, scope } => {
+                    (at(app, scope)) " " (v.t(K::WhyNotMember))
+                }
+                Decision::KeyOutOfScope { app, scope } => {
+                    (at(app, scope)) " " (v.t(K::WhyKeyOutOfScope))
+                }
             }
         }
-        @if decision.granted() {
+        @if granted && !matches!(decision, Decision::Anonymous { .. }) {
             p class="muted" {
                 (v.t(K::AppSees)) " " code { (IDENTITY_HEADER) ": " (email) }
             }
@@ -2869,62 +3287,57 @@ fn verdict(v: &View, access: &Access, email: &str, url: &str) -> (bool, Markup) 
 // submitted body, when a refusal sends the same form back. That is what "the submitted
 // values are preserved" is: the same page function, one error string later.
 
-/// The `users` form: an address and a scope.
+/// The `users` form: one email. Used both for `users · add` (the row's first identifier)
+/// and for `/users/{uuid}/emails/+add` — the two places an email is ever typed in, now that
+/// an identity carries no URL and its uuid never changes. `UserForm` gains nothing beyond
+/// this: there is nothing else left on a [`UserSpec`] a form could usefully edit.
 #[derive(Default)]
 struct UserForm {
     email: String,
-    urls: String,
 }
 
 impl UserForm {
-    fn of(u: &UserSpec) -> UserForm {
-        UserForm {
-            email: norm_email(&u.email),
-            urls: urls_text(u.authorized_urls.as_ref()),
-        }
-    }
     fn read(f: &Form) -> UserForm {
         UserForm {
             email: f.get("email").to_string(),
-            urls: f.get("urls").to_string(),
         }
     }
 }
 
-/// `users · add` and `users · edit`. One form for both: the difference is whether the
-/// address names a row that already exists, which is also the difference between
-/// [`add_user`] and [`rename_user`].
-///
-/// A user's scope has no absent-vs-empty distinction to express — absent and empty both
-/// deny — so it is a plain textarea, and an emptied one collapses to absent.
-fn page_user_form(v: &View, existing: Option<&str>, f: &UserForm, err: Option<&Refusal>) -> Markup {
-    let editing = existing.is_some();
+/// `users · add`: mints a uuid and enrols the first email.
+fn page_user_form(v: &View, f: &UserForm, err: Option<&Refusal>) -> Markup {
     let about = |name| err.is_some_and(|e| e.is(name));
     html! {
-        h1 { (v.t(K::Users)) " · " (if editing { v.t(K::Edit) } else { v.t(K::Add) }) }
-        @if let Some(e) = existing { p class="lede" { code { (e) } } }
+        h1 { (v.t(K::Users)) " · " (v.t(K::Add)) }
         div class="panel" {
             (form_shell(v, err, html! {
-                (text_field(
-                    if editing { v.t(K::NewEmail) } else { "email" },
-                    "email", &f.email, "bob@x.com", None, about("email")))
-                (urls_field("authorized_urls", "urls", &f.urls, html! {
-                    (v.t(K::ScopeHelp)) " " (v.t(K::ScopeEmptyMeans)) " " code { "*://*/*" } "."
-                }, about("urls")))
-            }, if editing { v.t(K::Save) } else { v.t(K::Create) }, false))
+                (text_field("email", "email", &f.email, "bob@x.com", None, about("email")))
+            }, v.t(K::Create), false))
         }
     }
 }
 
-/// The `api_keys` form: a label, a window, and a scope that may be its own or the user's.
+/// `/users/{uuid}/emails/+add`: one more identifier for an existing row.
+fn page_email_form(v: &View, owner: &str, f: &UserForm, err: Option<&Refusal>) -> Markup {
+    let about = |name| err.is_some_and(|e| e.is(name));
+    html! {
+        h1 { (owner) " · " (v.t(K::AddEmail)) }
+        div class="panel" {
+            (form_shell(v, err, html! {
+                (text_field("email", "email", &f.email, "bob@x.com", None, about("email")))
+            }, v.t(K::Create), false))
+        }
+    }
+}
+
+/// The `api_keys` form: a label, a window, and the `application/scope` restriction. Empty
+/// means every scope the owner reaches ([`K::KeyScopesHelp`]) — a restriction, never a
+/// grant, so it can only subtract from what the owner already has.
 #[derive(Default)]
 struct KeyForm {
     id: String,
     duration: String,
-    /// `true` = this key carries its own `authorized_urls`; `false` = the field is absent
-    /// and the key inherits the user's. Two different things in the file, so two radios.
-    own: bool,
-    urls: String,
+    scopes: String,
 }
 
 impl KeyForm {
@@ -2932,26 +3345,14 @@ impl KeyForm {
         KeyForm {
             id: k.id.trim().to_string(),
             duration: k.duration.trim().to_string(),
-            own: k.authorized_urls.is_some(),
-            urls: urls_text(k.authorized_urls.as_ref()),
+            scopes: urls_text(k.scopes.as_ref()),
         }
     }
     fn read(f: &Form) -> KeyForm {
         KeyForm {
             id: f.get("id").to_string(),
             duration: f.get("duration").to_string(),
-            own: f.get("scope") == "own",
-            urls: f.get("urls").to_string(),
-        }
-    }
-    /// The field as the file spells it: `None` is *absent* (inherit), `Some(vec![])` is a
-    /// present-but-empty own scope, which denies. Collapsing the two would quietly hand a
-    /// key its owner's access.
-    fn scope(&self, lines: Vec<String>) -> Option<Vec<String>> {
-        if self.own {
-            Some(lines)
-        } else {
-            None
+            scopes: f.get("scopes").to_string(),
         }
     }
 }
@@ -2984,89 +3385,182 @@ fn page_key_form(
                     span class="lbl" { "released" }
                     span class="mono" { (released) }
                 }
-                div {
-                    span class="lbl" { "authorized_urls" }
-                    label class="radio" {
-                        input type="radio" name="scope" value="inherit" checked[!f.own];
-                        span { (v.t(K::KeyScopeInherit)) }
-                    }
-                    label class="radio" {
-                        input type="radio" name="scope" value="own" checked[f.own];
-                        span { (v.t(K::KeyScopeOwn)) }
-                    }
-                }
-                (urls_field("", "urls", &f.urls, html! {
-                    (v.t(K::ScopeHelp)) " " (v.t(K::KeyScopeOwnEmpty))
-                }, about("urls")))
+                (urls_field("scopes", "scopes", &f.scopes, html! { (v.t(K::KeyScopesHelp)) },
+                            about("scopes")))
             }, if editing { v.t(K::Save) } else { v.t(K::Create) }, false))
         }
     }
 }
 
-/// The `sites` form. There is no field here that names a user, and there never may be one:
-/// a site describes a **place**, and grants to named users live in `users[].authorized_urls`
-/// alone.
+/// A free-text notes field: operator documentation, round-tripped untouched. Not a pattern
+/// list, so it gets no per-line framing.
+fn notes_field(value: &str) -> Markup {
+    html! {
+        label {
+            span class="lbl" { "notes" }
+            textarea name="notes" rows="3" spellcheck="true" { (value) }
+        }
+    }
+}
+
+/// The `applications` form: `name`, `base`, `login_url`, `notes`. There is no field here
+/// that names a user, and there never may be one: an application describes a **place**, and
+/// grants to named users live in a scope's `users`/`groups` alone.
 #[derive(Default)]
-struct SiteForm {
+struct AppForm {
     name: String,
-    urls: String,
-    public_auth: bool,
+    base: String,
     login_url: String,
+    notes: String,
 }
 
-impl SiteForm {
-    fn of(s: &SiteSpec) -> SiteForm {
-        SiteForm {
-            name: site_name(s),
-            urls: s.urls.join("\n"),
-            public_auth: s.public_auth,
-            login_url: s.login_url.clone().unwrap_or_default(),
+impl AppForm {
+    fn of(a: &AppSpec) -> AppForm {
+        AppForm {
+            name: a.name.trim().to_string(),
+            base: a.base.join("\n"),
+            login_url: a.login_url.clone().unwrap_or_default(),
+            notes: a.notes.clone().unwrap_or_default(),
         }
     }
-    fn read(f: &Form) -> SiteForm {
-        SiteForm {
+    fn read(f: &Form) -> AppForm {
+        AppForm {
             name: f.get("name").to_string(),
-            urls: f.get("urls").to_string(),
-            public_auth: f.checked("public_auth"),
+            base: f.get("base").to_string(),
             login_url: f.get("login_url").to_string(),
+            notes: f.get("notes").to_string(),
         }
     }
 }
 
-fn page_site_form(v: &View, existing: Option<&str>, f: &SiteForm, err: Option<&Refusal>) -> Markup {
+fn page_app_form(v: &View, existing: Option<&str>, f: &AppForm, err: Option<&Refusal>) -> Markup {
     let editing = existing.is_some();
     let about = |name| err.is_some_and(|e| e.is(name));
     html! {
-        h1 { (v.t(K::Sites)) " · " (if editing { v.t(K::Edit) } else { v.t(K::Add) }) }
+        h1 { (v.t(K::Apps)) " · " (if editing { v.t(K::Edit) } else { v.t(K::Add) }) }
         @if let Some(n) = existing { p class="lede" { code { (n) } } }
         div class="panel" {
             (form_shell(v, err, html! {
                 (text_field(if editing { v.t(K::NewName) } else { "name" },
                             "name", &f.name, "app1", None, about("name")))
-                (urls_field("urls", "urls", &f.urls, html! { (v.t(K::SiteUrlsHelp)) }, about("urls")))
-                label class="radio" {
-                    input type="checkbox" name="public_auth" value="on" checked[f.public_auth];
-                    span { "public_auth" " — " (v.t(K::PublicAuthWarn)) }
-                }
-                (text_field("login_url", "login_url", &f.login_url, "https://login.x.com/", None,
-                            about("login_url")))
+                (urls_field(v.t(K::Base), "base", &f.base, html! { (v.t(K::BaseHelp)) }, about("base")))
+                (text_field(v.t(K::LoginUrl), "login_url", &f.login_url, "https://login.x.com/",
+                            Some(v.t(K::LoginUrlHelp)), about("login_url")))
+                (notes_field(&f.notes))
             }, if editing { v.t(K::Save) } else { v.t(K::Create) }, false))
         }
     }
 }
 
-/// The `url_groups` form — a name and its patterns.
+/// The `scopes` form: `name`, `urls`, `access`, and — only meaningful under `restricted` —
+/// `members` (people, one per line: an email or uuid resolved to a uuid, `@name` kept as a
+/// group reference) and `credentials`.
+#[derive(Default)]
+struct ScopeForm {
+    name: String,
+    urls: String,
+    access: String,
+    members: String,
+    cred_login: bool,
+    cred_api_key: bool,
+    notes: String,
+}
+
+impl ScopeForm {
+    fn of(doc: &AccessFile, s: &ScopeSpec) -> ScopeForm {
+        let (cred_login, cred_api_key) = match &s.credentials {
+            None => (true, true),
+            Some(list) => (
+                list.iter().any(|c| c.trim() == "login"),
+                list.iter().any(|c| c.trim() == "api_key"),
+            ),
+        };
+        ScopeForm {
+            name: s.name.trim().to_string(),
+            urls: s.urls.join("\n"),
+            access: s.access.trim().to_string(),
+            members: scope_members_display(doc, s).join("\n"),
+            cred_login,
+            cred_api_key,
+            notes: s.notes.clone().unwrap_or_default(),
+        }
+    }
+    fn read(f: &Form) -> ScopeForm {
+        ScopeForm {
+            name: f.get("name").to_string(),
+            urls: f.get("urls").to_string(),
+            access: f.get("access").to_string(),
+            members: f.get("members").to_string(),
+            cred_login: f.checked("cred_login"),
+            cred_api_key: f.checked("cred_api_key"),
+            notes: f.get("notes").to_string(),
+        }
+    }
+}
+
+fn page_scope_form(
+    v: &View,
+    app: &str,
+    existing: Option<&str>,
+    f: &ScopeForm,
+    err: Option<&Refusal>,
+) -> Markup {
+    let editing = existing.is_some();
+    let about = |name| err.is_some_and(|e| e.is(name));
+    html! {
+        h1 { (app) " · " (v.t(K::Scopes)) " · " (if editing { v.t(K::Edit) } else { v.t(K::Add) }) }
+        @if let Some(n) = existing { p class="lede" { code { (n) } } }
+        div class="panel" {
+            (form_shell(v, err, html! {
+                (text_field(if editing { v.t(K::NewName) } else { "name" },
+                            "name", &f.name, "admin", None, about("name")))
+                (urls_field("urls", "urls", &f.urls, html! { (v.t(K::ScopeUrlsHelp)) }, about("urls")))
+                div {
+                    span class="lbl" { (v.t(K::AccessWord)) }
+                    @for (val, label) in [
+                        ("anonymous", v.t(K::AccessAnonymous)),
+                        ("authenticated", v.t(K::AccessAuthenticated)),
+                        ("restricted", v.t(K::AccessRestricted)),
+                    ] {
+                        label class="radio" {
+                            input type="radio" name="access" value=(val) checked[f.access == val];
+                            span { (label) }
+                        }
+                    }
+                    span class="hint" { (v.t(K::AccessHelp)) }
+                }
+                (urls_field(v.t(K::Members), "members", &f.members, html! { (v.t(K::MembersHelp)) },
+                            about("members")))
+                div {
+                    span class="lbl" { (v.t(K::Credentials)) }
+                    label class="radio" {
+                        input type="checkbox" name="cred_login" value="on" checked[f.cred_login];
+                        span { (v.t(K::CredLogin)) }
+                    }
+                    label class="radio" {
+                        input type="checkbox" name="cred_api_key" value="on" checked[f.cred_api_key];
+                        span { (v.t(K::CredApiKey)) }
+                    }
+                    span class="hint" { (v.t(K::CredentialsHelp)) }
+                }
+                (notes_field(&f.notes))
+            }, if editing { v.t(K::Save) } else { v.t(K::Create) }, false))
+        }
+    }
+}
+
+/// The `user_groups` form — a name and its members, people now rather than URL patterns.
 #[derive(Default)]
 struct GroupForm {
     name: String,
-    urls: String,
+    members: String,
 }
 
 impl GroupForm {
     fn read(f: &Form) -> GroupForm {
         GroupForm {
             name: f.get("name").to_string(),
-            urls: f.get("urls").to_string(),
+            members: f.get("members").to_string(),
         }
     }
 }
@@ -3088,9 +3582,10 @@ fn page_group_form(
                 @if editing {
                     p class="muted" { (v.t(K::GroupNoRename)) }
                 } @else {
-                    (text_field("name", "name", &f.name, "mcp", None, about("name")))
+                    (text_field("name", "name", &f.name, "admins", None, about("name")))
                 }
-                (urls_field("urls", "urls", &f.urls, html! { (v.t(K::GroupUrlsHelp)) }, about("urls")))
+                (urls_field(v.t(K::Members), "members", &f.members, html! { (v.t(K::GroupMembersHelp)) },
+                            about("members")))
             }, if editing { v.t(K::Save) } else { v.t(K::Create) }, false))
         }
     }
@@ -3128,16 +3623,16 @@ fn page_deny_form(v: &View, f: &DenyForm, err: Option<&Refusal>) -> Markup {
 /// Rendered **directly**, not after a redirect: a `303` would put the result behind a fresh
 /// `GET` that has no bearer to show, and the bearer exists nowhere else — the file keeps
 /// only its sha256. It is not logged and never travels in a URL.
-fn page_minted(v: &View, owner: &str, id: &str, bearer: &str) -> Markup {
+fn page_minted(v: &View, owner_uuid: &str, owner_label: &str, id: &str, bearer: &str) -> Markup {
     html! {
-        h1 { (owner) " · api_keys · " (id) }
+        h1 { (owner_label) " · api_keys · " (id) }
         div class="secret" {
             div { strong { (v.t(K::BearerHeading)) } }
             p { (v.t(K::BearerOnce)) }
             code { "Authorization: Bearer " (bearer) }
             p class="hint" { (v.t(K::BearerClickHint)) }
         }
-        p { a href=(v.href(&Route::User(owner.to_string()))) { "← " (v.t(K::Back)) } }
+        p { a href=(v.href(&Route::User(owner_uuid.to_string()))) { "← " (v.t(K::Back)) } }
     }
 }
 
@@ -3148,7 +3643,7 @@ fn page_minted(v: &View, owner: &str, id: &str, bearer: &str) -> Markup {
 fn page_conflict(v: &View) -> Markup {
     // A `POST`-only route has no form to reload, so it goes back to its section.
     let back = match &v.at {
-        Route::SiteMove(_) => v.at.parent(),
+        Route::ScopeMove(..) => v.at.parent(),
         other => other.clone(),
     };
     html! {
@@ -3322,54 +3817,30 @@ fn mutate(v: &View, form: &Form) -> Outcome {
                 if email.is_empty() {
                     return Err(Refusal::on("email", v.t(K::EmailRequired)));
                 }
-                let urls = form.lines("urls");
                 add_user(
                     &mut doc,
                     UserSpec {
-                        email: email.clone(),
-                        authorized_urls: if urls.is_empty() { None } else { Some(urls) },
+                        emails: vec![email.clone()],
                         ..Default::default()
                     },
                 )
                 .map_err(|e| Refusal::on("email", e))?;
-                // Everything else in the file already compiled before this request; the
-                // scope just submitted is the only new, still-unvalidated content.
-                commit(v, &doc, "user add", &email).map_err(|e| Refusal::on("urls", e))?;
-                Ok(email)
+                let uuid = user_pos(&doc, &email)
+                    .map(|i| doc.users[i].uuid.trim().to_ascii_lowercase())
+                    .unwrap_or_default();
+                commit(v, &doc, "user add", &email)?;
+                Ok(uuid)
             })();
             match r {
-                Ok(email) => Outcome::Done(Route::User(email), Msg::UserAdded),
-                Err(e) => Outcome::Page(400, title, page_user_form(v, None, &f, Some(&e))),
-            }
-        }
-
-        Route::UserEdit(target) => {
-            let f = UserForm::read(form);
-            let r = (|| -> Result<String, Refusal> {
-                let email = norm_email(&f.email);
-                if email.is_empty() {
-                    return Err(Refusal::on("email", v.t(K::EmailRequired)));
-                }
-                rename_user(&mut doc, target, &email).map_err(|e| Refusal::on("email", e))?;
-                let u = user_mut(&mut doc, &email)?;
-                // A user's scope has no "inherit": an emptied list collapses to absent, and
-                // both mean the same thing — reaches nothing.
-                let urls = form.lines("urls");
-                let clear = urls.is_empty();
-                edit_urls(&mut u.authorized_urls, urls, Vec::new(), Vec::new(), clear);
-                commit(v, &doc, "user set", &email).map_err(|e| Refusal::on("urls", e))?;
-                Ok(email)
-            })();
-            match r {
-                Ok(email) => Outcome::Done(Route::User(email), Msg::UserSaved),
-                Err(e) => Outcome::Page(400, title, page_user_form(v, Some(target), &f, Some(&e))),
+                Ok(uuid) => Outcome::Done(Route::User(uuid), Msg::UserAdded),
+                Err(e) => Outcome::Page(400, title, page_user_form(v, &f, Some(&e))),
             }
         }
 
         Route::UserRm(target) => {
             let r = (|| -> Result<(), Refusal> {
-                let u = remove_user(&mut doc, target)?;
-                commit(v, &doc, "user rm", &norm_email(&u.email))?;
+                let (u, _swept) = remove_user(&mut doc, target)?;
+                commit(v, &doc, "user rm", &user_label(&u))?;
                 Ok(())
             })();
             match r {
@@ -3380,8 +3851,62 @@ fn mutate(v: &View, form: &Form) -> Outcome {
                     page_confirm(
                         v,
                         html! { (v.t(K::Users)) " · " (v.t(K::Remove)) },
-                        html! { p { code { (norm_email(target)) } } },
+                        html! { p { code { (target) } } },
                         v.t(K::ConfirmUserRm),
+                        v.t(K::Remove),
+                        Some(&e),
+                    ),
+                ),
+            }
+        }
+
+        Route::EmailAdd(owner) => {
+            let f = UserForm::read(form);
+            let r = (|| -> Result<(), Refusal> {
+                let email = norm_email(&f.email);
+                if email.is_empty() {
+                    return Err(Refusal::on("email", v.t(K::EmailRequired)));
+                }
+                add_user_email(&mut doc, owner, &email).map_err(|e| Refusal::on("email", e))?;
+                commit(
+                    v,
+                    &doc,
+                    "user email add",
+                    &format!("{}: +{email}", label_of(&doc, owner)),
+                )?;
+                Ok(())
+            })();
+            match r {
+                Ok(()) => Outcome::Done(Route::User(owner.clone()), Msg::UserSaved),
+                Err(e) => Outcome::Page(
+                    400,
+                    title,
+                    page_email_form(v, &label_of(&doc, owner), &f, Some(&e)),
+                ),
+            }
+        }
+
+        Route::EmailRm(owner, email) => {
+            let r = (|| -> Result<(), Refusal> {
+                remove_user_email(&mut doc, owner, email)?;
+                commit(
+                    v,
+                    &doc,
+                    "user email rm",
+                    &format!("{}: -{}", label_of(&doc, owner), norm_email(email)),
+                )?;
+                Ok(())
+            })();
+            match r {
+                Ok(()) => Outcome::Done(Route::User(owner.clone()), Msg::UserSaved),
+                Err(e) => Outcome::Page(
+                    400,
+                    title,
+                    page_confirm(
+                        v,
+                        html! { (v.t(K::Emails)) " · " (v.t(K::Remove)) },
+                        html! { p { code { (norm_email(email)) } } },
+                        v.t(K::ConfirmEmailRm),
                         v.t(K::Remove),
                         Some(&e),
                     ),
@@ -3394,6 +3919,7 @@ fn mutate(v: &View, form: &Form) -> Outcome {
             // Today, and not a field: a key's issue date is a fact about a secret that is
             // being created right now.
             let released = format_date(now());
+            let owner_label = label_of(&doc, owner);
             let r = (|| -> Result<(String, String), Refusal> {
                 let id = f.id.trim().to_string();
                 if id.is_empty() {
@@ -3405,6 +3931,8 @@ fn mutate(v: &View, form: &Form) -> Outcome {
                 if key_expiry(&released, &duration).is_none() {
                     return Err(Refusal::on("duration", v.t(K::BadKeyWindow)));
                 }
+                let lines = form.lines("scopes");
+                let scopes = if lines.is_empty() { None } else { Some(lines) };
                 // Not attributed: besides a duplicate id, this can also fail on an owner
                 // lookup or on entropy for the mint itself; neither is a field to blame.
                 let sealed: SealedKey = add_api_key(
@@ -3414,32 +3942,35 @@ fn mutate(v: &View, form: &Form) -> Outcome {
                         id: id.clone(),
                         released: released.clone(),
                         duration,
-                        authorized_urls: f.scope(form.lines("urls")),
+                        scopes,
                         ..Default::default()
                     },
                 )?;
                 // The bearer opens only against the receipt of a completed write, so this
                 // order is the library's and not a convention this file could get wrong.
-                // The id and duration already passed; the scope just submitted is the only
-                // new, still-unvalidated content left for the compile to catch.
-                let written = commit(v, &doc, "key add", &format!("{}/{id}", norm_email(owner)))
-                    .map_err(|e| Refusal::on("urls", e))?;
+                // The id and duration already passed; the scopes just submitted are the
+                // only new, still-unvalidated content left for the compile to catch.
+                let written = commit(v, &doc, "key add", &format!("{owner_label}/{id}"))
+                    .map_err(|e| Refusal::on("scopes", e))?;
                 Ok((id, sealed.reveal(&written)))
             })();
             match r {
-                Ok((id, bearer)) => {
-                    Outcome::Page(200, title, page_minted(v, &norm_email(owner), &id, &bearer))
-                }
+                Ok((id, bearer)) => Outcome::Page(
+                    200,
+                    title,
+                    page_minted(v, owner, &owner_label, &id, &bearer),
+                ),
                 Err(e) => Outcome::Page(
                     400,
                     title,
-                    page_key_form(v, &norm_email(owner), None, &released, &f, Some(&e)),
+                    page_key_form(v, &owner_label, None, &released, &f, Some(&e)),
                 ),
             }
         }
 
         Route::KeyEdit(owner, id) => {
             let f = KeyForm::read(form);
+            let owner_label = label_of(&doc, owner);
             let released = key_mut(&mut doc, owner, id)
                 .map(|k| k.released.trim().to_string())
                 .unwrap_or_default();
@@ -3449,44 +3980,42 @@ fn mutate(v: &View, form: &Form) -> Outcome {
                 if key_expiry(&k.released, &k.duration).is_none() {
                     return Err(Refusal::on("duration", v.t(K::BadKeyWindow)));
                 }
-                // Absent vs present-and-empty is the whole point of the radio: absent
-                // inherits the owner's scope, empty is an own scope that reaches nothing.
-                k.authorized_urls = f.scope(form.lines("urls"));
-                commit(v, &doc, "key set", &format!("{}/{id}", norm_email(owner)))
-                    .map_err(|e| Refusal::on("urls", e))?;
+                // Empty collapses to absent, which is what "everything the owner reaches"
+                // means: see `KeyScopesHelp`.
+                let lines = form.lines("scopes");
+                let clear = lines.is_empty();
+                edit_urls(&mut k.scopes, lines, Vec::new(), Vec::new(), clear);
+                commit(v, &doc, "key set", &format!("{owner_label}/{id}"))
+                    .map_err(|e| Refusal::on("scopes", e))?;
                 Ok(())
             })();
             match r {
-                Ok(()) => Outcome::Done(Route::User(norm_email(owner)), Msg::KeySaved),
+                Ok(()) => Outcome::Done(Route::User(owner.clone()), Msg::KeySaved),
                 Err(e) => Outcome::Page(
                     400,
                     title,
-                    page_key_form(v, &norm_email(owner), Some(id), &released, &f, Some(&e)),
+                    page_key_form(v, &owner_label, Some(id), &released, &f, Some(&e)),
                 ),
             }
         }
 
         Route::KeyRotate(owner, id) => {
+            let owner_label = label_of(&doc, owner);
             let r = (|| -> Result<String, Refusal> {
                 let sealed = rotate_api_key(&mut doc, owner, id)?;
-                let written = commit(
-                    v,
-                    &doc,
-                    "key rotate",
-                    &format!("{}/{id}", norm_email(owner)),
-                )?;
+                let written = commit(v, &doc, "key rotate", &format!("{owner_label}/{id}"))?;
                 Ok(sealed.reveal(&written))
             })();
             match r {
                 Ok(bearer) => {
-                    Outcome::Page(200, title, page_minted(v, &norm_email(owner), id, &bearer))
+                    Outcome::Page(200, title, page_minted(v, owner, &owner_label, id, &bearer))
                 }
                 Err(e) => Outcome::Page(
                     400,
                     title,
                     page_confirm(
                         v,
-                        html! { (norm_email(owner)) " · api_keys · " (v.t(K::Rotate)) },
+                        html! { (owner_label) " · api_keys · " (v.t(K::Rotate)) },
                         html! { p { code { (id) } } },
                         v.t(K::ConfirmKeyRotate),
                         v.t(K::Rotate),
@@ -3497,19 +4026,20 @@ fn mutate(v: &View, form: &Form) -> Outcome {
         }
 
         Route::KeyRm(owner, id) => {
+            let owner_label = label_of(&doc, owner);
             let r = (|| -> Result<(), Refusal> {
                 remove_api_key(&mut doc, owner, id)?;
-                commit(v, &doc, "key rm", &format!("{}/{id}", norm_email(owner)))?;
+                commit(v, &doc, "key rm", &format!("{owner_label}/{id}"))?;
                 Ok(())
             })();
             match r {
-                Ok(()) => Outcome::Done(Route::User(norm_email(owner)), Msg::KeyRemoved),
+                Ok(()) => Outcome::Done(Route::User(owner.clone()), Msg::KeyRemoved),
                 Err(e) => Outcome::Page(
                     400,
                     title,
                     page_confirm(
                         v,
-                        html! { (norm_email(owner)) " · api_keys · " (v.t(K::Remove)) },
+                        html! { (owner_label) " · api_keys · " (v.t(K::Remove)) },
                         html! { p { code { (id) } } },
                         v.t(K::ConfirmKeyRm),
                         v.t(K::Remove),
@@ -3519,66 +4049,179 @@ fn mutate(v: &View, form: &Form) -> Outcome {
             }
         }
 
-        Route::SiteAdd => {
-            let f = SiteForm::read(form);
+        Route::AppAdd => {
+            let f = AppForm::read(form);
             let r = (|| -> Result<(), Refusal> {
                 let name = f.name.trim().to_string();
-                add_site(&mut doc, site_spec(&f, form.lines("urls")), None)
-                    .map_err(|e| Refusal::on("name", e))?;
-                // Not attributed: the new record's urls and login_url are both still
-                // unvalidated at this point, so a compile failure could be either.
-                commit(v, &doc, "site add", &name)?;
+                let base = form.lines("base");
+                let login_url = match f.login_url.trim() {
+                    "" => None,
+                    l => Some(l.to_string()),
+                };
+                let notes = match f.notes.trim() {
+                    "" => None,
+                    n => Some(n.to_string()),
+                };
+                add_application(
+                    &mut doc,
+                    AppSpec {
+                        name: name.clone(),
+                        base,
+                        login_url,
+                        notes,
+                        ..Default::default()
+                    },
+                )
+                .map_err(|e| Refusal::on("name", e))?;
+                // Not attributed: base and login_url are both still unvalidated at this
+                // point, so a compile failure could be either.
+                commit(v, &doc, "app add", &name)?;
                 Ok(())
             })();
             match r {
-                Ok(()) => Outcome::Done(Route::Sites, Msg::SiteAdded),
-                Err(e) => Outcome::Page(400, title, page_site_form(v, None, &f, Some(&e))),
+                Ok(()) => Outcome::Done(Route::Apps, Msg::AppAdded),
+                Err(e) => Outcome::Page(400, title, page_app_form(v, None, &f, Some(&e))),
             }
         }
 
-        Route::SiteEdit(target) => {
-            let f = SiteForm::read(form);
-            let r = (|| -> Result<(), Refusal> {
+        Route::AppEdit(target) => {
+            let f = AppForm::read(form);
+            let r = (|| -> Result<String, Refusal> {
                 let name = f.name.trim().to_string();
                 if name.is_empty() {
                     return Err(Refusal::on("name", v.t(K::NameRequired)));
                 }
-                // The rename first, then the record is addressed by the name it now has.
-                rename_site(&mut doc, target, &name).map_err(|e| Refusal::on("name", e))?;
-                let i =
-                    site_pos(&doc, &name).ok_or_else(|| format!("no site '{}'", target.trim()))?;
-                let spec = site_spec(&f, form.lines("urls"));
-                doc.sites[i] = spec;
-                // Not attributed: urls and login_url are both still unvalidated here, so a
-                // compile failure could be either.
-                commit(v, &doc, "site set", &name)?;
-                Ok(())
+                rename_application(&mut doc, target, &name).map_err(|e| Refusal::on("name", e))?;
+                let a = app_mut(&mut doc, &name)?;
+                a.base = form.lines("base");
+                a.login_url = match f.login_url.trim() {
+                    "" => None,
+                    l => Some(l.to_string()),
+                };
+                a.notes = match f.notes.trim() {
+                    "" => None,
+                    n => Some(n.to_string()),
+                };
+                commit(v, &doc, "app set", &name)?;
+                Ok(name)
             })();
             match r {
-                Ok(()) => Outcome::Done(Route::Sites, Msg::SiteSaved),
-                Err(e) => Outcome::Page(400, title, page_site_form(v, Some(target), &f, Some(&e))),
+                Ok(name) => Outcome::Done(Route::App(name), Msg::AppSaved),
+                Err(e) => Outcome::Page(400, title, page_app_form(v, Some(target), &f, Some(&e))),
             }
         }
 
-        Route::SiteMove(target) => {
+        Route::AppRm(target) => {
+            let r = (|| -> Result<(), Refusal> {
+                let a = remove_application(&mut doc, target)?;
+                commit(v, &doc, "app rm", a.name.trim())?;
+                Ok(())
+            })();
+            match r {
+                Ok(()) => Outcome::Done(Route::Apps, Msg::AppRemoved),
+                Err(e) => Outcome::Page(
+                    400,
+                    title,
+                    page_confirm(
+                        v,
+                        html! { (v.t(K::Apps)) " · " (v.t(K::Remove)) },
+                        html! { p { code { (target) } } },
+                        v.t(K::ConfirmAppRm),
+                        v.t(K::Remove),
+                        Some(&e),
+                    ),
+                ),
+            }
+        }
+
+        Route::ScopeAdd(app) => {
+            let f = ScopeForm::read(form);
+            let r = (|| -> Result<(), Refusal> {
+                let spec = scope_spec(&doc, &f, form.lines("urls"))
+                    .map_err(|e| Refusal::on("members", e))?;
+                add_scope(&mut doc, app, spec, None).map_err(|e| Refusal::on("name", e))?;
+                commit(v, &doc, "scope add", &format!("{app}/{}", f.name.trim()))?;
+                Ok(())
+            })();
+            match r {
+                Ok(()) => Outcome::Done(Route::App(app.clone()), Msg::ScopeAdded),
+                Err(e) => Outcome::Page(400, title, page_scope_form(v, app, None, &f, Some(&e))),
+            }
+        }
+
+        Route::ScopeEdit(app, target) => {
+            let f = ScopeForm::read(form);
+            let r = (|| -> Result<String, Refusal> {
+                let name = f.name.trim().to_string();
+                if name.is_empty() {
+                    return Err(Refusal::on("name", v.t(K::NameRequired)));
+                }
+                rename_scope(&mut doc, app, target, &name).map_err(|e| Refusal::on("name", e))?;
+                let spec = scope_spec(&doc, &f, form.lines("urls"))
+                    .map_err(|e| Refusal::on("members", e))?;
+                *scope_mut(&mut doc, app, &name)? = spec;
+                commit(v, &doc, "scope set", &format!("{app}/{name}"))?;
+                Ok(name)
+            })();
+            match r {
+                Ok(_) => Outcome::Done(Route::App(app.clone()), Msg::ScopeSaved),
+                Err(e) => Outcome::Page(
+                    400,
+                    title,
+                    page_scope_form(v, app, Some(target), &f, Some(&e)),
+                ),
+            }
+        }
+
+        Route::ScopeRm(app, target) => {
+            let r = (|| -> Result<(), Refusal> {
+                let s = remove_scope(&mut doc, app, target)?;
+                commit(v, &doc, "scope rm", &format!("{app}/{}", s.name.trim()))?;
+                Ok(())
+            })();
+            match r {
+                Ok(()) => Outcome::Done(Route::App(app.clone()), Msg::ScopeRemoved),
+                Err(e) => Outcome::Page(
+                    400,
+                    title,
+                    page_confirm(
+                        v,
+                        html! { (v.t(K::Scopes)) " · " (v.t(K::Remove)) },
+                        html! { p { code { (app) "/" (target) } } },
+                        v.t(K::ConfirmScopeRm),
+                        v.t(K::Remove),
+                        Some(&e),
+                    ),
+                ),
+            }
+        }
+
+        Route::ScopeMove(app, target) => {
             let r = (|| -> Result<(), String> {
-                let i =
-                    site_pos(&doc, target).ok_or_else(|| format!("no site '{}'", target.trim()))?;
+                let ai =
+                    app_pos(&doc, app).ok_or_else(|| format!("no application '{}'", app.trim()))?;
+                let si = scope_pos(&doc.applications[ai], target)
+                    .ok_or_else(|| format!("{app}/{}: no such scope", target.trim()))?;
                 let to = match form.get("dir") {
-                    "up" => i.checked_sub(1),
-                    "down" => Some(i + 1).filter(|j| *j < doc.sites.len()),
+                    "up" => si.checked_sub(1),
+                    "down" => Some(si + 1).filter(|j| *j < doc.applications[ai].scopes.len()),
                     _ => None,
                 };
                 // A move off either end is not an error, it is a button that was already
                 // disabled: nothing changes, and nothing is written.
                 if let Some(to) = to {
-                    move_site(&mut doc, i, to);
-                    commit(v, &doc, "site mv", &format!("{} --at {to}", target.trim()))?;
+                    move_scope(&mut doc, app, si, to)?;
+                    commit(
+                        v,
+                        &doc,
+                        "scope mv",
+                        &format!("{app}/{} --at {to}", target.trim()),
+                    )?;
                 }
                 Ok(())
             })();
             match r {
-                Ok(()) => Outcome::Done(Route::Sites, Msg::SiteMoved),
+                Ok(()) => Outcome::Done(Route::App(app.clone()), Msg::ScopeMoved),
                 Err(e) => Outcome::Page(
                     400,
                     title,
@@ -3587,39 +4230,14 @@ fn mutate(v: &View, form: &Form) -> Outcome {
             }
         }
 
-        Route::SiteRm(target) => {
-            let r = (|| -> Result<(), Refusal> {
-                let s = remove_site(&mut doc, target)?;
-                commit(v, &doc, "site rm", &site_name(&s))?;
-                Ok(())
-            })();
-            match r {
-                Ok(()) => Outcome::Done(Route::Sites, Msg::SiteRemoved),
-                Err(e) => Outcome::Page(
-                    400,
-                    title,
-                    page_confirm(
-                        v,
-                        html! { (v.t(K::Sites)) " · " (v.t(K::Remove)) },
-                        html! { p { code { (target) } } },
-                        v.t(K::ConfirmSiteRm),
-                        v.t(K::Remove),
-                        Some(&e),
-                    ),
-                ),
-            }
-        }
-
         Route::GroupAdd => {
             let f = GroupForm::read(form);
             let r = (|| -> Result<(), Refusal> {
                 let name = f.name.trim().to_string();
-                add_url_group(&mut doc, &name, form.lines("urls"))
-                    .map_err(|e| Refusal::on("name", e))?;
-                // The name already passed; the patterns just submitted are the only new,
-                // still-unvalidated content left for the compile to catch.
-                commit(v, &doc, "url-group add", &format!("@{name}"))
-                    .map_err(|e| Refusal::on("urls", e))?;
+                let members =
+                    parse_group_members(&doc, &f.members).map_err(|e| Refusal::on("members", e))?;
+                add_user_group(&mut doc, &name, members).map_err(|e| Refusal::on("name", e))?;
+                commit(v, &doc, "group add", &format!("@{name}"))?;
                 Ok(())
             })();
             match r {
@@ -3633,9 +4251,10 @@ fn mutate(v: &View, form: &Form) -> Outcome {
             let r = (|| -> Result<(), Refusal> {
                 // No rename: a reference names a group by its exact spelling, so the
                 // library does not offer one and neither does this form.
-                *url_group_mut(&mut doc, target)? = form.lines("urls");
-                commit(v, &doc, "url-group set", &format!("@{}", target.trim()))
-                    .map_err(|e| Refusal::on("urls", e))?;
+                let members =
+                    parse_group_members(&doc, &f.members).map_err(|e| Refusal::on("members", e))?;
+                *user_group_mut(&mut doc, target)? = members;
+                commit(v, &doc, "group set", &format!("@{}", target.trim()))?;
                 Ok(())
             })();
             match r {
@@ -3648,8 +4267,8 @@ fn mutate(v: &View, form: &Form) -> Outcome {
             let r = (|| -> Result<(), Refusal> {
                 // The library refuses while anything still references the group, and its
                 // refusal names every referrer — which is the list of places to go and fix.
-                remove_url_group(&mut doc, target)?;
-                commit(v, &doc, "url-group rm", &format!("@{}", target.trim()))?;
+                remove_user_group(&mut doc, target)?;
+                commit(v, &doc, "group rm", &format!("@{}", target.trim()))?;
                 Ok(())
             })();
             match r {
@@ -3679,7 +4298,6 @@ fn mutate(v: &View, form: &Form) -> Outcome {
                 if !add_denied(&mut doc, &email).map_err(|e| Refusal::on("email", e))? {
                     return Err(Refusal::on("email", v.t(K::AlreadyDenied)));
                 }
-                // This form has no urls field, so nothing new reaches the compile unchecked.
                 commit(v, &doc, "deny add", &email)?;
                 Ok(())
             })();
@@ -3715,7 +4333,10 @@ fn mutate(v: &View, form: &Form) -> Outcome {
             }
         }
 
-        // Everything else is a page, and a page does not take a POST.
+        // Everything else is a page, and a page does not take a POST — `Route::UserEdit`
+        // included: nothing is left on a `UserSpec` for a standalone edit to change (the
+        // uuid is fixed, emails and keys have their own routes), so its `GET` just shows
+        // the user and its `POST` falls here.
         _ => Outcome::Page(
             405,
             title,
@@ -3728,19 +4349,83 @@ fn mutate(v: &View, form: &Form) -> Outcome {
     }
 }
 
-/// The record a site form describes. `login_url` is absent when the field is blank —
-/// absent means "use `BB_AUTH_LOGIN_URL`", and an empty string would be a malformed URL
-/// the gate refuses.
-fn site_spec(f: &SiteForm, urls: Vec<String>) -> SiteSpec {
-    SiteSpec {
+/// Build a `ScopeSpec` from a submitted form: `urls` already split into lines by the
+/// caller, `access` copied verbatim (the library is the judge of whether it is one of the
+/// three words), and the membership fields populated only under `restricted` — present on
+/// any other kind is fatal, so this is what keeps a stray tick from ever reaching the
+/// compile.
+fn scope_spec(doc: &AccessFile, f: &ScopeForm, urls: Vec<String>) -> Result<ScopeSpec, String> {
+    let access = f.access.trim().to_string();
+    let (users, groups, credentials) = if access == "restricted" {
+        let (u, g) = parse_members(doc, &f.members)?;
+        let credentials = if !f.cred_login && !f.cred_api_key {
+            None
+        } else {
+            let mut list = Vec::new();
+            if f.cred_login {
+                list.push("login".to_string());
+            }
+            if f.cred_api_key {
+                list.push("api_key".to_string());
+            }
+            Some(list)
+        };
+        (
+            (!u.is_empty()).then_some(u),
+            (!g.is_empty()).then_some(g),
+            credentials,
+        )
+    } else {
+        (None, None, None)
+    };
+    Ok(ScopeSpec {
         name: f.name.trim().to_string(),
         urls,
-        public_auth: f.public_auth,
-        login_url: match f.login_url.trim() {
+        access,
+        users,
+        groups,
+        credentials,
+        notes: match f.notes.trim() {
             "" => None,
-            l => Some(l.to_string()),
+            n => Some(n.to_string()),
         },
+    })
+}
+
+/// Split a members textarea into `users` (each line resolved to a uuid, exactly as an
+/// operator types it: email or uuid, through [`user_pos`]) and `groups` (`@name`, kept
+/// exactly as written — the file's own spelling, and what `compile_access` expands).
+fn parse_members(doc: &AccessFile, text: &str) -> Result<(Vec<String>, Vec<String>), String> {
+    let mut users = Vec::new();
+    let mut groups = Vec::new();
+    for line in text.lines().map(str::trim).filter(|l| !l.is_empty()) {
+        if group_ref(line).is_some() {
+            groups.push(line.to_string());
+        } else {
+            match user_pos(doc, line) {
+                Some(i) => users.push(doc.users[i].uuid.trim().to_ascii_lowercase()),
+                None => return Err(format!("no user '{line}' (add them with: user add {line})")),
+            }
+        }
     }
+    Ok((users, groups))
+}
+
+/// [`parse_members`] for a `user_groups` member list, which may only ever hold uuids: a
+/// group cannot reference another group, so an `@name` line is refused here rather than
+/// silently dropped into a field nothing reads.
+fn parse_group_members(doc: &AccessFile, text: &str) -> Result<Vec<String>, String> {
+    let mut users = Vec::new();
+    for line in text.lines().map(str::trim).filter(|l| !l.is_empty()) {
+        if let Some(g) = group_ref(line) {
+            return Err(format!("'@{g}': a group cannot reference another group"));
+        }
+        match user_pos(doc, line) {
+            Some(i) => users.push(doc.users[i].uuid.trim().to_ascii_lowercase()),
+            None => return Err(format!("no user '{line}' (add them with: user add {line})")),
+        }
+    }
+    Ok(users)
 }
 
 // ---------------------------------------------------------------------------
@@ -3930,38 +4615,28 @@ fn handle(mut req: Request, cfg: &Config) {
 
     let title = at.title();
     let (status, content, title) = match &at {
-        Route::Dashboard => (200, page_dashboard(&v, &doc), v.t(K::Dashboard)),
+        Route::Dashboard => (200, page_dashboard(&v, &doc, &access), v.t(K::Dashboard)),
         Route::Groups => (200, page_groups(&v, &doc), title),
-        Route::Sites => (200, page_sites(&v, &doc), title),
+        Route::Apps => (200, page_apps(&v, &doc), title),
+        Route::App(n) => {
+            let (status, content) = page_app(&v, &doc, n);
+            (status, content, title)
+        }
         Route::Denied => (200, page_denied(&v, &doc), title),
-        Route::Users => (200, page_users(&v, &doc), title),
-        Route::User(e) => {
-            let (status, content) = page_user(&v, &doc, e);
+        Route::Users => (200, page_users(&v, &doc, &access), title),
+        // Nothing left on a `UserSpec` for a standalone edit to change, so `UserEdit`
+        // simply shows the same page `User` does: the uuid is fixed, and emails and keys
+        // manage themselves on their own routes.
+        Route::User(e) | Route::UserEdit(e) => {
+            let (status, content) = page_user(&v, &doc, &access, e);
             (status, content, title)
         }
         Route::Can => (200, page_can(&v, &access, &query), title),
 
-        Route::UserAdd => (
-            200,
-            page_user_form(&v, None, &UserForm::default(), None),
-            title,
-        ),
-        Route::UserEdit(e) => match user_pos(&doc, e) {
-            Some(i) => {
-                let f = UserForm::of(&doc.users[i]);
-                let email = norm_email(&doc.users[i].email);
-                (200, page_user_form(&v, Some(&email), &f, None), title)
-            }
-            None => (
-                404,
-                page_missing(&v, v.t(K::NoSuchUser), e, &Route::Users),
-                title,
-            ),
-        },
-        Route::UserRm(e) => match user_pos(&doc, e) {
+        Route::UserAdd => (200, page_user_form(&v, &UserForm::default(), None), title),
+        Route::UserRm(key) => match user_pos(&doc, key) {
             Some(i) => {
                 let u = &doc.users[i];
-                let email = norm_email(&u.email);
                 let keys = u.api_keys.len();
                 (
                     200,
@@ -3969,9 +4644,19 @@ fn handle(mut req: Request, cfg: &Config) {
                         &v,
                         html! { (v.t(K::Users)) " · " (v.t(K::Remove)) },
                         html! {
-                            p { code { (email) } }
+                            p { code { (user_label(u)) } }
                             @if keys > 0 {
                                 p class="muted" { (keys) " api_keys" }
+                            }
+                            @let refs = user_refs(&doc, &u.uuid.trim().to_ascii_lowercase());
+                            @if !refs.is_empty() {
+                                p class="muted" {
+                                    (v.t(K::ReferencedBy)) " "
+                                    @for (i, r) in refs.iter().enumerate() {
+                                        @if i > 0 { ", " }
+                                        code { (r) }
+                                    }
+                                }
                             }
                         },
                         v.t(K::ConfirmUserRm),
@@ -3983,13 +4668,51 @@ fn handle(mut req: Request, cfg: &Config) {
             }
             None => (
                 404,
-                page_missing(&v, v.t(K::NoSuchUser), e, &Route::Users),
+                page_missing(&v, v.t(K::NoSuchUser), key, &Route::Users),
                 title,
             ),
         },
-        Route::KeyAdd(e) => match user_pos(&doc, e) {
+        Route::EmailAdd(uuid) => match user_pos(&doc, uuid) {
+            Some(i) => (
+                200,
+                page_email_form(&v, &user_label(&doc.users[i]), &UserForm::default(), None),
+                title,
+            ),
+            None => (
+                404,
+                page_missing(&v, v.t(K::NoSuchUser), uuid, &Route::Users),
+                title,
+            ),
+        },
+        Route::EmailRm(uuid, e) => match user_pos(&doc, uuid) {
+            Some(_)
+                if doc.users[user_pos(&doc, uuid).unwrap()]
+                    .emails
+                    .iter()
+                    .any(|x| norm_email(x) == norm_email(e)) =>
+            {
+                (
+                    200,
+                    page_confirm(
+                        &v,
+                        html! { (v.t(K::Emails)) " · " (v.t(K::Remove)) },
+                        html! { p { code { (norm_email(e)) } } },
+                        v.t(K::ConfirmEmailRm),
+                        v.t(K::Remove),
+                        None,
+                    ),
+                    title,
+                )
+            }
+            _ => (
+                404,
+                page_missing(&v, v.t(K::NoSuchUser), e, &Route::User(uuid.clone())),
+                title,
+            ),
+        },
+        Route::KeyAdd(uuid) => match user_pos(&doc, uuid) {
             Some(i) => {
-                let owner = norm_email(&doc.users[i].email);
+                let owner = user_label(&doc.users[i]);
                 let f = KeyForm {
                     duration: "365d".to_string(),
                     ..Default::default()
@@ -4002,16 +4725,16 @@ fn handle(mut req: Request, cfg: &Config) {
             }
             None => (
                 404,
-                page_missing(&v, v.t(K::NoSuchUser), e, &Route::Users),
+                page_missing(&v, v.t(K::NoSuchUser), uuid, &Route::Users),
                 title,
             ),
         },
-        Route::KeyEdit(e, id) => match find_key(&doc, e, id) {
-            Some((owner, k)) => (
+        Route::KeyEdit(uuid, id) => match find_key(&doc, uuid, id) {
+            Some((u, k)) => (
                 200,
                 page_key_form(
                     &v,
-                    &owner,
+                    &user_label(u),
                     Some(id),
                     k.released.trim(),
                     &KeyForm::of(k),
@@ -4021,16 +4744,16 @@ fn handle(mut req: Request, cfg: &Config) {
             ),
             None => (
                 404,
-                page_missing(&v, v.t(K::NoSuchKey), id, &Route::User(norm_email(e))),
+                page_missing(&v, v.t(K::NoSuchKey), id, &Route::User(uuid.clone())),
                 title,
             ),
         },
-        Route::KeyRotate(e, id) => match find_key(&doc, e, id) {
-            Some((owner, _)) => (
+        Route::KeyRotate(uuid, id) => match find_key(&doc, uuid, id) {
+            Some((u, _)) => (
                 200,
                 page_confirm(
                     &v,
-                    html! { (owner) " · api_keys · " (v.t(K::Rotate)) },
+                    html! { (user_label(u)) " · api_keys · " (v.t(K::Rotate)) },
                     html! { p { code { (id) } } },
                     v.t(K::ConfirmKeyRotate),
                     v.t(K::Rotate),
@@ -4040,16 +4763,16 @@ fn handle(mut req: Request, cfg: &Config) {
             ),
             None => (
                 404,
-                page_missing(&v, v.t(K::NoSuchKey), id, &Route::User(norm_email(e))),
+                page_missing(&v, v.t(K::NoSuchKey), id, &Route::User(uuid.clone())),
                 title,
             ),
         },
-        Route::KeyRm(e, id) => match find_key(&doc, e, id) {
-            Some((owner, _)) => (
+        Route::KeyRm(uuid, id) => match find_key(&doc, uuid, id) {
+            Some((u, _)) => (
                 200,
                 page_confirm(
                     &v,
-                    html! { (owner) " · api_keys · " (v.t(K::Remove)) },
+                    html! { (user_label(u)) " · api_keys · " (v.t(K::Remove)) },
                     html! { p { code { (id) } } },
                     v.t(K::ConfirmKeyRm),
                     v.t(K::Remove),
@@ -4059,41 +4782,43 @@ fn handle(mut req: Request, cfg: &Config) {
             ),
             None => (
                 404,
-                page_missing(&v, v.t(K::NoSuchKey), id, &Route::User(norm_email(e))),
+                page_missing(&v, v.t(K::NoSuchKey), id, &Route::User(uuid.clone())),
                 title,
             ),
         },
 
-        Route::SiteAdd => (
+        Route::AppAdd => (
             200,
-            page_site_form(&v, None, &SiteForm::default(), None),
+            page_app_form(&v, None, &AppForm::default(), None),
             title,
         ),
-        Route::SiteEdit(n) => match site_pos(&doc, n) {
+        Route::AppEdit(n) => match app_pos(&doc, n) {
             Some(i) => {
-                let f = SiteForm::of(&doc.sites[i]);
-                let name = site_name(&doc.sites[i]);
-                (200, page_site_form(&v, Some(&name), &f, None), title)
+                let f = AppForm::of(&doc.applications[i]);
+                let name = doc.applications[i].name.trim().to_string();
+                (200, page_app_form(&v, Some(&name), &f, None), title)
             }
             None => (
                 404,
-                page_missing(&v, v.t(K::NoSuchSite), n, &Route::Sites),
+                page_missing(&v, v.t(K::NoSuchApp), n, &Route::Apps),
                 title,
             ),
         },
-        Route::SiteRm(n) => match site_pos(&doc, n) {
+        Route::AppRm(n) => match app_pos(&doc, n) {
             Some(i) => {
-                let s = &doc.sites[i];
+                let a = &doc.applications[i];
                 (
                     200,
                     page_confirm(
                         &v,
-                        html! { (v.t(K::Sites)) " · " (v.t(K::Remove)) },
+                        html! { (v.t(K::Apps)) " · " (v.t(K::Remove)) },
                         html! {
-                            p { code { (site_name(s)) } }
-                            @if s.public_auth { p { (tag("warn", "public_auth")) } }
+                            p { code { (a.name.trim()) } }
+                            @if !a.scopes.is_empty() {
+                                p class="muted" { (a.scopes.len()) " " (v.t(K::Scopes)) }
+                            }
                         },
-                        v.t(K::ConfirmSiteRm),
+                        v.t(K::ConfirmAppRm),
                         v.t(K::Remove),
                         None,
                     ),
@@ -4102,13 +4827,69 @@ fn handle(mut req: Request, cfg: &Config) {
             }
             None => (
                 404,
-                page_missing(&v, v.t(K::NoSuchSite), n, &Route::Sites),
+                page_missing(&v, v.t(K::NoSuchApp), n, &Route::Apps),
+                title,
+            ),
+        },
+        Route::ScopeAdd(app) => match app_pos(&doc, app) {
+            Some(_) => (
+                200,
+                page_scope_form(&v, app, None, &ScopeForm::default(), None),
+                title,
+            ),
+            None => (
+                404,
+                page_missing(&v, v.t(K::NoSuchApp), app, &Route::Apps),
+                title,
+            ),
+        },
+        Route::ScopeEdit(app, n) => match app_pos(&doc, app).and_then(|i| {
+            scope_pos(&doc.applications[i], n).map(|j| &doc.applications[i].scopes[j])
+        }) {
+            Some(s) => {
+                let f = ScopeForm::of(&doc, s);
+                (200, page_scope_form(&v, app, Some(n), &f, None), title)
+            }
+            None => (
+                404,
+                page_missing(
+                    &v,
+                    v.t(K::NoSuchScope),
+                    &format!("{app}/{n}"),
+                    &Route::App(app.clone()),
+                ),
+                title,
+            ),
+        },
+        Route::ScopeRm(app, n) => match app_pos(&doc, app).and_then(|i| {
+            scope_pos(&doc.applications[i], n).map(|j| &doc.applications[i].scopes[j])
+        }) {
+            Some(_) => (
+                200,
+                page_confirm(
+                    &v,
+                    html! { (v.t(K::Scopes)) " · " (v.t(K::Remove)) },
+                    html! { p { code { (app) "/" (n) } } },
+                    v.t(K::ConfirmScopeRm),
+                    v.t(K::Remove),
+                    None,
+                ),
+                title,
+            ),
+            None => (
+                404,
+                page_missing(
+                    &v,
+                    v.t(K::NoSuchScope),
+                    &format!("{app}/{n}"),
+                    &Route::App(app.clone()),
+                ),
                 title,
             ),
         },
         // A button, not a page: there is nothing to render for it, and a GET must not move
-        // a site any more than it may delete a user.
-        Route::SiteMove(_) => (
+        // a scope any more than it may delete a user.
+        Route::ScopeMove(..) => (
             405,
             notice(
                 "bad",
@@ -4123,11 +4904,15 @@ fn handle(mut req: Request, cfg: &Config) {
             page_group_form(&v, None, &GroupForm::default(), None),
             title,
         ),
-        Route::GroupEdit(n) => match doc.url_groups.get(n.trim()) {
-            Some(urls) => {
+        Route::GroupEdit(n) => match doc.user_groups.get(n.trim()) {
+            Some(members) => {
                 let f = GroupForm {
                     name: n.trim().to_string(),
-                    urls: urls.join("\n"),
+                    members: members
+                        .iter()
+                        .map(|m| label_of(&doc, m))
+                        .collect::<Vec<_>>()
+                        .join("\n"),
                 };
                 (200, page_group_form(&v, Some(n.trim()), &f, None), title)
             }
@@ -4137,7 +4922,7 @@ fn handle(mut req: Request, cfg: &Config) {
                 title,
             ),
         },
-        Route::GroupRm(n) => match doc.url_groups.get(n.trim()) {
+        Route::GroupRm(n) => match doc.user_groups.get(n.trim()) {
             Some(_) => (
                 200,
                 page_confirm(
@@ -4145,7 +4930,7 @@ fn handle(mut req: Request, cfg: &Config) {
                     html! { (v.t(K::Groups)) " · " (v.t(K::Remove)) },
                     html! {
                         p { code { "@" (n.trim()) } }
-                        @let refs = url_group_refs(&doc, n.trim());
+                        @let refs = user_group_refs(&doc, n.trim());
                         @if !refs.is_empty() {
                             p class="muted" {
                                 (v.t(K::ReferencedBy)) " "
@@ -4197,13 +4982,18 @@ fn handle(mut req: Request, cfg: &Config) {
     respond_page(req, status, shell(&v, title, content));
 }
 
-/// One user's key, by owner and id — what a key form and its two confirmations need before
-/// there is anything to render. The owner comes back normalised, as every page spells it.
-fn find_key<'a>(doc: &'a AccessFile, email: &str, id: &str) -> Option<(String, &'a ApiKeySpec)> {
-    let i = user_pos(doc, email)?;
+/// One user's key, by owner (uuid or email) and id — what a key form and its two
+/// confirmations need before there is anything to render. The owner row comes back too, so
+/// a caller can label it with [`user_label`] without a second lookup.
+fn find_key<'a>(
+    doc: &'a AccessFile,
+    key: &str,
+    id: &str,
+) -> Option<(&'a UserSpec, &'a ApiKeySpec)> {
+    let i = user_pos(doc, key)?;
     let u = &doc.users[i];
     let k = u.api_keys.iter().find(|k| k.id.trim() == id.trim())?;
-    Some((norm_email(&u.email), k))
+    Some((u, k))
 }
 
 /// Read the config, bind, and serve forever on a fixed pool of blocking threads — the gate's
@@ -4215,11 +5005,15 @@ fn main() {
     // can say what is in it. Not fatal: the GUI's job is to *show* a broken file.
     match open_access_file(&cfg.access_path) {
         Ok((doc, _)) => eprintln!(
-            "[bb-auth-web] {}: {} users, {} sites, {} url_groups, {} denied",
+            "[bb-auth-web] {}: {} users, {} applications, {} scopes, {} user_groups, {} denied",
             cfg.access_path,
             doc.users.len(),
-            doc.sites.len(),
-            doc.url_groups.len(),
+            doc.applications.len(),
+            doc.applications
+                .iter()
+                .map(|a| a.scopes.len())
+                .sum::<usize>(),
+            doc.user_groups.len(),
             doc.denied.len()
         ),
         Err(e) => eprintln!("[bb-auth-web] WARNING: {e}"),
@@ -4277,29 +5071,44 @@ fn main() {
 mod tests {
     use super::*;
 
+    /// Bob's uuid, fixed so a redirect target and a route path are things a test can name.
+    const BOB: &str = "8f14e45f-ceea-467a-9f79-3b4e5c6d7a8b";
+    /// A second user, enrolled but in no scope: what `WarnNoScope`/`InNoScope` are for.
+    const NOWHERE: &str = "11111111-1111-1111-1111-111111111111";
+
     /// A file with one of everything, so a rendering test has something to render.
-    const SAMPLE: &str = r#"{
-      "url_groups": { "mcp": ["https://mcp.x.com/mcp/*"], "unused": ["https://old.x.com/*"] },
-      "sites": [
-        { "name": "onboarding", "urls": ["https://app.x.com/hello/*"], "public_auth": true }
+    const SAMPLE: &str = r#"{ "version": 3,
+      "applications": [
+        { "name": "mpa", "base": ["https://app.x.com/mpa"],
+          "scopes": [
+            { "name": "admin", "urls": ["https://app.x.com/mpa/admin/*"], "access": "restricted",
+              "groups": ["@admins"], "notes": "the admin area" }
+          ] }
       ],
+      "user_groups": {
+        "admins": ["8f14e45f-ceea-467a-9f79-3b4e5c6d7a8b"],
+        "unused": ["8f14e45f-ceea-467a-9f79-3b4e5c6d7a8b"]
+      },
       "denied": ["spammer@x.com"],
       "users": [
-        { "email": "Bob@X.com", "authorized_urls": ["@mcp"], "notes": "the bot",
+        { "uuid": "8f14e45f-ceea-467a-9f79-3b4e5c6d7a8b", "emails": ["Bob@X.com"], "notes": "the bot",
           "api_keys": [ { "id": "laptop",
             "key_hash": "1111111111111111111111111111111111111111111111111111111111111111",
             "released": "1970-01-01", "duration": "1d" } ] },
-        { "email": "nowhere@x.com" }
+        { "uuid": "11111111-1111-1111-1111-111111111111", "emails": ["nowhere@x.com"] }
       ]
     }"#;
 
-    /// Two sites, so a reorder has somewhere to go.
-    const TWO_SITES: &str = r#"{
-      "sites": [
-        { "name": "first", "urls": ["https://app.x.com/a/*"], "public_auth": false },
-        { "name": "second", "urls": ["https://app.x.com/b/*"], "public_auth": true }
+    /// Two scopes in one application, so a reorder has somewhere to go.
+    const TWO_SCOPES: &str = r#"{ "version": 3,
+      "applications": [
+        { "name": "app1", "base": ["https://app.x.com"],
+          "scopes": [
+            { "name": "first", "urls": ["https://app.x.com/a/*"], "access": "anonymous" },
+            { "name": "second", "urls": ["https://app.x.com/b/*"], "access": "anonymous" }
+          ] }
       ],
-      "users": [ { "email": "bob@x.com", "authorized_urls": ["https://app.x.com/*"] } ]
+      "users": [ { "uuid": "8f14e45f-ceea-467a-9f79-3b4e5c6d7a8b", "emails": ["bob@x.com"] } ]
     }"#;
 
     fn cfg_for(path: &str, base: &str) -> Config {
@@ -4444,7 +5253,7 @@ mod tests {
         assert_eq!(route("/users", ""), Some(Route::Users));
         assert_eq!(route("/users/", ""), Some(Route::Users));
         assert_eq!(route("/groups", ""), Some(Route::Groups));
-        assert_eq!(route("/sites", ""), Some(Route::Sites));
+        assert_eq!(route("/apps", ""), Some(Route::Apps));
         assert_eq!(route("/denied", ""), Some(Route::Denied));
         assert_eq!(route("/can", ""), Some(Route::Can));
         assert_eq!(route("/nope", ""), None);
@@ -4817,13 +5626,18 @@ mod tests {
         let (doc, access) = open_access_file(&cfg.access_path).unwrap();
         let v = view(&cfg, at.clone(), "REV");
         let content = match &at {
-            Route::Dashboard => page_dashboard(&v, &doc),
+            Route::Dashboard => page_dashboard(&v, &doc, &access),
             Route::Groups => page_groups(&v, &doc),
-            Route::Sites => page_sites(&v, &doc),
+            Route::Apps => page_apps(&v, &doc),
+            Route::App(n) => page_app(&v, &doc, n).1,
             Route::Denied => page_denied(&v, &doc),
-            Route::Users => page_users(&v, &doc),
-            Route::User(e) => page_user(&v, &doc, e).1,
-            Route::Can => page_can(&v, &access, "email=bob@x.com&url=https://mcp.x.com/mcp/a"),
+            Route::Users => page_users(&v, &doc, &access),
+            Route::User(e) => page_user(&v, &doc, &access, e).1,
+            Route::Can => page_can(
+                &v,
+                &access,
+                "email=bob@x.com&url=https://app.x.com/mpa/admin/x",
+            ),
             other => panic!("{other:?} is not a read-only page"),
         };
         let html = shell(&v, "t", content).into_string();
@@ -4834,38 +5648,52 @@ mod tests {
     #[test]
     fn dashboard_counts_expiries_and_warnings() {
         let html = render("dash", Route::Dashboard);
-        assert!(html.contains("url_groups"));
+        assert!(html.contains("user_groups"));
         // the 1970 key is long past
         assert!(html.contains("expired"), "{html}");
-        // a scope-less user, an unreferenced group
-        assert!(html.contains("no authorized_urls"));
+        // nowhere@x.com is in no scope, and @unused references nobody
+        assert!(html.contains("reaches nothing"), "{html}");
         assert!(html.contains("@unused"));
         assert!(html.contains("referenced by nothing"));
     }
 
     #[test]
-    fn user_page_shows_group_refs_raw_and_never_expanded() {
-        let html = render("user", Route::User("bob@x.com".to_string()));
-        assert!(html.contains("@mcp"), "the reference is shown as stored");
+    fn user_page_shows_its_scopes_and_notes() {
+        let html = render("user", Route::User(BOB.to_string()));
         assert!(
-            !html.contains("https://mcp.x.com/mcp/*"),
-            "a group must never be expanded on the page"
+            html.contains("mpa/admin"),
+            "the scope that lists this user is shown"
         );
         assert!(html.contains("the bot"), "notes come from extra");
         assert!(
-            html.contains("inherits the user's"),
-            "the key declares no scope"
+            html.contains("everything its owner reaches"),
+            "the sample key declares no scopes of its own"
         );
     }
 
     #[test]
-    fn sites_page_is_numbered_in_file_order() {
-        let html = render("sites", Route::Sites);
+    fn user_in_no_scope_gets_the_warning() {
+        let html = render("nowhere", Route::User(NOWHERE.to_string()));
+        assert!(html.contains("in no scope"), "{html}");
+    }
+
+    #[test]
+    fn app_page_lists_its_scopes_in_file_order_with_raw_group_refs() {
+        let html = render("app", Route::App("mpa".to_string()));
         assert!(
             html.contains("<ol"),
             "order is meaning, so it is an ordered list"
         );
-        assert!(html.contains("onboarding") && html.contains("public_auth"));
+        assert!(html.contains("admin") && html.contains("restricted"));
+        // A `@group` reference is shown as the file spells it, never expanded to who it
+        // resolves to today.
+        assert!(html.contains("@admins"), "the reference is shown as stored");
+    }
+
+    #[test]
+    fn apps_page_lists_applications_with_their_scope_count() {
+        let html = render("apps", Route::Apps);
+        assert!(html.contains("mpa"));
     }
 
     #[test]
@@ -4879,11 +5707,11 @@ mod tests {
     fn groups_page_names_who_references_a_group() {
         let html = render("groups", Route::Groups);
         assert!(html.contains("referenced by"));
-        assert!(html.contains("bob@x.com"));
+        assert!(html.contains("mpa/admin"));
     }
 
     #[test]
-    fn denied_page_marks_the_enrolled() {
+    fn denied_page_shows_a_stranger_by_email() {
         let html = render("denied", Route::Denied);
         assert!(html.contains("spammer@x.com"));
     }
@@ -4893,24 +5721,22 @@ mod tests {
         // The access file is operator-owned, but it is also a text file that anything with
         // root can write, and half of it ends up in a page. maud escapes on the way in;
         // this pins that it stays that way.
-        let json = r#"{ "users": [ { "email": "<script>alert(1)</script>@x.com",
-                          "authorized_urls": ["https://x.com/\"><img src=x onerror=alert(1)>/*"],
-                          "notes": "<b>bold</b>" } ] }"#;
+        let json = r#"{ "version": 3, "users": [
+            { "uuid": "8f14e45f-ceea-467a-9f79-3b4e5c6d7a8b",
+              "emails": ["<script>alert(1)</script>@x.com"], "notes": "<b>bold</b>" } ] }"#;
         let path = scratch("xss", json);
         let cfg = cfg_for(&path, "");
-        let (doc, _) = open_access_file(&cfg.access_path).unwrap();
+        let (doc, access) = open_access_file(&cfg.access_path).unwrap();
         let v = view(&cfg, Route::Users, "REV");
-        let email = "<script>alert(1)</script>@x.com";
         for html in [
-            shell(&v, "t", page_users(&v, &doc)).into_string(),
-            shell(&v, "t", page_user(&v, &doc, email).1).into_string(),
+            shell(&v, "t", page_users(&v, &doc, &access)).into_string(),
+            shell(&v, "t", page_user(&v, &doc, &access, BOB).1).into_string(),
         ] {
             assert!(
                 html.contains("&lt;script&gt;alert(1)&lt;/script&gt;@x.com"),
                 "{html}"
             );
             assert!(!html.contains("<script>alert(1)"), "{html}");
-            assert!(!html.contains("<img src=x"), "{html}");
             assert!(!html.contains("<b>bold</b>"), "{html}");
         }
         let _ = std::fs::remove_file(&path);
@@ -4920,7 +5746,10 @@ mod tests {
     fn a_broken_file_renders_the_librarys_message_verbatim() {
         let path = scratch(
             "broken",
-            r#"{ "users": [ { "email": "b@x", "authorized_urls": ["@nope"] } ] }"#,
+            r#"{ "version": 3, "applications": [
+                { "name": "a", "base": ["https://x.com/a"], "scopes": [
+                    { "name": "s", "urls": ["https://x.com/a/*"], "access": "restricted",
+                      "groups": ["@nope"] } ] } ] }"#,
         );
         let cfg = cfg_for(&path, "");
         // `Access` has no `Debug` on purpose (a table of live credentials), so no unwrap_err.
@@ -4934,7 +5763,7 @@ mod tests {
             html.contains("the gate would reject this file as it stands"),
             "{html}"
         );
-        assert!(html.contains("unknown url group"), "{html}");
+        assert!(html.contains("unknown user group"), "{html}");
         let _ = std::fs::remove_file(&path);
     }
 
@@ -4978,30 +5807,26 @@ mod tests {
     }
 
     #[test]
-    fn a_user_add_writes_through_and_redirects() {
+    fn a_user_add_mints_a_uuid_and_redirects_to_it() {
         let path = scratch("m-useradd", SAMPLE);
         let cfg = cfg_for(&path, "");
         let got = post(
             &cfg,
             Route::UserAdd,
-            &[
-                ("rev", &rev_of(&path)),
-                ("email", " New@X.com "),
-                ("urls", "https://app.x.com/*\n\n  @mcp  \n"),
-            ],
+            &[("rev", &rev_of(&path)), ("email", " New@X.com ")],
         );
-        assert_eq!(got.location(), "/users/new%40x.com?msg=user-added");
         let doc = bb_auth_core::read_access_file(&path).unwrap();
-        let u = &doc.users[doc.users.len() - 1];
+        let u = doc
+            .users
+            .iter()
+            .find(|u| u.emails.iter().any(|e| e == "new@x.com"))
+            .expect("the new row");
         assert_eq!(
-            u.email, "new@x.com",
+            u.emails,
+            ["new@x.com"],
             "the email is normalised on the way in"
         );
-        assert_eq!(
-            u.authorized_urls.as_deref().unwrap(),
-            ["https://app.x.com/*", "@mcp"],
-            "lines are trimmed, blanks dropped, @refs kept literal"
-        );
+        assert_eq!(got.location(), format!("/users/{}?msg=user-added", u.uuid));
         cleanup(&path);
     }
 
@@ -5019,7 +5844,6 @@ mod tests {
                     "0000000000000000000000000000000000000000000000000000000000000000",
                 ),
                 ("email", "new@x.com"),
-                ("urls", "*://*/*"),
             ],
         );
         let (status, html) = got.page();
@@ -5036,27 +5860,31 @@ mod tests {
     }
 
     #[test]
-    fn a_refused_edit_re_renders_the_form_with_the_librarys_words() {
+    fn a_refused_scope_add_re_renders_the_form_with_the_librarys_words() {
         let path = scratch("m-refused", SAMPLE);
         let cfg = cfg_for(&path, "");
         let before = read(&path);
         let got = post(
             &cfg,
-            Route::UserEdit("bob@x.com".to_string()),
+            Route::ScopeAdd("mpa".to_string()),
             &[
                 ("rev", &rev_of(&path)),
-                ("email", "bob@x.com"),
-                ("urls", "@nope"),
+                ("name", "reports"),
+                ("urls", "https://elsewhere.com/x"),
+                ("access", "anonymous"),
             ],
         );
         let (status, html) = got.page();
         assert_eq!(status, 400);
         // Verbatim, in the English the CLI says it in.
         assert!(html.contains("refusing to write"), "{html}");
-        assert!(html.contains("unknown url group '@nope'"), "{html}");
+        assert!(html.contains("outside this application's base"), "{html}");
         // And the submitted values are still in the fields.
-        assert!(html.contains("@nope</textarea>"), "{html}");
-        assert!(html.contains("value=\"bob@x.com\""), "{html}");
+        assert!(
+            html.contains("https://elsewhere.com/x</textarea>"),
+            "{html}"
+        );
+        assert!(html.contains("value=\"reports\""), "{html}");
         assert_eq!(read(&path), before, "a refusal writes nothing");
         cleanup(&path);
     }
@@ -5068,21 +5896,45 @@ mod tests {
         let before = read(&path);
         let got = post(
             &cfg,
+            Route::ScopeAdd("mpa".to_string()),
+            &[
+                ("rev", &rev_of(&path)),
+                ("name", "reports"),
+                ("urls", "https://app.x.com/mpa/reports/*"),
+                ("access", "restricted"),
+                ("members", "\"><img src=x onerror=alert(1)>"),
+            ],
+        );
+        let (status, html) = got.page();
+        assert_eq!(status, 400);
+        assert!(!html.contains("<img src=x"), "{html}");
+        assert_eq!(read(&path), before);
+        cleanup(&path);
+    }
+
+    #[test]
+    fn a_hostile_email_comes_back_escaped_in_the_user_form() {
+        // The local part is deliberately unrestricted (`well_formed_email` only checks the
+        // domain), so a script tag ahead of an ordinary `@x.com` is accepted; this uses a
+        // `>` in the domain instead, which the label check does refuse.
+        let path = scratch("m-hostile-email", SAMPLE);
+        let cfg = cfg_for(&path, "");
+        let before = read(&path);
+        let got = post(
+            &cfg,
             Route::UserAdd,
             &[
                 ("rev", &rev_of(&path)),
-                ("email", "<script>alert(1)</script>@x.com"),
-                ("urls", "@nope\n\"><img src=x onerror=alert(1)>"),
+                ("email", "<script>alert(1)</script>@evil>.com"),
             ],
         );
         let (status, html) = got.page();
         assert_eq!(status, 400);
         assert!(
-            html.contains("&lt;script&gt;alert(1)&lt;/script&gt;@x.com"),
+            html.contains("&lt;script&gt;alert(1)&lt;/script&gt;@evil&gt;.com"),
             "{html}"
         );
         assert!(!html.contains("<script>alert(1)"), "{html}");
-        assert!(!html.contains("<img src=x"), "{html}");
         assert_eq!(read(&path), before);
         cleanup(&path);
     }
@@ -5094,13 +5946,8 @@ mod tests {
         let stale = rev_of(&path);
         let got = post(
             &cfg,
-            Route::KeyAdd("bob@x.com".to_string()),
-            &[
-                ("rev", &stale),
-                ("id", "ci"),
-                ("duration", "365d"),
-                ("scope", "inherit"),
-            ],
+            Route::KeyAdd(BOB.to_string()),
+            &[("rev", &stale), ("id", "ci"), ("duration", "365d")],
         );
         let (status, html) = got.page();
         assert_eq!(
@@ -5124,21 +5971,16 @@ mod tests {
         let k = &doc.users[0].api_keys;
         assert_eq!(k.len(), 2);
         assert!(
-            k[1].authorized_urls.is_none(),
-            "'inherit' is the field being absent"
+            k[1].scopes.is_none(),
+            "an empty scopes field is the field being absent"
         );
 
         // A re-submitted form cannot double-mint: the write moved the file, so the rev the
         // browser still holds is stale.
         let replay = post(
             &cfg,
-            Route::KeyAdd("bob@x.com".to_string()),
-            &[
-                ("rev", &stale),
-                ("id", "ci2"),
-                ("duration", "365d"),
-                ("scope", "inherit"),
-            ],
+            Route::KeyAdd(BOB.to_string()),
+            &[("rev", &stale), ("id", "ci2"), ("duration", "365d")],
         );
         assert_eq!(replay.page().0, 409);
         assert_eq!(read(&path), on_disk, "the replay wrote nothing");
@@ -5150,12 +5992,7 @@ mod tests {
         let path = scratch("m-mint-reload", SAMPLE);
         let cfg = cfg_for(&path, "");
         let stale = rev_of(&path);
-        let fields = [
-            ("rev", stale.as_str()),
-            ("id", "ci"),
-            ("duration", "365d"),
-            ("scope", "inherit"),
-        ];
+        let fields = [("rev", stale.as_str()), ("id", "ci"), ("duration", "365d")];
         let first = post(&cfg, Route::KeyAdd("bob@x.com".to_string()), &fields);
         assert_eq!(first.page().0, 200, "the mint itself succeeds");
         let on_disk = read(&path);
@@ -5184,12 +6021,7 @@ mod tests {
         let other = post(
             &cfg,
             Route::KeyAdd("bob@x.com".to_string()),
-            &[
-                ("rev", &stale),
-                ("id", "other"),
-                ("duration", "365d"),
-                ("scope", "inherit"),
-            ],
+            &[("rev", &stale), ("id", "other"), ("duration", "365d")],
         );
         let (status, html) = other.page();
         assert_eq!(status, 409);
@@ -5206,11 +6038,7 @@ mod tests {
         let got = post(
             &cfg,
             Route::UserAdd,
-            &[
-                ("rev", &rev_of(&path)),
-                ("email", "not an email"),
-                ("urls", "*://*/*"),
-            ],
+            &[("rev", &rev_of(&path)), ("email", "not an email")],
         );
         let (status, html) = got.page();
         assert_eq!(status, 400);
@@ -5242,17 +6070,13 @@ mod tests {
     }
 
     #[test]
-    fn a_malformed_email_marks_the_email_field_invalid_and_leaves_urls_alone() {
+    fn a_malformed_email_marks_the_email_field_invalid() {
         let path = scratch("m-bademail-attr", SAMPLE);
         let cfg = cfg_for(&path, "");
         let got = post(
             &cfg,
             Route::UserAdd,
-            &[
-                ("rev", &rev_of(&path)),
-                ("email", "not an email"),
-                ("urls", "*://*/*"),
-            ],
+            &[("rev", &rev_of(&path)), ("email", "not an email")],
         );
         let (status, html) = got.page();
         assert_eq!(status, 400);
@@ -5270,35 +6094,30 @@ mod tests {
             html.contains(&format!("id=\"{ERR_ID}\"")),
             "the error box carries the id aria-describedby points at: {html}"
         );
-        // The urls textarea contributed nothing to this refusal: no invalid class, no aria
-        // attributes; only the email field is marked.
         assert_eq!(
             html.matches("aria-invalid=\"true\"").count(),
             1,
             "only the email field is marked: {html}"
-        );
-        assert!(
-            !html.contains("class=\"invalid\""),
-            "the untouched urls textarea is not bare-invalid: {html}"
         );
         cleanup(&path);
     }
 
     #[test]
     fn an_unattributable_refusal_marks_no_field_invalid() {
-        // A site's `urls` and `login_url` are both still-unvalidated when `commit` runs, so
-        // a compile failure there cannot be pinned to either one with certainty, unlike a
-        // malformed email, which always names `email` (see `mutate`'s `Route::SiteAdd` arm).
-        // A confidently wrong field is worse than none, so this refusal marks nothing.
+        // An application's `base` and `login_url` are both still-unvalidated when `commit`
+        // runs, so a compile failure there cannot be pinned to either one with certainty,
+        // unlike a malformed email, which always names `email` (see `mutate`'s
+        // `Route::UserAdd` arm). A confidently wrong field is worse than none, so this
+        // refusal marks nothing.
         let path = scratch("m-unattributed", SAMPLE);
         let cfg = cfg_for(&path, "");
         let got = post(
             &cfg,
-            Route::SiteAdd,
+            Route::AppAdd,
             &[
                 ("rev", &rev_of(&path)),
                 ("name", "app1"),
-                ("urls", "https://app.x.com/*"),
+                ("base", "https://app.x.com/app1"),
                 ("login_url", "http://login.x.com/"),
             ],
         );
@@ -5316,44 +6135,41 @@ mod tests {
     }
 
     #[test]
-    fn a_key_scope_is_inherited_or_its_own_and_empty_is_not_absent() {
+    fn a_key_scopes_field_collapses_empty_to_inherit() {
         let path = scratch("m-keyscope", SAMPLE);
         let cfg = cfg_for(&path, "");
-        let key = || Route::KeyEdit("bob@x.com".to_string(), "laptop".to_string());
-        let scope = || {
+        let key = || Route::KeyEdit(BOB.to_string(), "laptop".to_string());
+        let scopes = || {
             bb_auth_core::read_access_file(&path).unwrap().users[0].api_keys[0]
-                .authorized_urls
+                .scopes
                 .clone()
         };
-        assert_eq!(scope(), None, "the sample key inherits");
+        assert_eq!(scopes(), None, "the sample key inherits");
 
-        // "own scope" with an empty textarea is a present, empty list: it denies.
         let got = post(
             &cfg,
             key(),
             &[
                 ("rev", &rev_of(&path)),
                 ("duration", "1d"),
-                ("scope", "own"),
-                ("urls", "   \n  "),
+                ("scopes", "mpa/admin"),
             ],
         );
-        assert_eq!(got.location(), "/users/bob%40x.com?msg=key-saved");
-        assert_eq!(scope(), Some(Vec::new()));
+        assert_eq!(got.location(), format!("/users/{BOB}?msg=key-saved"));
+        assert_eq!(scopes(), Some(vec!["mpa/admin".to_string()]));
 
-        // And back: "inherit" is the field being absent, not an empty one.
+        // And back: an empty textarea collapses to absent, "everything the owner reaches".
         let got = post(
             &cfg,
             key(),
             &[
                 ("rev", &rev_of(&path)),
                 ("duration", "1d"),
-                ("scope", "inherit"),
-                ("urls", "https://x.com/*"),
+                ("scopes", "   \n  "),
             ],
         );
-        assert_eq!(got.location(), "/users/bob%40x.com?msg=key-saved");
-        assert_eq!(scope(), None, "inherit drops the field, textarea and all");
+        assert_eq!(got.location(), format!("/users/{BOB}?msg=key-saved"));
+        assert_eq!(scopes(), None, "an emptied textarea collapses to inherit");
         cleanup(&path);
     }
 
@@ -5364,12 +6180,11 @@ mod tests {
         let before = read(&path);
         let got = post(
             &cfg,
-            Route::KeyAdd("bob@x.com".to_string()),
+            Route::KeyAdd(BOB.to_string()),
             &[
                 ("rev", &rev_of(&path)),
                 ("id", "ci"),
                 ("duration", "forever"),
-                ("scope", "inherit"),
             ],
         );
         let (status, html) = got.page();
@@ -5380,7 +6195,7 @@ mod tests {
         // The same for a key with no id.
         let got = post(
             &cfg,
-            Route::KeyAdd("bob@x.com".to_string()),
+            Route::KeyAdd(BOB.to_string()),
             &[("rev", &rev_of(&path)), ("id", "  "), ("duration", "365d")],
         );
         assert!(got.page().1.contains("a key needs an id"));
@@ -5389,19 +6204,19 @@ mod tests {
     }
 
     #[test]
-    fn removing_a_referenced_url_group_is_refused_with_its_referrers() {
+    fn removing_a_referenced_group_is_refused_with_its_referrers() {
         let path = scratch("m-grouprm", SAMPLE);
         let cfg = cfg_for(&path, "");
         let before = read(&path);
         let got = post(
             &cfg,
-            Route::GroupRm("mcp".to_string()),
+            Route::GroupRm("admins".to_string()),
             &[("rev", &rev_of(&path))],
         );
         let (status, html) = got.page();
         assert_eq!(status, 400);
         assert!(html.contains("is still referenced by"), "{html}");
-        assert!(html.contains("bob@x.com"), "the referrer is named: {html}");
+        assert!(html.contains("mpa/admin"), "the referrer is named: {html}");
         assert_eq!(read(&path), before);
 
         // The unreferenced one goes.
@@ -5412,75 +6227,80 @@ mod tests {
         );
         assert_eq!(got.location(), "/groups?msg=group-removed");
         let doc = bb_auth_core::read_access_file(&path).unwrap();
-        assert!(!doc.url_groups.contains_key("unused"));
-        assert!(doc.url_groups.contains_key("mcp"));
+        assert!(!doc.user_groups.contains_key("unused"));
+        assert!(doc.user_groups.contains_key("admins"));
         cleanup(&path);
     }
 
     #[test]
-    fn a_site_is_edited_and_reordered_by_its_buttons() {
-        let path = scratch("m-sites", TWO_SITES);
+    fn a_scope_is_edited_and_reordered_by_its_buttons() {
+        let path = scratch("m-scopes", TWO_SCOPES);
         let cfg = cfg_for(&path, "");
         let names = || {
-            bb_auth_core::read_access_file(&path)
-                .unwrap()
-                .sites
+            bb_auth_core::read_access_file(&path).unwrap().applications[0]
+                .scopes
                 .iter()
-                .map(site_name)
+                .map(|s| s.name.clone())
                 .collect::<Vec<_>>()
         };
 
-        // Editing replaces the record wholesale — urls, public_auth and login_url.
+        // Editing replaces the record wholesale: urls, access, members and credentials.
         let got = post(
             &cfg,
-            Route::SiteEdit("second".to_string()),
+            Route::ScopeEdit("app1".to_string(), "second".to_string()),
             &[
                 ("rev", &rev_of(&path)),
                 ("name", "second"),
                 ("urls", "https://app.x.com/b\nhttps://app.x.com/b/*"),
-                ("public_auth", "on"),
-                ("login_url", "https://login.x.com/"),
+                ("access", "restricted"),
+                ("members", "bob@x.com"),
+                ("cred_login", "on"),
+                ("notes", "the vip area"),
             ],
         );
-        assert_eq!(got.location(), "/sites?msg=site-saved");
+        assert_eq!(got.location(), "/apps/app1?msg=scope-saved");
         let doc = bb_auth_core::read_access_file(&path).unwrap();
-        assert_eq!(doc.sites[1].urls.len(), 2);
-        assert!(doc.sites[1].public_auth);
+        let second = &doc.applications[0].scopes[1];
+        assert_eq!(second.urls.len(), 2);
+        assert_eq!(second.access, "restricted");
+        assert_eq!(second.users.as_deref(), Some(&[BOB.to_string()][..]));
         assert_eq!(
-            doc.sites[1].login_url.as_deref(),
-            Some("https://login.x.com/")
+            second.credentials.as_deref(),
+            Some(&["login".to_string()][..])
         );
+        assert_eq!(second.notes.as_deref(), Some("the vip area"));
 
-        // An unticked checkbox is a field the browser does not send at all.
+        // An access of "anonymous" with no members/credentials sent is not a stray field:
+        // there is nothing to send, since this form never sends those fields blank-vs-set.
         let got = post(
             &cfg,
-            Route::SiteEdit("second".to_string()),
+            Route::ScopeEdit("app1".to_string(), "second".to_string()),
             &[
                 ("rev", &rev_of(&path)),
                 ("name", "second"),
                 ("urls", "https://app.x.com/b/*"),
-                ("login_url", ""),
+                ("access", "anonymous"),
             ],
         );
-        assert_eq!(got.location(), "/sites?msg=site-saved");
+        assert_eq!(got.location(), "/apps/app1?msg=scope-saved");
         let doc = bb_auth_core::read_access_file(&path).unwrap();
-        assert!(!doc.sites[1].public_auth);
-        assert_eq!(doc.sites[1].login_url, None, "a blank login_url is absent");
+        assert_eq!(doc.applications[0].scopes[1].access, "anonymous");
+        assert!(doc.applications[0].scopes[1].users.is_none());
 
         // Order is meaning, so a move is a mutation like any other.
         assert_eq!(names(), ["first", "second"]);
         let got = post(
             &cfg,
-            Route::SiteMove("second".to_string()),
+            Route::ScopeMove("app1".to_string(), "second".to_string()),
             &[("rev", &rev_of(&path)), ("dir", "up")],
         );
-        assert_eq!(got.location(), "/sites?msg=site-moved");
+        assert_eq!(got.location(), "/apps/app1?msg=scope-moved");
         assert_eq!(names(), ["second", "first"]);
         // And a move off the end changes nothing rather than erroring.
         let before = read(&path);
         post(
             &cfg,
-            Route::SiteMove("second".to_string()),
+            Route::ScopeMove("app1".to_string(), "second".to_string()),
             &[("rev", &rev_of(&path)), ("dir", "up")],
         );
         assert_eq!(read(&path), before);
@@ -5489,7 +6309,7 @@ mod tests {
 
     #[test]
     fn a_denied_email_is_added_once_and_lifted() {
-        let path = scratch("m-deny", TWO_SITES);
+        let path = scratch("m-deny", TWO_SCOPES);
         let cfg = cfg_for(&path, "");
         let got = post(
             &cfg,
@@ -5497,10 +6317,8 @@ mod tests {
             &[("rev", &rev_of(&path)), ("email", " Bob@X.com ")],
         );
         assert_eq!(got.location(), "/denied?msg=denied-added");
-        assert_eq!(
-            bb_auth_core::read_access_file(&path).unwrap().denied,
-            ["bob@x.com"]
-        );
+        // An enrolled user is written down by uuid, so the veto covers every email they hold.
+        assert_eq!(bb_auth_core::read_access_file(&path).unwrap().denied, [BOB]);
         // Twice is a refusal, not a second row.
         let got = post(
             &cfg,
@@ -5534,26 +6352,84 @@ mod tests {
     }
 
     #[test]
+    fn a_user_edit_route_has_nothing_to_post_and_falls_to_405() {
+        // There is nothing left on a `UserSpec` for a standalone edit to change: the uuid
+        // is fixed, and emails and keys manage themselves on their own routes.
+        let path = scratch("m-useredit", SAMPLE);
+        let cfg = cfg_for(&path, "");
+        let before = read(&path);
+        let got = post(
+            &cfg,
+            Route::UserEdit(BOB.to_string()),
+            &[("rev", &rev_of(&path))],
+        );
+        assert_eq!(got.page().0, 405);
+        assert_eq!(read(&path), before);
+        cleanup(&path);
+    }
+
+    #[test]
+    fn an_email_is_added_and_removed() {
+        let path = scratch("m-email", SAMPLE);
+        let cfg = cfg_for(&path, "");
+        let got = post(
+            &cfg,
+            Route::EmailAdd(BOB.to_string()),
+            &[("rev", &rev_of(&path)), ("email", " Second@X.com ")],
+        );
+        assert_eq!(got.location(), format!("/users/{BOB}?msg=user-saved"));
+        let doc = bb_auth_core::read_access_file(&path).unwrap();
+        // The original email round-trips exactly as the file had it (case untouched); only
+        // the freshly submitted one is normalised on the way in.
+        assert_eq!(doc.users[0].emails, ["Bob@X.com", "second@x.com"]);
+
+        let got = post(
+            &cfg,
+            Route::EmailRm(BOB.to_string(), "second@x.com".to_string()),
+            &[("rev", &rev_of(&path))],
+        );
+        assert_eq!(got.location(), format!("/users/{BOB}?msg=user-saved"));
+        let doc = bb_auth_core::read_access_file(&path).unwrap();
+        assert_eq!(doc.users[0].emails, ["Bob@X.com"]);
+
+        // The last email is refused: a row nobody can sign in as is not a retirement, it
+        // is a dead end.
+        let got = post(
+            &cfg,
+            Route::EmailRm(BOB.to_string(), "bob@x.com".to_string()),
+            &[("rev", &rev_of(&path))],
+        );
+        assert!(got.page().1.contains("only email"));
+        cleanup(&path);
+    }
+
+    #[test]
     fn a_mutation_under_a_base_path_redirects_under_it() {
         let path = scratch("m-base", SAMPLE);
         let cfg = cfg_for(&path, "/admin");
         let got = post(
             &cfg,
             Route::UserAdd,
-            &[
-                ("rev", &rev_of(&path)),
-                ("email", "new@x.com"),
-                ("urls", "*://*/*"),
-            ],
+            &[("rev", &rev_of(&path)), ("email", "new@x.com")],
         );
-        assert_eq!(got.location(), "/admin/users/new%40x.com?msg=user-added");
+        let doc = bb_auth_core::read_access_file(&path).unwrap();
+        let uuid = &doc
+            .users
+            .iter()
+            .find(|u| u.emails.iter().any(|e| e == "new@x.com"))
+            .unwrap()
+            .uuid;
+        assert_eq!(
+            got.location(),
+            format!("/admin/users/{uuid}?msg=user-added")
+        );
         cleanup(&path);
     }
 
     #[test]
     fn a_known_msg_key_renders_and_an_unknown_one_is_dropped() {
         assert_eq!(Msg::parse("user-added"), Some(Msg::UserAdded));
-        assert_eq!(Msg::parse("site-moved"), Some(Msg::SiteMoved));
+        assert_eq!(Msg::parse("scope-moved"), Some(Msg::ScopeMoved));
         assert_eq!(Msg::parse("<script>"), None);
         assert_eq!(Msg::parse(""), None);
         assert_eq!(Msg::UserRemoved.text(Lang::It), "utente rimosso");
@@ -5561,6 +6437,8 @@ mod tests {
         for m in [
             Msg::UserAdded,
             Msg::KeySaved,
+            Msg::AppAdded,
+            Msg::ScopeAdded,
             Msg::GroupRemoved,
             Msg::DeniedAdded,
         ] {
@@ -5608,7 +6486,7 @@ mod tests {
             .into_string()
             .unwrap();
         assert!(
-            body.contains("url_groups") && body.contains("Warnings"),
+            body.contains("user_groups") && body.contains("Warnings"),
             "{body}"
         );
         // And an unknown path is a 404, not a fall-through to the dashboard.

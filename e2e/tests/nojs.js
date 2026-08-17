@@ -16,7 +16,7 @@ async function run(ctx, t) {
   const { context, page } = await newPage(ctx);
   try {
     // Zero scripts, sampled across page shapes: dashboard, list, form.
-    for (const p of ['/', '/users', '/sites', '/users/bot%40example.com/keys/+add']) {
+    for (const p of ['/', '/users', '/apps', '/apps/app1', '/users/b3f1c8a2-4e77-4f1a-9c0d-1e2f3a4b5c6d/keys/+add']) {
       await page.goto(ctx.base + p);
       t.eq(`no <script> on ${p}`, await page.locator('script').count(), 0);
       // And exactly one kind of handler, on exactly the two controls entitled to it.
@@ -29,9 +29,9 @@ async function run(ctx, t) {
     }
 
     // PRG: save, land on the msg page, reload it — a GET, so nothing can repeat.
-    await page.goto(ctx.base + '/groups/mcp/edit');
-    const urls = await page.locator('textarea[name=urls]').inputValue();
-    await page.fill('textarea[name=urls]', urls);
+    await page.goto(ctx.base + '/groups/admins/edit');
+    const members = await page.locator('textarea[name=members]').inputValue();
+    await page.fill('textarea[name=members]', members + '\nbot@example.com');
     await submit(page);
     t.check('a save lands on a GET with ?msg=', page.url().includes('?msg=group-saved'), page.url());
     t.check('and renders the flash', (await page.locator('.flash').count()) >= 1);
@@ -50,15 +50,19 @@ async function run(ctx, t) {
       await page.goto(`${ctx.base}/can?email=${encodeURIComponent(email)}&url=${encodeURIComponent(url)}`);
       return mainText(page);
     };
-    // The four corners of the grant model, answered by the library's own `decide`:
-    t.check('a scoped user inside their scope is AUTHORIZED',
-      (await verdict('bot@example.com', 'https://mcp.example.com/mcp/context7/x')).includes('AUTHORIZED'));
-    t.check('denied outranks everything — spammer@ on a public_auth site is DENIED',
+    // The corners of the grant model, answered by the library's own `decide`:
+    t.check('a member of a restricted scope is AUTHORIZED',
+      (await verdict('you@example.com', 'https://app.example.com/app1/admin/panel')).includes('AUTHORIZED'));
+    t.check('the credential class is the place\'s to decide — a login on an api_key-only scope is DENIED',
+      (await verdict('bot@example.com', 'https://mcp.example.com/mcp/context7/x')).includes('DENIED'));
+    t.check('denied outranks everything — spammer@ on an authenticated scope is DENIED',
       (await verdict('spammer@example.com', 'https://app.example.com/app1')).includes('DENIED'));
-    t.check('public_auth grants on identity alone — a stranger is AUTHORIZED there',
+    t.check('authenticated grants on identity alone — a stranger is AUTHORIZED there',
       (await verdict('stranger@example.com', 'https://app.example.com/app1')).includes('AUTHORIZED'));
-    t.check('no grant source, no access — the same stranger elsewhere is DENIED',
-      (await verdict('stranger@example.com', 'https://nowhere.example.com/')).includes('DENIED'));
+    t.check('an anonymous scope needs no credential at all',
+      (await verdict('', 'https://app.example.com/app1/healthz')).includes('AUTHORIZED'));
+    t.check('a URL no application covers is reachable by nobody',
+      (await verdict('you@example.com', 'https://nowhere.example.com/')).includes('DENIED'));
     await t.shot(page, 'can-denied');
 
     t.check('asking `can` wrote nothing', bytes(ctx) === before, 'can mutated the file');

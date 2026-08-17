@@ -1,126 +1,162 @@
 {
   "_comment": [
-    "bb-auth access file (JSON) — the REAL access gate (Cognito self-signup is open).",
-    "Re-checked on every /auth/validate, so an edit + `systemctl reload bb-auth` (SIGHUP)",
-    "takes effect on the next request; a plain restart works too. Emails match",
-    "case-insensitively. Four sibling sections, four different questions:",
+    "bb-auth access file (JSON), format version 3 — the REAL access gate (Cognito",
+    "self-signup is open). Re-checked on every /auth/validate, so an edit plus",
+    "`systemctl reload bb-auth` (SIGHUP) takes effect on the next request; a plain restart",
+    "works too. Four sibling sections, four different questions:",
     "",
-    "  url_groups — named sets of URL patterns, written '@name' in any urls list below.",
-    "  sites   — URL areas and the properties that hold for them. A site describes a",
-    "            PLACE, never a person: no field of it may name a user.",
-    "  denied  — a veto by email. Outranks every grant, on every credential.",
-    "  users   — the roster: who is enrolled, what they may reach, and their API keys.",
+    "  applications — the places, and who may reach them. This is where every grant is.",
+    "  user_groups  — named sets of people, written '@name' in a scope's `groups`.",
+    "  denied       — a veto. Outranks every grant, on every credential.",
+    "  users        — the roster: an identity, its identifiers, and its API keys.",
     "",
-    "URL GROUPS are abbreviation, never a grant: defining one authorizes nobody until a",
-    "user's authorized_urls, a key's, or a site's urls names it as '@name'. The entry is",
-    "replaced by the group's patterns when the file is loaded, so nothing else changes.",
-    "A name is [A-Za-z0-9_-] and matches exactly (case-sensitive); a group cannot contain",
-    "a reference to another group; an unknown '@name' is a FATAL load error, like a",
-    "malformed pattern — a silently dropped entry would change who reaches what. Every",
-    "group is validated even when nothing references it. NOTE a bb-auth older than 2.6",
-    "does not understand '@name' and refuses to load such a file (it fails closed, so",
-    "deploy the binary before the file). Edit them with: bb-auth-adm url-group add|set|rm.",
+    "THE MODEL IS APPLICATION-CENTRIC. A grant is written once, on the side of the place. An",
+    "application owns a literal URL area (`base`) and a list of named scopes; a scope owns",
+    "URL patterns and one access policy; a user owns a uuid, some emails and some keys, and",
+    "NO URL at all. So 'who reaches this application?' and 'what does this application",
+    "expose?' are both one lookup instead of a scan of the whole roster.",
     "",
-    "GRANTS. A request is authorized when the credential resolves to an identity and one",
-    "of exactly two sources covers the request URL: the user's `authorized_urls`, or a",
-    "site with `public_auth: true`. ACCESS IS ENUMERATED, NEVER ASSUMED — a user with no",
-    "authorized_urls (or an empty list) reaches nothing, and a URL with no site is not",
-    "open. To grant everything, say so: ['*://*/*'].",
+    "APPLICATIONS PARTITION THE URL SPACE. Every `base` is a LITERAL prefix (no wildcards),",
+    "no two of them overlap, and every pattern of every scope must lie inside its own",
+    "application's base. A URL no application covers is REACHABLE BY NOBODY: with no",
+    "per-user URLs left, that is the only fail-closed reading, so a gated location outside",
+    "every application is a 401 for everyone. `bb-auth --check-users FILE` prints the areas.",
     "",
-    "SITES. `public_auth: true` opens a URL area to ANY identity Cognito vouches for,",
-    "enrolled or not — that is the point: it is how someone who has just registered",
-    "reaches an onboarding area. Since Cognito self-signup is open, this means anyone who",
-    "can register. The app still gets X-Auth-Email and can enroll them. `public_auth`",
-    "does not help an API key: an unknown bbk_ key is nobody, not a new user.",
-    "`login_url` (absolute https) overrides BB_AUTH_LOGIN_URL for this area: on a 401 the",
-    "gate names it in X-Auth-Login-URL and nginx redirects there (see README).",
-    "FIRST MATCH WINS, in file order: the first site whose urls cover the request answers",
-    "for it — for public_auth AND for login_url — even if it grants nothing. Put specific",
-    "sites before broad ones.",
-    "A site only ever GRANTS; the only thing that takes access away is `denied`.",
-    "Unknown fields inside a site are a hard error (a typo in a future restriction must",
-    "not fail open), so no `notes` in there — unlike users and keys, which ignore extras.",
-    "There is NO per-site logout landing page: a logout happens at /auth/logout, which no",
-    "site's urls cover, so there is nothing to resolve. The logout link says where to go:",
-    "  <a href=\"/auth/logout?rd=/app1/goodbye\">Sign out</a>   (rd is open-redirect guarded)",
+    "SCOPES ARE FIRST MATCH WINS, IN FILE ORDER, inside one application. That is what makes",
+    "a carve-out expressible: put the narrow, stricter scope BEFORE the broad one, as",
+    "'healthz' and 'admin' are below. Reversed, 'everything' would answer for them and they",
+    "would never be reached. Reorder with: bb-auth-adm scope mv APP SCOPE POSITION.",
     "",
-    "DENIED. Not the same as deleting the user's row. On a public_auth site the roster is",
-    "never consulted, so for an un-enrolled identity this is the ONLY denial there is. And",
-    "for an enrolled one it is a suspension, not a deletion: scope and keys survive the",
-    "lockout, so re-enabling is one edit. NOTE it cannot revoke an id_token or a cookie",
-    "mid-flight — those are stateless — but the very next /auth/validate denies.",
+    "ACCESS is required on every scope and has no default, because it decides everything:",
+    "  anonymous     — no credential at all. The 204 names nobody.",
+    "  authenticated — ANY identity Cognito vouches for, enrolled or not. Since self-signup",
+    "                  is open, that means anyone who can register: right for an onboarding",
+    "                  area, wrong for anything else. An API key never qualifies, because",
+    "                  Cognito vouches for no key of ours.",
+    "  restricted    — the uuids in `users` and the groups in `groups`, and only through the",
+    "                  credential classes in `credentials` ('login' = an id_token or the",
+    "                  session cookie, 'api_key' = a bbk_ key; absent means both).",
+    "",
+    "USERS are identified by a uuid, and every reference in this file uses it. The emails",
+    "are the identifiers Cognito can vouch for, and any of them resolves to the same row, so",
+    "changing how someone signs in touches one line instead of every scope that lists them.",
+    "The tools take an email wherever they take a uuid: you never have to type one.",
+    "",
+    "DENIED accepts a uuid (vetoes the user and every identifier they have) or a bare email",
+    "(vetoes an identity this file has never heard of, which on an `authenticated` scope is",
+    "the only denial that exists). It cannot revoke an id_token or a cookie mid-flight,",
+    "since those are stateless, but the very next /auth/validate denies. Note it does NOT",
+    "reach an `anonymous` scope: that scope grants with no credential at all, so a vetoed",
+    "client would simply send nothing.",
     "",
     "KEYS are addressed by `key_hash` = SHA-256 of the bbk_ bearer (mint with",
     "bb-auth-adm key add); the raw key is never stored here. `duration`: <n>d / <n>h / 0 /",
-    "never, counted from `released`. A key without authorized_urls inherits its user's.",
+    "never, counted from `released`. `scopes` is a RESTRICTION, never a grant: it limits",
+    "which of its owner's grants that key may exercise. Absent means all of them.",
     "",
-    "WILDCARDS, valid in every URL component: `*` = any run of characters but never `/` —",
-    "EXCEPT as the final character, where it swallows the rest of the URL, slashes",
-    "included; `&` = exactly one character, never `/`. So `/app1/*` covers the whole /app1",
-    "subtree while `/app1*` would also match /app1-admin — always put the `/` before the",
-    "`*`. And `/app1/*` does NOT match a bare `/app1`: list both, as below.",
+    "WILDCARDS, valid in every component of a scope pattern: `*` = any run of characters but",
+    "never `/` — EXCEPT as the final character, where it swallows the rest of the URL,",
+    "slashes included; `&` = exactly one character, never `/`. So `/app1/*` covers the whole",
+    "/app1 subtree while `/app1*` would also match /app1-admin: always put the `/` before",
+    "the `*`. And `/app1/*` does NOT match a bare `/app1`: list both.",
     "",
-    "Validate a file before deploying it: `bb-auth --check-users FILE`."
+    "Validate a file before deploying it: `bb-auth --check-users FILE`.",
+    "Convert an older file (one with no \"version\"): `bb-auth-adm migrate -f OLD -o NEW`."
   ],
-  "url_groups": {
-    "mcp": [
-      "https://mcp.example.com/mcp",
-      "https://mcp.example.com/mcp/*"
-    ]
-  },
 
-  "sites": [
+  "version": 3,
+
+  "applications": [
     {
-      "name": "app1-onboarding",
-      "urls": [
-        "https://app.example.com/app1",
-        "https://app.example.com/app1/*"
-      ],
-      "public_auth": true,
-      "login_url": "https://signup.example.com/"
+      "name": "app1",
+      "base": ["https://app.example.com/app1"],
+      "login_url": "https://signup.example.com/",
+      "notes": "the login page here overrides BB_AUTH_LOGIN_URL for this whole area",
+      "scopes": [
+        {
+          "name": "healthz",
+          "urls": ["https://app.example.com/app1/healthz"],
+          "access": "anonymous",
+          "notes": "listed FIRST, or 'everything' below would answer for it"
+        },
+        {
+          "name": "admin",
+          "urls": ["https://app.example.com/app1/admin/*"],
+          "access": "restricted",
+          "groups": ["@admins"],
+          "credentials": ["login"],
+          "notes": "a browser login only: no machine credential reaches the admin area"
+        },
+        {
+          "name": "everything",
+          "urls": [
+            "https://app.example.com/app1",
+            "https://app.example.com/app1/*"
+          ],
+          "access": "authenticated",
+          "notes": "the onboarding grant: anyone Cognito vouches for, enrolled or not"
+        }
+      ]
+    },
+    {
+      "name": "mcp",
+      "base": ["https://mcp.example.com/mcp"],
+      "scopes": [
+        {
+          "name": "api",
+          "urls": [
+            "https://mcp.example.com/mcp",
+            "https://mcp.example.com/mcp/*"
+          ],
+          "access": "restricted",
+          "users": ["b3f1c8a2-4e77-4f1a-9c0d-1e2f3a4b5c6d"],
+          "credentials": ["api_key"],
+          "notes": "machines only, and only the ones enrolled here"
+        }
+      ]
     }
   ],
 
-  "denied": ["spammer@example.com"],
+  "user_groups": {
+    "admins": ["8f14e45f-ceea-467a-9f79-3b4e5c6d7a8b"]
+  },
+
+  "denied": [
+    "spammer@example.com"
+  ],
 
   "users": [
     {
-      "email": "you@example.com",
-      "authorized_urls": ["*://*/*"]
+      "uuid": "8f14e45f-ceea-467a-9f79-3b4e5c6d7a8b",
+      "emails": ["you@example.com"],
+      "notes": "in @admins, so reaches app1/admin through the group"
     },
-
     {
-      "email": "friend@example.com",
-      "authorized_urls": ["https://app.example.com/*"],
-      "notes": "browser login, confined to the app host"
-    },
-
-    {
-      "email": "suspended@example.com",
-      "authorized_urls": [],
-      "notes": "listed but reaches nothing — an empty list is a deliberate lockout. NOTE it does NOT keep them off a public_auth site; that is what `denied` is for."
-    },
-
-    {
-      "email": "bot@example.com",
-      "authorized_urls": ["@mcp"],
-      "notes": "'@mcp' is the url group above — the same two patterns, named once",
+      "uuid": "b3f1c8a2-4e77-4f1a-9c0d-1e2f3a4b5c6d",
+      "emails": ["bot@example.com", "bot@old.example.com"],
+      "notes": "two identifiers, one identity: either one signs in as this row",
       "api_keys": [
         {
           "id": "laptop",
           "key_hash": "0000000000000000000000000000000000000000000000000000000000000000",
           "released": "2026-07-08",
           "duration": "365d",
-          "authorized_urls": ["https://mcp.example.com/mcp/context7/*"],
-          "notes": "example only — mint a real one with: bb-auth-adm key add bot@example.com --id laptop"
+          "scopes": ["mcp/api"],
+          "notes": "example only: mint a real one with `bb-auth-adm key add bot@example.com --id laptop`"
         },
         {
           "id": "ci",
           "key_hash": "1111111111111111111111111111111111111111111111111111111111111111",
           "released": "2026-07-08",
-          "duration": "never"
+          "duration": "never",
+          "notes": "no `scopes`, so it reaches everything its owner reaches through api_key"
         }
       ]
+    },
+    {
+      "uuid": "c1d2e3f4-5a6b-4c7d-8e9f-0a1b2c3d4e5f",
+      "emails": ["suspended@example.com"],
+      "notes": "in no scope, so reaches nothing. NOTE this does NOT keep them off an authenticated scope; that is what `denied` is for."
     }
   ]
 }

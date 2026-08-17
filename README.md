@@ -39,7 +39,7 @@ nginx error_page 401 → 302  <login-page>/?rd=<original>
 
 | Method | Path             | Who        | Purpose                                            |
 |--------|------------------|------------|----------------------------------------------------|
-| GET    | `/auth/validate` | nginx only | `auth_request`: 204 + `X-Auth-Email` (+ one header per configured profile claim, when known) if the session cookie, an `Authorization: Bearer <id_token>`, or a static `Authorization: Bearer bbk_…` API key authorizes the request (in a user's URL scope, or on a `public_auth` site), else 401 + `X-Auth-Login-URL` |
+| GET    | `/auth/validate` | nginx only | `auth_request`: 204 naming the identity in one header per configured attribute (default `X-Auth-Email`, plus one per configured profile claim when known) if the session cookie, an `Authorization: Bearer <id_token>`, or a static `Authorization: Bearer bbk_…` API key is admitted by the scope that owns the URL, else 401 + `X-Auth-Login-URL`. An `anonymous` scope answers 204 with no credential, and names nobody. |
 | POST   | `/auth/session`  | browser    | validate posted `id_token`, set cookie, 302 → `rd` |
 | GET    | `/auth/logout`   | browser    | clear cookie, 302 → `rd` (guarded) or the login page |
 | GET    | `/auth/healthz`  | local      | liveness                                           |
@@ -63,7 +63,7 @@ Authorization: Bearer <cognito_id_token>
 
 Validated with the **same** checks as `/auth/session` (RS256 via JWKS, iss/aud/exp,
 `token_use=id`, `email_verified`), then the email must be granted the URL — by the
-access file's roster, or by a `public_auth` site.
+scope that owns the request URL.
 No flag needed: a valid id_token for an allowlisted email is exactly the credential
 `/auth/session` already trusts to mint a 30-day cookie. Mint/refresh one with
 [`tools/bb-token.py`](tools/bb-token.py) (dependency-free Python 3 stdlib; runs the
@@ -82,7 +82,7 @@ Authorization: Bearer bbk_<secret>
 
 bb-auth looks it up by `sha256(bearer)` in the access file (only the hash is stored,
 never the raw key), checks its owner is not `denied`, checks it is not past its
-`duration`, and enforces its URL scope. A `public_auth` site does **not** rescue an
+`duration`, and then the scope that owns the URL decides. An `authenticated` scope does **not** rescue an
 unknown key — that grant is for identities Cognito vouches for, and an unknown key is
 nobody. Mint one with `bb-auth-adm`, which writes the entry into the file itself and
 prints the raw bearer **once**, on stdout, after the file is safely saved:
@@ -103,7 +103,7 @@ All three credentials resolve to one thing: an email. A `204` from `/auth/valida
 carries it in **`X-Auth-Email`**, which nginx lifts out of the subrequest and injects
 into the request it proxies — that is how the app behind the gate learns who is
 calling. An API key resolves to its **owning user's** email: a key acts as its user.
-On a [`public_auth` site](#sites-and-public_auth) the email may name someone with no
+On an [`authenticated` scope](#scopes--who-reaches-what-and-how) the email may name someone with no
 entry anywhere — an *authenticated* identity that the app is expected to enroll.
 
 ```nginx
@@ -181,15 +181,12 @@ proxy_set_header X-Auth-Family-Name $bb_family;
 - **These claims are self-asserted.** Any Cognito user edits their own profile, so treat
   them as display hints and never as an authorization input. The identity is the email.
 
-## URL scoping
+## URL patterns
 
-Each user, and each key, carries `authorized_urls` — a list of full
-`<scheme>://<host>/<path>` patterns it is allowed to reach. **Access is enumerated,
-never assumed:** a user with no `authorized_urls` (or an empty list) reaches nothing.
-Blanket access is spelled out, as `["*://*/*"]`. A key with no `authorized_urls`
-inherits its user's scope. An entry may also be `"@name"`, which stands for a
-[url group](#url_groups--one-name-for-a-set-of-patterns) defined once at the top of the
-file.
+A scope carries `urls` — a list of full `<scheme>://<host>/<path>` patterns it answers
+for. **Access is enumerated, never assumed:** a scope with no `urls` matches nothing, a
+`restricted` scope that lists nobody admits nobody, and a URL no application covers is
+reachable by nobody at all. Blanket coverage is spelled out, as `["*://*/*"]`.
 
 Two wildcards, valid in **every** component — scheme, host and path:
 
@@ -216,104 +213,140 @@ match `/mcp-admin`. And `…/mcp/*` does **not** match a bare `/mcp` — list bo
 client hits the parent too. The host and scheme match case-insensitively; the path
 does not. Ports never appear (nginx's `$host` omits them), so don't write one.
 
-Scoping needs the original request URL, so nginx must pass it on the subrequest —
-see [the nginx wiring](#putting-a-service-behind-the-gate). Since every credential is
-scoped, that header is **required**: a request without it is denied, as is any URL
-containing `..` (fail-closed on both counts).
+Matching needs the original request URL, so nginx must pass it on the subrequest —
+see [the nginx wiring](#putting-a-service-behind-the-gate). That header is **required**:
+a request without it resolves to no application and is denied, as is any URL containing
+`..` (fail-closed on both counts).
 
 ## Access file
 
 The access gate is a single JSON file (`BB_AUTH_USERS_FILE`, installed as
 `/opt/bb-auth/var/lib/users.json`; see [`deploy/users.example.json`](deploy/users.example.json)).
-Four sibling sections answer four different questions:
+Since 3.0 it is **application-centric**: a grant is written once, on the side of the
+place. Four sibling sections answer four different questions:
 
 ```json
-{ "url_groups": {
-    "mcp": ["https://mcp.badbat75.com/mcp", "https://mcp.badbat75.com/mcp/*"]
-  },
-  "sites": [
-    { "name": "signup", "urls": ["https://app.badbat75.com/welcome",
-                                 "https://app.badbat75.com/welcome/*"],
-      "public_auth": true }
-  ],
+{ "version": 3,
+  "applications": [
+    { "name": "app1",
+      "base": ["https://app.badbat75.com/app1"],
+      "login_url": "https://signup.badbat75.com/",
+      "scopes": [
+        { "name": "healthz", "urls": ["https://app.badbat75.com/app1/healthz"],
+          "access": "anonymous" },
+        { "name": "admin", "urls": ["https://app.badbat75.com/app1/admin/*"],
+          "access": "restricted", "groups": ["@admins"], "credentials": ["login"] },
+        { "name": "everything", "urls": ["https://app.badbat75.com/app1",
+                                         "https://app.badbat75.com/app1/*"],
+          "access": "authenticated" } ] } ],
+  "user_groups": { "admins": ["8f14e45f-ceea-467a-9f79-3b4e5c6d7a8b"] },
   "denied": ["spammer@badbat75.com"],
   "users": [
-    { "email": "you@badbat75.com", "authorized_urls": ["*://*/*"] },
-    { "email": "bot@badbat75.com",
-      "authorized_urls": ["@mcp"],
+    { "uuid": "8f14e45f-ceea-467a-9f79-3b4e5c6d7a8b",
+      "emails": ["you@badbat75.com"],
       "api_keys": [
         { "id": "laptop", "key_hash": "<sha256 hex of the bbk_ bearer>",
           "released": "2026-07-08", "duration": "365d",
-          "authorized_urls": ["@mcp"] }
-      ] }
-] }
+          "scopes": ["app1/admin"] } ] } ] }
 ```
 
-A request is authorized when its credential resolves to an identity and one of exactly
-**two grant sources** covers the request URL: the user's `authorized_urls`, or a
-`public_auth` site. Both are re-checked on every `/validate`. The one thing that takes
+A request is authorized when the URL resolves to a scope and **that scope admits the
+credential**. All of it is re-checked on every `/validate`. The one thing that takes
 access away is `denied`.
 
-### `url_groups` — one name for a set of patterns
+Coming from an older file, one with no `"version"` in it? The format changed, and the
+gate refuses the old one by name. Convert it with `bb-auth-adm migrate`, which replays
+every (identity, URL) pair the old file granted and refuses to write if any answer
+changed. Read [Upgrading to 3.0](#upgrading-to-30) before you install anything.
 
-A group is **abbreviation, never a grant**: defining one authorizes nobody until some
-URL list names it. Any of the three — a user's `authorized_urls`, a key's, a site's
-`urls` — may carry the entry `"@mcp"`, which is replaced by that group's patterns when
-the file is loaded, so everything downstream sees the same flat list it always did.
+### `applications` — the places
+
+An application owns a **literal** URL area and a list of named scopes.
+
+- **`name`** — `[A-Za-z0-9_-]+`, unique in the file, and the left half of `application/scope`.
+- **`base`** — one or more literal URL prefixes, **no wildcards**. Every pattern of every scope must lie inside one of them, and **no two applications may overlap**, anywhere in the file. Together those make applications a partition of the URL space: at most one can answer for a URL, so their order carries no meaning.
+- **`login_url`** — an absolute `https://` login page for this whole area, overriding `BB_AUTH_LOGIN_URL` (see [Per-application login page](#per-application-login-page)). Validated at load: printable ASCII, https, no userinfo `@`, no backslash, because it ends up in a header and a redirect.
+- **`scopes`** — see below. Order is meaning.
+
+The area is compared at a **path boundary**, which is why `https://x.com/app` covers
+`https://x.com/app/deep` but not `https://x.com/application`. The same trap as a `*`
+written with no `/` before it.
+
+> **A URL no application covers is reachable by nobody.** A gated location outside every
+> area is a `401` for everyone, including you. `bb-auth --check-users FILE` prints each
+> application's area so you can compare it with what nginx actually gates.
+
+### `scopes` — who reaches what, and how
+
+**First match wins**, in file order: the first scope whose `urls` cover the request
+answers for it, even if it grants nothing. That is what makes a **carve-out**
+expressible, as `healthz` and `admin` are above: put the narrow, stricter scope
+*before* the broad one. Reversed, `everything` would answer for all three and the other
+two would never be reached. `bb-auth-adm scope mv` reorders them, and
+`bb-auth-adm check` warns when one is shadowed.
+
+- **`name`** — `[A-Za-z0-9_-]+`, unique inside its application.
+- **`urls`** — the patterns this scope answers for (see [URL patterns](#url-patterns)). A malformed one is fatal, and so is one outside the application's `base`.
+- **`access`** — **required, no default**, one of three words:
+  - `anonymous` — no credential at all. The `204` names nobody. Note `denied` does not reach here: the scope grants with nothing, so a vetoed client would simply send nothing.
+  - `authenticated` — any identity Cognito vouches for, enrolled or not. It is how someone who has just registered reaches an onboarding area, with the app receiving their `X-Auth-Email` and enrolling them. An unknown `bbk_` key is not rescued by it: Cognito vouches for no key of ours.
+  - `restricted` — the people in `users` and `groups`, and nobody else.
+- **`users`** / **`groups`** — uuids and `"@name"` group references. Legal **only** under `restricted`.
+- **`credentials`** — `["login"]` and/or `["api_key"]`; absent means both. Legal only under `restricted`. This is a property of the *place*: "this area is reached by a browser login" is a statement about the application, and expressing it here is what let a key stop carrying URLs of its own.
+- Unknown fields are a **hard error** in an application or a scope, unlike in the sections that describe people. The day `access` gains a companion restriction, a typo in that companion must not be silently dropped, leaving the field it was meant to narrow standing alone — that would fail *open*.
+
+> Cognito self-signup is open, so `authenticated` means *anyone who can register*, and
+> `anonymous` means everyone. Both are the right grant for an onboarding or health-check
+> area and the wrong one for everything else. `--check-users` and the startup banner
+> print every scope of either kind by name, because they are the two an operator most
+> often did not mean to leave open.
+
+### `user_groups` — one name for a set of people
+
+A group is **abbreviation, never a grant**: defining one authorizes nobody until a scope
+names it in `groups`.
 
 - **name** — `[A-Za-z0-9_-]+`, matched exactly (case-sensitive).
-- Groups are **flat**: a group may not reference another group.
-- An **unknown** `@name` is fatal, like a malformed pattern — a silently dropped entry would change who reaches what. Every group is validated even when nothing references it.
-- `bb-auth-adm url-group add|set|list|rm` edits them; `rm` refuses while anything still references the group.
+- Members are uuids. Groups are **flat**: a group may not reference another group.
+- An **unknown** `@name` is fatal, like a malformed pattern: a silently dropped entry would change who reaches what. Every group is validated even when nothing references it.
+- A member that names no roster row only warns, and grants nothing.
+- `bb-auth-adm group add|set|list|rm` edits them; `rm` refuses while a scope still references the group.
 
 ### `users` — the roster
 
-- **`email`** (required) — matched case-insensitively; its presence is the allowlist.
-- **`authorized_urls`** — allowed URL patterns (see [URL scoping](#url-scoping)). Omitted or `[]` grants nothing; `["*://*/*"]` grants everything.
+A user is an identity plus the identifiers that resolve to it. It carries **no URL**:
+what a user reaches is written in the scopes that list them.
+
+- **`uuid`** (required) — canonical lowercase 8-4-4-4-12. What every reference in the file names. `bb-auth-adm user add EMAIL` mints it for you, and both editors take an email wherever they take a uuid, so you never have to type one.
+- **`emails`** — the identifiers Cognito can vouch for; any of them resolves to this row. Changing how someone signs in is therefore one edit here, not a sweep over every scope that lists them. Two rows may not share an identifier, and may not share a uuid.
 - **`api_keys[]`** — static `bbk_` keys for that user (see [Programmatic access](#programmatic-access-bearer)):
   - **`key_hash`** — `sha256` of the bearer; the raw key is never stored (mint via `bb-auth-adm key add`).
   - **`duration`** — `<n>d` / `<n>h` / `0` / `never`, counted from **`released`** (`YYYY-MM-DD`).
-  - **`id`** — human label for logs/revocation. **`authorized_urls`** — omit to inherit the user's scope.
+  - **`id`** — human label for logs and revocation.
+  - **`scopes`** — a list of `"application/scope"` names, and a **restriction, never a grant**: it can only subtract from what the owner already reaches. Omit it and the key reaches everything its owner does through scopes that admit `api_key`.
   - Unknown fields (e.g. `notes`) are ignored, so annotate freely.
-
-### Sites and `public_auth`
-
-A site describes a **URL area**, never a person: no field of it may name a user. That
-line is what keeps `sites` from becoming a second, conflicting way to say what
-`authorized_urls` already says — and it is why a user removed from the roster cannot
-walk back in through a site.
-
-- **`urls`** — the same `<scheme>://<host>/<path>` patterns as `authorized_urls`. A malformed one is fatal.
-- **`public_auth`** — grant this area to **any** identity Cognito vouches for, enrolled in `users` or not. This is the point: it is how someone who has just registered reaches an onboarding area, with the app receiving their `X-Auth-Email` and enrolling them. `false` (the default) grants nothing and is indistinguishable from having no site at all — the field exists to carry future properties.
-- **`login_url`** — an absolute `https://` login page for this area, overriding `BB_AUTH_LOGIN_URL` (see [Per-site login page](#per-site-login-page)). Validated at load: printable ASCII, https, no userinfo `@`, no backslash — it ends up in a header and a redirect.
-- **`name`** — a label for the logs (`granted via site 'signup' (public_auth): …`), which is your only visibility into who is walking in un-enrolled.
-- Unknown fields are a **hard error** here, unlike everywhere else. The day `public_auth` gains a companion restriction, a typo in that companion must not be silently dropped, leaving `public_auth: true` standing alone — that would fail *open*.
-
-**First match wins**, in file order: the first site whose `urls` cover the request
-answers for it — for `public_auth` *and* for `login_url` — even if it grants nothing. Put
-specific sites before broad ones. A URL with no site is not denied — it is simply not
-open, and the roster decides as before.
-
-> Cognito self-signup is open, so `public_auth` means *anyone who can register*. It is
-> the right grant for an onboarding page and the wrong one for everything else. An
-> `id_token` behind it still proves a verified email (unless
-> `BB_AUTH_ALLOW_UNVERIFIED_SOCIAL` is on, which widens this further).
 
 ### `denied` — the veto
 
-Lowercased emails refused on **every** credential and **both** grant sources, checked
-before anything else. It is not the same as deleting the user's row:
+Refused on **every** credential, ahead of every grant, checked before anything else. Two
+kinds of entry, and both matter:
 
-- On a `public_auth` site the roster is never consulted, so for an un-enrolled identity this is the **only** denial that exists.
-- For an enrolled one it is a *suspension*, not a deletion: their scope and their API keys survive the lockout, so re-enabling is a one-line edit. (A user's `authorized_urls: []` locks them out of the roster grant — but **not** out of a `public_auth` site. That is what `denied` is for.)
+- a **uuid**, which vetoes the user and every email they hold. An email that resolves to a roster row is folded onto its uuid when the file loads, so denying one address cannot leave another standing.
+- a bare **email**, which vetoes an identity the file has never heard of. On an `authenticated` scope the roster is never consulted, so for an un-enrolled identity this is the **only** denial that exists.
+
+For an enrolled user it is a *suspension*, not a deletion: their group memberships and
+their API keys survive the lockout, so re-enabling is a one-line edit. An entry that is
+neither a uuid nor an email is a fatal load error, because a veto that vetoes nobody
+while reading as if it did is the one failure this section cannot afford.
 
 Like everything else it applies from the next request; a cookie or `id_token` already
-in flight is stateless and cannot be recalled mid-request.
+in flight is stateless and cannot be recalled mid-request. And it does not reach an
+`anonymous` scope, which asks for no credential at all.
 
-### Per-site login page
+### Per-application login page
 
 bb-auth never redirects a gated request: it answers `401` and **nginx** decides where to
-send the browser. So the way a site names its own login page is a response header the
+send the browser. So the way an application names its own login page is a response header the
 gate sets on that `401`, which nginx lifts with `auth_request_set` — exactly as it
 already does for `X-Auth-Email`:
 
@@ -337,7 +370,7 @@ location /app1 {
 location @bb_signin { return 302 $bb_login_safe?rd=$scheme://$host$request_uri; }
 ```
 
-The header carries the site's `login_url`, or `BB_AUTH_LOGIN_URL` when it declares none.
+The header carries the application's `login_url`, or `BB_AUTH_LOGIN_URL` when it declares none.
 `auth_request_set` copies it into a request variable, which is what stops a later
 `proxy_pass` from clobbering `$upstream_http_*`; it reads the subrequest's headers even
 though the subrequest answered `401`, which is the whole reason this works. Without the
@@ -345,7 +378,7 @@ though the subrequest answered `401`, which is the whole reason this works. With
 hardcoded `@bb_signin` did before.
 
 The gate can name the login page here because a `401` happens **on** a gated URL, so the
-site resolves. Logout gets no such luck.
+application resolves, and it answers even when none of its scopes covers the URL. Logout gets no such luck.
 
 ### Logging out
 
@@ -353,8 +386,8 @@ site resolves. Logout gets no such luck.
 cookie: any Cognito session the login page holds is out of scope, and a cross-site
 navigation is ignored (CSRF-forced logout).
 
-There is deliberately **no per-site logout landing page**. A logout happens at
-`/auth/logout`, which no site's `urls` cover, so the gate cannot tell which area you are
+There is deliberately **no per-area logout landing page**. A logout happens at
+`/auth/logout`, which is inside no application's area, so the gate cannot tell which area you are
 leaving — there is nothing to resolve against. The one party that knows is whoever wrote
 the logout link, so they say it:
 
@@ -379,16 +412,17 @@ bb-auth-adm -f users.json show                 # the file as the gate resolves i
 bb-auth-adm -f users.json user add bob@x.com --url 'https://app.x.com/reports/*'
 bb-auth-adm -f users.json user set bob@x.com --add-url 'https://app.x.com/reports'
 bb-auth-adm -f users.json key add bob@x.com --id laptop --duration 365d
-bb-auth-adm -f users.json site add onboarding --url 'https://app.x.com/welcome/*' --public-auth
-bb-auth-adm -f users.json url-group add mcp --url 'https://mcp.x.com/mcp,https://mcp.x.com/mcp/*'
+bb-auth-adm -f users.json app add app1 --base 'https://app.x.com/app1'
+bb-auth-adm -f users.json scope add app1 onboarding --url 'https://app.x.com/app1/*' --access authenticated
+bb-auth-adm -f users.json group add admins --member bob@x.com
 bb-auth-adm -f users.json user set bob@x.com --add-url '@mcp'
 bb-auth-adm -f users.json deny add spammer@x.com
 bb-auth-adm -f users.json check                # the gate's parser, then lint
 ```
 
 It talks back. Adding a user with no `--url` says so ("they reach NOTHING"); adding a
-`public_auth` site says what that means; removing a user reminds you that a `public_auth`
-site does not consult the roster, so deleting them is not a lockout — `deny` is. `check`
+`authenticated` scope says what that means; removing a user reminds you that such a scope
+does not consult the roster, so deleting them is not a lockout: `deny` is. `check`
 also finds what parses fine and still doesn't mean what it says: a duplicate email (the
 last one silently wins), an expired key, a site listed after a broader one that already
 answers for its URLs, so it never speaks, a url group nothing references. And it refuses
@@ -399,7 +433,7 @@ exit 0 iff the request would pass:
 
 ```bash
 bb-auth-adm -f users.json can bob@x.com https://app.x.com/reports/q3
-# AUTHORIZED — bob@x.com is enrolled and https://app.x.com/reports/q3 is in their authorized_urls
+# AUTHORIZED — app1/reports lists bob@x.com, and it is the scope that owns this URL
 bb-auth-adm -f users.json can bob@x.com https://app.x.com/admin --key laptop
 # DENIED — https://app.x.com/admin is outside the key's scope (...)
 ```
@@ -411,7 +445,7 @@ its `root:bb-auth 0640` ownership. Then reload — see below.
 ### Editing it in a browser — `bb-auth-web`
 
 The same file in a browser: a server-rendered admin GUI that needs no JavaScript. It shows the
-roster, each url group and who references it, the sites **numbered in file order** (the
+roster, each user group and who references it, each application's scopes **numbered in file order** (the
 number is the meaning — first match wins), the `denied` veto, every key's expiry, and a
 `can` tester answered by the gate's own decision function.
 
@@ -443,7 +477,7 @@ with no identity header answers `401` and says so, rather than serving anyone.
 | `BB_AUTH_WEB_DEFAULT_LANG` | no | `en` | `en` or `it`; a `?lang=` choice is remembered in a cookie |
 
 `BB_AUTH_WEB_ADMINS` is deliberate defense in depth, not a second copy of the roster: a
-`public_auth` site covering the GUI's URL would otherwise hand the admin surface to any
+`authenticated` scope covering the GUI's URL would otherwise hand the admin surface to any
 Cognito account, and self-signup is open.
 
 The file is read fresh on **every request** — no cache, no reload signal, and no
@@ -522,7 +556,7 @@ nginx wiring: see [The admin GUI behind the gate](#the-admin-gui-behind-the-gate
 
 ### Validating and reloading
 
-Check a file before shipping it — a bad pattern or an unknown site field is a fatal
+Check a file before shipping it — a bad pattern or an unknown scope field is a fatal
 startup error, and the deploy script runs this same check before it restarts anything:
 
 ```bash
@@ -584,10 +618,54 @@ to a database).
 > empty `BB_AUTH_WEB_ADMINS`, which is fatal by design; fill it in on the host and re-run.
 > Nothing was restarted, exactly as with any other rejected config. And the GUI is reachable
 > only through nginx, so it needs a gated location
-> ([The admin GUI behind the gate](#the-admin-gui-behind-the-gate)) plus the admin area in
-> each admin's `authorized_urls`. `sudo bb-auth-adm` needs no change and keeps working on
+> ([The admin GUI behind the gate](#the-admin-gui-behind-the-gate)) plus a grant covering
+> the admin area for each admin. `sudo bb-auth-adm` needs no change and keeps working on
 > the same file; rolling back is dropping the old `dist/` back on, though the file stays
 > `bb-auth-web`-owned until someone chowns it back.
+
+### Upgrading to 3.0
+
+**Nobody is logged out**: the cookie is still `bb4` and the HMAC key is preserved, as
+always. What changes is the **access file**, which becomes application-centric, and the
+gate refuses the old format outright rather than misreading it.
+
+That refusal is the whole reason there is a procedure. A 3.0 gate reading an older file
+exits fatally, which under `Restart=on-failure` is a boot loop; the older gate reading a
+3.0 file would see an empty table, which is a silent, total lockout. Neither is survivable
+on its own, but the reload being **fail-soft** makes one order work:
+
+```bash
+# 1. put the new bb-auth-adm on the host (or convert a copy of the file on a workstation)
+scp dist/bb-auth-adm user@host:/tmp/
+
+# 2. convert. The still-running old gate cannot read the result, so the reload that the
+#    path unit fires FAILS and keeps the table already in memory: the service goes on
+#    serving, unchanged.
+sudo /tmp/bb-auth-adm migrate -f /opt/bb-auth/var/lib/users.json -o /tmp/users.v3.json
+sudo install -o bb-auth-web -g bb-auth -m 0640 /tmp/users.v3.json /opt/bb-auth/var/lib/users.json
+
+# 3. now install. The restart is the first moment the new file is read, by the binary
+#    that understands it.
+./scripts/deploy.ps1 user@host
+```
+
+Do not reverse steps 2 and 3, and do not restart the gate between them.
+
+`migrate` is not a best-effort translation: it replays every (identity, URL) pair the old
+file speaks about through both rule sets and **refuses to write if any answer changed**.
+What it cannot place, it reports. What it produces is safe to install, but it is not
+necessarily tidy: it invents an application per URL area it found, and renaming those is a
+separate, unhurried edit once the service is up.
+
+Two things to check afterwards, because they are the ones the old format had no answer for:
+
+- **Every gated URL must fall inside some application's `base`.** A URL no application
+  covers is now reachable by nobody. `bb-auth --check-users FILE` prints the areas; compare
+  them with the locations nginx actually gates.
+- **nginx should clear `X-Auth-Uuid`** on every gated location, even though it is off by
+  default. `proxy_set_header` overrides only the names it lists, so a header the gate could
+  emit and nginx does not clear is one a client can send. Doing it now means enabling the
+  attribute later needs no nginx change at all.
 
 ## Session cookie
 
@@ -753,7 +831,7 @@ The binary is service-agnostic. To front a service at `app.example.com`:
    # server_name. Without this, a spoofed Host: could widen a URL scope.
    server { listen 443 ssl default_server; ssl_reject_handshake on; }
 
-   # Optional: let a site pick its own login page (see "Per-site login page").
+   # Optional: let an application pick its own login page (see "Per-application login page").
    # The default arm is what a location without auth_request_set, or an older
    # bb-auth, falls back to — never leave $bb_login to reach `return 302` raw.
    map $bb_login $bb_login_safe {
@@ -807,7 +885,7 @@ The binary is service-agnostic. To front a service at `app.example.com`:
            proxy_set_header X-Auth-Family-Name $bb_family;
 
            # Which login page this area uses. auth_request_set reads the 401's
-           # headers too, so the gate can name it per site.
+           # headers too, so the gate can name it per application.
            auth_request_set $bb_login $upstream_http_x_auth_login_url;
 
            error_page 401 = @bb_signin;
@@ -834,7 +912,7 @@ The binary is service-agnostic. To front a service at `app.example.com`:
    }
    ```
 
-   `X-Original-URL` is what [URL scoping](#url-scoping) matches against. It is
+   `X-Original-URL` is what [URL patterns](#url-patterns) matches against. It is
    required — every credential is scoped, so a subrequest without it is denied.
    The `set $bb_url …` / `$bb_url` split is not stylistic: an `auth_request`
    subrequest gets its own `$uri` (`/internal/auth-gate`) but shares the parent's
@@ -922,7 +1000,7 @@ server {
 
 Three operator notes, and the first is the one that matters:
 
-- **The admin area must be in each admin's `authorized_urls`.** The gate is the lock;
+- **The admin area must be a scope that lists each admin.** The gate is the lock;
   `BB_AUTH_WEB_ADMINS` is the backstop behind it. Enrol each admin:
 
   ```bash
@@ -934,7 +1012,7 @@ Three operator notes, and the first is the one that matters:
   A blanket `*://*.badbat75.com/*` scope already covers it — check with
   `bb-auth-adm can you@badbat75.com https://auth.badbat75.com/admin/` before assuming
   either way.
-- **Never cover the admin area with a `public_auth` site.** That grants on identity alone,
+- **Never cover the admin area with an `anonymous` or `authenticated` scope.** Those grant without listing anybody,
   to anyone who can register, and Cognito self-signup is open — it would put every account
   in front of the admin surface with only `BB_AUTH_WEB_ADMINS` left standing. Two locks or
   one is the whole difference.
