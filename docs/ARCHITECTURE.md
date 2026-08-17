@@ -219,7 +219,9 @@ sig = HMAC_SHA256("bb1.<keyid>.<exp>.<b64url(email)>.<b64url(claims_json)>", key
 
 Because the cookie is self-contained and key addressed, **key rotation
 invalidates nobody**: the new key is added as verify-only, then flipped to
-active, then the old one is dropped after a TTL. See README "Key rotation".
+active, then the old one is dropped after a TTL. See README "Key rotation". Skipping
+that window is the inverse of it, and the only way to invalidate every session at once,
+since there is no session store to purge: see README "Revoking every session at once".
 De-authorizing an email is separate from signatures: remove the user from the
 access file (or add them to `denied`) and reload/restart — the next `/auth/validate`
 for that cookie returns `401` even though the cookie signature is still valid. On a

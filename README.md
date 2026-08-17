@@ -1050,30 +1050,63 @@ gate, so even a misconfigured proxy cannot turn this into an open redirect. Note
 ### Key rotation
 
 The cookie is HMAC-signed under `BB_AUTH_HMAC_KEY`, addressed by
-`BB_AUTH_HMAC_KEY_ID`. Rotation is **zero-downtime** because the key id is
+`BB_AUTH_HMAC_KEY_ID`. Rotation **logs nobody out** because the key id is
 stamped into every cookie and multiple keys can be accepted for
 verification at once. 3-step runbook (k1 → k2):
 
-1. Generate the new key and publish it as verify-only, then reload:
+1. Generate the new key and publish it as verify-only:
 
    ```bash
    NEW=$(openssl rand -base64 48)
    # in the env file: BB_AUTH_HMAC_ACCEPTED_KEYS=k2:$NEW   (k1 stays the active key)
-   systemctl reload bb-auth
+   systemctl restart bb-auth
    ```
 
-2. Flip the active key + id and reload. New cookies are signed with k2; existing
+2. Flip the active key + id. New cookies are signed with k2; existing
    cookies (signed with k1) still verify because k1 is still in the accepted set:
 
    ```bash
    # in the env file: BB_AUTH_HMAC_KEY=$NEW  and  BB_AUTH_HMAC_KEY_ID=k2
-   systemctl reload bb-auth
+   systemctl restart bb-auth
    ```
 
 3. After ~30 d (one TTL), every surviving cookie is k2-signed. Drop k1 from
-   `BB_AUTH_HMAC_ACCEPTED_KEYS` and reload.
+   `BB_AUTH_HMAC_ACCEPTED_KEYS` and restart.
+
+It is `restart` at every step, and not `reload`: the keys live in the env file, which
+systemd loads once at `ExecStart`, so the running process cannot re-read them. A `reload`
+sends SIGHUP, which re-reads the access file and the settings file and nothing else, so
+after one the gate would still be signing and verifying under the keys it started with.
+The restart costs nothing that a reload would have saved, because
+[sessions are stateless](#session-cookie): it drops no cookie, and the only requests that
+notice are the ones in flight during the second it takes.
 
 Nobody is logged out at any step — that is the point of rotating by id rather than by
 swapping the secret. A **cookie-format** bump is the other axis and behaves the
 opposite way: only [the current format](#session-cookie) is accepted, so it does log
 everyone out once. Don't conflate the two.
+
+### Revoking every session at once
+
+There is no endpoint for this, and there is nothing to purge either: the cookie is
+self-contained, so the gate keeps no record of what it has issued and has no list of
+sessions to walk. What every cookie *does* name is the key that signed it, so the kill
+switch is the rotation above with **no rollover window**:
+
+```bash
+# in the env file: a fresh BB_AUTH_HMAC_KEY, a new BB_AUTH_HMAC_KEY_ID, and
+# BB_AUTH_HMAC_ACCEPTED_KEYS emptied of every previous id
+systemctl restart bb-auth
+```
+
+Every cookie now names a key id the gate does not hold, so it fails before its signature
+is even considered and its holder is sent back through the login page. Reach for it when
+the signing key itself is suspect, since it is the whole estate at once and nothing
+narrower.
+
+Two things it deliberately does not cover. Static `bbk_` keys are not sessions and carry
+no HMAC, so they survive it untouched: revoke one with `bb-auth-adm key rotate`, or by
+removing it. And de-authorizing *one person* is a different lever, not a small version of
+this one: put them in `denied` (or remove them from the roster) and reload, which is
+re-checked on every `/auth/validate` and so denies even their unexpired cookie, while
+everybody else stays signed in.
