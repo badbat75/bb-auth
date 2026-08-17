@@ -432,6 +432,44 @@ so it opens no new redirect surface. With no `rd`, the browser lands on the logi
 relative `rd` needs `X-Original-URL` on that location too; if nginx omits it, the redirect
 falls back to the login page — fail-soft.
 
+#### One logout endpoint for every vhost
+
+Wiring `/auth/logout` into every server block is avoidable, and worth avoiding: with
+`BB_AUTH_COOKIE_DOMAIN` set to a parent domain the session is **one cookie** for the whole
+estate, and the handler reads nothing about the host it was called on. So mount it once, on
+whichever vhost you keep for auth, and point every application's `Sign out` at it
+absolutely:
+
+```nginx
+# On the auth vhost only. No auth_request here: a logged-out visitor must be able to
+# reach it. X-Original-URL is needed only to resolve a relative `rd`, and an absolute
+# one does not need it.
+location = /auth/logout {
+    proxy_pass http://127.0.0.1:4181/auth/logout;
+}
+```
+
+```html
+<!-- in every application, whatever host it is served from -->
+<a href="https://auth.example.com/auth/logout">Sign out</a>
+<a href="https://auth.example.com/auth/logout?rd=https://app.example.com/goodbye">Sign out</a>
+```
+
+The clear reaches the whole estate because the expiring cookie carries the same `Domain`
+and `Path` as the minted one, which is what a browser matches a `Set-Cookie` against
+(`build_cookie`, pinned by `clearing_a_cookie_targets_the_same_cookie_it_minted`). With no
+`rd` every application can use the identical link and the browser lands on the login page;
+with one, list its host in `BB_AUTH_AUTHORIZED_HOSTS` like any other redirect target, and
+remember that `*.example.com` does not match the bare apex.
+
+Two conditions, and both are structural rather than a matter of care. The applications and
+the endpoint must share a **registrable domain**, because a `Sign out` across two of them is
+a cross-site navigation and the CSRF guard ignores exactly that: a service on a different
+domain is not covered and keeps its own logout location. And a **host-only cookie** (no
+`BB_AUTH_COOKIE_DOMAIN`, i.e. the per-service login of the next section) cannot work this
+way at all: there is a separate cookie per host, and only the host that set one can clear
+it.
+
 ### Editing it — `bb-auth-adm`
 
 The file is JSON and you can edit it by hand; `bb-auth-adm` is the way not to. It does
@@ -894,8 +932,12 @@ The binary is service-agnostic. To front a service at `app.example.com`:
            proxy_pass http://127.0.0.1:4181/auth/session;
        }
        location = /auth/logout  {
-           # Only needed so a relative `?rd=` on the logout link resolves against
-           # this host; without it the logout falls back to the login page.
+           # One of these per vhost is one arrangement; with a shared cookie domain,
+           # a single one mounted on the auth vhost logs the browser out of this
+           # service too. See "One logout endpoint for every vhost".
+           # The header is only needed so a relative `?rd=` on the logout link
+           # resolves against this host; without it the logout falls back to the
+           # login page.
            proxy_set_header X-Original-URL https://app.example.com$uri;
            proxy_pass http://127.0.0.1:4181/auth/logout;
        }

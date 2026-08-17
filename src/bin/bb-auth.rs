@@ -1181,6 +1181,15 @@ fn pct_encode(s: &str) -> String {
 /// Render a `Set-Cookie` value. `max_age = 0` expires the cookie (logout). Always
 /// `HttpOnly` + `Secure` + `SameSite=Lax`, so JS cannot read it and it still rides
 /// top-level navigations back to the service.
+///
+/// Minting and clearing go through this one function, which is what makes a **single logout
+/// endpoint serve every vhost**: a browser matches a `Set-Cookie` against the cookie it
+/// stored by `(name, Domain, Path)`, so the expiring cookie has to name the same triple the
+/// minted one did. It does, because both are built here. With `BB_AUTH_COOKIE_DOMAIN` set
+/// to a parent domain the session is one cookie for the whole estate, and clearing it from
+/// any host under that domain signs the browser out of all of them: see [`handle_logout`].
+/// Give the clear a different `Domain` or `Path` than the mint and it stops matching, the
+/// browser keeps the cookie it had, and the logout silently succeeds at nothing.
 fn build_cookie(cfg: &Config, value: &str, max_age: i64) -> String {
     let mut c = format!(
         "{}={}; Max-Age={}; Path=/; HttpOnly; Secure; SameSite=Lax",
@@ -1848,6 +1857,17 @@ fn handle_session(mut req: Request, state: &State) {
 /// caller's root, which is what `safe_rd` would default to and is the wrong end for a
 /// logout. A relative `rd` needs `BB_AUTH_ORIGINAL_URL_HEADER` on this location too; if
 /// nginx omits it the redirect falls back to the login page, which is fail-soft.
+///
+/// **One endpoint is enough for every vhost**, which is worth knowing before wiring this
+/// into nginx once per service. Nothing here reads the request's host: the handler expires
+/// a cookie and redirects, so under a `BB_AUTH_COOKIE_DOMAIN` shared by the whole estate
+/// the clear applies to all of it ([`build_cookie`]) and one mounted location does the job
+/// for every service behind the gate, with each `Sign out` link naming it absolutely. Two
+/// conditions, both structural. The location must not itself be gated: an `auth_request` on
+/// it would answer a logged-out visitor with the login page instead of clearing anything.
+/// And the link must stay **same-site**, because the CSRF guard above ignores a cross-site
+/// navigation, so a service on a different registrable domain than the endpoint is not
+/// covered by it and keeps its own.
 fn handle_logout(req: Request, state: &State) {
     let cfg = &state.cfg;
     // Block cross-site CSRF logout: a navigation triggered from another origin
@@ -2692,6 +2712,54 @@ mod tests {
         assert_eq!(cookie_value(h, "bb_session"), Some("bb1.k1.1.aaa...bbb"));
         assert_eq!(cookie_value("bb_session_extra=x", "bb_session"), None);
         assert_eq!(cookie_value("", "bb_session"), None);
+    }
+
+    /// Only two fields matter to `build_cookie`; the rest are placeholders so the literal
+    /// compiles.
+    fn cookie_cfg(domain: Option<&str>) -> Config {
+        Config {
+            listen: "127.0.0.1:4181".to_string(),
+            hmac_keys: keys_one(),
+            issuer: "https://issuer.invalid".to_string(),
+            audiences: vec!["client".to_string()],
+            cookie_name: "bb_session".to_string(),
+            cookie_domain: domain.map(str::to_string),
+            authorized_hosts: bb_hosts(),
+            login_url: LOGIN.to_string(),
+            original_url_header: "X-Original-URL".to_string(),
+            workers: 1,
+        }
+    }
+
+    /// The line a single, estate-wide logout endpoint stands on: a browser matches a
+    /// `Set-Cookie` against what it stored by `(name, Domain, Path)`, so the expiring cookie
+    /// must name the same triple the minted one did. Make the clear host-only while the mint
+    /// is domain-wide and it misses in silence — the browser keeps the domain cookie, the
+    /// logout reports success, and every other host stays signed in.
+    #[test]
+    fn clearing_a_cookie_targets_the_same_cookie_it_minted() {
+        let cfg = cookie_cfg(Some(".badbat75.com"));
+        let minted = build_cookie(&cfg, "bb1.k1.9999999999.ZWI.", 2_592_000);
+        let cleared = build_cookie(&cfg, "", 0);
+        for attr in [
+            "bb_session=",
+            "Path=/",
+            "Domain=.badbat75.com",
+            "HttpOnly",
+            "Secure",
+            "SameSite=Lax",
+        ] {
+            assert!(minted.contains(attr), "mint lost {attr}: {minted}");
+            assert!(cleared.contains(attr), "clear lost {attr}: {cleared}");
+        }
+        assert!(cleared.contains("Max-Age=0"), "{cleared}");
+        assert!(!minted.contains("Max-Age=0"), "{minted}");
+
+        // Host-only deployment (no cookie domain): neither carries a Domain, so the two
+        // still address one cookie. What must never happen is one of them carrying it.
+        let host_only = cookie_cfg(None);
+        assert!(!build_cookie(&host_only, "v", 60).contains("Domain"));
+        assert!(!build_cookie(&host_only, "", 0).contains("Domain"));
     }
 
     #[test]

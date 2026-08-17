@@ -237,6 +237,12 @@ happens on a gated URL and therefore can name that application's `login_url` in
 `X-Auth-Login-URL`. A relative `rd` needs `X-Original-URL` on this location too;
 without it the redirect falls back to the login page.
 
+The host in that URL need not be the application's own. Nothing in the handler reads it, and
+the expiring cookie carries the same `Domain` as the minted one, so with a
+`BB_AUTH_COOKIE_DOMAIN` shared across the estate a single logout location clears the session
+for every service behind the gate, provided the link stays same-site (a cross-site one is
+the case the guard above ignores). See README "One logout endpoint for every vhost".
+
 This clears the bb-auth session cookie only. It does **not** revoke the Cognito
 refresh token the login page may still hold; the browser will need to re-enter
 Phase 2 on next access. (Cognito global sign-out is intentionally out of scope —
