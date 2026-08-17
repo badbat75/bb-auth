@@ -46,9 +46,9 @@ const VIEWS = [
     viewport: { width: 1280, height: 900 },
     lang: 'it',
     // Only where there is something to read: a form's field measures do not change.
-    only: ['dashboard', 'users', 'denied', 'sites', 'can-authorized', 'can-denied',
-      'user-rm', 'key-minted', 'error-refused', 'conflict', 'conflict-mint', 'forbidden',
-      'settings-menu'],
+    only: ['dashboard', 'users', 'denied', 'apps', 'app-detail', 'can-authorized',
+      'can-denied', 'user-rm', 'key-minted', 'error-refused', 'conflict', 'conflict-mint',
+      'forbidden', 'settings-menu'],
   },
   // An explicit theme is only worth photographing against the OPPOSITE `colorScheme`:
   // that is the pair that proves the choice beat the operating system. Under a matching
@@ -104,22 +104,29 @@ const SCENES = [
   // ---- the read-only inventory -------------------------------------------
   ['dashboard', go('/')],
   ['groups', go('/groups')],
-  ['sites', go('/sites')],
+  ['apps', go('/apps')],
+  // The application detail page: the one place the scopes appear in file order, with the
+  // reorder buttons that make that order editable.
+  ['app-detail', go('/apps/app1')],
   ['denied', go('/denied')],
   ['users', go('/users')],
   ['user-detail', go('/users/bot%40example.com')],
   ['can-empty', go('/can')],
-  ['can-authorized', go('/can?email=friend%40example.com&url=https%3A%2F%2Fapp.example.com%2Freports')],
+  ['can-authorized', go('/can?email=you%40example.com&url=https%3A%2F%2Fapp.example.com%2Fapp1%2Fadmin%2Fpanel')],
   ['can-denied', go('/can?email=spammer%40example.com&url=https%3A%2F%2Fapp.example.com%2Fapp1')],
 
   // ---- the forms ---------------------------------------------------------
   ['user-add', go('/users/%2Badd')],
-  ['user-edit', go('/users/friend%40example.com/edit')],
+  ['user-edit', go('/users/you%40example.com/edit')],
   ['key-add', go('/users/bot%40example.com/keys/%2Badd')],
   ['key-edit', go('/users/bot%40example.com/keys/laptop/edit')],
-  ['site-add', go('/sites/%2Badd')],
-  ['site-edit', go('/sites/app1-onboarding/edit')],
-  ['group-edit', go('/groups/mcp/edit')],
+  ['app-add', go('/apps/%2Badd')],
+  ['app-edit', go('/apps/app1/edit')],
+  // The scope form is the richest one in the GUI, so it is photographed on a scope that
+  // fills every control: `admin` is restricted, names a group, excludes somebody and ticks
+  // one credential class.
+  ['scope-edit', go('/apps/app1/scopes/admin/edit')],
+  ['group-edit', go('/groups/admins/edit')],
   ['deny-add', go('/denied/%2Badd')],
 
   // The other file. One page, one form, and the two shapes worth looking at: as it reads,
@@ -141,21 +148,21 @@ const SCENES = [
   }],
 
   // ---- the confirmations: a GET that changes nothing ----------------------
-  ['user-rm', go('/users/friend%40example.com/rm')],
+  ['user-rm', go('/users/bot%40example.com/rm')],
   ['key-rm', go('/users/bot%40example.com/keys/laptop/rm')],
-  ['site-rm', go('/sites/app1-onboarding/rm')],
+  ['app-rm', go('/apps/app1/rm')],
+  ['scope-rm', go('/apps/app1/scopes/admin/rm')],
 
   // ---- the states only a POST reaches ------------------------------------
   // The flash: a save, then the 303 lands on the page carrying ?msg=.
   ['flash-saved', async (page, ctx) => {
-    await page.goto(ctx.base + '/groups/mcp/edit');
+    await page.goto(ctx.base + '/groups/admins/edit');
     await submit(page);
   }],
   // The in-context refusal: the library's own words, the typed input preserved, 400.
   ['error-refused', async (page, ctx) => {
     await page.goto(ctx.base + '/users/%2Badd');
     await page.fill('input[name=email]', 'not-an-email');
-    await page.fill('textarea[name=urls]', 'https://app.example.com/*');
     await submit(page);
   }],
   // The reveal-once bearer: the only page that ever shows a secret.
@@ -167,12 +174,12 @@ const SCENES = [
   }],
   // The generic 409: a form rendered against bytes someone else has since replaced.
   ['conflict', async (page, ctx) => {
-    await page.goto(ctx.base + '/groups/mcp/edit');
+    await page.goto(ctx.base + '/groups/admins/edit');
     const fields = await formBytes(page);
     const d = doc(ctx);
     d.denied.push('someone-else@example.com'); // an out-of-band `bb-auth-adm` write
     writeDoc(ctx, d);
-    await resubmit(page, ctx.base + '/groups/mcp/edit', fields);
+    await resubmit(page, ctx.base + '/groups/admins/edit', fields);
   }],
   // The mint-specific 409: a reloaded reveal page, which must not mint a second key.
   ['conflict-mint', async (page, ctx) => {

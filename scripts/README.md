@@ -8,7 +8,7 @@ others cannot, and the boundaries are where the interesting failures live.
 | `build.sh` | Linux or WSL | `package.sh` | cross-compiles the three binaries into `dist/` |
 | `package.sh` | Linux or WSL | `deploy.ps1`, or you | builds the three `.deb` (cargo-deb) |
 | `deploy.ps1` | Windows, **pwsh 7** | you | orchestrates a deploy over SSH |
-| `deploy.sh` | the target host, as root | `deploy.ps1`, or you | `dpkg -i` and the three things a package may not do |
+| `deploy.sh` | the target host, as root | `deploy.ps1`, or you | `dpkg -i` and the two things a package may not do |
 | `verify.sh` | the target host, as root | `deploy.sh`, or you | read-only post-deploy checks |
 
 **The install itself is not here.** It lives in the packages: `[package.metadata.deb]` in
@@ -27,7 +27,6 @@ business. Everything in this directory is scaffolding around that.
 ├── scp *.deb + deploy.sh + verify.sh
 └── deploy.sh, as root on the host
     ├── dpkg -i, one transaction
-    ├── move aside units from a pre-package install
     ├── install access.json                 (only with -AccessFile)
     └── verify.sh
 ```
@@ -55,7 +54,7 @@ bash scripts/package.sh                    # arm64, the Pi
 bash scripts/package.sh --arch amd64
 bash scripts/package.sh --no-build         # package the binaries already in dist/
 bash scripts/package.sh --only gate,web    # skip a package
-bash scripts/package.sh --revision 2       # 3.0.0-2 instead of 3.0.0-1
+bash scripts/package.sh --revision 2       # 1.0.0-2 instead of 1.0.0-1
 ```
 
 Produces `dist/{bb-auth,bb-auth-adm,bb-auth-web}_<version>-<rev>_<arch>.deb`. Started from
@@ -90,8 +89,8 @@ What it adds on top of a bare `cargo deb`:
 ./scripts/deploy.ps1 user@host -NoBuild                          # repackage the current dist/
 ```
 
-**pwsh 7, not Windows PowerShell 5.1.** Other switches: `-Arch` (arm64, amd64, armhf),
-`-KeepLegacyUnits`, `-WslDistro`.
+**pwsh 7, not Windows PowerShell 5.1.** Other switches: `-Arch` (arm64, amd64, armhf) and
+`-WslDistro`.
 
 It probes the target **before copying anything**, because neither of the two things it
 asks can be discovered halfway through a transfer:
@@ -111,24 +110,20 @@ its logic to live.
 ## `deploy.sh`
 
 ```bash
-sudo bash deploy.sh <staging_dir>     # DEST=/opt/bb-auth, BB_AUTH_KEEP_LEGACY_UNITS=1
+sudo bash deploy.sh <staging_dir>     # DEST=/opt/bb-auth
 ```
 
-Installs nothing itself. It does the four things a package cannot:
+Installs nothing itself. It does the two things a package cannot, then checks its work:
 
 1. **`dpkg -i`, in one transaction**, so the strict `bb-auth (= <version>)` dependency of
    the two admin packages is satisfied by the gate in the same run. Not `apt install`:
    apt declines to reinstall a version equal to the one already there, so a rebuilt
-   `3.0.0-1` would silently not deploy.
-2. **Moves aside units left in `/etc/systemd/system`** by an install from before the
-   packages. That is the admin's directory and it *overrides* `/usr/lib/systemd/system`,
-   where a package must put its units, so left in place they win forever. Moved, not
-   deleted, and the enablement symlinks are `reenable`d onto the packaged files.
-3. **Installs a staged `access.json`**, after the gate's own parser has vouched for it,
+   `1.0.0-1` would silently not deploy.
+2. **Installs a staged `access.json`**, after the gate's own parser has vouched for it,
    with the owner and mode the live file already had. The packages create that file once,
    empty, and never touch it again, which is what makes a redeploy safe, so replacing it
    is necessarily a separate and explicit act.
-4. Runs `verify.sh`.
+3. Runs `verify.sh`.
 
 A **first** install ends without starting the gate: its env file is still a template, and
 the script says which three steps are left instead of failing the verification.

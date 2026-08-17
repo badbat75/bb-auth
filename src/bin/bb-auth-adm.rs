@@ -1,9 +1,9 @@
 //! bb-auth-adm — edit a bb-auth **access file** (`BB_AUTH_ACCESS_FILE`, a.k.a. access.json).
 //!
 //! CRUD over every section of the file the gate actually enforces: `applications` and their
-//! scopes, `user_groups`, `denied`, `users` and their `api_keys`. Plus the three things an
-//! operator otherwise has to do by hand and by eye: minting a `bbk_` key, answering "would
-//! this credential reach that URL?", and converting a file older than 3.0.
+//! scopes, `user_groups`, `denied`, `users` and their `api_keys`. Plus the two things an
+//! operator otherwise has to do by hand and by eye: minting a `bbk_` key, and answering
+//! "would this credential reach that URL?".
 //!
 //! It shares [`bb_auth_core`] with the gate, and that is the whole design:
 //!
@@ -38,16 +38,16 @@
 //! Editing the file is not enough to change anything: the gate re-reads it on `systemctl
 //! reload bb-auth` (SIGHUP) or a restart.
 
-use std::collections::{BTreeMap, HashMap, HashSet};
+use std::collections::HashSet;
 use std::process::ExitCode;
 
 use bb_auth_core::{
     add_api_key, add_application, add_denied, add_scope, add_user, add_user_email, add_user_group,
-    app_mut, app_pos, base_covers, decide, decide_api_key, default_settings_path, edit_url_list,
-    edit_urls, format_date, key_expiry, key_mut, mint_uuid, move_scope, norm_email, now,
-    open_access_file, open_settings_file, remove_api_key, remove_application, remove_denied,
-    remove_scope, remove_user, remove_user_email, remove_user_group, rename_application,
-    rename_scope, render_access_file, render_settings_file, request_url, rotate_api_key, scope_pos,
+    app_mut, app_pos, decide, decide_api_key, default_settings_path, edit_url_list, edit_urls,
+    format_date, key_expiry, key_mut, mint_uuid, move_scope, norm_email, now, open_access_file,
+    open_settings_file, remove_api_key, remove_application, remove_denied, remove_scope,
+    remove_user, remove_user_email, remove_user_group, rename_application, rename_scope,
+    render_access_file, render_settings_file, request_url, rotate_api_key, scope_pos,
     user_group_mut, user_group_refs, user_label, user_pos, well_formed_uuid, Access, AccessFile,
     AccessWrite, ApiKeySpec, AppSpec, Decision, KeyDecision, ScopeSpec, SealedKey, SettingsFile,
     SettingsWrite, Subject, UrlScope, UserSpec, Written, ACCESS_FILE_VERSION, SETTINGS_VERSION,
@@ -70,7 +70,6 @@ file
   check                         validate with the gate's own parser, then lint
   can WHO URL [--as login|api_key] [--key ID]
                                 would this credential reach this URL? (exit 0 = yes)
-  migrate [-o OUT]              convert a pre-3.0 file, and prove nothing changed
 
 applications                    the places. Areas do not overlap, so their order is nothing
   app list
@@ -189,12 +188,6 @@ fn run() -> Result<ExitCode, String> {
                 dry_run = true;
                 argv.remove(i);
             }
-            // `-o` is `migrate`'s alone, but it is rewritten here so the short form does
-            // not have to fight the one-dash rule in `parse_args`.
-            "-o" => {
-                argv[i] = "--out".to_string();
-                i += 1;
-            }
             _ => i += 1,
         }
     }
@@ -245,7 +238,6 @@ fn run() -> Result<ExitCode, String> {
         ["show"] => cmd_show(ctx),
         ["check"] => cmd_check(ctx),
         ["can", who, url] => cmd_can(ctx, who, url),
-        ["migrate"] => cmd_migrate(ctx),
 
         ["app", "list"] => cmd_app_list(ctx),
         ["app", "add", name] => cmd_app_add(ctx, name),
@@ -586,7 +578,7 @@ fn save_settings(ctx: &Ctx, doc: &SettingsFile) -> Result<(), String> {
 }
 
 /// `settings init` creates a new settings file: a version and nothing else, which compiles to
-/// exactly the behaviour every version before this file had.
+/// the default of every setting it can hold.
 ///
 /// Refuses to overwrite, for the reason `init` refuses to overwrite an access file: every
 /// other command starts by reading, so this is the only way to lose one.
@@ -928,8 +920,8 @@ fn print_app(a: &AppSpec, doc: &AccessFile) {
     }
 }
 
-/// One roster row, plus what it reaches, which is the question the inversion made harder
-/// to answer by eye: the grants are on the side of the place now, so the tool computes it.
+/// One roster row, plus what it reaches, which is the one question the file cannot be read
+/// off by eye: a grant is written on the side of the place, so the tool computes it.
 fn print_user(u: &UserSpec, _doc: &AccessFile, access: &Access) {
     let uuid = u.uuid.trim().to_ascii_lowercase();
     let denied = access.denied_users.contains(&uuid)
@@ -2159,464 +2151,6 @@ fn cmd_deny_rm(ctx: Ctx, who: &[&str]) -> Result<ExitCode, String> {
 }
 
 // ---------------------------------------------------------------------------
-// migrate: a pre-3.0 file to this format
-// ---------------------------------------------------------------------------
-
-/// One old grant, as the pre-3.0 rules expressed it.
-struct OldUser {
-    email: String,
-    urls: Vec<String>,
-    keys: Vec<serde_json::Value>,
-}
-
-/// The literal prefix of a pattern: everything before the first wildcard, trimmed back to
-/// the last `/`. `https://x.com/app/*` gives `https://x.com/app`; a pattern whose authority
-/// carries a wildcard has none, and cannot be placed in an area.
-fn literal_prefix(pattern: &str) -> Option<String> {
-    let p = pattern.trim();
-    let cut = p.find(['*', '&']).unwrap_or(p.len());
-    let head = &p[..cut];
-    let sep = head.find("://")?;
-    if head[sep + 3..].is_empty() {
-        return None; // the wildcard is in the authority
-    }
-    let path_at = head[sep + 3..].find('/').map(|i| sep + 3 + i)?;
-    if cut == p.len() {
-        return Some(p.to_string()); // wholly literal
-    }
-    let end = head.rfind('/').unwrap_or(path_at);
-    let out = &head[..end.max(path_at)];
-    Some(out.to_string())
-}
-
-/// Replace every wildcard with a literal token, so a pattern becomes one representative URL
-/// the old and the new rules can both be asked about.
-fn representative(pattern: &str) -> String {
-    pattern.trim().replace(['*', '&'], "x")
-}
-
-/// `migrate` — convert a pre-3.0 access file, and refuse to write unless every grant
-/// survives.
-///
-/// The conversion is mechanical and the result is correct, not tidy: it invents one
-/// application per URL area it can find, and renaming those is a separate, unhurried edit.
-/// What it will not do is guess. Every old grant it cannot place is reported, and any
-/// (identity, URL) pair whose answer changed stops the write entirely.
-fn cmd_migrate(mut ctx: Ctx) -> Result<ExitCode, String> {
-    let out = ctx.flags.take_one("out")?;
-    ctx.flags.finish()?;
-
-    let raw = std::fs::read_to_string(&ctx.path).map_err(|e| format!("read {}: {e}", ctx.path))?;
-    let old: serde_json::Value =
-        serde_json::from_str(&raw).map_err(|e| format!("parse {}: {e}", ctx.path))?;
-    if old.get("applications").is_some() || old.get("version").is_some() {
-        return Err(format!(
-            "{} already looks like a version {ACCESS_FILE_VERSION} file: nothing to migrate",
-            ctx.path
-        ));
-    }
-
-    // --- read the old shape -------------------------------------------------
-    let groups: BTreeMap<String, Vec<String>> = old
-        .get("url_groups")
-        .and_then(|g| g.as_object())
-        .map(|o| {
-            o.iter()
-                .map(|(k, v)| {
-                    let list = v
-                        .as_array()
-                        .map(|a| {
-                            a.iter()
-                                .filter_map(|x| x.as_str().map(str::to_string))
-                                .collect()
-                        })
-                        .unwrap_or_default();
-                    (k.clone(), list)
-                })
-                .collect()
-        })
-        .unwrap_or_default();
-    let expand = |list: &[String]| -> Vec<String> {
-        let mut out = Vec::new();
-        for e in list {
-            match e.trim().strip_prefix('@') {
-                Some(g) => out.extend(groups.get(g).cloned().unwrap_or_default()),
-                None => out.push(e.trim().to_string()),
-            }
-        }
-        out
-    };
-    let strings = |v: Option<&serde_json::Value>| -> Vec<String> {
-        v.and_then(|x| x.as_array())
-            .map(|a| {
-                a.iter()
-                    .filter_map(|x| x.as_str().map(|s| s.trim().to_string()))
-                    .collect()
-            })
-            .unwrap_or_default()
-    };
-
-    let denied: Vec<String> = strings(old.get("denied"))
-        .iter()
-        .map(|e| norm_email(e))
-        .collect();
-    let old_sites: Vec<serde_json::Value> = old
-        .get("sites")
-        .and_then(|s| s.as_array())
-        .cloned()
-        .unwrap_or_default();
-    let old_users: Vec<OldUser> = old
-        .get("users")
-        .and_then(|u| u.as_array())
-        .map(|a| {
-            a.iter()
-                .map(|u| OldUser {
-                    email: norm_email(u.get("email").and_then(|e| e.as_str()).unwrap_or("")),
-                    urls: expand(&strings(u.get("authorized_urls"))),
-                    keys: u
-                        .get("api_keys")
-                        .and_then(|k| k.as_array())
-                        .cloned()
-                        .unwrap_or_default(),
-                })
-                .collect()
-        })
-        .unwrap_or_default();
-
-    // --- the areas ----------------------------------------------------------
-    let mut every_pattern: Vec<String> = Vec::new();
-    for s in &old_sites {
-        every_pattern.extend(expand(&strings(s.get("urls"))));
-    }
-    for u in &old_users {
-        every_pattern.extend(u.urls.clone());
-        for k in &u.keys {
-            every_pattern.extend(expand(&strings(k.get("authorized_urls"))));
-        }
-    }
-    let mut bases: Vec<String> = Vec::new();
-    let mut unplaceable: Vec<String> = Vec::new();
-    for p in &every_pattern {
-        match literal_prefix(p) {
-            Some(b) => {
-                if !bases.iter().any(|x| base_covers(x, &b)) {
-                    bases.retain(|x| !base_covers(&b, x));
-                    bases.push(b);
-                }
-            }
-            None => unplaceable.push(p.clone()),
-        }
-    }
-    bases.sort();
-    if bases.is_empty() {
-        return Err("nothing to migrate: this file has no URL pattern with a literal area".into());
-    }
-
-    // --- the new document ---------------------------------------------------
-    let mut doc = AccessFile {
-        version: ACCESS_FILE_VERSION,
-        ..Default::default()
-    };
-    // Keep the operator's own comment, if any: it is theirs, not ours.
-    if let Some(c) = old.get("_comment") {
-        doc.extra.insert("_comment".into(), c.clone());
-    }
-    let app_name = |base: &str| -> String {
-        let tail = base.rsplit('/').next().unwrap_or("app");
-        let host = base
-            .split("://")
-            .nth(1)
-            .and_then(|r| r.split('/').next())
-            .unwrap_or("app");
-        let raw = if tail.is_empty() || tail.contains('.') {
-            host
-        } else {
-            tail
-        };
-        let cleaned: String = raw
-            .chars()
-            .map(|c| if c.is_ascii_alphanumeric() { c } else { '-' })
-            .collect();
-        cleaned.trim_matches('-').to_string()
-    };
-    let mut names: HashSet<String> = HashSet::new();
-    let mut app_of: HashMap<String, String> = HashMap::new(); // base -> application name
-    for b in &bases {
-        let mut n = app_name(b);
-        if n.is_empty() {
-            n = "app".into();
-        }
-        let mut candidate = n.clone();
-        let mut i = 2;
-        while !names.insert(candidate.clone()) {
-            candidate = format!("{n}-{i}");
-            i += 1;
-        }
-        app_of.insert(b.clone(), candidate.clone());
-        doc.applications.push(AppSpec {
-            name: candidate,
-            base: vec![b.clone()],
-            ..Default::default()
-        });
-    }
-    let app_for = |p: &str| -> Option<String> {
-        let b = literal_prefix(p)?;
-        bases
-            .iter()
-            .find(|x| base_covers(x, &b))
-            .and_then(|x| app_of.get(x).cloned())
-    };
-
-    // Mint an identity per old user, keeping their email as the one identifier.
-    let mut uuid_of: HashMap<String, String> = HashMap::new();
-    for u in &old_users {
-        if u.email.is_empty() {
-            continue;
-        }
-        let uuid = mint_uuid()?;
-        uuid_of.insert(u.email.clone(), uuid.clone());
-        let keys: Vec<ApiKeySpec> = u
-            .keys
-            .iter()
-            .map(|k| ApiKeySpec {
-                id: k
-                    .get("id")
-                    .and_then(|v| v.as_str())
-                    .unwrap_or("")
-                    .to_string(),
-                key_hash: k
-                    .get("key_hash")
-                    .and_then(|v| v.as_str())
-                    .unwrap_or("")
-                    .to_string(),
-                released: k
-                    .get("released")
-                    .and_then(|v| v.as_str())
-                    .unwrap_or("")
-                    .to_string(),
-                duration: k
-                    .get("duration")
-                    .and_then(|v| v.as_str())
-                    .unwrap_or("never")
-                    .to_string(),
-                ..Default::default()
-            })
-            .collect();
-        doc.users.push(UserSpec {
-            uuid,
-            emails: vec![u.email.clone()],
-            api_keys: keys,
-            ..Default::default()
-        });
-    }
-    doc.denied = denied
-        .iter()
-        .map(|d| match uuid_of.get(d) {
-            Some(u) => u.clone(),
-            None => d.clone(),
-        })
-        .collect();
-
-    // The sites become scopes first, because a `public_auth` site grants to more people
-    // than any roster entry does, and first match wins.
-    for s in &old_sites {
-        let urls = expand(&strings(s.get("urls")));
-        let public = s
-            .get("public_auth")
-            .and_then(|v| v.as_bool())
-            .unwrap_or(false);
-        let login = s.get("login_url").and_then(|v| v.as_str());
-        let name = s.get("name").and_then(|v| v.as_str()).unwrap_or("site");
-        let mut by_app: BTreeMap<String, Vec<String>> = BTreeMap::new();
-        for u in &urls {
-            match app_for(u) {
-                Some(a) => by_app.entry(a).or_default().push(u.clone()),
-                None => unplaceable.push(u.clone()),
-            }
-        }
-        for (app, urls) in by_app {
-            let i = app_pos(&doc, &app).ok_or("internal: application vanished")?;
-            if let Some(l) = login {
-                doc.applications[i].login_url = Some(l.to_string());
-            }
-            let scope = ScopeSpec {
-                name: sanitize(name),
-                urls,
-                access: if public {
-                    "authenticated"
-                } else {
-                    "restricted"
-                }
-                .into(),
-                users: if public { None } else { Some(Vec::new()) },
-                ..Default::default()
-            };
-            add_scope(&mut doc, &app, scope, None)?;
-        }
-    }
-
-    // Then the roster, one scope per distinct set of patterns, listing the users that had
-    // it. That is the smallest conversion that keeps every grant.
-    let mut by_urls: BTreeMap<Vec<String>, Vec<String>> = BTreeMap::new();
-    for u in &old_users {
-        if u.email.is_empty() || u.urls.is_empty() {
-            continue;
-        }
-        let mut key = u.urls.clone();
-        key.sort();
-        key.dedup();
-        by_urls.entry(key).or_default().push(u.email.clone());
-    }
-    for (n, (urls, emails)) in by_urls.iter().enumerate() {
-        let mut by_app: BTreeMap<String, Vec<String>> = BTreeMap::new();
-        for u in urls {
-            match app_for(u) {
-                Some(a) => by_app.entry(a).or_default().push(u.clone()),
-                None => unplaceable.push(u.clone()),
-            }
-        }
-        for (app, urls) in by_app {
-            let members: Vec<String> = emails
-                .iter()
-                .filter_map(|e| uuid_of.get(e).cloned())
-                .collect();
-            add_scope(
-                &mut doc,
-                &app,
-                ScopeSpec {
-                    name: format!("roster-{}", n + 1),
-                    urls,
-                    access: "restricted".into(),
-                    users: Some(members),
-                    ..Default::default()
-                },
-                None,
-            )?;
-        }
-    }
-
-    // --- prove it -----------------------------------------------------------
-    let pending = AccessWrite::prepare(&doc)?;
-    let new = pending.access();
-    let mut diffs: Vec<String> = Vec::new();
-    let urls: Vec<String> = every_pattern.iter().map(|p| representative(p)).collect();
-    for u in &old_users {
-        for url in &urls {
-            let before = old_grants(u, &old_sites, &denied, &expand, url);
-            let after = decide(new, &Subject::Identifier(&u.email), Some(url)).granted();
-            if before != after {
-                diffs.push(format!(
-                    "{} -> {url}: was {}, now {}",
-                    u.email,
-                    if before { "AUTHORIZED" } else { "denied" },
-                    if after { "AUTHORIZED" } else { "denied" }
-                ));
-            }
-        }
-    }
-
-    unplaceable.sort();
-    unplaceable.dedup();
-    for p in &unplaceable {
-        eprintln!(
-            "[bb-auth-adm] COULD NOT PLACE '{p}': it has no literal area, so no application can \
-             own it. Split it by hand."
-        );
-    }
-    if !diffs.is_empty() {
-        for d in &diffs {
-            eprintln!("[bb-auth-adm] CHANGED: {d}");
-        }
-        return Err(format!(
-            "refusing to write: {} (identity, URL) pair(s) would answer differently. The \
-             conversion is not safe as it stands",
-            diffs.len()
-        ));
-    }
-
-    let target = out.unwrap_or_else(|| format!("{}.v3", ctx.path));
-    if ctx.dry_run {
-        print!("{}", pending.json());
-        eprintln!("[bb-auth-adm] --dry-run: {target} NOT written");
-        return Ok(ExitCode::SUCCESS);
-    }
-    std::fs::write(&target, pending.json()).map_err(|e| format!("write {target}: {e}"))?;
-    eprintln!(
-        "[bb-auth-adm] wrote {target}: {} applications, {} users. Every grant the old file made \
-         still resolves the same way.",
-        doc.applications.len(),
-        doc.users.len()
-    );
-    eprintln!(
-        "[bb-auth-adm] the names are invented: read it, rename what deserves a name, then \
-         install it. Do NOT restart the gate before the new binary is in place."
-    );
-    Ok(ExitCode::SUCCESS)
-}
-
-/// A name the new format accepts: `[A-Za-z0-9_-]`, never empty.
-fn sanitize(raw: &str) -> String {
-    let s: String = raw
-        .trim()
-        .chars()
-        .map(|c| {
-            if c.is_ascii_alphanumeric() || c == '_' || c == '-' {
-                c
-            } else {
-                '-'
-            }
-        })
-        .collect();
-    let s = s.trim_matches('-').to_string();
-    if s.is_empty() {
-        "scope".into()
-    } else {
-        s
-    }
-}
-
-/// The pre-3.0 rules, reimplemented here and nowhere else: denied first, then a `public_auth`
-/// site covering the URL, then the user's own patterns. This is the oracle the conversion
-/// is checked against, so it has to say what the old gate said, not what the new one does.
-fn old_grants(
-    u: &OldUser,
-    sites: &[serde_json::Value],
-    denied: &[String],
-    expand: &dyn Fn(&[String]) -> Vec<String>,
-    url: &str,
-) -> bool {
-    if denied.contains(&u.email) {
-        return false;
-    }
-    for s in sites {
-        let urls = expand(
-            &s.get("urls")
-                .and_then(|v| v.as_array())
-                .map(|a| {
-                    a.iter()
-                        .filter_map(|x| x.as_str().map(|s| s.trim().to_string()))
-                        .collect::<Vec<_>>()
-                })
-                .unwrap_or_default(),
-        );
-        let scope = match UrlScope::compile(&urls) {
-            Ok(s) => s,
-            Err(_) => continue,
-        };
-        if scope.allows(Some(url)) {
-            // First match wins, exactly as `Sites::resolve` did.
-            return s
-                .get("public_auth")
-                .and_then(|v| v.as_bool())
-                .unwrap_or(false);
-        }
-    }
-    UrlScope::compile(&u.urls)
-        .map(|s| s.allows(Some(url)))
-        .unwrap_or(false)
-}
-
-// ---------------------------------------------------------------------------
 // Tests
 // ---------------------------------------------------------------------------
 
@@ -2625,28 +2159,9 @@ mod tests {
     use super::*;
 
     #[test]
-    fn literal_prefix_stops_at_the_first_wildcard() {
-        assert_eq!(
-            literal_prefix("https://x.com/app/*").as_deref(),
-            Some("https://x.com/app")
-        );
-        assert_eq!(
-            literal_prefix("https://x.com/app").as_deref(),
-            Some("https://x.com/app")
-        );
-        assert_eq!(
-            literal_prefix("https://x.com/a/b/*/c").as_deref(),
-            Some("https://x.com/a/b")
-        );
-        // A wildcard in the authority leaves no area to own.
-        assert_eq!(literal_prefix("*://*/*"), None);
-        assert_eq!(literal_prefix("https://*.x.com/a"), None);
-    }
-
-    #[test]
     fn to_exclusions_keeps_a_stranger_and_resolves_a_user() {
         let doc: AccessFile = serde_json::from_str(
-            r#"{ "version": 3, "user_groups": { "admins": [] },
+            r#"{ "version": 1, "user_groups": { "admins": [] },
                  "users": [ { "uuid": "11111111-1111-4111-8111-111111111111",
                               "emails": ["bob@x.com"] } ] }"#,
         )
@@ -2674,19 +2189,6 @@ mod tests {
     }
 
     #[test]
-    fn representative_turns_a_pattern_into_one_url() {
-        assert_eq!(representative("https://x.com/a/*"), "https://x.com/a/x");
-        assert_eq!(representative("https://x.com/v&/y"), "https://x.com/vx/y");
-    }
-
-    #[test]
-    fn sanitize_makes_a_name_the_format_accepts() {
-        assert_eq!(sanitize("app 1"), "app-1");
-        assert_eq!(sanitize("  --  "), "scope");
-        assert_eq!(sanitize("keep_this-1"), "keep_this-1");
-    }
-
-    #[test]
     fn shadowed_by_finds_the_broad_scope_listed_first() {
         let broad = ScopeSpec {
             name: "broad".into(),
@@ -2703,58 +2205,5 @@ mod tests {
         let scopes = vec![broad, narrow];
         assert_eq!(shadowed_by(&scopes, 1), Some(0));
         assert_eq!(shadowed_by(&scopes, 0), None);
-    }
-
-    /// The old rules, on the shape the old file had. This is what `migrate` checks itself
-    /// against, so it is worth pinning on its own.
-    #[test]
-    fn old_grants_is_the_pre_3_0_rule() {
-        let sites: Vec<serde_json::Value> = vec![serde_json::json!({
-            "name": "signup",
-            "urls": ["https://x.com/welcome/*"],
-            "public_auth": true
-        })];
-        let expand = |l: &[String]| l.to_vec();
-        let bob = OldUser {
-            email: "bob@x.com".into(),
-            urls: vec!["https://x.com/app/*".into()],
-            keys: vec![],
-        };
-        let denied = vec!["spammer@x.com".to_string()];
-
-        assert!(old_grants(
-            &bob,
-            &sites,
-            &denied,
-            &expand,
-            "https://x.com/app/x"
-        ));
-        // The public_auth site grants without consulting the roster.
-        assert!(old_grants(
-            &bob,
-            &sites,
-            &denied,
-            &expand,
-            "https://x.com/welcome/x"
-        ));
-        assert!(!old_grants(
-            &bob,
-            &sites,
-            &denied,
-            &expand,
-            "https://x.com/other"
-        ));
-        let spammer = OldUser {
-            email: "spammer@x.com".into(),
-            urls: vec!["*://*/*".into()],
-            keys: vec![],
-        };
-        assert!(!old_grants(
-            &spammer,
-            &sites,
-            &denied,
-            &expand,
-            "https://x.com/app/x"
-        ));
     }
 }

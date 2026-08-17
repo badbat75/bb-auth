@@ -1,8 +1,8 @@
 #!/bin/sh
 # bb-auth-web postinst. Same contract as the gate's: the env file is created once and
 # never touched again, and nothing here writes the access file. What is special to this
-# package is that installing it is what MOVES the access file to bb-auth-web:bb-auth,
-# so that migration lives here and a host without the GUI never sees it.
+# package is that installing it is what HANDS the access file to bb-auth-web:bb-auth,
+# so that change of ownership lives here and a host without the GUI never sees it.
 set -e
 
 DEST=/opt/bb-auth
@@ -70,7 +70,7 @@ configure)
     for u in bb-auth-web.service bb-auth-reload.path bb-auth-reload.service; do
         if [ -e "/etc/systemd/system/$u" ]; then
             echo "bb-auth-web: WARNING /etc/systemd/system/$u overrides the packaged unit." >&2
-            echo "bb-auth-web:          It is from scripts/deploy.sh. Remove it, then: systemctl daemon-reload" >&2
+            echo "bb-auth-web:          Remove it, then: systemctl daemon-reload" >&2
         fi
     done
 
@@ -81,17 +81,9 @@ configure)
         grep -E "^[[:space:]]*$1=" "$ENV_FILE" 2>/dev/null | tail -1 | cut -d= -f2- | tr -d '[:space:]' || true
     }
     FAIL=0
-    # The allowlist moved into the settings file in 3.1, where this service can edit it and
-    # see the edit. The gate's postinst has already copied whatever this file said into it
-    # (it configures first), so the line here is now a value nothing reads: delete it.
-    if grep -qE '^[[:space:]]*BB_AUTH_WEB_ADMINS=' "$ENV_FILE" 2>/dev/null; then
-        echo "bb-auth-web: BB_AUTH_WEB_ADMINS moved into $SETTINGS_FILE (web.admins) and is" >&2
-        echo "bb-auth-web:              no longer read. Its value is already there. Delete the" >&2
-        echo "bb-auth-web:              line from $ENV_FILE, then: dpkg --configure bb-auth-web" >&2
-        FAIL=1
-    fi
-    # And it must still name somebody, for the reason it always had to: empty must never
-    # come to mean 'everyone'. Whitespace is stripped first, so the test does not depend on
+    # The allowlist lives in the settings file (web.admins), where this service can edit it
+    # and see the edit, and it must name somebody: empty must never come to mean 'everyone'.
+    # Whitespace is stripped first, so the test does not depend on
     # how the file happens to be laid out; the binary is the one that truly enforces this,
     # per request, and this is only what keeps the enforcement from being discovered by the
     # first visitor.

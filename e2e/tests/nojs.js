@@ -6,7 +6,7 @@
 // the browser shows repeats nothing. And `can` answers with the gate's own decision
 // function, read-only by construction.
 //
-// The rule is no longer "no JavaScript" but "no page may need it": the Settings list boxes
+// The rule is "no page may need it" rather than "no JavaScript": the Settings list boxes
 // carry one inline handler that saves a click, and the last block here runs the whole GUI
 // with scripting switched off to prove nothing else does.
 

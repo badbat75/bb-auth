@@ -1,6 +1,6 @@
 [package]
 name = "bb-auth"
-version = "3.1.0"
+version = "1.0.0"
 edition = "2021"
 description = "Minimal, service-agnostic Cognito id_token → session-cookie auth gate (nginx auth_request)"
 license = "MIT"
@@ -51,8 +51,8 @@ base64 = "0.22"
 getrandom = "0.2"
 # x-www-form-urlencoded body + query parsing (small, standalone).
 form_urlencoded = "1"
-# SIGHUP handling for live users-table reload. Pure Rust + libc FFI — no system
-# OpenSSL, keeps the aarch64 cross-compile clean.
+# SIGHUP handling for the live reload of the access and settings files. Pure Rust
+# + libc FFI, no system OpenSSL, keeps the aarch64 cross-compile clean.
 signal-hook = { version = "0.3", features = ["iterator"] }
 # HTML templating for bb-auth-web, compile-time and pure Rust (a proc macro over
 # proc-macro2/quote/syn — no runtime, no C, nothing to cross-compile). It is here for its
@@ -133,7 +133,7 @@ The HMAC key and the access file are NOT part of this package. Both are created 
 # no state, and the file it edits belongs to the gate's package.
 [package.metadata.deb.variants.adm]
 name = "bb-auth-adm"
-depends = "bb-auth (= 3.1.0-1), libc6 (>= 2.34)"
+depends = "bb-auth (= 1.0.0-1), libc6 (>= 2.34)"
 assets = [
     ["target/release/bb-auth-adm", "opt/bb-auth/bin/", "755"],
 ]
@@ -141,11 +141,11 @@ extended-description = """
 CRUD over a bb-auth access file: applications and their scopes, user groups, denied, users and API keys, plus `can EMAIL URL`, which answers with the gate's own decision function. Every write is re-parsed with the gate's parser on the exact bytes about to land on disk, replaced atomically, and left with the mode and owner it found.
 """
 
-# The admin GUI. Installing it is what moves the access file to bb-auth-web:bb-auth,
-# which is why this package, and not the gate's, carries that migration.
+# The admin GUI. Installing it is what hands the access file to bb-auth-web:bb-auth,
+# which is why this package, and not the gate's, is what sets that ownership.
 [package.metadata.deb.variants.web]
 name = "bb-auth-web"
-depends = "bb-auth (= 3.1.0-1), libc6 (>= 2.34), passwd, init-system-helpers (>= 1.54)"
+depends = "bb-auth (= 1.0.0-1), libc6 (>= 2.34), passwd, init-system-helpers (>= 1.54)"
 maintainer-scripts = "deploy/debian/bb-auth-web"
 assets = [
     ["target/release/bb-auth-web", "opt/bb-auth/bin/", "755"],

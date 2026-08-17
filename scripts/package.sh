@@ -9,7 +9,7 @@
 #   bash scripts/package.sh --arch amd64
 #   bash scripts/package.sh --no-build         # package the binaries already in dist/
 #   bash scripts/package.sh --only gate,web    # skip a package
-#   bash scripts/package.sh --revision 2       # 3.0.0-2 instead of 3.0.0-1
+#   bash scripts/package.sh --revision 2       # 1.0.0-2 instead of 1.0.0-1
 #
 # Output, in dist/:
 #   bb-auth_<ver>-<rev>_<arch>.deb       the gate, its unit, the env template
@@ -287,5 +287,5 @@ cat <<EOF
 [pkg]   scp $OUT_DIR/*_${DEB_VERSION}_${ARCH}.deb user@host:/tmp/
 [pkg]   ssh user@host 'sudo apt-get install -y /tmp/bb-auth_${DEB_VERSION}_${ARCH}.deb'
 [pkg] A first install does not start the gate: it writes an HMAC key and an empty
-[pkg] access file, and says what to fill in. An upgrade preserves both and restarts.
+[pkg] access file, and says what to fill in. A reinstall preserves both and restarts.
 EOF

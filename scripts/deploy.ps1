@@ -15,12 +15,11 @@
          directory on the remote
       4. run deploy.sh there as root, then clean the staging directory up
 
-    deploy.sh is the host side and does the four things a package cannot: `dpkg -i` in
-    one transaction, moving aside any unit an older deploy.sh left in /etc/systemd/system
-    (it overrides the packaged one forever), installing a staged access file after the
-    gate's own parser has vouched for it, and running verify.sh. It is staged rather
-    than inlined here so the logic that touches a live gate is reviewable in the repo,
-    not quoted through PowerShell into ssh into a remote shell.
+    deploy.sh is the host side and does the three things a package cannot: `dpkg -i` in
+    one transaction, installing a staged access file after the gate's own parser has
+    vouched for it, and running verify.sh. It is staged rather than inlined here so the
+    logic that touches a live gate is reviewable in the repo, not quoted through
+    PowerShell into ssh into a remote shell.
 
     The install itself, and everything that must survive it, is the packages' business:
     see [package.metadata.deb] in Cargo.toml and deploy/debian/*/postinst. In short, no
@@ -35,7 +34,7 @@
         file with `bb-auth --check-access` before anything is overwritten.
 
     `dpkg -i` rather than `apt install`, deliberately: apt would decline to reinstall a
-    version equal to the one already there, so a rebuilt 3.0.0-1 would silently not
+    version equal to the one already there, so a rebuilt 1.0.0-1 would silently not
     deploy. dpkg always unpacks and re-configures, which is what a redeploy means here.
 
 .PARAMETER Target
@@ -60,11 +59,6 @@
 .PARAMETER NoBuild
     Skip the compile and package whatever binaries are already in dist/. The packages
     are still rebuilt, which takes seconds.
-
-.PARAMETER KeepLegacyUnits
-    Leave any /etc/systemd/system/bb-auth*.{service,path} from an older
-    scripts/deploy.sh install in place. They OVERRIDE the packaged units, so this is
-    only for a host you are deliberately keeping on the old layout.
 
 .PARAMETER WslDistro
     WSL distribution used for the build. Default: FedoraLinux-44.
@@ -96,8 +90,6 @@ param(
 
     [switch]$NoBuild,
 
-    [switch]$KeepLegacyUnits,
-
     [string]$WslDistro = 'FedoraLinux-44'
 )
 
@@ -108,9 +100,9 @@ $PSNativeCommandUseErrorActionPreference = $false
 
 $Repo        = (Resolve-Path (Join-Path $PSScriptRoot '..')).Path
 $DistDir     = Join-Path $Repo 'dist'
-# The host side of the deploy: dpkg -i, the legacy-unit migration, the access file, and
-# the checks. It runs as root on the target and is staged with the packages, so the
-# logic that touches a live gate is in the repo and not in a quoted string.
+# The host side of the deploy: dpkg -i, the access file, and the checks. It runs as root
+# on the target and is staged with the packages, so the logic that touches a live gate is
+# in the repo and not in a quoted string.
 $DeploySh    = Join-Path $Repo 'scripts\deploy.sh'
 $VerifySh    = Join-Path $Repo 'scripts\verify.sh'
 $RemoteStage = 'bb-auth-stage'
@@ -267,15 +259,14 @@ foreach ($a in $staged) {
 }
 Write-Host "    staged $($staged.Count) file(s): $($Packages -join ', ')"
 
-# --- 5. run deploy.sh as root (dpkg -i + units + access file + verify) --------
+# --- 5. run deploy.sh as root (dpkg -i + access file + verify) ----------------
 # Everything that touches the live host is in that script, staged alongside the
 # packages, rather than in a string quoted through PowerShell into ssh into a remote
 # shell. A postinst that fails its preflight makes dpkg exit non-zero and this step
 # fails with the gate still serving on the inode it holds, which is the point.
 Write-Host "==> running deploy.sh as root on $Target" -ForegroundColor Cyan
-$deployEnv = if ($KeepLegacyUnits) { 'BB_AUTH_KEEP_LEGACY_UNITS=1 ' } else { '' }
-ssh -o BatchMode=yes $Target "sudo ${deployEnv}bash ~/$RemoteStage/deploy.sh ~/$RemoteStage"
-Assert-Native "remote deploy.sh (install, migration or verification failed)"
+ssh -o BatchMode=yes $Target "sudo bash ~/$RemoteStage/deploy.sh ~/$RemoteStage"
+Assert-Native "remote deploy.sh (install or verification failed)"
 
 # --- 6. cleanup staging ------------------------------------------------------
 Write-Host "==> cleaning up ~/$RemoteStage on $Target" -ForegroundColor Cyan

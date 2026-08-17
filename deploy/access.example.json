@@ -1,6 +1,6 @@
 {
   "_comment": [
-    "bb-auth access file (JSON), format version 3 — the REAL access gate (Cognito",
+    "bb-auth access file (JSON), format version 1 — the REAL access gate (Cognito",
     "self-signup is open). Re-checked on every /auth/validate, so an edit plus",
     "`systemctl reload bb-auth` (SIGHUP) takes effect on the next request; a plain restart",
     "works too. Four sibling sections, four different questions:",
@@ -68,11 +68,10 @@
     "/app1 subtree while `/app1*` would also match /app1-admin: always put the `/` before",
     "the `*`. And `/app1/*` does NOT match a bare `/app1`: list both.",
     "",
-    "Validate a file before deploying it: `bb-auth --check-access FILE`.",
-    "Convert an older file (one with no \"version\"): `bb-auth-adm migrate -f OLD -o NEW`."
+    "Validate a file before deploying it: `bb-auth --check-access FILE`."
   ],
 
-  "version": 3,
+  "version": 1,
 
   "applications": [
     {

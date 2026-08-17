@@ -119,7 +119,11 @@ Two things make the header trustworthy, and both are required:
 
 - **nginx sets or clears it on every gated location.** `proxy_set_header` overwrites
   whatever the client sent and nginx drops the header when the variable is empty — but
-  only for the names it lists. Explicitly clear any *other* name the app also trusts.
+  only for the names it lists. Explicitly clear any *other* name the app also trusts, and
+  that includes every identity header the gate *could* emit while this deployment has it
+  switched off (`X-Auth-Uuid`): the set of possible names is fixed in the code, precisely
+  so that it can be cleared exhaustively, and clearing one now means switching the
+  attribute on later needs no nginx change at all.
 - **The app is unreachable except through nginx** (loopback, unix socket, firewall).
   An app reachable directly believes any header anybody sends it.
 
@@ -172,10 +176,11 @@ proxy_set_header X-Auth-Family-Name $bb_family;
   from). nginx passes that through: an unset variable drops the header too.
 - **Additive.** Adding the four lines above is per gated location; leave them out and
   nothing changes. An app must treat every profile header as optional.
-- **Read at startup, so changing the list needs `systemctl restart`** — not `reload`,
-  which only re-reads the access file. It is *not* a cookie-format change: an existing
-  cookie keeps working, a claim removed from the list stops being emitted even from
-  cookies that still carry it, and one added appears at each user's next sign-in.
+- **The list lives in the settings file, so a change is live at the next reload**
+  (`systemctl reload bb-auth`, which `bb-auth-reload.path` sends for you when the file is
+  replaced). It is *not* a cookie-format change: an existing cookie keeps working, a claim
+  removed from the list stops being emitted even from cookies that still carry it, and one
+  added appears at each user's next sign-in.
 - **A value is capped at 256 bytes** and dropped, not truncated, beyond that. Keep the
   list short: the claims ride in the session cookie, and a browser silently drops a
   cookie over ~4 KB. The gate warns at startup if the configured set could get close.
@@ -223,11 +228,11 @@ a request without it resolves to no application and is denied, as is any URL con
 
 The access gate is a single JSON file (`BB_AUTH_ACCESS_FILE`, installed as
 `/opt/bb-auth/var/lib/access.json`; see [`deploy/access.example.json`](deploy/access.example.json)).
-Since 3.0 it is **application-centric**: a grant is written once, on the side of the
+It is **application-centric**: a grant is written once, on the side of the
 place. Four sibling sections answer four different questions:
 
 ```json
-{ "version": 3,
+{ "version": 1,
   "applications": [
     { "name": "app1",
       "base": ["https://app.badbat75.com/app1"],
@@ -254,11 +259,6 @@ place. Four sibling sections answer four different questions:
 A request is authorized when the URL resolves to a scope and **that scope admits the
 credential**. All of it is re-checked on every `/validate`. Two things take access away:
 `denied`, everywhere, and a scope's own `excluded`, in that one place.
-
-Coming from an older file, one with no `"version"` in it? The format changed, and the
-gate refuses the old one by name. Convert it with `bb-auth-adm migrate`, which replays
-every (identity, URL) pair the old file granted and refuses to write if any answer
-changed. Read [Upgrading to 3.0](#upgrading-to-30) before you install anything.
 
 ### `applications` — the places
 
@@ -406,8 +406,8 @@ The header carries the application's `login_url`, or `BB_AUTH_LOGIN_URL` when it
 `auth_request_set` copies it into a request variable, which is what stops a later
 `proxy_pass` from clobbering `$upstream_http_*`; it reads the subrequest's headers even
 though the subrequest answered `401`, which is the whole reason this works. Without the
-`auth_request_set` line nothing breaks — the `map` yields the global URL, exactly as a
-hardcoded `@bb_signin` did before.
+`auth_request_set` line nothing breaks: the `map` yields the global URL, exactly as a
+hardcoded `@bb_signin` would.
 
 The gate can name the login page here because a `401` happens **on** a gated URL, so the
 application resolves, and it answers even when none of its scopes covers the URL. Logout gets no such luck.
@@ -477,8 +477,8 @@ its `root:bb-auth 0640` ownership. Then reload — see below.
 
 ### Editing it in a browser — `bb-auth-web`
 
-The same file in a browser: a server-rendered admin GUI that needs no JavaScript. Five tabs
-about the access file, and a sixth for the settings file.
+The same file in a browser: a server-rendered admin GUI that needs no JavaScript. Four tabs
+about the access file, and a fifth for the settings file.
 **Users** holds the three sections about people, in the order they nest: the user groups and
 who references each one, then the roster, then the `denied` veto. **Applications** lists each
 one with its area, its scope count and which credential classes get in anywhere inside it,
@@ -589,19 +589,21 @@ all — root may write anything, and because the writer *preserves the owner it 
 rewrites leave the file `bb-auth-web:bb-auth` too. The two editors go on sharing one file,
 which is what the `rev` check was built for.
 
-A deploy that does **not** carry the GUI performs no migration: nothing would need the new
-owner, so `root:bb-auth` stays exactly as it is.
+A deploy that does **not** carry the GUI performs no such handover: nothing would need the
+other owner, so `root:bb-auth` stays exactly as it is.
 
 #### Making an edit live
 
-`bb-auth-reload.path` watches `access.json` and runs `systemctl reload bb-auth` whenever it
-is replaced — by the GUI or by a `sudo bb-auth-adm` over SSH. It is installed with the GUI
+`bb-auth-reload.path` watches `access.json` **and `settings.json`** and runs `systemctl
+reload bb-auth` whenever either is replaced, by the GUI or by a `sudo bb-auth-adm` over
+SSH. One unit for both, because the gate's SIGHUP re-reads both files and each is fail-soft
+on its own, so there is nothing to route. It is installed with the GUI
 because it is what makes a GUI edit live: `bb-auth-web` runs unprivileged, is not the gate,
 and could not signal it. It uses `PathChanged=`, which catches the `rename(2)` both editors
 end with (and a hand-edit's close-write); `PathModified=` would only add mid-write triggers,
 i.e. reloading the gate on half a file.
 
-So a CLI operator no longer *has* to reload by hand — and if they do, it is one extra
+So a CLI operator does not *have* to reload by hand; and if they do, it is one extra
 reload of the same file, which costs nothing: a reload re-reads the file, and one that fails
 to parse keeps the live table. The habit is still worth keeping, since the watcher is only
 there when the GUI is.
@@ -624,187 +626,6 @@ that fails to parse keeps the live table (never nuked). Keys are indexed by thei
 a lookup is a single map hit (and trivially a single indexed query if you ever move this
 to a database).
 
-> **Upgrading from 1.x.** `enabled_paths` is gone and its presence is rejected
-> outright: silently ignoring it would leave a user unscoped, which under the old
-> semantics failed *open*. Rewrite each entry as a full URL pattern — and note that a
-> 1.x user with **no** scope meant "all paths", so those users now need an explicit
-> `["*://*/*"]` or they will reach nothing. Update nginx to send `X-Original-URL` too;
-> the deploy script aborts before restarting rather than boot-loop the service.
->
-> **Upgrading from 2.1.** Nothing to do: a file with no `sites` and no `denied`
-> behaves exactly as before.
->
-> **Upgrading to 2.4.** The access file is unchanged, but the cookie format moved to
-> `bb3` and older cookies are no longer accepted, so **every signed-in user is logged
-> out once** and signs in again (their Cognito session usually makes that a click).
-> Nothing to prepare; just don't deploy it in the middle of something. The two new name
-> headers are opt-in per nginx location — see
-> [Profile claims](#profile-claims-optional).
->
-> **Upgrading to 2.5.** The access file is again unchanged, and again the cookie format
-> moved — to `bb4`, so **every signed-in user is logged out once**. Two things to know
-> before deploying. First, the name headers are no longer emitted by default: which OIDC
-> claims propagate is now `BB_AUTH_PROFILE_CLAIMS`, empty unless set, so a 2.4
-> deployment that wants its two headers back must add
-> `BB_AUTH_PROFILE_CLAIMS=given_name,family_name` to the env file (which the deploy never
-> edits) — the headers are byte-identical, nginx needs no change. Second, that variable
-> is read at startup, so later edits to it need a `restart`, not a `reload`. See
-> [Profile claims](#profile-claims-optional).
->
-> **Upgrading to 2.6.** Nobody is logged out: the cookie is unchanged, and so is every
-> access file that does not use the new `url_groups` section. The one ordering rule is
-> **deploy the binary before an access file that uses `@groups`** — a 2.5 gate does not
-> know what `"@mcp"` is, fails the load outright and keeps its previous table (fail-closed;
-> there is no partial grant to worry about). `bb-auth --check-access` on the old binary
-> tells you the same thing before a restart does.
->
-> **Upgrading to 3.0.** **Nobody is logged out**: the cookie is still `bb4`, the HMAC key
-> is preserved as always, the access file is unchanged, and so is every env var the gate
-> reads — its unit is byte-identical too. The major number is about the *deploy*, which
-> grows a second service: `bb-auth-web`, with its own system user, its own unit and env,
-> and the `bb-auth-reload.path` watcher — and, when it is installed, the access file
-> changes owner to `bb-auth-web:bb-auth`.
->
-> All of that is **opt-in by staging**. A `dist/` without `bb-auth-web` deploys exactly as
-> it did on 2.6: no new user, no new units, no migration, `access.json` still `root:bb-auth`.
-> If you do ship it, know two things. The first deploy **stops at the env preflight** —
-> `/opt/bb-auth/etc/bb-auth-web.env` has just been installed from the template with an
-> empty `BB_AUTH_WEB_ADMINS`, which is fatal by design; fill it in on the host and re-run.
-> Nothing was restarted, exactly as with any other rejected config. And the GUI is reachable
-> only through nginx, so it needs a gated location
-> ([The admin GUI behind the gate](#the-admin-gui-behind-the-gate)) plus a grant covering
-> the admin area for each admin. `sudo bb-auth-adm` needs no change and keeps working on
-> the same file; rolling back is dropping the old `dist/` back on, though the file stays
-> `bb-auth-web`-owned until someone chowns it back.
-
-### Upgrading to 3.1
-
-**Nobody is logged out**: the cookie is still `bb4`, the HMAC key is preserved, the access
-file is untouched, and nginx needs no change. What moves is **six settings, out of the
-environment and into a settings file** beside the access file:
-
-| was | is now |
-|-----|--------|
-| `BB_AUTH_PROFILE_CLAIMS` | `gate.profile_claims` |
-| `BB_AUTH_IDENTITY_ATTRS` | `gate.identity_attrs` |
-| `BB_AUTH_ALLOW_UNVERIFIED_SOCIAL` | `gate.allow_unverified_social` |
-| `BB_AUTH_SOCIAL_PROVIDERS` | `gate.social_providers` |
-| `BB_AUTH_SESSION_TTL_SECS` | `gate.session_ttl_secs` |
-| `BB_AUTH_WEB_ADMINS` | `web.admins` |
-
-Not for tidiness. A process cannot re-read its own environment: systemd loads
-`EnvironmentFile=` once, at `ExecStart`, so nothing in an env file can *ever* take effect
-without a restart. These six are read per request, cannot lock anybody out when they are
-wrong, and hold no secret, which is exactly the rule that decided which file each setting
-belongs in. In a file they are reloadable, editable from the GUI's new **Settings** tab, and
-`bb-auth-reload.path` now watches both files.
-
-**The upgrade is two steps, and dpkg walks you through it.** `dpkg -i` creates
-`/opt/bb-auth/var/lib/settings.json` seeded from whatever those variables still say in your
-env files, so behaviour does not change; then it **stops before the restart** and names the
-lines to delete. Delete them, run `dpkg --configure bb-auth bb-auth-web` (or deploy again),
-and you are done. Nothing was restarted in between: the running gate keeps serving on the
-table it already holds.
-
-Leaving one of them in an env file is a **fatal startup**, deliberately: a value an operator
-can see and the service silently ignores is the failure mode this deployment does not
-accept. That is why the postinst refuses rather than shrugging.
-
-After the upgrade:
-
-```bash
-bb-auth-adm settings show                 # what the two services read
-bb-auth-adm settings set --claims given_name,family_name
-bb-auth-adm settings admin add you@example.com
-bb-auth --check-settings /opt/bb-auth/var/lib/settings.json
-```
-
-### Upgrading to 3.0
-
-**Nobody is logged out**: the cookie is still `bb4` and the HMAC key is preserved, as
-always. Two other things change, and a host may need one or both.
-
-#### The access file is renamed (every host)
-
-`users.json` becomes **`access.json`**, `BB_AUTH_USERS_FILE` becomes
-**`BB_AUTH_ACCESS_FILE`**, and `--check-users` becomes **`--check-access`**. The file has
-described four sections since 3.0 and the roster is the smallest of them; the name now
-says what the rest of the codebase has always called it.
-
-This is a **breaking config change**, and it is yours to apply, because both halves of it
-are state a package must not touch: the file is the only current copy of who reaches what,
-and the env file is operator-owned so that a deploy can never rewrite it. Do it **before**
-installing, in this order:
-
-```bash
-# 1. the file (and the writer's one-step-back copy), owner and mode preserved
-sudo mv /opt/bb-auth/var/lib/users.json     /opt/bb-auth/var/lib/access.json
-sudo mv /opt/bb-auth/var/lib/users.json.bak /opt/bb-auth/var/lib/access.json.bak   # if present
-
-# 2. the variable, in the gate's env file and in the GUI's if it is installed
-sudo sed -i 's|^BB_AUTH_USERS_FILE=.*|BB_AUTH_ACCESS_FILE=/opt/bb-auth/var/lib/access.json|' \
-    /opt/bb-auth/etc/bb-auth.env /opt/bb-auth/etc/bb-auth-web.env
-
-# 3. now install
-./scripts/deploy.ps1 user@host
-```
-
-Between steps 1 and 3 the **gate keeps serving**: it holds its table in memory and only
-re-reads on SIGHUP, and the reload the path unit fires on the rename fails to find the old
-name and keeps that table (fail-soft, as always). The **GUI** is the one thing that breaks
-in that window, with a 500 per request, because it re-reads the file on every one.
-
-Getting it half-done is the case worth naming: the packaged `postinst` creates an empty
-access file when it finds none, and an empty file *parses* (it just authorizes nobody), so
-a forgotten step 1 would restart the gate onto a total lockout that `--check-access`
-approved. It therefore refuses to install at all when `access.json` is absent and
-`users.json` is sitting next to it, and says what to run. Skipping step 2 alone is caught
-by the same preflight, as a missing required variable.
-
-#### The file format becomes application-centric (pre-3.0 hosts only)
-
-The gate refuses the old format outright rather than misreading it, and that refusal is
-the whole reason there is a procedure. A 3.0 gate reading an older file exits fatally,
-which under `Restart=on-failure` is a boot loop; the older gate reading a 3.0 file would
-see an empty table, which is a silent, total lockout. Neither is survivable on its own,
-but the reload being **fail-soft** makes one order work:
-
-```bash
-# 1. put the new bb-auth-adm on the host (or convert a copy of the file on a workstation)
-scp dist/bb-auth-adm user@host:/tmp/
-
-# 2. convert, writing the NEW name. The still-running old gate cannot read the result, so
-#    the reload that the path unit fires FAILS and keeps the table already in memory: the
-#    service goes on serving, unchanged.
-sudo /tmp/bb-auth-adm migrate -f /opt/bb-auth/var/lib/users.json -o /tmp/access.v3.json
-sudo install -o root -g bb-auth -m 0640 /tmp/access.v3.json /opt/bb-auth/var/lib/access.json
-sudo rm /opt/bb-auth/var/lib/users.json
-
-# 3. the variable, as above, then install. The restart is the first moment the new file is
-#    read, by the binary that understands it.
-sudo sed -i 's|^BB_AUTH_USERS_FILE=.*|BB_AUTH_ACCESS_FILE=/opt/bb-auth/var/lib/access.json|' \
-    /opt/bb-auth/etc/bb-auth.env
-./scripts/deploy.ps1 user@host
-```
-
-Do not reverse steps 2 and 3, and do not restart the gate between them.
-
-`migrate` is not a best-effort translation: it replays every (identity, URL) pair the old
-file speaks about through both rule sets and **refuses to write if any answer changed**.
-What it cannot place, it reports. What it produces is safe to install, but it is not
-necessarily tidy: it invents an application per URL area it found, and renaming those is a
-separate, unhurried edit once the service is up.
-
-Two things to check afterwards, because they are the ones the old format had no answer for:
-
-- **Every gated URL must fall inside some application's `base`.** A URL no application
-  covers is now reachable by nobody. `bb-auth --check-access FILE` prints the areas; compare
-  them with the locations nginx actually gates.
-- **nginx should clear `X-Auth-Uuid`** on every gated location, even though it is off by
-  default. `proxy_set_header` overrides only the names it lists, so a header the gate could
-  emit and nginx does not clear is one a client can send. Doing it now means enabling the
-  attribute later needs no nginx change at all.
-
 ## Session cookie
 
 HttpOnly, Secure, SameSite=Lax, host-only on the service host, ~30 days. The key id is
@@ -813,8 +634,8 @@ rotation" below). Stateless: no server-side session store — any worker can
 validate any cookie and a restart logs nobody out.
 
 ```text
-bb4.<keyid>.<exp>.<b64url(email)>.<b64url(claims_json)>.<b64url(sig)>
-sig = HMAC_SHA256("bb4.<keyid>.<exp>.<b64url(email)>.<b64url(claims_json)>", key[keyid])
+bb1.<keyid>.<exp>.<b64url(email)>.<b64url(claims_json)>.<b64url(sig)>
+sig = HMAC_SHA256("bb1.<keyid>.<exp>.<b64url(email)>.<b64url(claims_json)>", key[keyid])
 ```
 
 Six fields always. `claims_json` is a JSON object of the profile claims the token
@@ -828,12 +649,13 @@ segments would let a change to that list reinterpret a live cookie's values unde
 someone else's claim name. Editing the list is therefore *not* a format change — no one
 is logged out by it.
 
-`bb4` is the **only** format accepted — there is no verify-only arm for the older `bb1`,
-`bb2` and `bb3`. A format bump therefore costs every user one trip through the login
-page, which is a re-authentication (the browser still holds its Cognito session), not a
-re-enrolment. That was judged cheaper than carrying every format bb-auth ever had, but
-it means **the 2.5 upgrade logs everyone out once** — don't deploy it mid-something.
-Key *rotation* is the separate mechanism that must never do that, and doesn't.
+The tag is a version, and **exactly one version is ever accepted**: there is no
+verify-only arm for any other. Changing the serialization or the signed bytes therefore
+costs every user one trip through the login page, which is a re-authentication (the
+browser still holds its Cognito session) and not a re-enrolment. That is cheaper than
+carrying an arm per format for ever, but it does mean a format bump **logs everyone out
+once**, so bump the tag deliberately and don't ship one mid-something. Key *rotation* is
+the separate axis that must never do that, and doesn't.
 
 The access file is re-checked on every `/validate`, so de-authorizing someone is
 just an edit (remove the user or a single API key, or add them to `denied`) +
@@ -863,6 +685,7 @@ On the target, bb-auth is laid out as:
 /opt/bb-auth/etc/bb-auth.env      # config + HMAC key (0640, service-user readable)
 /opt/bb-auth/share/*.example      # the templates the first install copies from
 /opt/bb-auth/var/lib/access.json   # access list (0640, readable by the bb-auth group)
+/opt/bb-auth/var/lib/settings.json # the hot settings (same ownership as the access file)
 /usr/lib/systemd/system/bb-auth.service
 
 # separate packages, both optional: see "Editing it" and "Editing it in a browser"
@@ -870,12 +693,12 @@ On the target, bb-auth is laid out as:
 /opt/bb-auth/bin/bb-auth-web      # the admin GUI, run by its own bb-auth-web user
 /opt/bb-auth/etc/bb-auth-web.env  # the GUI's config (operator-owned, no secret)
 /usr/lib/systemd/system/bb-auth-web.service
-/usr/lib/systemd/system/bb-auth-reload.{path,service}   # access.json changed -> reload the gate
+/usr/lib/systemd/system/bb-auth-reload.{path,service}   # either file changed -> reload the gate
 ```
 
 The units live where a **package** must put them. `/etc/systemd/system` is the admin's
-directory and a copy there *overrides* them, which is what an install from before the
-packages left behind; `deploy.sh` moves any it finds aside.
+directory, and a unit of the same name there *overrides* the packaged one for good, so
+`deploy.sh` moves any it finds aside.
 
 Installing the GUI is what moves `access.json` to `bb-auth-web:bb-auth` (the gate keeps
 reading it through the group, unit unchanged); a deploy without it changes no ownership at
@@ -906,9 +729,9 @@ A first install therefore ends *without* starting the gate: it says what to fill
 
 `scripts/deploy.sh` is the **on-host installer** (run as root, on the target) and does
 only what a package may not: `dpkg -i` in one transaction (not `apt install`, which
-declines to reinstall an equal version, so a rebuilt `3.0.0-1` would silently not
-deploy); moves aside any unit an older install left in `/etc/systemd/system`; installs a
-staged `access.json` after `--check-access` has vouched for it, with the owner and mode
+declines to reinstall an equal version, so a rebuilt `1.0.0-1` would silently not
+deploy); moves aside any unit in `/etc/systemd/system` shadowing a packaged one; installs
+a staged `access.json` after `--check-access` has vouched for it, with the owner and mode
 the live file already had; and runs `scripts/verify.sh`.
 
 `scripts/verify.sh` is the **post-deploy verification**, and it is standalone: packages
@@ -941,15 +764,17 @@ gate-only host installs the gate alone.
 
 ## Run
 
-bb-auth is a single binary configured entirely from the environment. It expects
+bb-auth is a single binary, configured from its environment plus the settings file
+described under [Config](#config). It expects
 to run **as a non-privileged service, on loopback, behind a TLS-terminating
-reverse proxy** that performs the `auth_request`. It needs two files: the env
-file (holds the HMAC secret) and the users file (JSON access list). The included
+reverse proxy** that performs the `auth_request`. It needs three files: the env
+file (which holds the HMAC secret), the access file (the JSON access list) and the
+settings file beside it. The included
 `deploy/bb-auth.service` runs it as a dedicated system user with aggressive
 systemd hardening, and the `bb-auth` package installs exactly that: it creates the
 user, puts the binary and the unit in place, writes `bb-auth.env` from the shipped
-template with a freshly generated HMAC key on the **first** install, and preserves that
-key and the access file through every later upgrade. See
+template with a freshly generated HMAC key on the **first** install, and never touches
+that key or the access file again, because it ships neither. See
 [`docs/ARCHITECTURE.md`](docs/ARCHITECTURE.md) §"Running it".
 
 ## Config
@@ -967,9 +792,12 @@ shared storage.
 **[`deploy/settings.example.json`](deploy/settings.example.json)**: the six that are read
 per request, cannot lock anybody out, and hold no secret: the profile claims, the identity
 attributes, the social relaxation and its providers, the session lifetime, and who may use
-`bb-auth-web`. They are in a file rather than the environment for one mechanical reason: a
-process cannot re-read its own environment, so nothing in an env file can take effect
-without a restart. These take effect on the next request.
+`bb-auth-web`. They are in a file rather than the environment for one mechanical reason,
+and not for tidiness: a process cannot re-read its own environment (systemd loads
+`EnvironmentFile=` once, at `ExecStart`), so a value that must change with no restart
+cannot be an environment variable. These take effect on the next request, and the settings
+file is reloaded by the same SIGHUP as the access file, fail-soft in the same way: the
+worst a bad save can do is leave the previous values in force.
 
 ```bash
 bb-auth-adm settings show                              # what the two services read
@@ -994,8 +822,8 @@ The binary is service-agnostic. To front a service at `app.example.com`:
    server { listen 443 ssl default_server; ssl_reject_handshake on; }
 
    # Optional: let an application pick its own login page (see "Per-application login page").
-   # The default arm is what a location without auth_request_set, or an older
-   # bb-auth, falls back to — never leave $bb_login to reach `return 302` raw.
+   # The default arm is what a location without auth_request_set falls back to.
+   # Never leave $bb_login to reach `return 302` raw.
    map $bb_login $bb_login_safe {
        ""      https://login.example.com/;
        default $bb_login;
@@ -1097,8 +925,8 @@ The binary is service-agnostic. To front a service at `app.example.com`:
    `/auth/session`. For multiple services, derive the target from the validated
    `rd` instead of a fixed base.
 
-Step 3 is the only per-service behaviour change; the SSO scope in step 2 is now
-just configuration (`BB_AUTH_COOKIE_DOMAIN` + `BB_AUTH_AUTHORIZED_HOSTS`).
+Step 3 is the only per-service behaviour change; the SSO scope in step 2 is pure
+configuration (`BB_AUTH_COOKIE_DOMAIN` + `BB_AUTH_AUTHORIZED_HOSTS`).
 
 ### The admin GUI behind the gate
 
@@ -1166,14 +994,14 @@ Three operator notes, and the first is the one that matters:
   `web.admins` in the settings file is the backstop behind it. Enrol each admin:
 
   ```bash
-  sudo /opt/bb-auth/bin/bb-auth-adm -f /opt/bb-auth/var/lib/access.json \
-      user set you@badbat75.com \
-      --add-url 'https://auth.badbat75.com/admin,https://auth.badbat75.com/admin/*'
+  ADM="sudo /opt/bb-auth/bin/bb-auth-adm -f /opt/bb-auth/var/lib/access.json"
+  $ADM app add auth --base 'https://auth.badbat75.com/admin'
+  $ADM scope add auth admin --access restricted --user you@badbat75.com \
+      --url 'https://auth.badbat75.com/admin,https://auth.badbat75.com/admin/*'
   ```
 
-  A blanket `*://*.badbat75.com/*` scope already covers it — check with
-  `bb-auth-adm can you@badbat75.com https://auth.badbat75.com/admin/` before assuming
-  either way.
+  Then ask the gate's own decision function rather than assuming either way:
+  `bb-auth-adm can you@badbat75.com https://auth.badbat75.com/admin/`.
 - **Never cover the admin area with an `anonymous` or `authenticated` scope.** Those grant without listing anybody,
   to anyone who can register, and Cognito self-signup is open — it would put every account
   in front of the admin surface with only `web.admins` left standing. Two locks or
@@ -1210,9 +1038,10 @@ gate, so even a misconfigured proxy cannot turn this into an open redirect. Note
 - A Cognito-signed `id_token` is unforgeable; possession of one for an
   allowlisted, verified email is the credential.
 - Static `bbk_` API keys are stored only as a SHA-256 hash; a valid, unexpired key
-  authorizes its user per request within its path scope. Revoke by removing the key
-  (or the user) from the users file + reload. Keys bypass Cognito, so treat the raw
-  bearer like a password and prefer scoping it to the paths it needs.
+  authorizes its user per request, never beyond what that user reaches and never beyond
+  the scopes it restricts itself to. Revoke by removing the key (or the user) from the
+  access file + reload. Keys bypass Cognito, so treat the raw bearer like a password and
+  prefer restricting it to the scopes it needs.
 - `rd` is open-redirect-guarded to `BB_AUTH_AUTHORIZED_HOSTS`.
 - Login-CSRF (an attacker POSTing *their* token to log a victim into the
   attacker's account) is possible in theory but low-impact for a read gate;

@@ -146,8 +146,8 @@ const MAX_CLAIM_VALUE_BYTES: usize = 256;
 /// Active session-cookie format tag, and the wire format it names:
 ///
 /// ```text
-/// cookie = "bb4" "." keyid "." exp "." b64url(email) "." b64url(claims_json) "." b64url(sig)
-/// sig    = HMAC_SHA256("bb4." keyid "." exp "." b64url(email) "." b64url(claims_json), key[keyid])
+/// cookie = "bb1" "." keyid "." exp "." b64url(email) "." b64url(claims_json) "." b64url(sig)
+/// sig    = HMAC_SHA256("bb1." keyid "." exp "." b64url(email) "." b64url(claims_json), key[keyid])
 /// ```
 ///
 /// The field count is fixed at six. Neither the base64url alphabet nor a key id
@@ -178,15 +178,15 @@ const MAX_CLAIM_VALUE_BYTES: usize = 256;
 /// signs new cookies. That is the mechanism that must never log anyone out, and it is
 /// untouched by a format change.
 ///
-/// **This is the only format [`verify_session`] accepts.** The `bb1`, `bb2` and `bb3` arms
-/// it used to carry are gone: a version bump costs each user one trip through the login
-/// page — the browser still holds its Cognito session, so it is a re-authentication, not a
-/// re-enrolment — and that was judged cheaper than keeping a verify-only arm, its tests and
-/// its reasoning alive for every format that ever existed. So changing the serialization,
-/// or the bytes that go into `sig`, does log out every live session: bump the tag, expect
-/// the re-auth, and do not schedule it in the middle of something. [`make_session`],
+/// **This is the only format [`verify_session`] accepts**, and there is deliberately no
+/// verify-only arm for any other tag: a version bump costs each user one trip through the
+/// login page (the browser still holds its Cognito session, so it is a re-authentication and
+/// not a re-enrolment), which is cheaper than keeping an arm, its tests and its reasoning
+/// alive for every format that has ever existed. So changing the serialization, or the bytes
+/// that go into `sig`, does log out every live session: bump the tag, never reuse one, expect
+/// the re-auth, and do not ship it in the middle of something. [`make_session`],
 /// [`verify_session`] and their tests pin the format.
-const COOKIE_VERSION: &str = "bb4";
+const COOKIE_VERSION: &str = "bb1";
 
 /// Response header naming the authenticated user on a `204` from `/auth/validate`.
 ///
@@ -234,11 +234,12 @@ const COOKIE_VERSION: &str = "bb4";
 /// the nginx contract above is this end of it, and stays here.
 const IDENTITY_HEADER: &str = bb_auth_core::IDENTITY_HEADER;
 
-/// Response header naming the login page on a `401` from `/auth/validate` — the site's
-/// `login_url`, or `BB_AUTH_LOGIN_URL` when it declares none ([`login_url_for`]).
+/// Response header naming the login page on a `401` from `/auth/validate`: the
+/// application's `login_url`, or `BB_AUTH_LOGIN_URL` when it declares none
+/// ([`login_url_for`]).
 ///
 /// bb-auth never redirects a gated request itself: it answers `401` and nginx decides.
-/// This header is how nginx learns *which* login page, per site rather than per server
+/// This header is how nginx learns *which* login page, per application rather than per server
 /// block. The `auth_request_set` copies it into a request variable, which is what keeps a
 /// later `proxy_pass` from clobbering `$upstream_http_*`:
 ///
@@ -257,12 +258,12 @@ const IDENTITY_HEADER: &str = bb_auth_core::IDENTITY_HEADER;
 /// location @bb_signin { return 302 $bb_login_safe?rd=$scheme://$host$request_uri; }
 /// ```
 ///
-/// The `map` is load-bearing: an unset `$bb_login` — an older gate, or a location missing
-/// the `auth_request_set` — turns `return 302 $bb_login?rd=…` into a *relative*
+/// The `map` is load-bearing: an unset `$bb_login` (a location missing the
+/// `auth_request_set`) turns `return 302 $bb_login?rd=…` into a *relative*
 /// `Location: ?rd=…`, which sends the browser back to the gated path it just failed on.
 ///
 /// The gate can name the login page here because a `401` happens *on* a gated URL, so the
-/// site resolves. `/auth/logout` has no such luck — see [`handle_logout`].
+/// application resolves. `/auth/logout` has no such luck: see [`handle_logout`].
 ///
 /// Emitting it is safe without a per-request check: every candidate passed
 /// [`compile_login_url`] at load, which requires printable ASCII.
@@ -324,8 +325,18 @@ fn worst_case_cookie_bytes(claims: &[ProfileClaim]) -> usize {
 
 /// Runtime configuration, read once from the environment at startup. Every field is
 /// a `BB_AUTH_*` env var; a missing required one is a fatal exit. Because it is read
-/// once, a config change needs `systemctl restart`, not `reload` (which only re-reads
-/// the users file).
+/// once, a change to any of it needs `systemctl restart`, not `reload` (which re-reads
+/// the access file and the settings file, and nothing else).
+///
+/// Read once is also the reason a setting is *here* rather than in the settings file: a
+/// process cannot re-read its own environment, because systemd loads `EnvironmentFile=`
+/// once, at `ExecStart`, so a `SIGHUP` handler asking `std::env::var` would be handed the
+/// values it started with. What lives here is therefore everything that fails at least one
+/// part of the settings file's membership rule ([`bb_auth_core::Settings`]: read per
+/// request, harmless to get wrong, not a secret). The listener and the worker count are a
+/// rebind; the HMAC keys are the secret; the Cognito trust roots and the cookie's name and
+/// domain let nobody in or log everybody out; and `BB_AUTH_LOGIN_URL`,
+/// `BB_AUTH_AUTHORIZED_HOSTS` and `BB_AUTH_ORIGINAL_URL_HEADER` *are* the lockout.
 struct Config {
     /// `BB_AUTH_LISTEN`, the loopback address the gate binds. Default `127.0.0.1:4181`.
     listen: String,
@@ -352,8 +363,8 @@ struct Config {
     /// with `BB_AUTH_COOKIE_DOMAIN=.<domain>` to share the session cookie across siblings.
     authorized_hosts: Vec<UrlPattern>,
     /// `BB_AUTH_LOGIN_URL`, e.g. `https://login.example.com/`. Where a logout and every
-    /// rejected `rd` land, and what a `401` names in [`LOGIN_URL_HEADER`] — unless the
-    /// site that speaks for the URL overrides it ([`login_url_for`]). Validated by
+    /// rejected `rd` land, and what a `401` names in [`LOGIN_URL_HEADER`], unless the
+    /// application that speaks for the URL overrides it ([`login_url_for`]). Validated by
     /// [`compile_login_url`] at startup.
     login_url: String,
     /// Name of the request header carrying the original request URL — scheme, host and
@@ -384,67 +395,6 @@ struct Config {
     workers: usize,
 }
 
-/// The five settings that used to be env vars and are now read from the settings file, plus
-/// the reason they moved.
-///
-/// A process cannot re-read its own environment: systemd loads `EnvironmentFile=` once, at
-/// `ExecStart`, so a `SIGHUP` handler asking `std::env::var` would be handed the same values
-/// it started with. Anything that must change while the gate keeps serving therefore cannot
-/// be an env var, whatever else recommends one. These five qualified on three counts, all of
-/// which are the settings file's membership rule ([`bb_auth_core::Settings`]): read per
-/// request, harmless to get wrong, and not a secret.
-///
-/// What is left in [`Config`] is everything that fails one of those: the listener and the
-/// worker count (a rebind), the HMAC keys (the secret), the Cognito trust roots and the
-/// cookie's name and domain (a change logs everyone out or lets nobody in), and the three
-/// that *are* the lockout: `BB_AUTH_LOGIN_URL`, `BB_AUTH_AUTHORIZED_HOSTS` and
-/// `BB_AUTH_ORIGINAL_URL_HEADER`.
-///
-/// The env vars they were are not accepted any more, and their presence is a fatal startup
-/// naming the file ([`check_legacy_env`]): a setting silently read from nowhere is the one
-/// failure mode this gate does not accept.
-const MOVED_TO_SETTINGS: [&str; 5] = [
-    "BB_AUTH_PROFILE_CLAIMS",
-    "BB_AUTH_IDENTITY_ATTRS",
-    "BB_AUTH_ALLOW_UNVERIFIED_SOCIAL",
-    "BB_AUTH_SOCIAL_PROVIDERS",
-    "BB_AUTH_SESSION_TTL_SECS",
-];
-
-/// Refuse to start while any of [`MOVED_TO_SETTINGS`] is still set in the environment.
-///
-/// The alternative is to ignore them, and ignoring them is exactly the trap: an operator who
-/// left `BB_AUTH_PROFILE_CLAIMS` in `bb-auth.env` would get a gate that emits no profile
-/// header and reports a successful start, and the discovery would happen in an application
-/// waiting for a header that never comes. The same reflex as the access file's `check_legacy`,
-/// pointed at the env file instead: name the variables found, name where they went, and stop.
-///
-/// It is checked *before* anything else in [`Config::from_env`], so the message is the first
-/// thing in the journal rather than the last.
-fn check_legacy_env() {
-    let found: Vec<&str> = MOVED_TO_SETTINGS
-        .iter()
-        .copied()
-        .filter(|k| std::env::var_os(k).is_some())
-        .collect();
-    if found.is_empty() {
-        return;
-    }
-    let (subject, them, line) = match found.len() {
-        1 => ("this setting", "it", "the line"),
-        _ => ("these settings", "them", "the lines"),
-    };
-    eprintln!(
-        "[bb-auth] FATAL: {} set, but {subject} moved out of the environment and into the \
-         settings file (BB_AUTH_SETTINGS_FILE, by default settings.json beside the access \
-         file). Nothing reads {them} here any more.\n\
-         [bb-auth]   Move the values with `bb-auth-adm settings set …`, then delete {line} \
-         from bb-auth.env.",
-        found.join(", ")
-    );
-    std::process::exit(1);
-}
-
 /// Read an env var, falling back to `default` when unset.
 fn env_or(key: &str, default: &str) -> String {
     std::env::var(key).unwrap_or_else(|_| default.to_string())
@@ -463,7 +413,6 @@ impl Config {
     /// problem: a missing required var, a short HMAC key, a malformed key id, or an
     /// empty/unparseable `BB_AUTH_AUTHORIZED_HOSTS`.
     fn from_env() -> Self {
-        check_legacy_env();
         let active_key = env_req("BB_AUTH_HMAC_KEY").into_bytes();
         if active_key.len() < 32 {
             eprintln!("[bb-auth] FATAL: BB_AUTH_HMAC_KEY must be >= 32 bytes");
@@ -540,8 +489,8 @@ impl Config {
 
         // `client_id` is always an accepted audience; `BB_AUTH_AUDIENCES`
         // (comma-separated) appends extra app-client ids — a Cognito id_token is
-        // accepted if its `aud` matches ANY of them. Unset => only `client_id`
-        // (backward-compatible). Deduplicated, order-preserving.
+        // accepted if its `aud` matches ANY of them. Unset => only `client_id`.
+        // Deduplicated, order-preserving.
         let client_id = env_req("BB_AUTH_CLIENT_ID");
         let mut audiences = vec![client_id.clone()];
         for extra in env_or("BB_AUTH_AUDIENCES", "").split(',') {
@@ -559,7 +508,7 @@ impl Config {
             cookie_name: env_or("BB_AUTH_COOKIE_NAME", "bb_session"),
             cookie_domain,
             authorized_hosts,
-            // The global fallback for every site that declares no `login_url`. Validated
+            // The global fallback for every application that declares no `login_url`. Validated
             // with the same parser, so nothing that reaches a header or a page can carry
             // a CR/LF — including the value `safe_rd` falls back to.
             login_url: compile_login_url(&env_req("BB_AUTH_LOGIN_URL")).unwrap_or_else(|e| {
@@ -988,7 +937,7 @@ fn validate_id_token(token: &str, state: &State) -> Result<UserIdentity, String>
         return Err("token_use is not 'id'".into());
     }
     let email = c.email.ok_or("token has no email")?.to_ascii_lowercase();
-    // A `public_auth` site emits identities that appear in no table, so `read_access`
+    // An `authenticated` scope emits identities that appear in no table, so `read_access`
     // never sees this email. It goes into IDENTITY_HEADER and, via `make_session`, into
     // the cookie — a CR/LF here would be a response-splitting gadget. `{email:?}` escapes
     // the very bytes being rejected, so a crafted token cannot forge a log line either.
@@ -1114,8 +1063,8 @@ fn make_session(ident: &UserIdentity, ttl: u64, keys: &HmacKeys) -> String {
 ///
 /// The signature is checked over the segments **as received**, before the claims blob is
 /// parsed; nothing is re-serialized to compare. [`COOKIE_VERSION`] is the **only** format
-/// accepted: a cookie in any older one is not distinguished from junk, and its holder is
-/// sent back through the login page. See that constant for why no verify-only arm is kept.
+/// accepted: a cookie carrying any other tag is not distinguished from junk, and its holder
+/// is sent back through the login page. See that constant for why exactly one is accepted.
 fn verify_session(val: &str, keys: &HmacKeys) -> Option<UserIdentity> {
     let parts: Vec<&str> = val.splitn(6, '.').collect();
     match parts.as_slice() {
@@ -1291,10 +1240,10 @@ fn safe_rd(
 /// Rejects any other scheme, userinfo (`@`) and backslashes. A `:port` suffix is
 /// tolerated on the candidate and stripped before matching (patterns are bare hosts).
 ///
-/// Matching is the same glob as `authorized_urls`, so `*.badbat75.com` accepts
-/// `mcp.badbat75.com` but neither `evilbadbat75.com` nor `badbat75.com.evil.com` —
-/// the literal dot in the pattern is what rules those out. It does *not* accept the
-/// bare apex `badbat75.com`; list it explicitly if you want it.
+/// Matching is the same [`bb_auth_core::glob_match`] a scope's URL patterns use, so
+/// `*.badbat75.com` accepts `mcp.badbat75.com` but neither `evilbadbat75.com` nor
+/// `badbat75.com.evil.com` — the literal dot in the pattern is what rules those out. It does
+/// *not* accept the bare apex `badbat75.com`; list it explicitly if you want it.
 fn rd_url_allowed(url: &str, hosts: &[UrlPattern]) -> bool {
     let rest = match url.strip_prefix("https://") {
         Some(r) => r,
@@ -1695,7 +1644,7 @@ fn authorize_login(access: &Access, ident: UserIdentity, url: Option<&str>) -> O
 /// configured profile claims came with it. See [`respond_authorized`].
 fn handle_validate(req: Request, state: &State) {
     let cfg = &state.cfg;
-    // Original request URL (for site resolution and per-user / per-key URL scoping),
+    // Original request URL (for application resolution and per-scope URL matching),
     // captured now as an owned value so the request can be consumed when we respond.
     let url = original_url(&req, cfg);
 
@@ -1774,13 +1723,13 @@ fn handle_validate(req: Request, state: &State) {
 /// courtesy — it tells someone at the login page that they are not enrolled, rather than
 /// letting them bounce off a 401 later. It has to soften once any `authenticated` scope
 /// exists, because then an un-enrolled identity *does* have somewhere to go and refusing
-/// the cookie would make that site unreachable from a browser. Guessing at `rd` instead
+/// the cookie would make that area unreachable from a browser. Guessing at `rd` instead
 /// would be worse: it is the post-login destination, not the URL that triggered the login,
 /// and [`safe_rd`] may already have replaced it with the login page.
 fn handle_session(mut req: Request, state: &State) {
     let cfg = &state.cfg;
 
-    // Which host this login is happening on, and hence which site's login page an error
+    // Which host this login is happening on, and hence which application's login page an error
     // page should link back to. nginx sets the header here too, not just on the gate.
     let caller_url = original_url(&req, cfg);
     let login = login_url_for(
@@ -1877,11 +1826,11 @@ fn handle_session(mut req: Request, state: &State) {
 /// Clears the bb-auth cookie only; the Cognito refresh token the login page may hold is
 /// out of scope. A cross-site navigation is ignored (CSRF logout).
 ///
-/// **Where it lands is the caller's choice, not a site's.** A logout happens *at*
-/// `/auth/logout`, which no site's `urls` cover — the gate cannot tell which area you are
-/// leaving, so there is nothing for a per-site landing page to resolve against. (Contrast
-/// [`LOGIN_URL_HEADER`]: a `401` happens *on* a gated URL, so the site resolves.) The one
-/// party that does know is whoever wrote the logout link, so they say it:
+/// **Where it lands is the caller's choice, not an application's.** A logout happens *at*
+/// `/auth/logout`, which lies inside no application's area, so the gate cannot tell which
+/// one you are leaving and a per-area landing page would have nothing to resolve against.
+/// (Contrast [`LOGIN_URL_HEADER`]: a `401` happens *on* a gated URL, so the application
+/// resolves.) The one party that does know is whoever wrote the logout link, so they say it:
 ///
 /// ```html
 /// <a href="/auth/logout?rd=/app1/goodbye">Sign out</a>
@@ -1933,8 +1882,8 @@ fn handle_logout(req: Request, state: &State) {
 
 /// `bb-auth --check-access <file>`: parse an access file with the real parser and exit
 /// 0 (with a summary) or 1 (with the error). Reads no env and touches no network, so
-/// a deploy can validate the file that is *about* to go live — a rejected scope, an
-/// unknown site field, or a residual `enabled_paths` is a fatal startup error, and with
+/// a deploy can validate the file that is *about* to go live: a rejected scope, or an
+/// unknown field anywhere in the application tree, is a fatal startup error, and with
 /// `Restart=on-failure` that would be a boot loop.
 fn check_access(path: &str) -> ! {
     match read_access(path) {
@@ -2070,8 +2019,8 @@ fn main() {
     let access_path = env_req("BB_AUTH_ACCESS_FILE");
     let access = load_access(&access_path);
     // Optional, and defaulted from the access file's own directory: see
-    // `bb_auth_core::default_settings_path` for why a second *required* variable would be a
-    // boot loop waiting for an upgrade that forgot it.
+    // `bb_auth_core::default_settings_path` for why making a second variable *required*
+    // would be a boot loop waiting on an env file nobody had a reason to edit.
     let settings_path = std::env::var("BB_AUTH_SETTINGS_FILE")
         .ok()
         .filter(|p| !p.trim().is_empty())
@@ -2263,19 +2212,20 @@ mod tests {
                 .collect(),
         }
     }
-    /// An identity carrying the two claims v2.4 hard-coded.
+    /// An identity carrying the two claims a display name is usually built from.
     fn ident_full(email: &str, given: &str, family: &str) -> UserIdentity {
         ident_claims(email, &[("given_name", given), ("family_name", family)])
     }
-    /// A compiled claim list from the comma-separated spelling an operator used to write in
-    /// an env var. The compiler itself, and everything it refuses, is the library's and is
-    /// tested there; what these tests need is a list to emit from.
+    /// A compiled claim list, written comma-separated for brevity. The compiler itself, and
+    /// everything it refuses, is the library's and is tested there; what these tests need is
+    /// a list to emit from.
     fn claims(spec: &str) -> Vec<ProfileClaim> {
         let list: Vec<String> = spec.split(',').map(str::to_string).collect();
         bb_auth_core::compile_profile_claims(&list).unwrap()
     }
 
-    /// The claim set an operator writes to reproduce v2.4's behaviour.
+    /// The claim set behind a first-and-last-name greeting, which is what most deployments
+    /// configure and therefore the size the cookie budget is judged against.
     fn claims_cfg() -> Vec<ProfileClaim> {
         claims("given_name,family_name")
     }
@@ -2287,7 +2237,7 @@ mod tests {
         assert!(two > none, "a claim must cost something");
         // The threshold `main` warns at. A couple of claims is comfortable; a handful of
         // max-length ones is not, which is the whole point of warning.
-        assert!(two <= 3072, "the v2.4 pair must not warn: {two}");
+        assert!(two <= 3072, "the usual pair must not warn: {two}");
         let many = claims("a,b,c,d,e,f,g,h");
         assert!(
             worst_case_cookie_bytes(&many) > 3072,
@@ -2296,7 +2246,7 @@ mod tests {
     }
 
     #[test]
-    fn session_roundtrip_bb4() {
+    fn session_roundtrip() {
         let k = keys_one();
         // Non-ASCII and an apostrophe: the cookie is binary-safe (base64) where the header
         // is not, so this is the roundtrip that has to survive untouched.
@@ -2305,7 +2255,7 @@ mod tests {
             3600,
             &k,
         );
-        assert!(c.starts_with("bb4.k1."));
+        assert!(c.starts_with("bb1.k1."));
         // The email lowercases; the claim values do not — their case is the user's.
         assert_eq!(
             verify_session(&c, &k),
@@ -2314,7 +2264,7 @@ mod tests {
     }
 
     #[test]
-    fn session_roundtrip_bb4_no_claims() {
+    fn session_roundtrip_no_claims() {
         let k = keys_one();
         let c = make_session(&ident("a@b.com"), 3600, &k);
         // No claims is the empty segment, not a missing field and not "{}": the count
@@ -2329,8 +2279,8 @@ mod tests {
     }
 
     #[test]
-    fn session_roundtrip_bb4_json_special_chars() {
-        // The blob is JSON now, so a value containing a quote or a backslash goes through
+    fn session_roundtrip_json_special_chars() {
+        // The blob is JSON, so a value containing a quote or a backslash goes through
         // escaping and must come back byte-identical.
         let k = keys_one();
         let id = ident_claims("a@b.com", &[("nickname", r#"a"b\c/d"#)]);
@@ -2339,7 +2289,7 @@ mod tests {
     }
 
     #[test]
-    fn session_bb4_claims_are_signed() {
+    fn session_claims_are_signed() {
         let k = keys_one();
         let c = make_session(&ident_full("a@b.com", "Ada", "Byron"), 3600, &k);
         let p: Vec<&str> = c.split('.').collect();
@@ -2354,7 +2304,7 @@ mod tests {
     }
 
     #[test]
-    fn session_bb4_bad_claims_segment_fails_closed() {
+    fn session_bad_claims_segment_fails_closed() {
         let k = keys_one();
         let exp = now() + 3600;
         let eb = URL_SAFE_NO_PAD.encode(b"a@b.com");
@@ -2376,7 +2326,7 @@ mod tests {
             b64(r#"{"a":" Ada"}"#),               // not trim-stable
             b64(r#"{"bad key!":"Ada"}"#),         // key no config could produce
         ] {
-            let msg = format!("bb4.k1.{exp}.{eb}.{seg}");
+            let msg = format!("bb1.k1.{exp}.{eb}.{seg}");
             let sig = sign(&k.by_id["k1"], &msg);
             assert_eq!(
                 verify_session(&format!("{msg}.{sig}"), &k),
@@ -2408,7 +2358,7 @@ mod tests {
         let k = keys_one(); // only k1
         let exp = now() + 3600;
         let eb = URL_SAFE_NO_PAD.encode(b"a@b.com");
-        let msg = format!("bb4.k9.{exp}.{eb}.");
+        let msg = format!("bb1.k9.{exp}.{eb}.");
         let sig = sign(&k.by_id["k1"], &msg);
         let c = format!("{msg}.{sig}");
         assert_eq!(verify_session(&c, &k), None);
@@ -2420,7 +2370,7 @@ mod tests {
         let exp = now() + 3600;
         let eb = URL_SAFE_NO_PAD.encode(b"x@y.com");
         let cb = URL_SAFE_NO_PAD.encode(r#"{"given_name":"Ada"}"#);
-        let msg = format!("bb4.k2.{exp}.{eb}.{cb}");
+        let msg = format!("bb1.k2.{exp}.{eb}.{cb}");
         let sig = sign(&k.by_id["k2"], &msg);
         let c = format!("{msg}.{sig}");
         assert_eq!(
@@ -2430,18 +2380,21 @@ mod tests {
     }
 
     #[test]
-    fn pre_bb4_cookies_are_rejected() {
-        // The deliberate cost of dropping the verify-only arms: a cookie in an older
-        // format, correctly signed with a live key, no longer verifies. Its holder goes
-        // through the login page once. This is the contract, so it is pinned.
+    fn foreign_cookie_versions_are_rejected() {
+        // The tag is inside the signed bytes and exactly one value of it has an arm, so a
+        // live key signing the cookie is not enough: the tag has to be ours. That is what
+        // makes a future format bump a clean break rather than an ambiguity, and it is the
+        // contract, so it is pinned.
         let k = keys_one();
         let exp = now() + 3600;
-        let eb = URL_SAFE_NO_PAD.encode(b"old@a.com");
-        let gb = URL_SAFE_NO_PAD.encode("Ada");
+        let eb = URL_SAFE_NO_PAD.encode(b"a@b.com");
+        let cb = URL_SAFE_NO_PAD.encode(r#"{"given_name":"Ada"}"#);
         for msg in [
-            format!("bb3.k1.{exp}.{eb}.{gb}."), // v2.4
-            format!("bb2.k1.{exp}.{eb}"),       // v2.0–2.3
-            format!("bb1.{exp}.{eb}"),          // pre-2.0
+            format!("bb2.k1.{exp}.{eb}.{cb}"), // our shape, a tag we never mint
+            format!("bb9.k1.{exp}.{eb}."),     // ditto, with no claims
+            format!("xx1.k1.{exp}.{eb}.{cb}"), // another namespace entirely
+            format!("bb1.{exp}.{eb}"),         // our tag, too few fields
+            format!("bb1.k1.{exp}.{eb}.{cb}.x"), // our tag, one field too many
         ] {
             let sig = sign(&k.by_id["k1"], &msg);
             let c = format!("{msg}.{sig}");
@@ -2455,18 +2408,14 @@ mod tests {
         for bad in [
             "",
             "bb1",
-            "bb1.x.y",
-            "bb2.k1.x.y",
-            "zzz.a.b.c",
-            "bb1.notanum.aaa.sig",
-            "bb2.k1.99999.!!!.AAAA",
-            // bb4 shapes
-            "bb4",
-            "bb4.k1.x.y",
-            "bb4.k1.99999.!!!.AAAA", // five fields — one short
-            "bb4.k1.9.aa.bb.cc.dd",  // seven — the extra folds into sig, which then fails
-            "bb3.k1.9.aa.bb.cc",     // bb3 tag wearing bb4's shape: no arm matches
-            "bb3.k1.9.aa.bb.cc.dd",  // bb3's own shape: the arm is gone
+            "bb1.k1",
+            "bb1.k1.9.aa",             // too few fields
+            "bb1.k1.99999.!!!.AAAA",   // five: one short
+            "bb1.k1.9.aa.bb.cc.dd",    // seven: the extra folds into sig, which then fails
+            "bb1.k1.notanum.aa.bb.cc", // right shape, exp is not a number
+            "bb1.k1.99999.!!!.bb.cc",  // right shape, the email is not base64url
+            "zzz.a.b.c",               // no arm matches a tag we do not mint
+            "bb9.k1.9.aa.bb.cc",       // ditto, even wearing our shape
         ] {
             assert_eq!(verify_session(bad, &k), None, "should reject: {bad:?}");
         }
@@ -2732,8 +2681,8 @@ mod tests {
 
     #[test]
     fn cookie_value_parses_named() {
-        let h = "a=1; bb_session=bb4.k1.1.aaa...bbb; c=2";
-        assert_eq!(cookie_value(h, "bb_session"), Some("bb4.k1.1.aaa...bbb"));
+        let h = "a=1; bb_session=bb1.k1.1.aaa...bbb; c=2";
+        assert_eq!(cookie_value(h, "bb_session"), Some("bb1.k1.1.aaa...bbb"));
         assert_eq!(cookie_value("bb_session_extra=x", "bb_session"), None);
         assert_eq!(cookie_value("", "bb_session"), None);
     }
@@ -2894,7 +2843,7 @@ mod tests {
 
     // --- the two wrappers over the grant model ------------------------------
     //
-    // The rule itself (`decide` / `decide_api_key`, sites, `denied`, scopes, expiry) is
+    // The rule itself (`decide` / `decide_api_key`, applications, `denied`, scopes, expiry) is
     // pinned in bb_auth_core's tests. What is the gate's own is the mapping to what a
     // response needs — and one property those tests cannot see: that the identity handed
     // back is the very string that came in, which is what `respond_authorized`'s
@@ -2917,7 +2866,7 @@ mod tests {
         access_of(
             name,
             &format!(
-                r#"{{ "version": 3,
+                r#"{{ "version": 1,
                      "applications": [
                        {{ "name": "app1", "base": ["https://app.x.com/app1"], "scopes": [
                           {{ "name": "open", "urls": ["https://app.x.com/app1/*"],
@@ -3035,7 +2984,7 @@ mod tests {
         let a = access_of(
             "key-class",
             &format!(
-                r#"{{ "version": 3,
+                r#"{{ "version": 1,
                      "applications": [ {{ "name": "app", "base": ["https://x.com/a"],
                        "scopes": [ {{ "name": "s", "urls": ["https://x.com/a/*"],
                          "access": "restricted", "users": ["{BOB}"],

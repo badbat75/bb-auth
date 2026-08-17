@@ -42,7 +42,7 @@ idempotent and areas are order-independent.
 | File | Contract under test |
 | --- | --- |
 | `auth.js` | identity comes from `X-Auth-Email` and nowhere else: 401 / 403 / 200, 404 in and outside the base path, 405 on GET of a POST-only route, the same-origin guard on every POST |
-| `crud.js` | full CRUD through the forms — url_groups, sites (incl. reorder), denied, users, api_keys (mint / reveal-once / edit / rotate / remove) — each asserted against the JSON file's actual state |
+| `crud.js` | full CRUD through the forms — user_groups, applications, scopes (incl. reorder and `excluded`), denied, users, api_keys (mint / reveal-once / edit / rotate / remove) — each asserted against the JSON file's actual state |
 | `validation.js` | refused submissions: 400, in-context error, typed input preserved, and **zero bytes written** — incl. the malformed-email refusals on `users · add` and `denied · add` |
 | `conflict.js` | the `rev` check: generic 409 (Back-button recovery hint, en+it), stale-form resubmit, and the mint-specific 409 on a reloaded reveal page (rotate link, exactly one key, en+it) |
 | `i18n.js` | the two display preferences: `?lang=` / `?theme=` answer 302 + a cookie, the choice persists across plain navigations, the 401/403/verdict copy is translated, `html lang=` is the proof; plus the Settings menu, where picking an option applies it on the spot, keeps the rest of the query, and offers `auto` as a real stored choice |

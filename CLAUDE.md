@@ -10,35 +10,33 @@ HMAC-signed session cookie that nginx enforces on every request via `auth_reques
 accepts per-request bearer credentials — a Cognito `id_token` or a static `bbk_` API key.
 
 The access list is a JSON **access file** (`BB_AUTH_ACCESS_FILE`, default
-`access.json`; both said *users* until 3.0 left the roster as one section of four and the
-name describing the smallest of them), and since **3.0 it is application-centric**: an `applications` entry owns a
+`access.json`, and it says *access* rather than *users* because the roster is one section of
+four, the smallest of them), and it is **application-centric**: an `applications` entry owns a
 literal URL area and a list of named **scopes**; a scope owns URL patterns, one access
 policy (`anonymous`, `authenticated`, `restricted`) and an `excluded` list that keeps named
 people out of it ahead of that policy; a user is a **uuid** plus the emails
 that resolve to it plus its API keys, and carries no URL at all. A grant is written once,
 on the side of the place. It is service-agnostic — one binary fronts any web service, wired
 per-deployment through `BB_AUTH_*` env vars **and a settings file** (`settings.json` beside
-the access file): since 3.1 the six settings that must change without a restart live there,
-because a process cannot re-read its own environment.
+the access file): the six settings that must change without a restart live there, because a
+process cannot re-read its own environment.
 
 One crate, four targets, and the split is load-bearing:
 
 - **[src/lib.rs](src/lib.rs)** (`bb_auth_core`): **the files the programs share**. The
   access file above all: its schema, its parser, the URL matcher, the two-level resolution
   (`Access::resolve`), the grant model (`decide` / `decide_api_key`), and how one is *edited
-  and written* (`open_access_file`, `AccessWrite`, the document mutations). And since 3.1
+  and written* (`open_access_file`, `AccessWrite`, the document mutations). And
   **the settings file** beside it (`SettingsFile`, `compile_settings`, `SettingsWrite`, plus
-  `compile_profile_claims` / `compile_identity_attrs`, which moved here because three
-  programs now validate them). Everything more than one program must agree on, byte for
+  `compile_profile_claims` / `compile_identity_attrs`, which are here because all three
+  programs validate them). Everything more than one program must agree on, byte for
   byte.
 - **[src/bin/bb-auth.rs](src/bin/bb-auth.rs)** — **the gate**, and everything the access file has no
   opinion about: HTTP, the session cookie, id_token validation, the nginx contract. Still
   **one file**, still read top to bottom.
 - **[src/bin/bb-auth-adm.rs](src/bin/bb-auth-adm.rs)** — the access-file admin CLI: CRUD over
   `applications` / `scopes` / `user_groups` / `denied` / `users` / `api_keys`, key minting,
-  `can EMAIL URL` (would this credential get in?), and `migrate` (a pre-3.0 file to this one,
-  which refuses to write unless every old grant survives the conversion). It links the
-  library, none of the gate.
+  and `can EMAIL URL` (would this credential get in?). It links the library, none of the gate.
 - **[src/bin/bb-auth-web.rs](src/bin/bb-auth-web.rs)** — the access-file admin GUI
   (server-rendered, `maud`): the same CRUD as the CLI, made **only** through the library's
   editing core, plus a **Settings** tab over the settings file. Five tabs, and none of them
@@ -50,8 +48,9 @@ One crate, four targets, and the split is load-bearing:
   scripting off; each list namespaces its two parameters (`uq`/`up`, `gq`/`gp`, …) so several
   on one page do not steal each other's state. **Scopes are deliberately excluded from that**:
   their order is their meaning and the ↑/↓ buttons move them within the *file*, so a filtered
-  view would show positions that are not the file's and a move that appears to do nothing. **No page may need JavaScript** — the rule that replaced "no JavaScript at
-  all", and the *only* thing standing on the far side of it is `SETTINGS_ONCHANGE`, one
+  view would show positions that are not the file's and a move that appears to do nothing.
+  **No page may need JavaScript**, and the *only* thing standing on the far side of that
+  rule is `SETTINGS_ONCHANGE`, one
   inline handler that applies a Settings list box the moment it is picked, with a
   `<noscript>` submit button behind it doing the same job one click later. There is no
   `<script>` tag anywhere and nothing else carries a handler of any kind; a page that stops
@@ -103,7 +102,7 @@ This repo is developed on Windows but the artifact is a Linux/aarch64 binary.
 # Tests — pure unit tests in src/lib.rs (the access file) and src/bin/bb-auth.rs (the gate),
 # run on the host, no network needed
 cargo test
-cargo test session_roundtrip_bb4      # a single test by name
+cargo test session_roundtrip          # a single test by name
 
 # Validate an access file with the real parser (no env, no network). Same check the
 # deploy runs before it restarts the service. Prints each application's area, and the
@@ -130,11 +129,6 @@ cargo run --bin bb-auth-adm -- -s .\deploy\settings.json settings show
 cargo run --bin bb-auth-adm -- -s .\deploy\settings.json settings set --claims given_name,family_name
 cargo run --bin bb-auth-adm -- -s .\deploy\settings.json settings admin add bob@x.com
 
-# Convert an older access file (one with no "version"). It replays every (identity, URL)
-# pair the old file speaks
-# about through both rule sets, and refuses to write if any answer changed.
-cargo run --bin bb-auth-adm -- migrate -f .\old-access.json -o .\deploy\access.json
-
 # Browser E2E suite for bb-auth-web (Node + system Edge/Chrome; self-contained — builds,
 # starts and kills its own server on a temp copy of the fixture; see e2e/README.md)
 node e2e/run.js
@@ -156,7 +150,7 @@ bash scripts/build.sh                 # target overridable via BB_AUTH_TARGET
 bash scripts/package.sh               # arm64; --arch amd64, --no-build, --only, --revision
 
 # Deploy from Windows over SSH: package in WSL, ship the .deb, dpkg -i, remote verify.
-# Building is no longer opt-in; -NoBuild repackages the current dist/ instead.
+# It always builds; -NoBuild repackages the current dist/ instead.
 ./scripts/deploy.ps1 user@host
 ./scripts/deploy.ps1 user@host -Packages bb-auth                # gate only, no admin tools
 ./scripts/deploy.ps1 user@host -AccessFile .\deploy\access.json   # also replace the access file
@@ -193,11 +187,11 @@ changes. `node e2e/shots.js` takes a scene-name filter for the same reason: the 
   is edited and written**, too — validate-before-write on the exact bytes, atomic replace,
   mode and owner preserved (`open_access_file`, `AccessWrite`, and the document mutations
   beside them), because `bb-auth-adm` and the web admin must agree on that byte
-  for byte: the same argument that created the library. It is also what admitted the
-  **settings file** in 3.1 (`compile_settings`, `SettingsWrite`), and with it
-  `compile_profile_claims` / `compile_identity_attrs`, which had been the gate's while the
-  gate was the only program that read them: the moment an editor must refuse to *write* a
-  bad claim list, the rule that decides one is shared. `write_atomically` stays private and
+  for byte: the same argument that created the library. It is also what admits the
+  **settings file** (`compile_settings`, `SettingsWrite`), and with it
+  `compile_profile_claims` / `compile_identity_attrs`: the moment an editor must refuse to
+  *write* a bad claim list, the rule that decides one is shared, however much it may look
+  like the gate's business. `write_atomically` stays private and
   serves both writers. What stays in a tool is what has an
   operator: flags, warnings, and the wording of a verdict. HTTP, the cookie, the JWT,
   the env, the nginx contract are the **gate's**, and stay in `src/bin/bb-auth.rs` — which is
@@ -219,16 +213,17 @@ changes. `node e2e/shots.js` takes a scene-name filter for the same reason: the 
   `root:root` would lock the service out of its own access list. The chown failing is
   therefore a hard abort, not a warning; it is also what makes the *unprivileged* writer
   work at all, so its owner and group are a deploy-time contract, not cosmetics.
-- **The cookie is a versioned wire format, and exactly one version is accepted.** `bb4` is it;
-  there is deliberately no verify-only arm for `bb1`/`bb2`/`bb3` any more. So changing the
-  serialization or the signed-message bytes logs out **every** existing user — that is the
+- **The cookie is a versioned wire format, and exactly one version is accepted.** `bb1` is it,
+  and there is deliberately no verify-only arm for any other tag. So changing the
+  serialization or the signed-message bytes logs out **every** existing user: that is the
   accepted price, because a re-auth is one trip through the login page against a Cognito session
-  the browser still holds, and carrying an arm per historical format is not worth it. Bump the tag
-  when the bytes change (never reuse one), say so in the README's upgrade note, and don't ship it
+  the browser still holds, and carrying an arm per format is not worth it. Bump the tag
+  when the bytes change (never reuse one), say so in the release notes, and don't ship it
   mid-something. What must *never* log anyone out is HMAC **key rotation**, which is a separate
   axis: the keyid in the cookie is what makes it zero-downtime (README "Key rotation").
   `make_session` / `verify_session` and their tests pin the format, and
-  `pre_bb4_cookies_are_rejected` pins the absence of the legacy arms. The claims segment is a
+  `foreign_cookie_versions_are_rejected` pins that a tag this binary did not write gets no arm at
+  all. The claims segment is a
   **self-describing JSON object**, and that is what keeps `profile_claims` off this
   axis: positional segments would let a config edit reinterpret a live cookie's values under
   another claim's name, so editing the list must stay a no-logout change. Verify checks the
@@ -240,10 +235,10 @@ changes. `node e2e/shots.js` takes a scene-name filter for the same reason: the 
   old table (never nuke the live one). See `read_access`; keep it the access gate and keep the
   reload fail-soft. Its four sections answer four questions: `applications` describe places and who
   reaches them, `user_groups` names a reusable set of people, `denied` vetoes people, `users` is the
-  roster of identities. The file declares `"version": 3` and an older one (which carries no
-  `version` at all) is a **fatal, explanatory** load error naming `bb-auth-adm migrate`
-  (`check_legacy`): a new binary that ignored the old sections would read it as an empty access
-  table, which is a total lockout reported as a successful load.
+  roster of identities. The file declares `"version": 1`, and a file that declares anything else,
+  or nothing at all, is a **fatal, explanatory** load error rather than a type mismatch three
+  levels down: a file written for another format could otherwise compile to an access table that
+  grants differently, which is a lockout, or worse, reported as a successful load.
 - **The settings file is what must change without a restart, and the rule for what goes in it
   is three-part.** A setting belongs there iff it is (1) read **per request**, (2) unable to
   lock the operator out when it is wrong, and (3) not a secret. Six pass:
@@ -260,17 +255,14 @@ changes. `node e2e/shots.js` takes a scene-name filter for the same reason: the 
   **fail-soft in the same way** (a broken file keeps the live values), which is what makes it
   safe to hand to a GUI: the worst a bad save can do is leave the previous values in force.
   `bb-auth-web` reads it fresh per request instead, because it is the one service that edits
-  its own half of it. The five env vars that moved are a **fatal startup** if still set
-  (`check_legacy_env`, and the same for `BB_AUTH_WEB_ADMINS` in the GUI): a value an operator
-  can see and the service silently ignores is exactly the failure this repo refuses
-  everywhere else.
+  its own half of it.
 - **What changes who reaches what is fatal; what drops one credential is skipped.** Fatal
   (`read_access` returns `Err`: fatal at startup, old table retained on SIGHUP): a malformed URL
   pattern, an `access` that is absent or misspelled, `users`/`groups`/`credentials` on a scope that
   is not `restricted`, an unknown field anywhere in the application/scope tree, a base that is not
   literal or that overlaps another application's, a scope pattern outside its own application's
   base, a malformed uuid, two rows claiming one uuid or one identifier, a key restriction naming a
-  scope that does not exist, a residual pre-2.0 `enabled_paths`, and anything wrong about a
+  scope that does not exist, and anything wrong about a
   **`@group` reference** (an unknown one, with the message naming the referrer; a bad group name; a
   group that references another group, since groups are flat and there is no cycle to detect; a
   malformed member in a group **nothing references**, because a group that only breaks when someone
@@ -291,7 +283,7 @@ changes. `node e2e/shots.js` takes a scene-name filter for the same reason: the 
   order carries no meaning. Scopes inside one application are **first match wins, in file order**
   (`Access::resolve`). That asymmetry is the design: first-match is what makes a **carve-out**
   expressible (a narrower, stricter scope listed before a broad one), which a union of grants cannot
-  express at all, and its dangerous half (a broad entry shadowing a narrow one) can now only bite
+  express at all, and its dangerous half (a broad entry shadowing a narrow one) can only bite
   between scopes an operator sees together, on one screen, in one form. The literal base is what
   makes non-overlap a string comparison instead of a glob-intersection test, and `base_covers` is
   the one function both checks go through, so "does this application own that URL?" and "does this
@@ -299,8 +291,8 @@ changes. `node e2e/shots.js` takes a scene-name filter for the same reason: the 
   which is what stops the area `https://x.com/app` from swallowing `https://x.com/application`: the
   same trap as a `*` written with no `/` before it. An application on a wildcard host is therefore
   not expressible, and that is a deliberate cost.
-- **A URL no application covers is reachable by nobody.** With no per-user URLs left, this is the
-  only fail-closed reading, and it is a change of operator posture worth saying out loud: a gated
+- **A URL no application covers is reachable by nobody.** Since a user carries no URL of their
+  own, this is the only fail-closed reading, and it is a posture worth saying out loud: a gated
   location outside every application is a `401` for everyone, including the person who wrote the
   file. `--check-access` prints each application's area so it can be compared with what nginx
   actually gates.
@@ -332,14 +324,13 @@ changes. `node e2e/shots.js` takes a scene-name filter for the same reason: the 
   unknown email as itself (`to_exclusions`, `parse_exclusions`), and `remove_user` and
   `user_group_refs` count an exclusion as a reference like any other — marked `(excluded)`,
   because a sweep that reported the two alike would read as if the user had been let in there.
-- **A scope names people, and that is the only place a grant is written.** The rule the old
-  "a site describes a place, never a person" enforced was against **duplication**, not against a
-  direction: it existed so a user removed from the roster could not still walk in through a place.
-  Here the grant is written on the side of the place and nowhere else, so the rule holds in the
-  mirror: `ScopeRecord::members` are **references to roster rows**, a reference to a row that does
-  not exist grants nothing, and `remove_user` sweeps every scope and group that named the row it
-  removes. Without both halves, a deleted user who re-registers on Cognito would walk back in
-  through a dangling reference: the exact hazard, pointing the other way.
+- **A scope names people, and that is the only place a grant is written.** The rule is against
+  **duplication**: a user removed from the roster must not still walk in through a place. Since
+  the grant is written on the side of the place and nowhere else, that takes two halves.
+  `ScopeRecord::members` are **references to roster rows**, so a reference to a row that does
+  not exist grants nothing; and `remove_user` sweeps every scope and group that named the row it
+  removes. Without both, a deleted user who re-registers on Cognito would walk back in
+  through a dangling reference.
 - **`anonymous` and `authenticated` grant without listing anybody**, which makes them the two
   things an operator most often did not mean to leave open, and why `--check-access` and the startup
   banner print them by name. `anonymous` needs no credential at all and the `204` names nobody.
@@ -509,7 +500,8 @@ changes. `node e2e/shots.js` takes a scene-name filter for the same reason: the 
   etc/bb-auth.env, etc/bb-auth-web.env, share/*.example, var/lib/{access,settings}.json}`, units at
   `/usr/lib/systemd/system/{bb-auth.service, bb-auth-web.service, bb-auth-reload.{path,service}}`
   (where a **package** must put them; `/etc/systemd/system` is the admin's, and a copy there
-  from a pre-package install *overrides* it, which is what `deploy.sh` moves aside).
+  *overrides* the packaged one forever, which is why both postinsts and `verify.sh` report one
+  rather than remove it).
   **The gate** writes nothing, so its whole prefix is `ReadOnlyPaths` and no `StateDirectory` is
   needed despite the `var/lib` name — `bb-auth-adm` writes that file from *outside* the unit's
   namespace, as root, and the hardening does not apply to it. It runs hardened and non-privileged
@@ -523,8 +515,8 @@ changes. `node e2e/shots.js` takes a scene-name filter for the same reason: the 
 - **Installing `bb-auth-web` is what moves the access file (and the settings file) to
   `bb-auth-web:bb-auth 0640`**
   (its directory `bb-auth-web:bb-auth 0750`); a deploy without it changes no ownership at all,
-  which is what keeps an older `dist/` byte-identical in behaviour. The gate keeps read access
-  through the `bb-auth` group and its unit is unchanged. The owner has to move because the
+  which is what lets a host run the gate alone. The gate keeps read access
+  through the `bb-auth` group and its unit is the same either way. The owner has to move because the
   library's writer restores the replaced file's mode and owner before renaming, and an
   unprivileged process may only `chown` to the uid it already owns and a group it belongs to —
   hence `SupplementaryGroups=bb-auth` on the unit; without either, every GUI save aborts with
@@ -540,60 +532,22 @@ changes. `node e2e/shots.js` takes a scene-name filter for the same reason: the 
   `PathModified=`: both editors end with a `rename(2)`, seen as `IN_MOVED_TO` on the watched
   directory, and `IN_MODIFY` would only add a reload on a half-written file. It ships with the
   GUI, so a CLI-only host still reloads by hand; a doubled reload costs nothing.
-- **The access file's name is a config contract, so renaming it is the operator's job and the
-  package's business is only to refuse a half-done one.** 3.0 renamed `users.json` to
-  `access.json`, `BB_AUTH_USERS_FILE` to `BB_AUTH_ACCESS_FILE` and `--check-users` to
-  `--check-access`, so that every name says the word the code has always used. Both halves are
-  **state a package may not touch**: the file is the only current copy of the access list, and the
-  env file is operator-owned precisely so a deploy can never rewrite it. Hence the order (rename
-  the file and the `.bak`, edit both env files, *then* `dpkg -i`) and hence the one guard that
-  matters, in the gate's `postinst`: `access.json` absent with `users.json` beside it is a **hard
-  abort before the restart**, because the "create it empty, once" branch would otherwise write a
-  file that authorizes nobody, `--check-access` would approve it (it parses), and the restart would
-  be a total lockout reported as a successful install. A missing `BB_AUTH_ACCESS_FILE` is caught by
-  the existing required-var preflight, which is why only the file needs a new check. Between the
-  rename and the install the **gate keeps serving** (it holds its table in memory, and the reload
-  the path unit fires cannot find the old name, so it fails soft); the **GUI** 500s for that window,
-  because it re-reads the file per request. No `BB_AUTH_USERS_FILE` fallback: the repo carries no
-  compatibility arms, for the same reason there is exactly one accepted cookie version.
-- **Upgrading to 3.1 is a two-step `dpkg -i`, and the postinst is what makes it one-way.**
-  The six settings move out of the env files and into `settings.json`. The gate's `postinst`
-  **creates that file seeded from whatever the env files still say** (including
-  `BB_AUTH_WEB_ADMINS`, read out of `bb-auth-web.env`, because the gate's package configures
-  first and owns the file both services read), so behaviour does not change; then it **aborts
-  before the restart** naming the lines to delete, and the GUI's does the same for its own
-  variable. Nothing is restarted in between, so the running gate keeps serving on the table it
-  holds. The order is not negotiable: seed, *then* refuse. Refusing first would mean an
-  operator deleting values that had nowhere to go. And the refusal itself is the point: a
-  variable an operator can still see, that nothing reads, is exactly the trap the repo refuses
-  elsewhere, so it must not become a warning.
-- **Upgrading a *pre-3.0* host is also a file conversion, and the order is what keeps it
-  lockout-free.** The new gate *refuses* the older access file (fatal, so a boot loop under
-  `Restart=on-failure`), and the old gate reading a 3.0 one would see an empty table (a silent,
-  total lockout). Neither is survivable on its own, but the reload being **fail-soft** is what
-  makes one order work:
-  1. put the new `bb-auth-adm` on the host (or convert a copy of the file elsewhere);
-  2. `bb-auth-adm migrate -f users.json -o access.json` and move it into place under the **new**
-     name, removing the old one. The still-running
-     old gate cannot read it, so the `bb-auth-reload.path` write triggers a reload that **fails
-     and keeps the table already in memory**: the service goes on serving, unchanged;
-  3. rename the variable in the env file, then `dpkg -i` the three packages. The restart is the
-     first moment the new file is read, and it is read by the binary that understands it.
-
-  Do not reverse steps 2 and 3, and do not restart the gate between them. `migrate` refuses to write
-  unless every (identity, URL) pair the old file granted still resolves the same way, so what it
-  produces is safe to install; it is not necessarily *tidy*, and renaming the applications it
-  invented is a separate, unhurried edit.
+- **The access file's name is a config contract**, so `BB_AUTH_ACCESS_FILE` and the file it names
+  are **state a package may not touch**: the file is the only current copy of the access list, and
+  the env file is operator-owned precisely so a deploy can never rewrite it. The gate's `postinst`
+  therefore checks that the variable names the file this install creates and aborts **before the
+  restart** if it does not, because a mismatched path means `--check-access` vouched for a file
+  nothing loads. A missing `BB_AUTH_ACCESS_FILE` is caught by the same required-var preflight.
 - **The live `access.json` is the copy that is current** — it is edited on the host (`sudo
   bb-auth-adm …; systemctl reload bb-auth`) and a repo copy drifts from it within a week. So
   a redeploy preserves it and `deploy.ps1 -AccessFile` **replaces** it wholesale: never stage a
   stale file. `bb-auth-adm` is installed to the host precisely so the edit can happen where the
   current file is. It is its own package and optional, and must stay that way: the gate never
   calls it.
-- **The deploy is `dpkg -i`, and the packages are where the install lives.** Everything the
-  old file-copying installer did (the binaries, the units, the service users, the env file, the
-  HMAC key, the empty access file, and the order they must happen in) is now
-  `deploy/debian/*/postinst`, and it is **lockout-safe by the same argument, made stronger**:
+- **The deploy is `dpkg -i`, and the packages are where the install lives.** The binaries, the
+  units, the service users, the env file, the HMAC key, the empty access file, and the order they
+  must happen in all live in `deploy/debian/*/postinst`, and the arrangement is
+  **lockout-safe by construction**:
   no state is packaged, so dpkg *cannot* clobber the HMAC key or the live `access.json`, because
   it cannot clobber a file it does not ship. That is also why they are **not** `conf-files`: a
   prompt one `--force-confnew` would lose is not the same guarantee. The env file stays
@@ -603,13 +557,15 @@ changes. `node e2e/shots.js` takes a scene-name filter for the same reason: the 
   and dpkg reports it. Both matter: a fatal startup under `Restart=on-failure` is a boot loop,
   and a mismatched path means `--check-access` vouched for a file nothing loads. A redeploy must
   never log anyone out *by accident*, and the one sanctioned exception is a deliberate
-  cookie-format bump, which belongs in the release's upgrade note.
+  cookie-format bump, which belongs in the release notes.
 - **`scripts/deploy.sh` is what a package may not do**, and nothing else: `dpkg -i` in one
   transaction (not `apt install`, which declines to reinstall an equal version, so a rebuilt
-  `3.0.0-1` would silently not deploy); moving aside a unit an older install left in
-  `/etc/systemd/system`, which overrides the packaged one forever; installing a staged
+  `1.0.0-1` would silently not deploy); installing a staged
   `access.json` after the gate's own parser has vouched for it, with the owner and mode the live
-  file already had; and running `scripts/verify.sh`. `deploy.ps1` builds the packages
+  file already had; and running `scripts/verify.sh`. It deliberately does **not** move aside a
+  unit an admin put in `/etc/systemd/system`, which shadows the packaged one forever:
+  that directory is the admin's, so the postinsts and `verify.sh` *report* the shadow and the
+  admin decides, which is also what keeps `verify.sh` read-only. `deploy.ps1` builds the packages
   (`package.sh` first, always), ships them with those two scripts, and runs `deploy.sh` as root
   there. Keep the host-side logic in those files rather than in a string quoted through
   PowerShell into `ssh` into a remote shell, and keep `verify.sh` read-only so it stays runnable

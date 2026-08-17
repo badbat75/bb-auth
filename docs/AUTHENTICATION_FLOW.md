@@ -117,7 +117,7 @@ Inside bb-auth (`handle_session`):
    request it accompanies is re-authorized. This `403` is a courtesy, so someone who is
    not enrolled hears it at the login page instead of bouncing off a `401` later.
 4. **Build the cookie** (see `ARCHITECTURE.md` §7):
-   `bb4.<keyid>.<exp>.<b64url(email)>.<b64url(claims_json)>.<b64url(HMAC_SHA256(prefix))>`,
+   `bb1.<keyid>.<exp>.<b64url(email)>.<b64url(claims_json)>.<b64url(HMAC_SHA256(prefix))>`,
    signed with the active key, `exp = now + TTL`. `claims_json` is a JSON object naming
    each captured claim; no claims at all is the empty segment, never `{}`. This is the
    only moment the claims are readable, which is why the cookie carries them: on a later
@@ -151,7 +151,7 @@ would be `/internal/auth-gate`. For programmatic clients it also forwards the
 `Authorization` header:
 
 ```text
- browser ──GET https://app.example.com/?...  Cookie: <cookie>=bb4...──▶ nginx
+ browser ──GET https://app.example.com/?...  Cookie: <cookie>=bb1...──▶ nginx
  nginx: auth_request → /internal/auth-gate → bb-auth GET /auth/validate
         (X-Original-URL: https://app.example.com/...
          [+ Authorization: Bearer … for API clients])
@@ -159,9 +159,9 @@ would be `/internal/auth-gate`. For programmatic clients it also forwards the
    a. Authorization: Bearer bbk_…  → static API key: sha256(bearer) in by_key_hash,
       owner not denied, unexpired. Acts as its owner's row; no token, so no claims.
    b. Authorization: Bearer <id_token>  → validated as in Phase 3, then decide()
-   c. session cookie → verify_session: split up to 6 parts; version==bb4 → key by id;
+   c. session cookie → verify_session: split up to 6 parts; version==bb1 → key by id;
       HMAC verify_slice (constant-time); exp>now; then the lowercased identifier and
-      the claims blob it carries → decide()  (bb1/bb2/bb3 are not accepted)
+      the claims blob it carries → decide()  (any other tag is junk)
    d. no credential at all, which only an `anonymous` scope grants
    decide(subject, url): resolve url → one application (areas do not overlap) → the
       first scope, in file order, whose urls cover it. anonymous → granted, ahead of
@@ -228,12 +228,12 @@ A few things are worth emphasizing:
 Same-origin / same-site / direct navigations (a normal logout link click) clear
 the cookie. A cross-site navigation (`Sec-Fetch-Site: cross-site`, i.e. a CSRF
 logout) is ignored — the attacker cannot force the victim to log out. If the
-header is absent (legacy browsers) the cookie is still cleared.
+header is absent (a browser that does not send it) the cookie is still cleared.
 
 Where the browser lands is the logout link's choice, guarded by the same `safe_rd` used
-on `/auth/session`. There is no per-site landing page: `/auth/logout` is covered by no
-site's `urls`, so the gate cannot tell which area is being left — unlike a `401`, which
-happens on a gated URL and therefore can name that site's `login_url` in
+on `/auth/session`. There is no per-area landing page: `/auth/logout` is inside no
+application's area, so the gate cannot tell which area is being left — unlike a `401`, which
+happens on a gated URL and therefore can name that application's `login_url` in
 `X-Auth-Login-URL`. A relative `rd` needs `X-Original-URL` on this location too;
 without it the redirect falls back to the login page.
 
@@ -262,7 +262,7 @@ the gate only manages its own cookie.)
    │─POST /auth/session id_token=…&rd=…────────▶│             │
    │              │              │─JWKS (cache) │             │
    │              │              │  verify sig+claims          │
-   │              │              │  email ∈ users table        │
+   │              │              │  email ∈ access table       │
    │              │              │  build HMAC cookie          │
    │◀─────────────302 rd  Set-Cookie <cookie>─────────────────│
    │─GET / Cookie: <cookie>─────▶│              │             │

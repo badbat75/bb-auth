@@ -126,7 +126,7 @@ pub fn lower_authority(url: &str) -> String {
     out
 }
 
-/// A compiled URL pattern (`authorized_urls`, or a site's `urls`): normalised bytes.
+/// A compiled URL pattern (a scope's `urls`): normalised bytes.
 #[derive(Clone)]
 pub struct UrlPattern {
     pat: Vec<u8>,
@@ -179,9 +179,10 @@ pub fn compile_pattern(raw: &str) -> Result<UrlPattern, String> {
     })
 }
 
-/// Validate a login URL — `BB_AUTH_LOGIN_URL` or a site's `login_url`. Both end up in a
-/// `Location:` header, in `X-Auth-Login-URL`, and inside a page, so this is what makes
-/// those emissions safe with no per-use check: printable ASCII forbids CR/LF and spaces.
+/// Validate a login URL — `BB_AUTH_LOGIN_URL` or an application's `login_url`. Both end
+/// up in a `Location:` header, in `X-Auth-Login-URL`, and inside a page, so this is what
+/// makes those emissions safe with no per-use check: printable ASCII forbids CR/LF and
+/// spaces.
 ///
 /// https-only, and no userinfo `@` or backslash in the authority — the same lookalike
 /// tricks the gate's `rd_url_allowed` rejects, since a login page is where a rejected
@@ -269,8 +270,8 @@ pub struct UrlScope {
 }
 
 impl UrlScope {
-    /// The empty scope: authorizes no URL at all. What an absent `authorized_urls`
-    /// resolves to.
+    /// The empty scope: authorizes no URL at all. What an absent list of patterns
+    /// resolves to, since access is enumerated and never assumed.
     pub fn deny_all() -> UrlScope {
         UrlScope {
             patterns: Vec::new(),
@@ -362,11 +363,11 @@ pub enum AccessKind {
 /// A resolved scope: a URL area inside an application, and the one policy that holds for
 /// it.
 ///
-/// A scope names people, which the sites it replaces were forbidden to do. That rule
-/// forbade *duplication*, not direction: it existed so a user removed from the roster
-/// could not still walk in through a place. Here the grant is written on the side of the
-/// place and nowhere else, so the rule holds in the mirror: [`ScopeRecord::members`] are
-/// references to roster rows, and a reference to a row that does not exist grants nothing.
+/// A scope names people, and that is the only place a grant is written. The rule being
+/// kept is against *duplication*, not against a direction: a user removed from the roster
+/// must not still walk in through a place. So the grant lives on the side of the place and
+/// nowhere else, [`ScopeRecord::members`] are references to roster rows, and a reference to
+/// a row that does not exist grants nothing.
 pub struct ScopeRecord {
     /// Human label, for logging and for `app/scope`. Never empty.
     pub name: String,
@@ -467,7 +468,7 @@ fn sane_url(url: Option<&str>) -> Option<&str> {
 /// The login page for `url`: the application whose area covers it, or `global`
 /// (`BB_AUTH_LOGIN_URL`).
 ///
-/// There is no ambiguity to resolve here any more. Areas do not overlap, so at most one
+/// There is no ambiguity to resolve here. Areas do not overlap, so at most one
 /// application answers, and it answers whether or not any of its scopes covers the URL:
 /// a `401` inside an application is exactly when its own login page is wanted.
 ///
@@ -634,8 +635,8 @@ pub enum Subject<'a> {
 /// that will answer the real request.
 ///
 /// Every refusal names where it happened, because with the URL space partitioned the
-/// useful question is no longer "was it granted?" but "which scope answered, and what did
-/// it want?".
+/// useful question is not "was it granted?" but "which scope answered, and what did it
+/// want?".
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Decision {
     /// An `anonymous` scope covers the URL: no credential was needed and none was
@@ -837,7 +838,7 @@ pub fn decide_api_key<'a>(access: &'a Access, key_hash: &str, now: u64) -> KeyDe
 /// and hot-reloaded on SIGHUP.
 ///
 /// ```json
-/// { "version": 3,
+/// { "version": 1,
 ///   "applications": [
 ///     { "name": "app1",
 ///       "base": ["https://app.x.com/app1"],
@@ -877,22 +878,16 @@ pub fn decide_api_key<'a>(access: &'a Access, key_hash: &str, now: u64) -> KeyDe
 /// The env var (`BB_AUTH_ACCESS_FILE`), the CLI flag (`--check-access`) and the default
 /// file name (`access.json`) all say *access*, which is the word this crate uses for the
 /// thing everywhere else: [`AccessFile`], [`compile_access`], [`read_access`],
-/// [`open_access_file`]. They said *users* until 3.0 made the file application-centric,
-/// at which point the roster was one section of four and the name described the smallest
-/// of them. Renaming it is a **breaking config change**, not a cosmetic one: the env file
-/// is operator-owned and a deploy never rewrites it, so the variable has to be renamed on
-/// each host before the package that expects it is installed.
+/// [`open_access_file`].
 #[derive(Deserialize, Serialize, Default)]
 pub struct AccessFile {
     /// The format this file is written in. **Required**, and the only accepted value is
-    /// `3`.
+    /// [`ACCESS_FILE_VERSION`].
     ///
-    /// It is here so that a version mismatch is a sentence rather than a puzzle. The
-    /// older file this format replaces carries no `version` at all and fails on its own
-    /// sections anyway (see [`AccessFile::sites`]), but "this file predates bb-auth 3.0,
-    /// convert it with `bb-auth-adm migrate`" is a different quality of error from a type
-    /// mismatch three levels down, and every future migration gets the same courtesy for
-    /// free.
+    /// It is here so that a mismatch is a sentence rather than a type error three levels
+    /// down, and so that every future change of format gets that courtesy for free: a file
+    /// this binary cannot read must say so about itself, in one line, before anything else
+    /// is made of it.
     #[serde(default)]
     pub version: u32,
     /// The places, and who reaches them. See [`AppRecord`].
@@ -902,12 +897,11 @@ pub struct AccessFile {
     /// scope's `groups`.
     ///
     /// Abbreviation, never a grant: defining one authorizes nobody until a scope names it.
-    /// Deliberately shallow and deliberately strict, the reflex the older `url_groups`
-    /// carried: a name is `[A-Za-z0-9_-]+` matched exactly, a group may not reference
-    /// another group, an unknown reference is fatal, and every group is validated even
-    /// when nothing references it (a group that only breaks the day someone first uses it
-    /// is a trap `--check-access` never saw). Duplicate JSON keys are serde's last-wins, as
-    /// everywhere else in this file.
+    /// Deliberately shallow and deliberately strict: a name is `[A-Za-z0-9_-]+` matched
+    /// exactly, a group may not reference another group, an unknown reference is fatal, and
+    /// every group is validated even when nothing references it (a group that only breaks
+    /// the day someone first uses it is a trap `--check-access` never saw). Duplicate JSON
+    /// keys are serde's last-wins, as everywhere else in this file.
     #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
     pub user_groups: BTreeMap<String, Vec<String>>,
     /// Uuids and bare identifiers, vetoed ahead of every grant. See
@@ -916,16 +910,6 @@ pub struct AccessFile {
     pub denied: Vec<String>,
     #[serde(default)]
     pub users: Vec<UserSpec>,
-    /// The pre-3.0 sites section. Its mere presence is a fatal parse error naming the
-    /// converter, exactly as [`UserSpec::enabled_paths`] is: a new binary that silently
-    /// ignored it would read an older file as an empty access table, which is a total
-    /// lockout dressed up as a successful load.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub sites: Option<Value>,
-    /// The pre-3.0 url_groups section. Fatal if present, for the reason [`AccessFile::sites`]
-    /// is.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub url_groups: Option<Value>,
     /// Unknown top-level keys, preserved verbatim across an edit: `_comment` above all.
     #[serde(flatten)]
     pub extra: Map<String, Value>,
@@ -1008,7 +992,8 @@ pub struct ScopeSpec {
 }
 
 /// One roster entry: an identity, its identifiers, and its keys. Extra fields are ignored
-/// (and preserved on a rewrite), with two deliberate exceptions.
+/// and preserved on a rewrite, which is safe here because a row describes a person rather
+/// than a grant: an ignored typo denies at worst.
 ///
 /// A user carries no URL. What they reach is written in the scopes that list their uuid,
 /// which is what makes deleting a row a complete revocation again: there is no second
@@ -1030,16 +1015,6 @@ pub struct UserSpec {
     /// warned about and skipped: dropping an identifier is fail-closed.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub emails: Vec<String>,
-    /// The pre-2.0 path-prefix field. Its mere presence is a fatal parse error rather
-    /// than an ignored extra: under the old semantics an unscoped user reached
-    /// everything, so silently dropping it would fail *open*. See [`compile_access`].
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub enabled_paths: Option<Value>,
-    /// The pre-3.0 per-user scope. Fatal if present, for the same reason: a new binary
-    /// that ignored it would silently read an older roster as a set of users who reach
-    /// nothing.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub authorized_urls: Option<Value>,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub api_keys: Vec<ApiKeySpec>,
     /// `notes` and anything else an operator wrote here. Round-tripped untouched.
@@ -1069,12 +1044,6 @@ pub struct ApiKeySpec {
     /// A restriction, never a grant: see [`ApiKeyRecord::scopes`].
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub scopes: Option<Vec<String>>,
-    /// Fatal if present, exactly as on [`UserSpec::enabled_paths`].
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub enabled_paths: Option<Value>,
-    /// The pre-3.0 per-key scope. Fatal if present, as on [`UserSpec::authorized_urls`].
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub authorized_urls: Option<Value>,
     #[serde(flatten)]
     pub extra: Map<String, Value>,
 }
@@ -1093,8 +1062,8 @@ pub struct ApiKeySpec {
 /// * [`compile_access`], at load, for every roster email — the only guard on the API-key
 ///   path, whose email comes straight off [`ApiKeyRecord`] and never passes through a
 ///   token claim.
-/// * the gate's `validate_id_token`, for every email lifted out of a Cognito claim. A
-///   `public_auth` site emits identities that are in no table, so load time cannot see
+/// * the gate's `validate_id_token`, for every email lifted out of a Cognito claim. An
+///   `authenticated` scope emits identities that are in no table, so load time cannot see
 ///   them; and because that is the only way an email reaches the session cookie, the
 ///   cookie inherits the property through the HMAC rather than needing its own check.
 pub fn header_safe_email(email: &str) -> bool {
@@ -1399,69 +1368,29 @@ fn compile_user_groups(
     Ok(out)
 }
 
-/// Refuse a file written for an older bb-auth, by name and with the way out.
+/// Refuse a file whose format this binary does not read, in a sentence.
 ///
-/// Every one of these fields would otherwise be *ignored*, and that is the danger: an
-/// older file read by this binary would compile to an access table with no applications
-/// and a roster that reaches nothing, which is a total lockout reported as a successful
-/// load. The same reflex the pre-2.0 `enabled_paths` field has carried since 2.0, extended
-/// to the sections 3.0 replaces.
-fn check_legacy(file: &AccessFile) -> Result<(), String> {
-    let stale = |what: &str| {
-        Err(format!(
-            "'{what}' is a pre-3.0 access file field. This binary reads version \
-             {ACCESS_FILE_VERSION} (applications and scopes); convert the file with: \
-             bb-auth-adm migrate"
-        ))
-    };
-    if file.sites.is_some() {
-        return stale("sites");
+/// The two arms are worth spelling out separately: a file with no `version` at all is a
+/// file nobody declared a format for, while one that names a format this binary does not
+/// have is a different mistake with a different fix, and neither should surface as a type
+/// mismatch three levels down.
+fn check_version(file: &AccessFile) -> Result<(), String> {
+    if file.version == ACCESS_FILE_VERSION {
+        return Ok(());
     }
-    if file.url_groups.is_some() {
-        return stale("url_groups");
-    }
-    for u in &file.users {
-        let who = if u.uuid.trim().is_empty() {
-            "users entry".to_string()
-        } else {
-            u.uuid.trim().to_string()
-        };
-        if u.enabled_paths.is_some() {
-            return Err(format!(
-                "{who}: 'enabled_paths' is no longer supported; access is granted by an \
-                 application scope that lists this user"
-            ));
-        }
-        if u.authorized_urls.is_some() {
-            return Err(format!("{who}: {}", stale("authorized_urls").unwrap_err()));
-        }
-        for k in &u.api_keys {
-            if k.enabled_paths.is_some() || k.authorized_urls.is_some() {
-                return Err(format!(
-                    "{who} key '{}': a key carries no urls of its own; it names the scopes it \
-                     may exercise. Convert the file with: bb-auth-adm migrate",
-                    k.id
-                ));
-            }
-        }
-    }
-    if file.version != ACCESS_FILE_VERSION {
-        return Err(match file.version {
-            0 => format!(
-                "this file has no 'version'. bb-auth {ACCESS_FILE_VERSION}.x access files \
-                 declare \"version\": {ACCESS_FILE_VERSION}"
-            ),
-            v => format!(
-                "this file declares version {v}; this binary reads version \
-                 {ACCESS_FILE_VERSION}"
-            ),
-        });
-    }
-    Ok(())
+    Err(match file.version {
+        0 => format!(
+            "this file has no 'version'; an access file declares \"version\": \
+             {ACCESS_FILE_VERSION}"
+        ),
+        v => format!(
+            "this file declares version {v}; this binary reads version {ACCESS_FILE_VERSION}"
+        ),
+    })
 }
 
 /// The one access-file format this binary reads. See [`AccessFile::version`].
-pub const ACCESS_FILE_VERSION: u32 = 3;
+pub const ACCESS_FILE_VERSION: u32 = 1;
 
 /// Compile a parsed access file into the runtime table.
 ///
@@ -1483,7 +1412,7 @@ pub const ACCESS_FILE_VERSION: u32 = 3;
 /// Emails are additionally required to be [`header_safe_email`], since every one of them
 /// can end up in an identity header.
 pub fn compile_access(file: &AccessFile) -> Result<Access, String> {
-    check_legacy(file)?;
+    check_version(file)?;
 
     // The roster first: everything below references it, and the dangling-reference
     // warnings need to know which uuids exist.
@@ -2280,12 +2209,12 @@ pub fn user_refs(doc: &AccessFile, uuid: &str) -> Vec<String> {
     out
 }
 
-/// Apply the standard scope edits to an `authorized_urls` field: a full replacement
-/// (`set`), then `add` (deduplicated) and `rm`. Returns `true` if anything changed.
+/// Apply the standard list edits to an optional list field: a full replacement (`set`),
+/// then `add` (deduplicated) and `rm`. Returns `true` if anything changed.
 ///
-/// `None` means "absent". For a user that is deny-all; for a key it means "inherit the
-/// owner's" — two different things, so `clear` says which one the caller wants an emptied
-/// list to collapse to.
+/// `None` means "absent", which does not mean the same thing in every field it is used on:
+/// on a key's `scopes` it is "every scope the owner reaches", on a scope's own lists it is
+/// nobody. So `clear` says which one the caller wants an emptied list to collapse to.
 pub fn edit_urls(
     urls: &mut Option<Vec<String>>,
     set: Vec<String>,
@@ -2321,8 +2250,9 @@ pub fn edit_urls(
     changed
 }
 
-/// [`edit_urls`] over a plain list — a site's `urls`, a url group's patterns. There is no
-/// "inherit" to fall back to in either, so a cleared list is empty, never absent.
+/// [`edit_urls`] over a plain list: an application's `base`, a scope's `urls`, a group's
+/// members. There is no "inherit" to fall back to in any of them, so a cleared list is
+/// empty, never absent.
 pub fn edit_url_list(
     urls: &mut Vec<String>,
     set: Vec<String>,
@@ -2339,8 +2269,8 @@ pub fn edit_url_list(
 // --- document mutations ----------------------------------------------------
 
 /// The refusal every mutation that lets a **new** email into the file makes, in one
-/// sentence. Only new values: an address already in the file is never re-checked, so a
-/// legacy row does not block the edits around it.
+/// sentence. Only new values: an address already in the file is never re-checked, so a row
+/// this check would refuse does not block the edits around it.
 fn check_new_email(email: &str) -> Result<(), String> {
     if well_formed_email(email) {
         return Ok(());
@@ -3552,7 +3482,7 @@ mod tests {
 
     #[test]
     fn url_scope_empty_denies_everything() {
-        // No authorized_urls => no access. Both the absent field and an explicit `[]`.
+        // No patterns => no access. Both the absent list and an explicit `[]`.
         for s in [UrlScope::deny_all(), UrlScope::compile(&[]).unwrap()] {
             assert!(s.is_empty());
             assert!(!s.allows(Some("https://x/a")));
@@ -3572,8 +3502,8 @@ mod tests {
         assert!(!s.allows(None)); // the header is still mandatory
         assert!(!s.allows(Some("https://h/../etc"))); // and `..` still denied
 
-        // A bare "*" is NOT a sentinel any more — it is a malformed pattern, and the
-        // error points at the spelling that works.
+        // A bare "*" is NOT a sentinel: it is a malformed pattern, and the error points
+        // at the spelling that works.
         let err = match compile_pattern("*") {
             Ok(_) => panic!("a bare '*' must not compile"),
             Err(e) => e,
@@ -3694,7 +3624,7 @@ mod tests {
     /// are first match wins, and a key narrower than its owner.
     fn fixture() -> String {
         r#"{
-          "version": 3,
+          "version": 1,
           "applications": [
             { "name": "mpa",
               "base": ["https://app.x.com/mpa"],
@@ -3759,7 +3689,7 @@ mod tests {
     fn application_areas_may_not_overlap() {
         let e = access_err(
             "overlap",
-            r#"{ "version": 3, "applications": [
+            r#"{ "version": 1, "applications": [
                  { "name": "a", "base": ["https://x.com/app"], "scopes": [] },
                  { "name": "b", "base": ["https://x.com/app/inner"], "scopes": [] } ] }"#,
         );
@@ -3773,7 +3703,7 @@ mod tests {
         // doing its job.
         let a = access_of(
             "no-overlap",
-            r#"{ "version": 3, "applications": [
+            r#"{ "version": 1, "applications": [
                  { "name": "a", "base": ["https://x.com/app"], "scopes": [] },
                  { "name": "b", "base": ["https://x.com/application"], "scopes": [] } ] }"#,
         );
@@ -3789,7 +3719,7 @@ mod tests {
             "x.com/app",
         ] {
             let json = format!(
-                r#"{{ "version": 3, "applications": [
+                r#"{{ "version": 1, "applications": [
                      {{ "name": "a", "base": ["{bad}"], "scopes": [] }} ] }}"#
             );
             let e = access_err("bad-base", &json);
@@ -3801,7 +3731,7 @@ mod tests {
     fn a_scope_may_not_reach_outside_its_application() {
         let e = access_err(
             "outside",
-            r#"{ "version": 3, "applications": [
+            r#"{ "version": 1, "applications": [
                  { "name": "a", "base": ["https://x.com/app"],
                    "scopes": [ { "name": "s", "urls": ["https://x.com/other/*"],
                                  "access": "authenticated" } ] } ] }"#,
@@ -3814,7 +3744,7 @@ mod tests {
     fn an_application_needs_a_base() {
         let e = access_err(
             "no-base",
-            r#"{ "version": 3, "applications": [ { "name": "a", "scopes": [] } ] }"#,
+            r#"{ "version": 1, "applications": [ { "name": "a", "scopes": [] } ] }"#,
         );
         assert!(e.contains("no base"), "{e}");
     }
@@ -3837,7 +3767,7 @@ mod tests {
         // is meaning, which is why an editor lints it and offers a move.
         let a = access_of(
             "shadowed",
-            r#"{ "version": 3, "applications": [
+            r#"{ "version": 1, "applications": [
                  { "name": "mcp", "base": ["https://ai.x.com/mcp"], "scopes": [
                    { "name": "api", "urls": ["https://ai.x.com/mcp/*"],
                      "access": "authenticated" },
@@ -4072,7 +4002,7 @@ mod tests {
     fn a_denied_entry_must_be_a_uuid_or_an_email() {
         let e = access_err(
             "veto-junk",
-            r#"{ "version": 3, "denied": ["11111111-1111-4111-8111-11111111111"] }"#,
+            r#"{ "version": 1, "denied": ["11111111-1111-4111-8111-11111111111"] }"#,
         );
         assert!(e.contains("not a uuid and not an email"), "{e}");
     }
@@ -4323,15 +4253,15 @@ mod tests {
         for (what, json) in [
             (
                 "roster",
-                r#"{ "version": 3, "users": [ { "uuid": "nope", "emails": ["a@x.com"] } ] }"#,
+                r#"{ "version": 1, "users": [ { "uuid": "nope", "emails": ["a@x.com"] } ] }"#,
             ),
             (
                 "group",
-                r#"{ "version": 3, "user_groups": { "g": ["nope"] } }"#,
+                r#"{ "version": 1, "user_groups": { "g": ["nope"] } }"#,
             ),
             (
                 "scope",
-                r#"{ "version": 3, "applications": [ { "name": "a",
+                r#"{ "version": 1, "applications": [ { "name": "a",
                      "base": ["https://x.com/a"], "scopes": [ { "name": "s",
                        "urls": ["https://x.com/a/*"], "access": "restricted",
                        "users": ["nope"] } ] } ] }"#,
@@ -4372,7 +4302,7 @@ mod tests {
     fn a_group_may_not_reference_a_group() {
         let e = access_err(
             "group-nested",
-            r#"{ "version": 3, "user_groups": { "a": ["@b"], "b": [] } }"#,
+            r#"{ "version": 1, "user_groups": { "a": ["@b"], "b": [] } }"#,
         );
         assert!(e.contains("cannot reference another group"), "{e}");
     }
@@ -4383,7 +4313,7 @@ mod tests {
         // `--check-access` never saw.
         let e = access_err(
             "group-unused",
-            r#"{ "version": 3, "user_groups": { "unused": ["not-a-uuid"] } }"#,
+            r#"{ "version": 1, "user_groups": { "unused": ["not-a-uuid"] } }"#,
         );
         assert!(e.contains("not a uuid"), "{e}");
     }
@@ -4392,7 +4322,7 @@ mod tests {
     fn a_dangling_reference_grants_nothing() {
         let a = access_of(
             "dangling",
-            r#"{ "version": 3,
+            r#"{ "version": 1,
                  "applications": [ { "name": "a", "base": ["https://x.com/a"], "scopes": [
                    { "name": "s", "urls": ["https://x.com/a/*"], "access": "restricted",
                      "users": ["33333333-3333-4333-8333-333333333333"] } ] } ],
@@ -4415,7 +4345,7 @@ mod tests {
     fn access_is_required_and_has_no_default() {
         let e = access_err(
             "no-access",
-            r#"{ "version": 3, "applications": [ { "name": "a",
+            r#"{ "version": 1, "applications": [ { "name": "a",
                  "base": ["https://x.com/a"], "scopes": [
                    { "name": "s", "urls": ["https://x.com/a/*"] } ] } ] }"#,
         );
@@ -4423,7 +4353,7 @@ mod tests {
 
         let e = access_err(
             "bad-access",
-            r#"{ "version": 3, "applications": [ { "name": "a",
+            r#"{ "version": 1, "applications": [ { "name": "a",
                  "base": ["https://x.com/a"], "scopes": [
                    { "name": "s", "urls": ["https://x.com/a/*"],
                      "access": "anonimous" } ] } ] }"#,
@@ -4439,7 +4369,7 @@ mod tests {
             r#""credentials": ["login"]"#,
         ] {
             let json = format!(
-                r#"{{ "version": 3, "applications": [ {{ "name": "a",
+                r#"{{ "version": 1, "applications": [ {{ "name": "a",
                      "base": ["https://x.com/a"], "scopes": [
                        {{ "name": "s", "urls": ["https://x.com/a/*"],
                           "access": "authenticated", {field} }} ] }} ] }}"#
@@ -4453,7 +4383,7 @@ mod tests {
     fn an_empty_credentials_list_is_fatal() {
         let e = access_err(
             "no-creds",
-            r#"{ "version": 3, "applications": [ { "name": "a",
+            r#"{ "version": 1, "applications": [ { "name": "a",
                  "base": ["https://x.com/a"], "scopes": [
                    { "name": "s", "urls": ["https://x.com/a/*"],
                      "access": "restricted", "credentials": [] } ] } ] }"#,
@@ -4466,44 +4396,21 @@ mod tests {
         // The one place a typo could fail open, so it is the one place extras are refused.
         let e = access_err(
             "unknown-field",
-            r#"{ "version": 3, "applications": [ { "name": "a",
+            r#"{ "version": 1, "applications": [ { "name": "a",
                  "base": ["https://x.com/a"], "scopes": [
                    { "name": "s", "urls": ["https://x.com/a/*"],
-                     "access": "restricted", "public_auth": true } ] } ] }"#,
+                     "access": "restricted", "anonymous_ok": true } ] } ] }"#,
         );
-        assert!(e.contains("public_auth"), "{e}");
+        assert!(e.contains("anonymous_ok"), "{e}");
     }
 
     // --- the format version -------------------------------------------------
 
     #[test]
-    fn a_pre_3_0_file_is_refused_by_name_and_points_at_the_converter() {
-        for json in [
-            r#"{ "sites": [] }"#,
-            r#"{ "url_groups": {} }"#,
-            r#"{ "version": 3, "users": [ { "uuid": "11111111-1111-4111-8111-111111111111",
-                 "authorized_urls": ["*://*/*"] } ] }"#,
-            r#"{ "version": 3, "users": [ { "uuid": "11111111-1111-4111-8111-111111111111",
-                 "api_keys": [ { "id": "k", "authorized_urls": [] } ] } ] }"#,
-        ] {
-            let e = access_err("legacy", json);
-            assert!(e.contains("bb-auth-adm migrate"), "{json}: {e}");
-        }
-    }
-
-    #[test]
-    fn enabled_paths_is_still_refused() {
-        let e = access_err(
-            "enabled-paths",
-            r#"{ "version": 3, "users": [ { "uuid": "11111111-1111-4111-8111-111111111111",
-                 "enabled_paths": ["/x"] } ] }"#,
-        );
-        assert!(e.contains("enabled_paths"), "{e}");
-    }
-
-    #[test]
     fn the_version_must_be_the_one_this_binary_reads() {
-        let e = access_err("no-version", r#"{ "users": [] }"#);
+        // The two arms say different things: nobody declared a format, versus a format
+        // this binary does not have.
+        let e = access_err("no-version", r#"{}"#);
         assert!(e.contains("no 'version'"), "{e}");
         let e = access_err("future", r#"{ "version": 5 }"#);
         assert!(e.contains("declares version 5"), "{e}");
@@ -4550,9 +4457,9 @@ mod tests {
             Some(&["@admins".to_string()][..])
         );
         assert!(out.ends_with('\n'));
-        // An older field is absent rather than serialized as null.
-        assert!(!out.contains("authorized_urls"), "{out}");
-        assert!(!out.contains("\"sites\""), "{out}");
+        // An absent optional field is left out rather than written as null, which the
+        // parser would take for a value.
+        assert!(!out.contains("null"), "{out}");
     }
 
     #[test]
@@ -4827,7 +4734,7 @@ mod tests {
 
     #[test]
     fn open_access_file_refuses_a_file_the_gate_would_reject() {
-        let path = users_tmp("open-bad", r#"{ "version": 3, "denied": ["nope"] }"#);
+        let path = users_tmp("open-bad", r#"{ "version": 1, "denied": ["nope"] }"#);
         let e = err_of(open_access_file(path.to_str().unwrap()));
         assert!(e.contains("the gate would reject this file"), "{e}");
         let _ = std::fs::remove_file(&path);
@@ -4900,7 +4807,7 @@ mod tests {
         assert!(a.any_authenticated_scope());
         let b = access_of(
             "no-authn",
-            r#"{ "version": 3, "applications": [ { "name": "a",
+            r#"{ "version": 1, "applications": [ { "name": "a",
                  "base": ["https://x.com/a"], "scopes": [
                    { "name": "s", "urls": ["https://x.com/a/*"],
                      "access": "restricted" } ] } ] }"#,
@@ -4937,9 +4844,9 @@ mod tests {
     }
 
     #[test]
-    fn compile_profile_claims_derives_v24_headers_exactly() {
-        // The 2.4 compatibility pin: this list, and only this list, must reproduce the two
-        // headers that used to be constants, byte for byte, in this order.
+    fn compile_profile_claims_derives_each_header_in_order() {
+        // The header name is code and the claim name is config, so the derivation is
+        // pinned byte for byte; the order out is the order the operator wrote.
         let c = compile_profile_claims(&claims("given_name,family_name")).unwrap();
         let got: Vec<(&str, &str)> = c
             .iter()

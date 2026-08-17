@@ -7,14 +7,12 @@
 #                        pool/client, service & login URLs, install paths). The
 #                        real BB_AUTH_HMAC_KEY is generated on the host and lives
 #                        only there — never in git.
-#   allowed_emails     : the access list (real emails).
 #   deploy/access.json  : the real access file (emails + API key hashes). Only
 #                        deploy/access.example.json is tracked.
 #   deploy/settings.json: a real settings file, if one is ever kept here. Only
 #                        deploy/settings.example.json is tracked. The live one is
 #                        state on the host, like the access file.
 *.env
-allowed_emails
 /deploy/access.json
 /deploy/settings.json
 

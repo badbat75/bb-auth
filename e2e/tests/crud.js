@@ -172,7 +172,8 @@ async function run(ctx, t) {
       !!fresh && /^[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[0-9a-f]{4}-[0-9a-f]{12}$/.test(fresh.uuid),
       JSON.stringify(fresh));
     t.check('and it carries no url of its own: a user reaches what a scope says',
-      !('authorized_urls' in fresh), JSON.stringify(fresh));
+      Object.keys(fresh).every((k) => ['uuid', 'emails', 'notes', 'api_keys'].includes(k)),
+      JSON.stringify(fresh));
 
     // An identifier is added and dropped on its own: that is what replaced a rename,
     // because the identity never changes.

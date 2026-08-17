@@ -31,7 +31,6 @@
   "_comment_profile_claims": [
     "gate.profile_claims — OIDC claims to hand to the application on a 204, in the order the",
     "headers come out. EMPTY BY DEFAULT: nothing is propagated but the identity.",
-    "['given_name', 'family_name'] reproduces what 2.4 emitted unconditionally.",
     "The header name is DERIVED and never configured: '_' and ':' become '-', each part is",
     "title-cased, and 'X-Auth-' is prefixed. given_name -> X-Auth-Given-Name,",
     "custom:department -> X-Auth-Custom-Department (nginx:",
@@ -47,7 +46,7 @@
 
   "_comment_identity_attrs": [
     "gate.identity_attrs — which identity attributes a 204 names. Default ['email'], which is",
-    "exactly what every version before this file emitted. Only 'email' and 'uuid' exist; a",
+    "what every application behind the gate already reads. Only 'email' and 'uuid' exist; a",
     "third would be a code change, not a string you may invent. An empty list is refused: a",
     "204 that names nobody breaks every application behind the gate, in silence.",
     "NGINX MUST CLEAR EVERY POSSIBLE NAME, not the ones enabled here. proxy_set_header",

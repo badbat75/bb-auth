@@ -41,8 +41,8 @@ rustup target add "$TARGET" >/dev/null 2>&1 || true
 mkdir -p "$CRATE_DIR/dist"
 # Three binaries out of one crate: the gate, the access-file admin CLI, and the admin GUI.
 # The two admin tools are built alongside the gate because the file they edit lives on the
-# host. They are still OPTIONAL to a deploy, but that is now expressed by each being its
-# own package (`deploy.ps1 -Packages`), not by what happens to be sitting in dist/.
+# host. They are OPTIONAL to a deploy, and that is expressed by each being its own
+# package (`deploy.ps1 -Packages`), not by what happens to be sitting in dist/.
 for b in bb-auth bb-auth-adm bb-auth-web; do
   cp "$BUILD_DIR/target/$TARGET/release/$b" "$CRATE_DIR/dist/$b"
 done

@@ -68,14 +68,14 @@ the gate is the gate's, and stays in one file.
 |--------|------------|
 | `src/lib.rs` (`bb_auth_core`) | **The access file.** Schema (`AccessFile`), parser (`compile_access`), URL matcher (`glob_match` / `UrlScope`), the two-level resolution (`Access::resolve`, `base_covers`), the grant model (`decide`, `decide_api_key`), identity and key minting (`mint_uuid`, `mint_api_key`), and how a file is edited and written (`open_access_file`, `AccessWrite`, the document mutations). Reads no env, opens no socket, holds no HTTP, prints nothing. |
 | `src/bin/bb-auth.rs` (`bb-auth`) | **The gate**, still a single file read top to bottom: HTTP, config, the session cookie, id_token validation, the nginx contract. |
-| `src/bin/bb-auth-adm.rs` (`bb-auth-adm`) | **The access-file admin CLI.** CRUD over `applications` / `scopes` / `user_groups` / `denied` / `users` / `api_keys`, key minting and rotation, `migrate` for a pre-3.0 file, and `can EMAIL URL` — which calls the library's `decide`, so it answers the question the gate will answer. Every edit and every write is a library call (`AccessWrite`), so it cannot save a file the gate would reject; what is left here is flags, warnings and the wording of a verdict. See §12. |
+| `src/bin/bb-auth-adm.rs` (`bb-auth-adm`) | **The access-file admin CLI.** CRUD over `applications` / `scopes` / `user_groups` / `denied` / `users` / `api_keys`, key minting and rotation, and `can EMAIL URL` — which calls the library's `decide`, so it answers the question the gate will answer. Every edit and every write is a library call (`AccessWrite`), so it cannot save a file the gate would reject; what is left here is flags, warnings and the wording of a verdict. See §12. |
 | `src/bin/bb-auth-web.rs` (`bb-auth-web`) | **The access-file admin GUI**: server-rendered (`maud`; no page needs JavaScript, the one inline handler is a Settings-menu shortcut with a `<noscript>` submit behind it) over the library, read *and* write — CRUD through `AccessWrite` alone, `POST`-only mutations behind a same-origin check and a `rev` (sha256-of-file) concurrency check. Loopback behind nginx `auth_request`, identity from the `X-Auth-Email` nginx injects plus its own administrator allowlist (`web.admins` in the settings file, read fresh on every request and editable from its own Settings tab). Links the library, none of the gate. |
 
 Inside `src/bin/bb-auth.rs`, in file order:
 
 | Section | Purpose |
 |---------|---------|
-| `Config` / `from_env` | The env-var half of the configuration; fatal-`exit`s on a missing required value, a too-short HMAC key, or any of the five variables that moved into the settings file in 3.1 (`check_legacy_env`: a setting read from nowhere is worse than no setting). The other half is `State::settings`, re-read on `SIGHUP`; see §8a. |
+| `Config` / `from_env` | The env-var half of the configuration; fatal-`exit`s on a missing required value or a too-short HMAC key. The other half is `State::settings`, re-read on `SIGHUP`; see §8a. |
 | `State` / `JwksCache` | Shared state behind `Arc`: config, a `RwLock<Access>` access table, a `RwLock` JWKS cache, and a `Mutex` serializing JWKS refreshes. |
 | `load_access` / `reload_access` | Wrap the library's `read_access`, which parses the JSON access file (`BB_AUTH_ACCESS_FILE`) into the applications and their scopes, the two `denied` sets, and three indices: identifiers (`by_identifier`), the roster (`by_uuid`) and `bbk_` API keys (`by_key_hash`); identifiers lowercased. `load_access` aborts startup if unreadable (warns if nothing is granted); `reload_access` swaps the table live on `SIGHUP`, keeping the old table on error. See §12. |
 | `authorize` / `bearer_apikey` | Thin wrappers over the library's `decide` / `decide_api_key`: they add the log line naming the reason, and the wall clock a key's expiry is measured against. The rule itself is in the library, which is what lets `bb-auth-adm can` be truthful. `authorize_login` resolves the identifier to a roster row and re-attaches the profile claims after the decision, which never sees them. See §12. |
@@ -97,7 +97,7 @@ And in `src/lib.rs`:
 | `decide` / `decide_api_key` / `Subject` | The grant model as a value (`Decision` / `KeyDecision`): resolve the URL, an `anonymous` scope grants ahead of the veto, then `denied`, then the scope's kind, the credential class, the roster, membership and the key's own restriction. The single authorization point, shared by the gate and both editors. See §12. |
 | `AccessFile` / `compile_access` / `read_access` | The document model (what `bb-auth-adm` edits, `notes` and `_comment` round-tripping untouched) and the parser that turns it into the runtime table. |
 | `mint_api_key` | 256 bits from the OS CSPRNG, `bbk_` + base64url; returns the bearer and the `sha256` the file stores. |
-| `open_access_file` / `AccessWrite` / the document mutations | **Editing an access file** — here rather than in a tool because `bb-auth-adm` and the coming web admin must do it identically. Open (refusing a file the gate would reject), the lookups and mutations behind every CRUD command (`add_user`, `add_user_email`, `add_api_key`, `add_application`, `add_scope`, `move_scope`, `remove_user_group`, `add_denied`, `edit_urls`, …), and the write: render → re-parse → `compile_access` → atomic temp+rename, preserving mode and owner. `AccessWrite::prepare` is the only way to obtain bytes and `commit` writes exactly those, with `write_atomically` private, so the check cannot be skipped; a minted bearer comes back as a `SealedKey` that only opens against the `Written` receipt of a completed write. |
+| `open_access_file` / `AccessWrite` / the document mutations | **Editing an access file** — here rather than in a tool because `bb-auth-adm` and `bb-auth-web` must do it identically. Open (refusing a file the gate would reject), the lookups and mutations behind every CRUD command (`add_user`, `add_user_email`, `add_api_key`, `add_application`, `add_scope`, `move_scope`, `remove_user_group`, `add_denied`, `edit_urls`, …), and the write: render → re-parse → `compile_access` → atomic temp+rename, preserving mode and owner. `AccessWrite::prepare` is the only way to obtain bytes and `commit` writes exactly those, with `write_atomically` private, so the check cannot be skipped; a minted bearer comes back as a `SealedKey` that only opens against the `Written` receipt of a completed write. |
 
 ---
 
@@ -107,7 +107,7 @@ And in `src/lib.rs`:
   small and resident memory low, so it runs comfortably on constrained hosts.
 - **Thread pool:** `BB_AUTH_WORKERS` threads (default 4), each looping on
   `server.recv()` and dispatching on `(method, path)`. State is shared via
-  `Arc<State>`; the JWKS cache and the users table are each behind a `RwLock`, and a
+  `Arc<State>`; the JWKS cache and the access table are each behind a `RwLock`, and a
   `Mutex` serializes JWKS refreshers (double-checked locking — see §6).
 - **Stateless sessions:** there is **no server-side session store**. The session
   is fully carried by the HMAC cookie, so any worker can validate any request and
@@ -170,7 +170,7 @@ ever issuing a cookie:
    attribute is self-asserted on every token.
 
 Failure on any step → the session request is rejected with `401` (token
-invalid/expired) or `403` (email not in the users table).
+invalid/expired) or `403` (email not in the access table).
 
 ---
 
@@ -180,21 +180,20 @@ One format, carrying an `exp`, the base64url-encoded email, a base64url-encoded 
 object of profile claims, and a base64url HMAC-SHA256 tag:
 
 ```text
-bb4.<keyid>.<exp>.<b64url(email)>.<b64url(claims_json)>.<b64url(sig)>
-sig = HMAC_SHA256("bb4.<keyid>.<exp>.<b64url(email)>.<b64url(claims_json)>", key[keyid])
+bb1.<keyid>.<exp>.<b64url(email)>.<b64url(claims_json)>.<b64url(sig)>
+sig = HMAC_SHA256("bb1.<keyid>.<exp>.<b64url(email)>.<b64url(claims_json)>", key[keyid])
 ```
 
-- **`bb4`** — the **only** accepted format, since v2.5. The **key id** (`<keyid>`) is
+- **`bb1`** — the **only** accepted format. The **key id** (`<keyid>`) is
   stamped in so the signing key can roll over with zero downtime: the verifier looks up
   the key by id in the accepted set (`BB_AUTH_HMAC_KEY` active +
   `BB_AUTH_HMAC_ACCEPTED_KEYS`).
-- **No verify-only arm.** The earlier `bb1`, `bb2` and `bb3` formats are not
-  distinguished from junk. A version bump therefore logs every live session out, once,
-  and the holder walks back through the login page — a re-authentication against a
-  Cognito session the browser still has, not a re-enrolment. That was chosen over keeping
-  an arm, its tests and its reasoning alive for every format that ever shipped.
-  Consequence to plan around: **the 2.5 upgrade signs everyone out.** Key *rotation* is
-  the mechanism that must not do that, and it still doesn't.
+- **No verify-only arm.** A tag the gate does not know is not distinguished from junk, so
+  changing the serialization or the signed bytes logs every live session out, once, and
+  the holder walks back through the login page: a re-authentication against a Cognito
+  session the browser still has, not a re-enrolment. That is the accepted price of never
+  carrying more than one arm, its tests and its reasoning. Key *rotation* is the separate
+  axis that must never log anybody out, and does not.
 - **Profile claims** — `claims_json` is a JSON object mapping claim name to value
   (`{"family_name":"Byron","given_name":"Ada"}`, sorted keys), raw UTF-8 under the
   base64, so the cookie is binary-safe where a header is not; percent-encoded only on
@@ -250,12 +249,12 @@ nothing in an env file can ever take effect without a restart.
 | `BB_AUTH_COGNITO_ISSUER` | yes | — | The Cognito user-pool issuer URL, `https://cognito-idp.<region>.amazonaws.com/<user-pool-id>`. Trailing `/` stripped. JWKS URL is derived from this. |
 | `BB_AUTH_CLIENT_ID` | yes | — | The public app client used by the login page; always an accepted `id_token.aud`. |
 | `BB_AUTH_AUDIENCES` | no | empty | Comma-separated extra accepted `aud`s (Cognito app client ids), e.g. a separate social-login client. `BB_AUTH_CLIENT_ID` is always accepted; a token is valid if its `aud` matches any. Read at startup → needs `restart`, not `reload`. |
-| `BB_AUTH_ACCESS_FILE` | yes | — | Path to the JSON access file (`sites`, `denied`, and the roster of emails with their `bbk_` API keys and URL scopes; see §12). Loaded at startup, hot-reloaded on `SIGHUP`. Named for the roster it used to hold only; the name is a contract with the operator-owned env file a deploy never rewrites. |
+| `BB_AUTH_ACCESS_FILE` | yes | — | Path to the JSON access file (`applications`, `user_groups`, `denied`, and the roster of users with their `bbk_` API keys; see §12). Loaded at startup, hot-reloaded on `SIGHUP`. The name is a contract with the operator-owned env file a deploy never rewrites. |
 | `BB_AUTH_ORIGINAL_URL_HEADER` | no | `X-Original-URL` | Request header carrying the original request URL (scheme + host + normalised path). Set by nginx on the `auth_request` subrequest (from a `$bb_url` captured in the gated location — **not** from `$uri`, see §12) **and** on `/auth/session` (there a plain `https://app.example.com$uri` is correct). Drives URL scoping, and on `/auth/session` tells bb-auth which host the login is on. Query/fragment are stripped; missing ⇒ fail closed. |
 | `BB_AUTH_LISTEN` | no | `127.0.0.1:4181` | Bind address. Loopback only — nginx fronts it. |
 | `BB_AUTH_COOKIE_NAME` | no | `bb_session` | |
 | `BB_AUTH_COOKIE_DOMAIN` | no | empty → host-only | Set to a parent domain for cross-service SSO. |
-| `BB_AUTH_AUTHORIZED_HOSTS` | yes | — | Comma-separated host globs a post-login `rd` may land on, e.g. `example.com,*.example.com`. The sole authority for the `rd` guard (see §9a). `*.x.com` does not match the apex `x.com`. Replaces the pre-2.0 `BB_AUTH_SEARCH_URL` + `BB_AUTH_RD_BASE_DOMAIN`. |
+| `BB_AUTH_AUTHORIZED_HOSTS` | yes | — | Comma-separated host globs a post-login `rd` may land on, e.g. `example.com,*.example.com`. The sole authority for the `rd` guard (see §9a). `*.x.com` does not match the apex `x.com`. |
 | `BB_AUTH_LOGIN_URL` | yes | — | Where `401`/logout send the user (the login page), and where a rejected `rd` falls back to. |
 | `BB_AUTH_SETTINGS_FILE` | no | `settings.json` beside the access file | Path to the settings file (§8a). Re-read on `SIGHUP` like the access file, fail-soft on both. A missing file is a fatal startup. |
 | `BB_AUTH_WORKERS` | no | `4` | Thread pool size (min 1). |
@@ -348,7 +347,7 @@ target host's glibc.
 
 ## 10. Running it
 
-bb-auth is one binary plus two files (env + users file). Its operational contract:
+bb-auth is one binary plus two files (env + access file). Its operational contract:
 
 - **Runs as a non-privileged service** — a dedicated system user, no login, no home.
 - **Loopback only**, behind a TLS-terminating reverse proxy that performs the
@@ -356,8 +355,8 @@ bb-auth is one binary plus two files (env + users file). Its operational contrac
 - **Env file** holds the config and the HMAC secret; keep it readable only by the
   service user (e.g. `0640 root:bb-auth`). The secret should be generated once and
   preserved across redeploys so existing cookies keep verifying.
-- **Users file** holds the access list — allowlisted emails plus their `bbk_` API
-  keys and URL scopes (JSON); editable + `SIGHUP` to apply live.
+- **Access file** holds the access list: the applications and their scopes, plus the
+  roster of users with their `bbk_` API keys (JSON); editable + `SIGHUP` to apply live.
 
 The layout, separated by role:
 
@@ -381,12 +380,12 @@ outside the gate's namespace: `bb-auth-adm` as root, `bb-auth-web` as its own se
 user under its own unit (see below).
 
 The install is a Debian package, `bb-auth`, and its `postinst` is what does all of
-this (idempotent, because dpkg runs it again on every upgrade): it creates the system
+this (idempotent, because dpkg runs it again on every install): it creates the system
 user/group, and on a **first** install writes `bb-auth.env` from the shipped template
 with a freshly generated `BB_AUTH_HMAC_KEY`, plus an empty `access.json` that authorizes
-nobody. Neither file is part of the package, which is precisely why an upgrade cannot
-touch either: dpkg does not clobber files it does not ship, so the key survives and
-every session cookie with it. It never edits a preserved `bb-auth.env`: instead it
+nobody. Neither file is part of the package, which is precisely why a later install
+cannot touch either: dpkg does not clobber files it does not ship, so the key survives
+and every session cookie with it. It never edits a preserved `bb-auth.env`: instead it
 validates it (every required var present, and `BB_AUTH_ACCESS_FILE` pointing at the file
 this package creates) alongside the access file itself (`bb-auth --check-access`), and a
 failure there exits non-zero **before** the restart, leaving the running process
@@ -394,8 +393,8 @@ serving, so a bad config can never become a `Restart=on-failure` boot loop. A fi
 install ends without starting the gate at all, since its env is still a template.
 
 `scripts/deploy.sh` is the host-side driver around that (`dpkg -i` in one transaction,
-the legacy-unit migration, an optional staged `access.json`, then `scripts/verify.sh`),
-and `scripts/deploy.ps1` builds the packages and drives it over SSH.
+an optional staged `access.json`, then `scripts/verify.sh`), and `scripts/deploy.ps1`
+builds the packages and drives it over SSH.
 
 ### The admin GUI's unit, and who owns the access file
 
@@ -449,9 +448,9 @@ own), and `SupplementaryGroups=bb-auth` is what lets the write restore the file'
 - **The id_token is the credential.** A Cognito-signed `id_token` is unforgeable;
   possession of one for an allowlisted, `email_verified` address is proof of
   identity. bb-auth holds no Cognito secret — it only reads public JWKS.
-- **The users file is the real access gate.** Cognito self-signup is open by
+- **The access file is the real access gate.** Cognito self-signup is open by
   design (to enable frictionless registration). Anyone can get an `id_token`, but
-  only emails listed in the users file get a session cookie, and the check is
+  only emails the access file admits get a session cookie, and the check is
   repeated on every `/auth/validate` (see §12) — as is each `bbk_` API key and the
   request-URL scope.
 - **Why `email_verified` is mandatory for native users.** Self-signup being open,
@@ -481,11 +480,11 @@ own), and `SupplementaryGroups=bb-auth` is what lets the write restore the file'
 
 Access is described by a single JSON file (`BB_AUTH_ACCESS_FILE`, installed as
 `/opt/bb-auth/var/lib/access.json`), loaded at startup and hot-reloaded on `SIGHUP`. It is
-the real access gate (`read_access` / `Access`), and since 3.0 it is **application-centric**:
-a grant is written once, on the side of the place.
+the real access gate (`read_access` / `Access`), and it is **application-centric**: a grant
+is written once, on the side of the place.
 
 ```json
-{ "version": 3,
+{ "version": 1,
   "applications": [
     { "name": "app1",
       "base": ["https://app.example.com/app1"],
@@ -522,20 +521,14 @@ identifiers that resolve to nobody), and three indices: `by_identifier` (lowerca
 uuid, many to one), `by_uuid` (uuid → `UserRecord`), and `by_key_hash` (`sha256(bearer)` hex
 → `ApiKeyRecord`).
 
-**An older file is refused by name.** `sites`, `url_groups`, `users[].authorized_urls` and
-`api_keys[].authorized_urls` are detected and named in the error, which points at
-`bb-auth-adm migrate` (`check_legacy`). Ignoring them would be far worse than failing: the
-new parser would read it as an access table with no applications and a roster that
-reaches nothing, which is a total lockout reported as a successful load.
-
 What is fatal and what is skipped follows one rule: **an error that changes who reaches what
 is fatal; an error whose only effect is to drop one credential warns and skips**. Fatal, so
 that a startup exits and a `SIGHUP` keeps the live table: a malformed pattern, an `access`
 that is absent or misspelled, a membership field on a scope that is not `restricted`, an
 unknown field anywhere in the application/scope tree, a non-literal or overlapping `base`, a
 scope pattern outside its own application's base, a malformed uuid, two rows claiming one
-uuid or one identifier, a key restriction naming a scope that does not exist, a residual
-pre-2.0 `enabled_paths`, and anything wrong about a `@group` reference. Warned and skipped:
+uuid or one identifier, a key restriction naming a scope that does not exist, and anything
+wrong about a `@group` reference. Warned and skipped:
 a bad `key_hash` or `released`/`duration`, an identifier that could not be a header value,
 and a dangling reference (a well-formed uuid matching no roster row), which grants nothing
 and which both editors lint. `bb-auth --check-access <file>` runs exactly this parser and
@@ -561,9 +554,10 @@ glob-intersection test, and it is what makes the partition hold at all: the usef
 patterns (`*://*/*`) would intersect everything. The cost is deliberate and worth stating: an
 application on a wildcard host (`https://*.x.com/`) is not expressible.
 
-**A URL no application covers is reachable by nobody**, with any credential. With no
-per-user URLs left this is the only fail-closed reading, and it is a real change of posture
-for an operator: a gated location outside every area is a `401` for everyone.
+**A URL no application covers is reachable by nobody**, with any credential. Grants are
+written on the side of the place and nowhere else, so this is the only fail-closed reading,
+and it is worth an operator hearing out loud: a gated location outside every area is a
+`401` for everyone, including the person who wrote the file.
 `--check-access` prints each application's area so it can be compared with what nginx
 actually gates.
 
@@ -576,7 +570,7 @@ meaning, which is what `bb-auth-adm scope mv` and the GUI's move buttons exist f
 First-match is what makes a **carve-out** expressible: a narrower, stricter scope listed
 before a broad one, as `healthz` and `admin` are above. A union of grants cannot express
 that at all, because the broad scope would go on granting. The dangerous half of first-match
-(a broad entry silently shadowing a narrow one) survives, but it can now only bite between
+(a broad entry silently shadowing a narrow one) is real, but it can only bite between
 scopes of the same application: entries an operator sees together, on one screen, in one
 form, and which `bb-auth-adm check` lints.
 
@@ -611,7 +605,8 @@ nothing.
 
 This is a property of the **place**, not of the credential: "this area is reached by a
 browser login" and "this area is reached by a machine key" are statements an operator makes
-about an application. Expressing them here is what let a key stop carrying URLs of its own.
+about an application. Expressing them here is what keeps a key from carrying URLs of its
+own.
 
 ### The scope's own veto (`excluded`)
 
@@ -638,10 +633,9 @@ excluded client would simply send none.
 
 ### A scope names people, and that is the only place a grant is written
 
-The rule the older model enforced ("a site describes a place, never a person") was against
-**duplication**, not against a direction: it existed so a user removed from the roster could
-not still walk in through a place. Here the grant is written on the side of the place and
-nowhere else, so the rule holds in the mirror, and it needs two halves to hold:
+A grant is written on the side of the place, and nowhere else. The rule that protects is
+against **duplication**, and it exists so that a user removed from the roster cannot still
+walk in through a place. It needs two halves to hold:
 
 - `ScopeRecord::members` are **references to roster rows**. A reference to a row that does
   not exist grants nothing.
@@ -649,7 +643,7 @@ nowhere else, so the rule holds in the mirror, and it needs two halves to hold:
   hands back the list of what it swept.
 
 Without both, a deleted user who re-registers on Cognito would walk back in through a
-dangling reference: the exact hazard the old rule prevented, pointing the other way.
+dangling reference.
 
 ### User groups (`user_groups`)
 
@@ -725,7 +719,7 @@ the key has not expired. What the key may then *reach* is `decide`'s, through
 An application's `login_url` overrides `BB_AUTH_LOGIN_URL` for its whole area
 (`login_url_for`); it names the login page on `/auth/validate`'s `401`, the fallback for a
 rejected `rd`, and the link on `/auth/session`'s error pages. There is no ambiguity to
-resolve any more: areas do not overlap, so at most one application answers, and it answers
+resolve: areas do not overlap, so at most one application answers, and it answers
 whether or not any of its scopes covers the URL. A `401` inside an application is exactly
 when its own login page is wanted.
 
@@ -749,11 +743,11 @@ location @bb_signin { return 302 $bb_login_safe?rd=$scheme://$host$request_uri; 
 ```
 
 `auth_request_set` reads the subrequest's response headers even when it answered `401`,
-which is what makes this work at all. The `map` is not decoration: an unset `$bb_login` (an
-older binary, or a gated location that omits the `auth_request_set`) would make
+which is what makes this work at all. The `map` is not decoration: an unset `$bb_login` (a
+gated location that omits the `auth_request_set`) would make
 `return 302 $bb_login?rd=…` emit a *relative* `Location: ?rd=…`, sending the browser back to
 the gated path it just failed on. A redirect loop. The default arm degrades to the global
-login page instead, i.e. to exactly what a hardcoded `@bb_signin` did before.
+login page instead.
 
 Both the global and the per-application value pass `compile_login_url` at load: printable
 ASCII, absolute `https://`, no userinfo `@`, no backslash. That is what lets the gate emit

@@ -1,11 +1,12 @@
 //! bb-auth-web — a server-rendered admin GUI over a bb-auth **access file**
 //! (`BB_AUTH_ACCESS_FILE`, a.k.a. access.json).
 //!
-//! What `bb-auth-adm` shows on a terminal, this shows in a browser: the roster, the url
-//! groups and who references them, the sites in the order that decides which one answers,
-//! the `denied` veto, every api key's expiry, and the `can EMAIL URL` tester — answered, as
-//! there, by the gate's own [`decide`]. And what `bb-auth-adm` *edits*, this edits: full
-//! CRUD over every section, through the library's editing core and through nothing else.
+//! What `bb-auth-adm` shows on a terminal, this shows in a browser: the roster, the user
+//! groups and who references them, each application's scopes in the order that decides which
+//! one answers, the `denied` veto, every api key's expiry, and the `can EMAIL URL` tester —
+//! answered, as there, by the gate's own [`decide`]. And what `bb-auth-adm` *edits*, this
+//! edits: full CRUD over every section, through the library's editing core and through
+//! nothing else.
 //!
 //! **Deployment.** Its own hardened unit (`deploy/bb-auth-web.service`) under a dedicated
 //! `bb-auth-web` user, its own operator-owned env (`deploy/bb-auth-web.env.example`), and
@@ -38,9 +39,9 @@
 //!
 //! And the header is not the last word: the email must also be on **`web.admins`** in the
 //! settings file.
-//! That allowlist is deliberate defense in depth: a `public_auth` site covering the GUI's
-//! URL would otherwise open the admin surface to any Cognito account. It is required, and
-//! must be non-empty — empty must never mean "everyone".
+//! That allowlist is deliberate defense in depth: an `authenticated` scope covering the
+//! GUI's URL would otherwise open the admin surface to any Cognito account. It is required,
+//! and must be non-empty — empty must never mean "everyone".
 //!
 //! Both checks are **route-global** and run before the router: there is no path — not a
 //! `404`, not a `POST`, not a broken access file — that answers anything to someone nginx
@@ -92,9 +93,10 @@
 //! redoing the change — which here would mint a second key — where the truth is that the
 //! key was created and a lost bearer's remedy is `key rotate`.
 //!
-//! Destructive actions (`user rm`, `key rm`, `key rotate`, `site rm`, `url-group rm`,
-//! `deny rm`) are a `GET` confirmation page whose `POST` does the deed — the no-JavaScript
-//! form of "are you sure", and the only way to be sure a link never deletes anything.
+//! Destructive actions (`user rm`, `key rm`, `key rotate`, `app rm`, `scope rm`,
+//! `group rm`, `deny rm`) are a `GET` confirmation page whose `POST` does the deed — the
+//! no-JavaScript form of "are you sure", and the only way to be sure a link never deletes
+//! anything.
 //! Each successful mutation writes one audit line to stderr ([`audit`]): who, the verb as
 //! `bb-auth-adm` spells it, and the target's name — never a bearer, never a hash, never a
 //! submitted value beyond the name.
@@ -118,11 +120,10 @@
 //! Read once at startup, like the gate: a change needs a restart. A missing required var is
 //! a fatal exit, in the same words and for the same reason — there is no safe default.
 //!
-//! The administrator allowlist is **not** in this table any more. It is `web.admins` in the
-//! settings file, read fresh on every request, and editable from the Settings tab: it is the
-//! one setting this service both enforces and owns, so a change that needed a restart would
-//! be a change this GUI could make and not see. `BB_AUTH_WEB_ADMINS` is therefore a fatal
-//! startup if it is still set, for the reason a silently ignored setting always is.
+//! The administrator allowlist is deliberately **not** in this table. It is `web.admins` in
+//! the settings file, read fresh on every request, and editable from the Settings tab: it is
+//! the one setting this service both enforces and owns, so a change that needed a restart
+//! would be a change this GUI could make and not see.
 //!
 //! # The file is read fresh on every request
 //!
@@ -162,10 +163,11 @@
 //! `Auto`: the choice to make no choice, which resolves per request against the browser's
 //! `Accept-Language` and is what a session that never chose has always been getting (see
 //! [`LangPref`]). Prose and labels are translated; the **file's vocabulary never is** —
-//! `public_auth`, `authorized_urls`, `url_groups`, `sites`, `denied`, `bbk_`, an `@group`
-//! reference, and every name, email and URL pattern read the same in both, because they are
-//! what an operator will type into `bb-auth-adm` and into the file itself. Library error
-//! messages render verbatim, in the English the gate and the CLI already say them in.
+//! `applications`, `scopes`, `user_groups`, `denied`, `anonymous`, `authenticated`,
+//! `restricted`, `bbk_`, an `@group` reference, and every name, email and URL pattern read
+//! the same in both, because they are what an operator will type into `bb-auth-adm` and into
+//! the file itself. Library error messages render verbatim, in the English the gate and the
+//! CLI already say them in.
 //!
 //! **Theme** is light, dark or system, and [`Theme::System`] is the floor for the same
 //! reason `Auto` is: an existing session's page does not change appearance until someone
@@ -237,7 +239,7 @@ const WORKERS: usize = 2;
 /// Light and dark come from `prefers-color-scheme` over a handful of custom properties, and
 /// an explicit choice overrides it through a `data-theme` attribute [`shell`] puts on `html`
 /// (see [`Theme::attr`]) and a selector that outranks the media query. There is still no
-/// script on any page: not for a form, not for a confirmation, not for reordering a site,
+/// script on any page: not for a form, not for a confirmation, not for reordering a scope,
 /// not for opening the Settings menu, and not for the theme it sets either. The override is
 /// CSS specificity, nothing more, which is why the dark token list below is written twice
 /// and kept in sync by hand. (The one handler in the binary, [`SETTINGS_ONCHANGE`], saves a
@@ -319,8 +321,8 @@ tr:last-child td{border-bottom:0}
 tbody tr:hover{background:var(--bg)}
 ul.plain{list-style:none;margin:0;padding:0}
 ul.plain li{padding:2px 0}
-ol.sites{margin:0;padding-left:22px}
-ol.sites > li{margin:0 0 14px}
+ol.scopes{margin:0;padding-left:22px}
+ol.scopes > li{margin:0 0 14px}
 .cards{display:grid;grid-template-columns:repeat(auto-fit,minmax(110px,160px));gap:10px;
   margin:0 0 18px}
 .card{background:var(--panel);border:1px solid var(--line);border-radius:var(--r-box);
@@ -360,9 +362,9 @@ input[type=text].invalid,textarea.invalid{border-color:var(--bad)}
    the point: it is what makes a filled submit and the outlined cancel pill beside it land on
    exactly the same footprint as .pill below (same border width, same radius, same padding
    step). A class selector already outranks this element selector regardless of source order,
-   so the two reorder buttons on the sites page (plain buttons carrying class pill) take the
-   pill shape either way; .pill still follows button here so the object reads as built on top
-   of it. */
+   so the two reorder buttons on an application's page (plain buttons carrying class pill)
+   take the pill shape either way; .pill still follows button here so the object reads as
+   built on top of it. */
 button{font:inherit;padding:6px 14px;border:1px solid var(--accent);border-radius:var(--r-pill);
   background:var(--accent);color:var(--on-accent);cursor:pointer}
 button.danger{background:var(--bad);border-color:var(--bad)}
@@ -382,21 +384,21 @@ textarea{font-family:ui-monospace,SFMono-Regular,Consolas,Menlo,monospace;font-s
 form.edit .radio{display:flex;gap:8px;align-items:baseline;margin:0 0 6px}
 form.edit .radio input{margin:0}
 .actions{display:flex;flex-wrap:wrap;gap:12px;align-items:center;margin:18px 0 0}
-/* The pill: one shape for every small control that used to style itself where it happened
-   to be used: a nav tab, the Settings menu's own trigger, a row's edit/rotate/remove, the two
-   site reorder buttons, a form's cancel. .pills is the group (the flex row that holds them);
-   .pill is the member. Nothing at a call site is allowed to say how a pill looks any more,
-   which is why no style= attribute survives anywhere in this file. Every pill looks the same
-   at rest, on purpose: the only things allowed to change one are its state (selected, hovered,
-   disabled) and the one case where the click's consequence differs in kind (rm). */
+/* The pill: one shape for every small control, wherever it happens to sit: a nav tab, the
+   Settings menu's own trigger, a row's edit/rotate/remove, the two scope reorder buttons, a
+   form's cancel. .pills is the group (the flex row that holds them); .pill is the member.
+   Nothing at a call site is allowed to say how a pill looks, which is why no style=
+   attribute appears anywhere in this file. Every pill looks the same at rest, on purpose:
+   the only things allowed to change one are its state (selected, hovered, disabled) and the
+   one case where the click's consequence differs in kind (rm). */
 .pills{display:inline-flex;flex-wrap:wrap;gap:6px;align-items:center}
 /* A table cell's action group must not wrap: wrapping is exactly what broke the api_keys
    row's three actions onto two ragged lines inside a narrow right-aligned cell. The panel
    already scrolls (overflow-x:auto) if a row's actions ever outgrow the column, so nowrap
    here costs nothing. */
 td.pills{display:flex;flex-wrap:nowrap;justify-content:flex-end}
-/* The resting box is currentColor, not --line: the old hairline measured about 1.3 to 1
-   against the panel, which is why these did not read as controls at all before this pass.
+/* The resting box is currentColor, not --line: a --line hairline measures about 1.3 to 1
+   against the panel, which is not enough contrast for these to read as controls at all.
    Every pill carries the box, with no exception, so a nav tab, a language or theme choice,
    a row action, a reorder button and cancel all look identical at rest. */
 .pill{display:inline-flex;align-items:center;font:inherit;font-size:var(--fs-sm);
@@ -406,15 +408,15 @@ td.pills{display:flex;flex-wrap:nowrap;justify-content:flex-end}
    border follows along since it is currentColor) and only turns --bad on hover, so the
    consequence is legible right before the click without making the row alarming at rest. */
 .pill.rm{color:var(--muted)}
-/* Has to read on every surface a pill can sit on: the plain panel, a hovered row now tinted
+/* Has to read on every surface a pill can sit on: the plain panel, a hovered row tinted
    --bg, a coloured .panel.ok/.bad/.warn state. --line is one step off all of them, and the
-   accent border is the half none of those surfaces can cancel out; this is the rule that
-   makes a row action's hover plainly visible again, which was the reported defect. */
+   accent border is the half none of those surfaces can cancel out; without both halves a row
+   action's hover is invisible on at least one of them. */
 .pill:hover{background:var(--line);border-color:var(--accent)}
 .pill.rm:hover{color:var(--bad);border-color:var(--bad)}
 .pill[disabled]{color:var(--muted);border-color:var(--line);background:none;cursor:default}
-/* Selected state as a fill, never as a border: the top nav's own idiom before this pass, now
-   the whole family's. Declared last so a selected pill always outranks a hovered one. */
+/* Selected state as a fill, never as a border, for the whole family. Declared last so a
+   selected pill always outranks a hovered one. */
 .pill.on,.pill.on:hover{background:var(--accent);border-color:var(--accent);
   color:var(--on-accent);font-weight:600}
 /* The size step: body-size pills for the nav, for the Settings trigger that sits in the same
@@ -654,7 +656,7 @@ fn parse_theme(s: &str) -> Option<Theme> {
 /// [`K::Dashboard`], [`K::Groups`], [`K::Apps`], [`K::Users`], [`K::Denied`] and [`K::Can`]
 /// are the nav labels and page headings: descriptive prose *about* a section, not that
 /// section's name. The name itself stays untranslated wherever it appears as itself,
-/// namely `authorized_urls`, `public_auth`, `login_url`, `api_keys`, `released`, `duration`,
+/// namely `base`, `urls`, `access`, `login_url`, `api_keys`, `released`, `duration`,
 /// `notes`, `bbk_`, every `@group` reference, and the raw key shown in muted monospace
 /// beside a heading; that is because it is what an operator types into the file and into
 /// `bb-auth-adm`, and translating it would invent a second name for a thing that has one.
@@ -1302,10 +1304,11 @@ fn t(lang: Lang, key: K) -> &'static str {
         K::ConfirmUserRm => m(
             lang,
             "The roster row goes, and every api key it owns with it. It does NOT keep them \
-             off a public_auth site — the roster is not consulted there; that is what denied \
-             is for.",
+             off an authenticated scope: the roster is not consulted there; that is what \
+             denied is for.",
             "Sparisce la riga del roster, e con essa ogni sua api key. NON li tiene fuori da \
-             un site public_auth — lì il roster non viene consultato; per quello c'è denied.",
+             uno scope authenticated: lì il roster non viene consultato; per quello c'è \
+             denied.",
         ),
         K::ConfirmKeyRm => m(
             lang,
@@ -1337,10 +1340,10 @@ fn t(lang: Lang, key: K) -> &'static str {
         ),
         K::ConfirmAppRm => m(
             lang,
-            "If it was public_auth, the identities it let in with no roster entry now reach \
-             nothing.",
-            "Se era public_auth, le identità che entravano senza riga nel roster ora non \
-             raggiungono nulla.",
+            "If any of its scopes was authenticated, the identities it let in with no roster \
+             entry now reach nothing.",
+            "Se uno dei suoi scope era authenticated, le identità che entravano senza riga nel \
+             roster ora non raggiungono nulla.",
         ),
         K::ConfirmGroupRm => m(
             lang,
@@ -1351,8 +1354,8 @@ fn t(lang: Lang, key: K) -> &'static str {
         ),
         K::ConfirmDenyRm => m(
             lang,
-            "The veto is lifted. Whatever the roster and the sites grant them applies again.",
-            "Il veto viene tolto. Torna a valere quanto gli concedono il roster e i site.",
+            "The veto is lifted. Whatever the roster and the scopes grant them applies again.",
+            "Il veto viene tolto. Torna a valere quanto gli concedono il roster e gli scope.",
         ),
 
         K::BearerHeading => m(
@@ -1404,7 +1407,7 @@ fn t(lang: Lang, key: K) -> &'static str {
         K::NoSuchKey => m(lang, "no such api key", "api key inesistente"),
         K::NoSuchApp => m(lang, "no such application", "applicazione inesistente"),
         K::NoSuchScope => m(lang, "no such scope", "scope inesistente"),
-        K::NoSuchGroup => m(lang, "no such url group", "url group inesistente"),
+        K::NoSuchGroup => m(lang, "no such user group", "gruppo di utenti inesistente"),
         K::NoSuchDenied => m(
             lang,
             "that email is not on denied",
@@ -1482,9 +1485,9 @@ fn t(lang: Lang, key: K) -> &'static str {
         K::MsgScopeSaved => m(lang, "scope saved", "scope salvato"),
         K::MsgScopeRemoved => m(lang, "scope removed", "scope rimosso"),
         K::MsgScopeMoved => m(lang, "scope moved", "scope spostato"),
-        K::MsgGroupAdded => m(lang, "url group added", "url group aggiunto"),
-        K::MsgGroupSaved => m(lang, "url group saved", "url group salvato"),
-        K::MsgGroupRemoved => m(lang, "url group removed", "url group rimosso"),
+        K::MsgGroupAdded => m(lang, "user group added", "gruppo di utenti aggiunto"),
+        K::MsgGroupSaved => m(lang, "user group saved", "gruppo di utenti salvato"),
+        K::MsgGroupRemoved => m(lang, "user group removed", "gruppo di utenti rimosso"),
         K::MsgDeniedAdded => m(lang, "email denied", "email negata"),
         K::MsgDeniedRemoved => m(lang, "veto lifted", "veto tolto"),
     }
@@ -1613,10 +1616,9 @@ struct Config {
     /// `BB_AUTH_SETTINGS_FILE`, the settings file this GUI reads **and writes**, defaulting
     /// to `settings.json` beside the access file exactly as the gate defaults it.
     ///
-    /// Its `web.admins` is the allowlist that used to be `BB_AUTH_WEB_ADMINS`, and it is read
-    /// **per request** rather than at startup: this is the one service that can edit it, and
-    /// a change that needed a restart to take effect would be a change this GUI could make
-    /// but not see.
+    /// Its `web.admins` is the administrator allowlist, and it is read **per request** rather
+    /// than at startup: this is the one service that can edit it, and a change that needed a
+    /// restart to take effect would be a change this GUI could make but not see.
     settings_path: String,
     /// `BB_AUTH_WEB_BASE_PATH`, normalised by [`normalize_base_path`]: `""` or `/admin`.
     /// Every internal href carries it and the router strips it.
@@ -1670,22 +1672,9 @@ fn normalize_base_path(raw: &str) -> Result<String, String> {
 impl Config {
     /// Build the config from the environment, exiting on the first fatal problem.
     fn from_env() -> Config {
-        // The allowlist is no longer an env var: it lives in the settings file, where this
-        // GUI can edit it and see the edit. What used to be a fatal startup over an empty
-        // `BB_AUTH_WEB_ADMINS` is now a refusal to serve, per request, in `handle`, and the
-        // variable itself is fatal if it is still set, because a list read from nowhere is
-        // worse than no list at all.
-        if std::env::var_os("BB_AUTH_WEB_ADMINS").is_some() {
-            eprintln!(
-                "[bb-auth-web] FATAL: BB_AUTH_WEB_ADMINS is set, but the administrator list \
-                 moved into the settings file (web.admins). Nothing reads it here any more."
-            );
-            eprintln!(
-                "[bb-auth-web]   Move it with `bb-auth-adm settings admin add EMAIL`, then \
-                 delete the line from bb-auth-web.env."
-            );
-            std::process::exit(1);
-        }
+        // The administrator allowlist is not read here: it lives in the settings file, where
+        // this GUI can edit it and see the edit, and an empty or missing one is a refusal to
+        // serve, per request, in `handle`.
         let base_path =
             normalize_base_path(&env_or("BB_AUTH_WEB_BASE_PATH", "")).unwrap_or_else(|e| {
                 eprintln!("[bb-auth-web] FATAL: BB_AUTH_WEB_BASE_PATH: {e}");
@@ -1724,8 +1713,8 @@ impl Config {
 ///
 /// A route that mutates is reached by `POST` on **the same path** that renders its form by
 /// `GET`, which is what makes "re-render this form with the library's refusal" a matter of
-/// calling the same page function again. The names a route carries — an email, a key id, a
-/// site or group name — are already percent-**decoded**.
+/// calling the same page function again. The names a route carries — an email, a key id, an
+/// application, scope or group name — are already percent-**decoded**.
 #[derive(Clone, PartialEq, Eq, Debug)]
 enum Route {
     Dashboard,
@@ -1757,7 +1746,7 @@ enum Route {
     UserAdd,
     UserEdit(String),
     UserRm(String),
-    /// An identifier is added and dropped on its own, because that is what replaced a
+    /// An identifier is added and dropped on its own, which is what stands in place of a
     /// rename: the identity never changes.
     EmailAdd(String),
     EmailRm(String, String),
@@ -1828,8 +1817,8 @@ impl Route {
 
     /// Which nav tab to mark current for this route: everything about a user belongs to
     /// the `users` tab, and so on down the sections. `denied` has no tab of its own: its
-    /// page still lives at its own route, but the bar lights up `users` for it, since the
-    /// two are the sections about people and [`page_users`] is where an operator now finds
+    /// page lives at its own route, but the bar lights up `users` for it, since the
+    /// two are the sections about people and [`page_users`] is where an operator finds
     /// both.
     fn tab(&self) -> Route {
         match self {
@@ -1890,7 +1879,7 @@ impl Route {
 
     /// The `<title>`: the section's own name, untranslated, because that is the word an
     /// operator types. Matched on `self` and not on [`Route::tab`]: `denied` and
-    /// `user_groups` now share the `users` *tab*, but a form's `<title>` should still say
+    /// `user_groups` share the `users` *tab*, but a form's `<title>` should still say
     /// which section it edits, not which tab is lit.
     fn title(&self) -> &'static str {
         match self {
@@ -1963,8 +1952,8 @@ fn route(path: &str, base: &str) -> Option<Route> {
         ["apps", a, "scopes", n, "rm"] if !a.is_empty() => Some(Route::ScopeRm(s(a), s(n))),
         ["apps", a, "scopes", n, "move"] if !a.is_empty() => Some(Route::ScopeMove(s(a), s(n))),
 
-        // `/groups` is now a section of the users page rather than a page: an old link
-        // lands where the list actually is instead of on a 404.
+        // `/groups` is a section of the users page rather than a page of its own, so the
+        // bare path lands where the list actually is instead of on a 404.
         ["groups"] => Some(Route::Users),
         ["groups", ACTION_ADD] => Some(Route::GroupAdd),
         ["groups", n, "edit"] if !n.is_empty() => Some(Route::GroupEdit(s(n))),
@@ -2296,10 +2285,10 @@ fn preference_href(cfg: &Config, at: &Route, query: &str, param: &str) -> String
 /// The query as received, minus the two parameters the Settings form sets itself, as hidden
 /// fields for that form to put back.
 ///
-/// A switch that was a link could rebuild the whole URL ([`preference_href`]); a `GET` form
-/// sends its own fields and nothing else, so without this, changing the theme on a `can`
+/// The redirect that follows a pick rebuilds the whole URL ([`preference_href`]); a `GET`
+/// form sends its own fields and nothing else, so without this, changing the theme on a `can`
 /// result page would throw the result away. `msg` is deliberately *not* dropped: the flash
-/// belongs to the page the operator is looking at, and survived the old switch links too.
+/// belongs to the page the operator is looking at.
 fn preserved_query(query: &str) -> Vec<(String, String)> {
     form_urlencoded::parse(query.as_bytes())
         .filter(|(k, _)| k != LANG_COOKIE && k != THEME_COOKIE)
@@ -2318,7 +2307,7 @@ fn preserved_query(query: &str) -> Vec<(String, String)> {
 // preferences through the Settings form.
 //
 // Each list namespaces its two parameters with a prefix (`uq`/`up`, `gq`/`gp`, …) so that
-// several lists can sit on one page — as users, groups and denied now do — without stealing
+// several lists can sit on one page (as users, groups and denied do) without stealing
 // each other's state.
 //
 // Scopes are deliberately NOT in this scheme. They are first-match-wins, their position is
@@ -2509,8 +2498,8 @@ impl View<'_> {
 ///
 /// Five tabs, not the access file's four sections plus the dashboard, the tester and the
 /// settings: `denied` shares the `users` tab (see [`Route::tab`]) because both are about
-/// people, and the page itself moved to sit at the bottom of [`page_users`] rather than
-/// stand on its own in the bar. What is left reads left to right roughly as the file reads
+/// people, and the page itself sits at the bottom of [`page_users`] rather than
+/// standing on its own in the bar. The bar reads left to right roughly as the file reads
 /// top to bottom, dashboard in front, then the tester, then the settings, which are last
 /// because they are the *other* file, and the one tab not about who reaches what. Labels are translated, descriptive prose about a section ([`K::Groups`] and
 /// friends), not the section's own name in the file; that name still appears, untranslated,
@@ -2551,8 +2540,8 @@ fn shell(v: &View, title: &str, content: Markup) -> Markup {
                 header class="top" {
                     div class="bar" {
                         // The brand is the way home, but only when there is a home to go
-                        // to: the 403 page has no nav for the same reason, so the brand
-                        // stays the plain inert span it always was.
+                        // to: the 403 page has no nav for the same reason, so there the
+                        // brand is a plain inert span.
                         @if v.admin.is_some() {
                             a class="brand" href=(v.href(&Route::Dashboard)) {
                                 "bb-auth-web"
@@ -2630,9 +2619,9 @@ fn shell(v: &View, title: &str, content: Markup) -> Markup {
                     (content)
                 }
                 footer {
-                    // No reload hint any more: `bb-auth-reload.path` watches the file and
-                    // reloads the gate on every save, so telling an administrator to run
-                    // `systemctl reload bb-auth` described work nobody has to do.
+                    // No reload hint: `bb-auth-reload.path` watches the file and reloads the
+                    // gate on every save, so telling an administrator to run
+                    // `systemctl reload bb-auth` would describe work nobody has to do.
                     @if let Some(a) = v.admin {
                         span { (v.t(K::SignedInAs)) " " code { (a) } }
                     }
@@ -2642,12 +2631,12 @@ fn shell(v: &View, title: &str, content: Markup) -> Markup {
     }
 }
 
-/// A rounded label — a `denied` badge, an expiry state, `public_auth`.
+/// A rounded label — a `denied` badge, an expiry state, a scope's `access`.
 fn tag(class: &str, text: &str) -> Markup {
     html! { span class=(format!("tag {class}")) { (text) } }
 }
 
-/// A top-level section page's `h1`: the descriptive, translated label the nav now carries,
+/// A top-level section page's `h1`: the descriptive, translated label the nav carries,
 /// with the access file's own key for that section beside it in muted monospace. The label
 /// is the headline; the key is what the docs, the CLI and the file itself all speak, so it
 /// must not disappear, only stop being the first thing an operator reads.
@@ -2771,8 +2760,9 @@ fn text_field(
     }
 }
 
-/// A URL-pattern list: one per line, `@refs` written literally. The same shape for a user's
-/// scope, a key's, a site's `urls` and a group's patterns — one grammar, as in the file.
+/// A URL-pattern list: one per line, `@refs` written literally. The same shape for an
+/// application's `base`, a scope's `urls`, its members and its exclusions, a key's `scopes`
+/// and a group's members — one grammar, as in the file.
 ///
 /// `invalid` is the same attribution [`text_field`] takes: see its doc comment.
 fn urls_field(label: &str, name: &str, value: &str, hint: Markup, invalid: bool) -> Markup {
@@ -2839,7 +2829,8 @@ fn page_confirm(
     }
 }
 
-/// "no such user / api key / site / url group" — a `GET` for a name the file does not have.
+/// "no such user / api key / application / scope / group" — a `GET` for a name the file does
+/// not have.
 fn page_missing(v: &View, what: &str, name: &str, back_to: &Route) -> Markup {
     html! {
         h1 { (what) }
@@ -2930,9 +2921,9 @@ fn label_of(doc: &AccessFile, key: &str) -> String {
 ///
 /// The warnings are computed from library data only: [`Access::scopes_for`], the compiled
 /// scopes (for shadowing and empty-membership), [`user_group_refs`] and [`Access::denied_users`].
-/// Shadowing is a heuristic an earlier version of this doc comment kept out of the GUI on
-/// the grounds that it needed an operator to explain itself to; it earns its place here
-/// because the alternative — a scope that answers for nothing and nobody notices — is worse.
+/// Shadowing is a heuristic, and it needs an operator to explain itself to; it earns its
+/// place here because the alternative (a scope that answers for nothing, with nobody
+/// noticing) is worse.
 fn page_dashboard(v: &View, doc: &AccessFile, access: &Access) -> Markup {
     let n = now();
     let scope_count: usize = doc.applications.iter().map(|a| a.scopes.len()).sum();
@@ -3262,12 +3253,12 @@ fn page_user(v: &View, doc: &AccessFile, access: &Access, key: &str) -> (u16, Ma
 }
 
 /// The `user_groups` section of [`page_users`]: each entry, who it references, and
-/// everything that names it. Members are people now: an email where a roster row still
+/// everything that names it. Members are people: an email where a roster row still
 /// resolves it, the raw uuid where none does, and flagged when it matches nobody at all.
 ///
 /// A section rather than a page of its own: a group only ever means something in terms of
-/// the roster below it, and the nav bar had a tab for a list that is usually three lines
-/// long.
+/// the roster below it, and a list that is usually three lines long does not earn a tab in
+/// the nav bar.
 fn groups_section(v: &View, doc: &AccessFile) -> Markup {
     let l = Listing::read("g", v.query);
     // A group is searchable by its own name and by who is in it, because "which group is
@@ -3448,7 +3439,7 @@ fn page_app(v: &View, doc: &AccessFile, name: &str) -> (u16, Markup) {
                 @if a.scopes.is_empty() {
                     span class="muted" { (v.t(K::NoScopes)) }
                 } @else {
-                    ol class="sites" {
+                    ol class="scopes" {
                         @for (i, s) in a.scopes.iter().enumerate() {
                             li { (scope_block(v, doc, &app_name, s, i, last)) }
                         }
@@ -3817,9 +3808,9 @@ fn verdict(v: &View, access: &Access, email_in: &str, url: &str) -> (bool, Marku
 // values are preserved" is: the same page function, one error string later.
 
 /// The `users` form: one email. Used both for `users · add` (the row's first identifier)
-/// and for `/users/{uuid}/emails/+add` — the two places an email is ever typed in, now that
-/// an identity carries no URL and its uuid never changes. `UserForm` gains nothing beyond
-/// this: there is nothing else left on a [`UserSpec`] a form could usefully edit.
+/// and for `/users/{uuid}/emails/+add`: the two places an email is ever typed in, since an
+/// identity carries no URL and its uuid never changes. `UserForm` gains nothing beyond
+/// this: there is nothing else on a [`UserSpec`] a form could usefully edit.
 #[derive(Default)]
 struct UserForm {
     email: String,
@@ -4086,7 +4077,7 @@ fn page_scope_form(
     }
 }
 
-/// The `user_groups` form — a name and its members, people now rather than URL patterns.
+/// The `user_groups` form: a name and its members, who are people rather than URL patterns.
 #[derive(Default)]
 struct GroupForm {
     name: String,
@@ -5875,7 +5866,7 @@ mod tests {
     const NOWHERE: &str = "11111111-1111-1111-1111-111111111111";
 
     /// A file with one of everything, so a rendering test has something to render.
-    const SAMPLE: &str = r#"{ "version": 3,
+    const SAMPLE: &str = r#"{ "version": 1,
       "applications": [
         { "name": "mpa", "base": ["https://app.x.com/mpa"],
           "scopes": [
@@ -5898,7 +5889,7 @@ mod tests {
     }"#;
 
     /// Two scopes in one application, so a reorder has somewhere to go.
-    const TWO_SCOPES: &str = r#"{ "version": 3,
+    const TWO_SCOPES: &str = r#"{ "version": 1,
       "applications": [
         { "name": "app1", "base": ["https://app.x.com"],
           "scopes": [
@@ -6508,7 +6499,8 @@ mod tests {
     #[test]
     fn every_small_control_is_a_pill_of_the_same_family() {
         // The rule the CSS states in prose: nothing at a call site decides how a pill looks,
-        // and the two controls that used to sit outside the family are in it now.
+        // and every small control is in the family, the way back and the Settings trigger
+        // included.
         let app = render("pill-app", Route::App("mpa".into()));
         assert!(
             app.contains(r#"<a class="pill" href="/apps">"#),
@@ -6524,13 +6516,13 @@ mod tests {
             app.contains(r#"<summary class="pill">"#),
             "and carry the class that rule selects: {app}"
         );
-        // The footer no longer tells anybody to reload: `bb-auth-reload.path` does it.
+        // The footer never tells anybody to reload: `bb-auth-reload.path` does it.
         assert!(!app.contains("systemctl reload"), "{app}");
     }
 
     #[test]
     fn the_page_carries_one_handler_and_no_script() {
-        // The invariant that replaced "no JavaScript": no page may *need* a script. One
+        // The invariant is not "no JavaScript": it is that no page may *need* a script. One
         // inline handler is allowed to save a click on the Settings list boxes; anything
         // else — a `<script>` tag, a second kind of handler, a `javascript:` href — would be
         // a page that stops working when scripting is off, which this GUI must never be.
@@ -6699,16 +6691,16 @@ mod tests {
     #[test]
     fn the_users_page_leads_with_the_groups_section() {
         let html = render("groups", Route::Users);
-        // The groups section is on the users page now, and it is ABOVE the roster.
+        // The groups section is on the users page, and it is ABOVE the roster.
         let g = html.find("user_groups").expect("no user_groups section");
         let u = html.rfind(">users<").expect("no users section");
         assert!(g < u, "user_groups must come before users: {html}");
         assert!(html.contains("referenced by"));
         assert!(html.contains("mpa/admin"));
-        // And it is no longer a tab of its own.
+        // And it is not a tab of its own.
         assert!(
             !html.contains("href=\"/groups\""),
-            "the nav must not offer a groups tab any more: {html}"
+            "the nav must not offer a groups tab: {html}"
         );
     }
 
@@ -6723,7 +6715,7 @@ mod tests {
             })
             .collect();
         format!(
-            r#"{{ "version": 3, "applications": [], "users": [{}] }}"#,
+            r#"{{ "version": 1, "applications": [], "users": [{}] }}"#,
             rows.join(",")
         )
     }
@@ -6808,7 +6800,7 @@ mod tests {
         // The access file is operator-owned, but it is also a text file that anything with
         // root can write, and half of it ends up in a page. maud escapes on the way in;
         // this pins that it stays that way.
-        let json = r#"{ "version": 3, "users": [
+        let json = r#"{ "version": 1, "users": [
             { "uuid": "8f14e45f-ceea-467a-9f79-3b4e5c6d7a8b",
               "emails": ["<script>alert(1)</script>@x.com"], "notes": "<b>bold</b>" } ] }"#;
         let path = scratch("xss", json);
@@ -6833,7 +6825,7 @@ mod tests {
     fn a_broken_file_renders_the_librarys_message_verbatim() {
         let path = scratch(
             "broken",
-            r#"{ "version": 3, "applications": [
+            r#"{ "version": 1, "applications": [
                 { "name": "a", "base": ["https://x.com/a"], "scopes": [
                     { "name": "s", "urls": ["https://x.com/a/*"], "access": "restricted",
                       "groups": ["@nope"] } ] } ] }"#,
@@ -7312,7 +7304,7 @@ mod tests {
             Route::GroupRm("unused".to_string()),
             &[("rev", &rev_of(&path))],
         );
-        // Back to the users page, which is where the group list lives now.
+        // Back to the users page, which is where the group list lives.
         assert_eq!(got.location(), "/users?msg=group-removed");
         let doc = bb_auth_core::read_access_file(&path).unwrap();
         assert!(!doc.user_groups.contains_key("unused"));

@@ -12,27 +12,18 @@ set -e
 
 DEST=/opt/bb-auth
 ENV_FILE="$DEST/etc/bb-auth.env"
-WEB_ENV_FILE="$DEST/etc/bb-auth-web.env"
 ACCESS_FILE="$DEST/var/lib/access.json"
 SETTINGS_FILE="$DEST/var/lib/settings.json"
 UNIT=bb-auth.service
 
-# The last value an env file gives a variable, whitespace stripped. Used for the preflight
-# and for the one-time seeding below.
-envval_of() {
-    grep -E "^[[:space:]]*$2=" "$1" 2>/dev/null | tail -1 | cut -d= -f2- | tr -d '[:space:]' || true
-}
-
-# "a, b ,c" -> "a", "b", "c": a comma-separated env value as a JSON array's contents.
-json_list() {
-    printf '%s' "$1" | tr ',' '\n' \
-        | sed 's/^[[:space:]]*//;s/[[:space:]]*$//' | grep -v '^$' \
-        | sed 's/.*/"&"/' | paste -sd, - || true
+# The last value the env file gives a variable, whitespace stripped. Used by the preflight.
+envval() {
+    grep -E "^[[:space:]]*$1=" "$ENV_FILE" 2>/dev/null | tail -1 | cut -d= -f2- | tr -d '[:space:]' || true
 }
 
 case "$1" in
 configure)
-    # --- identity: the service user, no login, no home (as scripts/deploy.sh) ---
+    # --- identity: the service user, no login, no home ---
     getent group bb-auth >/dev/null || groupadd --system bb-auth
     getent passwd bb-auth >/dev/null || useradd --system --gid bb-auth \
         --no-create-home --home-dir "$DEST" --shell /usr/sbin/nologin bb-auth
@@ -56,108 +47,43 @@ configure)
         chmod 0640 "$ENV_FILE"
     fi
 
-    # --- a half-finished rename is the one way "create it empty" is dangerous ---
-    # The file was users.json before 3.0. Renaming it is the operator's job, because it
-    # is state and no package may move state; but if only half of that job is done, the
-    # branch below writes an EMPTY access file, --check-access says yes to it (it parses,
-    # it just authorizes nobody), and the restart takes out every user on the host. That
-    # is a total lockout reported as a successful install, so refuse instead: the file
-    # next door is almost certainly the one that was meant to be read.
-    if [ ! -e "$ACCESS_FILE" ] && [ -e "$DEST/var/lib/users.json" ]; then
-        echo "bb-auth: $ACCESS_FILE does not exist, but $DEST/var/lib/users.json does." >&2
-        echo "bb-auth:          3.0.0 renamed the access file, and moving it is yours to do:" >&2
-        echo "bb-auth:            mv $DEST/var/lib/users.json $ACCESS_FILE" >&2
-        echo "bb-auth:            mv $DEST/var/lib/users.json.bak $ACCESS_FILE.bak   # if present" >&2
-        echo "bb-auth:          and set BB_AUTH_ACCESS_FILE=$ACCESS_FILE in $ENV_FILE" >&2
-        echo "bb-auth:          (and in etc/bb-auth-web.env if the GUI is installed)." >&2
-        echo "bb-auth:          Installing over this would create an EMPTY access file and" >&2
-        echo "bb-auth:          lock everybody out. NOT restarted; the running process is" >&2
-        echo "bb-auth:          still serving." >&2
-        exit 1
-    fi
-
     # --- the access file, once, and EMPTY ---
     # Deliberately not a copy of share/access.example.json, which grants a whole area to
     # you@example.com. A file with no applications authorizes nobody, which is the only
     # safe thing an unattended install can write, and it parses.
     #
-    # The "version" is not optional: a file without one is a fatal load error, which is
-    # what makes an older file impossible to mistake for this one.
+    # The "version" is not optional: the parser is fatal on a file that does not declare
+    # one, so a file in any other shape cannot be mistaken for an access file.
     if [ ! -e "$ACCESS_FILE" ]; then
-        printf '{\n  "version": 3,\n  "applications": [],\n  "users": []\n}\n' > "$ACCESS_FILE"
+        printf '{\n  "version": 1,\n  "applications": [],\n  "users": []\n}\n' > "$ACCESS_FILE"
         chown root:bb-auth "$ACCESS_FILE"
         chmod 0640 "$ACCESS_FILE"
     fi
 
-    # --- the settings file, once, seeded from the env vars it replaces ---
-    # Six settings moved out of the environment in 3.1, for one mechanical reason: a process
-    # cannot re-read its own environment, so nothing in an env file can ever be reloaded
-    # without a restart. Seeding is done HERE, from whatever those variables still say, so
-    # that an upgrade changes no behaviour at all; the operator then deletes the lines, which
-    # the check below refuses to proceed without.
+    # --- the settings file, once, and at its defaults ---
+    # It is a file rather than more env vars for one mechanical reason: a process cannot
+    # re-read its own environment, so nothing in an env file can ever take effect without a
+    # restart. `{ "version": 1 }` is a complete file: every setting is then its default, and
+    # the defaults are the ones the gate would have had anyway. Written minimal on purpose,
+    # so an install states nothing it was not asked to state.
     #
-    # `web.admins` is seeded from the GUI's env file if there is one, because this package
-    # owns the file both services read and the GUI's postinst runs after this one.
+    # `web.admins` is left empty here, and the GUI's own postinst is what says so out loud:
+    # this package is the one that creates the file both services read, but naming an
+    # administrator is not a decision an unattended install may take.
     if [ ! -e "$SETTINGS_FILE" ]; then
-        S_CLAIMS="$(json_list "$(envval_of "$ENV_FILE" BB_AUTH_PROFILE_CLAIMS)")"
-        S_ATTRS="$(json_list "$(envval_of "$ENV_FILE" BB_AUTH_IDENTITY_ATTRS)")"
-        [ -n "$S_ATTRS" ] || S_ATTRS='"email"'
-        S_PROVIDERS="$(json_list "$(envval_of "$ENV_FILE" BB_AUTH_SOCIAL_PROVIDERS)")"
-        S_TTL="$(envval_of "$ENV_FILE" BB_AUTH_SESSION_TTL_SECS)"
-        case "$S_TTL" in ''|*[!0-9]*) S_TTL=2592000 ;; esac
-        S_SOCIAL=false
-        case "$(envval_of "$ENV_FILE" BB_AUTH_ALLOW_UNVERIFIED_SOCIAL | tr 'A-Z' 'a-z')" in
-            1|true|yes|on) S_SOCIAL=true ;;
-        esac
-        S_ADMINS="$(json_list "$(envval_of "$WEB_ENV_FILE" BB_AUTH_WEB_ADMINS)")"
-        cat > "$SETTINGS_FILE" <<EOF
-{
-  "version": 1,
-  "gate": {
-    "profile_claims": [$S_CLAIMS],
-    "identity_attrs": [$S_ATTRS],
-    "allow_unverified_social": $S_SOCIAL,
-    "social_providers": [$S_PROVIDERS],
-    "session_ttl_secs": $S_TTL
-  },
-  "web": {
-    "admins": [$S_ADMINS]
-  }
-}
-EOF
+        printf '{\n  "version": 1\n}\n' > "$SETTINGS_FILE"
         chown root:bb-auth "$SETTINGS_FILE"
         chmod 0640 "$SETTINGS_FILE"
-        echo "bb-auth: created $SETTINGS_FILE from the settings that were in $ENV_FILE."
+        echo "bb-auth: created $SETTINGS_FILE (every setting at its default)."
     fi
 
-    # --- a setting read from nowhere is worse than no setting ---
-    # The variables above are not read any more, and the binary is fatal on any of them, for
-    # the reason it is fatal on a misspelled scope field: a value an operator can see in a
-    # file and the service silently ignores is the failure mode this deployment does not
-    # accept. The seeding above has already happened, so deleting the lines loses nothing.
-    MOVED=""
-    for v in BB_AUTH_PROFILE_CLAIMS BB_AUTH_IDENTITY_ATTRS BB_AUTH_ALLOW_UNVERIFIED_SOCIAL \
-             BB_AUTH_SOCIAL_PROVIDERS BB_AUTH_SESSION_TTL_SECS; do
-        if grep -qE "^[[:space:]]*$v=" "$ENV_FILE" 2>/dev/null; then
-            MOVED="$MOVED $v"
-        fi
-    done
-    if [ -n "$MOVED" ]; then
-        echo "bb-auth: these variables moved into $SETTINGS_FILE and are no longer read:" >&2
-        for v in $MOVED; do echo "bb-auth:            $v" >&2; done
-        echo "bb-auth:          Their values are already in that file. Delete the lines from" >&2
-        echo "bb-auth:          $ENV_FILE, then: dpkg --configure bb-auth" >&2
-        echo "bb-auth:          NOT restarted; the running process is still serving." >&2
-        exit 1
-    fi
-
-    # --- a scripts/deploy.sh install shadows this one ---
-    # That installer writes /etc/systemd/system, the ADMIN directory, whose copy wins
-    # over the packaged unit in /usr/lib/systemd/system. dpkg may not remove it, so say
-    # so out loud: otherwise the unit this package ships is simply never read.
+    # --- an admin copy of the unit shadows the packaged one ---
+    # /etc/systemd/system is the ADMIN's directory and a copy there wins over the packaged
+    # unit in /usr/lib/systemd/system. dpkg may not remove it, so say so out loud:
+    # otherwise the unit this package ships is simply never read.
     if [ -e "/etc/systemd/system/$UNIT" ]; then
         echo "bb-auth: WARNING /etc/systemd/system/$UNIT exists and overrides the packaged unit." >&2
-        echo "bb-auth:          It is from scripts/deploy.sh. Remove it, then: systemctl daemon-reload" >&2
+        echo "bb-auth:          Remove it, then: systemctl daemon-reload" >&2
     fi
 
     # --- preflight: validate, never fix ---
@@ -165,9 +91,6 @@ EOF
     # var, or an access file the parser rejects, is a fatal startup, and under
     # Restart=on-failure that is a boot loop. Failing HERE, before the restart below,
     # leaves the already-running process serving on the inode it still holds.
-    envval() {
-        envval_of "$ENV_FILE" "$1"
-    }
     FAIL=0
     for req in BB_AUTH_HMAC_KEY BB_AUTH_COGNITO_ISSUER BB_AUTH_CLIENT_ID \
                BB_AUTH_AUTHORIZED_HOSTS BB_AUTH_LOGIN_URL BB_AUTH_ACCESS_FILE; do

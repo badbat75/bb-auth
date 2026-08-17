@@ -8,23 +8,16 @@
 # verify.sh, and optionally access.json. Nothing else is read from it, and nothing is
 # read from the network.
 #
-# THIS SCRIPT NO LONGER INSTALLS ANYTHING ITSELF. Everything that used to be here (the
-# binaries, the units, the service users, the env file, the HMAC key, the access file,
-# and the order they must happen in) now lives in the packages: see
-# [package.metadata.deb] in Cargo.toml and deploy/debian/*/postinst. What is left here
-# is the three things a package may not do:
+# THIS SCRIPT INSTALLS NOTHING ITSELF. The binaries, the units, the service users, the
+# env file, the HMAC key, the access file, and the order they must happen in are all the
+# packages' business: see [package.metadata.deb] in Cargo.toml and
+# deploy/debian/*/postinst. What is left here is the two things a package may not do:
 #
 #   1. dpkg -i, in ONE transaction, so the strict `bb-auth (= <version>)` dependency of
 #      the two admin packages is satisfied by the gate in the same run. `dpkg -i` and
 #      not `apt install`, deliberately: apt declines to reinstall a version equal to the
-#      one already installed, so a rebuilt 3.0.0-1 would silently not deploy.
-#   2. Move aside the units an older version of this script wrote to
-#      /etc/systemd/system. That is the ADMIN's directory and it OVERRIDES the packaged
-#      units in /usr/lib/systemd/system, so left in place they win forever and the unit
-#      just installed is never read. A package must not touch that directory; a deploy
-#      must. Moved, not deleted: systemd ignores the renamed file and the original is
-#      one `mv` away.
-#   3. Install a staged access.json over the live one. The packages create that file
+#      one already installed, so a rebuilt 1.0.0-1 would silently not deploy.
+#   2. Install a staged access.json over the live one. The packages create that file
 #      once, empty, and never touch it again, which is what makes a redeploy safe; so
 #      REPLACING it is necessarily a separate, explicit act. It is validated with the
 #      freshly-installed binary before anything is overwritten, and written back with
@@ -36,7 +29,6 @@
 # file it does not ship.
 #
 # Install dir is overridable:  DEST=/opt/bb-auth (default).
-# Keep the legacy units:       BB_AUTH_KEEP_LEGACY_UNITS=1
 set -euo pipefail
 
 SRC_DIR="${1:?usage: sudo bash deploy.sh <staging_dir>}"
@@ -82,46 +74,7 @@ if ! DEBIAN_FRONTEND=noninteractive dpkg -i "${DEBS[@]}"; then
   exit 1
 fi
 
-# --- 2. units from an older deploy.sh -----------------------------------------
-if [ "${BB_AUTH_KEEP_LEGACY_UNITS:-0}" != "1" ]; then
-  # Each entry is "unit:was-active:was-enabled", captured BEFORE the move because the
-  # move is what makes both unreadable. `enabled` here means literally that word:
-  # bb-auth-reload.service is `static` (it has no [Install] section, the .path unit
-  # starts it), and reenabling a static unit is an error, not a no-op.
-  MOVED=""
-  for u in bb-auth.service bb-auth-web.service bb-auth-reload.path bb-auth-reload.service; do
-    if [ -e "/etc/systemd/system/$u" ] && [ -e "/usr/lib/systemd/system/$u" ]; then
-      ACT=no; systemctl is-active --quiet "$u" && ACT=yes
-      ENA="$(systemctl is-enabled "$u" 2>/dev/null || true)"
-      mv "/etc/systemd/system/$u" "/etc/systemd/system/$u.deploy-sh-legacy-$TS"
-      echo "[deploy] moved aside /etc/systemd/system/$u (it overrode the packaged unit)"
-      MOVED="$MOVED $u:$ACT:$ENA"
-    fi
-  done
-  if [ -n "$MOVED" ]; then
-    systemctl daemon-reload
-    for entry in $MOVED; do
-      u="${entry%%:*}"; rest="${entry#*:}"; ACT="${rest%%:*}"; ENA="${rest##*:}"
-      # The enablement symlink in multi-user.target.wants pointed at the file just
-      # moved, so it now dangles. systemd would still pull the unit in by NAME, but
-      # `systemctl is-enabled` reports it broken, and this script and verify.sh both ask
-      # that question. `reenable` rewrites the link onto the packaged unit.
-      if [ "$ENA" = "enabled" ]; then
-        systemctl reenable "$u" >/dev/null 2>&1 || echo "[deploy] WARNING: could not reenable $u"
-      fi
-      # Restart only what was already running. On a first install the gate is
-      # deliberately not started (its env is still a template), and starting it here
-      # would turn an unconfigured host into the Restart=on-failure loop the postinst
-      # went out of its way to avoid.
-      if [ "$ACT" = "yes" ]; then
-        systemctl restart "$u"
-        echo "[deploy] restarted $u on the packaged unit"
-      fi
-    done
-  fi
-fi
-
-# --- 3. the access file, only if one was staged --------------------------------
+# --- 2. the access file, only if one was staged --------------------------------
 # Absent, the live file is left exactly as it is, so a binary-only redeploy can never
 # lock anyone out. Staged, it REPLACES the live one, after the gate's own parser has
 # vouched for it: a rejected file is a fatal startup, and under Restart=on-failure that
@@ -159,7 +112,7 @@ else
   echo "[deploy] no access.json staged, keeping the live $LIVE_ACCESS"
 fi
 
-# --- 4. verify -----------------------------------------------------------------
+# --- 3. verify -----------------------------------------------------------------
 # A first install leaves the gate installed and NOT enabled, because its env file is
 # still the template: the postinst enables and starts only once its preflight passes.
 # Verifying then would fail on "bb-auth active", which would be a red deploy for a host

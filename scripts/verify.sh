@@ -3,9 +3,9 @@
 #
 #   sudo bash verify.sh
 #
-# It asks the questions scripts/deploy.sh used to ask itself at the end of an install,
-# and it asks them of whatever is on the host right now: the .deb path (scripts/deploy.ps1)
-# and a hand-run `apt install` land in the same place, so this is the one check both
+# It asks whether the host is in the state an install should have left it in, of whatever
+# is on the host right now: the .deb path (scripts/deploy.ps1) and a hand-run
+# `apt install` land in the same place, so this is the one check both
 # share. It reads nothing but the host, changes nothing, and exits non-zero if any
 # check fails, so a CI or an orchestrator caller can detect it.
 #
@@ -54,13 +54,12 @@ if command -v dpkg-query >/dev/null 2>&1; then
     esac
   done
 else
-  note "no dpkg on this host (installed by scripts/deploy.sh, not by package)"
+  note "no dpkg on this host, so there is no package state to report"
 fi
 
 # The units a package ships live in /usr/lib/systemd/system. A copy under
-# /etc/systemd/system is the ADMIN's and overrides it, which is exactly what an older
-# scripts/deploy.sh install leaves behind: the packaged unit is then never read, and the
-# next change to it would silently not apply.
+# /etc/systemd/system is the ADMIN's and overrides it: the packaged unit is then never
+# read, and the next change to it would silently not apply.
 echo "[verify] --- units ---"
 SHADOWED=0
 for u in bb-auth.service bb-auth-web.service bb-auth-reload.path bb-auth-reload.service; do
@@ -69,7 +68,7 @@ for u in bb-auth.service bb-auth-web.service bb-auth-reload.path bb-auth-reload.
     SHADOWED=1
   fi
 done
-[ "$SHADOWED" = 0 ] && echo "  PASS  no legacy unit shadows a packaged one"
+[ "$SHADOWED" = 0 ] && echo "  PASS  no admin copy shadows a packaged unit"
 
 echo "[verify] --- the gate ---"
 chk "bb-auth active" "active" "$(systemctl is-active bb-auth 2>/dev/null || true)"
@@ -117,16 +116,6 @@ else
   bad "$SETTINGS_FILE does not exist"
 fi
 
-# The six settings that moved out of the environment in 3.1. Any of them still in an env
-# file is a fatal startup, on purpose: a value an operator can see and the service ignores
-# is the failure mode this deployment does not accept.
-for v in BB_AUTH_PROFILE_CLAIMS BB_AUTH_IDENTITY_ATTRS BB_AUTH_SESSION_TTL_SECS \
-         BB_AUTH_ALLOW_UNVERIFIED_SOCIAL BB_AUTH_SOCIAL_PROVIDERS; do
-  if grep -qE "^[[:space:]]*$v=" "$ENV_FILE" 2>/dev/null; then
-    bad "$v is still set in $ENV_FILE: it moved into $SETTINGS_FILE and is now fatal"
-  fi
-done
-
 SINCE="$(unit_active_since bb-auth)"
 if [ -n "$SINCE" ] && journalctl -u bb-auth --since "$SINCE" --no-pager 2>/dev/null | grep -q 'listening on'; then
   echo "  PASS  journal: clean startup (listening line since the unit came up)"
@@ -148,12 +137,9 @@ if [ -x "$DEST/bin/bb-auth-web" ]; then
   chk "GET bb-auth-web / (no identity header) == 401" "401" \
       "$(curl -s -o /dev/null -w '%{http_code}' --max-time 3 "http://$WEB_LISTEN/" || true)"
 
-  # The allowlist lives in the settings file since 3.1. Emptiness is what must never mean
+  # The allowlist lives in the settings file. Emptiness is what must never mean
   # "everyone", and the binary refuses to serve without it, so this is the check that keeps
   # that refusal from being discovered by the first visitor.
-  if grep -qE '^[[:space:]]*BB_AUTH_WEB_ADMINS=' "$WEB_ENV_FILE" 2>/dev/null; then
-    bad "BB_AUTH_WEB_ADMINS is still set in $WEB_ENV_FILE: it moved into $SETTINGS_FILE"
-  fi
   if tr -d '[:space:]' < "$SETTINGS_FILE" 2>/dev/null | grep -q '"admins":\["'; then
     echo "  PASS  the settings file names at least one administrator"
   else
