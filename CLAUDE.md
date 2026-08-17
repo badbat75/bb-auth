@@ -9,8 +9,9 @@ browser-side login page already obtained, validates it (RS256 via JWKS), and iss
 HMAC-signed session cookie that nginx enforces on every request via `auth_request`. It also
 accepts per-request bearer credentials — a Cognito `id_token` or a static `bbk_` API key.
 
-The access list is a JSON **access file** (`BB_AUTH_USERS_FILE` — the var keeps its
-pre-3.0 name), and since **3.0 it is application-centric**: an `applications` entry owns a
+The access list is a JSON **access file** (`BB_AUTH_ACCESS_FILE`, default
+`access.json`; both said *users* until 3.0 left the roster as one section of four and the
+name describing the smallest of them), and since **3.0 it is application-centric**: an `applications` entry owns a
 literal URL area and a list of named **scopes**; a scope owns URL patterns, one access
 policy (`anonymous`, `authenticated`, `restricted`) and an `excluded` list that keeps named
 people out of it ahead of that policy; a user is a **uuid** plus the emails
@@ -100,22 +101,22 @@ cargo test session_roundtrip_bb4      # a single test by name
 # Validate an access file with the real parser (no env, no network). Same check the
 # deploy runs before it restarts the service. Prints each application's area, and the
 # scopes that grant without listing anybody (anonymous, authenticated).
-cargo run --bin bb-auth -- --check-users .\deploy\users.example.json
+cargo run --bin bb-auth -- --check-access .\deploy\access.example.json
 
 # Administer an access file (CRUD; every write is validated with the gate's own parser).
 # `can` answers with the gate's own decision function — exit 0 = the request would pass.
 cargo run --bin bb-auth-adm -- --help
-cargo run --bin bb-auth-adm -- -f .\deploy\users.json show
-cargo run --bin bb-auth-adm -- -f .\deploy\users.json app add mpa --base 'https://app.x.com/mpa'
-cargo run --bin bb-auth-adm -- -f .\deploy\users.json scope add mpa admin --url 'https://app.x.com/mpa/admin/*' --access restricted --user bob@x.com
-cargo run --bin bb-auth-adm -- -f .\deploy\users.json user add bob@x.com
-cargo run --bin bb-auth-adm -- -f .\deploy\users.json key add bob@x.com --id laptop --duration 365d
-cargo run --bin bb-auth-adm -- -f .\deploy\users.json can bob@x.com https://app.x.com/mpa/admin/panel
+cargo run --bin bb-auth-adm -- -f .\deploy\access.json show
+cargo run --bin bb-auth-adm -- -f .\deploy\access.json app add mpa --base 'https://app.x.com/mpa'
+cargo run --bin bb-auth-adm -- -f .\deploy\access.json scope add mpa admin --url 'https://app.x.com/mpa/admin/*' --access restricted --user bob@x.com
+cargo run --bin bb-auth-adm -- -f .\deploy\access.json user add bob@x.com
+cargo run --bin bb-auth-adm -- -f .\deploy\access.json key add bob@x.com --id laptop --duration 365d
+cargo run --bin bb-auth-adm -- -f .\deploy\access.json can bob@x.com https://app.x.com/mpa/admin/panel
 
 # Convert an older access file (one with no "version"). It replays every (identity, URL)
 # pair the old file speaks
 # about through both rule sets, and refuses to write if any answer changed.
-cargo run --bin bb-auth-adm -- migrate -f .\old-users.json -o .\deploy\users.json
+cargo run --bin bb-auth-adm -- migrate -f .\old-access.json -o .\deploy\access.json
 
 # Browser E2E suite for bb-auth-web (Node + system Edge/Chrome; self-contained — builds,
 # starts and kills its own server on a temp copy of the fixture; see e2e/README.md)
@@ -141,7 +142,7 @@ bash scripts/package.sh               # arm64; --arch amd64, --no-build, --only,
 # Building is no longer opt-in; -NoBuild repackages the current dist/ instead.
 ./scripts/deploy.ps1 user@host
 ./scripts/deploy.ps1 user@host -Packages bb-auth                # gate only, no admin tools
-./scripts/deploy.ps1 user@host -UsersFile .\deploy\users.json   # also replace the access file
+./scripts/deploy.ps1 user@host -AccessFile .\deploy\access.json   # also replace the access file
 
 # Health-check a host without deploying to it (also run at the end of every deploy)
 ssh user@host 'sudo bash -s' < ./scripts/verify.sh
@@ -188,7 +189,7 @@ changes. `node e2e/shots.js` takes a scene-name filter for the same reason: the 
   unskippable and is the only door: `prepare` compiles, `commit` writes what it compiled,
   and `write_atomically` is private to the library. A rejected access file is a fatal
   startup, and under `Restart=on-failure` that is a boot loop; this tool and
-  `--check-users` are the two places that can catch it in time. The write is atomic
+  `--check-access` are the two places that can catch it in time. The write is atomic
   (temp + rename) and **preserves mode and owner**: the live file is `root:bb-auth 0640`
   — `bb-auth-web:bb-auth 0640` once the GUI is installed — and a rewrite that left it
   `root:root` would lock the service out of its own access list. The chown failing is
@@ -229,7 +230,7 @@ changes. `node e2e/shots.js` takes a scene-name filter for the same reason: the 
   **`@group` reference** (an unknown one, with the message naming the referrer; a bad group name; a
   group that references another group, since groups are flat and there is no cycle to detect; a
   malformed member in a group **nothing references**, because a group that only breaks when someone
-  first uses it is a trap `--check-users` never saw). Warn and skip: a bad `key_hash`/`duration`, an
+  first uses it is a trap `--check-access` never saw). Warn and skip: a bad `key_hash`/`duration`, an
   identifier that is not `header_safe_email`, and a **dangling** reference (a well-formed uuid that
   matches no roster row), which fails closed and which both editors lint: making it fatal would mean
   removing a user could brick the gate on its next reload. Groups are pure abbreviation and expand
@@ -237,7 +238,7 @@ changes. `node e2e/shots.js` takes a scene-name filter for the same reason: the 
   keep the expansion there. `deny_unknown_fields` on `AppSpec` and `ScopeSpec` is the same reflex
   aimed forward: the day `access` grows a companion restriction, a typo in it must not be silently
   dropped and leave the field it was meant to narrow standing alone, which fails *open*.
-  `bb-auth --check-users <file>` runs this same parser and exits 0/1, and `scripts/deploy.sh` calls
+  `bb-auth --check-access <file>` runs this same parser and exits 0/1, and `scripts/deploy.sh` calls
   it on the file about to go live and aborts before restarting, so a rejected file can never become
   a `Restart=on-failure` boot loop.
 - **Two levels of resolution, and they answer differently on purpose.** Applications **partition**
@@ -257,7 +258,7 @@ changes. `node e2e/shots.js` takes a scene-name filter for the same reason: the 
 - **A URL no application covers is reachable by nobody.** With no per-user URLs left, this is the
   only fail-closed reading, and it is a change of operator posture worth saying out loud: a gated
   location outside every application is a `401` for everyone, including the person who wrote the
-  file. `--check-users` prints each application's area so it can be compared with what nginx
+  file. `--check-access` prints each application's area so it can be compared with what nginx
   actually gates.
 - **One veto, ahead of every grant, on every credential.** `denied` outranks everything
   (`decide`, `decide_api_key`, and the gate's `/auth/session`), and it holds two kinds of entry: a
@@ -296,7 +297,7 @@ changes. `node e2e/shots.js` takes a scene-name filter for the same reason: the 
   removes. Without both halves, a deleted user who re-registers on Cognito would walk back in
   through a dangling reference: the exact hazard, pointing the other way.
 - **`anonymous` and `authenticated` grant without listing anybody**, which makes them the two
-  things an operator most often did not mean to leave open, and why `--check-users` and the startup
+  things an operator most often did not mean to leave open, and why `--check-access` and the startup
   banner print them by name. `anonymous` needs no credential at all and the `204` names nobody.
   `authenticated` takes any identity Cognito vouches for, enrolled or not; since self-signup is open
   that means anyone who can register, which is the right grant for an onboarding area and the wrong
@@ -441,8 +442,8 @@ changes. `node e2e/shots.js` takes a scene-name filter for the same reason: the 
   `login_url` pass `compile_login_url` at load (printable ASCII, absolute https, no `@`, no `\`) —
   that is what makes emitting them into a header, a `Location:` and a page safe with no per-use
   check. It is deliberately **not** checked against `BB_AUTH_AUTHORIZED_HOSTS`: `read_access` reads
-  no env, which is what lets `--check-users` run with no config, and moving the check to startup
-  would turn a typo into a boot loop that `--check-users` never saw.
+  no env, which is what lets `--check-access` run with no config, and moving the check to startup
+  would turn a typo into a boot loop that `--check-access` never saw.
 - **`safe_rd` guards the post-login redirect** against open-redirect + response-splitting. **Every**
   candidate — relative, absolute, or the no-`rd` default — goes through the same `rd_url_allowed`
   gate, so a spoofed caller origin still can't escape. Rejected ⇒ fall back to `BB_AUTH_LOGIN_URL`.
@@ -459,7 +460,7 @@ changes. `node e2e/shots.js` takes a scene-name filter for the same reason: the 
   secret is `BB_AUTH_HMAC_KEY` (≥32 bytes). Full reference: [deploy/bb-auth.env.example](deploy/bb-auth.env.example)
   and `docs/ARCHITECTURE.md` §8.
 - **Target layout is a tree**: `/opt/bb-auth/{bin/bb-auth, bin/bb-auth-adm, bin/bb-auth-web,
-  etc/bb-auth.env, etc/bb-auth-web.env, share/*.example, var/lib/users.json}`, units at
+  etc/bb-auth.env, etc/bb-auth-web.env, share/*.example, var/lib/access.json}`, units at
   `/usr/lib/systemd/system/{bb-auth.service, bb-auth-web.service, bb-auth-reload.{path,service}}`
   (where a **package** must put them; `/etc/systemd/system` is the admin's, and a copy there
   from a pre-package install *overrides* it, which is what `deploy.sh` moves aside).
@@ -484,29 +485,47 @@ changes. `node e2e/shots.js` takes a scene-name filter for the same reason: the 
   bb-auth-adm` keeps working untouched and leaves the file `bb-auth-web:bb-auth` too — the two
   editors go on sharing one file, which is what the GUI's `rev` check exists for.
 - **`bb-auth-reload.path` is what makes an edit live**, from either editor: it watches
-  `users.json` and runs `systemctl reload bb-auth`, so neither the GUI (unprivileged, and not
+  `access.json` and runs `systemctl reload bb-auth`, so neither the GUI (unprivileged, and not
   the gate) nor the CLI operator needs the privilege to signal the service. `PathChanged=`, not
   `PathModified=`: both editors end with a `rename(2)`, seen as `IN_MOVED_TO` on the watched
   directory, and `IN_MODIFY` would only add a reload on a half-written file. It ships with the
   GUI, so a CLI-only host still reloads by hand; a doubled reload costs nothing.
-- **Upgrading to 3.0 is a file conversion, and the order is what keeps it lockout-free.** The new
-  gate *refuses* the older access file (fatal, so a boot loop under `Restart=on-failure`), and the
-  old gate reading a 3.0 one would see an empty table (a silent, total lockout). Neither is
-  survivable on its own, but the reload being **fail-soft** is what makes one order work:
+- **The access file's name is a config contract, so renaming it is the operator's job and the
+  package's business is only to refuse a half-done one.** 3.0 renamed `users.json` to
+  `access.json`, `BB_AUTH_USERS_FILE` to `BB_AUTH_ACCESS_FILE` and `--check-users` to
+  `--check-access`, so that every name says the word the code has always used. Both halves are
+  **state a package may not touch**: the file is the only current copy of the access list, and the
+  env file is operator-owned precisely so a deploy can never rewrite it. Hence the order (rename
+  the file and the `.bak`, edit both env files, *then* `dpkg -i`) and hence the one guard that
+  matters, in the gate's `postinst`: `access.json` absent with `users.json` beside it is a **hard
+  abort before the restart**, because the "create it empty, once" branch would otherwise write a
+  file that authorizes nobody, `--check-access` would approve it (it parses), and the restart would
+  be a total lockout reported as a successful install. A missing `BB_AUTH_ACCESS_FILE` is caught by
+  the existing required-var preflight, which is why only the file needs a new check. Between the
+  rename and the install the **gate keeps serving** (it holds its table in memory, and the reload
+  the path unit fires cannot find the old name, so it fails soft); the **GUI** 500s for that window,
+  because it re-reads the file per request. No `BB_AUTH_USERS_FILE` fallback: the repo carries no
+  compatibility arms, for the same reason there is exactly one accepted cookie version.
+- **Upgrading a *pre-3.0* host is also a file conversion, and the order is what keeps it
+  lockout-free.** The new gate *refuses* the older access file (fatal, so a boot loop under
+  `Restart=on-failure`), and the old gate reading a 3.0 one would see an empty table (a silent,
+  total lockout). Neither is survivable on its own, but the reload being **fail-soft** is what
+  makes one order work:
   1. put the new `bb-auth-adm` on the host (or convert a copy of the file elsewhere);
-  2. `bb-auth-adm migrate -f users.json -o users.json.v3` and move it into place. The still-running
+  2. `bb-auth-adm migrate -f users.json -o access.json` and move it into place under the **new**
+     name, removing the old one. The still-running
      old gate cannot read it, so the `bb-auth-reload.path` write triggers a reload that **fails
      and keeps the table already in memory**: the service goes on serving, unchanged;
-  3. `dpkg -i` the three packages. The restart is the first moment the new file is read, and it is
-     read by the binary that understands it.
+  3. rename the variable in the env file, then `dpkg -i` the three packages. The restart is the
+     first moment the new file is read, and it is read by the binary that understands it.
 
   Do not reverse steps 2 and 3, and do not restart the gate between them. `migrate` refuses to write
   unless every (identity, URL) pair the old file granted still resolves the same way, so what it
   produces is safe to install; it is not necessarily *tidy*, and renaming the applications it
   invented is a separate, unhurried edit.
-- **The live `users.json` is the copy that is current** — it is edited on the host (`sudo
+- **The live `access.json` is the copy that is current** — it is edited on the host (`sudo
   bb-auth-adm …; systemctl reload bb-auth`) and a repo copy drifts from it within a week. So
-  a redeploy preserves it and `deploy.ps1 -UsersFile` **replaces** it wholesale: never stage a
+  a redeploy preserves it and `deploy.ps1 -AccessFile` **replaces** it wholesale: never stage a
   stale file. `bb-auth-adm` is installed to the host precisely so the edit can happen where the
   current file is. It is its own package and optional, and must stay that way: the gate never
   calls it.
@@ -514,21 +533,21 @@ changes. `node e2e/shots.js` takes a scene-name filter for the same reason: the 
   old file-copying installer did (the binaries, the units, the service users, the env file, the
   HMAC key, the empty access file, and the order they must happen in) is now
   `deploy/debian/*/postinst`, and it is **lockout-safe by the same argument, made stronger**:
-  no state is packaged, so dpkg *cannot* clobber the HMAC key or the live `users.json`, because
+  no state is packaged, so dpkg *cannot* clobber the HMAC key or the live `access.json`, because
   it cannot clobber a file it does not ship. That is also why they are **not** `conf-files`: a
   prompt one `--force-confnew` would lose is not the same guarantee. The env file stays
   operator-owned (created once from `share/*.example`, then never edited), so the install
-  *validates* config rather than fixing it: a missing required var, or a `BB_AUTH_USERS_FILE`
+  *validates* config rather than fixing it: a missing required var, or a `BB_AUTH_ACCESS_FILE`
   that does not name the file this install creates, fails the `postinst` **before** the restart
   and dpkg reports it. Both matter: a fatal startup under `Restart=on-failure` is a boot loop,
-  and a mismatched path means `--check-users` vouched for a file nothing loads. A redeploy must
+  and a mismatched path means `--check-access` vouched for a file nothing loads. A redeploy must
   never log anyone out *by accident*, and the one sanctioned exception is a deliberate
   cookie-format bump, which belongs in the release's upgrade note.
 - **`scripts/deploy.sh` is what a package may not do**, and nothing else: `dpkg -i` in one
   transaction (not `apt install`, which declines to reinstall an equal version, so a rebuilt
   `3.0.0-1` would silently not deploy); moving aside a unit an older install left in
   `/etc/systemd/system`, which overrides the packaged one forever; installing a staged
-  `users.json` after the gate's own parser has vouched for it, with the owner and mode the live
+  `access.json` after the gate's own parser has vouched for it, with the owner and mode the live
   file already had; and running `scripts/verify.sh`. `deploy.ps1` builds the packages
   (`package.sh` first, always), ships them with those two scripts, and runs `deploy.sh` as root
   there. Keep the host-side logic in those files rather than in a string quoted through

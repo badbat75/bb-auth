@@ -177,9 +177,9 @@ pub fn compile_pattern(raw: &str) -> Result<UrlPattern, String> {
 /// `rd` lands.
 ///
 /// It is **not** checked against `BB_AUTH_AUTHORIZED_HOSTS`, and cannot be: [`read_access`]
-/// reads no env, which is exactly what lets `bb-auth --check-users` validate a file with no
+/// reads no env, which is exactly what lets `bb-auth --check-access` validate a file with no
 /// config and no network. Moving the check to startup would turn an operator's typo into a
-/// fatal boot under `Restart=on-failure` that `--check-users` never saw coming.
+/// fatal boot under `Restart=on-failure` that `--check-access` never saw coming.
 pub fn compile_login_url(raw: &str) -> Result<String, String> {
     let e = |m: &str| Err(format!("login_url '{raw}': {m}"));
     let u = raw.trim();
@@ -854,7 +854,7 @@ pub fn decide_api_key<'a>(access: &'a Access, key_hash: &str, now: u64) -> KeyDe
 /// `denied` vetoes people, `users` is the roster of identities. Access is enumerated,
 /// never assumed: a URL no application covers is reachable by nobody, and a `restricted`
 /// scope that lists nobody grants to nobody. Validate a file before shipping it with
-/// `bb-auth --check-users <file>`, or `bb-auth-adm check`: the same parser,
+/// `bb-auth --check-access <file>`, or `bb-auth-adm check`: the same parser,
 /// [`read_access`].
 ///
 /// This type is also the **document model** `bb-auth-adm` edits, hence [`Serialize`] and
@@ -863,8 +863,14 @@ pub fn decide_api_key<'a>(access: &'a Access, key_hash: &str, now: u64) -> KeyDe
 /// document into the runtime table, so a tool that writes one can ask, before saving,
 /// exactly what the gate will make of it.
 ///
-/// The env var (`BB_AUTH_USERS_FILE`) and the CLI flag keep their pre-`sites` names: both
-/// are contracts with an operator-owned env file that a deploy never rewrites.
+/// The env var (`BB_AUTH_ACCESS_FILE`), the CLI flag (`--check-access`) and the default
+/// file name (`access.json`) all say *access*, which is the word this crate uses for the
+/// thing everywhere else: [`AccessFile`], [`compile_access`], [`read_access`],
+/// [`open_access_file`]. They said *users* until 3.0 made the file application-centric,
+/// at which point the roster was one section of four and the name described the smallest
+/// of them. Renaming it is a **breaking config change**, not a cosmetic one: the env file
+/// is operator-owned and a deploy never rewrites it, so the variable has to be renamed on
+/// each host before the package that expects it is installed.
 #[derive(Deserialize, Serialize, Default)]
 pub struct AccessFile {
     /// The format this file is written in. **Required**, and the only accepted value is
@@ -889,7 +895,7 @@ pub struct AccessFile {
     /// carried: a name is `[A-Za-z0-9_-]+` matched exactly, a group may not reference
     /// another group, an unknown reference is fatal, and every group is validated even
     /// when nothing references it (a group that only breaks the day someone first uses it
-    /// is a trap `--check-users` never saw). Duplicate JSON keys are serde's last-wins, as
+    /// is a trap `--check-access` never saw). Duplicate JSON keys are serde's last-wins, as
     /// everywhere else in this file.
     #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
     pub user_groups: BTreeMap<String, Vec<String>>,
@@ -922,7 +928,7 @@ pub struct AccessFile {
 /// people ignore extras, where an ignored typo denies at worst. These two describe grants
 /// and restrictions on grants, so a typo in a future companion field would be dropped in
 /// silence and leave the field it was meant to restrict standing alone, failing *open*.
-/// `bb-auth --check-users` catches it instead, before the restart.
+/// `bb-auth --check-access` catches it instead, before the restart.
 #[derive(Deserialize, Serialize, Default)]
 #[serde(deny_unknown_fields)]
 pub struct AppSpec {
@@ -1267,7 +1273,7 @@ pub fn read_access_file(path: &str) -> Result<AccessFile, String> {
 
 /// Parse the access JSON at `path` into the runtime table: [`read_access_file`] then
 /// [`compile_access`]. What the gate loads at startup, re-loads on SIGHUP, and what
-/// `bb-auth --check-users` and `bb-auth-adm` validate with.
+/// `bb-auth --check-access` and `bb-auth-adm` validate with.
 pub fn read_access(path: &str) -> Result<Access, String> {
     compile_access(&read_access_file(path)?)
 }
@@ -1327,7 +1333,7 @@ fn compile_base(raw: &str) -> Result<String, String> {
 ///
 /// Unreferenced groups are compiled too, and a bad one is just as fatal: a group that only
 /// breaks the day someone first references it is a trap laid for a future edit, and the
-/// whole point of `--check-users` is that the file is checked before it is live.
+/// whole point of `--check-access` is that the file is checked before it is live.
 ///
 /// Groups are flat by construction: an entry that is itself a reference is rejected here,
 /// so a scope can splice one in with no recursion, no cycle detection and no order
@@ -1459,7 +1465,7 @@ pub const ACCESS_FILE_VERSION: u32 = 3;
 /// duplicate identity, a key restriction naming no scope. An error whose only effect is to
 /// drop one credential warns and skips it: an unusable email, a malformed `key_hash`, a
 /// bad `released`/`duration`, a reference to a user who is not there. The first kind fails
-/// closed *loudly*, before the restart, which is what `bb-auth --check-users` is for and
+/// closed *loudly*, before the restart, which is what `bb-auth --check-access` is for and
 /// what makes a SIGHUP reload keep the old table; the second fails closed quietly, because
 /// dropping one credential is exactly what an operator would want it to do.
 ///
@@ -1968,7 +1974,7 @@ pub fn render_access_file(doc: &AccessFile) -> Result<String, String> {
 /// crate so there is no other door. Nothing can slip in between the check and the write,
 /// and no tool can write an access file that was not checked — a file the gate refuses at
 /// startup is a boot loop under `Restart=on-failure`, and an editor is one of the only two
-/// places (with `bb-auth --check-users`) that can catch it in time.
+/// places (with `bb-auth --check-access`) that can catch it in time.
 pub struct AccessWrite {
     json: String,
     access: Access,
@@ -3785,7 +3791,7 @@ mod tests {
     #[test]
     fn a_group_is_validated_even_when_nothing_references_it() {
         // A group that only breaks the day someone first uses it is a trap
-        // `--check-users` never saw.
+        // `--check-access` never saw.
         let e = access_err(
             "group-unused",
             r#"{ "version": 3, "user_groups": { "unused": ["not-a-uuid"] } }"#,

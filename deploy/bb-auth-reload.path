@@ -22,7 +22,7 @@ Documentation=man:systemd.path(5)
 # One save can trigger more than one reload (the .bak copy and the temp file are both
 # IN_CREATE in the watched directory). That is harmless: a reload re-reads the same file,
 # and a reload that fails to parse keeps the live table.
-PathChanged=/opt/bb-auth/var/lib/users.json
+PathChanged=/opt/bb-auth/var/lib/access.json
 
 [Install]
 WantedBy=multi-user.target

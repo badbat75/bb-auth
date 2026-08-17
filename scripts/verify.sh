@@ -16,7 +16,7 @@ set -uo pipefail
 DEST="${DEST:-/opt/bb-auth}"
 ENV_FILE="$DEST/etc/bb-auth.env"
 WEB_ENV_FILE="$DEST/etc/bb-auth-web.env"
-USERS_FILE="$DEST/var/lib/users.json"
+ACCESS_FILE="$DEST/var/lib/access.json"
 VAR_DIR="$DEST/var/lib"
 SVC_USER=bb-auth
 WEB_USER=bb-auth-web
@@ -89,18 +89,18 @@ fi
 
 # The env must name the file the gate actually reads, or a validated file is not the
 # one being served.
-ENV_USERS="$(envval BB_AUTH_USERS_FILE)"
-chk "BB_AUTH_USERS_FILE names the installed access file" "$USERS_FILE" "$ENV_USERS"
+ENV_ACCESS="$(envval BB_AUTH_ACCESS_FILE)"
+chk "BB_AUTH_ACCESS_FILE names the installed access file" "$ACCESS_FILE" "$ENV_ACCESS"
 
-if [ -e "$USERS_FILE" ]; then
-  if OUT="$("$DEST/bin/bb-auth" --check-users "$USERS_FILE" 2>&1)"; then
+if [ -e "$ACCESS_FILE" ]; then
+  if OUT="$("$DEST/bin/bb-auth" --check-access "$ACCESS_FILE" 2>&1)"; then
     note "$OUT"
   else
     bad "access file rejected by the gate's own parser:"
     echo "$OUT" | sed 's/^/        /'
   fi
 else
-  bad "$USERS_FILE does not exist"
+  bad "$ACCESS_FILE does not exist"
 fi
 
 SINCE="$(unit_active_since bb-auth)"
@@ -129,13 +129,13 @@ if [ -x "$DEST/bin/bb-auth-web" ]; then
   else
     echo "  PASS  BB_AUTH_WEB_ADMINS is set"
   fi
-  chk "the GUI edits the file the gate reads" "$USERS_FILE" \
-      "$(envval BB_AUTH_USERS_FILE "$WEB_ENV_FILE")"
+  chk "the GUI edits the file the gate reads" "$ACCESS_FILE" \
+      "$(envval BB_AUTH_ACCESS_FILE "$WEB_ENV_FILE")"
 
   # The whole write path in two lines: own the file, share the gate's group, 0640; and
   # write permission on the DIRECTORY, because the replacement is a rename into place.
-  chk "users.json ownership" "$WEB_USER:$SVC_USER 640" \
-      "$(stat -c '%U:%G %a' "$USERS_FILE" 2>/dev/null || true)"
+  chk "access.json ownership" "$WEB_USER:$SVC_USER 640" \
+      "$(stat -c '%U:%G %a' "$ACCESS_FILE" 2>/dev/null || true)"
   chk "var/lib ownership" "$WEB_USER:$SVC_USER 750" \
       "$(stat -c '%U:%G %a' "$VAR_DIR" 2>/dev/null || true)"
 
@@ -149,8 +149,8 @@ else
   echo "[verify] --- the admin GUI is not installed (fine: it is optional) ---"
   # Without the GUI the access file stays root-owned, which is what a gate-only host
   # looks like. Assert that rather than skipping, so a half-finished purge is visible.
-  chk "users.json ownership" "root:$SVC_USER 640" \
-      "$(stat -c '%U:%G %a' "$USERS_FILE" 2>/dev/null || true)"
+  chk "access.json ownership" "root:$SVC_USER 640" \
+      "$(stat -c '%U:%G %a' "$ACCESS_FILE" 2>/dev/null || true)"
 fi
 
 echo "[verify] --- status ---"

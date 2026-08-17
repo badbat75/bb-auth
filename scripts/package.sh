@@ -210,7 +210,7 @@ cp -r "$CRATE_DIR/deploy/." "$PKG_DIR/deploy/"
 # templates are assets. Delete the rest from the copy rather than trusting a Cargo.toml
 # asset list to never name one: the HMAC key and the real roster must not be able to
 # reach a .deb by way of an edit somewhere else.
-rm -f "$PKG_DIR"/deploy/*.env "$PKG_DIR/deploy/users.json"
+rm -f "$PKG_DIR"/deploy/*.env "$PKG_DIR/deploy/access.json"
 
 # A Windows checkout with core.autocrlf=true delivers CRLF, and `#!/bin/sh\r` is a
 # shebang the kernel will not honour: the package installs and every maintainer script

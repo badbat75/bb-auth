@@ -16,7 +16,7 @@ const path = require('path');
 
 const E2E_DIR = path.resolve(__dirname, '..');
 const REPO = path.resolve(E2E_DIR, '..');
-const FIXTURE = path.join(REPO, 'deploy', 'users.example.json');
+const FIXTURE = path.join(REPO, 'deploy', 'access.example.json');
 const CHANNEL = process.env.E2E_BROWSER_CHANNEL || 'msedge';
 
 /** Run a command, inheriting stdio; a non-zero exit is fatal to the whole run. */
@@ -47,7 +47,7 @@ function buildBin() {
 /** A fresh temp directory holding a copy of the fixture, plus the copy's path. */
 function tempAccessFile() {
   const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'bb-auth-e2e-'));
-  const file = path.join(dir, 'users.json');
+  const file = path.join(dir, 'access.json');
   fs.copyFileSync(FIXTURE, file);
   return { dir, file };
 }
@@ -65,14 +65,14 @@ function freePort() {
 }
 
 /** Start bb-auth-web and resolve once it says it is listening. */
-function startServer(bin, usersFile, port) {
+function startServer(bin, accessFile, port) {
   return new Promise((resolve, reject) => {
     const child = spawn(bin, [], {
       cwd: REPO,
       env: {
         ...process.env,
         BB_AUTH_WEB_ADMINS: 'admin@example.com',
-        BB_AUTH_USERS_FILE: usersFile,
+        BB_AUTH_ACCESS_FILE: accessFile,
         BB_AUTH_WEB_LISTEN: `127.0.0.1:${port}`,
         BB_AUTH_WEB_BASE_PATH: '/admin',
         BB_AUTH_WEB_DEFAULT_LANG: 'en',
@@ -108,7 +108,7 @@ function startServer(bin, usersFile, port) {
 async function boot() {
   const { chromium } = ensureDeps();
   const bin = buildBin();
-  const { dir, file: usersFile } = tempAccessFile();
+  const { dir, file: accessFile } = tempAccessFile();
   const port = await freePort();
 
   let server, browser;
@@ -118,7 +118,7 @@ async function boot() {
     fs.rmSync(dir, { recursive: true, force: true });
   };
   try {
-    server = await startServer(bin, usersFile, port);
+    server = await startServer(bin, accessFile, port);
     browser = await chromium.launch({ channel: CHANNEL, headless: true });
   } catch (e) {
     await stop();
@@ -128,9 +128,9 @@ async function boot() {
     browser,
     origin: `http://127.0.0.1:${port}`,
     base: `http://127.0.0.1:${port}/admin`,
-    usersFile,
+    accessFile,
   };
-  console.log(`== server on ${ctx.origin} (file: ${usersFile}) | browser: ${CHANNEL} ==\n`);
+  console.log(`== server on ${ctx.origin} (file: ${accessFile}) | browser: ${CHANNEL} ==\n`);
   return { ctx, stop };
 }
 

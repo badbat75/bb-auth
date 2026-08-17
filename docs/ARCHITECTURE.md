@@ -77,9 +77,9 @@ Inside `src/bin/bb-auth.rs`, in file order:
 |---------|---------|
 | `Config` / `from_env` | All tunables from env vars; fatal-`exit`s on missing required values, a too-short HMAC key, or an unusable `BB_AUTH_PROFILE_CLAIMS` / `BB_AUTH_IDENTITY_ATTRS` entry (`compile_profile_claims` / `compile_identity_attrs`, which also derive each header name; see §12). |
 | `State` / `JwksCache` | Shared state behind `Arc`: config, a `RwLock<Access>` access table, a `RwLock` JWKS cache, and a `Mutex` serializing JWKS refreshes. |
-| `load_access` / `reload_access` | Wrap the library's `read_access`, which parses the JSON access file (`BB_AUTH_USERS_FILE`) into the applications and their scopes, the two `denied` sets, and three indices: identifiers (`by_identifier`), the roster (`by_uuid`) and `bbk_` API keys (`by_key_hash`); identifiers lowercased. `load_access` aborts startup if unreadable (warns if nothing is granted); `reload_access` swaps the table live on `SIGHUP`, keeping the old table on error. See §12. |
+| `load_access` / `reload_access` | Wrap the library's `read_access`, which parses the JSON access file (`BB_AUTH_ACCESS_FILE`) into the applications and their scopes, the two `denied` sets, and three indices: identifiers (`by_identifier`), the roster (`by_uuid`) and `bbk_` API keys (`by_key_hash`); identifiers lowercased. `load_access` aborts startup if unreadable (warns if nothing is granted); `reload_access` swaps the table live on `SIGHUP`, keeping the old table on error. See §12. |
 | `authorize` / `bearer_apikey` | Thin wrappers over the library's `decide` / `decide_api_key`: they add the log line naming the reason, and the wall clock a key's expiry is measured against. The rule itself is in the library, which is what lets `bb-auth-adm can` be truthful. `authorize_login` resolves the identifier to a roster row and re-attaches the profile claims after the decision, which never sees them. See §12. |
-| `check_users` | The `bb-auth --check-users <file>` mode: parse and exit `0`/`1`, no env and no network. Lets a deploy reject an access file before restarting onto it. |
+| `check_access` | The `bb-auth --check-access <file>` mode: parse and exit `0`/`1`, no env and no network. Lets a deploy reject an access file before restarting onto it. |
 | `fetch_jwks` / `refresh_jwks_if_due` / `decoding_key` | `GET {issuer}/.well-known/jwks.json` via `ureq`+rustls; cache keyed by `kid`, refreshed at most once per 60 s, deduped across workers by double-checked locking. |
 | `validate_id_token` | Full JWT validation (see §6). Returns a `UserIdentity`: the verified, lowercased email plus whichever configured profile claims the token asserted (`clean_claim`). |
 | `make_session` / `verify_session` | HMAC-SHA256 signed cookie (see §7). |
@@ -244,7 +244,7 @@ Required vars cause a fatal exit if missing.
 | `BB_AUTH_ALLOW_UNVERIFIED_SOCIAL` | no | `false` | Truthy (`1`/`true`/`yes`/`on`) accepts `email_verified=false` tokens **only** for federated/social logins (those carrying an `identities` claim); native Cognito users stay strict. Off = strict for everyone. |
 | `BB_AUTH_SOCIAL_PROVIDERS` | no | empty → any | Comma-separated `providerName`s (case-insensitive, e.g. `Google,SignInWithApple`) the relaxation above applies to. Empty = any federated provider. No effect unless `BB_AUTH_ALLOW_UNVERIFIED_SOCIAL` is on. |
 | `BB_AUTH_PROFILE_CLAIMS` | no | empty → none | Comma-separated OIDC claim names to propagate to the app on a `204`, each in a header derived from its own name (`given_name` → `X-Auth-Given-Name`; see §12). Empty = nothing but the email. Any unusable entry is a fatal startup error. Read at startup → needs `restart`, not `reload`; changing it logs nobody out. |
-| `BB_AUTH_USERS_FILE` | yes | — | Path to the JSON access file (`sites`, `denied`, and the roster of emails with their `bbk_` API keys and URL scopes; see §12). Loaded at startup, hot-reloaded on `SIGHUP`. Named for the roster it used to hold only; the name is a contract with the operator-owned env file a deploy never rewrites. |
+| `BB_AUTH_ACCESS_FILE` | yes | — | Path to the JSON access file (`sites`, `denied`, and the roster of emails with their `bbk_` API keys and URL scopes; see §12). Loaded at startup, hot-reloaded on `SIGHUP`. Named for the roster it used to hold only; the name is a contract with the operator-owned env file a deploy never rewrites. |
 | `BB_AUTH_ORIGINAL_URL_HEADER` | no | `X-Original-URL` | Request header carrying the original request URL (scheme + host + normalised path). Set by nginx on the `auth_request` subrequest (from a `$bb_url` captured in the gated location — **not** from `$uri`, see §12) **and** on `/auth/session` (there a plain `https://app.example.com$uri` is correct). Drives URL scoping, and on `/auth/session` tells bb-auth which host the login is on. Query/fragment are stripped; missing ⇒ fail closed. |
 | `BB_AUTH_LISTEN` | no | `127.0.0.1:4181` | Bind address. Loopback only — nginx fronts it. |
 | `BB_AUTH_COOKIE_NAME` | no | `bb_session` | |
@@ -255,7 +255,7 @@ Required vars cause a fatal exit if missing.
 | `BB_AUTH_WORKERS` | no | `4` | Thread pool size (min 1). |
 
 The admin GUI is a separate service with a separate env file
-(`deploy/bb-auth-web.env.example`, installed as `etc/bb-auth-web.env`): `BB_AUTH_USERS_FILE`
+(`deploy/bb-auth-web.env.example`, installed as `etc/bb-auth-web.env`): `BB_AUTH_ACCESS_FILE`
 — the same name for the same file — plus `BB_AUTH_WEB_ADMINS` (required, empty is fatal),
 `BB_AUTH_WEB_LISTEN`, `BB_AUTH_WEB_BASE_PATH` and `BB_AUTH_WEB_DEFAULT_LANG`. It shares no
 variable with the gate but that one, and holds no secret at all.
@@ -334,7 +334,7 @@ The layout, separated by role:
 ├── bin/bb-auth-web      # admin GUI      — optional, installed only if staged
 ├── etc/bb-auth.env      # config + HMAC key (service-user readable only)
 ├── etc/bb-auth-web.env  # the GUI's config (no secret) — with the GUI
-└── var/lib/users.json   # access list: emails + API keys + URL scopes
+└── var/lib/access.json   # access list: emails + API keys + URL scopes
 <systemd-unit-dir>/bb-auth.service
 <systemd-unit-dir>/bb-auth-web.service           # with the GUI
 <systemd-unit-dir>/bb-auth-reload.{path,service} # with the GUI
@@ -342,25 +342,25 @@ The layout, separated by role:
 
 Nothing under the tree is ever written by **the gate** (sessions are stateless), so
 the whole prefix stays read-only to it and no `StateDirectory` is needed despite the
-`var/lib` name. The admin tools write `var/lib/users.json`, and they do it from
+`var/lib` name. The admin tools write `var/lib/access.json`, and they do it from
 outside the gate's namespace: `bb-auth-adm` as root, `bb-auth-web` as its own service
 user under its own unit (see below).
 
 The install is a Debian package, `bb-auth`, and its `postinst` is what does all of
 this (idempotent, because dpkg runs it again on every upgrade): it creates the system
 user/group, and on a **first** install writes `bb-auth.env` from the shipped template
-with a freshly generated `BB_AUTH_HMAC_KEY`, plus an empty `users.json` that authorizes
+with a freshly generated `BB_AUTH_HMAC_KEY`, plus an empty `access.json` that authorizes
 nobody. Neither file is part of the package, which is precisely why an upgrade cannot
 touch either: dpkg does not clobber files it does not ship, so the key survives and
 every session cookie with it. It never edits a preserved `bb-auth.env`: instead it
-validates it (every required var present, and `BB_AUTH_USERS_FILE` pointing at the file
-this package creates) alongside the access file itself (`bb-auth --check-users`), and a
+validates it (every required var present, and `BB_AUTH_ACCESS_FILE` pointing at the file
+this package creates) alongside the access file itself (`bb-auth --check-access`), and a
 failure there exits non-zero **before** the restart, leaving the running process
 serving, so a bad config can never become a `Restart=on-failure` boot loop. A first
 install ends without starting the gate at all, since its env is still a template.
 
 `scripts/deploy.sh` is the host-side driver around that (`dpkg -i` in one transaction,
-the legacy-unit migration, an optional staged `users.json`, then `scripts/verify.sh`),
+the legacy-unit migration, an optional staged `access.json`, then `scripts/verify.sh`),
 and `scripts/deploy.ps1` builds the packages and drives it over SSH.
 
 ### The admin GUI's unit, and who owns the access file
@@ -368,12 +368,12 @@ and `scripts/deploy.ps1` builds the packages and drives it over SSH.
 `bb-auth-web` is its own package, installed only when it is asked for, and everything
 about it follows from that: the
 `bb-auth-web` user, `bb-auth-web.service`, `etc/bb-auth-web.env` (operator-owned and
-validated exactly like the gate's — `BB_AUTH_WEB_ADMINS` non-empty, `BB_AUTH_USERS_FILE`
+validated exactly like the gate's — `BB_AUTH_WEB_ADMINS` non-empty, `BB_AUTH_ACCESS_FILE`
 naming the file this deploy installs), and the ownership migration below. A deploy that
 does not carry it does none of this.
 
 It is the one thing here that **writes** the access file, so the file changes hands with
-it: `var/lib/` becomes `bb-auth-web:bb-auth 0750` and `users.json`
+it: `var/lib/` becomes `bb-auth-web:bb-auth 0750` and `access.json`
 `bb-auth-web:bb-auth 0640`. The gate reads it through the `bb-auth` group and its unit is
 unchanged. Two properties of the library's writer force that shape — it replaces the file
 with a temp file renamed into place (so write permission is needed on the *directory*),
@@ -382,7 +382,7 @@ writer must already own the file and be a member of its group, hence
 `SupplementaryGroups=bb-auth`). Because the owner is *preserved* rather than reset,
 `sudo bb-auth-adm` keeps working unchanged and leaves the file `bb-auth-web:bb-auth` too.
 
-`bb-auth-reload.path` watches `users.json` with `PathChanged=` and runs `systemctl reload
+`bb-auth-reload.path` watches `access.json` with `PathChanged=` and runs `systemctl reload
 bb-auth` when it is replaced — the `rename(2)` both editors end with is seen as
 `IN_MOVED_TO` on the watched directory. It ships with the GUI because the GUI cannot
 signal the gate itself; a CLI operator reloading by hand as well merely reloads twice.
@@ -445,8 +445,8 @@ own), and `SupplementaryGroups=bb-auth` is what lets the write restore the file'
 
 ## 12. Access file: applications, scopes, users & keys
 
-Access is described by a single JSON file (`BB_AUTH_USERS_FILE`, installed as
-`/opt/bb-auth/var/lib/users.json`), loaded at startup and hot-reloaded on `SIGHUP`. It is
+Access is described by a single JSON file (`BB_AUTH_ACCESS_FILE`, installed as
+`/opt/bb-auth/var/lib/access.json`), loaded at startup and hot-reloaded on `SIGHUP`. It is
 the real access gate (`read_access` / `Access`), and since 3.0 it is **application-centric**:
 a grant is written once, on the side of the place.
 
@@ -504,7 +504,7 @@ uuid or one identifier, a key restriction naming a scope that does not exist, a 
 pre-2.0 `enabled_paths`, and anything wrong about a `@group` reference. Warned and skipped:
 a bad `key_hash` or `released`/`duration`, an identifier that could not be a header value,
 and a dangling reference (a well-formed uuid matching no roster row), which grants nothing
-and which both editors lint. `bb-auth --check-users <file>` runs exactly this parser and
+and which both editors lint. `bb-auth --check-access <file>` runs exactly this parser and
 exits `0`/`1`, which is how the package's `postinst` refuses to restart the service onto a
 file that would not boot, and how `scripts/deploy.sh` refuses to install a staged one.
 
@@ -530,7 +530,7 @@ application on a wildcard host (`https://*.x.com/`) is not expressible.
 **A URL no application covers is reachable by nobody**, with any credential. With no
 per-user URLs left this is the only fail-closed reading, and it is a real change of posture
 for an operator: a gated location outside every area is a `401` for everyone.
-`--check-users` prints each application's area so it can be compared with what nginx
+`--check-access` prints each application's area so it can be compared with what nginx
 actually gates.
 
 ### Scopes, and first match wins
@@ -726,9 +726,9 @@ ASCII, absolute `https://`, no userinfo `@`, no backslash. That is what lets the
 them into a header, a `Location:` and a page with no per-use check; a CR/LF would otherwise
 be a response-splitting gadget, and `h()` panics on a non-ASCII header value. It is **not**
 checked against `BB_AUTH_AUTHORIZED_HOSTS`, and cannot be: `read_access` reads no env, which
-is precisely what lets `--check-users` validate a file with no config and no network. Moving
+is precisely what lets `--check-access` validate a file with no config and no network. Moving
 that check to startup would turn an operator's typo into a fatal boot under
-`Restart=on-failure` that `--check-users` never saw.
+`Restart=on-failure` that `--check-access` never saw.
 
 There is deliberately **no per-area logout landing page**. The gate can name a login page on
 a `401` because the `401` happens *on* a gated URL, so the application resolves. A logout

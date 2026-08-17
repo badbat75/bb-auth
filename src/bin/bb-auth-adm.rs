@@ -1,4 +1,4 @@
-//! bb-auth-adm — edit a bb-auth **access file** (`BB_AUTH_USERS_FILE`, a.k.a. users.json).
+//! bb-auth-adm — edit a bb-auth **access file** (`BB_AUTH_ACCESS_FILE`, a.k.a. access.json).
 //!
 //! CRUD over every section of the file the gate actually enforces: `applications` and their
 //! scopes, `user_groups`, `denied`, `users` and their `api_keys`. Plus the three things an
@@ -9,7 +9,7 @@
 //!
 //! * **It cannot write a file the gate would reject.** Every mutation goes through
 //!   [`AccessWrite`], which serializes, re-parses and compiles with the same parser
-//!   `bb-auth --check-users` and the running gate use, *before* anything reaches the disk.
+//!   `bb-auth --check-access` and the running gate use, *before* anything reaches the disk.
 //!   A file the gate refuses at startup is a boot loop under `Restart=on-failure`, so the
 //!   only safe place to catch it is here.
 //! * **It cannot disagree with the gate about who may reach what.** `can` calls
@@ -28,11 +28,11 @@
 //! next restart.
 //!
 //! ```text
-//! bb-auth-adm -f deploy/users.json app add mpa --base 'https://app.x.com/mpa'
-//! bb-auth-adm -f deploy/users.json scope add mpa admin --url 'https://app.x.com/mpa/admin/*' \
+//! bb-auth-adm -f deploy/access.json app add mpa --base 'https://app.x.com/mpa'
+//! bb-auth-adm -f deploy/access.json scope add mpa admin --url 'https://app.x.com/mpa/admin/*' \
 //!     --access restricted --user bob@x.com
-//! bb-auth-adm -f deploy/users.json key add bob@x.com --id laptop --duration 365d
-//! bb-auth-adm -f deploy/users.json can bob@x.com https://app.x.com/mpa/admin/panel
+//! bb-auth-adm -f deploy/access.json key add bob@x.com --id laptop --duration 365d
+//! bb-auth-adm -f deploy/access.json can bob@x.com https://app.x.com/mpa/admin/panel
 //! ```
 //!
 //! Editing the file is not enough to change anything: the gate re-reads it on `systemctl
@@ -53,11 +53,11 @@ use bb_auth_core::{
 };
 
 const USAGE: &str = "\
-bb-auth-adm — edit a bb-auth access file (users.json)
+bb-auth-adm — edit a bb-auth access file (access.json)
 
 usage: bb-auth-adm [-f FILE] [--dry-run] <command> [args]
 
-  -f, --file FILE   the access file (default: $BB_AUTH_USERS_FILE)
+  -f, --file FILE   the access file (default: $BB_AUTH_ACCESS_FILE)
   --dry-run         print the resulting file to stdout, write nothing
 
 file
@@ -174,9 +174,9 @@ fn run() -> Result<ExitCode, String> {
             _ => i += 1,
         }
     }
-    let path = match file.or_else(|| std::env::var("BB_AUTH_USERS_FILE").ok()) {
+    let path = match file.or_else(|| std::env::var("BB_AUTH_ACCESS_FILE").ok()) {
         Some(p) => p,
-        None => return Err("no access file: pass -f FILE or set BB_AUTH_USERS_FILE".into()),
+        None => return Err("no access file: pass -f FILE or set BB_AUTH_ACCESS_FILE".into()),
     };
 
     let (words, flags) = parse_args(&argv)?;
@@ -880,7 +880,7 @@ fn shadowed_by(scopes: &[ScopeSpec], i: usize) -> Option<usize> {
 }
 
 /// `can WHO URL [--as CLASS] [--key ID]` — put the question to the gate's own decision
-/// function, and exit 0 only if it says yes. What `--check-users` is to the file, this is
+/// function, and exit 0 only if it says yes. What `--check-access` is to the file, this is
 /// to a grant.
 fn cmd_can(mut ctx: Ctx, who: &str, url: &str) -> Result<ExitCode, String> {
     let key_id = ctx.flags.take_one("key")?;

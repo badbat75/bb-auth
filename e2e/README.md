@@ -25,7 +25,7 @@ Dependencies (`playwright` only) are installed automatically on first run.
 node e2e/run.js        # from the repo root (or `npm test` inside e2e/)
 ```
 
-The runner builds the binary if needed, copies `deploy/users.example.json` to a per-run
+The runner builds the binary if needed, copies `deploy/access.example.json` to a per-run
 temp file (tests mutate it — the server is **never** pointed at a repo file), starts
 `bb-auth-web` on an ephemeral loopback port with `BB_AUTH_WEB_BASE_PATH=/admin`, waits
 for its listening line, runs every test area against it, kills it, and exits non-zero on

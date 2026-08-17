@@ -1,7 +1,7 @@
 #!/usr/bin/env node
 'use strict';
 // Single-command E2E runner for bb-auth-web. Builds the binary, starts a real server on
-// an ephemeral loopback port against a per-run temp copy of deploy/users.example.json —
+// an ephemeral loopback port against a per-run temp copy of deploy/access.example.json —
 // the tests mutate that file, so the server is NEVER pointed at anything in the repo —
 // drives a real browser through every test area, prints a pass/fail summary, and exits
 // non-zero on any failure. Each area starts from a fresh copy of the fixture, which is
@@ -32,7 +32,7 @@ async function main() {
   try {
     const { Checker } = require('./lib/harness');
     for (const area of AREAS) {
-      fs.copyFileSync(FIXTURE, ctx.usersFile); // every area starts from the pristine fixture
+      fs.copyFileSync(FIXTURE, ctx.accessFile); // every area starts from the pristine fixture
       const t = new Checker(area, shotsDir);
       try {
         await require(`./tests/${area}`).run(ctx, t);

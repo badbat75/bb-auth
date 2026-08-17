@@ -8,11 +8,11 @@
 #                        real BB_AUTH_HMAC_KEY is generated on the host and lives
 #                        only there — never in git.
 #   allowed_emails     : the access list (real emails).
-#   deploy/users.json  : the real access file (emails + API key hashes). Only
-#                        deploy/users.example.json is tracked.
+#   deploy/access.json  : the real access file (emails + API key hashes). Only
+#                        deploy/access.example.json is tracked.
 *.env
 allowed_emails
-/deploy/users.json
+/deploy/access.json
 
 # Browser E2E suite (e2e/) — installed deps and per-run artifacts, never tracked
 /e2e/node_modules

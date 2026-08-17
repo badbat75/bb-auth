@@ -41,13 +41,13 @@ class Checker {
 }
 
 /** The working access file, parsed. Read fresh every time — the server rewrites it. */
-const doc = (ctx) => JSON.parse(fs.readFileSync(ctx.usersFile, 'utf8'));
+const doc = (ctx) => JSON.parse(fs.readFileSync(ctx.accessFile, 'utf8'));
 
 /** The working access file, exact bytes — what `rev` and "wrote nothing" are about. */
-const bytes = (ctx) => fs.readFileSync(ctx.usersFile, 'utf8');
+const bytes = (ctx) => fs.readFileSync(ctx.accessFile, 'utf8');
 
 /** An out-of-band write, as a `bb-auth-adm` over SSH would do it: valid file, new bytes. */
-const writeDoc = (ctx, d) => fs.writeFileSync(ctx.usersFile, JSON.stringify(d, null, 2) + '\n');
+const writeDoc = (ctx, d) => fs.writeFileSync(ctx.accessFile, JSON.stringify(d, null, 2) + '\n');
 
 const sha256 = (s) => crypto.createHash('sha256').update(s).digest('hex');
 

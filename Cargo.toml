@@ -89,7 +89,7 @@ strip = true
 # the crate version and the revision it was given, so the two cannot drift.
 #
 # NO STATE IS PACKAGED. Not etc/bb-auth.env (it carries the HMAC key: replacing it
-# logs every user out), not var/lib/users.json (the live access file is the only copy
+# logs every user out), not var/lib/access.json (the live access file is the only copy
 # that is current). dpkg cannot clobber a file it does not ship, so preservation here
 # is by construction, not by a conffile prompt that one --force-confnew would lose.
 # What ships instead is share/*.example; the maintainer scripts create the real files
@@ -120,7 +120,7 @@ assets = [
     ["target/release/bb-auth", "opt/bb-auth/bin/", "755"],
     ["deploy/bb-auth.service", "usr/lib/systemd/system/", "644"],
     ["deploy/bb-auth.env.example", "opt/bb-auth/share/", "644"],
-    ["deploy/users.example.json", "opt/bb-auth/share/", "644"],
+    ["deploy/access.example.json", "opt/bb-auth/share/", "644"],
 ]
 extended-description = """
 bb-auth validates an AWS Cognito id_token that a browser-side login page already obtained, and issues an HMAC-signed session cookie that nginx enforces on every request through auth_request. It also accepts per-request bearer credentials (a Cognito id_token or a static bbk_ API key) and enforces the access policy of the application scope that owns the request URL, read from a JSON access file.

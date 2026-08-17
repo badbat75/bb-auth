@@ -20,7 +20,7 @@
     "no two of them overlap, and every pattern of every scope must lie inside its own",
     "application's base. A URL no application covers is REACHABLE BY NOBODY: with no",
     "per-user URLs left, that is the only fail-closed reading, so a gated location outside",
-    "every application is a 401 for everyone. `bb-auth --check-users FILE` prints the areas.",
+    "every application is a 401 for everyone. `bb-auth --check-access FILE` prints the areas.",
     "",
     "SCOPES ARE FIRST MATCH WINS, IN FILE ORDER, inside one application. That is what makes",
     "a carve-out expressible: put the narrow, stricter scope BEFORE the broad one, as",
@@ -68,7 +68,7 @@
     "/app1 subtree while `/app1*` would also match /app1-admin: always put the `/` before",
     "the `*`. And `/app1/*` does NOT match a bare `/app1`: list both.",
     "",
-    "Validate a file before deploying it: `bb-auth --check-users FILE`.",
+    "Validate a file before deploying it: `bb-auth --check-access FILE`.",
     "Convert an older file (one with no \"version\"): `bb-auth-adm migrate -f OLD -o NEW`."
   ],
 

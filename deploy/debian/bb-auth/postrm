@@ -32,12 +32,12 @@ purge)
     # data loss no upgrade note can undo. It is moved aside instead: no longer live
     # (which is what purge means), still on disk (which is what an operator means).
     # Its .bak is one step back from a file being kept, so that one does go.
-    if [ -e "$DEST/var/lib/users.json" ]; then
-        KEPT="$DEST/var/lib/users.json.purged-$(date +%Y%m%d-%H%M%S)"
-        mv "$DEST/var/lib/users.json" "$KEPT"
+    if [ -e "$DEST/var/lib/access.json" ]; then
+        KEPT="$DEST/var/lib/access.json.purged-$(date +%Y%m%d-%H%M%S)"
+        mv "$DEST/var/lib/access.json" "$KEPT"
         echo "bb-auth: purge does not delete the access file. Kept as $KEPT"
     fi
-    rm -f "$DEST/var/lib/users.json.bak"
+    rm -f "$DEST/var/lib/access.json.bak"
 
     # Best effort: these hold no packaged file, so dpkg will not remove them, and they
     # are only empty if nothing above was kept.

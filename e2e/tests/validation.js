@@ -51,7 +51,7 @@ async function run(ctx, t) {
     await refused('scope url outside the base', 'outside this application');
     t.check('outside the base: no scope written', !app1(ctx).scopes.find((s) => s.name === 'outside'));
 
-    // An unknown @group reference — the trap --check-users exists for.
+    // An unknown @group reference — the trap --check-access exists for.
     await page.goto(ctx.base + '/apps/app1/scopes/+add');
     await page.fill('input[name=name]', 'ghost');
     await page.fill('textarea[name=urls]', 'https://app.example.com/app1/ghost/*');

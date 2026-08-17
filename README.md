@@ -88,11 +88,11 @@ nobody. Mint one with `bb-auth-adm`, which writes the entry into the file itself
 prints the raw bearer **once**, on stdout, after the file is safely saved:
 
 ```bash
-bb-auth-adm -f users.json key add bob@badbat75.com --id laptop --duration 365d \
+bb-auth-adm -f access.json key add bob@badbat75.com --id laptop --duration 365d \
     --scope mcp/api
 # → stdout: bbk_…                   (the bearer — give it to the client, it is not recoverable)
 # → the file now holds only its sha256
-bb-auth-adm -f users.json key rotate bob@badbat75.com laptop   # a leak? new secret, same grant
+bb-auth-adm -f access.json key rotate bob@badbat75.com laptop   # a leak? new secret, same grant
 ```
 
 See [Editing it — `bb-auth-adm`](#editing-it--bb-auth-adm) for the rest of the tool.
@@ -220,8 +220,8 @@ a request without it resolves to no application and is denied, as is any URL con
 
 ## Access file
 
-The access gate is a single JSON file (`BB_AUTH_USERS_FILE`, installed as
-`/opt/bb-auth/var/lib/users.json`; see [`deploy/users.example.json`](deploy/users.example.json)).
+The access gate is a single JSON file (`BB_AUTH_ACCESS_FILE`, installed as
+`/opt/bb-auth/var/lib/access.json`; see [`deploy/access.example.json`](deploy/access.example.json)).
 Since 3.0 it is **application-centric**: a grant is written once, on the side of the
 place. Four sibling sections answer four different questions:
 
@@ -273,7 +273,7 @@ The area is compared at a **path boundary**, which is why `https://x.com/app` co
 written with no `/` before it.
 
 > **A URL no application covers is reachable by nobody.** A gated location outside every
-> area is a `401` for everyone, including you. `bb-auth --check-users FILE` prints each
+> area is a `401` for everyone, including you. `bb-auth --check-access FILE` prints each
 > application's area so you can compare it with what nginx actually gates.
 
 ### `scopes` — who reaches what, and how
@@ -298,7 +298,7 @@ two would never be reached. `bb-auth-adm scope mv` reorders them, and
 
 > Cognito self-signup is open, so `authenticated` means *anyone who can register*, and
 > `anonymous` means everyone. Both are the right grant for an onboarding or health-check
-> area and the wrong one for everything else. `--check-users` and the startup banner
+> area and the wrong one for everything else. `--check-access` and the startup banner
 > print every scope of either kind by name, because they are the two an operator most
 > often did not mean to leave open.
 
@@ -325,10 +325,10 @@ client would simply send none, and a field that reads like a defence while defen
 nothing is worse than no field at all.
 
 ```bash
-bb-auth-adm -f users.json scope set app1 admin --add-exclude bob@x.com
-bb-auth-adm -f users.json scope set app1 everything --add-exclude nuisance@x.com
-bb-auth-adm -f users.json scope set app1 admin --rm-exclude bob@x.com
-bb-auth-adm -f users.json can bob@x.com https://app.x.com/app1/admin/panel
+bb-auth-adm -f access.json scope set app1 admin --add-exclude bob@x.com
+bb-auth-adm -f access.json scope set app1 everything --add-exclude nuisance@x.com
+bb-auth-adm -f access.json scope set app1 admin --rm-exclude bob@x.com
+bb-auth-adm -f access.json can bob@x.com https://app.x.com/app1/admin/panel
 # → DENIED — app1/admin excludes this identity, ahead of its own grant
 ```
 
@@ -439,15 +439,15 @@ the gate would refuse** — which matters, because a refused file is a fatal sta
 under `Restart=on-failure` that is a boot loop.
 
 ```bash
-bb-auth-adm -f users.json show                 # the file as the gate resolves it
-bb-auth-adm -f users.json app add app1 --base 'https://app.x.com/app1'
-bb-auth-adm -f users.json user add bob@x.com   # mints the uuid; a user carries no URL
-bb-auth-adm -f users.json group add admins --member bob@x.com
-bb-auth-adm -f users.json scope add app1 reports --url 'https://app.x.com/app1/reports/*'     --access restricted --group @admins
-bb-auth-adm -f users.json scope set app1 reports --add-exclude carol@x.com
-bb-auth-adm -f users.json key add bob@x.com --id laptop --duration 365d --scope app1/reports
-bb-auth-adm -f users.json deny add spammer@x.com
-bb-auth-adm -f users.json check                # the gate's parser, then lint
+bb-auth-adm -f access.json show                 # the file as the gate resolves it
+bb-auth-adm -f access.json app add app1 --base 'https://app.x.com/app1'
+bb-auth-adm -f access.json user add bob@x.com   # mints the uuid; a user carries no URL
+bb-auth-adm -f access.json group add admins --member bob@x.com
+bb-auth-adm -f access.json scope add app1 reports --url 'https://app.x.com/app1/reports/*'     --access restricted --group @admins
+bb-auth-adm -f access.json scope set app1 reports --add-exclude carol@x.com
+bb-auth-adm -f access.json key add bob@x.com --id laptop --duration 365d --scope app1/reports
+bb-auth-adm -f access.json deny add spammer@x.com
+bb-auth-adm -f access.json check                # the gate's parser, then lint
 ```
 
 It talks back. Adding a user says they reach nothing until a scope lists them; adding an
@@ -462,15 +462,15 @@ And it answers the question you actually have, with the gate's own decision func
 exit 0 iff the request would pass:
 
 ```bash
-bb-auth-adm -f users.json can bob@x.com https://app.x.com/app1/reports/q3
+bb-auth-adm -f access.json can bob@x.com https://app.x.com/app1/reports/q3
 # AUTHORIZED — app1/reports admits this credential for https://app.x.com/app1/reports/q3
-bb-auth-adm -f users.json can carol@x.com https://app.x.com/app1/reports/q3
+bb-auth-adm -f access.json can carol@x.com https://app.x.com/app1/reports/q3
 # DENIED — app1/reports excludes this identity, ahead of its own grant
-bb-auth-adm -f users.json can bob@x.com https://app.x.com/app1/admin --key laptop
+bb-auth-adm -f access.json can bob@x.com https://app.x.com/app1/admin --key laptop
 # DENIED — this key restricted itself to other scopes, not app1/admin
 ```
 
-Edit the **live** file (`sudo bb-auth-adm -f /opt/bb-auth/var/lib/users.json …`, the tool
+Edit the **live** file (`sudo bb-auth-adm -f /opt/bb-auth/var/lib/access.json …`, the tool
 is deployed alongside the gate): it is the copy that is current, and the write preserves
 its `root:bb-auth 0640` ownership. Then reload — see below.
 
@@ -511,7 +511,7 @@ with no identity header answers `401` and says so, rather than serving anyone.
 
 | Var | Required | Default | Meaning |
 |-----|----------|---------|---------|
-| `BB_AUTH_USERS_FILE` | yes | — | the access file to render (the gate's own variable name) |
+| `BB_AUTH_ACCESS_FILE` | yes | — | the access file to render (the gate's own variable name) |
 | `BB_AUTH_WEB_ADMINS` | yes | — | comma-separated emails allowed in. **Empty is fatal**, never "everyone" |
 | `BB_AUTH_WEB_LISTEN` | no | `127.0.0.1:8091` | bind address. Keep it on loopback |
 | `BB_AUTH_WEB_BASE_PATH` | no | *(empty)* | the URL prefix nginx mounts it at, e.g. `/admin` |
@@ -550,7 +550,7 @@ place — that is what makes it atomic, and renaming needs the directory.
 
 Its env is operator-owned like the gate's: installed once, then never edited by a redeploy,
 and *validated* before anything restarts (`BB_AUTH_WEB_ADMINS` non-empty, and
-`BB_AUTH_USERS_FILE` naming the file the gate actually loads). A missing required var is a
+`BB_AUTH_ACCESS_FILE` naming the file the gate actually loads). A missing required var is a
 fatal startup and under `Restart=on-failure` a boot loop, so the deploy aborts first. The
 practical consequence: **the first deploy that carries the GUI stops at that check**, having
 installed `/opt/bb-auth/etc/bb-auth-web.env` from the template. Fill in
@@ -565,7 +565,7 @@ Installing the GUI hands the access file over, once and idempotently:
 | | before | with `bb-auth-web` installed |
 |---|---|---|
 | `var/lib/` | `root:root 0755` | `bb-auth-web:bb-auth 0750` |
-| `users.json` | `root:bb-auth 0640` | `bb-auth-web:bb-auth 0640` |
+| `access.json` | `root:bb-auth 0640` | `bb-auth-web:bb-auth 0640` |
 
 The gate reads it through the `bb-auth` group exactly as before — **its unit does not
 change**. The GUI needs to own it because the writer restores the replaced file's mode and
@@ -581,7 +581,7 @@ owner, so `root:bb-auth` stays exactly as it is.
 
 #### Making an edit live
 
-`bb-auth-reload.path` watches `users.json` and runs `systemctl reload bb-auth` whenever it
+`bb-auth-reload.path` watches `access.json` and runs `systemctl reload bb-auth` whenever it
 is replaced — by the GUI or by a `sudo bb-auth-adm` over SSH. It is installed with the GUI
 because it is what makes a GUI edit live: `bb-auth-web` runs unprivileged, is not the gate,
 and could not signal it. It uses `PathChanged=`, which catches the `rename(2)` both editors
@@ -601,7 +601,7 @@ Check a file before shipping it — a bad pattern or an unknown scope field is a
 startup error, and the deploy script runs this same check before it restarts anything:
 
 ```bash
-bb-auth --check-users deploy/users.json     # exit 0 + a summary, or exit 1 + the error
+bb-auth --check-access deploy/access.json     # exit 0 + a summary, or exit 1 + the error
 ```
 
 It is the real access gate, re-checked on **every** `/validate`, hot-reloaded on
@@ -642,7 +642,7 @@ to a database).
 > access file that does not use the new `url_groups` section. The one ordering rule is
 > **deploy the binary before an access file that uses `@groups`** — a 2.5 gate does not
 > know what `"@mcp"` is, fails the load outright and keeps its previous table (fail-closed;
-> there is no partial grant to worry about). `bb-auth --check-users` on the old binary
+> there is no partial grant to worry about). `bb-auth --check-access` on the old binary
 > tells you the same thing before a restart does.
 >
 > **Upgrading to 3.0.** **Nobody is logged out**: the cookie is still `bb4`, the HMAC key
@@ -653,7 +653,7 @@ to a database).
 > changes owner to `bb-auth-web:bb-auth`.
 >
 > All of that is **opt-in by staging**. A `dist/` without `bb-auth-web` deploys exactly as
-> it did on 2.6: no new user, no new units, no migration, `users.json` still `root:bb-auth`.
+> it did on 2.6: no new user, no new units, no migration, `access.json` still `root:bb-auth`.
 > If you do ship it, know two things. The first deploy **stops at the env preflight** —
 > `/opt/bb-auth/etc/bb-auth-web.env` has just been installed from the template with an
 > empty `BB_AUTH_WEB_ADMINS`, which is fatal by design; fill it in on the host and re-run.
@@ -667,26 +667,68 @@ to a database).
 ### Upgrading to 3.0
 
 **Nobody is logged out**: the cookie is still `bb4` and the HMAC key is preserved, as
-always. What changes is the **access file**, which becomes application-centric, and the
-gate refuses the old format outright rather than misreading it.
+always. Two other things change, and a host may need one or both.
 
-That refusal is the whole reason there is a procedure. A 3.0 gate reading an older file
-exits fatally, which under `Restart=on-failure` is a boot loop; the older gate reading a
-3.0 file would see an empty table, which is a silent, total lockout. Neither is survivable
-on its own, but the reload being **fail-soft** makes one order work:
+#### The access file is renamed (every host)
+
+`users.json` becomes **`access.json`**, `BB_AUTH_USERS_FILE` becomes
+**`BB_AUTH_ACCESS_FILE`**, and `--check-users` becomes **`--check-access`**. The file has
+described four sections since 3.0 and the roster is the smallest of them; the name now
+says what the rest of the codebase has always called it.
+
+This is a **breaking config change**, and it is yours to apply, because both halves of it
+are state a package must not touch: the file is the only current copy of who reaches what,
+and the env file is operator-owned so that a deploy can never rewrite it. Do it **before**
+installing, in this order:
+
+```bash
+# 1. the file (and the writer's one-step-back copy), owner and mode preserved
+sudo mv /opt/bb-auth/var/lib/users.json     /opt/bb-auth/var/lib/access.json
+sudo mv /opt/bb-auth/var/lib/users.json.bak /opt/bb-auth/var/lib/access.json.bak   # if present
+
+# 2. the variable, in the gate's env file and in the GUI's if it is installed
+sudo sed -i 's|^BB_AUTH_USERS_FILE=.*|BB_AUTH_ACCESS_FILE=/opt/bb-auth/var/lib/access.json|' \
+    /opt/bb-auth/etc/bb-auth.env /opt/bb-auth/etc/bb-auth-web.env
+
+# 3. now install
+./scripts/deploy.ps1 user@host
+```
+
+Between steps 1 and 3 the **gate keeps serving**: it holds its table in memory and only
+re-reads on SIGHUP, and the reload the path unit fires on the rename fails to find the old
+name and keeps that table (fail-soft, as always). The **GUI** is the one thing that breaks
+in that window, with a 500 per request, because it re-reads the file on every one.
+
+Getting it half-done is the case worth naming: the packaged `postinst` creates an empty
+access file when it finds none, and an empty file *parses* (it just authorizes nobody), so
+a forgotten step 1 would restart the gate onto a total lockout that `--check-access`
+approved. It therefore refuses to install at all when `access.json` is absent and
+`users.json` is sitting next to it, and says what to run. Skipping step 2 alone is caught
+by the same preflight, as a missing required variable.
+
+#### The file format becomes application-centric (pre-3.0 hosts only)
+
+The gate refuses the old format outright rather than misreading it, and that refusal is
+the whole reason there is a procedure. A 3.0 gate reading an older file exits fatally,
+which under `Restart=on-failure` is a boot loop; the older gate reading a 3.0 file would
+see an empty table, which is a silent, total lockout. Neither is survivable on its own,
+but the reload being **fail-soft** makes one order work:
 
 ```bash
 # 1. put the new bb-auth-adm on the host (or convert a copy of the file on a workstation)
 scp dist/bb-auth-adm user@host:/tmp/
 
-# 2. convert. The still-running old gate cannot read the result, so the reload that the
-#    path unit fires FAILS and keeps the table already in memory: the service goes on
-#    serving, unchanged.
-sudo /tmp/bb-auth-adm migrate -f /opt/bb-auth/var/lib/users.json -o /tmp/users.v3.json
-sudo install -o bb-auth-web -g bb-auth -m 0640 /tmp/users.v3.json /opt/bb-auth/var/lib/users.json
+# 2. convert, writing the NEW name. The still-running old gate cannot read the result, so
+#    the reload that the path unit fires FAILS and keeps the table already in memory: the
+#    service goes on serving, unchanged.
+sudo /tmp/bb-auth-adm migrate -f /opt/bb-auth/var/lib/users.json -o /tmp/access.v3.json
+sudo install -o root -g bb-auth -m 0640 /tmp/access.v3.json /opt/bb-auth/var/lib/access.json
+sudo rm /opt/bb-auth/var/lib/users.json
 
-# 3. now install. The restart is the first moment the new file is read, by the binary
-#    that understands it.
+# 3. the variable, as above, then install. The restart is the first moment the new file is
+#    read, by the binary that understands it.
+sudo sed -i 's|^BB_AUTH_USERS_FILE=.*|BB_AUTH_ACCESS_FILE=/opt/bb-auth/var/lib/access.json|' \
+    /opt/bb-auth/etc/bb-auth.env
 ./scripts/deploy.ps1 user@host
 ```
 
@@ -701,7 +743,7 @@ separate, unhurried edit once the service is up.
 Two things to check afterwards, because they are the ones the old format had no answer for:
 
 - **Every gated URL must fall inside some application's `base`.** A URL no application
-  covers is now reachable by nobody. `bb-auth --check-users FILE` prints the areas; compare
+  covers is now reachable by nobody. `bb-auth --check-access FILE` prints the areas; compare
   them with the locations nginx actually gates.
 - **nginx should clear `X-Auth-Uuid`** on every gated location, even though it is off by
   default. `proxy_set_header` overrides only the names it lists, so a header the gate could
@@ -765,7 +807,7 @@ On the target, bb-auth is laid out as:
 /opt/bb-auth/bin/bb-auth          # binary (root-owned, read-only to the service)
 /opt/bb-auth/etc/bb-auth.env      # config + HMAC key (0640, service-user readable)
 /opt/bb-auth/share/*.example      # the templates the first install copies from
-/opt/bb-auth/var/lib/users.json   # access list (0640, readable by the bb-auth group)
+/opt/bb-auth/var/lib/access.json   # access list (0640, readable by the bb-auth group)
 /usr/lib/systemd/system/bb-auth.service
 
 # separate packages, both optional: see "Editing it" and "Editing it in a browser"
@@ -773,14 +815,14 @@ On the target, bb-auth is laid out as:
 /opt/bb-auth/bin/bb-auth-web      # the admin GUI, run by its own bb-auth-web user
 /opt/bb-auth/etc/bb-auth-web.env  # the GUI's config (operator-owned, no secret)
 /usr/lib/systemd/system/bb-auth-web.service
-/usr/lib/systemd/system/bb-auth-reload.{path,service}   # users.json changed -> reload the gate
+/usr/lib/systemd/system/bb-auth-reload.{path,service}   # access.json changed -> reload the gate
 ```
 
 The units live where a **package** must put them. `/etc/systemd/system` is the admin's
 directory and a copy there *overrides* them, which is what an install from before the
 packages left behind; `deploy.sh` moves any it finds aside.
 
-Installing the GUI is what moves `users.json` to `bb-auth-web:bb-auth` (the gate keeps
+Installing the GUI is what moves `access.json` to `bb-auth-web:bb-auth` (the gate keeps
 reading it through the group, unit unchanged); a deploy without it changes no ownership at
 all. See [Who owns the access file](#who-owns-the-access-file).
 
@@ -797,11 +839,11 @@ Everything the install does lives in those packages: the service users, the unit
 env file, the HMAC key, an empty access file, and the order they must happen in. What
 they deliberately do **not** carry is any state, so `dpkg` cannot clobber
 `etc/bb-auth.env` (the HMAC key: every live session cookie depends on it) or
-`var/lib/users.json` (the only copy that is current). It cannot clobber a file it does
+`var/lib/access.json` (the only copy that is current). It cannot clobber a file it does
 not ship, and that is a stronger guarantee than a `conffile` prompt, which one
 `--force-confnew` would lose. Both are created on the **first** install only, and the
 `postinst` runs the same preflight before anything restarts: the required env vars, and
-`bb-auth --check-users` on the access file about to go live. A failure there exits
+`bb-auth --check-access` on the access file about to go live. A failure there exits
 non-zero with the running process still serving, because a fatal startup under
 `Restart=on-failure` is a boot loop.
 
@@ -811,7 +853,7 @@ A first install therefore ends *without* starting the gate: it says what to fill
 only what a package may not: `dpkg -i` in one transaction (not `apt install`, which
 declines to reinstall an equal version, so a rebuilt `3.0.0-1` would silently not
 deploy); moves aside any unit an older install left in `/etc/systemd/system`; installs a
-staged `users.json` after `--check-users` has vouched for it, with the owner and mode
+staged `access.json` after `--check-access` has vouched for it, with the owner and mode
 the live file already had; and runs `scripts/verify.sh`.
 
 `scripts/verify.sh` is the **post-deploy verification**, and it is standalone: packages
@@ -829,15 +871,15 @@ ssh user@host 'sudo bash -s' < ./scripts/verify.sh
 `user@host`:
 
 ```powershell
-./scripts/deploy.ps1 emiliano@rpi-01.bombicci.local          # package in WSL + redeploy (users.json + HMAC key kept)
+./scripts/deploy.ps1 emiliano@rpi-01.bombicci.local          # package in WSL + redeploy (access.json + HMAC key kept)
 ./scripts/deploy.ps1 emiliano@rpi-01.bombicci.local -Packages bb-auth   # gate only
-./scripts/deploy.ps1 emiliano@rpi-01.bombicci.local -UsersFile .\deploy\users.json   # also replace the access file
+./scripts/deploy.ps1 emiliano@rpi-01.bombicci.local -AccessFile .\deploy\access.json   # also replace the access file
 ```
 
 It builds the packages (`package.sh`, which builds through `build.sh`, so `dist/` stays
 current for everything else), verifies SSH + passwordless sudo + the target's
 architecture, ships the `.deb` files with `deploy.sh` and `verify.sh`, runs `deploy.sh`
-as root, and cleans up. By default it ships no `users.json` and never regenerates the
+as root, and cleans up. By default it ships no `access.json` and never regenerates the
 HMAC key, so redeploys are zero-downtime. `-Packages` is how the two admin tools stay
 optional: they are separate packages that `Depends: bb-auth (= <version>)`, and a
 gate-only host installs the gate alone.
@@ -1045,7 +1087,7 @@ Three operator notes, and the first is the one that matters:
   `BB_AUTH_WEB_ADMINS` is the backstop behind it. Enrol each admin:
 
   ```bash
-  sudo /opt/bb-auth/bin/bb-auth-adm -f /opt/bb-auth/var/lib/users.json \
+  sudo /opt/bb-auth/bin/bb-auth-adm -f /opt/bb-auth/var/lib/access.json \
       user set you@badbat75.com \
       --add-url 'https://auth.badbat75.com/admin,https://auth.badbat75.com/admin/*'
   ```

@@ -8,7 +8,7 @@ set -e
 DEST=/opt/bb-auth
 ENV_FILE="$DEST/etc/bb-auth-web.env"
 VAR_DIR="$DEST/var/lib"
-USERS_FILE="$VAR_DIR/users.json"
+ACCESS_FILE="$VAR_DIR/access.json"
 
 case "$1" in
 configure)
@@ -43,17 +43,17 @@ configure)
     # to traverse and read through the bb-auth group and everyone else out.
     # `sudo bb-auth-adm` goes on working untouched: the writer preserves the owner it
     # finds, which is what lets the two editors share one file.
-    if [ -e "$USERS_FILE" ]; then
-        chown bb-auth-web:bb-auth "$VAR_DIR" "$USERS_FILE"
+    if [ -e "$ACCESS_FILE" ]; then
+        chown bb-auth-web:bb-auth "$VAR_DIR" "$ACCESS_FILE"
         chmod 0750 "$VAR_DIR"
-        chmod 0640 "$USERS_FILE"
+        chmod 0640 "$ACCESS_FILE"
         # The writer's one-step-back copy is replaced with open(O_TRUNC), never
         # recreated, so its owner survives whoever writes next. Creating it here once,
         # owned by the GUI, is what stops a root-run bb-auth-adm from leaving behind a
         # root-owned .bak that the GUI's next save could not open for writing.
-        [ -e "$USERS_FILE.bak" ] || cp -p "$USERS_FILE" "$USERS_FILE.bak"
-        chown bb-auth-web:bb-auth "$USERS_FILE.bak"
-        chmod 0640 "$USERS_FILE.bak"
+        [ -e "$ACCESS_FILE.bak" ] || cp -p "$ACCESS_FILE" "$ACCESS_FILE.bak"
+        chown bb-auth-web:bb-auth "$ACCESS_FILE.bak"
+        chmod 0640 "$ACCESS_FILE.bak"
     fi
 
     for u in bb-auth-web.service bb-auth-reload.path bb-auth-reload.service; do
@@ -77,9 +77,9 @@ configure)
         echo "bb-auth-web:              to any Cognito account." >&2
         FAIL=1
     fi
-    WEB_USERS="$(envval BB_AUTH_USERS_FILE)"
-    if [ "$WEB_USERS" != "$USERS_FILE" ]; then
-        echo "bb-auth-web: BB_AUTH_USERS_FILE=${WEB_USERS:-<unset>}, but the gate reads $USERS_FILE." >&2
+    WEB_ACCESS="$(envval BB_AUTH_ACCESS_FILE)"
+    if [ "$WEB_ACCESS" != "$ACCESS_FILE" ]; then
+        echo "bb-auth-web: BB_AUTH_ACCESS_FILE=${WEB_ACCESS:-<unset>}, but the gate reads $ACCESS_FILE." >&2
         echo "bb-auth-web:              The GUI would edit a file nothing serves, and every save" >&2
         echo "bb-auth-web:              would silently do nothing." >&2
         FAIL=1

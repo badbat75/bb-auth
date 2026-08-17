@@ -5,7 +5,7 @@
 #   sudo bash deploy.sh <staging_dir>
 #
 # <staging_dir> is what scripts/deploy.ps1 leaves behind: one or more .deb files,
-# verify.sh, and optionally users.json. Nothing else is read from it, and nothing is
+# verify.sh, and optionally access.json. Nothing else is read from it, and nothing is
 # read from the network.
 #
 # THIS SCRIPT NO LONGER INSTALLS ANYTHING ITSELF. Everything that used to be here (the
@@ -24,7 +24,7 @@
 #      just installed is never read. A package must not touch that directory; a deploy
 #      must. Moved, not deleted: systemd ignores the renamed file and the original is
 #      one `mv` away.
-#   3. Install a staged users.json over the live one. The packages create that file
+#   3. Install a staged access.json over the live one. The packages create that file
 #      once, empty, and never touch it again, which is what makes a redeploy safe; so
 #      REPLACING it is necessarily a separate, explicit act. It is validated with the
 #      freshly-installed binary before anything is overwritten, and written back with
@@ -32,7 +32,7 @@
 #
 # What is preserved across every run, and why it is preserved by construction rather
 # than by care: neither etc/bb-auth.env (the HMAC key, so every session cookie keeps
-# verifying) nor var/lib/users.json is part of any package, and dpkg cannot clobber a
+# verifying) nor var/lib/access.json is part of any package, and dpkg cannot clobber a
 # file it does not ship.
 #
 # Install dir is overridable:  DEST=/opt/bb-auth (default).
@@ -41,7 +41,7 @@ set -euo pipefail
 
 SRC_DIR="${1:?usage: sudo bash deploy.sh <staging_dir>}"
 DEST="${DEST:-/opt/bb-auth}"
-LIVE_USERS="$DEST/var/lib/users.json"
+LIVE_ACCESS="$DEST/var/lib/access.json"
 TS="$(date +%Y%m%d-%H%M%S)"
 
 [ "$(id -u)" = "0" ] || { echo "[deploy] FATAL: run as root (sudo bash deploy.sh ...)"; exit 1; }
@@ -126,26 +126,26 @@ fi
 # lock anyone out. Staged, it REPLACES the live one, after the gate's own parser has
 # vouched for it: a rejected file is a fatal startup, and under Restart=on-failure that
 # is a boot loop.
-if [ -f "$SRC_DIR/users.json" ]; then
+if [ -f "$SRC_DIR/access.json" ]; then
   echo "[deploy] --- access file ---"
-  if ! "$DEST/bin/bb-auth" --check-users "$SRC_DIR/users.json"; then
-    echo "[deploy] FATAL: the staged users.json is not a valid bb-auth access file (see above)."
+  if ! "$DEST/bin/bb-auth" --check-access "$SRC_DIR/access.json"; then
+    echo "[deploy] FATAL: the staged access.json is not a valid bb-auth access file (see above)."
     echo "[deploy]        The live file was NOT touched."
     exit 1
   fi
   # Whatever the live file is, the replacement must stay: bb-auth-web:bb-auth 0640 once
   # the GUI is installed, root:bb-auth 0640 without it. Getting this wrong locks either
   # the gate out of its own access list or the GUI out of writing it.
-  if [ -e "$LIVE_USERS" ]; then
-    OWNER="$(stat -c '%U:%G' "$LIVE_USERS")"
-    MODE="$(stat -c '%a' "$LIVE_USERS")"
-    cp -a "$LIVE_USERS" "$LIVE_USERS.bak.$TS"
+  if [ -e "$LIVE_ACCESS" ]; then
+    OWNER="$(stat -c '%U:%G' "$LIVE_ACCESS")"
+    MODE="$(stat -c '%a' "$LIVE_ACCESS")"
+    cp -a "$LIVE_ACCESS" "$LIVE_ACCESS.bak.$TS"
   else
     OWNER="root:bb-auth"
     MODE=640
   fi
-  install -o "${OWNER%%:*}" -g "${OWNER##*:}" -m "$MODE" "$SRC_DIR/users.json" "$LIVE_USERS"
-  echo "[deploy] installed users.json as $OWNER $MODE (previous kept as $(basename "$LIVE_USERS").bak.$TS)"
+  install -o "${OWNER%%:*}" -g "${OWNER##*:}" -m "$MODE" "$SRC_DIR/access.json" "$LIVE_ACCESS"
+  echo "[deploy] installed access.json as $OWNER $MODE (previous kept as $(basename "$LIVE_ACCESS").bak.$TS)"
   # bb-auth-reload.path already turns the replacement into a reload when the GUI is
   # installed. Doing it here as well costs one extra reload and covers a gate-only host.
   # Guarded, because a first install leaves the gate stopped on purpose and `reload` on
@@ -156,7 +156,7 @@ if [ -f "$SRC_DIR/users.json" ]; then
     echo "[deploy] bb-auth is not running yet, so there is nothing to reload"
   fi
 else
-  echo "[deploy] no users.json staged, keeping the live $LIVE_USERS"
+  echo "[deploy] no access.json staged, keeping the live $LIVE_ACCESS"
 fi
 
 # --- 4. verify -----------------------------------------------------------------

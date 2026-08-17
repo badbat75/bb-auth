@@ -2067,12 +2067,12 @@ fn handle_logout(req: Request, state: &State) {
 // main
 // ---------------------------------------------------------------------------
 
-/// `bb-auth --check-users <file>`: parse an access file with the real parser and exit
+/// `bb-auth --check-access <file>`: parse an access file with the real parser and exit
 /// 0 (with a summary) or 1 (with the error). Reads no env and touches no network, so
 /// a deploy can validate the file that is *about* to go live — a rejected scope, an
 /// unknown site field, or a residual `enabled_paths` is a fatal startup error, and with
 /// `Restart=on-failure` that would be a boot loop.
-fn check_users(path: &str) -> ! {
+fn check_access(path: &str) -> ! {
     match read_access(path) {
         Ok(a) => {
             let scopes: usize = a.apps.iter().map(|x| x.scopes.len()).sum();
@@ -2125,27 +2125,27 @@ fn check_users(path: &str) -> ! {
     }
 }
 
-/// Parse argv (only `--check-users`), build the config, load the access table, prime the
+/// Parse argv (only `--check-access`), build the config, load the access table, prime the
 /// JWKS, then serve forever on a fixed pool of blocking worker threads.
 fn main() {
     let args: Vec<String> = std::env::args().skip(1).collect();
     match args.first().map(String::as_str) {
-        Some("--check-users") => match args.get(1) {
-            Some(p) => check_users(p),
+        Some("--check-access") => match args.get(1) {
+            Some(p) => check_access(p),
             None => {
-                eprintln!("usage: bb-auth --check-users <users.json>");
+                eprintln!("usage: bb-auth --check-access <access.json>");
                 std::process::exit(2);
             }
         },
         Some(other) => {
-            eprintln!("[bb-auth] unknown argument '{other}' (only --check-users is accepted)");
+            eprintln!("[bb-auth] unknown argument '{other}' (only --check-access is accepted)");
             std::process::exit(2);
         }
         None => {}
     }
 
     let cfg = Config::from_env();
-    let access_path = env_req("BB_AUTH_USERS_FILE");
+    let access_path = env_req("BB_AUTH_ACCESS_FILE");
     let access = load_access(&access_path);
 
     let initial = fetch_jwks(&cfg.issuer).unwrap_or_else(|e| {

@@ -28,7 +28,7 @@ business. Everything in this directory is scaffolding around that.
 └── deploy.sh, as root on the host
     ├── dpkg -i, one transaction
     ├── move aside units from a pre-package install
-    ├── install users.json                 (only with -UsersFile)
+    ├── install access.json                 (only with -AccessFile)
     └── verify.sh
 ```
 
@@ -86,7 +86,7 @@ What it adds on top of a bare `cargo deb`:
 ```powershell
 ./scripts/deploy.ps1 user@host                                   # build + deploy all three
 ./scripts/deploy.ps1 user@host -Packages bb-auth                 # gate only
-./scripts/deploy.ps1 user@host -UsersFile .\deploy\users.json     # also replace the access file
+./scripts/deploy.ps1 user@host -AccessFile .\deploy\access.json     # also replace the access file
 ./scripts/deploy.ps1 user@host -NoBuild                          # repackage the current dist/
 ```
 
@@ -124,7 +124,7 @@ Installs nothing itself. It does the four things a package cannot:
    packages. That is the admin's directory and it *overrides* `/usr/lib/systemd/system`,
    where a package must put its units, so left in place they win forever. Moved, not
    deleted, and the enablement symlinks are `reenable`d onto the packaged files.
-3. **Installs a staged `users.json`**, after the gate's own parser has vouched for it,
+3. **Installs a staged `access.json`**, after the gate's own parser has vouched for it,
    with the owner and mode the live file already had. The packages create that file once,
    empty, and never touch it again, which is what makes a redeploy safe, so replacing it
    is necessarily a separate and explicit act.
@@ -151,12 +151,12 @@ deploying to. Keep it that way.
 ## What must not break
 
 - **No state in the packages.** `etc/*.env` (the HMAC key: every live session cookie
-  depends on it) and `var/lib/users.json` are created by `postinst` only when absent and
+  depends on it) and `var/lib/access.json` are created by `postinst` only when absent and
   are in no package, so `dpkg` cannot clobber them. They are deliberately not
   `conf-files`: a prompt that one `--force-confnew` would lose is not the same guarantee.
 - **One build path.** `package.sh` goes through `build.sh` so the `.deb` contains exactly
   the bytes in `dist/`, which is what makes those bytes independently checkable.
-- **Validate before restart.** The `postinst` preflight, and `--check-users` on any staged
+- **Validate before restart.** The `postinst` preflight, and `--check-access` on any staged
   access file, run before anything is restarted. A fatal startup under
   `Restart=on-failure` is a boot loop.
 - **Host-side logic stays in these files**, not in strings assembled by the orchestrator.

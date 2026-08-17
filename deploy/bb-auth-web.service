@@ -47,7 +47,7 @@ MemoryDenyWriteExecute=true
 # is written as a name rather than a literal address.
 RestrictAddressFamilies=AF_INET AF_INET6 AF_UNIX AF_NETLINK
 # @system-service contains @chown (and copy_file_range/sendfile), which the writer needs:
-# it copies the file one step back to users.json.bak, writes a temp file beside it,
+# it copies the file one step back to access.json.bak, writes a temp file beside it,
 # restores mode and owner, and renames. A narrower set would turn every save into an
 # EPERM that looks exactly like a permissions bug.
 SystemCallFilter=@system-service

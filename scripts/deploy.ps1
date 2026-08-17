@@ -30,9 +30,9 @@
       - etc/bb-auth.env, which carries the HMAC key. It is created once, on a first
         install, and preserved forever after, so existing session cookies keep
         verifying and nobody is logged out by a redeploy.
-      - var/lib/users.json, the live access file. A redeploy leaves it exactly as it
-        is. -UsersFile is the only thing here that replaces it, and it validates the
-        file with `bb-auth --check-users` before anything is overwritten.
+      - var/lib/access.json, the live access file. A redeploy leaves it exactly as it
+        is. -AccessFile is the only thing here that replaces it, and it validates the
+        file with `bb-auth --check-access` before anything is overwritten.
 
     `dpkg -i` rather than `apt install`, deliberately: apt would decline to reinstall a
     version equal to the one already there, so a rebuilt 3.0.0-1 would silently not
@@ -47,12 +47,12 @@
     NOTE installing bb-auth-web is what hands the access file to the bb-auth-web user;
     a deploy without it changes no ownership at all.
 
-.PARAMETER UsersFile
-    Local users.json to install over the remote one. Required only for a first install
+.PARAMETER AccessFile
+    Local access.json to install over the remote one. Required only for a first install
     on a host where you want a roster immediately: the package creates an EMPTY access
     file (nobody authorized) and never touches it again. Validated as JSON locally, then
     by the freshly-installed binary on the host, before it replaces the live file.
-    Check it locally first: cargo run -- --check-users .\deploy\users.json
+    Check it locally first: cargo run -- --check-access .\deploy\access.json
 
 .PARAMETER Arch
     Debian architecture to build and deploy. Default: arm64 (the Pi).
@@ -71,14 +71,14 @@
 
 .EXAMPLE
     ./scripts/deploy.ps1 emiliano@rpi-01.bombicci.local
-    Build the arm64 packages and deploy all three (users.json + HMAC key kept).
+    Build the arm64 packages and deploy all three (access.json + HMAC key kept).
 
 .EXAMPLE
     ./scripts/deploy.ps1 emiliano@rpi-01.bombicci.local -NoBuild -Packages bb-auth
     Repackage the current dist/ and install the gate only.
 
 .EXAMPLE
-    ./scripts/deploy.ps1 emiliano@rpi-01.bombicci.local -UsersFile .\deploy\users.json
+    ./scripts/deploy.ps1 emiliano@rpi-01.bombicci.local -AccessFile .\deploy\access.json
     Deploy, then replace the access file with the given one.
 #>
 [CmdletBinding()]
@@ -89,7 +89,7 @@ param(
     [ValidateSet('bb-auth', 'bb-auth-adm', 'bb-auth-web')]
     [string[]]$Packages = @('bb-auth', 'bb-auth-adm', 'bb-auth-web'),
 
-    [string]$UsersFile,
+    [string]$AccessFile,
 
     [ValidateSet('arm64', 'amd64', 'armhf')]
     [string]$Arch = 'arm64',
@@ -165,12 +165,12 @@ $debs = foreach ($p in $Packages) {
 foreach ($f in @($DeploySh, $VerifySh)) {
     if (-not (Test-Path -LiteralPath $f)) { throw "Missing required file: $f" }
 }
-if ($UsersFile) {
-    if (-not (Test-Path -LiteralPath $UsersFile)) { throw "UsersFile not found: $UsersFile" }
+if ($AccessFile) {
+    if (-not (Test-Path -LiteralPath $AccessFile)) { throw "AccessFile not found: $AccessFile" }
     # Cheap local sanity check, so a typo costs a second instead of a round trip. The
     # authoritative check is the gate's own parser, on the host, below.
-    try { $null = Get-Content -Raw -LiteralPath $UsersFile | ConvertFrom-Json }
-    catch { throw "UsersFile is not valid JSON: $UsersFile" }
+    try { $null = Get-Content -Raw -LiteralPath $AccessFile | ConvertFrom-Json }
+    catch { throw "AccessFile is not valid JSON: $AccessFile" }
 }
 Write-Host "    $($debs.Count) package(s) for $Arch at $DebVersion"
 
@@ -259,7 +259,7 @@ $staged = @()
 foreach ($f in $debs) { $staged += @{ src = $f; dst = (Split-Path -Leaf $f) } }
 $staged += @{ src = $DeploySh; dst = 'deploy.sh' }
 $staged += @{ src = $VerifySh; dst = 'verify.sh' }
-if ($UsersFile) { $staged += @{ src = $UsersFile; dst = 'users.json' } }
+if ($AccessFile) { $staged += @{ src = $AccessFile; dst = 'access.json' } }
 
 foreach ($a in $staged) {
     scp -o BatchMode=yes $a.src "${Target}:~/$RemoteStage/$($a.dst)"
@@ -284,6 +284,6 @@ Assert-Native "cleanup staging dir"
 
 Write-Host ""
 Write-Host "DEPLOY COMPLETE: $($Packages -join ', ') $DebVersion ($Arch) on $Target" -ForegroundColor Green
-if (-not $UsersFile) {
+if (-not $AccessFile) {
     Write-Host "The access file and the HMAC key were left untouched." -ForegroundColor Green
 }

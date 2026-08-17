@@ -1,5 +1,5 @@
 //! bb-auth-web — a server-rendered admin GUI over a bb-auth **access file**
-//! (`BB_AUTH_USERS_FILE`, a.k.a. users.json).
+//! (`BB_AUTH_ACCESS_FILE`, a.k.a. access.json).
 //!
 //! What `bb-auth-adm` shows on a terminal, this shows in a browser: the roster, the url
 //! groups and who references them, the sites in the order that decides which one answers,
@@ -108,7 +108,7 @@
 //!
 //! | Var | Required | Default | Meaning |
 //! |-----|----------|---------|---------|
-//! | `BB_AUTH_USERS_FILE` | yes | — | the access file to render. Same name, same meaning as the gate's |
+//! | `BB_AUTH_ACCESS_FILE` | yes | — | the access file to render. Same name, same meaning as the gate's |
 //! | `BB_AUTH_WEB_ADMINS` | yes | — | comma-separated emails allowed in. Empty is fatal |
 //! | `BB_AUTH_WEB_LISTEN` | no | `127.0.0.1:8091` | bind address. Keep it on loopback |
 //! | `BB_AUTH_WEB_BASE_PATH` | no | *(empty)* | URL prefix nginx mounts the GUI at, e.g. `/admin` |
@@ -1508,7 +1508,7 @@ impl Msg {
 struct Config {
     /// `BB_AUTH_WEB_LISTEN`. Loopback — see the trust model on the crate root.
     listen: String,
-    /// `BB_AUTH_USERS_FILE`, the access file to render. The gate's variable name, on
+    /// `BB_AUTH_ACCESS_FILE`, the access file to render. The gate's variable name, on
     /// purpose: each service gets its own env file, and one name means one meaning.
     access_path: String,
     /// `BB_AUTH_WEB_ADMINS`, normalised with [`norm_email`] — the emails allowed in, and
@@ -1607,7 +1607,7 @@ impl Config {
         });
         Config {
             listen: env_or("BB_AUTH_WEB_LISTEN", "127.0.0.1:8091"),
-            access_path: env_req("BB_AUTH_USERS_FILE"),
+            access_path: env_req("BB_AUTH_ACCESS_FILE"),
             admins,
             base_path,
             default_lang,
@@ -4129,7 +4129,7 @@ fn notice(kind: &str, title: &str, body: Markup) -> Markup {
 }
 
 /// The page for an access file the gate would refuse. The library's message goes out
-/// **verbatim** — it is the same sentence `bb-auth --check-users` and a failed startup
+/// **verbatim** — it is the same sentence `bb-auth --check-access` and a failed startup
 /// print, and an operator who can match those three is an operator who can fix the file.
 fn page_file_error(v: &View, err: &str) -> Markup {
     notice(

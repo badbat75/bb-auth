@@ -6,7 +6,7 @@ set -e
 
 DEST=/opt/bb-auth
 VAR_DIR="$DEST/var/lib"
-USERS_FILE="$VAR_DIR/users.json"
+ACCESS_FILE="$VAR_DIR/access.json"
 
 if [ -d /run/systemd/system ]; then
     systemctl --system daemon-reload >/dev/null || true
@@ -35,13 +35,13 @@ purge)
     # directory root:root 0755. Only while the gate's group still exists to own it;
     # if it does not, the gate is going too and its own purge deals with the file.
     if getent group bb-auth >/dev/null 2>&1; then
-        if [ -e "$USERS_FILE" ]; then
-            chown root:bb-auth "$USERS_FILE"
-            chmod 0640 "$USERS_FILE"
+        if [ -e "$ACCESS_FILE" ]; then
+            chown root:bb-auth "$ACCESS_FILE"
+            chmod 0640 "$ACCESS_FILE"
         fi
-        if [ -e "$USERS_FILE.bak" ]; then
-            chown root:bb-auth "$USERS_FILE.bak"
-            chmod 0640 "$USERS_FILE.bak"
+        if [ -e "$ACCESS_FILE.bak" ]; then
+            chown root:bb-auth "$ACCESS_FILE.bak"
+            chmod 0640 "$ACCESS_FILE.bak"
         fi
         if [ -d "$VAR_DIR" ]; then
             chown root:root "$VAR_DIR"

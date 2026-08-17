@@ -12,7 +12,7 @@ set -e
 
 DEST=/opt/bb-auth
 ENV_FILE="$DEST/etc/bb-auth.env"
-USERS_FILE="$DEST/var/lib/users.json"
+ACCESS_FILE="$DEST/var/lib/access.json"
 UNIT=bb-auth.service
 
 case "$1" in
@@ -41,17 +41,37 @@ configure)
         chmod 0640 "$ENV_FILE"
     fi
 
+    # --- a half-finished rename is the one way "create it empty" is dangerous ---
+    # The file was users.json before 3.0. Renaming it is the operator's job, because it
+    # is state and no package may move state; but if only half of that job is done, the
+    # branch below writes an EMPTY access file, --check-access says yes to it (it parses,
+    # it just authorizes nobody), and the restart takes out every user on the host. That
+    # is a total lockout reported as a successful install, so refuse instead: the file
+    # next door is almost certainly the one that was meant to be read.
+    if [ ! -e "$ACCESS_FILE" ] && [ -e "$DEST/var/lib/users.json" ]; then
+        echo "bb-auth: $ACCESS_FILE does not exist, but $DEST/var/lib/users.json does." >&2
+        echo "bb-auth:          3.0.0 renamed the access file, and moving it is yours to do:" >&2
+        echo "bb-auth:            mv $DEST/var/lib/users.json $ACCESS_FILE" >&2
+        echo "bb-auth:            mv $DEST/var/lib/users.json.bak $ACCESS_FILE.bak   # if present" >&2
+        echo "bb-auth:          and set BB_AUTH_ACCESS_FILE=$ACCESS_FILE in $ENV_FILE" >&2
+        echo "bb-auth:          (and in etc/bb-auth-web.env if the GUI is installed)." >&2
+        echo "bb-auth:          Installing over this would create an EMPTY access file and" >&2
+        echo "bb-auth:          lock everybody out. NOT restarted; the running process is" >&2
+        echo "bb-auth:          still serving." >&2
+        exit 1
+    fi
+
     # --- the access file, once, and EMPTY ---
-    # Deliberately not a copy of share/users.example.json, which grants a whole area to
+    # Deliberately not a copy of share/access.example.json, which grants a whole area to
     # you@example.com. A file with no applications authorizes nobody, which is the only
     # safe thing an unattended install can write, and it parses.
     #
     # The "version" is not optional: a file without one is a fatal load error, which is
     # what makes an older file impossible to mistake for this one.
-    if [ ! -e "$USERS_FILE" ]; then
-        printf '{\n  "version": 3,\n  "applications": [],\n  "users": []\n}\n' > "$USERS_FILE"
-        chown root:bb-auth "$USERS_FILE"
-        chmod 0640 "$USERS_FILE"
+    if [ ! -e "$ACCESS_FILE" ]; then
+        printf '{\n  "version": 3,\n  "applications": [],\n  "users": []\n}\n' > "$ACCESS_FILE"
+        chown root:bb-auth "$ACCESS_FILE"
+        chmod 0640 "$ACCESS_FILE"
     fi
 
     # --- a scripts/deploy.sh install shadows this one ---
@@ -73,23 +93,23 @@ configure)
     }
     FAIL=0
     for req in BB_AUTH_HMAC_KEY BB_AUTH_COGNITO_ISSUER BB_AUTH_CLIENT_ID \
-               BB_AUTH_AUTHORIZED_HOSTS BB_AUTH_LOGIN_URL BB_AUTH_USERS_FILE; do
+               BB_AUTH_AUTHORIZED_HOSTS BB_AUTH_LOGIN_URL BB_AUTH_ACCESS_FILE; do
         if [ -z "$(envval "$req")" ]; then
             echo "bb-auth: $ENV_FILE does not set $req (required)" >&2
             FAIL=1
         fi
     done
 
-    # --check-users must have vouched for the file the service will actually read.
-    ENV_USERS="$(envval BB_AUTH_USERS_FILE)"
-    if [ -n "$ENV_USERS" ] && [ "$ENV_USERS" != "$USERS_FILE" ]; then
-        echo "bb-auth: BB_AUTH_USERS_FILE=$ENV_USERS but this package installs $USERS_FILE." >&2
+    # --check-access must have vouched for the file the service will actually read.
+    ENV_ACCESS="$(envval BB_AUTH_ACCESS_FILE)"
+    if [ -n "$ENV_ACCESS" ] && [ "$ENV_ACCESS" != "$ACCESS_FILE" ]; then
+        echo "bb-auth: BB_AUTH_ACCESS_FILE=$ENV_ACCESS but this package installs $ACCESS_FILE." >&2
         echo "bb-auth:          The gate would read a file nothing validated." >&2
         FAIL=1
     fi
 
     # The authoritative check: the gate's own parser, on the exact bytes going live.
-    "$DEST/bin/bb-auth" --check-users "$USERS_FILE" || FAIL=1
+    "$DEST/bin/bb-auth" --check-access "$ACCESS_FILE" || FAIL=1
 
     if [ -d /run/systemd/system ]; then
         systemctl --system daemon-reload >/dev/null || true
@@ -102,11 +122,11 @@ configure)
         echo "bb-auth: installed, not started."
         echo "bb-auth:   1. fill in $ENV_FILE (issuer, client id, authorized hosts,"
         echo "bb-auth:      login URL). The HMAC key is already there and must stay."
-        echo "bb-auth:   2. $USERS_FILE is empty: nobody is authorized. Describe a place,"
+        echo "bb-auth:   2. $ACCESS_FILE is empty: nobody is authorized. Describe a place,"
         echo "bb-auth:      then say who reaches it:"
-        echo "bb-auth:      bb-auth-adm -f $USERS_FILE app add app1 --base 'https://app.example.com/app1'"
-        echo "bb-auth:      bb-auth-adm -f $USERS_FILE user add you@example.com"
-        echo "bb-auth:      bb-auth-adm -f $USERS_FILE scope add app1 all --url 'https://app.example.com/app1/*' \\"
+        echo "bb-auth:      bb-auth-adm -f $ACCESS_FILE app add app1 --base 'https://app.example.com/app1'"
+        echo "bb-auth:      bb-auth-adm -f $ACCESS_FILE user add you@example.com"
+        echo "bb-auth:      bb-auth-adm -f $ACCESS_FILE scope add app1 all --url 'https://app.example.com/app1/*' \\"
         echo "bb-auth:          --access restricted --user you@example.com"
         echo "bb-auth:   3. systemctl enable --now bb-auth"
     elif [ "$FAIL" = 1 ]; then

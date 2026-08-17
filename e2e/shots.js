@@ -293,7 +293,7 @@ async function main() {
       if (view.lang) await page.goto(`${ctx.base}/?lang=${view.lang}`);
       if (view.theme) await page.goto(`${ctx.base}/?theme=${view.theme}`);
       for (const [name, steps] of scenes) {
-        fs.copyFileSync(FIXTURE, ctx.usersFile); // every scene starts from the fixture
+        fs.copyFileSync(FIXTURE, ctx.accessFile); // every scene starts from the fixture
         // One scene that cannot reach its state (a selector the markup no longer has,
         // typically) must not cost the other hundred their screenshot: this is evidence
         // for a human, not an assertion, so it degrades instead of aborting. The exit

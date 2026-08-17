@@ -41,7 +41,7 @@ SystemCallArchitectures=native
 CapabilityBoundingSet=
 AmbientCapabilities=
 # The whole tree is read-only to the service: bin/ (binary), etc/ (config + HMAC
-# key), var/lib/ (users.json). bb-auth never writes — no StateDirectory needed.
+# key), var/lib/ (access.json). bb-auth never writes — no StateDirectory needed.
 ReadOnlyPaths=/opt/bb-auth
 UMask=0077
 
