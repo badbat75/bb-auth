@@ -2257,6 +2257,58 @@ mod tests {
         claims("given_name,family_name")
     }
 
+    /// A JWKS holding one RSA public key, and an id_token signed by its private half. Both
+    /// were generated once, offline, and are fixtures rather than secrets: the private half
+    /// was thrown away, so the only thing this key can do is verify this token. `exp` is in
+    /// 2100 because the point is the signature, not the clock.
+    const TEST_JWKS: &str = r#"{"keys":[{"kty":"RSA","alg":"RS256","use":"sig","kid":"bb-auth-test","e":"AQAB","n":"nmAtxmXBaFrRJyUe6i5CSQEPTq-80tfKKzO5jXg58t_KsovozqKu9dVzcJXh44gtXaoxbqPmVtj8Nn8sjC1G-kbF-MM4zQQ_F0z2S23Xkcz5-u0emQpt3ZPMRmkfQBsZs6Y_7qZT6ovm0RMRtEvOwJ1g1AFRp72saVt3lPlT9aMXDL0JN7GU1ytnNpYtn4C3u-UpnN9uxcGLYx3ULptmI3BK0s-zvVMzfxKSSvS_zvIfMxeJjAxrYmh1-cZifJsLGVuSQCcUeiCHP6kYxL_-sJjgb3H8tHeZVB4xjUzlkpKFiAKUmE5l39Rqbgxmq_bBLP2GvLAUBIjGV27r7bVriw"}]}"#;
+    const TEST_TOKEN: &str = "eyJhbGciOiJSUzI1NiIsInR5cCI6IkpXVCIsImtpZCI6ImJiLWF1dGgtdGVzdCJ9.eyJpc3MiOiJodHRwczovL2NvZ25pdG8taWRwLmV1LWNlbnRyYWwtMS5hbWF6b25hd3MuY29tL2V1LWNlbnRyYWwtMV9URVNUUE9PTCIsImF1ZCI6InRlc3RjbGllbnQiLCJ0b2tlbl91c2UiOiJpZCIsImV4cCI6NDEwMjQ0NDgwMCwiaWF0IjoxMDAwMDAwMDAwLCJlbWFpbCI6InJzMjU2QGV4YW1wbGUuY29tIiwiZW1haWxfdmVyaWZpZWQiOnRydWUsImdpdmVuX25hbWUiOiJBZGEifQ.EsoTSyILbHFsucRSARUt4qahpK5R6rPlteCq1sUQ8gMoAqneJwJ8YXeFZmVFh3bCRlmgA0q4ygyXKMh_1ltNi8bfOoLtSCJBV-w-PrKeFRq1khEFfskIvWirsiVgzo5BK0DDj74dEFdG2zz7f_YAkln3indvFv1RbULDYfStID8F4WViQJP02nG4LdJiR4tihjw9E7f6Q7iMUeUw6a8axkWy1vtykzZptf_QNO2knyaAbOSNRd8hNbiYnid0VvbzrbxRFkvlzOSmiPwuab1kKW1H5AqGK0gN9eZTbOFKizVzajXHgcY7joRziYXI-86LZwRUHAAuAE-Jul82pMxDeQ";
+
+    /// The JWKS parse and the RS256 verification, which every login runs and which nothing
+    /// else here covers: the rest of the suite starts from a [`UserIdentity`] that already
+    /// exists. The `Validation` is built exactly as [`validate_id_token`] builds it, so this
+    /// exercises the gate's own configuration and not a lenient one.
+    ///
+    /// It exists because that coverage gap has already cost a production outage.
+    /// `jsonwebtoken` selects its crypto provider from a **feature**, and compiles happily
+    /// with none: it then installs a provider whose verifier factory is a `panic!`. Nothing
+    /// says so until the first signature is checked, and under `panic = "abort"` that is not
+    /// a failed login but a dead process, which `Restart=on-failure` turns into a restart
+    /// loop. A test that only built a `DecodingKey` would have missed it, because the JWKS
+    /// fetch and `from_jwk` never reach the provider; the verification is the whole point.
+    #[test]
+    fn rsa_signature_verification_works() {
+        let set: JwkSet = serde_json::from_str(TEST_JWKS).expect("the JWKS must parse");
+        let key = DecodingKey::from_jwk(&set.keys[0]).expect("the JWK must become a key");
+
+        let mut v = Validation::new(Algorithm::RS256);
+        v.set_audience(&["testclient"]);
+        v.set_issuer(&["https://cognito-idp.eu-central-1.amazonaws.com/eu-central-1_TESTPOOL"]);
+        v.set_required_spec_claims(&["exp", "aud", "iss"]);
+        v.validate_exp = true;
+        v.leeway = 60;
+
+        let data = decode::<Claims>(TEST_TOKEN, &key, &v).expect("a valid RS256 token verifies");
+        assert_eq!(data.claims.email.as_deref(), Some("rs256@example.com"));
+        assert_eq!(data.claims.token_use.as_deref(), Some("id"));
+        // The profile claim rides in `extra`, which is what proves `flatten` still collects
+        // what no typed field above took.
+        assert_eq!(
+            data.claims.extra.get("given_name").and_then(|v| v.as_str()),
+            Some("Ada")
+        );
+
+        // The other half, and the one that says this is a signature check rather than a
+        // decoder: one flipped base64 digit in the signature, the signed message untouched.
+        let (msg, sig) = TEST_TOKEN.rsplit_once('.').expect("a JWT has three segments");
+        assert!(sig.starts_with('E'), "fixture drifted: {sig}");
+        let forged = format!("{msg}.F{}", &sig[1..]);
+        assert!(
+            decode::<Claims>(&forged, &key, &v).is_err(),
+            "a forged signature must not verify"
+        );
+    }
+
     #[test]
     fn worst_case_cookie_bytes_grows_and_trips_the_warning() {
         let none = worst_case_cookie_bytes(&[]);

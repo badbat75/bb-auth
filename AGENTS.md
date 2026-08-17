@@ -204,10 +204,14 @@ target. Two things it prints are worth reading: the **max GLIBC symbol** (it mus
 below the `libc6 (>= …)` floor the packages declare in `Cargo.toml`) and the binary sizes,
 because `[profile.release]` is size-optimised on purpose.
 
-One gap to close by hand: **no unit test covers RS256 verification or the JWKS parse**, so a
-change under `jsonwebtoken` or `ureq` can pass the whole suite and still break every login.
-Start the gate against the real issuer instead: the initial JWKS fetch is fatal on failure,
-so reaching the `listening on …` line proves the fetch, the parse and every
+The gap that used to sit here is now half closed, and the half that remains is worth naming.
+`rsa_signature_verification_works` covers the JWKS parse and a real RS256 verification against
+a fixed offline key, both ways (a good signature must verify, a forged one must not), which is
+what catches a `jsonwebtoken` change that breaks every login while the rest of the suite stays
+green. It exists because that is not hypothetical: see the crypto-provider half of the
+dependency invariant. What a unit test cannot cover is the **fetch** (`ureq`, rustls, and the
+real issuer's document), so start the gate against that issuer as well: the initial JWKS fetch
+is fatal on failure, so reaching the `listening on …` line proves the fetch, the parse and every
 `DecodingKey::from_jwk`.
 
 ## Conventions
@@ -502,7 +506,15 @@ so reaching the `listening on …` line proves the fetch, the parse and every
   aarch64 cross-compile with **no system
   OpenSSL or cert store**. Do not add a dep that pulls in `openssl`/native-tls, and do not let
   rustls or a JWT crate switch to `aws-lc-rs` or a platform verifier: both reintroduce exactly
-  what this rule exists to keep out. After any dependency bump, check with
+  what this rule exists to keep out. Selecting **no** provider is not the safe middle, and it
+  is the half of this rule that has actually broken production: `jsonwebtoken`'s crypto is the
+  `rust_crypto` **feature**, not a default, and with neither feature it compiles happily and
+  installs a verifier factory that is a `panic!`. The gate then starts clean (the JWKS fetch and
+  `from_jwk` never reach the provider) and aborts on the first real login, which under
+  `panic = "abort"` and `Restart=on-failure` is a restart loop rather than a failed request.
+  `cargo tree` cannot catch that one, because there the wrong tree is the one with a crate
+  **missing**; `rsa_signature_verification_works` is what catches it, and is why that test
+  exists. After any dependency bump, check with
   `cargo tree | grep -iE "openssl|native-tls|aws-lc|schannel|security-framework"`, which must
   stay empty, and confirm `webpki-roots` is still there. No async runtime
   (`tiny_http` is blocking + threaded) — keeps the binary and resident memory small.
