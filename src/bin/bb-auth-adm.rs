@@ -198,23 +198,44 @@ fn run() -> Result<ExitCode, String> {
             _ => i += 1,
         }
     }
-    let path = match file.or_else(|| std::env::var("BB_AUTH_ACCESS_FILE").ok()) {
-        Some(p) => p,
-        None => return Err("no access file: pass -f FILE or set BB_AUTH_ACCESS_FILE".into()),
-    };
+    let access = file
+        .or_else(|| std::env::var("BB_AUTH_ACCESS_FILE").ok())
+        .filter(|p| !p.trim().is_empty());
 
     // Derived from the access file's own path when nothing names it, exactly as the gate
     // derives it: the two files live together, and an operator who moved one moved both.
-    let settings_path = settings_file
+    let settings = settings_file
         .or_else(|| std::env::var("BB_AUTH_SETTINGS_FILE").ok())
         .filter(|p| !p.trim().is_empty())
-        .unwrap_or_else(|| default_settings_path(&path));
+        .or_else(|| access.as_deref().map(default_settings_path));
 
     let (words, flags) = parse_args(&argv)?;
     let cmd: Vec<&str> = words.iter().map(String::as_str).collect();
+
+    // Which file this invocation is missing depends on which file it is about. A `settings`
+    // command that refused because nobody named the *access* file would send an operator to
+    // look at the wrong one, which is the whole reason this is not a single check.
+    let about_settings = cmd.first() == Some(&"settings");
     let ctx = Ctx {
-        path,
-        settings_path,
+        path: match (&access, about_settings) {
+            (Some(p), _) => p.clone(),
+            // Never read: every `settings` arm works on `settings_path`. Empty rather than
+            // an `Option` so the forty arms that do use it stay as they read now.
+            (None, true) => String::new(),
+            (None, false) => {
+                return Err("no access file: pass -f FILE or set BB_AUTH_ACCESS_FILE".into())
+            }
+        },
+        settings_path: match settings {
+            Some(p) => p,
+            None => {
+                return Err(
+                    "no settings file: pass -s FILE, or -f FILE to take the one \
+                            beside it, or set BB_AUTH_SETTINGS_FILE"
+                        .into(),
+                )
+            }
+        },
         dry_run,
         flags,
     };
@@ -288,6 +309,9 @@ fn run() -> Result<ExitCode, String> {
 /// in `--access` must not be silently ignored by a tool whose job is to keep typos out of
 /// the access file.
 struct Ctx {
+    /// The access file. Empty on a `settings` invocation that named no access file, which is
+    /// the one case where there is nothing to name: those commands read `settings_path` and
+    /// never this.
     path: String,
     /// The settings file, which only the `settings` commands touch. Resolved for every
     /// invocation rather than only for those, so that `--help` and an error message can name
