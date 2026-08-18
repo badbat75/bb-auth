@@ -52,7 +52,7 @@ __BB_LOGO__
     </p>
   </main>
 
-  <script>
+  <script nonce="__BB_NONCE__">
     var TOKEN_URL = "__BB_TOKEN_URL__";
     var IDP_ENDPOINT = "__BB_ENDPOINT__";
     var SOCIAL_CLIENT_ID = "__BB_SOCIAL_CLIENT_ID__";
@@ -243,7 +243,12 @@ __BB_LOGO__
       failExchange(T.no_code);
     } else if (!verifier) {
       failExchange(T.no_verifier);
-    } else if (expectedState && state !== expectedState) {
+      // Unconditional, and not `expectedState && state !== expectedState`: an empty stored
+      // state used to mean "skip the check", which is a fail-open written in the shape of a
+      // fail-closed. It is unreachable today (the verifier and the state are stored in the
+      // same breath, and the verifier is checked one branch above), and that is exactly the
+      // kind of guard that stops being unreachable without anybody noticing.
+    } else if (state !== expectedState) {
       failExchange(T.bad_state);
     } else {
       var body = new URLSearchParams({

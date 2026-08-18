@@ -3,7 +3,8 @@
 Minimal **auth gate**. It accepts a Cognito `id_token` that a browser-side login
 page obtained and turns it into an HMAC-signed session cookie that nginx enforces
 via `auth_request`. The service is generic — it fronts any web service and is
-wired per-deployment through `BB_AUTH_*` env vars.
+wired per-deployment through `BB_AUTH_*` env vars **and a settings file** (§8a), which
+holds what must change with no restart.
 
 This document describes the **service**. The end-to-end login sequence (browser,
 Cognito, nginx, bb-auth) is documented separately in
@@ -59,7 +60,8 @@ Three actors outside bb-auth itself:
 
 ## 3. Code structure
 
-One crate, four targets. The split has exactly one seam, and it is the **access file**:
+One crate, four targets. The seam is the **access file** (and, since 3.1, the settings
+file and the presentation contract beside it, for the same reason and by the same rule):
 its schema, its parser, its matcher and its grant model are the one thing two programs
 must agree on byte for byte, so they live in a library both link. Everything else about
 the gate is the gate's, and stays in one file.
@@ -124,11 +126,17 @@ And in `src/lib.rs`:
 
 ## 5. Endpoints
 
+The table below is a **second copy** of the one on `bb-auth`'s crate root (`cargo doc
+--no-deps`), which is where the endpoint contract belongs and where it is maintained: this
+one exists because this document is read end to end and a reader should not have to leave
+it. When the two disagree, the crate root is right, and this one is what needs fixing. The
+same goes for README's operator-facing version.
+
 | Method | Path | Caller | Behavior |
 |--------|------|--------|----------|
-| `GET` | `/auth/validate` | nginx only (`auth_request`) | `204` naming the identity in one header per `identity_attrs` entry (default `X-Auth-Email`) if an accepted credential authorizes the request URL, otherwise `401` + `X-Auth-Login-URL: <this area's login page>`. A `204` also carries one header per `profile_claims` entry the credential knows (percent-encoded; omitted otherwise). Accepts (in order) an `Authorization: Bearer bbk_…` static API key, an `Authorization: Bearer <id_token>`, or the session cookie, and then no credential at all, which only an `anonymous` scope grants (and which names nobody). See §12. |
-| `GET` | `/auth/login[?rd=…]` | browser | The sign-in page: runs the Cognito `USER_AUTH` flow in the browser and POSTs the resulting id_token to `/auth/session`. Self-contained (palette, layout, script and both languages in the document; only the operator's optional stylesheet and logo are external). `rd` is validated here with the same `rd_url_allowed` `safe_rd` uses and dropped if it fails; with none, the browser's `Referer` answers in its place, through that same check and absolute-only, since this page resolves nothing against nginx. Social buttons appear only when `BB_AUTH_SOCIAL_*` is configured. |
-| `GET` | `/auth/callback` | browser | Finishes a social sign-in: exchanges the OAuth code and the PKCE verifier for tokens, offers a profile form when the IdP sent no names, and delivers the id_token exactly as the sign-in page does. `404` when no social client is configured. |
+| `GET` | `/auth/validate` | nginx only (`auth_request`) | `204` naming the identity in one header per `identity_attrs` entry (default `X-Auth-Email`) if an accepted credential authorizes the request URL, otherwise `401` + `X-Auth-Login-URL: <this area's login page>`. A `204` also carries one header per `profile_claims` entry the credential knows (percent-encoded; omitted otherwise). Accepts (in order) an `Authorization: Bearer bbk_…` static API key, an `Authorization: Bearer <id_token>`, or the session cookie, and then no credential at all, which only an `anonymous` scope grants. A request with no credential names nobody; one that carried a valid credential is still named, so the header is bimodal on such a scope and an application there must treat it as "if you know who this is, say so". A **vetoed** identity is never named. See §12. |
+| `GET`, `HEAD` | `/auth/login[?rd=…]` | browser | The sign-in page: runs the Cognito `USER_AUTH` flow in the browser and POSTs the resulting id_token to `/auth/session`. Self-contained (palette, layout, script and both languages in the document; only the operator's optional stylesheet and logo are external). `rd` is validated here with the same `rd_url_allowed` `safe_rd` uses and dropped if it fails; with none, the browser's `Referer` answers in its place, through that same check and absolute-only, since this page resolves nothing against nginx. Social buttons appear only when `BB_AUTH_SOCIAL_*` is configured. |
+| `GET`, `HEAD` | `/auth/callback` | browser | Finishes a social sign-in: exchanges the OAuth code and the PKCE verifier for tokens, offers a profile form when the IdP sent no names, and delivers the id_token exactly as the sign-in page does. `404` when no social client is configured. |
 | `POST` | `/auth/session` | browser | Body `application/x-www-form-urlencoded`: `id_token=…&rd=…`. Fully validates the id_token; on success sets the session cookie and `302`s to `rd` (open-redirect guarded). |
 | `GET` | `/auth/logout[?rd=…]` | browser | Sets an expired (Max-Age=0) cookie and `302` → `rd` (same `safe_rd` guard), or, with no `rd`, the browser's `Referer` (same guard), and failing both the login page. Cross-site requests (`Sec-Fetch-Site: cross-site`) are ignored (no cookie clear) to block CSRF-forced logout. Reads nothing about the host it was called on, and the expiring cookie carries the same `Domain` as the minted one, so under a shared `BB_AUTH_COOKIE_DOMAIN` one mounted location logs the browser out of every vhost: see README "One logout endpoint for every vhost". |
 | `GET` | `/auth/healthz` | local | `200 ok`. Liveness probe. |
@@ -261,7 +269,7 @@ nothing in an env file can ever take effect without a restart.
 | `BB_AUTH_LISTEN` | no | `127.0.0.1:4181` | Bind address. Loopback only — nginx fronts it. |
 | `BB_AUTH_COOKIE_NAME` | no | `bb_session` | |
 | `BB_AUTH_COOKIE_DOMAIN` | no | empty → host-only | Set to a parent domain for cross-service SSO. |
-| `BB_AUTH_AUTHORIZED_HOSTS` | yes | — | Comma-separated host globs a post-login `rd` may land on, e.g. `example.com,*.example.com`. The sole authority for the `rd` guard (see §9a). `*.x.com` does not match the apex `x.com`. |
+| `BB_AUTH_AUTHORIZED_HOSTS` | yes | — | Comma-separated host globs a post-login `rd` may land on, e.g. `example.com,*.example.com`. The sole authority for the `rd` guard (see §8b). `*.x.com` does not match the apex `x.com`. |
 | `BB_AUTH_LOGIN_URL` | yes | — | Where `401`/logout send the user (the login page), and where a rejected `rd` falls back to. |
 | `BB_AUTH_SETTINGS_FILE` | no | `settings.json` beside the access file | Path to the settings file (§8a). Re-read on `SIGHUP` like the access file, fail-soft on both. A missing file is a fatal startup. |
 | `BB_AUTH_OAUTH_DOMAIN` | no | empty | The Cognito hosted-UI domain, as a bare host. One of the four `BB_AUTH_SOCIAL_*`/OAuth values that enable social sign-in on `/auth/login`: **all four or none**, and half of them is a fatal startup. |
@@ -273,7 +281,10 @@ nothing in an env file can ever take effect without a restart.
 The admin GUI is a separate service with a separate env file
 (`deploy/bb-auth-web.env.example`, installed as `etc/bb-auth-web.env`): `BB_AUTH_ACCESS_FILE`
 and `BB_AUTH_SETTINGS_FILE`, the same names for the same files, plus `BB_AUTH_WEB_LISTEN`,
-`BB_AUTH_WEB_BASE_PATH` and `BB_AUTH_WEB_DEFAULT_LANG`. It holds no secret at all, and its
+`BB_AUTH_WEB_BASE_PATH`, `BB_AUTH_WEB_DEFAULT_LANG`, `BB_AUTH_WEB_LOGOUT_URL` (unset means
+the header carries no Sign out control at all) and `BB_AUTH_WEB_ALLOW_NONLOOPBACK` (a
+non-loopback listen address is otherwise a fatal startup, because this service's only
+credential is a header nginx sets). It holds no secret at all, and its
 administrator allowlist is not an env var: it is `web.admins` in the settings file, read
 fresh on every request, because this is the one service that can edit it.
 
@@ -317,7 +328,7 @@ validate-before-write the access file gets (`SettingsWrite`). Checked by hand wi
 Unknown keys **inside a section** are a hard error, for the reason a misspelled scope field
 is one; unknown keys at the top level are preserved, which is where `_comment` lives.
 
-### 9a. Where the post-login redirect may land (`safe_rd`)
+### 8b. Where the post-login redirect may land (`safe_rd`)
 
 There is no canonical service base URL: one gate fronts several hosts, and which one is
 in play is decided by the caller. `safe_rd` therefore takes two inputs beyond the `rd`
@@ -489,7 +500,7 @@ own), and `SupplementaryGroups=bb-auth` is what lets the write restore the file'
   host, and no `//` or `/\` counts as a path (browsers normalise the latter to a
   scheme-relative off-host redirect). Any control byte (incl. CR/LF) is also rejected,
   so attacker-supplied bytes can never reach the `Location` header (no response
-  splitting). See §9a.
+  splitting). See §8b.
 - **Body size** capped at 64 KiB (`MAX_BODY`) — id_tokens are 1–3 KB.
 - **Login-CSRF** (an attacker POSTing *their* token to log a victim into the
   attacker's account) is theoretically possible but low-impact for a read gate;
@@ -603,10 +614,14 @@ form, and which `bb-auth-adm check` lints.
 `access` is **required and has no default**, because it decides everything and a typo must
 never resolve to the most open value:
 
-- **`anonymous`** — no credential at all. The gate answers `204` and names nobody: no
-  identity header, nothing for an application to key on. Note that `denied` does **not**
-  reach here, and the reason is not an oversight: the scope grants with no credential, so a
-  vetoed client would simply omit theirs. A veto bypassed by sending *less* is not a veto.
+- **`anonymous`**, no credential at all. To a request that presents none the gate answers `204` and names nobody: no
+  identity header, nothing for an application to key on. A request that *did* carry a valid
+  credential is still named, which makes the header bimodal on such a scope: it is decoration
+  there, never a condition of service. Note that `denied` does **not**
+  reach here as an access decision, and the reason is not an oversight: the scope grants with
+  no credential, so a vetoed client would simply omit theirs. A veto bypassed by sending
+  *less* is not a veto. What the veto does still do is stop the gate **naming** that person
+  to the application behind it.
 - **`authenticated`** — any identity Cognito vouches for, enrolled or not. An un-enrolled
   user gets a `204` and the app receives their identity, which is how an onboarding page
   enrolls them. Since Cognito self-signup is open, this means *anyone who can register*: the
@@ -652,7 +667,8 @@ than only here. And the field is **fatal on `anonymous`**, for exactly the reaso
 file-level veto does not reach that kind: the scope grants with no credential at all, so an
 excluded client would simply send none.
 
-`user_refs` and `user_group_refs` count an exclusion as a reference, marked `(excluded)`, so
+`user_refs` and `user_group_refs` count an exclusion as a reference, marked `(excluded)`,
+and `remove_user` sweeps what they list, so
 `remove_user` sweeps it and `remove_user_group` refuses while one still names the group.
 
 ### A scope names people, and that is the only place a grant is written
@@ -1002,7 +1018,7 @@ proxy_set_header X-Auth-Family-Name $bb_family;
   that does not set them would read whatever the client sent.
 - **Self-asserted.** Any Cognito user edits their own profile, verified email or not, so
   these are display hints and must never be an authorization input. Nothing in the access
-  file mentions them, and `authorize_identity` keeps them out of the decision — which is
+  file mentions them, and `authorize_login` keeps them out of the decision, which is
   what keeps `bb-auth-adm can` answering the gate's question.
 - **Never logged.** The log line already carries the email; a profile value is PII it does
   not need. The startup banner lists the configured claim *names*, which are config.

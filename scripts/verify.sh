@@ -73,6 +73,27 @@ done
 echo "[verify] --- the gate ---"
 chk "bb-auth active" "active" "$(systemctl is-active bb-auth 2>/dev/null || true)"
 
+# WHICH BUILD IS THIS? A package version says 1.1.0-1 for a tagged release, a dirty tree
+# and a hand-patched experiment alike, so it cannot answer the first question of any
+# incident. `--version` carries the commit and a -dirty marker.
+note "$("$DEST/bin/bb-auth" --version 2>/dev/null || echo 'bb-auth --version is not supported by this build')"
+
+# CAN IT VERIFY A SIGNATURE AT ALL? This is the check that was missing, and its absence
+# is the reason a build whose JWT verifier is a `panic!` once deployed green: every
+# runtime check below passes on it (a healthz answers, a request with no cookie is 401,
+# and a restart loop even produces a FRESHER "listening on" line than a healthy process),
+# because none of them touches the crypto. The self-test does the offline RS256
+# verification the gate does on every login, against a key compiled into the binary: no
+# env, no network, no state.
+if OUT="$("$DEST/bin/bb-auth" --self-test 2>&1)"; then
+  echo "  PASS  the gate can verify an RS256 signature"
+  note "$OUT"
+else
+  bad "the gate CANNOT verify an RS256 signature: every login will fail"
+  echo "$OUT" | sed 's/^/        /'
+  echo "        (a build with no crypto provider does this: see the dependency invariant)"
+fi
+
 LISTEN="$(envval BB_AUTH_LISTEN)"
 LISTEN="${LISTEN:-127.0.0.1:4181}"
 chk "GET /auth/healthz == ok" "ok" \
@@ -165,10 +186,14 @@ if [ -x "$DEST/bin/bb-auth-web" ]; then
   fi
 else
   echo "[verify] --- the admin GUI is not installed (fine: it is optional) ---"
-  # Without the GUI the access file stays root-owned, which is what a gate-only host
-  # looks like. Assert that rather than skipping, so a half-finished purge is visible.
+  # Without the GUI both state files stay root-owned, which is what a gate-only host looks
+  # like. Assert that rather than skipping, so a half-finished purge is visible: a
+  # settings.json still owned by a bb-auth-web that no longer exists is exactly the state
+  # a `dpkg --purge bb-auth-web` used to leave behind without a word.
   chk "access.json ownership" "root:$SVC_USER 640" \
       "$(stat -c '%U:%G %a' "$ACCESS_FILE" 2>/dev/null || true)"
+  chk "settings.json ownership" "root:$SVC_USER 640" \
+      "$(stat -c '%U:%G %a' "$SETTINGS_FILE" 2>/dev/null || true)"
 fi
 
 echo "[verify] --- status ---"

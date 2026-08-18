@@ -37,6 +37,14 @@ body{display:flex;justify-content:center;padding:24px}
 .brand p{color:var(--muted);font-size:.92rem;margin:0}
 
 .field{margin-bottom:16px}
+
+/* Two fields on one line, which is the shape a first name and a last name want. It is here
+   rather than in a `style=` attribute on the elements because the page's Content-Security-
+   Policy allows exactly one thing to style it: the nonced block this file is emitted in. An
+   inline style attribute carries no nonce and cannot be given one, so it is not a shortcut
+   here, it is simply a rule that would not apply. */
+.row{display:flex;gap:12px}
+.row>.field{flex:1}
 /* The one-time code: wide tracking and centred, because it is read off another screen and
    typed in one go. */
 .otp input{letter-spacing:.4em;text-align:center;font-size:1.3rem;font-weight:700}

@@ -44,6 +44,13 @@ AmbientCapabilities=
 # key), var/lib/ (access.json). bb-auth never writes — no StateDirectory needed.
 ReadOnlyPaths=/opt/bb-auth
 UMask=0077
+# Bounds, because tiny_http spawns a thread per connection once the fixed worker pool is
+# busy and there is no rate limit in front of it: on loopback behind nginx that is bounded
+# by nginx, and these are what keep an exposed or misconfigured deployment from taking the
+# host down with it rather than just itself. Generous on purpose: the gate runs four
+# workers and a few MB resident, so anything near these numbers is already pathological.
+TasksMax=512
+MemoryMax=256M
 
 [Install]
 WantedBy=multi-user.target

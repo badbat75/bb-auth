@@ -45,13 +45,13 @@ use bb_auth_core::{
     add_api_key, add_application, add_denied, add_scope, add_user, add_user_email, add_user_group,
     app_mut, app_pos, compile_asset_url, compile_brand_name, decide, decide_api_key,
     default_settings_path, edit_url_list, edit_urls, format_date, key_expiry, key_mut, mint_uuid,
-    move_scope, norm_email, now, open_access_file, open_settings_file, remove_api_key,
-    remove_application, remove_denied, remove_scope, remove_user, remove_user_email,
-    remove_user_group, rename_application, rename_scope, render_access_file, render_settings_file,
-    request_url, rotate_api_key, scope_pos, user_group_mut, user_group_refs, user_label, user_pos,
-    well_formed_uuid, Access, AccessFile, AccessWrite, ApiKeySpec, AppSpec, Decision, KeyDecision,
-    ScopeSpec, SealedKey, SettingsFile, SettingsWrite, Subject, UiTheme, UrlScope, UserSpec,
-    Written, ACCESS_FILE_VERSION, SETTINGS_VERSION,
+    move_scope, norm_email, now, open_access_file, open_settings_file, parse_exclusion,
+    remove_api_key, remove_application, remove_denied, remove_scope, remove_user,
+    remove_user_email, remove_user_group, rename_application, rename_scope, request_url,
+    rotate_api_key, scope_pos, shadowing_scope, user_group_mut, user_group_refs, user_label,
+    user_pos, version_line, well_formed_uuid, Access, AccessFile, AccessWrite, ApiKeySpec, AppSpec,
+    Decision, KeyDecision, ScopeSpec, SealedKey, SettingsFile, SettingsWrite, Subject, UiTheme,
+    UserSpec, Written, ACCESS_FILE_VERSION, SETTINGS_VERSION,
 };
 
 const USAGE: &str = "\
@@ -68,9 +68,11 @@ usage: bb-auth-adm [-f FILE] [--dry-run] <command> [args]
 file
   init                          create an empty access file (refuses to clobber one)
   show                          the file as the gate resolves it
-  check                         validate with the gate's own parser, then lint
+  check [--strict]              validate with the gate's own parser, then lint
+                                (--strict: exit 1 if anything was linted)
   can WHO URL [--as login|api_key] [--key ID]
-                                would this credential reach this URL? (exit 0 = yes)
+                                would this credential reach this URL?
+                                (exit 0 = yes, 1 = no, 2 = the question was unanswerable)
 
 applications                    the places. Areas do not overlap, so their order is nothing
   app list
@@ -151,18 +153,37 @@ covers is reachable by nobody.
 An edit takes effect when the gate re-reads the file: systemctl reload bb-auth.
 ";
 
+/// Exit codes, and there are three because a caller has to be able to tell them apart.
+///
+/// `0` yes, `1` no, **`2` I could not tell**. Everything used to be `0` or `1`, so a script
+/// running `can` could not distinguish "the gate would refuse this request" from "you passed
+/// a URL I could not parse" or "that file does not exist": the same code for the answer being
+/// no and for there being no answer. `2` is the shell's own convention for a usage error and
+/// is what `bb-auth --check-access` already exits with on a bad invocation.
+const EXIT_USAGE: u8 = 2;
+
 fn main() -> ExitCode {
     match run() {
         Ok(code) => code,
         Err(e) => {
             eprintln!("[bb-auth-adm] {e}");
-            ExitCode::FAILURE
+            // Every `Err` out of `run` is one of two things: a bad invocation, or a file this
+            // tool could not read or write. Neither is a verdict about a request, and `can`
+            // is the command that makes the difference matter.
+            ExitCode::from(EXIT_USAGE)
         }
     }
 }
 
 fn run() -> Result<ExitCode, String> {
     let mut argv: Vec<String> = std::env::args().skip(1).collect();
+    // Which build this is, before anything else is parsed. All three programs answer it the
+    // same way and with the same string: a package version cannot tell a tagged release from
+    // a working tree somebody built by hand, and on a host that is the first question.
+    if argv.iter().any(|a| a == "--version") {
+        println!("{}", version_line("bb-auth-adm"));
+        return Ok(ExitCode::SUCCESS);
+    }
     if argv.is_empty() || argv.iter().any(|a| a == "-h" || a == "--help") {
         print!("{USAGE}");
         return Ok(ExitCode::SUCCESS);
@@ -322,6 +343,7 @@ struct Ctx {
 
 /// Parsed `--flag [value]` options, in order. A flag with no value (the next token is
 /// another flag, or the end) is a boolean.
+#[derive(Debug)]
 struct Flags(Vec<(String, Option<String>)>);
 
 /// Split argv into positional words and flags. `--name=value` and `--name value` are
@@ -355,26 +377,53 @@ fn parse_args(argv: &[String]) -> Result<(Vec<String>, Flags), String> {
     Ok((words, Flags(flags)))
 }
 
+/// What one lookup of a flag found. Three states, and they are three because a flag can be
+/// **absent**, **bare** (`--force`), or **valued** (`--force=no`), and the difference between
+/// the last two is what six clearing flags in this tool are built on.
+///
+/// It exists because that difference used to be carried by an error *string*:
+/// [`Flags::take_flag`] asked [`Flags::take_one`] for a value and read `e.contains("needs a
+/// value")` off the refusal to decide that the flag was bare. Rewording one message would
+/// have turned every `--no-scopes`, `--clear` and `--force` into a hard error, and nothing in
+/// `cargo test` would have noticed, in the tool that writes the production access file as
+/// root over SSH.
+#[derive(Debug, PartialEq, Eq)]
+enum Taken {
+    Absent,
+    Bare,
+    Valued(String),
+}
+
 impl Flags {
-    /// The single value of `name`, or `None`. Repeated means an error, since silently
+    /// What `name` was given as, consuming it. Repeated means an error, since silently
     /// keeping one of two contradictory values is how an access file ends up not saying
     /// what its author thought.
-    fn take_one(&mut self, name: &str) -> Result<Option<String>, String> {
-        let mut found: Option<String> = None;
+    fn take(&mut self, name: &str) -> Result<Taken, String> {
+        let mut found: Option<Option<String>> = None;
         let mut n = 0;
         self.0.retain(|(k, v)| {
             if k != name {
                 return true;
             }
             n += 1;
-            found = v.clone();
+            found = Some(v.clone());
             false
         });
-        match (n, &found) {
-            (0, _) => Ok(None),
-            (1, Some(_)) => Ok(found),
-            (1, None) => Err(format!("--{name} needs a value")),
+        match (n, found) {
+            (0, _) => Ok(Taken::Absent),
+            (1, Some(Some(v))) => Ok(Taken::Valued(v)),
+            (1, _) => Ok(Taken::Bare),
             _ => Err(format!("--{name} given more than once")),
+        }
+    }
+
+    /// The single value of `name`, or `None`. A bare `--name` is an error here: a flag that
+    /// takes a value and was given none is a typo, not a boolean.
+    fn take_one(&mut self, name: &str) -> Result<Option<String>, String> {
+        match self.take(name)? {
+            Taken::Absent => Ok(None),
+            Taken::Bare => Err(format!("--{name} needs a value")),
+            Taken::Valued(v) => Ok(Some(v)),
         }
     }
 
@@ -404,17 +453,18 @@ impl Flags {
     }
 
     /// A boolean flag: present (bare, or `=true`/`=false`).
+    ///
+    /// The bare case is read off [`Taken`] and not off the text of an error, which is what it
+    /// used to be: see that type for what depended on the wording of a string.
     fn take_flag(&mut self, name: &str) -> Result<bool, String> {
-        match self.take_one(name) {
-            Ok(None) => Ok(false),
-            Ok(Some(v)) => match v.trim().to_ascii_lowercase().as_str() {
+        match self.take(name)? {
+            Taken::Absent => Ok(false),
+            Taken::Bare => Ok(true),
+            Taken::Valued(v) => match v.trim().to_ascii_lowercase().as_str() {
                 "1" | "true" | "yes" | "on" => Ok(true),
                 "0" | "false" | "no" | "off" => Ok(false),
                 other => Err(format!("--{name}: expected true/false, got '{other}'")),
             },
-            // a bare `--flag` lands here: take_one calls a valueless flag an error
-            Err(e) if e.contains("needs a value") => Ok(true),
-            Err(e) => Err(e),
         }
     }
 
@@ -481,29 +531,21 @@ fn save(ctx: &Ctx, doc: &AccessFile) -> Result<Option<Written>, String> {
 /// only one that can, but nobody else has any business reading it.
 fn cmd_init(ctx: Ctx) -> Result<ExitCode, String> {
     ctx.flags.finish()?;
-    if std::path::Path::new(&ctx.path).exists() {
-        return Err(format!(
-            "{} already exists: refusing to overwrite an access file",
-            ctx.path
-        ));
-    }
     let doc = AccessFile {
         version: ACCESS_FILE_VERSION,
         ..Default::default()
     };
-    let json = render_access_file(&doc)?;
+    // Through the library's writer like every other command here, and not a `std::fs::write`
+    // of its own: the bytes are compiled with the gate's parser before they land, the file is
+    // `0640` from its first byte, and "only if absent" is the filesystem's answer rather than
+    // an `exists()` this function asked a moment earlier.
+    let write = AccessWrite::prepare(&doc)?;
     if ctx.dry_run {
-        print!("{json}");
+        print!("{}", write.json());
         eprintln!("[bb-auth-adm] --dry-run: {} NOT created", ctx.path);
         return Ok(ExitCode::SUCCESS);
     }
-    std::fs::write(&ctx.path, &json).map_err(|e| format!("write {}: {e}", ctx.path))?;
-    #[cfg(unix)]
-    {
-        use std::os::unix::fs::PermissionsExt;
-        std::fs::set_permissions(&ctx.path, std::fs::Permissions::from_mode(0o640))
-            .map_err(|e| format!("chmod {}: {e}", ctx.path))?;
-    }
+    write.create(&ctx.path)?;
     eprintln!(
         "[bb-auth-adm] created {}: it grants nobody anything yet",
         ctx.path
@@ -591,30 +633,18 @@ fn save_settings(ctx: &Ctx, doc: &SettingsFile) -> Result<(), String> {
 /// other command starts by reading, so this is the only way to lose one.
 fn cmd_settings_init(ctx: Ctx) -> Result<ExitCode, String> {
     ctx.flags.finish()?;
-    if std::path::Path::new(&ctx.settings_path).exists() {
-        return Err(format!(
-            "{} already exists: refusing to overwrite a settings file",
-            ctx.settings_path
-        ));
-    }
     let doc = SettingsFile {
         version: SETTINGS_VERSION,
         ..Default::default()
     };
-    let json = render_settings_file(&doc)?;
+    // The access file's `init`, on the other file: see `cmd_init`.
+    let write = SettingsWrite::prepare(&doc)?;
     if ctx.dry_run {
-        print!("{json}");
+        print!("{}", write.json());
         eprintln!("[bb-auth-adm] --dry-run: {} NOT created", ctx.settings_path);
         return Ok(ExitCode::SUCCESS);
     }
-    std::fs::write(&ctx.settings_path, &json)
-        .map_err(|e| format!("write {}: {e}", ctx.settings_path))?;
-    #[cfg(unix)]
-    {
-        use std::os::unix::fs::PermissionsExt;
-        std::fs::set_permissions(&ctx.settings_path, std::fs::Permissions::from_mode(0o640))
-            .map_err(|e| format!("chmod {}: {e}", ctx.settings_path))?;
-    }
+    write.create(&ctx.settings_path)?;
     eprintln!(
         "[bb-auth-adm] created {}: the defaults, and no bb-auth-web administrator yet",
         ctx.settings_path
@@ -888,33 +918,17 @@ fn to_uuids(doc: &AccessFile, who: &[String]) -> Result<Vec<String>, String> {
     who.iter().map(|w| to_uuid(doc, w)).collect()
 }
 
-/// Resolve a list of `--exclude` values the way `excluded` is written: an enrolled person
-/// becomes their **uuid**, a group stays `@name`, and an email the roster has never heard of
-/// stays itself.
+/// Resolve a list of `--exclude` values with the library's [`parse_exclusion`], which is
+/// where the rule lives: an enrolled person becomes their **uuid**, a group stays `@name`,
+/// and an email the roster has never heard of stays itself.
 ///
-/// The last case is why this is not [`to_uuids`], which refuses an unknown email. Excluding
-/// a stranger is the only exclusion that exists on an `authenticated` scope, and that scope
-/// is precisely the one that admits people who are in no roster row — so refusing to name
-/// them here would make the field useless where it is needed most. An enrolled person is
-/// still written as a uuid, so an exclusion covers every identifier they have.
+/// The wrapper is the flag's name in the message and nothing else. It is not [`to_uuids`]
+/// because an unknown email is *accepted* here: excluding a stranger is the only exclusion
+/// that exists on an `authenticated` scope, which is precisely the scope that admits people
+/// in no roster row.
 fn to_exclusions(doc: &AccessFile, who: &[String]) -> Result<Vec<String>, String> {
     who.iter()
-        .map(|w| {
-            let w = w.trim();
-            if w.starts_with('@') {
-                return Ok(w.to_string());
-            }
-            if let Some(i) = user_pos(doc, w) {
-                return Ok(doc.users[i].uuid.trim().to_ascii_lowercase());
-            }
-            if w.contains('@') {
-                return Ok(norm_email(w));
-            }
-            Err(format!(
-                "--exclude '{w}': not a uuid, not '@group', and no user of that name. Give an \
-                 email (a stranger's is fine) or a group as '@name'"
-            ))
-        })
+        .map(|w| parse_exclusion(doc, w).map_err(|e| format!("--exclude {e}")))
         .collect()
 }
 
@@ -1097,7 +1111,13 @@ fn cmd_show(ctx: Ctx) -> Result<ExitCode, String> {
 /// `check` — the gate's parser (already run by [`load`]), then the lints only a tool that
 /// sees the *document* can do. The parser reports what would be fatal or skipped; these are
 /// the things that parse fine and still mean something other than what was intended.
-fn cmd_check(ctx: Ctx) -> Result<ExitCode, String> {
+///
+/// `--strict` makes a lint an exit code, which is what lets this sit in a deploy beside
+/// `bb-auth --check-access`. The default stays 0: a lint is a remark about a file that works,
+/// and a tool an operator runs by hand should not report failure for one. A pipeline that
+/// wants them to count says so.
+fn cmd_check(mut ctx: Ctx) -> Result<ExitCode, String> {
+    let strict = ctx.flags.take_flag("strict")?;
     ctx.flags.finish()?;
     let (doc, access) = load(&ctx)?;
 
@@ -1135,7 +1155,7 @@ fn cmd_check(ctx: Ctx) -> Result<ExitCode, String> {
             if s.urls.is_empty() {
                 lints.push(format!("{at} has no urls: it answers for nothing"));
             }
-            if let Some(j) = shadowed_by(&a.scopes, i) {
+            if let Some(j) = shadowing_scope(&a.scopes[..i], &s.urls) {
                 lints.push(format!(
                     "{at} is listed after '{}', which already answers for its urls: first match \
                      wins, so {at} never speaks. Move it earlier: scope mv {name} {} --at {j}",
@@ -1244,30 +1264,14 @@ fn cmd_check(ctx: Ctx) -> Result<ExitCode, String> {
     for l in &lints {
         println!("[bb-auth-adm] LINT: {l}");
     }
+    if strict {
+        eprintln!(
+            "[bb-auth-adm] --strict: {} lint(s), exiting non-zero",
+            lints.len()
+        );
+        return Ok(ExitCode::FAILURE);
+    }
     Ok(ExitCode::SUCCESS)
-}
-
-/// The index of an earlier scope that already answers for scope `i`'s urls, if any.
-///
-/// A heuristic, and deliberately so: matching one glob against another has no exact answer
-/// (`https://x.com/*` vs `*://x.com/app1` cover each other partially). Feeding the later
-/// scope's pattern *text* to the earlier scope's matcher catches the case that actually
-/// happens, a broad scope listed first, and stays quiet otherwise. It only ever warns.
-fn shadowed_by(scopes: &[ScopeSpec], i: usize) -> Option<usize> {
-    let mine = &scopes[i];
-    if mine.urls.is_empty() {
-        return None;
-    }
-    for (j, earlier) in scopes.iter().enumerate().take(i) {
-        let scope = match UrlScope::compile(&earlier.urls) {
-            Ok(s) => s,
-            Err(_) => continue,
-        };
-        if mine.urls.iter().all(|u| scope.allows(Some(u))) {
-            return Some(j);
-        }
-    }
-    None
 }
 
 /// `can WHO URL [--as CLASS] [--key ID]` — put the question to the gate's own decision
@@ -1327,11 +1331,39 @@ fn cmd_can(mut ctx: Ctx, who: &str, url: &str) -> Result<ExitCode, String> {
                 return Ok(ExitCode::FAILURE);
             }
         };
-        return Ok(verdict(&access, &doc, &Subject::Key(rec), at, &url));
+        return Ok(verdict(
+            &access,
+            &doc,
+            &Subject::Key(rec),
+            at,
+            &url,
+            &ctx.settings_path,
+        ));
     }
 
     let subject = Subject::Identifier(who);
-    Ok(verdict(&access, &doc, &subject, at, &url))
+    Ok(verdict(
+        &access,
+        &doc,
+        &subject,
+        at,
+        &url,
+        &ctx.settings_path,
+    ))
+}
+
+/// The identity headers this deployment's settings file asks for, or the default when it
+/// cannot be read.
+///
+/// Never an error: this is decoration on a verdict about the *access* file, and a settings
+/// file that is missing (or belongs to a host this workstation is not) must not stop `can`
+/// from answering. The default is what an unconfigured settings file compiles to, so the
+/// fallback says what a default deployment does rather than guessing.
+fn identity_headers(settings_path: &str) -> Vec<String> {
+    match open_settings_file(settings_path) {
+        Ok((_, s)) => s.identity_attrs.iter().map(|a| a.header.clone()).collect(),
+        Err(_) => vec![bb_auth_core::IDENTITY_HEADER.to_string()],
+    }
 }
 
 /// Print the gate's decision in the gate's own words, and turn it into an exit code.
@@ -1341,17 +1373,34 @@ fn verdict(
     subject: &Subject,
     at: Option<&str>,
     url: &str,
+    settings_path: &str,
 ) -> ExitCode {
     let d = decide(access, subject, at);
-    let sees = |uuid: Option<&str>| match uuid.and_then(|u| user_pos(doc, u)) {
-        Some(i) => format!(
-            "  the application sees X-Auth-Email: {}",
-            user_label(&doc.users[i])
-        ),
-        None => match subject {
-            Subject::Identifier(id) => format!("  the application sees X-Auth-Email: {id}"),
-            _ => "  the application sees no identity".to_string(),
-        },
+    // What the gate will actually put on the wire, which is `gate.identity_attrs` and not a
+    // header name spelled out here: on a `["uuid"]` deployment `X-Auth-Email` never arrives,
+    // and this line is where somebody goes to find out what does. Best effort on purpose:
+    // `can` answers a question about the ACCESS file, and an unreadable settings file must
+    // not take that answer away, so the default the settings compile to is the fallback.
+    let names = identity_headers(settings_path);
+    let sees = |uuid: Option<&str>| {
+        let who = match uuid.and_then(|u| user_pos(doc, u)) {
+            Some(i) => Some(user_label(&doc.users[i])),
+            None => match subject {
+                Subject::Identifier(id) => Some(id.to_string()),
+                _ => None,
+            },
+        };
+        match who {
+            Some(w) => format!(
+                "  the application sees {}",
+                names
+                    .iter()
+                    .map(|h| format!("{h}: {w}"))
+                    .collect::<Vec<_>>()
+                    .join(", ")
+            ),
+            None => "  the application sees no identity".to_string(),
+        }
     };
     let uuid = match subject {
         Subject::Identifier(id) => access.uuid_of(id).map(str::to_string),
@@ -2219,6 +2268,115 @@ fn cmd_deny_rm(ctx: Ctx, who: &[&str]) -> Result<ExitCode, String> {
 mod tests {
     use super::*;
 
+    // --- the argument grammar -----------------------------------------------
+    //
+    // This tool writes the production access file, as root, over SSH, and until now its
+    // parser had no test at all: the grammar was whatever `parse_args` happened to do, and
+    // one of its behaviours (a bare flag) was detected by matching on the *text* of an error
+    // message raised somewhere else. What follows pins the grammar itself, so that the next
+    // person to touch it finds out from `cargo test` rather than from a host.
+
+    /// `parse_args` over a command line written the way a person would type it.
+    fn args(line: &str) -> (Vec<String>, Flags) {
+        let argv: Vec<String> = line.split_whitespace().map(str::to_string).collect();
+        parse_args(&argv).expect("this line parses")
+    }
+
+    #[test]
+    fn the_two_spellings_of_a_flag_value_are_the_same_thing() {
+        for line in [
+            "scope add mpa admin --access restricted",
+            "scope add mpa admin --access=restricted",
+        ] {
+            let (words, mut flags) = args(line);
+            assert_eq!(words, ["scope", "add", "mpa", "admin"]);
+            assert_eq!(
+                flags.take_one("access").unwrap().as_deref(),
+                Some("restricted")
+            );
+            flags.finish().expect("nothing left over");
+        }
+    }
+
+    #[test]
+    fn a_bare_flag_is_a_boolean_and_a_valued_one_is_still_read() {
+        let (_, mut flags) = args("scope set mpa admin --no-scopes");
+        assert_eq!(flags.take("no-scopes").unwrap(), Taken::Bare);
+
+        // The whole point of the type: `take_flag` must not be reading this off an error
+        // string. Bare is true, an explicit false is false, and a value that is neither is a
+        // refusal rather than a silent true.
+        let (_, mut flags) = args("key set bob laptop --force");
+        assert!(flags.take_flag("force").unwrap());
+        let (_, mut flags) = args("key set bob laptop --force=no");
+        assert!(!flags.take_flag("force").unwrap());
+        let (_, mut flags) = args("key set bob laptop --force=perhaps");
+        assert!(flags.take_flag("force").is_err());
+        let (_, mut flags) = args("key set bob laptop");
+        assert!(!flags.take_flag("force").unwrap());
+    }
+
+    #[test]
+    fn a_flag_that_wants_a_value_refuses_a_bare_one() {
+        let (_, mut flags) = args("app add mpa --base");
+        let e = flags.take_one("base").unwrap_err();
+        assert!(e.contains("needs a value"), "{e}");
+    }
+
+    #[test]
+    fn a_repeated_single_value_is_an_error_rather_than_a_silent_choice() {
+        let (_, mut flags) = args("app add mpa --login-url a --login-url b");
+        let e = flags.take_one("login-url").unwrap_err();
+        assert!(e.contains("more than once"), "{e}");
+    }
+
+    #[test]
+    fn take_many_accumulates_across_repeats_and_commas() {
+        let (_, mut flags) = args("scope add mpa admin --url a,b --url c");
+        assert_eq!(flags.take_many("url").unwrap(), ["a", "b", "c"]);
+        // Empty items are dropped, so a trailing comma is not a pattern.
+        let (_, mut flags) = args("scope add mpa admin --url a,,b,");
+        assert_eq!(flags.take_many("url").unwrap(), ["a", "b"]);
+        // And a bare one is still a missing value, not an empty list.
+        let (_, mut flags) = args("scope add mpa admin --url");
+        assert!(flags.take_many("url").is_err());
+    }
+
+    #[test]
+    fn an_unclaimed_flag_is_refused_by_finish() {
+        // The reflex the whole tool is built on: a typo must never be shrugged off by the
+        // one program whose job is keeping typos out of the access file.
+        let (_, flags) = args("user add bob@x.com --emial x");
+        let e = flags.finish().unwrap_err();
+        assert!(e.contains("--emial"), "{e}");
+    }
+
+    #[test]
+    fn a_single_dash_option_is_refused_outright() {
+        let argv: Vec<String> = ["user", "add", "-x"]
+            .iter()
+            .map(|s| s.to_string())
+            .collect();
+        let e = parse_args(&argv).unwrap_err();
+        assert!(e.contains("unknown option"), "{e}");
+    }
+
+    #[test]
+    fn a_value_that_looks_like_a_flag_is_treated_as_a_flag() {
+        // A documented limit rather than a bug, and worth pinning so a change to it is a
+        // decision: `--note --base` is read as two bare flags, so the note is reported
+        // missing instead of being given the text "--base". A value that must start with two
+        // dashes is written `--note=--base`.
+        let (_, mut flags) = args("app add mpa --note --base");
+        assert_eq!(flags.take("note").unwrap(), Taken::Bare);
+        assert_eq!(flags.take("base").unwrap(), Taken::Bare);
+        let (_, mut flags) = args("app add mpa --note=--base");
+        assert_eq!(
+            flags.take("note").unwrap(),
+            Taken::Valued("--base".to_string())
+        );
+    }
+
     #[test]
     fn to_exclusions_keeps_a_stranger_and_resolves_a_user() {
         let doc: AccessFile = serde_json::from_str(
@@ -2250,7 +2408,7 @@ mod tests {
     }
 
     #[test]
-    fn shadowed_by_finds_the_broad_scope_listed_first() {
+    fn shadowing_scope_finds_the_broad_scope_listed_first() {
         let broad = ScopeSpec {
             name: "broad".into(),
             urls: vec!["https://x.com/a/*".into()],
@@ -2263,8 +2421,8 @@ mod tests {
             access: "authenticated".into(),
             ..Default::default()
         };
-        let scopes = vec![broad, narrow];
-        assert_eq!(shadowed_by(&scopes, 1), Some(0));
-        assert_eq!(shadowed_by(&scopes, 0), None);
+        let scopes = [broad, narrow];
+        assert_eq!(shadowing_scope(&scopes[..1], &scopes[1].urls), Some(0));
+        assert_eq!(shadowing_scope(&scopes[..0], &scopes[0].urls), None);
     }
 }

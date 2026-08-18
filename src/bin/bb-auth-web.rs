@@ -193,23 +193,20 @@
 
 use bb_auth_core::{
     add_api_key, add_application, add_denied, add_scope, add_user, add_user_email, add_user_group,
-    app_mut, app_pos, compile_asset_url, compile_brand_name, decide, default_settings_path,
-    edit_urls, format_date, group_ref, key_expiry, key_mut, move_scope, norm_email, now,
-    open_access_file, open_settings_file, remove_api_key, remove_application, remove_denied,
-    remove_scope, remove_user, remove_user_email, remove_user_group, rename_application,
-    rename_scope, request_url, rotate_api_key, scope_mut, scope_pos, sha256_hex, stylesheet_link,
-    user_group_mut, user_group_refs, user_label, user_pos, user_refs, Access, AccessFile,
-    AccessWrite, ApiKeySpec, AppSpec, Decision, ScopeSpec, SealedKey, SettingsFile, SettingsWrite,
-    Subject, UiTheme, UserSpec, Written, BASE_CSS, THEME_CSS,
+    app_mut, app_pos, compile_asset_url, compile_brand_name, csp_hash, decide,
+    default_settings_path, edit_urls, format_date, group_ref, key_expiry, key_mut, move_scope,
+    norm_email, now, open_access_file, open_settings_file, page_csp, parse_exclusion,
+    remove_api_key, remove_application, remove_denied, remove_scope, remove_user,
+    remove_user_email, remove_user_group, rename_application, rename_scope, request_site,
+    request_url, rotate_api_key, scope_mut, scope_pos, sha256_hex, shadowing_scope,
+    stylesheet_link, user_group_mut, user_group_refs, user_label, user_pos, user_refs,
+    version_line, Access, AccessFile, AccessWrite, ApiKeySpec, AppSpec, Decision, RequestSite,
+    ScopeSpec, SealedKey, SettingsFile, SettingsWrite, Subject, UiTheme, UserSpec, Written,
+    BASE_CSS, IDENTITY_HEADER, PAGE_SECURITY_HEADERS, THEME_CSS,
 };
 use maud::{html, Markup, PreEscaped, DOCTYPE};
 use std::io::Read;
 use tiny_http::{Header, Method, Request, Response, Server, StatusCode};
-
-/// Request header naming the authenticated user, injected by nginx after the gate
-/// authorized the request. The other end of `bb-auth`'s `IDENTITY_HEADER` contract — a fixed
-/// constant there, so a fixed constant here.
-const IDENTITY_HEADER: &str = "X-Auth-Email";
 
 /// Cookie remembering the language choice. It carries no identity and no capability: the
 /// worst an attacker who reads or rewrites it achieves is a page in the other language.
@@ -248,6 +245,9 @@ const SETTINGS_ONCHANGE: &str = "this.form.submit()";
 /// Blocking request threads. Fixed, and deliberately not an env var: this serves the
 /// handful of people on `web.admins`, not the public.
 const WORKERS: usize = 2;
+
+/// One writer at a time inside this process. See [`mutate`], which is its only user.
+static WRITE_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
 
 /// This GUI's layout, compiled in from `src/assets/admin.css`: **where things go**, and
 /// nothing about what they look like. The palette is [`THEME_CSS`] and the controls are
@@ -575,6 +575,8 @@ enum K {
     ConflictBack,
     MintConflictTitle,
     MintConflictBody,
+    RotateConflictTitle,
+    RotateConflictBody,
     MintConflictLost,
     MintConflictRotate,
     CsrfTitle,
@@ -612,6 +614,7 @@ enum K {
     IdentityAttrsHelp,
     SessionTtl,
     SessionTtlHelp,
+    SessionTtlBad,
     UnverifiedSocial,
     UnverifiedSocialHelp,
     SocialProviders,
@@ -629,6 +632,7 @@ enum K {
     BrandNameHelp,
     DefaultTheme,
     DefaultThemeHelp,
+    DefaultThemeBad,
     Days,
 }
 
@@ -648,8 +652,8 @@ fn t(lang: Lang, key: K) -> &'static str {
         K::Config => m(lang, "Settings", "Impostazioni"),
         K::ConfigIntro => m(
             lang,
-            "The settings that take effect with no restart. Everything else bb-auth is              configured with stays in its env file, on the host.",
-            "Le impostazioni che hanno effetto senza riavvio. Tutto il resto della              configurazione di bb-auth resta nel suo file di environment, sull'host.",
+            "The settings that take effect with no restart. Everything else bb-auth is configured with stays in its env file, on the host.",
+            "Le impostazioni che hanno effetto senza riavvio. Tutto il resto della configurazione di bb-auth resta nel suo file di environment, sull'host.",
         ),
         K::ConfigGate => m(lang, "What the gate answers with", "Come risponde il gate"),
         K::ConfigWeb => m(lang, "Who administers this", "Chi amministra questo"),
@@ -661,20 +665,30 @@ fn t(lang: Lang, key: K) -> &'static str {
         K::ProfileClaims => m(lang, "Profile claims", "Claim di profilo"),
         K::ProfileClaimsHelp => m(
             lang,
-            "OIDC claims to hand to the application, one per line. The header is derived              from the name and is never configured: given_name becomes X-Auth-Given-Name.              They are self-asserted decoration: they authorize nothing.",
-            "Claim OIDC da passare all'applicazione, uno per riga. L'header è derivato dal              nome e non si configura: given_name diventa X-Auth-Given-Name. Sono decorazione              auto-dichiarata: non autorizzano nulla.",
+            "OIDC claims to hand to the application, one per line. The header is derived from the name and is never configured: given_name becomes X-Auth-Given-Name. They are self-asserted decoration: they authorize nothing.",
+            "Claim OIDC da passare all'applicazione, uno per riga. L'header è derivato dal nome e non si configura: given_name diventa X-Auth-Given-Name. Sono decorazione auto-dichiarata: non autorizzano nulla.",
         ),
         K::IdentityAttrs => m(lang, "Identity attributes", "Attributi di identità"),
         K::IdentityAttrsHelp => m(
             lang,
-            "What a 204 names the authorized identity with, one per line: email, uuid.              Never empty. nginx already clears both names, so turning one on needs no              change there.",
-            "Con cosa un 204 nomina l'identità autorizzata, uno per riga: email, uuid. Mai              vuoto. nginx azzera già entrambi i nomi, quindi accenderne uno non richiede              modifiche lì.",
+            "What a 204 names the authorized identity with, one per line: email, uuid. Never empty. nginx already clears both names, so turning one on needs no change there.",
+            "Con cosa un 204 nomina l'identità autorizzata, uno per riga: email, uuid. Mai vuoto. nginx azzera già entrambi i nomi, quindi accenderne uno non richiede modifiche lì.",
         ),
         K::SessionTtl => m(lang, "Session lifetime", "Durata della sessione"),
+        K::SessionTtlBad => m(
+            lang,
+            "must be a whole number of seconds",
+            "deve essere un numero intero di secondi",
+        ),
+        K::DefaultThemeBad => m(
+            lang,
+            "must be one of: light, dark, system",
+            "deve essere uno tra: light, dark, system",
+        ),
         K::SessionTtlHelp => m(
             lang,
-            "Seconds. Applies to cookies minted from now on: nobody is logged out by              changing it.",
-            "Secondi. Vale per i cookie coniati da adesso: cambiarla non disconnette              nessuno.",
+            "Seconds. Applies to cookies minted from now on: nobody is logged out by changing it.",
+            "Secondi. Vale per i cookie coniati da adesso: cambiarla non disconnette nessuno.",
         ),
         K::UnverifiedSocial => m(
             lang,
@@ -683,20 +697,20 @@ fn t(lang: Lang, key: K) -> &'static str {
         ),
         K::UnverifiedSocialHelp => m(
             lang,
-            "Only for federated logins (Google, Apple…), never for native Cognito users,              whose sign-up is open and whose unverified email is attacker-controlled.",
-            "Solo per accessi federati (Google, Apple…), mai per utenti Cognito nativi: la              loro registrazione è aperta e un'email non verificata è controllata da chi              attacca.",
+            "Only for federated logins (Google, Apple…), never for native Cognito users, whose sign-up is open and whose unverified email is attacker-controlled.",
+            "Solo per accessi federati (Google, Apple…), mai per utenti Cognito nativi: la loro registrazione è aperta e un'email non verificata è controllata da chi attacca.",
         ),
         K::SocialProviders => m(lang, "Providers", "Provider"),
         K::SocialProvidersHelp => m(
             lang,
-            "One per line, matched against the token's providerName. Empty means any              federated provider.",
-            "Uno per riga, confrontati con il providerName del token. Vuoto significa              qualsiasi provider federato.",
+            "One per line, matched against the token's providerName. Empty means any federated provider.",
+            "Uno per riga, confrontati con il providerName del token. Vuoto significa qualsiasi provider federato.",
         ),
         K::Admins => m(lang, "Administrators", "Amministratori"),
         K::AdminsHelp => m(
             lang,
-            "One email per line. These are the only people this interface opens for, on top              of the gate that already stands in front of it.",
-            "Un'email per riga. Sono le uniche persone per cui questa interfaccia si apre,              oltre al gate che le sta già davanti.",
+            "One email per line. These are the only people this interface opens for, on top of the gate that already stands in front of it.",
+            "Un'email per riga. Sono le uniche persone per cui questa interfaccia si apre, oltre al gate che le sta già davanti.",
         ),
         K::AdminsKeepYourself => m(
             lang,
@@ -705,8 +719,8 @@ fn t(lang: Lang, key: K) -> &'static str {
         ),
         K::AdminsNeverEmpty => m(
             lang,
-            "at least one administrator is required: an empty list must never come to mean              'everyone'",
-            "serve almeno un amministratore: una lista vuota non deve mai finire per              significare 'chiunque'",
+            "at least one administrator is required: an empty list must never come to mean 'everyone'",
+            "serve almeno un amministratore: una lista vuota non deve mai finire per significare 'chiunque'",
         ),
         K::ConfigUi => m(lang, "How the pages look", "Come appaiono le pagine"),
         K::StylesheetUrl => m(lang, "Stylesheet", "Foglio di stile"),
@@ -1297,6 +1311,22 @@ fn t(lang: Lang, key: K) -> &'static str {
              copiato, rigenera la chiave: stessa riga, stesso scope, un nuovo segreto.",
         ),
         K::MintConflictRotate => m(lang, "rotate this key", "rigenera questa chiave"),
+        K::RotateConflictTitle => m(
+            lang,
+            "This key was already rotated",
+            "Questa chiave è già stata rigenerata",
+        ),
+        K::RotateConflictBody => m(
+            lang,
+            "Most likely this page is a reload of the one that showed the new bearer, \
+             re-submitting the rotation. Nothing was written now, which matters here: \
+             rotating again would invalidate the bearer that page showed, and leave you on \
+             this same page.",
+            "Con ogni probabilità questa pagina è il ricaricamento di quella che mostrava \
+             il nuovo bearer, e ha reinviato la rigenerazione. Adesso non è stato scritto \
+             nulla, il che qui conta: rigenerare di nuovo invaliderebbe il bearer che quella \
+             pagina mostrava, e ti riporterebbe su questa stessa pagina.",
+        ),
         K::CsrfTitle => m(lang, "Request refused", "Richiesta rifiutata"),
         K::CsrfBody => m(
             lang,
@@ -1589,6 +1619,32 @@ impl Config {
             logout_url,
         }
     }
+}
+
+/// Is this listen address on the loopback interface? The gate has the same function and the
+/// same reason for it; this one is what makes a stray `0.0.0.0` fatal rather than merely
+/// mentioned.
+///
+/// Textual on purpose: the value is a `host:port` string handed to `Server::http`, and what
+/// matters is what an operator wrote in the env file. An unresolvable name is not loopback as
+/// far as this is concerned, which errs towards refusing.
+fn listen_is_loopback(listen: &str) -> bool {
+    let host = match listen.rsplit_once(':') {
+        // `[::1]:8091`, the only shape where the last colon is not the port separator's.
+        Some((h, p)) if !p.is_empty() && p.bytes().all(|b| b.is_ascii_digit()) => h,
+        _ => listen,
+    };
+    let host = host.trim().trim_matches(['[', ']']).to_ascii_lowercase();
+    host == "localhost" || host == "::1" || host.starts_with("127.")
+}
+
+/// An env var read as a deliberate yes: `1`, `true`, `yes`, in any case. Anything else,
+/// including the variable being absent, is no.
+fn env_flag(key: &str) -> bool {
+    matches!(
+        env_or(key, "").trim().to_ascii_lowercase().as_str(),
+        "1" | "true" | "yes"
+    )
 }
 
 // ---------------------------------------------------------------------------
@@ -1941,34 +1997,17 @@ fn h(k: &str, v: &str) -> Header {
 
 /// Is this `POST` a same-origin form submission?
 ///
-/// Two questions, in the order the browser answers them best:
-///
-/// * **`Sec-Fetch-Site`** is set by the browser on every request and cannot be set by a
-///   page, so where it exists it is the whole answer: `same-origin` passes, anything else
-///   (`cross-site`, `same-site`, `none`) does not.
-/// * **`Origin`** is the fallback, and only its **host** is compared — against the `Host:`
-///   header's. Not the scheme: this binary speaks plain HTTP behind a TLS-terminating
-///   nginx, so the browser's `https://…` origin can never equal a scheme reconstructed
-///   here, and comparing one would refuse every honest request. The port travels with the
-///   host in both headers, so comparing the authority as written is right in the
-///   default-port case *and* the explicit-port one.
+/// The classification is the library's [`request_site`], which the gate's `/auth/session`
+/// door now uses too; what is this program's own is the **policy**, and it is the strict one:
+/// `same-origin` and nothing else. Every form here is rendered by this binary and submitted
+/// to the same origin, so there is no legitimate `same-site` submission to allow, and each
+/// form deletes a user or rewrites the access file. The gate is deliberately laxer, because a
+/// sign-in page an operator serves themselves may sit on a sibling host.
 ///
 /// Neither header present ⇒ **refused**. That is not a browser submitting a form, and no
 /// token in the page would help against a client that sends neither.
 fn csrf_ok(sec_fetch_site: Option<&str>, origin: Option<&str>, host: Option<&str>) -> bool {
-    if let Some(sfs) = sec_fetch_site {
-        return sfs.trim().eq_ignore_ascii_case("same-origin");
-    }
-    match (origin, host) {
-        (Some(o), Some(hst)) => {
-            let authority = o
-                .trim()
-                .split_once("://")
-                .map(|(_, rest)| rest.trim_end_matches('/'));
-            authority.is_some_and(|a| !a.is_empty() && a.eq_ignore_ascii_case(hst.trim()))
-        }
-        _ => false,
-    }
+    request_site(sec_fetch_site, origin, host) == RequestSite::SameOrigin
 }
 
 /// The most a form body may be. Every field here is an email, a name or a handful of URL
@@ -2042,13 +2081,36 @@ impl Form {
 /// because a page is a snapshot of a file that changes under it, `nosniff` because a browser
 /// guessing at a content type is a browser deciding something we already know, and the
 /// charset because the roster is full of names that are not ASCII.
-fn respond_page(req: Request, status: u16, page: Markup) {
-    let resp = Response::from_data(page.into_string().into_bytes())
+fn respond_page(req: Request, status: u16, page: Markup, look: &Look) {
+    let mut resp = Response::from_data(page.into_string().into_bytes())
         .with_status_code(StatusCode(status))
         .with_header(h("Content-Type", "text/html; charset=utf-8"))
-        .with_header(h("Cache-Control", "no-store"))
-        .with_header(h("X-Content-Type-Options", "nosniff"));
+        .with_header(h("Content-Security-Policy", &admin_csp(look)));
+    for (k, v) in PAGE_SECURITY_HEADERS {
+        resp.add_header(h(k, v));
+    }
     let _ = req.respond(resp);
+}
+
+/// This GUI's `Content-Security-Policy`.
+///
+/// Hashes and not a nonce, because everything this program executes or styles is a
+/// compile-time constant: the `<style>` block is [`THEME_CSS`] + [`BASE_CSS`] + [`CSS`] and
+/// the only scripting on any page is [`SETTINGS_ONCHANGE`], one attribute on one list box.
+/// So the policy is derived from the same `&str`s the page is, and the two cannot disagree.
+///
+/// `'unsafe-hashes'` is what an inline event handler needs: a nonce cannot be put on an
+/// attribute, and the alternative to naming this one handler by its hash is `'unsafe-inline'`,
+/// which would permit every handler anybody ever adds. The `<noscript>` button behind it means
+/// a browser that refuses the handler still works, which makes this the rare case where the
+/// strict policy has a fallback already built.
+///
+/// `img-src` is `'none'`: this interface shows no image at all, not even the deployment's
+/// logo, so the honest policy says so.
+fn admin_csp(look: &Look) -> String {
+    let script = format!("'unsafe-hashes' {}", csp_hash(SETTINGS_ONCHANGE));
+    let style = csp_hash(&format!("{THEME_CSS}{BASE_CSS}{CSS}"));
+    page_csp(&script, &style, look.stylesheet, None, &[])
 }
 
 /// `302` to `location`, setting one preference cookie to `value`. `location` is built from a
@@ -2392,6 +2454,15 @@ struct View<'a> {
     rev: &'a str,
     /// What the redirect that landed here says it did, if this binary said it ([`Msg`]).
     msg: Option<Msg>,
+    /// The header names an authorized `204` will actually carry, derived from
+    /// `gate.identity_attrs` by the library exactly as the gate derives them.
+    ///
+    /// Here because the access check answers "what will the application receive?", and that
+    /// is a question about *this* deployment's settings. It used to answer with the literal
+    /// `X-Auth-Email`, two clicks from the Settings field that can make it `X-Auth-Uuid` and
+    /// nothing else, so the one page whose whole job is to predict the gate's behaviour was
+    /// the page describing a header that would never arrive.
+    identity: Vec<String>,
 }
 
 impl View<'_> {
@@ -2492,7 +2563,7 @@ fn shell(v: &View, title: &str, content: Markup) -> Markup {
                         }
                         // The account end of the bar, and it is a `nav` for the same reason
                         // the tabs are: it makes these two controls flex items of a flex row,
-                        // exactly as the five tabs are. Before this they were a `details` and
+                        // exactly as the four tabs are. Before this they were a `details` and
                         // a bare link sitting directly in the bar, which is three different
                         // structures for one object, and an object whose box depends on which
                         // structure it happens to be in is not one object.
@@ -2575,8 +2646,51 @@ fn shell(v: &View, title: &str, content: Markup) -> Markup {
                     @if let Some(a) = v.admin {
                         span { (v.t(K::SignedInAs)) " " code { (a) } }
                     }
+                    // What these bytes were built from, which the version in the bar cannot
+                    // say: a `.deb` reads 1.1.0-1 for a clean release and for a working tree
+                    // somebody built by hand, and this is the one place a person can see
+                    // which of the two is answering.
+                    span class="muted" { code { (version_line("bb-auth-web")) } }
                 }
             }
+        }
+    }
+}
+
+/// What an unordered list looks like when it has nothing to show, which is **three** states
+/// and not two.
+///
+/// "The file holds none of these" and "your filter matched none of them" are different
+/// sentences and lead to different next actions, and every list on this GUI has to make that
+/// distinction. It was made four times, in four page functions, each spelling out the same
+/// three-armed `@if` around its own table: four places to change when the wording moves, and
+/// four chances for one of them to say the wrong thing to somebody staring at an empty page.
+///
+/// `body` is rendered by the caller and passed in, because the four bodies have nothing in
+/// common (a table, another table, a list, a run of panels) and pretending otherwise would be
+/// the wrong abstraction: what is shared is the emptiness, not the content.
+fn list_panel(v: &View, total: usize, shown: usize, body: Markup) -> Markup {
+    html! {
+        div class="panel" {
+            @if total == 0 {
+                span class="muted" { (v.t(K::None)) }
+            } @else if shown == 0 {
+                span class="muted" { (v.t(K::NoMatch)) }
+            } @else {
+                (body)
+            }
+        }
+    }
+}
+
+/// [`list_panel`] for a list whose rows are panels of their own, so the empty states get a
+/// panel and the rows are emitted bare.
+fn list_rows(v: &View, total: usize, shown: usize, rows: Markup) -> Markup {
+    html! {
+        @if total == 0 || shown == 0 {
+            (list_panel(v, total, shown, html! {}))
+        } @else {
+            (rows)
         }
     }
 }
@@ -2888,9 +3002,9 @@ fn page_dashboard(v: &View, doc: &AccessFile, access: &Access) -> Markup {
     keys.sort_by_key(|(_, _, e)| e.rank());
 
     let mut warnings: Vec<Markup> = Vec::new();
-    for (ai, a) in doc.applications.iter().enumerate() {
+    for a in doc.applications.iter() {
         for (si, s) in a.scopes.iter().enumerate() {
-            if scope_shadowed(access, ai, &s.urls, si) {
+            if shadowing_scope(&a.scopes[..si], &s.urls).is_some() {
                 warnings.push(html! {
                     code { (a.name.trim()) "/" (s.name.trim()) } " " (v.t(K::WarnShadowed))
                 });
@@ -2987,25 +3101,6 @@ fn page_dashboard(v: &View, doc: &AccessFile, access: &Access) -> Markup {
     }
 }
 
-/// Does an earlier scope of the same application already cover every URL this one has?
-///
-/// A heuristic, not an enumeration of every possible request: each of this scope's own raw
-/// patterns is asked of an earlier scope's *compiled* matcher, so `https://x.com/*` is
-/// correctly seen to shadow `https://x.com/admin/*` even though the two strings differ. It
-/// can miss a shadow built from several earlier scopes whose patterns only jointly cover
-/// this one pattern-by-pattern rather than each covering it outright; that is the price of
-/// staying a straight read of compiled data rather than a second matcher.
-fn scope_shadowed(access: &Access, app_idx: usize, urls: &[String], scope_idx: usize) -> bool {
-    let earlier = &access.apps[app_idx].scopes[..scope_idx];
-    !urls.is_empty()
-        && !earlier.is_empty()
-        && urls
-            .iter()
-            .map(|u| u.trim())
-            .filter(|u| !u.is_empty())
-            .all(|u| earlier.iter().any(|s| s.urls.allows(Some(u))))
-}
-
 /// `/users` — everything the file says about people, in three sections: the groups, the
 /// roster, and the veto.
 ///
@@ -3028,12 +3123,7 @@ fn page_users(v: &View, doc: &AccessFile, access: &Access) -> Markup {
         h2 { (section_heading(v.t(K::Users), "users")) }
         p class="primary" { (act(v, &Route::UserAdd, &format!("+ {}", v.t(K::Add)))) }
         (list_controls(v, &lu, rows.len(), doc.users.len()))
-        div class="panel" {
-            @if doc.users.is_empty() {
-                span class="muted" { (v.t(K::None)) }
-            } @else if rows.is_empty() {
-                span class="muted" { (v.t(K::NoMatch)) }
-            } @else {
+        (list_panel(v, doc.users.len(), rows.len(), html! {
                 table {
                     thead { tr {
                         th { (v.t(K::Emails)) }
@@ -3058,8 +3148,7 @@ fn page_users(v: &View, doc: &AccessFile, access: &Access) -> Markup {
                         }
                     }
                 }
-            }
-        }
+        }))
 
         // The `denied` veto, as the last section of this same page rather than a tab of
         // its own: all three sections are about people, and an operator managing the
@@ -3229,11 +3318,7 @@ fn groups_section(v: &View, doc: &AccessFile) -> Markup {
         p class="lede sub" { (v.t(K::GroupsIntro)) }
         p class="primary" { (act(v, &Route::GroupAdd, &format!("+ {}", v.t(K::Add)))) }
         (list_controls(v, &l, rows.len(), doc.user_groups.len()))
-        @if doc.user_groups.is_empty() {
-            div class="panel" { span class="muted" { (v.t(K::None)) } }
-        } @else if rows.is_empty() {
-            div class="panel" { span class="muted" { (v.t(K::NoMatch)) } }
-        } @else {
+        (list_rows(v, doc.user_groups.len(), rows.len(), html! {
             @for (name, members) in &rows[start..end] {
                 @let refs = user_group_refs(doc, name);
                 div class="panel" {
@@ -3281,7 +3366,7 @@ fn groups_section(v: &View, doc: &AccessFile) -> Markup {
                     }
                 }
             }
-        }
+        }))
     }
 }
 
@@ -3308,12 +3393,7 @@ fn page_apps(v: &View, doc: &AccessFile) -> Markup {
         p class="lede" { (v.t(K::AppsIntro)) }
         p class="primary" { (act(v, &Route::AppAdd, &format!("+ {}", v.t(K::Add)))) }
         (list_controls(v, &l, rows.len(), doc.applications.len()))
-        div class="panel" {
-            @if doc.applications.is_empty() {
-                span class="muted" { (v.t(K::None)) }
-            } @else if rows.is_empty() {
-                span class="muted" { (v.t(K::NoMatch)) }
-            } @else {
+        (list_panel(v, doc.applications.len(), rows.len(), html! {
                 table {
                     thead { tr {
                         th { "name" }
@@ -3348,8 +3428,7 @@ fn page_apps(v: &View, doc: &AccessFile) -> Markup {
                         }
                     }
                 }
-            }
-        }
+        }))
     }
 }
 
@@ -3633,12 +3712,7 @@ fn denied_list(v: &View, doc: &AccessFile) -> Markup {
     let (start, end, _, _) = l.window(rows.len());
     html! {
         (list_controls(v, &l, rows.len(), doc.denied.len()))
-        div class="panel" {
-            @if doc.denied.is_empty() {
-                span class="muted" { (v.t(K::None)) }
-            } @else if rows.is_empty() {
-                span class="muted" { (v.t(K::NoMatch)) }
-            } @else {
+        (list_panel(v, doc.denied.len(), rows.len(), html! {
                 ul class="plain" {
                     @for d in &rows[start..end] {
                         @let raw = d.trim().to_ascii_lowercase();
@@ -3656,8 +3730,7 @@ fn denied_list(v: &View, doc: &AccessFile) -> Markup {
                         }
                     }
                 }
-            }
-        }
+        }))
     }
 }
 
@@ -3834,7 +3907,16 @@ fn verdict(v: &View, access: &Access, email_in: &str, url: &str) -> (bool, Marku
         }
         @if granted && !matches!(decision, Decision::Anonymous { .. }) {
             p class="muted" {
-                (v.t(K::AppSees)) " " code { (IDENTITY_HEADER) ": " (email) }
+                (v.t(K::AppSees)) " "
+                // Every header this deployment's `gate.identity_attrs` will actually send,
+                // by the library's own derivation, not the literal one this page used to
+                // name. On a `["uuid"]` deployment there is no `X-Auth-Email` at all, and
+                // saying otherwise here is saying it on the page whose whole job is to
+                // predict what the application receives.
+                @for (i, h) in v.identity.iter().enumerate() {
+                    @if i > 0 { ", " }
+                    code { (h) ": " (email) }
+                }
             }
         }
     };
@@ -4257,7 +4339,7 @@ impl ConfigForm {
             .ttl
             .trim()
             .parse()
-            .map_err(|_| Refusal::on("ttl", t(lang, K::SessionTtlHelp)))?;
+            .map_err(|_| Refusal::on("ttl", t(lang, K::SessionTtlBad)))?;
         let admins = Self::lines(&self.admins);
         if admins.is_empty() {
             return Err(Refusal::on("admins", t(lang, K::AdminsNeverEmpty)));
@@ -4280,7 +4362,7 @@ impl ConfigForm {
         // A value this list box cannot produce, so a refusal here means the request was not
         // this form. It is still a refusal and not a silent `system`: see `UiTheme::parse`.
         let theme = UiTheme::parse(&self.theme)
-            .ok_or_else(|| Refusal::on("theme", t(lang, K::DefaultThemeHelp)))?;
+            .ok_or_else(|| Refusal::on("theme", t(lang, K::DefaultThemeBad)))?;
 
         doc.gate.profile_claims = Self::lines(&self.claims);
         doc.gate.identity_attrs = Self::lines(&self.identity);
@@ -4309,8 +4391,13 @@ fn page_config(v: &View, f: &ConfigForm, err: Option<&Refusal>) -> Markup {
                             html! { (v.t(K::IdentityAttrsHelp)) }, about("identity")))
                 (urls_field(v.t(K::ProfileClaims), "claims", &f.claims,
                             html! { (v.t(K::ProfileClaimsHelp)) }, about("claims")))
+                // The hint carries both halves: what this value is in days, which is the
+                // only way a number of seconds reads as a lifetime, and what changing it
+                // does to sessions that already exist. The second half used to appear only
+                // as the refusal on a typo, which is the one moment nobody is reading it.
                 (text_field(v.t(K::SessionTtl), "ttl", &f.ttl, "2592000",
-                            Some(&format!("{days} {}", v.t(K::Days))), about("ttl")))
+                            Some(&format!("{days} {}. {}", v.t(K::Days), v.t(K::SessionTtlHelp))),
+                            about("ttl")))
                 // The scope form's own furniture, because a checkbox here is the same thing
                 // it is there and inventing a second one would show.
                 div {
@@ -4428,24 +4515,38 @@ fn page_conflict(v: &View) -> Markup {
     }
 }
 
-/// The mint route's own `409`: the `rev` is stale **and** the requested key now exists —
-/// which is what a reload of the reveal page looks like from here, the reveal being the
-/// direct `POST` response ([`page_minted`]). The generic [`page_conflict`] would be wrong
-/// twice on this path: the "someone else" who moved the file was this administrator's own
-/// submit, and "make the change again" would mint a second key. What an administrator who
-/// lost the bearer needs instead is a rotation, so the link to it is here — and there is
-/// deliberately no Back-button hint, because the typed input is not worth recovering.
-fn page_mint_conflict(v: &View, owner: &str, id: &str) -> Markup {
+/// The `409` for the two routes that **reveal a bearer**: the `rev` is stale *and* the key in
+/// question exists, which is what a reload of the reveal page looks like from here, the reveal
+/// being the direct `POST` response ([`page_minted`]).
+///
+/// The generic [`page_conflict`] is wrong twice on these paths. The "someone else" who moved
+/// the file was this administrator's own submit; and "make the change again" would mint a
+/// second key, or, on a rotation, destroy the bearer that was just shown and produce this page
+/// again, so each recovery attempt would undo the previous one.
+///
+/// `rotated` picks which of the two happened, because the difference matters to the person
+/// reading it: after a mint the offer of a rotation is the answer to a lost bearer, and after
+/// a rotation it is the thing not to do twice. There is deliberately no Back-button hint on
+/// either: the typed input is not worth recovering.
+fn page_mint_conflict(v: &View, owner: &str, id: &str, rotated: bool) -> Markup {
     let owner = norm_email(owner);
+    let (title, body) = if rotated {
+        (K::RotateConflictTitle, K::RotateConflictBody)
+    } else {
+        (K::MintConflictTitle, K::MintConflictBody)
+    };
     html! {
-        h1 { (v.t(K::MintConflictTitle)) }
+        h1 { (v.t(title)) }
         div class="panel warn" {
             p { code { (owner) } " · api_keys · " code { (id) } }
-            p { (v.t(K::MintConflictBody)) }
+            p { (v.t(body)) }
             p { (v.t(K::MintConflictLost)) }
             p class="pills" {
-                a class="pill" href=(v.href(&Route::KeyRotate(owner.clone(), id.to_string()))) {
-                    (v.t(K::MintConflictRotate))
+                @if !rotated {
+                    a class="pill"
+                      href=(v.href(&Route::KeyRotate(owner.clone(), id.to_string()))) {
+                        (v.t(K::MintConflictRotate))
+                    }
                 }
                 (back(v, &Route::User(owner.clone())))
             }
@@ -4527,9 +4628,20 @@ fn commit(v: &View, doc: &AccessFile, verb: &str, target: &str) -> Result<Writte
 /// 3. only then does the arm for this route run, and every one of them ends in [`commit`].
 ///
 /// (1) and (2) are two reads of the same file, so a writer landing exactly between them is
-/// still not seen — the same window `bb-auth-adm` has had all along, since nothing here
-/// locks. What the `rev` removes is the interesting case, the one measured in minutes: a
-/// form loaded, read, thought about, and submitted onto a file that has since moved.
+/// still not seen. What the `rev` removes is the interesting case, the one measured in
+/// minutes: a form loaded, read, thought about, and submitted onto a file that has since
+/// moved.
+///
+/// **Within this process, the whole of it is serialized** by [`WRITE_LOCK`], and that half is
+/// not something `rev` can do: two workers submitting at the same moment both read the same
+/// bytes, both compute the same fingerprint, and both are entitled to write. There are two
+/// workers, an administrator with two tabs is ordinary, and the loser's edit vanishing with a
+/// success page is exactly the silent clobber the `rev` exists to prevent. The lock costs
+/// nothing: this serves a handful of people and a save is a few milliseconds.
+///
+/// What it cannot cover is the other process. A concurrent `bb-auth-adm` over SSH is still
+/// only guarded by the fingerprint, which is the window it has always had, and the write
+/// itself is atomic on both sides.
 ///
 /// A refusal — from a form's own check or from the library — re-renders the very form that
 /// caused it, with the submitted values still in the fields and the message verbatim. On
@@ -4540,6 +4652,12 @@ fn commit(v: &View, doc: &AccessFile, verb: &str, target: &str) -> Result<Writte
 /// way. From the browser's side the two say the same thing — nothing happened, here is the
 /// sentence that says why — and the sentence itself is what distinguishes them.
 fn mutate(v: &View, form: &Form) -> Outcome {
+    // Held for the whole of the read-check-write, and released when this returns. A poisoned
+    // lock is taken anyway: the panic it remembers happened in some other request's mutation,
+    // and refusing every edit afterwards would be a worse answer than proceeding, since every
+    // write is validated and atomic in its own right.
+    let _writing = WRITE_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+
     // Whichever file this route edits: the same `rev` field, checked against the file whose
     // fingerprint the form was given ([`edited_file`]).
     let path = edited_file(v.cfg, &v.at);
@@ -4560,15 +4678,28 @@ fn mutate(v: &View, form: &Form) -> Outcome {
         // actually happened — the generic page's advice, "make the change again", would
         // mint a second key. A stale rev with no such key is a genuine concurrent edit,
         // and keeps the generic answer.
-        if let Route::KeyAdd(owner) = &v.at {
-            let id = form.get("id").trim();
-            let minted = |d: &AccessFile| {
+        // Both routes that REVEAL a bearer, not just the mint: a rotate answers with a page
+        // for the same reason a mint does (a bearer cannot survive a redirect), so reloading
+        // it re-submits with a stale rev too. The generic page's advice, "make the change
+        // again", is actively destructive there: rotating a second time invalidates the
+        // bearer just copied, and lands on the same page offering the same advice.
+        let reveal = match &v.at {
+            Route::KeyAdd(owner) => Some((owner, false)),
+            Route::KeyRotate(owner, id) => Some((owner, !id.is_empty())),
+            _ => None,
+        };
+        if let Some((owner, rotated)) = reveal {
+            let id = match &v.at {
+                Route::KeyRotate(_, id) => id.clone(),
+                _ => form.get("id").trim().to_string(),
+            };
+            let exists = |d: &AccessFile| {
                 user_pos(d, owner)
                     .is_some_and(|i| d.users[i].api_keys.iter().any(|k| k.id.trim() == id))
             };
-            if !id.is_empty() && serde_json::from_str::<AccessFile>(&raw).is_ok_and(|d| minted(&d))
+            if !id.is_empty() && serde_json::from_str::<AccessFile>(&raw).is_ok_and(|d| exists(&d))
             {
-                return Outcome::Page(409, title, page_mint_conflict(v, owner, id));
+                return Outcome::Page(409, title, page_mint_conflict(v, owner, &id, rotated));
             }
         }
         return Outcome::Page(409, title, page_conflict(v));
@@ -5221,36 +5352,19 @@ fn parse_members(doc: &AccessFile, text: &str) -> Result<(Vec<String>, Vec<Strin
     Ok((users, groups))
 }
 
-/// The inverse of [`scope_excluded_display`]: one textarea into a scope's `excluded`.
+/// The inverse of [`scope_excluded_display`]: one textarea into a scope's `excluded`, one
+/// line at a time through the library's [`parse_exclusion`].
 ///
-/// Unlike [`parse_members`] this accepts an email the roster has never heard of, and keeps
-/// it. That is the whole point of the field on an `authenticated` scope, which admits
-/// exactly the people who are in no roster row — refusing to name them here would leave
-/// that scope with no exclusion at all. Anyone the roster *does* know is written as their
-/// uuid, so the exclusion covers every identifier they have.
+/// The rule itself is not here, and that is the fix rather than a detail: this and the CLI's
+/// `--exclude` had one implementation each and they had already come apart over what an
+/// `@name` line has to satisfy. Unlike [`parse_members`] it accepts an email the roster has
+/// never heard of, which is the whole point of the field on an `authenticated` scope.
 fn parse_exclusions(doc: &AccessFile, text: &str) -> Result<Vec<String>, String> {
-    let mut out = Vec::new();
-    for line in text.lines().map(str::trim).filter(|l| !l.is_empty()) {
-        if line.starts_with('@') {
-            match group_ref(line) {
-                Some(g) if doc.user_groups.contains_key(g) => out.push(line.to_string()),
-                Some(g) => return Err(format!("no user group '@{g}'")),
-                None => return Err(format!("'{line}': a group reference is written '@name'")),
-            }
-            continue;
-        }
-        match user_pos(doc, line) {
-            Some(i) => out.push(doc.users[i].uuid.trim().to_ascii_lowercase()),
-            None if line.contains('@') => out.push(norm_email(line)),
-            None => {
-                return Err(format!(
-                    "'{line}': not a user, not '@group' and not an email. An exclusion names \
-                     somebody enrolled, a group, or a stranger by their email"
-                ))
-            }
-        }
-    }
-    Ok(out)
+    text.lines()
+        .map(str::trim)
+        .filter(|l| !l.is_empty())
+        .map(|l| parse_exclusion(doc, l))
+        .collect()
 }
 
 /// [`parse_members`] for a `user_groups` member list, which may only ever hold uuids: a
@@ -5311,6 +5425,7 @@ fn handle(mut req: Request, cfg: &Config) {
         query: "",
         rev: "",
         msg: None,
+        identity: vec![IDENTITY_HEADER.to_string()],
     };
 
     // Identity comes from nginx and from nowhere else. A missing header is a broken
@@ -5324,7 +5439,7 @@ fn handle(mut req: Request, cfg: &Config) {
                 v.t(K::NoIdentityTitle),
                 html! { p { (v.t(K::NoIdentityBody)) } },
             );
-            respond_page(req, 401, shell(&v, v.t(K::NoIdentityTitle), page));
+            respond_page(req, 401, shell(&v, v.t(K::NoIdentityTitle), page), &v.look);
             return;
         }
     };
@@ -5344,6 +5459,7 @@ fn handle(mut req: Request, cfg: &Config) {
                 req,
                 500,
                 shell(&v, v.t(K::FileErrorTitle), page_file_error(&v, &e)),
+                &v.look,
             );
             return;
         }
@@ -5355,6 +5471,7 @@ fn handle(mut req: Request, cfg: &Config) {
             req,
             500,
             shell(&v, v.t(K::FileErrorTitle), page_file_error(&v, &e)),
+            &v.look,
         );
         return;
     }
@@ -5365,7 +5482,7 @@ fn handle(mut req: Request, cfg: &Config) {
             v.t(K::NotAdminTitle),
             html! { p { code { (email) } " " (v.t(K::NotAdminBody)) } },
         );
-        respond_page(req, 403, shell(&v, v.t(K::NotAdminTitle), page));
+        respond_page(req, 403, shell(&v, v.t(K::NotAdminTitle), page), &v.look);
         return;
     }
 
@@ -5378,6 +5495,13 @@ fn handle(mut req: Request, cfg: &Config) {
         theme: settings.theme,
         stylesheet: settings.stylesheet_url.as_deref(),
     };
+    // From the same settings read, for the same reason the look is: what the access check
+    // predicts and what admitted this request must come from one version of the file.
+    let identity: Vec<String> = settings
+        .identity_attrs
+        .iter()
+        .map(|a| a.header.clone())
+        .collect();
 
     let at = match route(&path, &cfg.base_path) {
         Some(r) => r,
@@ -5393,13 +5517,14 @@ fn handle(mut req: Request, cfg: &Config) {
                 query: "",
                 rev: "",
                 msg: None,
+                identity,
             };
             let page = notice(
                 "bad",
                 v.t(K::NotFoundTitle),
                 html! { p { (v.t(K::NotFoundBody)) } },
             );
-            respond_page(req, 404, shell(&v, v.t(K::NotFoundTitle), page));
+            respond_page(req, 404, shell(&v, v.t(K::NotFoundTitle), page), &v.look);
             return;
         }
     };
@@ -5423,10 +5548,11 @@ fn handle(mut req: Request, cfg: &Config) {
             query: "",
             rev: "",
             msg: None,
+            identity: identity.clone(),
         };
         if !allowed {
             let page = notice("bad", v.t(K::CsrfTitle), html! { p { (v.t(K::CsrfBody)) } });
-            respond_page(req, 403, shell(&v, v.t(K::CsrfTitle), page));
+            respond_page(req, 403, shell(&v, v.t(K::CsrfTitle), page), &v.look);
             return;
         }
         let form = Form::parse(&read_body(&mut req));
@@ -5436,7 +5562,7 @@ fn handle(mut req: Request, cfg: &Config) {
                 respond_redirect(req, &location);
             }
             Outcome::Page(status, title, content) => {
-                respond_page(req, status, shell(&v, title, content))
+                respond_page(req, status, shell(&v, title, content), &v.look)
             }
         }
         return;
@@ -5488,6 +5614,7 @@ fn handle(mut req: Request, cfg: &Config) {
         query: &query,
         rev: &rev,
         msg: query_param(&query, "msg").as_deref().and_then(Msg::parse),
+        identity,
     };
 
     // Answered before the access file is even opened, and deliberately: this page does not
@@ -5498,7 +5625,7 @@ fn handle(mut req: Request, cfg: &Config) {
             Ok((doc, _)) => page_config(&v, &ConfigForm::of(&doc), None),
             Err(e) => page_file_error(&v, &e),
         };
-        respond_page(req, 200, shell(&v, v.t(K::Config), content));
+        respond_page(req, 200, shell(&v, v.t(K::Config), content), &v.look);
         return;
     }
 
@@ -5509,6 +5636,7 @@ fn handle(mut req: Request, cfg: &Config) {
                 req,
                 500,
                 shell(&v, v.t(K::FileErrorTitle), page_file_error(&v, &e)),
+                &v.look,
             );
             return;
         }
@@ -5881,7 +6009,7 @@ fn handle(mut req: Request, cfg: &Config) {
             }
         }
     };
-    respond_page(req, status, shell(&v, title, content));
+    respond_page(req, status, shell(&v, title, content), &v.look);
 }
 
 /// One user's key, by owner (uuid or email) and id — what a key form and its two
@@ -5901,6 +6029,12 @@ fn find_key<'a>(
 /// Read the config, bind, and serve forever on a fixed pool of blocking threads — the gate's
 /// shape, minus everything the gate needs and this does not.
 fn main() {
+    // The same one-line answer the other two programs give, for the same reason: `dpkg-query`
+    // reports 1.1.0-1 for a release and for a hand-built tree alike.
+    if std::env::args().any(|a| a == "--version") {
+        println!("{}", version_line("bb-auth-web"));
+        return;
+    }
     let cfg = Config::from_env();
 
     // Read once at startup so a broken file is heard about immediately, and so the banner
@@ -5921,6 +6055,27 @@ fn main() {
         Err(e) => eprintln!("[bb-auth-web] WARNING: {e}"),
     }
 
+    // A bind that is not loopback, refused before the socket exists.
+    //
+    // This service's ONLY credential is a request header nginx injects. Reachable directly,
+    // it is an unauthenticated remote writer of the estate's access list: one header, and the
+    // caller is whoever they say they are. `BB_AUTH_WEB_LISTEN=0.0.0.0:8091` is one edit away
+    // from that, and nothing said so.
+    //
+    // Fatal here, where the gate only warns, and the asymmetry is deliberate: the gate
+    // refusing to start is an outage for everyone, while this refusing to start costs an
+    // administrator a GUI and leaves `bb-auth-adm` over SSH doing the same job. A deployment
+    // that genuinely proxies from another host can say so, once, in the env file.
+    if !listen_is_loopback(&cfg.listen) && !env_flag("BB_AUTH_WEB_ALLOW_NONLOOPBACK") {
+        eprintln!(
+            "[bb-auth-web] FATAL: BB_AUTH_WEB_LISTEN is {}, which is not loopback. This service \
+             takes its identity from the {IDENTITY_HEADER} header nginx sets, so anything that \
+             can reach the port can edit the access file. Put nginx in front of it, or set \
+             BB_AUTH_WEB_ALLOW_NONLOOPBACK=1 to say you meant it.",
+            cfg.listen
+        );
+        std::process::exit(1);
+    }
     let server = Server::http(&cfg.listen).unwrap_or_else(|e| {
         eprintln!("[bb-auth-web] FATAL: cannot bind {}: {e}", cfg.listen);
         std::process::exit(1);
@@ -5941,7 +6096,8 @@ fn main() {
         }
     };
     eprintln!(
-        "[bb-auth-web] listening on {} | file={} | settings={} | admins={admins} | base={base}          | lang={}",
+        "[bb-auth-web] {} listening on {} | file={} | settings={} | admins={admins} | base={base}          | lang={}",
+        version_line("bb-auth-web"),
         cfg.listen,
         cfg.access_path,
         cfg.settings_path,
@@ -6836,45 +6992,198 @@ mod tests {
         cleanup(&path);
     }
 
+    /// The policy names the page's own bytes by hash, so the two have to *be* the same bytes.
+    ///
+    /// A nonce cannot be wrong: it is generated and emitted in one breath. A hash can, and
+    /// silently: add a fourth constant to the `<style>` block, or a separator between the
+    /// three, and the browser refuses to apply the whole stylesheet while every test that
+    /// reads HTML goes on passing. This is what stands between that and a deployment
+    /// discovering it as an unstyled admin interface.
+    #[test]
+    fn the_policy_hashes_the_bytes_the_page_actually_carries() {
+        let html = render("csp-style", Route::Dashboard);
+        let open = html.find("<style>").expect("the built-in stylesheet");
+        let close = html.find("</style>").expect("a closed style element");
+        let inline = &html[open + "<style>".len()..close];
+        let csp = admin_csp(&Look::default());
+        assert!(
+            csp.contains(&csp_hash(inline)),
+            "style-src must name the hash of the bytes in the page"
+        );
+        // And the one handler, by the hash the policy allows it under.
+        assert!(csp.contains(&csp_hash(SETTINGS_ONCHANGE)), "{csp}");
+        assert!(
+            csp.contains("'unsafe-hashes'"),
+            "an attribute handler needs it: {csp}"
+        );
+        // Nothing else may run, load or be framed.
+        assert!(csp.starts_with("default-src 'none';"), "{csp}");
+        assert!(csp.contains("frame-ancestors 'none'"), "{csp}");
+        assert!(csp.contains("form-action 'self'"), "{csp}");
+    }
+
     #[test]
     fn the_page_carries_one_handler_and_no_script() {
         // The invariant is not "no JavaScript": it is that no page may *need* a script. One
         // inline handler is allowed to save a click on the Settings list boxes; anything
-        // else — a `<script>` tag, a second kind of handler, a `javascript:` href — would be
-        // a page that stops working when scripting is off, which this GUI must never be.
-        for html in [
-            render("nojs-dash", Route::Dashboard),
-            render("nojs-users", Route::Users),
-            // The two that carry the access check, which is the newest form in the GUI and
-            // the one most likely to reach for a script it may not have.
-            render("nojs-user", Route::User(BOB.to_string())),
-            render("nojs-app", Route::App("mpa".to_string())),
-        ] {
-            assert!(!html.contains("<script"), "no page may carry a script tag");
-            assert!(!html.contains("javascript:"), "{html}");
-            // Two selects, two handlers, and no other `on…=` attribute anywhere.
-            assert_eq!(
-                html.matches(&format!("onchange=\"{SETTINGS_ONCHANGE}\""))
-                    .count(),
-                2,
-                "{html}"
-            );
-            for handler in [
-                " onclick=",
-                " onload=",
-                " onsubmit=",
-                " oninput=",
-                " onfocus=",
-                " onerror=",
-            ] {
-                assert!(!html.contains(handler), "{handler} in {html}");
+        // else (a `<script>` tag, a second kind of handler, a `javascript:` href) would be a
+        // page that stops working when scripting is off, which this GUI must never be.
+        //
+        // Every page shape, over a socket, and an allowlist rather than a blacklist. The
+        // previous version rendered four read-only pages and looked for six named handlers,
+        // which says nothing about `onmouseover` anywhere, `onchange` on a seventh element,
+        // or any of the eighteen form pages it could not render at all: it could only find
+        // the mistakes somebody had already thought of. The browser suite (`e2e/nojs.js`)
+        // has enumerated attributes this way all along, and it runs on a machine with a
+        // browser, which no automated run of this repository's has.
+        let path = scratch("nojs-all", SAMPLE);
+        let served = cfg_for(&path, "");
+        let server = Server::http("127.0.0.1:0").expect("bind an ephemeral port");
+        let port = server.server_addr().to_ip().expect("an ip address").port();
+        std::thread::spawn(move || {
+            for req in server.incoming_requests() {
+                handle(req, &served);
             }
-            // And the way through without a script is on the page, inside <noscript>.
+        });
+
+        for at in every_route() {
+            let mut r = client()
+                .get(format!("http://127.0.0.1:{port}{}", at.path()))
+                .header(IDENTITY_HEADER, "admin@x.com")
+                .call()
+                .expect("a response");
+            assert_eq!(r.status(), 200, "{at:?}");
+            let html = r.body_mut().read_to_string().unwrap();
+            assert!(!html.contains("<script"), "a script tag on {at:?}");
+            assert!(
+                !html.contains("javascript:"),
+                "a javascript: href on {at:?}"
+            );
+
+            for h in handlers_in(&html) {
+                assert_eq!(
+                    h,
+                    format!("onchange=\"{SETTINGS_ONCHANGE}\""),
+                    "the only handler this GUI may carry is the Settings list box's, and \
+                     {at:?} carries {h}"
+                );
+            }
+            // The two Settings list boxes carry it, and the way through without a script is
+            // on the page, inside <noscript>.
+            assert_eq!(handlers_in(&html).len(), 2, "on {at:?}");
             assert!(
                 html.contains("<noscript><div class=\"actions\"><button>"),
-                "the no-script submit must be there, and inside noscript: {html}"
+                "the no-script submit must be there, and inside noscript: {at:?}"
             );
         }
+        cleanup(&path);
+    }
+
+    /// Every `on…="…"` attribute in `html`, found by scanning rather than by name: an
+    /// allowlist can only be checked against the attributes that are actually there.
+    fn handlers_in(html: &str) -> Vec<String> {
+        let bytes = html.as_bytes();
+        let mut out = Vec::new();
+        for (i, _) in html.match_indices(" on") {
+            let rest = &html[i + 3..];
+            let name_len = rest.bytes().take_while(|b| b.is_ascii_lowercase()).count();
+            if name_len == 0 || bytes.get(i + 3 + name_len) != Some(&b'=') {
+                continue; // " once", " only", prose: not an attribute
+            }
+            let value = rest[name_len + 1..]
+                .strip_prefix('"')
+                .and_then(|v| v.split('"').next())
+                .unwrap_or("");
+            out.push(format!("on{}=\"{value}\"", &rest[..name_len]));
+        }
+        out
+    }
+
+    /// Does [`every_route`] still name every page there is?
+    ///
+    /// The `match` is the check and the compiler is what runs it: it is exhaustive, so a new
+    /// `Route` variant does not compile until somebody has looked at this list, and the
+    /// count then says whether they added it to `every_route` as well. Without this, the
+    /// no-script guarantee quietly stops covering the newest page, which is the page most
+    /// likely to have reached for a script.
+    #[test]
+    fn every_route_covers_every_variant() {
+        fn variant(at: &Route) -> usize {
+            match at {
+                Route::Dashboard => 0,
+                Route::Apps => 1,
+                Route::App(_) => 2,
+                Route::Denied => 3,
+                Route::Users => 4,
+                Route::User(_) => 5,
+                Route::Config => 6,
+                Route::AppAdd => 7,
+                Route::AppEdit(_) => 8,
+                Route::AppRm(_) => 9,
+                Route::ScopeAdd(_) => 10,
+                Route::ScopeEdit(_, _) => 11,
+                Route::ScopeRm(_, _) => 12,
+                Route::ScopeMove(_, _) => 13,
+                Route::UserAdd => 14,
+                Route::UserEdit(_) => 15,
+                Route::UserRm(_) => 16,
+                Route::EmailAdd(_) => 17,
+                Route::EmailRm(_, _) => 18,
+                Route::KeyAdd(_) => 19,
+                Route::KeyEdit(_, _) => 20,
+                Route::KeyRotate(_, _) => 21,
+                Route::KeyRm(_, _) => 22,
+                Route::GroupAdd => 23,
+                Route::GroupEdit(_) => 24,
+                Route::GroupRm(_) => 25,
+                Route::DenyAdd => 26,
+                Route::DenyRm(_) => 27,
+            }
+        }
+        let seen: std::collections::HashSet<usize> = every_route().iter().map(variant).collect();
+        // All of them but `ScopeMove`, which has no page to render: it is POST only.
+        let missing: Vec<usize> = (0..=27).filter(|i| !seen.contains(i)).collect();
+        assert_eq!(missing, vec![13], "every_route must name every page");
+    }
+
+    /// One of every page shape this GUI serves, for the tests that must hold on all of them.
+    ///
+    /// Written out rather than derived, because `Route` carries names and a derived list
+    /// would have to invent them; the pairing is kept honest by
+    /// `every_route_covers_every_variant`, which fails the day a variant is added.
+    fn every_route() -> Vec<Route> {
+        let bob = BOB.to_string();
+        vec![
+            Route::Dashboard,
+            Route::Apps,
+            Route::App("mpa".to_string()),
+            Route::Denied,
+            Route::Users,
+            Route::User(bob.clone()),
+            Route::Config,
+            Route::AppAdd,
+            Route::AppEdit("mpa".to_string()),
+            Route::AppRm("mpa".to_string()),
+            Route::ScopeAdd("mpa".to_string()),
+            Route::ScopeEdit("mpa".to_string(), "admin".to_string()),
+            Route::ScopeRm("mpa".to_string(), "admin".to_string()),
+            Route::UserAdd,
+            Route::UserEdit(bob.clone()),
+            Route::UserRm(bob.clone()),
+            Route::EmailAdd(bob.clone()),
+            Route::EmailRm(bob.clone(), "bob@x.com".to_string()),
+            Route::KeyAdd(bob.clone()),
+            Route::KeyEdit(bob.clone(), "laptop".to_string()),
+            Route::KeyRotate(bob.clone(), "laptop".to_string()),
+            Route::KeyRm(bob.clone(), "laptop".to_string()),
+            Route::GroupAdd,
+            Route::GroupEdit("admins".to_string()),
+            Route::GroupRm("admins".to_string()),
+            Route::DenyAdd,
+            Route::DenyRm("spammer@x.com".to_string()),
+            // `ScopeMove` is deliberately absent: it is the one route with no page at all,
+            // POST only, and rendering it is not a thing that exists.
+        ]
     }
 
     #[test]
@@ -6916,6 +7225,7 @@ mod tests {
             query: "",
             rev,
             msg: None,
+            identity: vec![IDENTITY_HEADER.to_string()],
         }
     }
 

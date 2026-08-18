@@ -8,14 +8,58 @@ others cannot, and the boundaries are where the interesting failures live.
 | `build.sh` | Linux or WSL | `package.sh` | cross-compiles the three binaries into `dist/` |
 | `package.sh` | Linux or WSL | `deploy.ps1`, or you | builds the three `.deb` (cargo-deb) |
 | `deploy.ps1` | Windows, **pwsh 7** | you | orchestrates a deploy over SSH |
-| `deploy.sh` | the target host, as root | `deploy.ps1`, or you | `dpkg -i` and the two things a package may not do |
+| `deploy.sh` | the target host, as root | `deploy.ps1`, or you | `dpkg -i`, and everything around it a package may not do |
 | `verify.sh` | the target host, as root | `deploy.sh`, or you | read-only post-deploy checks |
+
+## Releasing
+
+The checklist, in order. Most of it is now enforced by the scripts themselves, which is the
+point: what is left below is the part that needs a person.
+
+1. **The tree is clean and the checks are green.** `cargo test`, `cargo clippy
+   --all-targets`, `cargo fmt`, `cargo doc --no-deps`, and `node e2e/run.js` if the GUI's
+   markup, forms or routes changed. Nothing runs them for you.
+2. **The version.** Bump `version` in `Cargo.toml` if the code changed; keep it and bump
+   `--revision` only when repackaging the same code.
+3. **The changelog.** A section in [`../CHANGELOG.md`](../CHANGELOG.md), and above all the
+   **Cookie format** line: if it changed, say so there, because that is the one change that
+   logs every user out and the invariant nominates release notes as where it is announced.
+4. **Commit, then tag.** `git tag -a v1.2.0 -m "…"`, on the commit that is being released.
+   `package.sh` refuses a dirty tree, and every binary bakes in `git describe`, so a tag is
+   what makes `bb-auth --version` on the host read as a release rather than as a hash.
+5. **Build and deploy.** `./scripts/deploy.ps1 user@host`, which packages (running the test
+   suite first), ships, installs and verifies. `verify.sh` runs `bb-auth --self-test`, so a
+   gate that cannot verify a signature fails the deploy instead of failing every login.
+6. **Read the two lines that matter** in the output: the max GLIBC symbol against the
+   declared `libc6 (>= …)` floor, and the binary sizes, since `[profile.release]` is
+   size-optimised on purpose.
+
+A rollback is `dpkg -i` of the previous packages: see "Rollback" in
+[`../README.md`](../README.md), and the list of builds that must never be rolled back to.
 
 **The install itself is not here.** It lives in the packages: `[package.metadata.deb]` in
 [`../Cargo.toml`](../Cargo.toml) and the maintainer scripts under
 [`../deploy/debian/`](../deploy/debian). The service users, the units, the env file, the
 HMAC key, the empty access file and the order they must happen in are all `postinst`'s
 business. Everything in this directory is scaffolding around that.
+
+## What a release machine needs
+
+The Linux side (a WSL distribution, by default `FedoraLinux-44`; `deploy.ps1 -WslDistro`
+names another) needs, once:
+
+- **rustup**, with a stable toolchain and the target installed
+  (`rustup target add aarch64-unknown-linux-gnu`; `build.sh` asks for it too, harmlessly).
+  Nothing in the repository pins either, so a release is built with whatever that machine's
+  `rustup default` is: worth knowing before upgrading it.
+- **the cross toolchain** for the target. On Fedora: `gcc-aarch64-linux-gnu` and
+  `sysroot-aarch64-fc*-glibc`. On Debian or Ubuntu: `gcc-aarch64-linux-gnu`. `build.sh` does
+  not configure it: the linker, the sysroot for the link and C-compile steps, and `CC`/`AR`
+  are expected in that machine's own `~/.cargo/config.toml`, which is the one piece of the
+  build that lives outside this repository.
+- **binutils for the target** (`binutils-aarch64-linux-gnu`), for the GLIBC-floor check;
+  without it `package.sh` warns and skips that check rather than failing.
+- **cargo-deb**, which `package.sh` installs at a pinned version if it is missing.
 
 ## The normal path
 
@@ -54,7 +98,7 @@ bash scripts/package.sh                    # arm64, the Pi
 bash scripts/package.sh --arch amd64
 bash scripts/package.sh --no-build         # package the binaries already in dist/
 bash scripts/package.sh --only gate,web    # skip a package
-bash scripts/package.sh --revision 2       # 1.0.0-2 instead of 1.0.0-1
+bash scripts/package.sh --revision 2       # 1.1.0-2 instead of 1.1.0-1
 ```
 
 Produces `dist/{bb-auth,bb-auth-adm,bb-auth-web}_<version>-<rev>_<arch>.deb`. Started from
@@ -85,7 +129,7 @@ What it adds on top of a bare `cargo deb`:
 ```powershell
 ./scripts/deploy.ps1 user@host                                   # build + deploy all three
 ./scripts/deploy.ps1 user@host -Packages bb-auth                 # gate only
-./scripts/deploy.ps1 user@host -AccessFile .\deploy\access.json     # also replace the access file
+./scripts/deploy.ps1 user@host -AccessFile <your-access.json>       # also replace the access file
 ./scripts/deploy.ps1 user@host -NoBuild                          # repackage the current dist/
 ```
 
@@ -113,12 +157,12 @@ its logic to live.
 sudo bash deploy.sh <staging_dir>     # DEST=/opt/bb-auth
 ```
 
-Installs nothing itself. It does the two things a package cannot, then checks its work:
+Installs nothing itself. It does what a package cannot, then checks its work:
 
 1. **`dpkg -i`, in one transaction**, so the strict `bb-auth (= <version>)` dependency of
    the two admin packages is satisfied by the gate in the same run. Not `apt install`:
    apt declines to reinstall a version equal to the one already there, so a rebuilt
-   `1.0.0-1` would silently not deploy.
+   `1.1.0-1` would silently not deploy.
 2. **Installs a staged `access.json`**, after the gate's own parser has vouched for it,
    with the owner and mode the live file already had. The packages create that file once,
    empty, and never touch it again, which is what makes a redeploy safe, so replacing it

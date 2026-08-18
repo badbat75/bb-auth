@@ -15,9 +15,10 @@
          directory on the remote
       4. run deploy.sh there as root, then clean the staging directory up
 
-    deploy.sh is the host side and does the three things a package cannot: `dpkg -i` in
-    one transaction, installing a staged access file after the gate's own parser has
-    vouched for it, and running verify.sh. It is staged rather than inlined here so the
+    deploy.sh is the host side and does what a package cannot: validate a staged access
+    file with the gate's own parser BEFORE anything is installed, `dpkg -i` in one
+    transaction, keep the packages it replaced so there is something to roll back to,
+    install the staged access file, and run verify.sh. It is staged rather than inlined here so the
     logic that touches a live gate is reviewable in the repo, not quoted through
     PowerShell into ssh into a remote shell.
 
@@ -34,7 +35,7 @@
         file with `bb-auth --check-access` before anything is overwritten.
 
     `dpkg -i` rather than `apt install`, deliberately: apt would decline to reinstall a
-    version equal to the one already there, so a rebuilt 1.0.0-1 would silently not
+    version equal to the one already there, so a rebuilt 1.1.0-1 would silently not
     deploy. dpkg always unpacks and re-configures, which is what a redeploy means here.
 
 .PARAMETER Target
@@ -55,6 +56,17 @@
 
 .PARAMETER Arch
     Debian architecture to build and deploy. Default: arm64 (the Pi).
+
+.PARAMETER Revision
+    The Debian revision: 1.1.0-<Revision>. Bump it to rebuild the same crate version
+    with a packaging change, exactly as `package.sh --revision` does. It was documented
+    there and unreachable through this script, which is the supported entry point.
+
+.PARAMETER AllowDirty
+    Package an uncommitted working tree. package.sh refuses one by default: a .deb
+    version reads the same whether it came from a tag or from a half-finished edit, and
+    the build string baked into the binaries (`bb-auth --version`) is the only thing that
+    would say otherwise.
 
 .PARAMETER NoBuild
     Skip the compile and package whatever binaries are already in dist/. The packages
@@ -88,7 +100,12 @@ param(
     [ValidateSet('arm64', 'amd64', 'armhf')]
     [string]$Arch = 'arm64',
 
+    [ValidateRange(1, 99)]
+    [int]$Revision = 1,
+
     [switch]$NoBuild,
+
+    [switch]$AllowDirty,
 
     [string]$WslDistro = 'FedoraLinux-44'
 )
@@ -132,8 +149,9 @@ function ConvertTo-WslPath([string]$WinPath) {
 }
 
 # --- 1. build the packages ---------------------------------------------------
-$pkgArgs = "--arch $Arch"
-if ($NoBuild) { $pkgArgs += ' --no-build' }
+$pkgArgs = "--arch $Arch --revision $Revision"
+if ($NoBuild)    { $pkgArgs += ' --no-build' }
+if ($AllowDirty) { $pkgArgs += ' --allow-dirty' }
 Write-Host "==> building the $Arch packages in WSL ($WslDistro)" -ForegroundColor Cyan
 $wslRepo = ConvertTo-WslPath $Repo
 wsl -d $WslDistro -- bash -lc "cd `"$wslRepo`" && bash scripts/package.sh $pkgArgs"
@@ -145,7 +163,7 @@ Assert-Native "WSL package build (scripts/package.sh $pkgArgs)"
 # version being shipped when this build produced nothing.
 $Version = (Select-String -Path (Join-Path $Repo 'Cargo.toml') -Pattern '^version\s*=\s*"([^"]+)"' |
             Select-Object -First 1).Matches[0].Groups[1].Value
-$DebVersion = "$Version-1"
+$DebVersion = "$Version-$Revision"
 
 $debs = foreach ($p in $Packages) {
     $f = Join-Path $DistDir "${p}_${DebVersion}_${Arch}.deb"
@@ -159,10 +177,19 @@ foreach ($f in @($DeploySh, $VerifySh)) {
 }
 if ($AccessFile) {
     if (-not (Test-Path -LiteralPath $AccessFile)) { throw "AccessFile not found: $AccessFile" }
-    # Cheap local sanity check, so a typo costs a second instead of a round trip. The
-    # authoritative check is the gate's own parser, on the host, below.
-    try { $null = Get-Content -Raw -LiteralPath $AccessFile | ConvertFrom-Json }
+    # Cheap local sanity checks, so a typo costs a second instead of a round trip. The
+    # authoritative check is the gate's own parser, which now runs on the host BEFORE
+    # anything is installed (scripts/deploy.sh).
+    try { $doc = Get-Content -Raw -LiteralPath $AccessFile | ConvertFrom-Json }
     catch { throw "AccessFile is not valid JSON: $AccessFile" }
+    # The version is the one thing a JSON parse cannot tell you and the gate refuses
+    # outright: a file in a pre-1.0 format parses perfectly and compiles to a completely
+    # different set of grants, which is why the gate makes it a fatal, explanatory error
+    # rather than a type mismatch three levels down.
+    if ($doc.version -ne 1) {
+        throw ("AccessFile declares version '{0}', not 1: {1}. The gate would refuse it. " +
+               "Run: cargo run --bin bb-auth -- --check-access '{1}'") -f $doc.version, $AccessFile
+    }
 }
 Write-Host "    $($debs.Count) package(s) for $Arch at $DebVersion"
 

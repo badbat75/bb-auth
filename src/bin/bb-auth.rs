@@ -6,7 +6,9 @@
 //! `USER_AUTH` flow on a public app client), validates it, and exchanges it for an
 //! HMAC-signed session cookie. That is what makes "auto-login right after
 //! registration, with no second OTP" possible. Everything else is wired
-//! per-deployment through `BB_AUTH_*` env vars ([`Config::from_env`]).
+//! per-deployment through `BB_AUTH_*` env vars ([`Config::from_env`]) and the settings
+//! file beside the access file ([`read_settings`]), which is where anything that must
+//! change without a restart lives.
 //!
 //! # Endpoints
 //!
@@ -15,8 +17,8 @@
 //! | Method | Path | Caller | Behaviour |
 //! |--------|------|--------|-----------|
 //! | `GET`  | `/auth/validate` | nginx `auth_request`, loopback | 204 + [`IDENTITY_HEADER`] (+ one header per configured [`ProfileClaim`] the credential carries) if a credential authorizes the request, else 401 |
-//! | `GET`  | `/auth/login`    | browser | the sign-in page ([`LOGIN_HTML`]), which runs the Cognito flow and POSTs the id_token back to `/auth/session`, landing on `?rd=` or, failing that, on the [`REFERER_HEADER`] ([`rd_candidate`]) |
-//! | `GET`  | `/auth/callback` | browser | the social sign-in callback ([`CALLBACK_HTML`]); `404` when no `BB_AUTH_SOCIAL_*` is configured |
+//! | `GET`, `HEAD` | `/auth/login` | browser | the sign-in page ([`LOGIN_HTML`]), which runs the Cognito flow and POSTs the id_token back to `/auth/session`, landing on `?rd=` or, failing that, on the [`REFERER_HEADER`] ([`rd_candidate`]) |
+//! | `GET`, `HEAD` | `/auth/callback` | browser | the social sign-in callback ([`CALLBACK_HTML`]); `404` when no `BB_AUTH_SOCIAL_*` is configured |
 //! | `POST` | `/auth/session`  | browser | validate the posted `id_token`, set the cookie, 302 → `rd` |
 //! | `GET`  | `/auth/logout`   | browser | clear the cookie, 302 → `?rd=`, else the [`REFERER_HEADER`] ([`rd_candidate`]), else the login page |
 //! | `GET`  | `/auth/healthz`  | local   | 200 `ok` |
@@ -109,7 +111,7 @@
 
 use std::collections::{BTreeMap, HashMap};
 use std::io::Read;
-use std::sync::{Arc, Mutex, RwLock};
+use std::sync::{Arc, Mutex, OnceLock, RwLock};
 use std::time::{Duration, Instant};
 
 use base64::engine::general_purpose::URL_SAFE_NO_PAD;
@@ -119,7 +121,7 @@ use jsonwebtoken::jwk::JwkSet;
 use jsonwebtoken::{decode, decode_header, Algorithm, DecodingKey, Validation};
 use serde::Deserialize;
 use sha2::Sha256;
-use tiny_http::{Header, Request, Response, Server, StatusCode};
+use tiny_http::{Header, Request, Response, ResponseBox, Server, StatusCode};
 
 // The access file — schema, parser, URL matcher and the grant model — is shared with
 // `bb-auth-adm`, which edits the very file this reads. One parser, one matcher, one
@@ -128,10 +130,11 @@ use tiny_http::{Header, Request, Response, Server, StatusCode};
 // contract — stays here, in one file, read top to bottom.
 use bb_auth_core::{
     claim_name_ok, compile_asset_url, compile_host_pattern, compile_login_url, decide,
-    decide_api_key, default_settings_path, header_safe_email, html_escape, login_url_for,
-    lower_authority, now, read_access, read_settings, sha256_hex, stylesheet_link, Access,
-    AccessKind, ApiKeyRecord, Decision, IdentityAttr, KeyDecision, ProfileClaim, Settings, Subject,
-    UrlPattern, API_KEY_PREFIX, BASE_CSS, THEME_CSS,
+    decide_api_key, default_settings_path, header_safe_email, html_escape, login_url_for, now,
+    page_csp, read_access, read_settings, request_site, request_url, sha256_hex, stylesheet_link,
+    version_line, Access, AccessKind, ApiKeyRecord, Decision, IdentityAttr, KeyDecision,
+    ProfileClaim, RequestSite, Settings, Subject, UrlPattern, API_KEY_PREFIX, BASE_CSS,
+    PAGE_SECURITY_HEADERS, THEME_CSS,
 };
 
 type HmacSha256 = Hmac<Sha256>;
@@ -471,6 +474,94 @@ struct SocialConfig {
 /// Read an env var, falling back to `default` when unset.
 fn env_or(key: &str, default: &str) -> String {
     std::env::var(key).unwrap_or_else(|_| default.to_string())
+}
+
+/// How much the gate says about individual requests.
+///
+/// There is no logging framework here and there should not be one: the journal is the log,
+/// `eprintln!` is the API, and what an operator actually needs is one knob for the volume.
+/// Two lines in the request path name an identity on *every* request that carries one, which
+/// on a busy `authenticated` area is a journal full of the same address; the other end of the
+/// same problem is an operator who wants those lines and cannot get more.
+#[derive(Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Debug)]
+enum LogLevel {
+    /// Startup, configuration, reloads, failures, and nothing about a single request. A
+    /// refused request is not an event at this level: on a gated URL it is the ordinary case.
+    Error,
+    /// The default, and what the gate has always done, minus the repetition: denials, grants
+    /// worth noticing, and the per-identity lines deduplicated by [`first_in_window`].
+    Info,
+    /// The same lines with no deduplication at all, which is what you want for ten minutes
+    /// while working out why one person cannot get in.
+    Debug,
+}
+
+/// The configured level, read once at startup. A `OnceLock` and not a field of [`Config`]
+/// because [`authorize`] is handed an access table and a subject, not the configuration, and
+/// threading a log level through the decision path would put it somewhere it has no business
+/// being.
+static LOG_LEVEL: OnceLock<LogLevel> = OnceLock::new();
+
+/// Is the configured level at least `want`? Defaults to [`LogLevel::Info`] before `main` has
+/// set it, so a unit test logs exactly as the service does.
+fn logs(want: LogLevel) -> bool {
+    *LOG_LEVEL.get().unwrap_or(&LogLevel::Info) >= want
+}
+
+/// How long one identity's per-request line stays quiet after it is printed.
+const LOG_DEDUPE_WINDOW: Duration = Duration::from_secs(300);
+
+/// How many distinct keys the dedupe table holds before it is emptied. A cap and not an
+/// eviction policy: this is a log filter, and the worst a wipe costs is one repeated line.
+const LOG_DEDUPE_MAX: usize = 1024;
+
+/// Keys already logged, and when. See [`first_in_window`].
+static RECENT_LOGS: OnceLock<Mutex<HashMap<String, Instant>>> = OnceLock::new();
+
+/// Is this the first time `key` has been seen in [`LOG_DEDUPE_WINDOW`]?
+///
+/// The per-request identity lines are worth keeping and not worth repeating: an un-enrolled
+/// identity walking into an `authenticated` area is something an operator should see, and
+/// seeing it once every five minutes says exactly as much as seeing it on every request while
+/// costing a journal nobody can read. [`LogLevel::Debug`] turns the filter off, which is the
+/// answer when the repetition is the information.
+fn first_in_window(key: &str) -> bool {
+    if logs(LogLevel::Debug) {
+        return true;
+    }
+    let Ok(mut seen) = RECENT_LOGS
+        .get_or_init(|| Mutex::new(HashMap::new()))
+        .lock()
+    else {
+        return true;
+    };
+    let now = Instant::now();
+    if let Some(t) = seen.get(key) {
+        if now.duration_since(*t) < LOG_DEDUPE_WINDOW {
+            return false;
+        }
+    }
+    if seen.len() >= LOG_DEDUPE_MAX {
+        seen.clear();
+    }
+    seen.insert(key.to_string(), now);
+    true
+}
+
+/// Is this listen address on the loopback interface, which is what every deployment note in
+/// this repository assumes?
+///
+/// Textual on purpose: the value is a `host:port` string handed to `Server::http`, and what
+/// is worth reporting is what an operator wrote in the env file. An unresolvable name is not
+/// loopback as far as this is concerned, which errs towards saying something.
+fn listen_is_loopback(listen: &str) -> bool {
+    let host = match listen.rsplit_once(':') {
+        // `[::1]:8080`, the only shape where the last colon is not the port separator's.
+        Some((h, p)) if p.bytes().all(|b| b.is_ascii_digit()) && !p.is_empty() => h,
+        _ => listen,
+    };
+    let host = host.trim().trim_matches(['[', ']']).to_ascii_lowercase();
+    host == "localhost" || host == "::1" || host.starts_with("127.")
 }
 
 /// Read a required env var, or exit(1). There is no safe default for any of these.
@@ -825,9 +916,22 @@ fn load_settings(path: &str) -> Settings {
 
 /// Hot-reload the access table from disk (SIGHUP). On read/parse failure, keep the
 /// current table and log — never nuke the live table on a transient error.
+///
+/// The path is a parameter, and the reason is testability rather than taste: this is the
+/// promise the whole arrangement rests on (a GUI may edit a live file because the worst a
+/// bad save costs is a declined reload), it is `cfg(unix)` so it never even compiles on the
+/// development host, and it had no test on any platform. With the path passed in, the
+/// fail-soft half can be exercised against a temp file that does not parse, on any machine
+/// where this code exists at all.
 #[cfg(unix)]
 fn reload_access(state: &State) {
-    match read_access(&state.access_path) {
+    reload_access_from(state, &state.access_path);
+}
+
+/// [`reload_access`] against a named file.
+#[cfg(unix)]
+fn reload_access_from(state: &State, path: &str) {
+    match read_access(path) {
         Ok(new) => {
             let (u, k) = (new.by_uuid.len(), new.by_key_hash.len());
             let a = new.apps.len();
@@ -852,7 +956,13 @@ fn reload_access(state: &State) {
 /// in the journal.
 #[cfg(unix)]
 fn reload_settings(state: &State) {
-    match read_settings(&state.settings_path) {
+    reload_settings_from(state, &state.settings_path);
+}
+
+/// [`reload_settings`] against a named file. Split for the reason [`reload_access_from`] is.
+#[cfg(unix)]
+fn reload_settings_from(state: &State, path: &str) {
+    match read_settings(path) {
         Ok(new) => {
             let c = new.profile_claims.len();
             let a = new
@@ -906,6 +1016,29 @@ fn spawn_access_reload_handler(_state: &Arc<State>) {}
 // JWKS
 // ---------------------------------------------------------------------------
 
+/// How long a JWKS fetch may take before it is abandoned.
+///
+/// It is deliberately shorter than nginx's `auth_request` read timeout (60 s by default,
+/// and commonly lowered): a request that is already waiting on the issuer must fail *here*,
+/// with a worker freed, rather than out there with the worker still held. The fetch is one
+/// small document from a CDN-backed endpoint, so three seconds is generous for the honest
+/// case and short for the case this constant exists for, which is the issuer being slow.
+const JWKS_TIMEOUT: Duration = Duration::from_secs(3);
+
+/// How long the cache is considered fresh: the interval a *successful* fetch buys.
+const JWKS_TTL: Duration = Duration::from_secs(60);
+
+/// How long a *failed* fetch buys, and why there is such a thing at all.
+///
+/// A failure used to leave `last_refresh` untouched so the next request retried
+/// immediately, which reads as eager and behaves as a stampede: with the issuer down, every
+/// request carrying an unknown `kid` starts its own fetch and holds a worker for
+/// [`JWKS_TIMEOUT`] doing it. An unauthenticated client can produce those requests at will,
+/// so the eager retry is also the cheapest way to take the gate off the air. Ten seconds is
+/// short enough that a real key rotation is picked up promptly and long enough that a dead
+/// issuer costs one worker per ten seconds instead of all of them.
+const JWKS_NEGATIVE_TTL: Duration = Duration::from_secs(10);
+
 /// Fetch and parse the issuer's JWKS, keyed by `kid`. Unusable individual keys are
 /// skipped with a warning; an empty result is an error. Outbound HTTPS only — bb-auth
 /// never sends anything to Cognito and holds no client secret.
@@ -914,7 +1047,7 @@ fn fetch_jwks(issuer: &str) -> Result<HashMap<String, DecodingKey>, String> {
     // The timeout is a property of the agent, not of the request, so it is built here
     // rather than set per call: one fetch, one agent, no connection pool to outlive it.
     let agent = ureq::Agent::config_builder()
-        .timeout_global(Some(Duration::from_secs(10)))
+        .timeout_global(Some(JWKS_TIMEOUT))
         .build()
         .new_agent();
     let body = agent
@@ -942,18 +1075,32 @@ fn fetch_jwks(issuer: &str) -> Result<HashMap<String, DecodingKey>, String> {
     Ok(map)
 }
 
-/// Refresh the JWKS cache if the last refresh is older than 60 s, using
-/// double-checked locking so concurrent workers don't all hammer Cognito when a
-/// `kid` misses. The network fetch happens with NO jwks lock held. On failure
-/// `last_refresh` is intentionally left stale so the next request retries
-/// immediately.
+/// Refresh the JWKS cache if the last refresh is older than [`JWKS_TTL`], using
+/// double-checked locking so concurrent workers don't all hammer Cognito when a `kid`
+/// misses. The network fetch happens with NO jwks lock held.
+///
+/// **At most one worker is ever inside the fetch, and no worker ever waits for it.** The
+/// refresh mutex is taken with `try_lock`, so a worker that finds a refresh already running
+/// answers from the map it has instead of queueing behind a network call. That is the whole
+/// point: an unknown `kid` is client-supplied, so anyone can aim requests at this path, and
+/// a blocking lock plus a slow issuer is `BB_AUTH_WORKERS` workers all parked on
+/// one socket while cookie-carrying requests that need no key at all go unserved. Losing the
+/// race costs the loser one stale answer, which for a genuinely rotated key is one `401` and
+/// a retry a moment later.
+///
+/// A failure advances `last_refresh` by [`JWKS_NEGATIVE_TTL`] rather than leaving it stale,
+/// for the same reason: the eager retry it replaced turned a dead issuer into an unbounded
+/// stream of 3-second fetches.
 fn refresh_jwks_if_due(state: &State) {
-    let due = state.jwks.read().unwrap().last_refresh.elapsed() > Duration::from_secs(60);
+    let due = state.jwks.read().unwrap().last_refresh.elapsed() > JWKS_TTL;
     if !due {
         return;
     }
-    let _guard = state.jwks_refresh.lock().unwrap(); // serialize refreshers
-    let still_due = state.jwks.read().unwrap().last_refresh.elapsed() > Duration::from_secs(60);
+    // Never block: whoever holds this is already doing the fetch we would do.
+    let Ok(_guard) = state.jwks_refresh.try_lock() else {
+        return;
+    };
+    let still_due = state.jwks.read().unwrap().last_refresh.elapsed() > JWKS_TTL;
     if !still_due {
         return;
     }
@@ -963,7 +1110,17 @@ fn refresh_jwks_if_due(state: &State) {
             c.keys = new;
             c.last_refresh = Instant::now();
         }
-        Err(e) => eprintln!("[bb-auth] JWKS refresh failed: {e}"),
+        Err(e) => {
+            eprintln!("[bb-auth] JWKS refresh failed: {e}");
+            // Pretend the failed attempt was a success that happened
+            // `JWKS_TTL - JWKS_NEGATIVE_TTL` ago, so the next attempt is due in
+            // `JWKS_NEGATIVE_TTL`. `checked_sub` because an `Instant` that early does not
+            // exist on a machine that just booted, where the eager retry is harmless anyway.
+            let mut c = state.jwks.write().unwrap();
+            if let Some(t) = Instant::now().checked_sub(JWKS_TTL - JWKS_NEGATIVE_TTL) {
+                c.last_refresh = t;
+            }
+        }
     }
 }
 
@@ -1168,10 +1325,14 @@ fn validate_id_token(token: &str, state: &State) -> Result<UserIdentity, String>
         ) {
             return Err("email not verified".into());
         }
-        eprintln!(
-            "[bb-auth] accepting unverified email via social login [{}]: {email}",
-            social_provider_names(&c.identities)
-        );
+        // Deduplicated for the reason the un-enrolled grant line is: this runs on every
+        // bearer-carrying request, not only at the login that created the session.
+        if logs(LogLevel::Info) && first_in_window(&format!("unverified:{email}")) {
+            eprintln!(
+                "[bb-auth] accepting unverified email via social login [{}]: {email}",
+                social_provider_names(&c.identities)
+            );
+        }
     }
     // Whatever the operator asked for, and only that: an unconfigured claim is never
     // looked at, let alone carried.
@@ -1212,12 +1373,21 @@ fn sig_matches(key: &[u8], msg: &str, sig_b64: &str) -> bool {
 }
 
 /// Cookie payload tail: enforce expiry and decode + lower-case the email segment.
+///
+/// The identifier is re-checked with [`header_safe_email`] on the way *in*, exactly as
+/// [`decode_claims_segment`] re-derives its own minting invariants rather than trusting that
+/// a signature implies them. It is the one field of the cookie that goes straight out again
+/// as a header, so it is the field where "this cannot happen" is worth the two lines it costs
+/// to stop happening: a signature verifying over bytes we could not have minted is either a
+/// bug here or a compromised key, and both call for the same fail-closed answer the claims
+/// segment gives.
 fn finish_session(exp: u64, eb: &str) -> Option<String> {
     if exp <= now() {
         return None;
     }
     let email = String::from_utf8(URL_SAFE_NO_PAD.decode(eb).ok()?).ok()?;
-    Some(email.to_ascii_lowercase())
+    let email = email.to_ascii_lowercase();
+    header_safe_email(&email).then_some(email)
 }
 
 /// Decode the profile-claims segment of a [`COOKIE_VERSION`] cookie.
@@ -1254,7 +1424,11 @@ fn decode_claims_segment(seg: &str) -> Option<BTreeMap<String, String>> {
 /// key in the [`COOKIE_VERSION`] format. An identity with no profile claims gets the
 /// empty segment, so the field count never varies.
 fn make_session(ident: &UserIdentity, ttl: u64, keys: &HmacKeys) -> String {
-    let exp = now() + ttl;
+    // Saturating, though `compile_settings` already refuses a `session_ttl_secs` anywhere
+    // near the wrap: this is the arithmetic whose overflow mints a cookie that expired
+    // before it was handed over, and it costs nothing to make it structurally impossible
+    // rather than impossible by the settings file alone.
+    let exp = now().saturating_add(ttl);
     let b64 = |s: &str| URL_SAFE_NO_PAD.encode(s.as_bytes());
     let eb = b64(&ident.email);
     let cb = if ident.claims.is_empty() {
@@ -1456,7 +1630,7 @@ fn safe_rd(
 }
 
 /// True iff `url` is an absolute `https://` URL whose host matches one of `hosts`.
-/// Rejects any other scheme, userinfo (`@`) and backslashes. A `:port` suffix is
+/// Rejects any other scheme, control bytes, userinfo (`@`) and backslashes. A `:port` suffix is
 /// tolerated on the candidate and stripped before matching (patterns are bare hosts).
 ///
 /// Matching is the same [`bb_auth_core::glob_match`] a scope's URL patterns use, so
@@ -1464,6 +1638,16 @@ fn safe_rd(
 /// `badbat75.com.evil.com` — the literal dot in the pattern is what rules those out. It does
 /// *not* accept the bare apex `badbat75.com`; list it explicitly if you want it.
 fn rd_url_allowed(url: &str, hosts: &[UrlPattern]) -> bool {
+    // Control bytes are rejected HERE and not only in `safe_rd`, so that the gate is one
+    // gate however it is entered. `login_rd` calls this one directly, so the check used to
+    // depend on which endpoint the candidate arrived at: a CR/LF in a `?rd=` reached the
+    // sign-in page's `data-rd` attribute (escaped, and re-checked before it could become a
+    // `Location:`, so it was never exploitable) and the same bytes were refused a few
+    // functions away. A guard two callers describe as the same guard has to be the same
+    // guard.
+    if url.bytes().any(|b| b < 0x20 || b == 0x7f) {
+        return false;
+    }
     let rest = match url.strip_prefix("https://") {
         Some(r) => r,
         None => return false,
@@ -1529,9 +1713,21 @@ struct Authorized {
     claims: BTreeMap<String, String>,
 }
 
-/// What a granted request carries. An `anonymous` scope authorizes with **no identity at
-/// all**, and the `204` then names nobody: no identity header, no profile header, nothing
-/// for an application to key on. That is not an omission, it is what the scope says.
+/// What a granted request carries.
+///
+/// [`Granted::Anonymous`] names nobody: no identity header, no profile header, nothing for an
+/// application to key on. That is not an omission, it is what an `anonymous` scope says, and
+/// it is what a request with no credential at all gets on one.
+///
+/// A request that *did* carry a credential is still named on such a scope, which is worth
+/// being explicit about because it makes the header bimodal: the same URL answers with
+/// `X-Auth-Email` for a signed-in visitor and without it for everybody else. The area is open
+/// either way, so this is decoration and never authorization, and an application on an
+/// `anonymous` scope must treat the header as "if you know who this is, say so" rather than
+/// as a condition of service. The one caller never named is a **vetoed** one
+/// ([`authorize_login`]): `denied` cannot close an area that is open with no credential at
+/// all, but it can and does stop the gate from introducing that person to the application
+/// behind it.
 enum Granted {
     Anonymous,
     Identity(Authorized),
@@ -1578,17 +1774,35 @@ fn identity_headers<'a>(attrs: &'a [IdentityAttr], who: &Authorized) -> Vec<(&'a
 ///   checked at load. The cookie carries it back unchanged under the HMAC.
 ///
 /// A uuid needs no such argument, being hex and dashes by [`well_formed_uuid`](bb_auth_core::well_formed_uuid).
-/// The first assert pins the lot, and it is what stands between a fourth credential that
-/// skips both routes and a panicking worker thread. It admits the space that joins a
-/// multi-valued attribute, which is the one byte the identifiers themselves can never
-/// contain.
 ///
 /// The profile claims need no such argument either: their header names are derived from an
 /// `[A-Za-z0-9_:-]` claim name and their values go through [`pct_encode`], which emits
 /// printable ASCII whatever it is handed — so safety is a property of the construction, not
-/// of where the value came from. The second assert pins *that*: it is what would catch a
-/// later change emitting a raw value, or a header name that stopped being a token.
-fn respond_authorized(req: Request, granted: &Granted, settings: &Settings) {
+/// of where the value came from.
+///
+/// **Both checks are made anyway, at run time, in release.** They used to be `debug_assert!`s,
+/// which is the one shape a guard must not have here: `[profile.release]` compiles those out,
+/// so what actually shipped was [`h`]'s `expect`, and with `panic = "abort"` under
+/// `Restart=on-failure` a value that slipped through would take the process down and keep
+/// taking it down. The argument above says neither check can fire today; it is a fourth
+/// credential added later that they exist for, and then the right answer is one header
+/// missing and a line in the journal, not a gate that stops answering.
+fn respond_authorized(req: Request, granted: &Granted, state: &State) {
+    // The settings lock is taken here and released before the socket write, which is why
+    // this takes the `State` and not a `&Settings`: the three call sites used to pass
+    // `&state.settings.read().unwrap()`, and a temporary guard in an argument lives to the
+    // end of the *statement*, so every one of them held a read lock across `req.respond`.
+    // `main`'s own comment says nothing below it may do that, because a SIGHUP swap waits
+    // for the last reader and a slow client would make it wait for the network.
+    let resp = {
+        let settings = state.settings.read().unwrap();
+        authorized_response(granted, &settings)
+    };
+    let _ = req.respond(resp);
+}
+
+/// The `204` itself, built while the settings lock is held and sent after it is not.
+fn authorized_response(granted: &Granted, settings: &Settings) -> ResponseBox {
     // The derivation lives in the library; the wire name every nginx snippet in this repo
     // clears literally is [`IDENTITY_HEADER`], here. This is where the two are held against
     // each other, so a change to the derivation cannot rename the header in silence.
@@ -1602,23 +1816,34 @@ fn respond_authorized(req: Request, granted: &Granted, settings: &Settings) {
     let mut resp = Response::empty(StatusCode(204));
     if let Granted::Identity(who) = granted {
         for (name, value) in identity_headers(&settings.identity_attrs, who) {
-            debug_assert!(
-                !value.is_empty() && value.bytes().all(|b| b.is_ascii_graphic() || b == b' '),
-                "identity header must be printable: {name:?}: {value:?}"
-            );
+            // A `debug_assert!` was the whole guard here, and `[profile.release]` compiles
+            // that out: what shipped was `h()`'s `expect`, i.e. a panicking worker, and with
+            // `panic = "abort"` and `Restart=on-failure` a restart loop. The property still
+            // holds by construction (both routes into an identity check it), so this can
+            // only ever fire on a fourth route somebody adds later. It costs one scan of a
+            // short string and it turns that mistake into a header nobody gets rather than a
+            // gate nobody gets through. The space is admitted because it is what joins a
+            // multi-valued attribute, and it is the one byte an identifier cannot contain.
+            if value.is_empty() || !value.bytes().all(|b| b.is_ascii_graphic() || b == b' ') {
+                eprintln!("[bb-auth] BUG: unsafe identity header {name}, omitted");
+                continue;
+            }
             resp = resp.with_header(h(name, &value));
         }
         for (name, enc) in profile_headers(&settings.profile_claims, &who.claims) {
-            debug_assert!(
-                !enc.is_empty()
-                    && enc.bytes().all(|b| b.is_ascii_graphic())
-                    && name.bytes().all(|b| b.is_ascii_graphic()),
-                "encoded claim must be non-empty printable ASCII: {name:?}: {enc:?}"
-            );
+            // Same reasoning, one step weaker: `pct_encode` emits printable ASCII whatever
+            // it is handed, so this can only catch a later change that emits a value raw.
+            if enc.is_empty()
+                || !enc.bytes().all(|b| b.is_ascii_graphic())
+                || !name.bytes().all(|b| b.is_ascii_graphic())
+            {
+                eprintln!("[bb-auth] BUG: unsafe claim header {name}, omitted");
+                continue;
+            }
             resp = resp.with_header(h(name, &enc));
         }
     }
-    let _ = req.respond(resp);
+    resp.boxed()
 }
 
 /// Respond `401` to a rejected `auth_request`, naming the login page in
@@ -1635,8 +1860,16 @@ fn respond_unauthorized(req: Request, login_url: &str) {
 
 /// Respond `302 Location: …`, optionally setting or clearing the session cookie.
 /// `location` must already have passed [`safe_rd`].
+///
+/// `no-store` for the same reason the pages carry it, and with more at stake: these two
+/// redirects are the ones that carry the `Set-Cookie`, so a cache or a browser that kept one
+/// would be keeping a whole session, and the logout's redirect is a cookie *clear* that must
+/// never be served from a store either. A `302` is not cacheable by default, which is exactly
+/// the kind of default worth not depending on for this.
 fn respond_redirect(req: Request, location: &str, set_cookie: Option<&str>) {
-    let mut resp = Response::empty(StatusCode(302)).with_header(h("Location", location));
+    let mut resp = Response::empty(StatusCode(302))
+        .with_header(h("Location", location))
+        .with_header(h("Cache-Control", "no-store"));
     if let Some(sc) = set_cookie {
         resp = resp.with_header(h("Set-Cookie", sc));
     }
@@ -1767,7 +2000,15 @@ fn render_page(template: &str, subs: &[(&str, String)]) -> String {
     while let Some(i) = rest.find("__BB_") {
         out.push_str(&rest[..i]);
         let tail = &rest[i..];
-        match subs.iter().find(|(k, _)| tail.starts_with(*k)) {
+        // The LONGEST match, not the first: no key today is a prefix of another, but
+        // `__BB_CLIENT_ID__` beside a future `__BB_CLIENT_ID_HINT__` would substitute the
+        // short one and leave `_HINT__` sitting on the page. Picking the longest makes the
+        // table order irrelevant, which is what a caller assembling it with `push` expects.
+        match subs
+            .iter()
+            .filter(|(k, _)| tail.starts_with(*k))
+            .max_by_key(|(k, _)| k.len())
+        {
             Some((k, v)) => {
                 out.push_str(v);
                 rest = &tail[k.len()..];
@@ -1782,14 +2023,45 @@ fn render_page(template: &str, subs: &[(&str, String)]) -> String {
     out
 }
 
+/// A `Content-Security-Policy` nonce for one response: 128 bits from the OS CSPRNG,
+/// base64url.
+///
+/// Per response and unguessable, which is what a nonce is for: the policy names it, the two
+/// inline blocks of the page carry it, and script an attacker gets onto the page by any means
+/// does not. Random rather than a [`bb_auth_core::csp_hash`] of the content, because the sign-in page's
+/// script is assembled per render out of the configuration and hashing it would mean hashing
+/// the rendered output back out of the document.
+///
+/// `getrandom` is already how `bb-auth-adm` mints an API key, so this is the OS entropy source
+/// the crate already depends on and no new one. A failure to read entropy is fatal for the
+/// same reason it is there: a predictable nonce is a policy that has stopped being one, and
+/// this is a machine where `/dev/urandom` not answering is not a survivable condition.
+fn csp_nonce() -> String {
+    let mut b = [0u8; 16];
+    getrandom::fill(&mut b).expect("OS CSPRNG");
+    URL_SAFE_NO_PAD.encode(b)
+}
+
 /// The substitutions every page of the gate's shares: the head, the theme, the brand and the
 /// logo. All four come from the settings file, so all four are live on the next request.
-fn look_subs(settings: &Settings) -> Vec<(&'static str, String)> {
+///
+/// `nonce` is the one value that is neither settings nor configuration: it belongs to this
+/// response alone and goes on both inline blocks the page carries, so that the
+/// [`page_csp`] the same handler builds can name it.
+fn look_subs(settings: &Settings, nonce: &str) -> Vec<(&'static str, String)> {
     vec![
+        (
+            "__BB_NONCE__",
+            // Base64url by construction, so there is nothing here that could break out of
+            // the attribute it lands in; escaped anyway, because that is a property of the
+            // emission and not of today's caller.
+            html_escape(nonce),
+        ),
         (
             "__BB_HEAD__",
             format!(
-                "  <style>{THEME_CSS}{BASE_CSS}{AUTH_CSS}</style>\n  {}",
+                "  <style nonce=\"{}\">{THEME_CSS}{BASE_CSS}{AUTH_CSS}</style>\n  {}",
+                html_escape(nonce),
                 stylesheet_link(settings.stylesheet_url.as_deref())
             ),
         ),
@@ -1872,11 +2144,16 @@ fn handle_login(req: Request, state: &State) {
         header_value(&req, REFERER_HEADER),
         &state.cfg.authorized_hosts,
     );
-    let page = {
+    let nonce = csp_nonce();
+    // The page's script speaks to exactly one host, the issuer's own API endpoint, and the
+    // social leg is a top-level navigation rather than a fetch.
+    let (page, csp) = {
         let settings = state.settings.read().unwrap();
-        login_page(&state.cfg, &settings, &rd)
+        let page = login_page(&state.cfg, &settings, &rd, &nonce);
+        let csp = gate_csp(&settings, &nonce, &[&state.cfg.cognito_endpoint]);
+        (page, csp)
     };
-    respond_page(req, 200, page);
+    respond_page(req, 200, page, &csp);
 }
 
 /// Where a browser endpoint is told to send somebody: the link's own `?rd=`, else
@@ -1915,8 +2192,8 @@ fn login_rd(rd: Option<&str>, referer: Option<&str>, hosts: &[UrlPattern]) -> St
 
 /// Render the sign-in page. Separate from [`handle_login`] so that what the page says can be
 /// asserted without a socket, which is the only way a test can read a page this size.
-fn login_page(cfg: &Config, settings: &Settings, rd: &str) -> String {
-    let mut subs = look_subs(settings);
+fn login_page(cfg: &Config, settings: &Settings, rd: &str, nonce: &str) -> String {
+    let mut subs = look_subs(settings, nonce);
     subs.push(("__BB_RD__", html_escape(rd)));
     subs.push(("__BB_ENDPOINT__", cfg.cognito_endpoint.clone()));
     subs.push(("__BB_CLIENT_ID__", cfg.audiences[0].clone()));
@@ -1956,16 +2233,26 @@ fn handle_callback(req: Request, state: &State) {
         respond_empty(req, 404);
         return;
     };
-    let page = {
+    let nonce = csp_nonce();
+    // This page's script POSTs to the token endpoint of the OAuth domain and then hands the
+    // id_token to `/auth/session`, which `form-action 'self'` already covers.
+    let (page, csp) = {
         let settings = state.settings.read().unwrap();
-        callback_page(&state.cfg, social, &settings)
+        let page = callback_page(&state.cfg, social, &settings, &nonce);
+        let token_origin = origin_of(&social.token_url).unwrap_or_default();
+        let csp = gate_csp(
+            &settings,
+            &nonce,
+            &[&state.cfg.cognito_endpoint, &token_origin],
+        );
+        (page, csp)
     };
-    respond_page(req, 200, page);
+    respond_page(req, 200, page, &csp);
 }
 
 /// Render the callback page. Split from its handler for the reason [`login_page`] is.
-fn callback_page(cfg: &Config, social: &SocialConfig, settings: &Settings) -> String {
-    let mut subs = look_subs(settings);
+fn callback_page(cfg: &Config, social: &SocialConfig, settings: &Settings, nonce: &str) -> String {
+    let mut subs = look_subs(settings, nonce);
     subs.push(("__BB_ENDPOINT__", cfg.cognito_endpoint.clone()));
     subs.push(("__BB_TOKEN_URL__", social.token_url.clone()));
     subs.push(("__BB_SOCIAL_CLIENT_ID__", social.client_id.clone()));
@@ -1973,19 +2260,39 @@ fn callback_page(cfg: &Config, social: &SocialConfig, settings: &Settings) -> St
     render_page(CALLBACK_HTML, &subs)
 }
 
+/// This page's `Content-Security-Policy`: [`page_csp`] with the same `nonce` on both inline
+/// blocks, plus the origins this particular page's script talks to.
+///
+/// One place, so the three pages cannot end up with three policies. The nonce covers the
+/// `<style>` [`look_subs`] builds and the `<script>` the template carries, which between them
+/// are everything either page executes: there is no second script, no external one, and
+/// nothing loaded from anywhere the settings did not name.
+fn gate_csp(settings: &Settings, nonce: &str, connect: &[&str]) -> String {
+    let src = format!("'nonce-{nonce}'");
+    page_csp(
+        &src,
+        &src,
+        settings.stylesheet_url.as_deref(),
+        settings.logo_url.as_deref(),
+        connect,
+    )
+}
+
 /// Respond with a whole HTML document.
 ///
-/// `no-store` on all of them: the sign-in page carries a `rd` that belongs to this attempt
-/// and the error page belongs to one failed `POST`, so a cached copy is a page that is right
-/// about a request nobody is making any more. `X-Frame-Options` because a login form in
-/// somebody else's frame is a clickjacking target, and the gate says so itself rather than
-/// relying on the reverse proxy in front of it having said it.
-fn respond_page(req: Request, status: u16, body: String) {
-    let resp = Response::from_string(body)
+/// The headers are [`PAGE_SECURITY_HEADERS`], which the admin GUI sends too and which is
+/// where the reasoning for each of them lives, plus this page's own policy. A login page is
+/// the page in the estate most worth spending a CSP on: it is the one whose entire job is to
+/// hold a credential for a moment, and the one a deployment can point at an external
+/// stylesheet through a GUI field.
+fn respond_page(req: Request, status: u16, body: String, csp: &str) {
+    let mut resp = Response::from_string(body)
         .with_status_code(StatusCode(status))
         .with_header(h("Content-Type", "text/html; charset=utf-8"))
-        .with_header(h("Cache-Control", "no-store"))
-        .with_header(h("X-Frame-Options", "DENY"));
+        .with_header(h("Content-Security-Policy", csp));
+    for (k, v) in PAGE_SECURITY_HEADERS {
+        resp.add_header(h(k, v));
+    }
     let _ = req.respond(resp);
 }
 
@@ -1997,8 +2304,9 @@ fn respond_page(req: Request, status: u16, body: String) {
 /// a validated env value, but there is no structural guarantee a future caller will not pass
 /// request data, so nothing is emitted raw.
 fn respond_html(req: Request, state: &State, status: u16, title: &str, msg: &str, login_url: &str) {
+    let nonce = csp_nonce();
     let settings = state.settings.read().unwrap();
-    let head = look_subs(&settings)
+    let head = look_subs(&settings, &nonce)
         .into_iter()
         .find(|(k, _)| *k == "__BB_HEAD__")
         .map(|(_, v)| v)
@@ -2007,6 +2315,16 @@ fn respond_html(req: Request, state: &State, status: u16, title: &str, msg: &str
         Some(a) => format!(" data-theme=\"{a}\""),
         None => String::new(),
     };
+    // This page has no script of its own and nothing to say to Cognito: it is a sentence and
+    // a link back. `'none'` rather than the nonce, because a policy that permits what the
+    // page does not do is a policy with nothing left to enforce.
+    let csp = page_csp(
+        "'none'",
+        &format!("'nonce-{nonce}'"),
+        settings.stylesheet_url.as_deref(),
+        settings.logo_url.as_deref(),
+        &[],
+    );
     drop(settings);
     let title = html_escape(title);
     let msg = html_escape(msg);
@@ -2022,19 +2340,24 @@ fn respond_html(req: Request, state: &State, status: u16, title: &str, msg: &str
          <p class=\"center hint\"><a href=\"{login_url}\">&larr; Back to sign-in</a></p>\n\
          </main></body>\n</html>\n"
     );
-    respond_page(req, status, body);
+    respond_page(req, status, body, &csp);
 }
 
 // ---------------------------------------------------------------------------
 // Handlers
 // ---------------------------------------------------------------------------
 
-/// The original request URL nginx is guarding, from the configured header, with any
-/// query/fragment stripped and the authority lowercased. `None` if the header is
-/// absent (which a restricted scope treats as a denial).
+/// The original request URL nginx is guarding, from the configured header, normalised by
+/// [`request_url`]. `None` if the header is absent (which a restricted scope treats as a
+/// denial).
+///
+/// The normalisation is the library's and not a copy of it, which matters more here than
+/// anywhere else it is called: [`request_url`] is what `bb-auth-adm can` and the admin GUI's
+/// access check run their URL through, and the whole value of those two is that they answer
+/// the question *this* function asks. They were byte-identical expressions in two files,
+/// which is the state a shared rule is in just before it stops being one.
 fn original_url(req: &Request, cfg: &Config) -> Option<String> {
-    header_value(req, &cfg.original_url_header)
-        .map(|u| lower_authority(u.split(['?', '#']).next().unwrap_or("")))
+    header_value(req, &cfg.original_url_header).map(request_url)
 }
 
 /// Resolve a `bbk_` API-key bearer against the access table: its owner must not be
@@ -2089,6 +2412,15 @@ fn bearer_apikey<'a>(access: &'a Access, token: &str) -> Option<&'a ApiKeyRecord
 /// owner for a `bbk_`. It is only ever logged, never matched on.
 fn authorize(access: &Access, subject: &Subject, url: Option<&str>, who: &str) -> bool {
     let at = || url.unwrap_or("<none>");
+    // Every refusal reads the same and returns the same, so it is written once. It is quiet
+    // at `LogLevel::Error`, where a `401` on a gated URL is the ordinary case rather than an
+    // event: that is the level for a gate in front of something the public browses.
+    let deny = |why: std::fmt::Arguments| -> bool {
+        if logs(LogLevel::Info) {
+            eprintln!("[bb-auth] denied: {why}");
+        }
+        false
+    };
     match decide(access, subject, url) {
         // An anonymous scope is the steady state of a health endpoint, so it is not
         // logged: a line per poll would bury everything that matters.
@@ -2098,7 +2430,10 @@ fn authorize(access: &Access, subject: &Subject, url: Option<&str>, who: &str) -
             // roster row, just walked in. That is what an `authenticated` scope is for,
             // and an operator should be able to see it happening.
             if let Subject::Identifier(id) = subject {
-                if access.uuid_of(id).is_none() {
+                // Once per identity per window: it says the same thing on the hundredth
+                // request as on the first, and this fires on every request that carries a
+                // credential into an `authenticated` area.
+                if access.uuid_of(id).is_none() && logs(LogLevel::Info) && first_in_window(id) {
                     eprintln!(
                         "[bb-auth] granted via {app}/{scope} to an un-enrolled identity: {id}"
                     );
@@ -2106,45 +2441,28 @@ fn authorize(access: &Access, subject: &Subject, url: Option<&str>, who: &str) -
             }
             true
         }
-        Decision::Vetoed => {
-            eprintln!("[bb-auth] denied: {who} is on the denied list");
-            false
-        }
-        Decision::Excluded { app, scope } => {
-            eprintln!("[bb-auth] denied: {app}/{scope} excludes {who}");
-            false
-        }
-        Decision::NoApplication => {
-            eprintln!("[bb-auth] denied: no application covers {} [{who}]", at());
-            false
-        }
-        Decision::NoScope { app } => {
-            eprintln!(
-                "[bb-auth] denied: application '{app}' has no scope for {} [{who}]",
-                at()
-            );
-            false
-        }
+        Decision::Vetoed => deny(format_args!("{who} is on the denied list")),
+        Decision::Excluded { app, scope } => deny(format_args!("{app}/{scope} excludes {who}")),
+        Decision::NoApplication => deny(format_args!("no application covers {} [{who}]", at())),
+        Decision::NoScope { app } => deny(format_args!(
+            "application '{app}' has no scope for {} [{who}]",
+            at()
+        )),
         Decision::Unauthenticated { app, scope } => {
-            eprintln!("[bb-auth] denied: {app}/{scope} needs an identity");
-            false
+            deny(format_args!("{app}/{scope} needs an identity"))
         }
-        Decision::CredentialRefused { app, scope } => {
-            eprintln!("[bb-auth] denied: {app}/{scope} does not admit this credential [{who}]");
-            false
-        }
+        Decision::CredentialRefused { app, scope } => deny(format_args!(
+            "{app}/{scope} does not admit this credential [{who}]"
+        )),
         Decision::NotEnrolled { app, scope } => {
-            eprintln!("[bb-auth] denied: {who} is in no users entry [{app}/{scope}]");
-            false
+            deny(format_args!("{who} is in no users entry [{app}/{scope}]"))
         }
         Decision::NotMember { app, scope } => {
-            eprintln!("[bb-auth] denied: {app}/{scope} does not list {who}");
-            false
+            deny(format_args!("{app}/{scope} does not list {who}"))
         }
-        Decision::KeyOutOfScope { app, scope } => {
-            eprintln!("[bb-auth] denied: this key may not exercise {app}/{scope} [{who}]");
-            false
-        }
+        Decision::KeyOutOfScope { app, scope } => deny(format_args!(
+            "this key may not exercise {app}/{scope} [{who}]"
+        )),
     }
 }
 
@@ -2177,6 +2495,16 @@ fn authorize_login(access: &Access, ident: UserIdentity, url: Option<&str>) -> O
     let UserIdentity { email, claims } = ident;
     if !authorize(access, &Subject::Identifier(&email), url, &email) {
         return None;
+    }
+    // A vetoed identity is never named downstream, and reaching this line means one just
+    // was authorized: `denied` outranks every grant except an `anonymous` scope, which
+    // grants before it and to everybody. So the request is genuinely authorized and the
+    // person genuinely has no business being introduced to the application behind it. The
+    // area is open to anyone with no credential at all, so answering as that is exactly
+    // what the scope says, and it is what a client under this veto would get by simply not
+    // sending their cookie.
+    if access.vetoes_identifier(&email) {
+        return Some(Granted::Anonymous);
     }
     let uuid = access.uuid_of(&email).map(str::to_string);
     let emails = match &uuid {
@@ -2232,7 +2560,7 @@ fn handle_validate(req: Request, state: &State) {
             }
         };
         if let Some(granted) = granted {
-            respond_authorized(req, &granted, &state.settings.read().unwrap());
+            respond_authorized(req, &granted, state);
             return;
         }
     }
@@ -2242,7 +2570,7 @@ fn handle_validate(req: Request, state: &State) {
         .and_then(|v| verify_session(&v, &cfg.hmac_keys))
         .and_then(|ident| authorize_login(&state.access.read().unwrap(), ident, url.as_deref()));
     if let Some(granted) = granted {
-        respond_authorized(req, &granted, &state.settings.read().unwrap());
+        respond_authorized(req, &granted, state);
         return;
     }
 
@@ -2261,7 +2589,7 @@ fn handle_validate(req: Request, state: &State) {
         )
     };
     if anonymous {
-        respond_authorized(req, &Granted::Anonymous, &state.settings.read().unwrap());
+        respond_authorized(req, &Granted::Anonymous, state);
     } else {
         respond_unauthorized(req, &login)
     }
@@ -2297,6 +2625,37 @@ fn handle_session(mut req: Request, state: &State) {
         &cfg.login_url,
         caller_url.as_deref(),
     );
+
+    // Where did this POST come from? A session cookie is minted here, and minting one for
+    // somebody else's form is login CSRF: an attacker registers with Cognito (self-signup is
+    // open, so their token costs nothing), auto-submits a top-level form carrying it, and the
+    // victim then browses the whole cookie domain as the attacker. `SameSite=Lax` is not a
+    // defence against it, because it governs when the cookie is *sent* and not who may cause
+    // one to be *set*.
+    //
+    // `same-site` passes as well as `same-origin`, which is deliberate and is the one place
+    // this differs from `bb-auth-web`'s door: `BB_AUTH_LOGIN_URL` may name a sign-in page an
+    // operator serves themselves, on a sibling host of the same estate, and that page has
+    // always been able to POST here. The cookie's own `Domain` is the site, so a page inside
+    // it is inside the trust boundary already. `cross-site` and a browser that says nothing
+    // are refused: neither is a form of ours being submitted.
+    let site = request_site(
+        header_value(&req, "Sec-Fetch-Site"),
+        header_value(&req, "Origin"),
+        header_value(&req, "Host"),
+    );
+    if !matches!(site, RequestSite::SameOrigin | RequestSite::SameSite) {
+        eprintln!("[bb-auth] session refused: {site:?} POST to /auth/session");
+        respond_html(
+            req,
+            state,
+            403,
+            "Sign-in failed",
+            "This sign-in did not come from the sign-in page. Please start again.",
+            &login,
+        );
+        return;
+    }
 
     let mut buf = Vec::new();
     if req
@@ -2604,29 +2963,223 @@ fn check_settings(path: &str) -> ! {
     }
 }
 
-/// Parse argv (`--check-access`, `--check-settings`), build the config, load both files,
-/// prime the JWKS, then serve forever on a fixed pool of blocking worker threads.
+/// Every env var the gate refuses to start without: [`env_req`]'s callers, in one list.
+///
+/// It exists so that the check can be run *before* the start rather than discovered by it.
+/// A missing variable is a fatal startup, and a fatal startup under `Restart=on-failure` is
+/// a boot loop, so `deploy/debian/bb-auth/postinst` looks for these before it restarts
+/// anything. It used to look for them with a list of its own, hand-maintained in shell
+/// beside this one in Rust, with nothing tying the two together: the seventh required
+/// variable would have defeated the preflight in silence. Now the postinst asks the binary
+/// (`--check-env`), and `the_required_env_list_matches_the_code` is what keeps this list
+/// honest about its own callers.
+const REQUIRED_ENV: [&str; 6] = [
+    "BB_AUTH_HMAC_KEY",
+    "BB_AUTH_COGNITO_ISSUER",
+    "BB_AUTH_AUTHORIZED_HOSTS",
+    "BB_AUTH_CLIENT_ID",
+    "BB_AUTH_LOGIN_URL",
+    "BB_AUTH_ACCESS_FILE",
+];
+
+/// A JWKS holding one RSA public key, and an id_token signed by its private half. Both were
+/// generated once, offline, and are fixtures rather than secrets: the private half was thrown
+/// away, so the only thing this key can do is verify this token. `exp` is in 2100 because the
+/// point is the signature, not the clock.
+const SELF_TEST_JWKS: &str = r#"{"keys":[{"kty":"RSA","alg":"RS256","use":"sig","kid":"bb-auth-test","e":"AQAB","n":"nmAtxmXBaFrRJyUe6i5CSQEPTq-80tfKKzO5jXg58t_KsovozqKu9dVzcJXh44gtXaoxbqPmVtj8Nn8sjC1G-kbF-MM4zQQ_F0z2S23Xkcz5-u0emQpt3ZPMRmkfQBsZs6Y_7qZT6ovm0RMRtEvOwJ1g1AFRp72saVt3lPlT9aMXDL0JN7GU1ytnNpYtn4C3u-UpnN9uxcGLYx3ULptmI3BK0s-zvVMzfxKSSvS_zvIfMxeJjAxrYmh1-cZifJsLGVuSQCcUeiCHP6kYxL_-sJjgb3H8tHeZVB4xjUzlkpKFiAKUmE5l39Rqbgxmq_bBLP2GvLAUBIjGV27r7bVriw"}]}"#;
+
+/// The token [`SELF_TEST_JWKS`] verifies. `aud=testclient`, `iss=…eu-central-1_TESTPOOL`.
+const SELF_TEST_TOKEN: &str = "eyJhbGciOiJSUzI1NiIsInR5cCI6IkpXVCIsImtpZCI6ImJiLWF1dGgtdGVzdCJ9.eyJpc3MiOiJodHRwczovL2NvZ25pdG8taWRwLmV1LWNlbnRyYWwtMS5hbWF6b25hd3MuY29tL2V1LWNlbnRyYWwtMV9URVNUUE9PTCIsImF1ZCI6InRlc3RjbGllbnQiLCJ0b2tlbl91c2UiOiJpZCIsImV4cCI6NDEwMjQ0NDgwMCwiaWF0IjoxMDAwMDAwMDAwLCJlbWFpbCI6InJzMjU2QGV4YW1wbGUuY29tIiwiZW1haWxfdmVyaWZpZWQiOnRydWUsImdpdmVuX25hbWUiOiJBZGEifQ.EsoTSyILbHFsucRSARUt4qahpK5R6rPlteCq1sUQ8gMoAqneJwJ8YXeFZmVFh3bCRlmgA0q4ygyXKMh_1ltNi8bfOoLtSCJBV-w-PrKeFRq1khEFfskIvWirsiVgzo5BK0DDj74dEFdG2zz7f_YAkln3indvFv1RbULDYfStID8F4WViQJP02nG4LdJiR4tihjw9E7f6Q7iMUeUw6a8axkWy1vtykzZptf_QNO2knyaAbOSNRd8hNbiYnid0VvbzrbxRFkvlzOSmiPwuab1kKW1H5AqGK0gN9eZTbOFKizVzajXHgcY7joRziYXI-86LZwRUHAAuAE-Jul82pMxDeQ";
+
+/// The `Validation` [`self_test`] verifies under: exactly what [`validate_id_token`] builds,
+/// pointed at the fixture's own issuer and audience, so the self-test exercises the gate's
+/// configuration of the verifier and not a lenient one.
+fn self_test_validation() -> Validation {
+    let mut v = Validation::new(Algorithm::RS256);
+    v.set_audience(&["testclient"]);
+    v.set_issuer(&["https://cognito-idp.eu-central-1.amazonaws.com/eu-central-1_TESTPOOL"]);
+    v.set_required_spec_claims(&["exp", "aud", "iss"]);
+    v.validate_exp = true;
+    v.leeway = 60;
+    v
+}
+
+/// `bb-auth --self-test`: prove *this binary* can verify an RS256 signature, and exit 0/1.
+///
+/// It is the answer to a deploy that reports success on a gate that cannot log anybody in.
+/// `jsonwebtoken` picks its crypto provider from a feature and compiles happily with none,
+/// installing a verifier factory that is a `panic!`; the gate then starts clean, because the
+/// JWKS fetch and `DecodingKey::from_jwk` never reach the provider, and dies on the first
+/// real login. Every runtime check `scripts/verify.sh` had (a healthz, a 401, a `listening
+/// on` line) is green on exactly that build, and a restart loop even produces a *fresher*
+/// journal line than a healthy process does.
+///
+/// So this runs the one thing those checks cannot: the verification itself, against an
+/// embedded key, with no env, no config file and no network. `rsa_signature_verification_works`
+/// is the same check in the test suite; this one is available on the host, after the install,
+/// on the bytes that are actually running.
+fn self_test() -> ! {
+    let set: JwkSet = match serde_json::from_str(SELF_TEST_JWKS) {
+        Ok(s) => s,
+        Err(e) => {
+            eprintln!("[bb-auth] SELF-TEST FAILED: the JWKS fixture did not parse: {e}");
+            std::process::exit(1);
+        }
+    };
+    let Ok(key) = DecodingKey::from_jwk(&set.keys[0]) else {
+        eprintln!("[bb-auth] SELF-TEST FAILED: the JWK did not become a decoding key");
+        std::process::exit(1);
+    };
+    let v = self_test_validation();
+
+    // The half that catches a build with no crypto provider: with one, this returns; with
+    // none, the verifier factory panics and `panic = "abort"` makes that a non-zero exit,
+    // which is the same verdict by a louder route.
+    let data = match decode::<Claims>(SELF_TEST_TOKEN, &key, &v) {
+        Ok(d) => d,
+        Err(e) => {
+            eprintln!("[bb-auth] SELF-TEST FAILED: a valid RS256 token did not verify: {e}");
+            std::process::exit(1);
+        }
+    };
+    if data.claims.email.as_deref() != Some("rs256@example.com")
+        || data.claims.token_use.as_deref() != Some("id")
+    {
+        eprintln!("[bb-auth] SELF-TEST FAILED: the token verified but decoded to the wrong claims");
+        std::process::exit(1);
+    }
+    // The half that says this is a signature check and not a decoder: one flipped base64
+    // digit in the signature, the signed message untouched.
+    let (msg, sig) = SELF_TEST_TOKEN
+        .rsplit_once('.')
+        .expect("the fixture is a three-segment JWT");
+    let forged = format!("{msg}.F{}", &sig[1..]);
+    if decode::<Claims>(&forged, &key, &v).is_ok() {
+        eprintln!("[bb-auth] SELF-TEST FAILED: a forged signature verified");
+        std::process::exit(1);
+    }
+    println!(
+        "[bb-auth] self-test OK: {} verifies RS256 (JWKS parse, signature accepted, forgery \
+         refused)",
+        version_line("bb-auth")
+    );
+    std::process::exit(0);
+}
+
+/// `bb-auth --check-env <file>`: does this env file name everything the gate refuses to start
+/// without? Exit 0/1, and never a start.
+///
+/// The grammar is systemd's `EnvironmentFile=`, read the way systemd reads it and no further:
+/// comments, blank lines, `KEY=VALUE`, optional surrounding quotes. It deliberately does not
+/// validate the *values* (that is what the gate's own startup does, and what
+/// `--check-access` and `--check-settings` do for the two files): it answers the one question
+/// a package can ask before it restarts a service, which is whether the answer will be
+/// "missing required env var".
+fn check_env(path: &str) -> ! {
+    let body = match std::fs::read_to_string(path) {
+        Ok(b) => b,
+        Err(e) => {
+            eprintln!("[bb-auth] INVALID {path}: {e}");
+            std::process::exit(1);
+        }
+    };
+    let mut present: Vec<&str> = Vec::new();
+    for line in body.lines() {
+        let l = line.trim().strip_prefix("export ").unwrap_or(line.trim());
+        if l.is_empty() || l.starts_with('#') {
+            continue;
+        }
+        let Some((k, v)) = l.split_once('=') else {
+            continue;
+        };
+        let v = v.trim().trim_matches(['"', '\'']);
+        if !v.is_empty() {
+            present.push(k.trim());
+        }
+    }
+    let missing: Vec<&str> = REQUIRED_ENV
+        .iter()
+        .copied()
+        .filter(|r| !present.contains(r))
+        .collect();
+    if missing.is_empty() {
+        println!(
+            "[bb-auth] {path}: OK: all {} required variables are set",
+            REQUIRED_ENV.len()
+        );
+        std::process::exit(0);
+    }
+    eprintln!(
+        "[bb-auth] INVALID {path}: missing or empty: {}",
+        missing.join(", ")
+    );
+    std::process::exit(1);
+}
+
+/// What `--help` says, and the whole argument surface in one place.
+const USAGE: &str = "\
+usage: bb-auth [OPTION]
+  (no argument)              serve, configured from the BB_AUTH_* environment
+  --check-access <file>      validate an access file with the gate's own parser
+  --check-settings <file>    validate a settings file with the parser all three programs use
+  --check-env <file>         is every required BB_AUTH_* variable set in this env file?
+  --self-test                verify an RS256 signature with an embedded key (no env, no network)
+  --version                  print the version and the commit this binary was built from
+  --help                     this";
+
+/// Parse argv, build the config, load both files, prime the JWKS, then serve forever on a
+/// fixed pool of blocking worker threads.
 fn main() {
     let args: Vec<String> = std::env::args().skip(1).collect();
     let flag = args.first().map(String::as_str);
     match flag {
-        Some(f @ ("--check-access" | "--check-settings")) => match args.get(1) {
+        Some(f @ ("--check-access" | "--check-settings" | "--check-env")) => match args.get(1) {
             Some(p) if f == "--check-access" => check_access(p),
-            Some(p) => check_settings(p),
+            Some(p) if f == "--check-settings" => check_settings(p),
+            Some(p) => check_env(p),
             None => {
-                eprintln!("usage: bb-auth {f} <file.json>");
+                eprintln!("usage: bb-auth {f} <file>");
                 std::process::exit(2);
             }
         },
+        Some("--self-test") => self_test(),
+        // Provenance, and the reason it is worth a flag: a `.deb` version says 1.1.0-1 for a
+        // clean release, a dirty tree and a hand-patched experiment alike, and the answer to
+        // "what is actually running" cannot be a guess during an incident.
+        Some("--version") => {
+            println!("{}", version_line("bb-auth"));
+            std::process::exit(0);
+        }
+        Some("--help" | "-h") => {
+            println!("{USAGE}");
+            std::process::exit(0);
+        }
         Some(other) => {
-            eprintln!(
-                "[bb-auth] unknown argument '{other}' (only --check-access and --check-settings \
-                 are accepted)"
-            );
+            eprintln!("[bb-auth] unknown argument '{other}'\n{USAGE}");
             std::process::exit(2);
         }
         None => {}
     }
+
+    // Before anything else that logs. An unrecognised value is a warning and the default,
+    // never a refusal to start: nothing about how loud the journal is can be worth a boot
+    // loop.
+    let level = match env_or("BB_AUTH_LOG_LEVEL", "info")
+        .trim()
+        .to_ascii_lowercase()[..]
+        .as_ref()
+    {
+        "error" => LogLevel::Error,
+        "info" | "" => LogLevel::Info,
+        "debug" => LogLevel::Debug,
+        other => {
+            eprintln!(
+                "[bb-auth] WARNING: BB_AUTH_LOG_LEVEL '{other}' is not error|info|debug, using info"
+            );
+            LogLevel::Info
+        }
+    };
+    let _ = LOG_LEVEL.set(level);
 
     let cfg = Config::from_env();
     let access_path = env_req("BB_AUTH_ACCESS_FILE");
@@ -2714,8 +3267,13 @@ fn main() {
             .collect::<Vec<_>>()
             .join(",")
     };
+    // The version and the commit lead the line, because this is the first thing anyone reads
+    // in `journalctl -u bb-auth` and "which build is this?" is the first thing they need. A
+    // `-dirty` suffix here is the only place a host ever says the deployed bytes were never
+    // committed.
     eprintln!(
-        "[bb-auth] listening on {listen} | issuer={} | aud={} | apps={app_n} | scopes={scope_n} | users={user_n} | api_keys={key_n} | denied={denied_n} | identity={identity_attrs} | claims={claim_names} | workers={workers}",
+        "[bb-auth] {} listening on {listen} | issuer={} | aud={} | apps={app_n} | scopes={scope_n} | users={user_n} | api_keys={key_n} | denied={denied_n} | identity={identity_attrs} | claims={claim_names} | workers={workers}",
+        version_line("bb-auth"),
         state.cfg.issuer,
         state.cfg.audiences.join(","),
     );
@@ -2764,45 +3322,111 @@ fn main() {
     // can hold a read lock across a request and starve the SIGHUP swap.
     drop(settings);
 
+    // A login page outside BB_AUTH_AUTHORIZED_HOSTS: a warning, never a refusal.
+    //
+    // `login_url_for` feeds a `Location:` (the logout's default, and `safe_rd`'s fallback),
+    // which makes an application's `login_url` the one redirect target that never passes the
+    // hosts list the manual calls the only authority on them. Anyone on `web.admins` can set
+    // it through a browser, so it is worth saying out loud once, here, where an operator can
+    // see it. It stays a warning for the reason `read_access` reads no env at all: making it
+    // fatal would turn a typo in a file into a boot loop that `--check-access` never saw,
+    // because `--check-access` has no hosts list to check against.
+    {
+        let access = state.access.read().unwrap();
+        let stray: Vec<String> = access
+            .apps
+            .iter()
+            .filter_map(|a| {
+                let u = a.login_url.as_deref()?;
+                (!rd_url_allowed(u, &state.cfg.authorized_hosts))
+                    .then(|| format!("{}: {u}", a.name))
+            })
+            .collect();
+        if !stray.is_empty() {
+            eprintln!(
+                "[bb-auth] WARNING: login_url outside BB_AUTH_AUTHORIZED_HOSTS, so a 401 and a \
+                 logout can send a browser off the estate [{}]",
+                stray.join(", ")
+            );
+        }
+    }
+
+    // A gate on a public interface: a warning, and for the same reason the one above is.
+    //
+    // Everything about this service assumes nginx in front of it: it speaks plain HTTP, it
+    // trusts `BB_AUTH_ORIGINAL_URL_HEADER` completely, and `/auth/validate` is meant to be
+    // reachable by the proxy alone. A bind that is not loopback is occasionally deliberate
+    // (a container whose proxy is on another host), which is exactly why this cannot be
+    // fatal: refusing to start is the failure mode this codebase spends the most effort
+    // avoiding.
+    if !listen_is_loopback(&listen) {
+        eprintln!(
+            "[bb-auth] WARNING: listening on {listen}, which is not loopback: this service \
+             trusts its reverse proxy for the request URL and speaks plain HTTP, so anything \
+             that can reach this port can ask it about any URL"
+        );
+    }
+
     let mut handles = Vec::new();
     for _ in 0..workers {
         let server = Arc::clone(&server);
         let state = Arc::clone(&state);
         handles.push(std::thread::spawn(move || loop {
+            // A `recv()` error is FATAL, and the `continue` that used to be here was the
+            // worst of the three possible answers. `tiny_http` reports at most one error
+            // per listener: its accept loop pushes the error and *breaks*, so the listening
+            // socket is gone and every worker that loops back around blocks forever on a
+            // queue nothing will ever fill again. The process stays alive with no listener,
+            // which is precisely the state systemd cannot see: `Restart=on-failure` never
+            // fires, `/auth/healthz` does not answer, and every gated request behind nginx
+            // fails until somebody restarts it by hand. Exiting turns an invisible outage
+            // into a restart, which is what the unit is configured for.
             let req = match server.recv() {
                 Ok(r) => r,
                 Err(e) => {
-                    eprintln!("[bb-auth] recv error: {e}");
-                    continue;
+                    eprintln!("[bb-auth] FATAL: accept failed, the listener is gone: {e}");
+                    std::process::exit(1);
                 }
             };
-            let method = req.method().as_str().to_string();
-            let path = req.url().split('?').next().unwrap_or("").to_string();
-            match (method.as_str(), path.as_str()) {
-                ("GET", "/auth/validate") => handle_validate(req, &state),
-                ("POST", "/auth/session") => handle_session(req, &state),
-                ("GET", "/auth/logout") => handle_logout(req, &state),
-                // The two pages, and the two locations nginx must leave UNGATED: a sign-in
-                // page behind an `auth_request` answers a signed-out visitor with itself,
-                // forever.
-                //
-                // `HEAD` as well as `GET`, and these are the only two routes that take it.
-                // Not for tidiness: these URLs REPLACED files nginx served off disk, and
-                // nginx answers `HEAD` on a file. Every probe, uptime check and `curl -I` an
-                // operator already points at the sign-in page has to keep working across
-                // that move, or the cutover breaks something nobody was watching. tiny_http
-                // suppresses the body itself, so the handler needs to know nothing about it.
-                ("GET" | "HEAD", "/auth/login") => handle_login(req, &state),
-                ("GET" | "HEAD", "/auth/callback") => handle_callback(req, &state),
-                ("GET", "/auth/healthz") => {
-                    let _ = req.respond(Response::from_string("ok"));
-                }
-                _ => respond_empty(req, 404),
-            }
+            route(req, &state);
         }));
     }
     for handle in handles {
         let _ = handle.join();
+    }
+}
+
+/// The router: one request to one handler, and the only place a method and a path decide
+/// anything.
+///
+/// A function rather than a `match` inside the worker loop so that a test can drive it over
+/// a real socket. That is not a cosmetic split: every request-shaped property of this
+/// service (what a `401` carries, what a cross-site `POST` gets, what headers a page comes
+/// back with, whether `HEAD` on the sign-in page works at all) is invisible to a test that
+/// can only call a handler's inner half, and those are exactly the properties nginx and a
+/// browser depend on.
+fn route(req: Request, state: &State) {
+    let method = req.method().as_str().to_string();
+    let path = req.url().split('?').next().unwrap_or("").to_string();
+    match (method.as_str(), path.as_str()) {
+        ("GET", "/auth/validate") => handle_validate(req, state),
+        ("POST", "/auth/session") => handle_session(req, state),
+        ("GET", "/auth/logout") => handle_logout(req, state),
+        // The two pages, and the two locations nginx must leave UNGATED: a sign-in page
+        // behind an `auth_request` answers a signed-out visitor with itself, forever.
+        //
+        // `HEAD` as well as `GET`, and these are the only two routes that take it. Not for
+        // tidiness: these URLs REPLACED files nginx served off disk, and nginx answers `HEAD`
+        // on a file. Every probe, uptime check and `curl -I` an operator already points at
+        // the sign-in page has to keep working across that move, or the cutover breaks
+        // something nobody was watching. tiny_http suppresses the body itself, so the handler
+        // needs to know nothing about it.
+        ("GET" | "HEAD", "/auth/login") => handle_login(req, state),
+        ("GET" | "HEAD", "/auth/callback") => handle_callback(req, state),
+        ("GET", "/auth/healthz") => {
+            let _ = req.respond(Response::from_string("ok"));
+        }
+        _ => respond_empty(req, 404),
     }
 }
 
@@ -2868,13 +3492,6 @@ mod tests {
         claims("given_name,family_name")
     }
 
-    /// A JWKS holding one RSA public key, and an id_token signed by its private half. Both
-    /// were generated once, offline, and are fixtures rather than secrets: the private half
-    /// was thrown away, so the only thing this key can do is verify this token. `exp` is in
-    /// 2100 because the point is the signature, not the clock.
-    const TEST_JWKS: &str = r#"{"keys":[{"kty":"RSA","alg":"RS256","use":"sig","kid":"bb-auth-test","e":"AQAB","n":"nmAtxmXBaFrRJyUe6i5CSQEPTq-80tfKKzO5jXg58t_KsovozqKu9dVzcJXh44gtXaoxbqPmVtj8Nn8sjC1G-kbF-MM4zQQ_F0z2S23Xkcz5-u0emQpt3ZPMRmkfQBsZs6Y_7qZT6ovm0RMRtEvOwJ1g1AFRp72saVt3lPlT9aMXDL0JN7GU1ytnNpYtn4C3u-UpnN9uxcGLYx3ULptmI3BK0s-zvVMzfxKSSvS_zvIfMxeJjAxrYmh1-cZifJsLGVuSQCcUeiCHP6kYxL_-sJjgb3H8tHeZVB4xjUzlkpKFiAKUmE5l39Rqbgxmq_bBLP2GvLAUBIjGV27r7bVriw"}]}"#;
-    const TEST_TOKEN: &str = "eyJhbGciOiJSUzI1NiIsInR5cCI6IkpXVCIsImtpZCI6ImJiLWF1dGgtdGVzdCJ9.eyJpc3MiOiJodHRwczovL2NvZ25pdG8taWRwLmV1LWNlbnRyYWwtMS5hbWF6b25hd3MuY29tL2V1LWNlbnRyYWwtMV9URVNUUE9PTCIsImF1ZCI6InRlc3RjbGllbnQiLCJ0b2tlbl91c2UiOiJpZCIsImV4cCI6NDEwMjQ0NDgwMCwiaWF0IjoxMDAwMDAwMDAwLCJlbWFpbCI6InJzMjU2QGV4YW1wbGUuY29tIiwiZW1haWxfdmVyaWZpZWQiOnRydWUsImdpdmVuX25hbWUiOiJBZGEifQ.EsoTSyILbHFsucRSARUt4qahpK5R6rPlteCq1sUQ8gMoAqneJwJ8YXeFZmVFh3bCRlmgA0q4ygyXKMh_1ltNi8bfOoLtSCJBV-w-PrKeFRq1khEFfskIvWirsiVgzo5BK0DDj74dEFdG2zz7f_YAkln3indvFv1RbULDYfStID8F4WViQJP02nG4LdJiR4tihjw9E7f6Q7iMUeUw6a8axkWy1vtykzZptf_QNO2knyaAbOSNRd8hNbiYnid0VvbzrbxRFkvlzOSmiPwuab1kKW1H5AqGK0gN9eZTbOFKizVzajXHgcY7joRziYXI-86LZwRUHAAuAE-Jul82pMxDeQ";
-
     /// The JWKS parse and the RS256 verification, which every login runs and which nothing
     /// else here covers: the rest of the suite starts from a [`UserIdentity`] that already
     /// exists. The `Validation` is built exactly as [`validate_id_token`] builds it, so this
@@ -2889,17 +3506,12 @@ mod tests {
     /// fetch and `from_jwk` never reach the provider; the verification is the whole point.
     #[test]
     fn rsa_signature_verification_works() {
-        let set: JwkSet = serde_json::from_str(TEST_JWKS).expect("the JWKS must parse");
+        let set: JwkSet = serde_json::from_str(SELF_TEST_JWKS).expect("the JWKS must parse");
         let key = DecodingKey::from_jwk(&set.keys[0]).expect("the JWK must become a key");
+        let v = self_test_validation();
 
-        let mut v = Validation::new(Algorithm::RS256);
-        v.set_audience(&["testclient"]);
-        v.set_issuer(&["https://cognito-idp.eu-central-1.amazonaws.com/eu-central-1_TESTPOOL"]);
-        v.set_required_spec_claims(&["exp", "aud", "iss"]);
-        v.validate_exp = true;
-        v.leeway = 60;
-
-        let data = decode::<Claims>(TEST_TOKEN, &key, &v).expect("a valid RS256 token verifies");
+        let data =
+            decode::<Claims>(SELF_TEST_TOKEN, &key, &v).expect("a valid RS256 token verifies");
         assert_eq!(data.claims.email.as_deref(), Some("rs256@example.com"));
         assert_eq!(data.claims.token_use.as_deref(), Some("id"));
         // The profile claim rides in `extra`, which is what proves `flatten` still collects
@@ -2911,7 +3523,7 @@ mod tests {
 
         // The other half, and the one that says this is a signature check rather than a
         // decoder: one flipped base64 digit in the signature, the signed message untouched.
-        let (msg, sig) = TEST_TOKEN
+        let (msg, sig) = SELF_TEST_TOKEN
             .rsplit_once('.')
             .expect("a JWT has three segments");
         assert!(sig.starts_with('E'), "fixture drifted: {sig}");
@@ -3517,6 +4129,7 @@ mod tests {
             &cfg,
             &ui_settings(bb_auth_core::UiSettings::default()),
             "https://search.badbat75.com/?q=a\"b",
+            "n0nce",
         );
         // Every placeholder was answered.
         assert!(!page.contains("__BB_"), "unsubstituted placeholder left");
@@ -3554,7 +4167,12 @@ mod tests {
     #[test]
     fn with_no_social_client_the_page_has_no_social_markup_at_all() {
         let cfg = page_cfg(false);
-        let page = login_page(&cfg, &ui_settings(bb_auth_core::UiSettings::default()), "");
+        let page = login_page(
+            &cfg,
+            &ui_settings(bb_auth_core::UiSettings::default()),
+            "",
+            "n0nce",
+        );
         assert!(
             !page.contains("data-idp=\""),
             "a button with nothing behind it"
@@ -3576,6 +4194,7 @@ mod tests {
             &page_cfg(false),
             &ui_settings(bb_auth_core::UiSettings::default()),
             "",
+            "n0nce",
         );
         assert!(page.contains(r#"data-rd=""#), "{page}");
     }
@@ -3591,10 +4210,10 @@ mod tests {
         let settings = ui_settings(ui);
         let cfg = page_cfg(true);
         for page in [
-            login_page(&cfg, &settings, ""),
-            callback_page(&cfg, cfg.social.as_ref().unwrap(), &settings),
+            login_page(&cfg, &settings, "", "n0nce"),
+            callback_page(&cfg, cfg.social.as_ref().unwrap(), &settings, "n0nce"),
         ] {
-            let style = page.find("<style>").expect("the built-in stylesheet");
+            let style = page.find("<style ").expect("the built-in stylesheet");
             let tokens = page.find("--accent:").expect("the palette");
             let components = page.find(".pill{").expect("the shared components");
             let layout = page
@@ -3628,6 +4247,7 @@ mod tests {
             &cfg,
             social,
             &ui_settings(bb_auth_core::UiSettings::default()),
+            "n0nce",
         );
         assert!(!page.contains("__BB_"), "unsubstituted placeholder left");
         // The value Cognito compares byte for byte with the client's registered callback.
@@ -3831,7 +4451,12 @@ mod tests {
 
     /// A live access table, via a real temp file and the real parser.
     fn access_of(name: &str, json: &str) -> Access {
-        let p = std::env::temp_dir().join(format!("bb-auth-gate-{name}.json"));
+        // Unique per call, not per `name`: several tests ask for the same fixture and the
+        // suite runs them on different threads, so a shared filename is one test writing the
+        // file another is reading.
+        static N: std::sync::atomic::AtomicUsize = std::sync::atomic::AtomicUsize::new(0);
+        let n = N.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+        let p = std::env::temp_dir().join(format!("bb-auth-gate-{name}-{n}.json"));
         std::fs::write(&p, json).unwrap();
         let a = read_access(p.to_str().unwrap()).unwrap();
         let _ = std::fs::remove_file(&p);
@@ -4035,5 +4660,482 @@ mod tests {
             identity_headers(&attrs("email,uuid"), &who)[0].0,
             IDENTITY_HEADER
         );
+    }
+    // --- the token verifier, over real signatures ---------------------------
+    //
+    // A second offline RSA key, generated once and thrown away, and a token per branch of
+    // `validate_id_token`. `SELF_TEST_TOKEN` proves a signature verifies at all; these prove
+    // what the gate does with a token whose signature is *fine* and whose claims are not,
+    // which is every check between the verifier and the identity. Before this, the whole
+    // group of them (`alg`, a missing `kid`, `token_use`, `exp`, `aud`, the email's shape)
+    // was reachable only through a live Cognito.
+
+    const IT_JWKS: &str = r#"{"keys":[{"kty":"RSA","alg":"RS256","use":"sig","kid":"bb-auth-it","e":"AQAB","n":"rugOpI1NhVG8CKJbf8LFMFjw-Goe26G5YJLb7-VTWg3VLG_-Qy2kQEW-aPIX_RgDZ9VcoU06LT6ZAAa142TGZYarzE8RsGqTgDVS6uiJEeeCy_mztxMcKXUoE45enGhbESY1-j9VZPvNMb-7Oearl-EqKeprpJYV2-SxYY9QRtJFJR4rKxberyssan4PkN2hlS128Z5Kd4TepQLU5RlIm6tPTZaP81fKF_rB6YNvHDyAofEVcK0s3YH6a5CI1FDPWbK9VssTmDnlzPVoSdd56Haq4kH2NbxrybK3OOStROluoS_Q0Ejzsg_JTcqjofuNKRiLd8itgYti2FMstsKkbQ"}]}"#;
+    const IT_TOKEN_OK: &str = "eyJhbGciOiJSUzI1NiIsInR5cCI6IkpXVCIsImtpZCI6ImJiLWF1dGgtaXQifQ.eyJpc3MiOiJodHRwczovL2NvZ25pdG8taWRwLmV1LWNlbnRyYWwtMS5hbWF6b25hd3MuY29tL2V1LWNlbnRyYWwtMV9URVNUUE9PTCIsImF1ZCI6InRlc3RjbGllbnQiLCJ0b2tlbl91c2UiOiJpZCIsImV4cCI6NDEwMjQ0NDgwMCwiaWF0IjoxMDAwMDAwMDAwLCJlbWFpbCI6ImFkYUBleGFtcGxlLmNvbSIsImVtYWlsX3ZlcmlmaWVkIjp0cnVlLCJnaXZlbl9uYW1lIjoiQWRhIiwiZmFtaWx5X25hbWUiOiJMb3ZlbGFjZSJ9.AsSpalg5hcJwwVL5Nh03f98i0xsz-Th4NJM5aFk9Wv7yRbBUq1zuYq6ZNZdOtpgKa19j3zTR3NsRETnHhWVZhGLRvSCluY_zyEGzgwO_D1cBwtDjc5XGqehOux-torQKaXryxWlhd2um3RyJt5KuBIUaCTuZsnRb4ghQBdYVBg7nmRwfXnFTCB-HWYwh_VaklGKpe0kaHfvv1ttp3oWdt37CCFT3CRXPQi2UNMxW53SeIk6UPrhEX2d9gNjRBMidno2ALMXxA6L4ku5G1bPEfj9HbkqArSNCJHCPtQMhH1WUB2iqZrMA6q78imDaFjI31uc5uzdIpt4FUda35NeQxA";
+    const IT_TOKEN_ACCESS: &str = "eyJhbGciOiJSUzI1NiIsInR5cCI6IkpXVCIsImtpZCI6ImJiLWF1dGgtaXQifQ.eyJpc3MiOiJodHRwczovL2NvZ25pdG8taWRwLmV1LWNlbnRyYWwtMS5hbWF6b25hd3MuY29tL2V1LWNlbnRyYWwtMV9URVNUUE9PTCIsImF1ZCI6InRlc3RjbGllbnQiLCJ0b2tlbl91c2UiOiJhY2Nlc3MiLCJleHAiOjQxMDI0NDQ4MDAsImlhdCI6MTAwMDAwMDAwMCwiZW1haWwiOiJhZGFAZXhhbXBsZS5jb20iLCJlbWFpbF92ZXJpZmllZCI6dHJ1ZSwiZ2l2ZW5fbmFtZSI6IkFkYSIsImZhbWlseV9uYW1lIjoiTG92ZWxhY2UifQ.BcXSfueCjbuy0ICSd9mXlm3vwI1ywkym7x2KdABO5aYYeP2l9_2A7WCmNOFDpPeDcDUD-8rT3hpBsKeckfl0-CgxwyIQ8UClRhC3GbGjKFEuA_65ieaxz1CfruCEItlpFpE-zb3YUc89Yk6-dVbGI45k-0UhWK6I91Hn-R5hliZoauYgq2CCIxDfRRE2-bOKJvsBVgc3xrYDQts8Wq8M8lsmQn-OfycFWAtG3shOw8ujrr4nLGvycy2A9hffOsXJyV-sPtC_Oj_jtufHv_nW1KnVVxzcQj6QQFO3_s0BMyTyfTZSRD7I7_7OqNZ-N0GfCjMeza6uxWcQQ7Y4KDh0NA";
+    const IT_TOKEN_UNVERIFIED: &str = "eyJhbGciOiJSUzI1NiIsInR5cCI6IkpXVCIsImtpZCI6ImJiLWF1dGgtaXQifQ.eyJpc3MiOiJodHRwczovL2NvZ25pdG8taWRwLmV1LWNlbnRyYWwtMS5hbWF6b25hd3MuY29tL2V1LWNlbnRyYWwtMV9URVNUUE9PTCIsImF1ZCI6InRlc3RjbGllbnQiLCJ0b2tlbl91c2UiOiJpZCIsImV4cCI6NDEwMjQ0NDgwMCwiaWF0IjoxMDAwMDAwMDAwLCJlbWFpbCI6ImFkYUBleGFtcGxlLmNvbSIsImVtYWlsX3ZlcmlmaWVkIjpmYWxzZSwiZ2l2ZW5fbmFtZSI6IkFkYSIsImZhbWlseV9uYW1lIjoiTG92ZWxhY2UifQ.owL1LWxaPNuK4do4S1T23b9Zywk7Fhfq178Nx9f0MO4R3qZKhtG10Z_E1bOqBK6hjy1T5hmbtUdg8FIwHg10OVWjbnW_m8Fzk7v-MWLnOgd5kLVwnsyWX8NgIAmo1dSb0-P3xV6C2HpCtFnZPhR98fGxXJUIf5HLr31Hi86VNJNG8-nMU3F2Iqy1vdeMBwcrSkMhlmZZO4n1rE0cR9DvUY9ixfEfr81sR9vTc4mpnXIwT-aViOP-s9Ovrq4gJCNz5os4IYJQkEwNVH8xO9tuXcx5zL-S2Rwfoqg6kv4Azk7gD4x4PCWbff2NsjTtS1fGxCwICQDhEmr46T2sitee8Q";
+    const IT_TOKEN_SOCIAL: &str = "eyJhbGciOiJSUzI1NiIsInR5cCI6IkpXVCIsImtpZCI6ImJiLWF1dGgtaXQifQ.eyJpc3MiOiJodHRwczovL2NvZ25pdG8taWRwLmV1LWNlbnRyYWwtMS5hbWF6b25hd3MuY29tL2V1LWNlbnRyYWwtMV9URVNUUE9PTCIsImF1ZCI6InRlc3RjbGllbnQiLCJ0b2tlbl91c2UiOiJpZCIsImV4cCI6NDEwMjQ0NDgwMCwiaWF0IjoxMDAwMDAwMDAwLCJlbWFpbCI6ImFkYUBleGFtcGxlLmNvbSIsImVtYWlsX3ZlcmlmaWVkIjpmYWxzZSwiZ2l2ZW5fbmFtZSI6IkFkYSIsImZhbWlseV9uYW1lIjoiTG92ZWxhY2UiLCJpZGVudGl0aWVzIjpbeyJwcm92aWRlck5hbWUiOiJHb29nbGUiLCJ1c2VySWQiOiIxIn1dfQ.f2CwAFGvK0AfVpkTQytWw-4mpt8i8Z5hbuO75hAbyKqTjlsvQBBIhcErgD_tRwJube7S9TN459arezyk79QX85Pa0lBA5fnzF-k83GYkDjA7HXF0f7P7HhAWBuw2AuiRYC7qWnlusVlCC2SGDVDlLcCb0tw_2Oou5XQBkHkQjxeIK9rCIZXOHqaPyflIQulDr1w0ptSy3DL1LElmMW9XpnoMd4wxqll494UvMwxh8sBFfQdgQs2ifPk6lrMT_TCgGS9BsYIL-GaryRn3aTe4_F0YWybfZ9LYB7S_4-F4fj1nSrt52aHz_F2umidLs7tP57qVE40Pg6JJwB__0gkh5g";
+    const IT_TOKEN_SOCIAL_APPLE: &str = "eyJhbGciOiJSUzI1NiIsInR5cCI6IkpXVCIsImtpZCI6ImJiLWF1dGgtaXQifQ.eyJpc3MiOiJodHRwczovL2NvZ25pdG8taWRwLmV1LWNlbnRyYWwtMS5hbWF6b25hd3MuY29tL2V1LWNlbnRyYWwtMV9URVNUUE9PTCIsImF1ZCI6InRlc3RjbGllbnQiLCJ0b2tlbl91c2UiOiJpZCIsImV4cCI6NDEwMjQ0NDgwMCwiaWF0IjoxMDAwMDAwMDAwLCJlbWFpbCI6ImFkYUBleGFtcGxlLmNvbSIsImVtYWlsX3ZlcmlmaWVkIjpmYWxzZSwiZ2l2ZW5fbmFtZSI6IkFkYSIsImZhbWlseV9uYW1lIjoiTG92ZWxhY2UiLCJpZGVudGl0aWVzIjpbeyJwcm92aWRlck5hbWUiOiJTaWduSW5XaXRoQXBwbGUiLCJ1c2VySWQiOiIxIn1dfQ.ZlwHhtX6ywtueOn8mDVKWufBPGGfIe5mViVVLw6mAYjX7_D-ghN-PZ7tRfrtebas5EMO8rQPVfk0hXxnt-9Eho9yWYTMtBz5kjX8eNBu409oC20gH-44-K2KPyl56vfJHbaCATzVArO6fJcSnbX_Z9T1doU1FuLMr89NhHtnnpTaoIZDsvTZCp-cMQsdlRicTtzhieuARyNFCH50quBsTzIy071BqClgYSCQ7a3z_f7o8-ZU2bKDWVM-XuwQFvc6JovnS9MF3Ds8W0zRXamh7oCz1zgEekmE6CpB172xTKa8DO6bIcgPzpFSyZzJlwF34-Udse-gm0VpxiUe2eKZGg";
+    const IT_TOKEN_BAD_EMAIL: &str = "eyJhbGciOiJSUzI1NiIsInR5cCI6IkpXVCIsImtpZCI6ImJiLWF1dGgtaXQifQ.eyJpc3MiOiJodHRwczovL2NvZ25pdG8taWRwLmV1LWNlbnRyYWwtMS5hbWF6b25hd3MuY29tL2V1LWNlbnRyYWwtMV9URVNUUE9PTCIsImF1ZCI6InRlc3RjbGllbnQiLCJ0b2tlbl91c2UiOiJpZCIsImV4cCI6NDEwMjQ0NDgwMCwiaWF0IjoxMDAwMDAwMDAwLCJlbWFpbCI6ImFkYVxyXG5YLUF1dGgtQWRtaW46IDFAZXhhbXBsZS5jb20iLCJlbWFpbF92ZXJpZmllZCI6dHJ1ZSwiZ2l2ZW5fbmFtZSI6IkFkYSIsImZhbWlseV9uYW1lIjoiTG92ZWxhY2UifQ.AbRKWpldAZsycR7s2aSyFo237MRDl10rRwDiCQ0JKvlBhIv4Uu31aal9pF8x0nDBAEKhcf0Djo1w2mCdoxhah3jOmKzYL9GL-N6gHzblS2uitZ-JkWKk0Azio9weNKp6_s5Ss_KsOwbHHsvOdYySnnbtI_PkRj9-wFwFtjX60NmP1G5YVl2CP5gXfuk_enAPFTbuyDcrJtFs5-8emWhVIkzZYO80OZhXRW3yJVtnrfVaJxkd3mfPYooBVEIt4O0UVIMlVFgGD4BTlejVbr7Zw-f0rjWCYvlE5MYziiCGFiEfN7VO7KQfSsmFpL8VBbcpHKfdhv6_VnpQrRc_OYRe6A";
+    const IT_TOKEN_EXPIRED: &str = "eyJhbGciOiJSUzI1NiIsInR5cCI6IkpXVCIsImtpZCI6ImJiLWF1dGgtaXQifQ.eyJpc3MiOiJodHRwczovL2NvZ25pdG8taWRwLmV1LWNlbnRyYWwtMS5hbWF6b25hd3MuY29tL2V1LWNlbnRyYWwtMV9URVNUUE9PTCIsImF1ZCI6InRlc3RjbGllbnQiLCJ0b2tlbl91c2UiOiJpZCIsImV4cCI6MTAwMDAwMDA2MCwiaWF0IjoxMDAwMDAwMDAwLCJlbWFpbCI6ImFkYUBleGFtcGxlLmNvbSIsImVtYWlsX3ZlcmlmaWVkIjp0cnVlLCJnaXZlbl9uYW1lIjoiQWRhIiwiZmFtaWx5X25hbWUiOiJMb3ZlbGFjZSJ9.k5DFscI5iwnSuBjW_9Uw9QhjS4PJHcrgn7MdlQjGGTfSkIg3XqvUEcSNMHlegVOryhEHavcSxwmsXxxdRGADTEQwa6xxyY9hKtG7J2rDM9cbbghk4sxF_PIAjC5g6xgyYVf731YVt-qHPzMmhRE0P_A7DaLtGaVcvHjT07txbN8B_9SBcP7zU3KJfRJVU9KiQb0zjTS7TgUfddQQPz9fk8DHFlsOA-oFvPtmsDFwUnEhZQ5aJ62Q6d9ak2RnJbYYGVor_Q77MTxdGkkSHMM9L0gm0veh6vW9J6C3jQQ9CuseimBZqiHvM5wL7WgP88_P1TDBzb2JostBwIJv6Mn2DQ";
+    const IT_TOKEN_WRONG_AUD: &str = "eyJhbGciOiJSUzI1NiIsInR5cCI6IkpXVCIsImtpZCI6ImJiLWF1dGgtaXQifQ.eyJpc3MiOiJodHRwczovL2NvZ25pdG8taWRwLmV1LWNlbnRyYWwtMS5hbWF6b25hd3MuY29tL2V1LWNlbnRyYWwtMV9URVNUUE9PTCIsImF1ZCI6InNvbWVvbmUtZWxzZSIsInRva2VuX3VzZSI6ImlkIiwiZXhwIjo0MTAyNDQ0ODAwLCJpYXQiOjEwMDAwMDAwMDAsImVtYWlsIjoiYWRhQGV4YW1wbGUuY29tIiwiZW1haWxfdmVyaWZpZWQiOnRydWUsImdpdmVuX25hbWUiOiJBZGEiLCJmYW1pbHlfbmFtZSI6IkxvdmVsYWNlIn0.ivJ9pHR_DS5aXQ_NB5zTUy4hKQ8yZYtEwf6dOjYVcU0wXHiUS5rygH4ENPwEZ45WHnr-KLMl8v9FRRMLTCl_hvCPwGwZtgc5y61W9Qn4WIkZKAH3gpCgbtAh3KbK1CZh0PsaGMhPWqBSJexKPvH72aceE60ZySeJyGf3vI6X16vzcaOCO9RUxHm7-X8_yps9a8heJWc2UJU8KVjJQAbK6z-hN2SjqzT8eMgQF-DgbXSM_CFUo1QFg_niZDcp6FZOP5KaFKtZXRVVfB-QfBrn17K3foIIYfuqFOorHuUfxMjPeHs6arZrzpxHrlSWTlfzMP5cAlZPSQ39vCUeFrzyvA";
+    const IT_TOKEN_NO_EMAIL: &str = "eyJhbGciOiJSUzI1NiIsInR5cCI6IkpXVCIsImtpZCI6ImJiLWF1dGgtaXQifQ.eyJpc3MiOiJodHRwczovL2NvZ25pdG8taWRwLmV1LWNlbnRyYWwtMS5hbWF6b25hd3MuY29tL2V1LWNlbnRyYWwtMV9URVNUUE9PTCIsImF1ZCI6InRlc3RjbGllbnQiLCJ0b2tlbl91c2UiOiJpZCIsImV4cCI6NDEwMjQ0NDgwMCwiaWF0IjoxMDAwMDAwMDAwLCJlbWFpbF92ZXJpZmllZCI6dHJ1ZSwiZ2l2ZW5fbmFtZSI6IkFkYSIsImZhbWlseV9uYW1lIjoiTG92ZWxhY2UifQ.HQg4OhQXErFEdSM8IQqXuW4PPsIBUTY_YClLP103dfL_8jVBWSBAqXLgPkXT_WdbGKGasf06o4coaU4zIzCEY734mGjJomQpU8x5NxDWUcw-skODFHXh8Xeadglx7aKaZ1HF70uBHwO8gIG-es1zcxPmcM7DWCsBiBJeTa-d6hVVYpGEYmxhuvEKbNSebMhxzeD9m6I-lZB_vSS7PcHjRvPE8492jUwCVjVXFFGjOQRuNylOChNkC9b-o6AXO9d6L3Sp2wqIPdscW7Qn0nenx7vieMp5_rXl4XvePxncsEa-ViOSNyKLmDgLrzplv0HUt5SJKJFEyMmhFSnEhcyj2w";
+
+    /// A state whose JWKS already holds the fixture key, so nothing here touches the
+    /// network. `last_refresh` is *now* on purpose: an unknown `kid` must not become a
+    /// fetch, and this is what keeps these tests offline.
+    fn token_state(settings: Settings) -> State {
+        let set: JwkSet = serde_json::from_str(IT_JWKS).expect("fixture JWKS parses");
+        let mut keys = HashMap::new();
+        keys.insert(
+            "bb-auth-it".to_string(),
+            DecodingKey::from_jwk(&set.keys[0]).expect("fixture JWK becomes a key"),
+        );
+        let mut cfg = cookie_cfg(None);
+        cfg.issuer =
+            "https://cognito-idp.eu-central-1.amazonaws.com/eu-central-1_TESTPOOL".to_string();
+        cfg.audiences = vec!["testclient".to_string()];
+        State {
+            cfg,
+            access: RwLock::new(gate_access("token")),
+            settings: RwLock::new(settings),
+            #[cfg(unix)]
+            access_path: String::new(),
+            #[cfg(unix)]
+            settings_path: String::new(),
+            jwks: RwLock::new(JwksCache {
+                keys,
+                last_refresh: Instant::now(),
+            }),
+            jwks_refresh: Mutex::new(()),
+        }
+    }
+
+    /// Compiled settings from a gate section written as JSON, which is how an operator
+    /// writes them and therefore what these tests should be exercising.
+    fn gate_settings(gate: &str) -> Settings {
+        let file: bb_auth_core::SettingsFile =
+            serde_json::from_str(&format!(r#"{{ "version": 1, "gate": {gate} }}"#)).unwrap();
+        bb_auth_core::compile_settings(&file).unwrap()
+    }
+
+    /// Swap the *header* of a signed token, which is what a client attacking a verifier's
+    /// algorithm agility does. The signature is left over the original message, so anything
+    /// that reaches the signature check refuses it anyway; what this exercises is that it
+    /// never gets that far.
+    fn with_header(token: &str, header_json: &str) -> String {
+        let rest: Vec<&str> = token.split('.').skip(1).collect();
+        format!(
+            "{}.{}",
+            URL_SAFE_NO_PAD.encode(header_json.as_bytes()),
+            rest.join(".")
+        )
+    }
+
+    #[test]
+    fn a_good_token_yields_the_identity_and_only_the_configured_claims() {
+        let st = token_state(gate_settings(r#"{ "profile_claims": ["given_name"] }"#));
+        let id = validate_id_token(IT_TOKEN_OK, &st).expect("a valid token verifies");
+        assert_eq!(id.email, "ada@example.com");
+        assert_eq!(id.claims.get("given_name").map(String::as_str), Some("Ada"));
+        // `family_name` is in the token and is not configured, so it is not captured: the
+        // cookie carries what the operator asked for and nothing else.
+        assert_eq!(id.claims.len(), 1);
+    }
+
+    #[test]
+    fn each_token_check_refuses_on_its_own() {
+        let st = token_state(gate_settings("{}"));
+        let why = |t: &str| validate_id_token(t, &st).unwrap_err();
+
+        // alg: refused before the signature is even looked up, which is the point of
+        // checking it at all.
+        assert!(why(&with_header(
+            IT_TOKEN_OK,
+            r#"{"alg":"HS256","kid":"bb-auth-it"}"#
+        ))
+        .contains("unexpected alg"));
+        // A missing kid, and an unknown one. Neither may reach the network here: the cache
+        // was just refreshed, so `refresh_jwks_if_due` returns without a fetch.
+        assert!(why(&with_header(IT_TOKEN_OK, r#"{"alg":"RS256"}"#)).contains("no kid"));
+        assert!(
+            why(&with_header(IT_TOKEN_OK, r#"{"alg":"RS256","kid":"nope"}"#))
+                .contains("unknown signing key")
+        );
+        // token_use is the single check between an access_token and a session cookie.
+        assert!(why(IT_TOKEN_ACCESS).contains("token_use"));
+        // exp and aud are `jsonwebtoken`'s, through the `Validation` this gate builds.
+        assert!(why(IT_TOKEN_EXPIRED).contains("token invalid"));
+        assert!(why(IT_TOKEN_WRONG_AUD).contains("token invalid"));
+        // The identity must be header-safe: this one carries a CR/LF, which downstream
+        // would be a response-splitting gadget.
+        assert!(why(IT_TOKEN_BAD_EMAIL).contains("printable ASCII"));
+        assert!(why(IT_TOKEN_NO_EMAIL).contains("no email"));
+        // And the default posture on an unverified email, with no relaxation configured.
+        assert!(why(IT_TOKEN_UNVERIFIED).contains("not verified"));
+    }
+
+    #[test]
+    fn the_unverified_relaxation_reaches_social_logins_only_and_narrows_by_provider() {
+        // Off: even a federated token is refused, which is the default every deployment
+        // starts on.
+        let st = token_state(gate_settings("{}"));
+        assert!(validate_id_token(IT_TOKEN_SOCIAL, &st).is_err());
+
+        // On, unrestricted: any federated provider, but still never a native user.
+        let st = token_state(gate_settings(r#"{ "allow_unverified_social": true }"#));
+        assert_eq!(
+            validate_id_token(IT_TOKEN_SOCIAL, &st).unwrap().email,
+            "ada@example.com"
+        );
+        assert!(validate_id_token(IT_TOKEN_UNVERIFIED, &st).is_err());
+
+        // On, narrowed: the provider list is the whole of it.
+        let st = token_state(gate_settings(
+            r#"{ "allow_unverified_social": true, "social_providers": ["Google"] }"#,
+        ));
+        assert!(validate_id_token(IT_TOKEN_SOCIAL, &st).is_ok());
+        assert!(validate_id_token(IT_TOKEN_SOCIAL_APPLE, &st).is_err());
+    }
+
+    // --- the router, over a real socket -------------------------------------
+    //
+    // What a handler puts on the wire is not what its inner half returns, and the wire is
+    // what nginx and a browser read. These bind a port, run one worker of `route`, and speak
+    // HTTP to it, which is the harness `bb-auth-web`'s tests have always had and the gate's
+    // have not.
+
+    /// Start the router on a loopback port and return its base URL. The thread is left
+    /// running: the test process exits soon enough, and a shutdown protocol would be more
+    /// code than the thing it guards.
+    fn serve(state: State) -> String {
+        let server = Server::http("127.0.0.1:0").expect("a loopback port");
+        let base = format!("http://{}", server.server_addr());
+        let state = Arc::new(state);
+        std::thread::spawn(move || {
+            while let Ok(req) = server.recv() {
+                route(req, &state);
+            }
+        });
+        base
+    }
+
+    /// The client half: no redirect following (the redirects *are* the assertion) and a
+    /// short timeout, so a hung handler fails one test instead of the suite.
+    fn agent() -> ureq::Agent {
+        ureq::Agent::config_builder()
+            .max_redirects(0)
+            .http_status_as_error(false)
+            .timeout_global(Some(Duration::from_secs(5)))
+            .build()
+            .new_agent()
+    }
+
+    #[test]
+    fn the_router_answers_every_documented_endpoint() {
+        let base = serve(token_state(gate_settings("{}")));
+        let a = agent();
+
+        // healthz, which is what `verify.sh` reads.
+        let mut r = a.get(format!("{base}/auth/healthz")).call().unwrap();
+        assert_eq!(r.status(), 200);
+        assert_eq!(r.body_mut().read_to_string().unwrap(), "ok");
+
+        // An unknown path is a 404 and never a page.
+        assert_eq!(a.get(format!("{base}/nope")).call().unwrap().status(), 404);
+
+        // A gated request with no credential: 401 naming this area's login page, which is
+        // the header nginx lifts with `auth_request_set`.
+        let r = a
+            .get(format!("{base}/auth/validate"))
+            .header("X-Original-URL", "https://app.x.com/other/x")
+            .call()
+            .unwrap();
+        assert_eq!(r.status(), 401);
+        assert_eq!(r.headers().get(LOGIN_URL_HEADER).unwrap(), LOGIN);
+
+        // An `anonymous` scope: 204, and it names nobody.
+        let r = a
+            .get(format!("{base}/auth/validate"))
+            .header("X-Original-URL", "https://app.x.com/pub/health")
+            .call()
+            .unwrap();
+        assert_eq!(r.status(), 204);
+        assert!(r.headers().get(IDENTITY_HEADER).is_none());
+
+        // A cookie this gate minted, on the area its owner is listed in: 204 naming them.
+        let cookie = make_session(&ident("bob@x.com"), 3600, &keys_one());
+        let r = a
+            .get(format!("{base}/auth/validate"))
+            .header("X-Original-URL", "https://app.x.com/other/x")
+            .header("Cookie", format!("bb_session={cookie}"))
+            .call()
+            .unwrap();
+        assert_eq!(r.status(), 204);
+        // Every identifier on the row, space-joined: the header names the person, not the
+        // address they happened to sign in with.
+        assert_eq!(
+            r.headers().get(IDENTITY_HEADER).unwrap(),
+            "bob@x.com bob@old.com"
+        );
+
+        // A `bbk_` key, which is the third credential and the one no token backs.
+        let r = a
+            .get(format!("{base}/auth/validate"))
+            .header("X-Original-URL", "https://app.x.com/other/x")
+            .header("Authorization", "Bearer bbk_secret")
+            .call()
+            .unwrap();
+        assert_eq!(r.status(), 204);
+        assert_eq!(
+            r.headers().get(IDENTITY_HEADER).unwrap(),
+            "bob@x.com bob@old.com"
+        );
+
+        // A gated request with no `X-Original-URL` resolves to no application at all, which
+        // is the fail-closed posture the whole nginx contract rests on.
+        let r = a.get(format!("{base}/auth/validate")).call().unwrap();
+        assert_eq!(r.status(), 401);
+    }
+
+    #[test]
+    fn a_session_post_from_another_site_is_refused_before_the_token_is_read() {
+        let base = serve(token_state(gate_settings("{}")));
+        let a = agent();
+        let post = |site: Option<&str>| {
+            let mut req = a.post(format!("{base}/auth/session"));
+            if let Some(s) = site {
+                req = req.header("Sec-Fetch-Site", s);
+            }
+            req.send_form([("id_token", IT_TOKEN_OK)]).unwrap()
+        };
+        // The attack: an attacker's own valid token, auto-submitted from their page. The
+        // victim would otherwise browse the whole cookie domain as them.
+        let r = post(Some("cross-site"));
+        assert_eq!(r.status(), 403);
+        assert!(r.headers().get("Set-Cookie").is_none());
+        // A client that says nothing about where it came from is not a browser submitting
+        // one of our forms.
+        let r = post(None);
+        assert_eq!(r.status(), 403);
+        assert!(r.headers().get("Set-Cookie").is_none());
+        // Same-site passes the door: `BB_AUTH_LOGIN_URL` may name a page an operator serves
+        // on a sibling host, and that page has always been able to post here.
+        assert_ne!(post(Some("same-site")).status(), 403);
+    }
+
+    #[test]
+    fn the_session_endpoint_mints_a_cookie_and_lands_on_the_rd() {
+        let base = serve(token_state(gate_settings("{}")));
+        let r = agent()
+            .post(format!("{base}/auth/session"))
+            .header("Sec-Fetch-Site", "same-origin")
+            .send_form([
+                ("id_token", IT_TOKEN_OK),
+                ("rd", "https://search.badbat75.com/x"),
+            ])
+            .unwrap();
+        assert_eq!(r.status(), 302);
+        assert_eq!(
+            r.headers().get("Location").unwrap(),
+            "https://search.badbat75.com/x"
+        );
+        // The cookie itself, and the header that keeps the response carrying it out of a
+        // cache.
+        let sc = r.headers().get("Set-Cookie").unwrap().to_str().unwrap();
+        assert!(sc.starts_with("bb_session=bb1."), "{sc}");
+        assert!(sc.contains("HttpOnly") && sc.contains("Secure"), "{sc}");
+        assert_eq!(r.headers().get("Cache-Control").unwrap(), "no-store");
+
+        // A token that does not validate gets no cookie and an error page, not a redirect.
+        let r = agent()
+            .post(format!("{base}/auth/session"))
+            .header("Sec-Fetch-Site", "same-origin")
+            .send_form([("id_token", IT_TOKEN_BAD_EMAIL)])
+            .unwrap();
+        assert_eq!(r.status(), 401);
+        assert!(r.headers().get("Set-Cookie").is_none());
+
+        // And a body that carries no token at all is a 400, which is the shape a broken
+        // sign-in page produces.
+        let r = agent()
+            .post(format!("{base}/auth/session"))
+            .header("Sec-Fetch-Site", "same-origin")
+            .send_form([("rd", "https://search.badbat75.com/x")])
+            .unwrap();
+        assert_eq!(r.status(), 400);
+    }
+
+    #[test]
+    fn the_sign_in_page_carries_its_policy_and_the_nonce_it_names() {
+        let mut st = token_state(gate_settings("{}"));
+        st.cfg = page_cfg(true);
+        let base = serve(st);
+        let mut r = agent().get(format!("{base}/auth/login")).call().unwrap();
+        assert_eq!(r.status(), 200);
+        for (k, v) in PAGE_SECURITY_HEADERS {
+            assert_eq!(r.headers().get(k).unwrap(), v, "missing {k}");
+        }
+        let csp = r
+            .headers()
+            .get("Content-Security-Policy")
+            .unwrap()
+            .to_str()
+            .unwrap()
+            .to_string();
+        let body = r.body_mut().read_to_string().unwrap();
+        // The policy is only a policy if the page's own two blocks carry the nonce it names,
+        // and if nothing else can execute.
+        let nonce = csp
+            .split("'nonce-")
+            .nth(1)
+            .and_then(|t| t.split('\'').next())
+            .expect("a nonce in the policy")
+            .to_string();
+        assert!(csp.starts_with("default-src 'none';"), "{csp}");
+        assert!(csp.contains("frame-ancestors 'none'"), "{csp}");
+        assert!(csp.contains("form-action 'self'"), "{csp}");
+        assert!(
+            body.contains(&format!("<script nonce=\"{nonce}\">")),
+            "the script must carry the policy's nonce"
+        );
+        assert!(
+            body.contains(&format!("<style nonce=\"{nonce}\">")),
+            "the stylesheet must carry the policy's nonce"
+        );
+        // A second response must not be able to reuse the first one's nonce.
+        let mut r2 = agent().get(format!("{base}/auth/login")).call().unwrap();
+        assert!(!r2.body_mut().read_to_string().unwrap().contains(&nonce));
+
+        // `HEAD`, which nginx answered on the file this URL replaced.
+        assert_eq!(
+            agent()
+                .head(format!("{base}/auth/login"))
+                .call()
+                .unwrap()
+                .status(),
+            200
+        );
+    }
+
+    #[test]
+    fn a_logout_clears_the_cookie_and_only_refuses_a_cross_site_one() {
+        let base = serve(token_state(gate_settings("{}")));
+        let r = agent().get(format!("{base}/auth/logout")).call().unwrap();
+        assert_eq!(r.status(), 302);
+        // No `rd`, no `Referer`: the login page, never `safe_rd`'s caller-root default.
+        assert_eq!(r.headers().get("Location").unwrap(), LOGIN);
+        let sc = r.headers().get("Set-Cookie").unwrap().to_str().unwrap();
+        assert!(sc.starts_with("bb_session=;"), "{sc}");
+        assert!(sc.contains("Max-Age=0"), "{sc}");
+
+        // Cross-site: still a redirect, deliberately, but nothing is cleared.
+        let r = agent()
+            .get(format!("{base}/auth/logout"))
+            .header("Sec-Fetch-Site", "cross-site")
+            .call()
+            .unwrap();
+        assert_eq!(r.status(), 302);
+        assert!(r.headers().get("Set-Cookie").is_none());
+    }
+
+    /// The list `--check-env` answers with, against the calls that actually make a variable
+    /// required. `deploy/debian/bb-auth/postinst` used to keep a second copy of this in
+    /// shell; it now asks the binary, and this is what keeps the binary honest.
+    #[test]
+    fn the_required_env_list_matches_the_code() {
+        let src = include_str!("bb-auth.rs");
+        let called: std::collections::BTreeSet<&str> = src
+            .match_indices("env_req(\"")
+            .map(|(i, m)| {
+                let rest = &src[i + m.len()..];
+                &rest[..rest.find('"').expect("a closed string literal")]
+            })
+            .collect();
+        let listed: std::collections::BTreeSet<&str> = REQUIRED_ENV.iter().copied().collect();
+        assert_eq!(
+            called, listed,
+            "REQUIRED_ENV and the env_req call sites have drifted"
+        );
+    }
+
+    /// The fail-soft promise, which is what makes it safe to let a GUI edit a live file:
+    /// a reload that cannot parse the file keeps what is already in memory.
+    ///
+    /// Unix only, because SIGHUP is; that is also why this went untested for so long, since
+    /// the development host is Windows and the code is not even compiled there. Run it under
+    /// WSL (`wsl -e bash -lc 'cd /mnt/c/... && cargo test'`) before a release.
+    #[cfg(unix)]
+    #[test]
+    fn a_reload_that_cannot_parse_keeps_what_is_live() {
+        let st = token_state(gate_settings("{}"));
+        let before = st.access.read().unwrap().apps.len();
+        assert!(before > 0, "the fixture has applications");
+
+        let dir = std::env::temp_dir();
+        let bad = dir.join("bb-auth-reload-bad.json");
+        std::fs::write(&bad, "{ not json at all").unwrap();
+        reload_access_from(&st, bad.to_str().unwrap());
+        assert_eq!(
+            st.access.read().unwrap().apps.len(),
+            before,
+            "a broken file must not empty the live table"
+        );
+
+        // A file the parser refuses for a rule reason, not a syntax one: same answer.
+        std::fs::write(&bad, r#"{ "version": 99 }"#).unwrap();
+        reload_access_from(&st, bad.to_str().unwrap());
+        assert_eq!(st.access.read().unwrap().apps.len(), before);
+
+        // And a good file does land.
+        let good = dir.join("bb-auth-reload-good.json");
+        std::fs::write(
+            &good,
+            r#"{ "version": 1, "applications": [
+                 { "name": "only", "base": ["https://x.com/only"], "scopes": [
+                   { "name": "all", "urls": ["https://x.com/only/*"], "access": "anonymous" } ] } ] }"#,
+        )
+        .unwrap();
+        reload_access_from(&st, good.to_str().unwrap());
+        assert_eq!(st.access.read().unwrap().apps.len(), 1);
+
+        // The settings file, by the same rule.
+        let ttl = st.settings.read().unwrap().session_ttl;
+        let bad_s = dir.join("bb-auth-reload-bad-settings.json");
+        std::fs::write(
+            &bad_s,
+            r#"{ "version": 1, "gate": { "identity_attrs": [] } }"#,
+        )
+        .unwrap();
+        reload_settings_from(&st, bad_s.to_str().unwrap());
+        assert_eq!(
+            st.settings.read().unwrap().session_ttl,
+            ttl,
+            "a settings file the gate refuses must leave the live values alone"
+        );
+
+        for f in [bad, good, bad_s] {
+            let _ = std::fs::remove_file(f);
+        }
+    }
+
+    #[test]
+    fn a_listen_address_is_recognised_as_loopback_or_not() {
+        for ok in [
+            "127.0.0.1:4181",
+            "localhost:4181",
+            "[::1]:4181",
+            "127.0.0.1",
+        ] {
+            assert!(listen_is_loopback(ok), "{ok}");
+        }
+        for no in [
+            "0.0.0.0:4181",
+            "10.0.0.5:4181",
+            "auth.badbat75.com:80",
+            "[::]:80",
+        ] {
+            assert!(!listen_is_loopback(no), "{no}");
+        }
     }
 }

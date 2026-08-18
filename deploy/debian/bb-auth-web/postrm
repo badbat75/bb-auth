@@ -7,6 +7,7 @@ set -e
 DEST=/opt/bb-auth
 VAR_DIR="$DEST/var/lib"
 ACCESS_FILE="$VAR_DIR/access.json"
+SETTINGS_FILE="$VAR_DIR/settings.json"
 
 if [ -d /run/systemd/system ]; then
     systemctl --system daemon-reload >/dev/null || true
@@ -35,14 +36,16 @@ purge)
     # directory root:root 0755. Only while the gate's group still exists to own it;
     # if it does not, the gate is going too and its own purge deals with the file.
     if getent group bb-auth >/dev/null 2>&1; then
-        if [ -e "$ACCESS_FILE" ]; then
-            chown root:bb-auth "$ACCESS_FILE"
-            chmod 0640 "$ACCESS_FILE"
-        fi
-        if [ -e "$ACCESS_FILE.bak" ]; then
-            chown root:bb-auth "$ACCESS_FILE.bak"
-            chmod 0640 "$ACCESS_FILE.bak"
-        fi
+        # Both state files, not just the access file. This package's postinst took
+        # ownership of both, so its purge has to hand both back, or the gate is left
+        # reading a settings file owned by a user nothing runs as: `verify.sh` now asserts
+        # exactly this on a gate-only host, which is how the omission became visible.
+        for f in "$ACCESS_FILE" "$ACCESS_FILE.bak" "$SETTINGS_FILE" "$SETTINGS_FILE.bak"; do
+            if [ -e "$f" ]; then
+                chown root:bb-auth "$f"
+                chmod 0640 "$f"
+            fi
+        done
         if [ -d "$VAR_DIR" ]; then
             chown root:root "$VAR_DIR"
             chmod 0755 "$VAR_DIR"

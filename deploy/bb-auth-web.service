@@ -46,6 +46,18 @@ MemoryDenyWriteExecute=true
 # bind 127.0.0.1:8091; AF_NETLINK/AF_UNIX for the resolver, in case BB_AUTH_WEB_LISTEN
 # is written as a name rather than a literal address.
 RestrictAddressFamilies=AF_INET AF_INET6 AF_UNIX AF_NETLINK
+# LOOPBACK ONLY, enforced by the kernel and not only by the bind address. This service's
+# entire credential is a request header nginx injects, so anything that can reach its port
+# is an administrator: a stray `BB_AUTH_WEB_LISTEN=0.0.0.0:8091` would be an unauthenticated
+# remote writer of the estate's access list. The binary refuses that bind unless
+# BB_AUTH_WEB_ALLOW_NONLOOPBACK says otherwise; this is the same rule one layer down, where
+# an env edit cannot reach it. A deployment that genuinely proxies from another host has to
+# change both, which is the point.
+IPAddressDeny=any
+IPAddressAllow=localhost
+# The same bounds the gate carries, and for the same reason.
+TasksMax=256
+MemoryMax=192M
 # @system-service contains @chown (and copy_file_range/sendfile), which the writer needs:
 # it copies the file one step back to access.json.bak, writes a temp file beside it,
 # restores mode and owner, and renames. A narrower set would turn every save into an

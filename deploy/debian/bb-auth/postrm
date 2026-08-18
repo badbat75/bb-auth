@@ -32,12 +32,25 @@ purge)
     # data loss no upgrade note can undo. It is moved aside instead: no longer live
     # (which is what purge means), still on disk (which is what an operator means).
     # Its .bak is one step back from a file being kept, so that one does go.
+    STAMP="$(date +%Y%m%d-%H%M%S)"
     if [ -e "$DEST/var/lib/access.json" ]; then
-        KEPT="$DEST/var/lib/access.json.purged-$(date +%Y%m%d-%H%M%S)"
+        KEPT="$DEST/var/lib/access.json.purged-$STAMP"
         mv "$DEST/var/lib/access.json" "$KEPT"
         echo "bb-auth: purge does not delete the access file. Kept as $KEPT"
     fi
     rm -f "$DEST/var/lib/access.json.bak"
+
+    # The settings file gets exactly the same treatment, and used to get none at all: it
+    # was neither moved aside nor mentioned, so a purge left an authorization list
+    # (`web.admins`) sitting on disk with nothing to say it was there, and the rmdir below
+    # silently failed on the directory it was in. It is not packaged either, it is edited
+    # by hand and by the GUI, and the same argument applies: no longer live, still on disk.
+    if [ -e "$DEST/var/lib/settings.json" ]; then
+        KEPT="$DEST/var/lib/settings.json.purged-$STAMP"
+        mv "$DEST/var/lib/settings.json" "$KEPT"
+        echo "bb-auth: purge does not delete the settings file. Kept as $KEPT"
+    fi
+    rm -f "$DEST/var/lib/settings.json.bak"
 
     # Best effort: these hold no packaged file, so dpkg will not remove them, and they
     # are only empty if nothing above was kept.

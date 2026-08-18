@@ -4,7 +4,7 @@
 A tiny, dependency-free CLI (Python 3 stdlib only) that runs the same passwordless
 Cognito flow the browser login page uses, and hands you an `id_token` to send as
 `Authorization: Bearer <id_token>` to any bb-auth-gated service (e.g.
-https://mcp.badbat75.com) from off-LAN.
+https://ai.badbat75.com) from off-LAN.
 
 It talks to the PUBLIC Cognito API directly (unsigned, like a browser) - it needs
 NO AWS credentials, SDK, or CLI. The only inputs are your email and the one-time
@@ -23,7 +23,7 @@ Commands
 
 Examples
   python bb-token.py login --email you@example.com
-  curl -H "$(python bb-token.py header)" https://mcp.badbat75.com/mcp/foo/
+  curl -H "$(python bb-token.py header)" https://ai.badbat75.com/mcp/foo/
   TOK=$(python bb-token.py token)
 
 Config (flags override env override defaults)

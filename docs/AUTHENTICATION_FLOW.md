@@ -84,6 +84,44 @@ client id.
 
 ---
 
+### 2c. Social sign-in (the OAuth + PKCE leg)
+
+The other way to reach an `id_token`, added in 1.1.0 and configured all-or-nothing by the
+four `BB_AUTH_SOCIAL_*` variables. Unset, the sign-in page has no social section at all and
+`/auth/callback` is a `404`; there is nothing on the page hinting at a way in this
+deployment does not have.
+
+```text
+ browser: click "Continue with Google" on /auth/login
+   page generates a PKCE verifier + a random state, stores both in sessionStorage
+   page ▶ https://<oauth-domain>/oauth2/authorize
+            ?client_id=<BB_AUTH_SOCIAL_CLIENT_ID>
+            &redirect_uri=<BB_AUTH_SOCIAL_CALLBACK_URL>   (byte-for-byte the registered one)
+            &identity_provider=Google&response_type=code&scope=openid+email+profile
+            &code_challenge=S256(verifier)&code_challenge_method=S256&state=<state>
+ ── Cognito hosted UI ▶ the identity provider ▶ back to Cognito ──
+ Cognito ▶ GET <BB_AUTH_SOCIAL_CALLBACK_URL>?code=…&state=…     (this is /auth/callback)
+   page checks state against the stored one, unconditionally
+   page ▶ POST https://<oauth-domain>/oauth2/token
+            grant_type=authorization_code, client_id, code, code_verifier, redirect_uri
+   ◀ { id_token, access_token, … }
+   page ▶ POST /auth/session with that id_token          → Phase 3, unchanged
+```
+
+Three things make this leg safe rather than merely working, and all three are structural:
+
+- **The state check is unconditional.** An empty stored value used to skip it, which is a
+  fail-open written in the shape of a fail-closed.
+- **The social client id must be an accepted `aud`**, and the gate checks that at startup.
+  Without it every social login succeeds at Cognito and is refused here one redirect later,
+  with nothing on the page to explain why.
+- **All four variables or none, fatally.** A half-configured deployment draws a button that
+  answers `redirect_mismatch`, in Amazon's words, on Amazon's page.
+
+The page runs no other network call: the token exchange is browser-to-Cognito, and the gate
+still hears nothing until the `POST /auth/session` below. Its Content-Security-Policy names
+the two Cognito origins and nothing else.
+
 ## Phase 3 — Exchange id_token for session cookie (browser → bb-auth)
 
 The page performs a **top-level form POST** (so the session cookie lands on
@@ -101,8 +139,10 @@ Inside bb-auth (`handle_session`):
 2. **`validate_id_token`:**
    - header `alg == RS256`; read `kid`.
    - look up `kid` in the JWKS cache (refresh once per 60 s on a miss).
-   - verify signature + `exp` (60 s leeway) + `iss` + `aud == client_id`;
-     require `exp`/`aud`/`iss` present.
+   - verify signature + `exp` (60 s leeway) + `iss` + `aud` against
+     **`BB_AUTH_AUDIENCES`**, which is a list: a deployment with a social sign-in has at
+     least two app clients (the login page's and the hosted UI's), and a token is accepted
+     when its `aud` is any of them. Require `exp`/`aud`/`iss` present.
    - require `token_use == "id"` and `email_verified` truthy. Exception: if
      `allow_unverified_social` is on, an `email_verified=false` token is
      accepted when it carries a federated `identities` entry (a social login),

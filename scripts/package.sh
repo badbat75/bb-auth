@@ -9,7 +9,9 @@
 #   bash scripts/package.sh --arch amd64
 #   bash scripts/package.sh --no-build         # package the binaries already in dist/
 #   bash scripts/package.sh --only gate,web    # skip a package
-#   bash scripts/package.sh --revision 2       # 1.0.0-2 instead of 1.0.0-1
+#   bash scripts/package.sh --revision 2       # 1.1.0-2 instead of 1.1.0-1
+#   bash scripts/package.sh --skip-tests       # repackage without re-running the suite
+#   bash scripts/package.sh --allow-dirty      # package an uncommitted working tree
 #
 # Output, in dist/:
 #   bb-auth_<ver>-<rev>_<arch>.deb       the gate, its unit, the env template
@@ -22,6 +24,18 @@
 # under deploy/debian/, one directory per package.
 #
 # WHAT THIS SCRIPT ADDS ON TOP OF `cargo deb`:
+#
+#   * It RUNS THE TESTS FIRST, on the host, natively. The suite is seconds long and it is
+#     the only thing standing between a release and the crypto-provider failure that took
+#     the gate down once already: `rsa_signature_verification_works` is what catches a
+#     build whose JWT verifier is a `panic!`, `cargo tree` cannot see it, and until now the
+#     whole defence was a human remembering a table in AGENTS.md. --skip-tests is for
+#     repackaging bytes that were already tested, and says so out loud.
+#   * It refuses to package an UNCOMMITTED tree unless told to. A .deb version says
+#     1.1.0-1 whether it was built from a tag, a dirty checkout or a hand-patched
+#     experiment; --allow-dirty makes that a decision, and either way the build string
+#     baked into every binary (`bb-auth --version`) carries the commit and a -dirty
+#     marker.
 #
 #   * It builds through scripts/build.sh, so the bytes in the package are the same
 #     bytes scripts/deploy.ps1 would ship, from the same cross toolchain, and dist/ is
@@ -70,6 +84,8 @@ PKG_DIR="${BB_AUTH_PKG_DIR:-$HOME/.cache/bb-auth-pkg}"
 OUT_DIR="$CRATE_DIR/dist"
 REVISION=1
 DO_BUILD=1
+DO_TEST=1
+ALLOW_DIRTY=0
 ONLY=""
 ARCH=""
 TARGET="${BB_AUTH_TARGET:-}"
@@ -88,6 +104,8 @@ while [ $# -gt 0 ]; do
     --only)     ONLY="${2:?--only needs a value}"; shift 2 ;;
     --output)   OUT_DIR="${2:?--output needs a value}"; shift 2 ;;
     --no-build) DO_BUILD=0; shift ;;
+    --skip-tests) DO_TEST=0; shift ;;
+    --allow-dirty) ALLOW_DIRTY=1; shift ;;
     -h|--help)  usage 0 ;;
     *)          echo "[pkg] FATAL: unknown argument '$1'" >&2; usage 1 ;;
   esac
@@ -145,13 +163,49 @@ echo "[pkg] target   : $TARGET  (Architecture: $ARCH)"
 echo "[pkg] staging  : $PKG_DIR"
 echo "[pkg] output   : $OUT_DIR"
 
-# --- 2. cargo-deb ------------------------------------------------------------
-if ! cargo deb --version >/dev/null 2>&1; then
-  echo "[pkg] cargo-deb is not installed; installing it now (cargo install cargo-deb)."
-  cargo install cargo-deb --locked
+# --- 2. provenance -----------------------------------------------------------
+# What these bytes are, in a form that survives into the binary (`bb-auth --version`) and
+# into this log. A .deb version cannot answer it: 1.1.0-1 is what a tagged release, a dirty
+# checkout and a hand-patched experiment all report.
+BB_AUTH_BUILD="$(cd "$CRATE_DIR" && git describe --always --dirty --tags 2>/dev/null || echo unknown)"
+export BB_AUTH_BUILD
+echo "[pkg] build    : $BB_AUTH_BUILD"
+case "$BB_AUTH_BUILD" in
+  *-dirty)
+    if [ "$ALLOW_DIRTY" = 1 ]; then
+      echo "[pkg] WARNING: packaging an uncommitted working tree (--allow-dirty)."
+    else
+      echo "[pkg] FATAL: the working tree has uncommitted changes, so this package could" >&2
+      echo "[pkg]        not be rebuilt from any commit and nothing on the host would say" >&2
+      echo "[pkg]        so. Commit them, or pass --allow-dirty to mean it." >&2
+      exit 1
+    fi
+    ;;
+esac
+
+# --- 2b. the tests -----------------------------------------------------------
+# Host-native and target-independent: what they cover is the feature selection and the
+# logic, neither of which changes with the architecture. See the header for why this is
+# not optional by default.
+if [ "$DO_TEST" = 1 ]; then
+  echo "[pkg] tests    : cargo test --locked (host)"
+  ( cd "$CRATE_DIR" && cargo test --locked --quiet ) || {
+    echo "[pkg] FATAL: the test suite failed; nothing was packaged." >&2
+    exit 1; }
+else
+  echo "[pkg] WARNING: --skip-tests: packaging without running the suite."
 fi
 
-# --- 3. the binaries ---------------------------------------------------------
+# --- 3. cargo-deb ------------------------------------------------------------
+# Pinned, because an unpinned `cargo install` is a different packaging tool on every
+# machine and on every day: the one thing a release pipeline must not have.
+CARGO_DEB_VERSION="${BB_AUTH_CARGO_DEB_VERSION:-3.1.0}"
+if ! cargo deb --version >/dev/null 2>&1; then
+  echo "[pkg] cargo-deb is not installed; installing $CARGO_DEB_VERSION."
+  cargo install cargo-deb --version "$CARGO_DEB_VERSION" --locked
+fi
+
+# --- 4. the binaries ---------------------------------------------------------
 # One build path for the whole repo: build.sh owns the cross toolchain and harvests
 # into dist/, and this packages exactly what it left there. --no-build skips it, which
 # is what makes re-packaging an existing dist/ instant.
@@ -196,7 +250,7 @@ else
   echo "[pkg] WARNING: $OBJDUMP not found, cannot verify libc6 (>= $DECLARED_GLIBC)." >&2
 fi
 
-# --- 4. staging --------------------------------------------------------------
+# --- 5. staging --------------------------------------------------------------
 # Never in the repo. On WSL that is a DrvFs mount, where cargo is slow and file modes
 # and line endings are not the ones a package needs.
 rm -rf "$PKG_DIR"
@@ -207,10 +261,14 @@ cp -r "$CRATE_DIR/src/." "$PKG_DIR/src/"
 cp -r "$CRATE_DIR/deploy/." "$PKG_DIR/deploy/"
 
 # The deploy directory holds the live config next to the templates, and only the
-# templates are assets. Delete the rest from the copy rather than trusting a Cargo.toml
-# asset list to never name one: the HMAC key and the real roster must not be able to
-# reach a .deb by way of an edit somewhere else.
-rm -f "$PKG_DIR"/deploy/*.env "$PKG_DIR/deploy/access.json"
+# templates are assets. Whitelist rather than blacklist: everything that is not an
+# *.example*, a unit, or the debian/ tree is deleted from the copy. The previous version
+# named the three files it knew about and missed deploy/settings.json, which .gitignore
+# itself anticipates, and the next file somebody drops in there would have been missed
+# too. The HMAC key and the real roster must not be able to reach a .deb by way of an edit
+# somewhere else, and that has to hold for files nobody has thought of yet.
+find "$PKG_DIR/deploy" -maxdepth 1 -type f \
+  ! -name '*.example*' ! -name '*.service' ! -name '*.path' -print -delete
 
 # A Windows checkout with core.autocrlf=true delivers CRLF, and `#!/bin/sh\r` is a
 # shebang the kernel will not honour: the package installs and every maintainer script

@@ -1024,6 +1024,19 @@ pub struct UserSpec {
 
 /// One static API key belonging to a [`UserSpec`]. The `bbk_` bearer itself never
 /// appears here, only `key_hash`. Mint keys with `bb-auth-adm key add`.
+///
+/// **An unknown field here is reported at load**, unlike on [`UserSpec`], and the difference
+/// is what the subtree is. A row describing a person can afford to carry an operator's own
+/// keys, and an ignored typo there denies at worst. This subtree is nothing but a grant, and
+/// its two narrowing fields both fail *open* when a typo drops them: a misspelled `scopes` is
+/// a key that reaches everything its owner reaches, and a misspelled `duration` is a key that
+/// never expires. Both were silent.
+///
+/// A warning and not a refusal, which is the one place this departs from `deny_unknown_fields`
+/// on [`AppSpec`] and [`ScopeSpec`]: `notes` is a documented thing to write here (`bb-auth-adm
+/// key add --note`), so the unknown-field set is not empty by design, and a live file carrying
+/// one must not become a fatal load, i.e. a boot loop under `Restart=on-failure`. The warning
+/// is printed by [`compile_access`], so `--check-access` and the startup banner both say it.
 #[derive(Deserialize, Serialize, Default)]
 pub struct ApiKeySpec {
     #[serde(default)]
@@ -1044,6 +1057,8 @@ pub struct ApiKeySpec {
     /// A restriction, never a grant: see [`ApiKeyRecord::scopes`].
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub scopes: Option<Vec<String>>,
+    /// `notes` and anything else written here. Round-tripped untouched, and reported at load
+    /// unless it is `notes`: see the type's own documentation for why this one is a warning.
     #[serde(flatten)]
     pub extra: Map<String, Value>,
 }
@@ -1763,6 +1778,15 @@ pub fn compile_access(file: &AccessFile) -> Result<Access, String> {
             } else {
                 k.id.trim().to_string()
             };
+            // A field nobody here knows. It is `notes` in the ordinary case and a typo in
+            // the case worth catching: `scope` for `scopes` widens a key to everything its
+            // owner reaches, `expires` for `duration` makes it immortal, and both do it
+            // without a word. See [`ApiKeySpec`] for why this warns rather than refuses.
+            for name in k.extra.keys().filter(|n| n.as_str() != "notes") {
+                eprintln!(
+                    "[bb-auth] WARNING: {uuid} key '{key_id}': unknown field '{name}' is                      ignored (a misspelled 'scopes' or 'duration' widens the key)"
+                );
+            }
             let hash = k.key_hash.trim().to_ascii_lowercase();
             if hash.len() != 64 || !hash.bytes().all(|b| b.is_ascii_hexdigit()) {
                 eprintln!("[bb-auth] WARNING: {uuid} key '{key_id}': invalid key_hash, skipping");
@@ -1950,6 +1974,25 @@ impl AccessWrite {
     pub fn commit(&self, path: &str) -> Result<Written, String> {
         write_atomically(path, &self.json)
     }
+
+    /// Create `path` with these bytes, and only if it does not exist yet.
+    ///
+    /// The other half of "there is one door". The two `init` commands used to write their
+    /// first file with `std::fs::write` and a `chmod` of their own, which is a second way to
+    /// put bytes in a place the gate will read: not compiled through the parser, not atomic,
+    /// and preceded by an `exists()` check that is a race against itself. Today's payload is
+    /// a default document and nothing is wrong with it; the invariant is stated absolutely
+    /// so that nobody has to re-derive whether a *particular* instance is safe, and the next
+    /// "create from a template" command would copy the shape it found.
+    ///
+    /// `create_new` is what makes the refusal-to-overwrite an operation of the filesystem
+    /// rather than a check the caller does first. The mode is `0640` from the start: the gate
+    /// reads this file as a group member and must not be the only one that can, and nobody
+    /// else has any business reading it. The owner is left to whoever runs the tool, which is
+    /// how the packages arrange it.
+    pub fn create(&self, path: &str) -> Result<(), String> {
+        create_new_file(path, &self.json)
+    }
 }
 
 /// What a completed write hands back — and the proof that there *was* one, which is what
@@ -1970,17 +2013,36 @@ pub struct Written {
 /// would be unreadable to the service, and the gate would die on its next start — a lockout
 /// dressed up as a successful edit. So a failed `chown` aborts the write rather than warning
 /// about it: nothing is renamed, and the old file stays intact.
+///
+/// The temp file is **unique per write**, and the durability is explicit:
+///
+/// * A shared temp name was the previous shape, on the argument that racing editors should
+///   contend for one file rather than each rename its own over the other's work. That
+///   argument describes a lost update, which is what the GUI's `rev` check catches; what a
+///   shared name buys instead is two writers interleaving their bytes into a file *neither*
+///   wrote, which both then rename. A file that does not parse is a fatal startup, i.e. a
+///   boot loop, so the cheap answer is a name nobody else can be using.
+/// * `sync_all` on the temp file and then on the directory, because "atomic" here means a
+///   reader sees the old file or the new one, and says nothing about a machine that loses
+///   power between the rename and the writeback. This file is the only current copy of the
+///   access list; two `fsync`s per edit is nothing next to reconstructing it.
 fn write_atomically(path: &str, content: &str) -> Result<Written, String> {
     let p = std::path::Path::new(path);
     let dir = p.parent().filter(|d| !d.as_os_str().is_empty());
-    // One temp name, whoever is writing: two editors racing would then contend for the same
-    // temp file rather than each renaming its own over the other's work.
+    // Unique per write: pid and a counter, which no other process and no other thread of
+    // this one can be holding.
+    static SEQ: std::sync::atomic::AtomicUsize = std::sync::atomic::AtomicUsize::new(0);
+    let unique = format!(
+        "{}.{}",
+        std::process::id(),
+        SEQ.fetch_add(1, std::sync::atomic::Ordering::Relaxed)
+    );
     let tmp = match dir {
         Some(d) => d.join(format!(
-            ".{}.bb-auth-adm.tmp",
+            ".{}.bb-auth.{unique}.tmp",
             p.file_name().unwrap_or_default().to_string_lossy()
         )),
-        None => std::path::PathBuf::from(format!(".{path}.bb-auth-adm.tmp")),
+        None => std::path::PathBuf::from(format!(".{path}.bb-auth.{unique}.tmp")),
     };
 
     let meta = std::fs::metadata(p).map_err(|e| format!("stat {path}: {e}"))?;
@@ -1988,11 +2050,21 @@ fn write_atomically(path: &str, content: &str) -> Result<Written, String> {
     let bak = format!("{path}.bak");
     std::fs::copy(p, &bak).map_err(|e| format!("backup {bak}: {e}"))?;
 
-    std::fs::write(&tmp, content).map_err(|e| format!("write {}: {e}", tmp.display()))?;
     let restore = |e: String| {
         let _ = std::fs::remove_file(&tmp);
         e
     };
+    {
+        use std::io::Write;
+        let mut f =
+            std::fs::File::create(&tmp).map_err(|e| format!("create {}: {e}", tmp.display()))?;
+        f.write_all(content.as_bytes())
+            .map_err(|e| restore(format!("write {}: {e}", tmp.display())))?;
+        // Before the rename, not after: a rename that lands ahead of the data is how an
+        // atomic replace ends up publishing an empty file.
+        f.sync_all()
+            .map_err(|e| restore(format!("fsync {}: {e}", tmp.display())))?;
+    }
     std::fs::set_permissions(&tmp, meta.permissions())
         .map_err(|e| restore(format!("chmod {}: {e}", tmp.display())))?;
     #[cfg(unix)]
@@ -2013,9 +2085,50 @@ fn write_atomically(path: &str, content: &str) -> Result<Written, String> {
         }
     }
     std::fs::rename(&tmp, p).map_err(|e| restore(format!("rename onto {path}: {e}")))?;
+    // The rename itself is a directory operation, so the directory is what has to be durable
+    // for it to survive a power cut. Best effort: on a filesystem that will not open a
+    // directory for reading, an unsynced rename is still an improvement on no rename, and
+    // failing an edit that has already landed would be the worse answer.
+    if let Some(d) = dir {
+        if let Ok(h) = std::fs::File::open(d) {
+            let _ = h.sync_all();
+        }
+    }
     Ok(Written {
         backup: std::path::PathBuf::from(bak),
     })
+}
+
+/// Create `path` with `content`, refusing to touch a file that is already there.
+///
+/// Private, beside [`write_atomically`], for the same reason: [`AccessWrite::create`] and
+/// [`SettingsWrite::create`] are the only callers, so a first file goes through the same
+/// compile-then-write order every later edit does.
+///
+/// `create_new` makes "only if absent" the filesystem's answer rather than a caller's
+/// `exists()` a moment earlier, which is a check whose result can already be stale when it
+/// is read.
+fn create_new_file(path: &str, content: &str) -> Result<(), String> {
+    use std::io::Write;
+    let mut opts = std::fs::OpenOptions::new();
+    opts.write(true).create_new(true);
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::OpenOptionsExt;
+        // From the first byte, not after a `chmod`: between the two there is a window where
+        // the file is world-readable, and what goes in it is an access list.
+        opts.mode(0o640);
+    }
+    let mut f = opts.open(path).map_err(|e| match e.kind() {
+        std::io::ErrorKind::AlreadyExists => {
+            format!("{path} already exists: refusing to overwrite it")
+        }
+        _ => format!("create {path}: {e}"),
+    })?;
+    f.write_all(content.as_bytes())
+        .map_err(|e| format!("write {path}: {e}"))?;
+    f.sync_all().map_err(|e| format!("fsync {path}: {e}"))?;
+    Ok(())
 }
 
 // --- lookups over the document ---------------------------------------------
@@ -2179,6 +2292,88 @@ pub fn user_group_refs(doc: &AccessFile, name: &str) -> Vec<String> {
 /// rather than letting them in. Display only, and one constant so the two agree.
 pub const EXCLUDED_REF: &str = "excluded";
 
+/// Resolve one entry an operator typed into a scope's `excluded`, the way the file spells it:
+/// an enrolled person becomes their **uuid**, a group stays `@name`, and an email the roster
+/// has never heard of stays itself.
+///
+/// Here, and not in each editor, because it is a statement about what an entry in that field
+/// *means*, which is the library's membership test exactly as `decide` and `glob_match` are.
+/// The two editors had one each and they had already drifted: the CLI accepted any `@token`
+/// as a group, the GUI checked the grammar and that the group existed, so the same file was
+/// refused at one form and written by the other.
+///
+/// A stranger's email is kept rather than refused, and that is the whole point of the field
+/// on an `authenticated` scope: that scope admits exactly the people who are in no roster
+/// row, so an exclusion that could only name enrolled people would be useless where it is
+/// needed most. Anyone the roster *does* know is written as their uuid, so one exclusion
+/// covers every identifier they have.
+pub fn parse_exclusion(doc: &AccessFile, entry: &str) -> Result<String, String> {
+    let raw = entry.trim();
+    if raw.starts_with('@') {
+        let g = group_ref(raw)
+            .filter(|g| !g.is_empty())
+            .ok_or_else(|| format!("'{raw}': a group reference is written '@name'"))?;
+        if !doc.user_groups.contains_key(g) {
+            return Err(format!("'{raw}': no user group '@{g}'"));
+        }
+        return Ok(raw.to_string());
+    }
+    if let Some(i) = user_pos(doc, raw) {
+        return Ok(doc.users[i].uuid.trim().to_ascii_lowercase());
+    }
+    if raw.contains('@') {
+        return Ok(norm_email(raw));
+    }
+    Err(format!(
+        "'{raw}': not a user, not '@group' and not an email. An exclusion names somebody \
+         enrolled, a group, or a stranger by their email"
+    ))
+}
+
+/// The earlier scope of the same application that makes scope `urls` dead, if there is one:
+/// its index, for a message that can name it.
+///
+/// Scopes are **first match wins in file order**, so a scope whose every pattern is already
+/// answered by something above it never speaks, whatever it grants. That is a lint and never
+/// an error: it is also how a carve-out is written the wrong way round, and telling an
+/// operator which line to move is the whole value of it.
+///
+/// A heuristic, deliberately. Matching one glob against another has no exact answer
+/// (`https://x.com/*` and `*://x.com/app1` cover each other partially), so this asks each of
+/// the later scope's own pattern *strings* of the earlier scopes' compiled matchers, which
+/// catches the case that actually happens: something broad listed first. Coverage may be
+/// **joint**, i.e. each pattern answered by a different earlier scope, because that is what
+/// first-match does; the index returned is the scope that answers the first pattern, which is
+/// where an operator will look. The CLI used to require one earlier scope to cover the whole
+/// list and the GUI did not, so a file was reported dead in one tool and clean in the other.
+pub fn shadowing_scope(earlier: &[ScopeSpec], urls: &[String]) -> Option<usize> {
+    let mine: Vec<&str> = urls
+        .iter()
+        .map(|u| u.trim())
+        .filter(|u| !u.is_empty())
+        .collect();
+    if mine.is_empty() || earlier.is_empty() {
+        return None;
+    }
+    // A scope whose patterns do not compile is skipped rather than assumed to cover
+    // everything: the parser refuses that file anyway, and a lint must not accuse a scope on
+    // the strength of a broken one above it.
+    let compiled: Vec<Option<UrlScope>> = earlier
+        .iter()
+        .map(|s| UrlScope::compile(&s.urls).ok())
+        .collect();
+    let covering = |u: &str| {
+        compiled
+            .iter()
+            .position(|c| c.as_ref().is_some_and(|c| c.allows(Some(u))))
+    };
+    let first = covering(mine[0])?;
+    mine[1..]
+        .iter()
+        .all(|u| covering(u).is_some())
+        .then_some(first)
+}
+
 /// Every place that names `uuid`: scopes as `application/scope`, groups as `@name`.
 ///
 /// What [`remove_user`] sweeps, and what an editor shows before it does. A dangling
@@ -2205,6 +2400,12 @@ pub fn user_refs(doc: &AccessFile, uuid: &str) -> Vec<String> {
         if members.iter().any(|m| norm_email(m) == want) {
             out.push(format!("@{name}"));
         }
+    }
+    // The veto, marked like an exclusion and for the same reason: it is a reference that
+    // keeps this person *out*, and a sweep that listed it beside a scope's members would
+    // read as if they had been let in there. [`remove_user`] rewrites rather than drops it.
+    if doc.denied.iter().any(|d| norm_email(d) == want) {
+        out.push(format!("denied ({EXCLUDED_REF})"));
     }
     out
 }
@@ -2409,6 +2610,30 @@ pub fn remove_user(doc: &mut AccessFile, key: &str) -> Result<(UserSpec, Vec<Str
     }
     for members in doc.user_groups.values_mut() {
         members.retain(|m| norm_email(m) != uuid);
+    }
+    // The veto is REWRITTEN, not swept, and it is the one reference that must not simply go.
+    //
+    // Every other reference to a removed row is a grant, and a grant naming nobody is a line
+    // to delete. `denied` is the opposite: dropping it *lifts* a suspension. The sequence is
+    // ordinary housekeeping (suspend somebody, tidy the roster afterwards), and with an
+    // `authenticated` scope anywhere in the file the same person then re-registers with
+    // Cognito and walks straight back in, which is precisely the walk-back-in the sweep of
+    // the other references exists to prevent.
+    //
+    // So a user veto becomes a stranger veto for the same person: their primary email, which
+    // is the spelling `denied` uses for an identity the file has never heard of, and which is
+    // exactly what this identity is about to become.
+    let primary = doc.users[i]
+        .emails
+        .iter()
+        .map(|e| norm_email(e))
+        .find(|e| !e.is_empty());
+    if let Some(email) = primary {
+        for d in doc.denied.iter_mut() {
+            if norm_email(d) == uuid {
+                *d = email.clone();
+            }
+        }
     }
     Ok((doc.users.remove(i), swept))
 }
@@ -2752,10 +2977,17 @@ pub fn remove_denied(doc: &mut AccessFile, who: &[String]) -> usize {
 // 3. it is **not a secret**. The one credential in the system stays in the gate's env file,
 //    which no other service reads and no editor writes.
 //
-// Six settings pass, and the file is shaped like the two services that read it: `gate` is
-// the five the gate answers with, `web` is the one the GUI's own door is made of. Each
-// service reads its own section and ignores the other's; both go through [`compile_settings`],
-// so an edit made by either is one the other would also accept.
+// Ten settings pass, in three sections, and the file is shaped like what reads them: `gate`
+// is the five the gate answers with, `web` is the one the GUI's own door is made of, and `ui`
+// is the four that say how a page looks. The `ui` four pass the middle part for a reason
+// worth stating, because they are the ones that look like they should not: the built-in
+// stylesheet is COMPLETE, so an override is only ever an addition to a page that already
+// works, and the worst a wrong value there achieves is an unstyled page rather than a closed
+// door. They are also the one section BOTH services read, which is what makes one save
+// restyle the sign-in page and the admin interface together.
+//
+// Each service reads its own section and ignores the other's; both go through
+// [`compile_settings`], so an edit made by either is one the other would also accept.
 //
 // The write path is the access file's, unchanged and for the same reason: [`SettingsWrite`]
 // is [`AccessWrite`] with a different document, `commit` writes exactly the bytes `prepare`
@@ -2800,6 +3032,36 @@ pub const LOGIN_URL_HEADER: &str = "X-Auth-Login-URL";
 /// its own administrator's identity out of, so three programs now name it and exactly one
 /// should spell it. The nginx wiring is on the gate's constant of the same name.
 pub const IDENTITY_HEADER: &str = "X-Auth-Email";
+
+/// What this build was made from: a `git describe --always --dirty --tags`, or `unknown`.
+///
+/// Read from `BB_AUTH_BUILD` at compile time, which is what `scripts/build.sh` and
+/// `scripts/package.sh` set from the checkout they are building. `option_env!` and not
+/// `env!` because a plain `cargo build` on a workstation sets nothing and must still
+/// compile: it then reports `unknown`, which is honest. The release path is the one that
+/// matters, and there the string names the commit and says whether the tree was clean.
+///
+/// It is in the library because all three programs print it, and because a version string
+/// that meant different things in different binaries of one release would be worse than
+/// none. There is deliberately no build script: a `build.rs` that shells out to `git` is a
+/// compile-time dependency on a program the build does not otherwise need, and the two
+/// scripts that produce a release already know the answer.
+pub const BUILD: &str = match option_env!("BB_AUTH_BUILD") {
+    Some(b) => b,
+    None => "unknown",
+};
+
+/// The one line every program answers `--version` with, and the one the gate opens its
+/// journal with.
+///
+/// Two facts, and they answer different questions. The **version** is what the packaging
+/// promises: `dpkg-query -W` agrees with it, and it is what a dependency between the three
+/// packages is written against. The **build** is what the bytes actually are, and it is the
+/// one an incident needs: a `-dirty` suffix says the tree was not committed, and a bare hash
+/// says the release was never tagged. Neither is a substitute for the other.
+pub fn version_line(program: &str) -> String {
+    format!("{program} {} ({BUILD})", env!("CARGO_PKG_VERSION"))
+}
 
 /// Claim names bb-auth consumes itself, and so cannot propagate.
 ///
@@ -3033,6 +3295,17 @@ pub const MIN_SESSION_TTL: u64 = 60;
 /// wrong, it is merely fiction, so this is a warning rather than a refusal.
 pub const MAX_HONOURED_SESSION_TTL: u64 = 400 * 86_400;
 
+/// The longest lifetime that is arithmetic rather than fiction: a hundred years.
+///
+/// Past [`MAX_HONOURED_SESSION_TTL`] a value is merely ignored by the browser, which is worth
+/// a warning and nothing more. Past *this* it stops being a number the gate can work with: it
+/// is added to the wall clock to make the cookie's `exp` and cast to `i64` for its `Max-Age`,
+/// and near `u64::MAX` both of those wrap into a cookie that is already expired, which is the
+/// login loop [`MIN_SESSION_TTL`] exists to prevent, reached from the other end. A ceiling
+/// three orders of magnitude past any real session leaves the setting's honest range
+/// untouched and takes the arithmetic out of reach.
+pub const MAX_SESSION_TTL: u64 = 100 * 365 * 86_400;
+
 /// The gate's half of the settings file: the five it answers with.
 #[derive(Deserialize, Serialize, Clone, Debug, PartialEq, Eq)]
 #[serde(deny_unknown_fields)]
@@ -3240,6 +3513,202 @@ pub fn stylesheet_link(url: Option<&str>) -> String {
     match url {
         Some(u) => format!("<link rel=\"stylesheet\" href=\"{}\">", html_escape(u)),
         None => String::new(),
+    }
+}
+
+/// The response headers every HTML page either program serves carries, and the one place
+/// that set is decided.
+///
+/// It is here for the reason [`BASE_CSS`] is. Two programs emit pages now, and "what does an
+/// HTML response carry" had two answers: the gate sent `X-Frame-Options` and no `nosniff`,
+/// the GUI sent `nosniff` and no `X-Frame-Options`. Nobody chose that; each file was edited
+/// by somebody looking at that file. The consequence is not cosmetic like a mismatched
+/// radius: the page that could be framed was the one whose forms delete users.
+///
+/// A caller emits these on every HTML response and adds a
+/// [`Content-Security-Policy`](page_csp) of its own, which is per page because its sources
+/// are.
+pub const PAGE_SECURITY_HEADERS: [(&str, &str); 4] = [
+    // A page here is a snapshot of a file that is being edited under it, or of one attempt
+    // at a login: a cached copy is a page that is right about a request nobody is making any
+    // more.
+    ("Cache-Control", "no-store"),
+    // A browser guessing at a content type is a browser deciding something we already know.
+    ("X-Content-Type-Options", "nosniff"),
+    // A login form, or a delete button, in somebody else's frame is a clickjacking target,
+    // and each service says so itself rather than trusting the proxy in front of it to have
+    // said it. `frame-ancestors` in the CSP is the modern spelling and is emitted too; this
+    // one costs a header and covers what does not implement it.
+    ("X-Frame-Options", "DENY"),
+    // These URLs carry an `rd`, a uuid, a key id or an email. None of it has business
+    // travelling to a third-party host in a `Referer`, and the gate reads that header as a
+    // redirect candidate itself, which is one more reason not to hand other people's out.
+    ("Referrer-Policy", "no-referrer"),
+];
+
+/// A `'sha256-…'` CSP source expression for a piece of inline content, exactly as a browser
+/// computes it: SHA-256 of the bytes between the tags, standard base64.
+///
+/// The alternative to a nonce, and the better one wherever the content is a compile-time
+/// constant: there is nothing to generate per response, nothing to thread through a renderer,
+/// and no way for the policy and the page to disagree, because both are derived from the same
+/// `&str`. It is a hash and not a copy, so a stale value cannot survive an edit to the
+/// content: the browser recomputes it and refuses to apply a block that changed.
+pub fn csp_hash(content: &str) -> String {
+    use base64::engine::general_purpose::STANDARD;
+    format!(
+        "'sha256-{}'",
+        STANDARD.encode(Sha256::digest(content.as_bytes()))
+    )
+}
+
+/// The CSP source for one of the two operator-supplied asset URLs: its origin when it is
+/// absolute, `'self'` when it is root-relative, and nothing at all when it is unset.
+///
+/// [`compile_asset_url`] has already reduced the shapes to those three, which is what makes
+/// this a `split` rather than a URL parser.
+fn csp_asset_source(url: Option<&str>) -> Option<String> {
+    let u = url?;
+    match u.strip_prefix("https://") {
+        Some(rest) => {
+            let authority = rest.split(['/', '?', '#']).next().unwrap_or("");
+            (!authority.is_empty()).then(|| format!("https://{authority}"))
+        }
+        None => Some("'self'".to_string()),
+    }
+}
+
+/// Assemble the `Content-Security-Policy` for a page either program serves.
+///
+/// The shape is `default-src 'none'` plus exactly what the page needs, which is short because
+/// these pages are built to be complete on their own: the palette, the components and the
+/// layout are inline, and the only external references a deployment can add are the two
+/// [`UiSettings`] URLs, both already validated by [`compile_asset_url`] and both optional.
+/// So the policy writes itself out of the settings, and an operator who sets neither gets a
+/// page that may load nothing from anywhere.
+///
+/// The two arguments the caller supplies are the two things this file cannot know:
+///
+/// * `script_src` is what the page's own scripting is allowed to be. A nonce where the script
+///   is assembled per response (the sign-in page substitutes configuration into it), a
+///   [`csp_hash`] where it is a constant, `'none'` where there is no script at all.
+/// * `style_src` is the same question for the inline `<style>` block that carries
+///   [`THEME_CSS`], [`BASE_CSS`] and the caller's own layout. The operator's stylesheet is
+///   appended to it here, because *that* source is this function's business.
+///
+/// `connect` is for the hosts a page's script legitimately talks to: the gate's sign-in page
+/// speaks to Cognito, and nothing else here speaks to anything. The two asset URLs are passed
+/// rather than the whole [`Settings`], because one caller renders a page from a settings file
+/// it has just read and the other from a snapshot of four fields, and this needs neither.
+///
+/// This is worth having on a login page more than anywhere else in the estate. It is the one
+/// page whose whole job is to hold a credential for a moment, the one page a deployment can
+/// point at an external stylesheet, and the page where a future templating slip would be
+/// worth the most to whoever found it. `default-src 'none'` is what makes all three cost
+/// nothing.
+pub fn page_csp(
+    script_src: &str,
+    style_src: &str,
+    stylesheet_url: Option<&str>,
+    logo_url: Option<&str>,
+    connect: &[&str],
+) -> String {
+    let mut style = style_src.to_string();
+    if let Some(s) = csp_asset_source(stylesheet_url) {
+        style.push(' ');
+        style.push_str(&s);
+    }
+    // `data:` because a logo is the one asset small enough that a deployment may reasonably
+    // inline it rather than serve it, and an image URI cannot script.
+    let img = match csp_asset_source(logo_url) {
+        Some(s) => format!("{s} data:"),
+        None => "data:".to_string(),
+    };
+    let connect_src = if connect.is_empty() {
+        "'none'".to_string()
+    } else {
+        connect.join(" ")
+    };
+    format!(
+        "default-src 'none'; script-src {script_src}; style-src {style}; img-src {img}; \
+         connect-src {connect_src}; form-action 'self'; frame-ancestors 'none'; \
+         base-uri 'none'"
+    )
+}
+
+/// Where the browser says a request came from, which is the input to every CSRF decision
+/// either program makes.
+///
+/// The classification is shared; the **policy is not**, and that separation is the point.
+/// Both programs accept `POST`s from forms they rendered themselves, so there must not be two
+/// answers to "where did this come from" (the GUI had one, the gate had none, which left
+/// `/auth/session` minting a session cookie for a cross-site form post that `SameSite=Lax`
+/// does nothing about: that attribute governs when a cookie is *sent*, never who may cause
+/// one to be *set*). But what each program then does about a `same-site` request is genuinely
+/// its own business, and writing one function that decided it for both would be the wrong
+/// kind of sharing.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub enum RequestSite {
+    /// Same scheme, host and port as the page: a form submitting to its own origin.
+    SameOrigin,
+    /// The same registrable domain, a different origin. Only a browser can tell us this;
+    /// there is no public-suffix list here to work it out from `Origin` alone.
+    SameSite,
+    /// Another site entirely. This is the one every caller refuses.
+    CrossSite,
+    /// The browser said nothing usable: no `Sec-Fetch-Site` and no `Origin`, or a
+    /// user-initiated navigation with no originating document at all (`none`). Not a form
+    /// submission from a page of ours, whatever else it is.
+    Unknown,
+}
+
+/// Classify a request by what the browser told us about its origin.
+///
+/// Two sources, in the order they deserve to be believed:
+///
+/// * **`Sec-Fetch-Site`** is set by the browser on every request and cannot be set by a page,
+///   so where it exists it is the whole answer.
+/// * **`Origin`** is the fallback, and only its **host** is compared, against the `Host:`
+///   header's. Not the scheme: both binaries speak plain HTTP behind a TLS-terminating nginx,
+///   so the browser's `https://…` origin can never equal a scheme reconstructed here, and
+///   comparing one would refuse every honest request. The port travels with the host in both
+///   headers, so comparing the authority as written is right in the default-port case *and*
+///   the explicit-port one. This arm needs nginx to forward `Host`, which the deployment
+///   examples now show; a mismatch here can only report [`RequestSite::CrossSite`], because
+///   distinguishing a sibling host from a stranger needs a public-suffix list.
+pub fn request_site(
+    sec_fetch_site: Option<&str>,
+    origin: Option<&str>,
+    host: Option<&str>,
+) -> RequestSite {
+    if let Some(sfs) = sec_fetch_site {
+        let s = sfs.trim();
+        return if s.eq_ignore_ascii_case("same-origin") {
+            RequestSite::SameOrigin
+        } else if s.eq_ignore_ascii_case("same-site") {
+            RequestSite::SameSite
+        } else if s.eq_ignore_ascii_case("cross-site") {
+            RequestSite::CrossSite
+        } else {
+            // `none`, and anything a future browser invents.
+            RequestSite::Unknown
+        };
+    }
+    match (origin, host) {
+        (Some(o), Some(hst)) => {
+            let authority = o
+                .trim()
+                .split_once("://")
+                .map(|(_, rest)| rest.trim_end_matches('/'));
+            match authority {
+                Some(a) if !a.is_empty() && a.eq_ignore_ascii_case(hst.trim()) => {
+                    RequestSite::SameOrigin
+                }
+                Some(a) if !a.is_empty() => RequestSite::CrossSite,
+                _ => RequestSite::Unknown,
+            }
+        }
+        _ => RequestSite::Unknown,
     }
 }
 
@@ -3455,6 +3924,17 @@ pub fn compile_settings(file: &SettingsFile) -> Result<Settings, String> {
              (400 day) cap browsers apply to Max-Age; the excess is fiction"
         );
     }
+    if ttl > MAX_SESSION_TTL {
+        // The floor is a refusal and the browser cap is a warning, which left the top end
+        // with no refusal at all: this value is added to the wall clock for the cookie's
+        // `exp` and cast to `i64` for its `Max-Age`, so far enough out it wraps and mints a
+        // cookie that expired in the past. That is the login loop the floor exists to
+        // prevent, arrived at from the other end, and it is reachable from a GUI field.
+        return Err(format!(
+            "session_ttl_secs: {ttl} is past the {MAX_SESSION_TTL}s ceiling; a lifetime that \
+             does not fit the arithmetic mints a cookie that is already expired"
+        ));
+    }
 
     let providers: Vec<String> = file
         .gate
@@ -3592,6 +4072,13 @@ impl SettingsWrite {
     /// what the replacement inherits.
     pub fn commit(&self, path: &str) -> Result<Written, String> {
         write_atomically(path, &self.json)
+    }
+
+    /// Create `path` with these bytes, and only if it does not exist yet. See
+    /// [`AccessWrite::create`], which is the same operation on the other file and carries the
+    /// reasoning.
+    pub fn create(&self, path: &str) -> Result<(), String> {
+        create_new_file(path, &self.json)
     }
 }
 
@@ -3765,7 +4252,18 @@ mod tests {
         let pat = format!("https://h/{}", "*a".repeat(24));
         let url = format!("https://h/{}b", "a".repeat(400));
         let p = compile_pattern(&pat).unwrap();
+        let t = std::time::Instant::now();
         assert!(!p.matches(&url)); // pattern ends in 'a', input in 'b'
+                                   // The assertion above is not the test: a backtracker would *also* return false here,
+                                   // eventually, and "eventually" is the regression. Without a clock, a return to
+                                   // exponential matching is a `cargo test` that hangs, which reads as a broken machine
+                                   // rather than a broken matcher. The DP does this in microseconds, so a second is
+                                   // three orders of magnitude of headroom and is not a timing-sensitive test.
+        assert!(
+            t.elapsed() < std::time::Duration::from_secs(1),
+            "matching took {:?}: the matcher is backtracking again",
+            t.elapsed()
+        );
     }
 
     #[test]
@@ -5581,10 +6079,43 @@ mod tests {
                 !code.contains('#'),
                 "{name} names a colour by hex; it may only read one from theme.css"
             );
-            assert!(
-                !code.contains("rgb"),
-                "{name} names a colour by channel; it may only read one from theme.css"
-            );
+            // Every other way CSS has of writing a colour, not just `rgb`. The scan used to
+            // be `#` and `rgb`, which let `hsl()`, `oklch()`, `color-mix()` and the 148 named
+            // colours through: a rule that only catches the spelling somebody happened to
+            // think of is a rule that stops holding the first time somebody writes it
+            // differently.
+            for how in [
+                "rgb(",
+                "rgba(",
+                "hsl(",
+                "hsla(",
+                "hwb(",
+                "lab(",
+                "lch(",
+                "oklab(",
+                "oklch(",
+                "color(",
+                "color-mix(",
+                "light-dark(",
+            ] {
+                assert!(
+                    !code.contains(how),
+                    "{name} names a colour with {how}; it may only read one from theme.css"
+                );
+            }
+            // The named colours worth naming: the ones somebody actually reaches for, and
+            // `transparent` and `currentColor` deliberately not among them (neither is a
+            // colour a token file could have supplied instead).
+            for named in [
+                ":white", ":black", ":red", ":green", ":blue", ":gray", ":grey", ":silver",
+                ":orange", ":yellow", ":purple", ":pink", ":brown", ":navy", ":teal", ":lime",
+                ":aqua", ":cyan", ":magenta", ":gold", ":crimson",
+            ] {
+                assert!(
+                    !code.replace(' ', "").contains(named),
+                    "{name} names the colour {named}; it may only read one from theme.css"
+                );
+            }
         }
     }
 
@@ -5603,14 +6134,192 @@ mod tests {
         }
         // And the negative half, which is the one that rots: a layout that starts redefining a
         // control has taken it back, and only its own program will ever see the change.
-        let admin = without_comments(include_str!("assets/admin.css"));
-        let auth = without_comments(include_str!("assets/auth.css"));
-        for layout in [&admin, &auth] {
-            assert!(
-                !layout.contains("\nbutton{") && !layout.contains("\n.pill{"),
-                "a layout may arrange the shared controls, never redefine one"
-            );
+        //
+        // A TOP-LEVEL rule is what that looks like: a selector at column zero. An indented one
+        // is inside a media query, where a layout adjusting a control's padding at a
+        // breakpoint is arrangement and is allowed (`admin.css` does exactly that, on
+        // purpose). The whitespace before the brace is normalised, because `button {` and
+        // `button{` are the same rule and the previous scan for `"\nbutton{"` saw only the
+        // second: a rule a reformat can switch off is not a rule.
+        for (name, css) in [
+            ("admin.css", include_str!("assets/admin.css")),
+            ("auth.css", include_str!("assets/auth.css")),
+        ] {
+            for line in without_comments(css).lines() {
+                if line.starts_with(char::is_whitespace) {
+                    continue;
+                }
+                let flat: String = line.chars().filter(|c| !c.is_whitespace()).collect();
+                for selector in ["button{", ".pill{", ".tag{"] {
+                    assert!(
+                        !flat.starts_with(selector),
+                        "{name} redefines {selector} at the top level: a layout may arrange \
+                         the shared controls, never redefine one"
+                    );
+                }
+            }
         }
+    }
+
+    /// Every symbol the operating manual pins a rule to still exists.
+    ///
+    /// `cargo doc` catches a broken intra-doc link, which the manual calls the cheapest rot
+    /// detector this repository has; Markdown is exactly where it cannot look. Three names
+    /// in `AGENTS.md` had already stopped existing (`bearer_apikey_email`,
+    /// `authorize_identity` twice), and each of them was a rule pointing at a function
+    /// nobody could find, in the file that is supposed to be the single source of the rules.
+    ///
+    /// The scan is deliberately narrow: a backticked token that looks like a Rust identifier
+    /// (`snake_case` with an underscore, or `CamelCase`), inside the Invariants section and
+    /// the deploy notes that follow it, which is where the rules live. A word that is not a
+    /// symbol is not one of those shapes, and a symbol that is genuinely gone shows up as a
+    /// name that appears nowhere in `src/`.
+    #[test]
+    fn every_symbol_the_manual_names_still_exists() {
+        const MANUAL: &str = include_str!("../AGENTS.md");
+        // The four sources, plus the two files that hold the other things the manual pins a
+        // rule to: a cargo feature (`rust_crypto`) and the unit directives the hardening
+        // argument is made of (`ReadOnlyPaths`, `ReadWritePaths`, `SupplementaryGroups`).
+        // Those are as real as a function, and as able to stop existing.
+        let src = format!(
+            "{}{}{}{}{}{}{}",
+            include_str!("lib.rs"),
+            include_str!("bin/bb-auth.rs"),
+            include_str!("bin/bb-auth-adm.rs"),
+            include_str!("bin/bb-auth-web.rs"),
+            include_str!("../Cargo.toml"),
+            include_str!("../deploy/bb-auth.service"),
+            include_str!("../deploy/bb-auth-web.service"),
+        );
+        let rules = MANUAL
+            .split_once("## Invariants")
+            .expect("the manual has an Invariants section")
+            .1;
+
+        let is_snake = |t: &str| {
+            t.contains('_')
+                && t.bytes()
+                    .all(|b| b.is_ascii_lowercase() || b.is_ascii_digit() || b == b'_')
+                && t.starts_with(|c: char| c.is_ascii_lowercase())
+        };
+        let is_camel = |t: &str| {
+            t.len() > 3
+                && t.starts_with(|c: char| c.is_ascii_uppercase())
+                && t.bytes().all(|b| b.is_ascii_alphanumeric())
+                && t.bytes().any(|b| b.is_ascii_lowercase())
+                && t.bytes().skip(1).any(|b| b.is_ascii_uppercase())
+        };
+
+        let mut missing: Vec<&str> = Vec::new();
+        for (i, chunk) in rules.split('`').enumerate() {
+            // Odd indices are the insides of a backtick pair.
+            if i % 2 == 0 {
+                continue;
+            }
+            // A call or a path in the prose: `decide_api_key(…)`, `Access::resolve`.
+            let token = chunk
+                .split(['(', ':', '.', '/', ' ', '<', '['])
+                .next()
+                .unwrap_or("");
+            if !(is_snake(token) || is_camel(token)) {
+                continue;
+            }
+            // Somebody else's vocabulary, named in the manual because the rule is about
+            // their configuration: nginx's, here. The list is short on purpose, and a name
+            // joins it only when the thing it names is genuinely not ours.
+            if ["default_server", "StateDirectory"].contains(&token) {
+                continue;
+            }
+            // Env vars and file names are not symbols; neither is a JSON field, but those
+            // appear in `src/` as string literals anyway, so they cost nothing.
+            if !src.contains(token) {
+                missing.push(token);
+            }
+        }
+        missing.sort_unstable();
+        missing.dedup();
+        assert!(
+            missing.is_empty(),
+            "AGENTS.md names symbols that no longer exist in src/: {missing:?}"
+        );
+    }
+
+    /// The half of the writer that a wrong answer locks the service out over.
+    ///
+    /// The live access file is `bb-auth-web:bb-auth 0640` (or `root:bb-auth` on a host with
+    /// no GUI), and the gate reads it as a group member. A rewrite that reset the mode would
+    /// leave the gate unable to read its own access list, which is a fatal startup and, under
+    /// `Restart=on-failure`, a boot loop. The manual calls that out twice and nothing
+    /// exercised it.
+    ///
+    /// Unix only, because a mode is what is being asserted. The owner half cannot be tested
+    /// without two uids to move between, so what is pinned here is the mode and the fact that
+    /// a *failed* write leaves the original byte-identical.
+    #[cfg(unix)]
+    #[test]
+    fn a_write_preserves_the_mode_it_replaces() {
+        use std::os::unix::fs::PermissionsExt;
+        let p = std::env::temp_dir().join("bb-auth-mode-test.json");
+        let path = p.to_str().unwrap().to_string();
+        let doc = AccessFile {
+            version: ACCESS_FILE_VERSION,
+            ..Default::default()
+        };
+        std::fs::write(&p, "{}").unwrap();
+        std::fs::set_permissions(&p, std::fs::Permissions::from_mode(0o640)).unwrap();
+
+        assert!(AccessWrite::prepare(&doc).unwrap().commit(&path).is_ok());
+        let mode = std::fs::metadata(&p).unwrap().permissions().mode() & 0o777;
+        assert_eq!(mode, 0o640, "the replacement must inherit the mode");
+
+        // A mode nobody would choose, to prove it is inherited rather than defaulted.
+        std::fs::set_permissions(&p, std::fs::Permissions::from_mode(0o600)).unwrap();
+        assert!(AccessWrite::prepare(&doc).unwrap().commit(&path).is_ok());
+        let mode = std::fs::metadata(&p).unwrap().permissions().mode() & 0o777;
+        assert_eq!(mode, 0o600);
+        let _ = std::fs::remove_file(&p);
+        let _ = std::fs::remove_file(format!("{path}.bak"));
+    }
+
+    /// A write to a path that cannot be written leaves the original untouched, which is what
+    /// "nothing is renamed, and the old file stays intact" means in practice.
+    #[test]
+    fn a_failed_write_leaves_the_original_byte_identical() {
+        let dir = std::env::temp_dir().join("bb-auth-nowhere-at-all");
+        let _ = std::fs::remove_dir_all(&dir);
+        let path = dir.join("access.json").to_str().unwrap().to_string();
+        let doc = AccessFile {
+            version: ACCESS_FILE_VERSION,
+            ..Default::default()
+        };
+        // The directory does not exist, so the `stat` of the file to replace fails first.
+        let e = match AccessWrite::prepare(&doc).unwrap().commit(&path) {
+            Ok(_) => panic!("a write into a directory that does not exist must fail"),
+            Err(e) => e,
+        };
+        assert!(e.contains("stat"), "{e}");
+    }
+
+    /// `create` is the only way a first file is written, and it refuses to touch one that is
+    /// already there: the two `init` commands used to do that with an `exists()` check of
+    /// their own, one line before a truncating write.
+    #[test]
+    fn create_refuses_a_file_that_already_exists() {
+        let p = std::env::temp_dir().join("bb-auth-create-test.json");
+        let path = p.to_str().unwrap().to_string();
+        let _ = std::fs::remove_file(&p);
+        let doc = AccessFile {
+            version: ACCESS_FILE_VERSION,
+            ..Default::default()
+        };
+        let w = AccessWrite::prepare(&doc).unwrap();
+        w.create(&path).expect("the first create makes the file");
+        assert_eq!(std::fs::read_to_string(&p).unwrap(), w.json());
+        let e = w.create(&path).unwrap_err();
+        assert!(e.contains("already exists"), "{e}");
+        // And it is still the file the first call wrote.
+        assert_eq!(std::fs::read_to_string(&p).unwrap(), w.json());
+        let _ = std::fs::remove_file(&p);
     }
 
     #[test]

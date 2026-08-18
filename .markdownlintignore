@@ -2,3 +2,9 @@
 # markdownlint gate green regardless of what cargo / the build emits locally.
 target/
 dist/
+
+# The browser suite's installed dependencies. Third-party Markdown, hundreds of files, and
+# the documented command reports 58 issues in 17 of them on any machine that has run
+# `npm install` in e2e/: a lint whose result depends on whether you have run the E2E suite
+# is a lint nobody can act on.
+e2e/node_modules/

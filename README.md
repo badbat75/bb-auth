@@ -4,7 +4,8 @@ Minimal **auth gate**. It accepts an AWS **Cognito `id_token`** that a browser
 already obtained and turns it into an HMAC-signed session cookie that a reverse
 proxy (nginx `auth_request`) enforces on every request. It is
 **service-agnostic** — it fronts any web service and is wired per-deployment
-through `BB_AUTH_*` env vars.
+through `BB_AUTH_*` env vars **and a settings file** (`settings.json`), which is where the
+values that must change without a restart live.
 
 ## Why
 
@@ -46,9 +47,9 @@ nginx error_page 401 → 302  <login-page>/?rd=<original>
 
 | Method | Path             | Who        | Purpose                                            |
 |--------|------------------|------------|----------------------------------------------------|
-| GET    | `/auth/validate` | nginx only | `auth_request`: 204 naming the identity in one header per configured attribute (default `X-Auth-Email`, plus one per configured profile claim when known) if the session cookie, an `Authorization: Bearer <id_token>`, or a static `Authorization: Bearer bbk_…` API key is admitted by the scope that owns the URL, else 401 + `X-Auth-Login-URL`. An `anonymous` scope answers 204 with no credential, and names nobody. |
-| GET    | `/auth/login`    | browser    | the sign-in page: runs the Cognito flow and POSTs the `id_token` to `/auth/session`. Self-contained (no external stylesheet, script or font), IT/EN, with the social buttons `BB_AUTH_SOCIAL_IDPS` names and none at all when it names none. Lands on `?rd=`, else on the `Referer` the browser sent |
-| GET    | `/auth/callback` | browser    | finishes a social sign-in (OAuth code + PKCE). `404` when no `BB_AUTH_SOCIAL_*` is configured |
+| GET    | `/auth/validate` | nginx only | `auth_request`: 204 naming the identity in one header per configured attribute (default `X-Auth-Email`, plus one per configured profile claim when known) if the session cookie, an `Authorization: Bearer <id_token>`, or a static `Authorization: Bearer bbk_…` API key is admitted by the scope that owns the URL, else 401 + `X-Auth-Login-URL`. An `anonymous` scope answers 204 with no credential at all, and then names nobody; a request that *did* carry a credential is still named on it, except a `denied` one, which is never named. |
+| GET, HEAD | `/auth/login`    | browser    | the sign-in page: runs the Cognito flow and POSTs the `id_token` to `/auth/session`. Self-contained (no external stylesheet, script or font), IT/EN, with the social buttons `BB_AUTH_SOCIAL_IDPS` names and none at all when it names none. Lands on `?rd=`, else on the `Referer` the browser sent |
+| GET, HEAD | `/auth/callback` | browser    | finishes a social sign-in (OAuth code + PKCE). `404` when no `BB_AUTH_SOCIAL_*` is configured |
 | POST   | `/auth/session`  | browser    | validate posted `id_token`, set cookie, 302 → `rd` |
 | GET    | `/auth/logout`   | browser    | clear cookie, 302 → `rd` (guarded), else `Referer` (same guard), else the login page |
 | GET    | `/auth/healthz`  | local      | liveness                                           |
@@ -84,7 +85,7 @@ passwordless email-OTP login against Cognito's public API, caches + auto-refresh
 
 ```bash
 python tools/bb-token.py login --email you@example.com      # once (emails you a code)
-curl -H "$(python tools/bb-token.py header)" https://mcp.badbat75.com/mcp/foo/
+curl -H "$(python tools/bb-token.py header)" https://ai.badbat75.com/mcp/foo/
 ```
 
 **2. Static API key (`bbk_…`)** — a long-lived key that needs no Cognito round-trip:
@@ -302,7 +303,7 @@ two would never be reached. `bb-auth-adm scope mv` reorders them, and
 - **`name`** — `[A-Za-z0-9_-]+`, unique inside its application.
 - **`urls`** — the patterns this scope answers for (see [URL patterns](#url-patterns)). A malformed one is fatal, and so is one outside the application's `base`.
 - **`access`** — **required, no default**, one of three words:
-  - `anonymous` — no credential at all. The `204` names nobody. Note `denied` does not reach here: the scope grants with nothing, so a vetoed client would simply send nothing.
+  - `anonymous`: no credential at all. A request that presents none is answered `204` naming nobody; one that presents a valid credential is still named, since knowing who is browsing an open area is useful and authorizes nothing. A **vetoed** identity is never named, which is the one thing `denied` can still do here: it cannot close an area that is open with no credential at all, because a vetoed client would simply send nothing.
   - `authenticated` — any identity Cognito vouches for, enrolled or not. It is how someone who has just registered reaches an onboarding area, with the app receiving their `X-Auth-Email` and enrolling them. An unknown `bbk_` key is not rescued by it: Cognito vouches for no key of ours.
   - `restricted` — the people in `users` and `groups`, and nobody else.
 - **`users`** / **`groups`** — uuids and `"@name"` group references. Legal **only** under `restricted`.
@@ -604,6 +605,8 @@ with no identity header answers `401` and says so, rather than serving anyone.
 | `BB_AUTH_WEB_LISTEN` | no | `127.0.0.1:8091` | bind address. Keep it on loopback |
 | `BB_AUTH_WEB_BASE_PATH` | no | *(empty)* | the URL prefix nginx mounts it at, e.g. `/admin` |
 | `BB_AUTH_WEB_DEFAULT_LANG` | no | `en` | `en` or `it`; a `?lang=` choice is remembered in a cookie |
+| `BB_AUTH_WEB_LOGOUT_URL` | no | *(none)* | where the header's "Sign out" points. **Unset means no control at all**, which is the only safe default: this binary knows neither its own scheme nor its own host, and the one thing it is handed is a client-supplied `Host:`. A bad value is refused at startup |
+| `BB_AUTH_WEB_ALLOW_NONLOOPBACK` | no | *(unset)* | `1` to allow a non-loopback `BB_AUTH_WEB_LISTEN`. Without it that bind is a fatal startup: the service's only credential is a header nginx sets, so anything that can reach the port could edit the access file |
 
 Who may use it is **not** an env var: it is `web.admins` in the settings file, read fresh on
 every request and editable from the GUI's own Settings tab, because this is the one service
@@ -633,8 +636,8 @@ is untouched by all of this, down to the ownership of the access file.
 ```text
 /opt/bb-auth/bin/bb-auth-web        # binary (root-owned, executed by bb-auth-web)
 /opt/bb-auth/etc/bb-auth-web.env    # its config — operator-owned, installed once
-/etc/systemd/system/bb-auth-web.service
-/etc/systemd/system/bb-auth-reload.{path,service}
+/usr/lib/systemd/system/bb-auth-web.service
+/usr/lib/systemd/system/bb-auth-reload.{path,service}
 ```
 
 The unit mirrors the gate's hardening (`NoNewPrivileges`, `ProtectSystem=strict`,
@@ -782,8 +785,11 @@ On the target, bb-auth is laid out as:
 ```
 
 The units live where a **package** must put them. `/etc/systemd/system` is the admin's
-directory, and a unit of the same name there *overrides* the packaged one for good, so
-`deploy.sh` moves any it finds aside.
+directory, and a unit of the same name there *overrides* the packaged one for good. Nothing
+here moves one aside: that directory belongs to the administrator, so both `postinst`s and
+`verify.sh` **report** a shadow and leave the decision where it belongs. It is a `FAIL` in
+`verify.sh`, so a deploy that finds one ends red rather than quietly installing a binary
+systemd will not run.
 
 Installing the GUI is what moves `access.json` to `bb-auth-web:bb-auth` (the gate keeps
 reading it through the group, unit unchanged); a deploy without it changes no ownership at
@@ -813,17 +819,21 @@ non-zero with the running process still serving, because a fatal startup under
 A first install therefore ends *without* starting the gate: it says what to fill in.
 
 `scripts/deploy.sh` is the **on-host installer** (run as root, on the target) and does
-only what a package may not: `dpkg -i` in one transaction (not `apt install`, which
-declines to reinstall an equal version, so a rebuilt `1.0.0-1` would silently not
-deploy); moves aside any unit in `/etc/systemd/system` shadowing a packaged one; installs
-a staged `access.json` after `--check-access` has vouched for it, with the owner and mode
-the live file already had; and runs `scripts/verify.sh`.
+only what a package may not: validates a staged `access.json` with the gate's own parser
+**before** anything is installed, out of the very package about to be installed; `dpkg -i`
+in one transaction (not `apt install`, which declines to reinstall an equal version, so a
+rebuilt `1.1.0-1` would silently not deploy); records what it is replacing under
+`share/previous/` so a rollback has somewhere to start; installs the staged `access.json`
+after `--check-access` has vouched for it a second time, with the owner and mode the live
+file already had; and runs `scripts/verify.sh`.
 
 `scripts/verify.sh` is the **post-deploy verification**, and it is standalone: packages
-configured, no unit shadowed, service active, `GET /auth/healthz == ok`,
-`GET /auth/validate` (no cookie) `== 401`, HMAC key present, the access file parsing,
-clean journal startup, and with the GUI its own liveness plus the ownership the write
-path needs. It exits non-zero if any check fails, and changes nothing, so it is also the
+configured, no unit shadowed, service active, **`bb-auth --self-test`** (the offline RS256
+verification a login performs, which is the one check that fails on a build whose JWT
+verifier cannot verify anything), the build the running binary came from,
+`GET /auth/healthz == ok`, `GET /auth/validate` (no cookie) `== 401`, HMAC key present, the
+access and settings files parsing, clean journal startup, and with the GUI its own liveness
+plus the ownership the write path needs. It exits non-zero if any check fails, and changes nothing, so it is also the
 way to ask a host how it is doing:
 
 ```powershell
@@ -836,7 +846,7 @@ ssh user@host 'sudo bash -s' < ./scripts/verify.sh
 ```powershell
 ./scripts/deploy.ps1 emiliano@rpi-01.bombicci.local          # package in WSL + redeploy (access.json + HMAC key kept)
 ./scripts/deploy.ps1 emiliano@rpi-01.bombicci.local -Packages bb-auth   # gate only
-./scripts/deploy.ps1 emiliano@rpi-01.bombicci.local -AccessFile .\deploy\access.json   # also replace the access file
+./scripts/deploy.ps1 emiliano@rpi-01.bombicci.local -AccessFile <your-access.json>  # also replace the access file
 ```
 
 It builds the packages (`package.sh`, which builds through `build.sh`, so `dist/` stays
@@ -985,6 +995,12 @@ The binary is service-agnostic. To front a service at `app.example.com`:
            # sent, and nginx omits the header entirely if the variable is empty.
            auth_request_set $bb_email $upstream_http_x_auth_email;
            proxy_set_header X-Auth-Email     $bb_email;
+           # EVERY possible identity header, not the configured ones. The set is fixed in
+           # the code (IDENTITY_ATTRS) precisely so it CAN be cleared: X-Auth-Uuid is off
+           # by default, which means nothing here overrides it and a client that sends one
+           # would have it passed straight through to the app. Clearing it now also means
+           # turning the attribute on later needs no nginx change at all.
+           proxy_set_header X-Auth-Uuid      "";
            proxy_set_header X-Forwarded-User "";   # clear names we do NOT set
            proxy_set_header Remote-User      "";
 
@@ -1104,8 +1120,14 @@ server {
         # and without it anyone could name themselves an admin.
         auth_request_set $bb_email $upstream_http_x_auth_email;
         proxy_set_header X-Auth-Email     $bb_email;
+        # The other identity attribute, cleared whether or not it is configured: see the
+        # main vhost above for why the code-defined set is what gets cleared.
+        proxy_set_header X-Auth-Uuid      "";
         proxy_set_header X-Forwarded-User "";
         proxy_set_header Remote-User      "";
+        # bb-auth-web compares Origin against Host on a POST when the browser sends no
+        # Sec-Fetch-Site, so Host has to arrive as the browser sent it.
+        proxy_set_header Host             $host;
         # The GUI has no use for a display name; clear them rather than relay the
         # client's. (Only needed if profile_claims names them at all.)
         proxy_set_header X-Auth-Given-Name  "";
@@ -1166,8 +1188,10 @@ authority on where `?rd=…` may send a freshly-logged-in browser:
 - a relative `rd` (`/preferences`) resolves against the **caller's** host, taken from
   `X-Original-URL` on `/auth/session`;
 - an absolute `rd` must be `https://` on a host matching one of the patterns;
-- with no `rd` at all, the browser lands on the caller's root; on `/auth/login` and
-  `/auth/logout` the browser's `Referer` is read in its place, through this same gate;
+- with no `rd` at all, `/auth/session` lands on the caller's root. The two browser
+  endpoints read the browser's `Referer` in its place first, through this same gate; and
+  where that says nothing either, `/auth/logout` goes to the **login page** rather than to
+  the caller's root, which would be the area the person was just signed out of;
 - anything rejected — an off-host URL, a control byte, `//evil`, `/\evil`, userinfo
   (`https://app.example.com@evil.com/`), a lookalike (`evilexample.com`) — falls back
   to `BB_AUTH_LOGIN_URL`.
@@ -1177,6 +1201,9 @@ gate, so even a misconfigured proxy cannot turn this into an open redirect. Note
 `*.example.com` does **not** match the bare apex `example.com`: list it if you want it.
 
 ## Security notes
+
+Reporting something that lets somebody in, and what is in scope:
+[docs/SECURITY.md](docs/SECURITY.md).
 
 - A Cognito-signed `id_token` is unforgeable; possession of one for an
   allowlisted, verified email is the credential.
@@ -1189,6 +1216,53 @@ gate, so even a misconfigured proxy cannot turn this into an open redirect. Note
 - Login-CSRF (an attacker POSTing *their* token to log a victim into the
   attacker's account) is possible in theory but low-impact for a read gate;
   accepted. Revisit with a state/nonce if the gate ever fronts something sensitive.
+
+### Rollback
+
+A deploy that went wrong is answered by installing the previous packages, and that is safe
+for one specific reason: [sessions are stateless](#session-cookie) and the cookie format has
+not changed, so an older gate verifies every cookie the newer one minted, and nobody is
+logged out in either direction. The day the cookie format *does* change,
+[CHANGELOG.md](CHANGELOG.md) says so, and a rollback across that line logs everyone out
+once, exactly as the upgrade did.
+
+What is on the host to roll back **to**: `scripts/deploy.sh` writes
+`/opt/bb-auth/share/previous/versions.txt` before it installs anything, and copies the
+previous `.deb` files there when apt's cache still has them. That is best effort, so the
+authoritative answer is to rebuild from the tag:
+
+```bash
+# on the host: what was installed before this deploy
+cat /opt/bb-auth/share/previous/versions.txt
+
+# roll back to it, all three in one transaction, as the install went in
+sudo dpkg -i /opt/bb-auth/share/previous/bb-auth_1.1.0-1_arm64.deb \
+             /opt/bb-auth/share/previous/bb-auth-adm_1.1.0-1_arm64.deb \
+             /opt/bb-auth/share/previous/bb-auth-web_1.1.0-1_arm64.deb
+sudo bash verify.sh
+```
+
+```powershell
+# or from the repository, if the files are gone: check out the tag and deploy it
+git checkout v1.1.0
+./scripts/deploy.ps1 user@host
+```
+
+`dpkg -i` downgrades without complaint (it is not apt), and no state is packaged, so the
+HMAC key, the access file and the settings file are untouched either way.
+
+**Which builds must never be rolled back to.** `f3a4e48`, `7f3d4a3` and `7650b92` predate
+the fix in `7d7cc8c`: their gate compiles with no JWT crypto provider, starts cleanly, and
+aborts on the first real login, which under `Restart=on-failure` is a restart loop. The
+check that tells them apart takes a second and needs nothing but the binary:
+
+```bash
+/opt/bb-auth/bin/bb-auth --self-test    # exit 0 = it can verify an RS256 signature
+/opt/bb-auth/bin/bb-auth --version      # which commit these bytes are
+```
+
+`verify.sh` runs the first of those on every deploy, which is what makes that failure
+visible now; before it existed, every check on the host was green on exactly that build.
 
 ### Key rotation
 

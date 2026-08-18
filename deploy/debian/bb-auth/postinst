@@ -103,13 +103,14 @@ configure)
     # Restart=on-failure that is a boot loop. Failing HERE, before the restart below,
     # leaves the already-running process serving on the inode it still holds.
     FAIL=0
-    for req in BB_AUTH_HMAC_KEY BB_AUTH_COGNITO_ISSUER BB_AUTH_CLIENT_ID \
-               BB_AUTH_AUTHORIZED_HOSTS BB_AUTH_LOGIN_URL BB_AUTH_ACCESS_FILE; do
-        if [ -z "$(envval "$req")" ]; then
-            echo "bb-auth: $ENV_FILE does not set $req (required)" >&2
-            FAIL=1
-        fi
-    done
+    # ASK THE BINARY which variables it requires, rather than keeping a list of them here.
+    # This used to be six names hand-maintained in shell beside six `env_req` calls in
+    # Rust, with nothing tying the two together: the seventh required variable would have
+    # defeated this preflight in silence, and the preflight exists precisely because a
+    # fatal startup under Restart=on-failure is a boot loop. `--check-env` reads the same
+    # `REQUIRED_ENV` the gate does, and a test in the crate holds that list against the
+    # call sites.
+    "$DEST/bin/bb-auth" --check-env "$ENV_FILE" || FAIL=1
 
     # --check-access must have vouched for the file the service will actually read.
     ENV_ACCESS="$(envval BB_AUTH_ACCESS_FILE)"
@@ -168,7 +169,21 @@ configure)
         # restart, not stop-then-start: sessions are stateless, so the only cost is the
         # window itself, and prerm deliberately does not stop the gate on an upgrade.
         if [ -d /run/systemd/system ] && [ -x /usr/bin/deb-systemd-invoke ]; then
+            # The `|| true` stays on the INVOKE: a policy-rc.d that declines to start
+            # services is a legitimate answer (a chroot, an image build), and treating it
+            # as a failure would break those installs.
             deb-systemd-invoke restart "$UNIT" >/dev/null || true
+            # But the STATE is asserted, and that is the half that was missing: everything
+            # this script does is arranged so a bad configuration is caught before the
+            # restart, and then the restart's own outcome was thrown away. A new binary
+            # that will not start, or an env change outside the preflight, left dpkg
+            # reporting success and the operator learning from users.
+            if systemctl is-enabled --quiet "$UNIT" 2>/dev/null \
+               && ! systemctl is-active --quiet "$UNIT" 2>/dev/null; then
+                echo "bb-auth: FAILED to start after the upgrade. The last 30 journal lines:" >&2
+                journalctl -u "$UNIT" -n 30 --no-pager >&2 || true
+                exit 1
+            fi
         fi
     fi
     ;;

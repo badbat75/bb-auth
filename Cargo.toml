@@ -79,12 +79,13 @@ maud = "0.27"
 # a rewrite that left it root:root would lock the service out of its own access list. Plain
 # libc FFI: no crypto, no OpenSSL, no runtime.
 #
-# This is deliberately the 1.0 PRE-RELEASE, and it is the one dependency here that buys
-# nothing: no other crate in the tree asks for it. sha2 (via cpufeatures), signal-hook (via
-# errno) and ring (via getrandom 0.2) all still require libc 0.2, so both majors are
-# compiled. Going back to "0.2" is a one-line change and removes the duplicate.
+# 0.2, and not the 1.0 pre-release it used to be. The whole crate's only `unsafe` is the
+# `chown` call this provides, and it is the call whose failure is a documented lockout, so
+# it is the last place to be running a pre-release for no gain: sha2 (via cpufeatures),
+# signal-hook (via errno) and ring (via getrandom 0.2) all pull 0.2 in regardless, so the
+# alpha was a second major of the same crate compiled to add nothing.
 [target.'cfg(unix)'.dependencies]
-libc = "1.0.0-alpha.4"
+libc = "0.2"
 
 [profile.release]
 opt-level = "z"   # optimize for size — tiny binary, fast enough for a gate

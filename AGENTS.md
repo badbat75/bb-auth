@@ -9,6 +9,16 @@ own.
 an authentication gate, and almost every rule in it exists because breaking that rule locks
 somebody out or lets somebody in.
 
+| | |
+| --- | --- |
+| [What this is](#what-this-is) | the four targets, and why the split is load-bearing |
+| [Where documentation lives](#where-documentation-lives) | this file holds the rules, rustdoc holds the mechanism |
+| [Commands](#commands) | what to run, and **which check matches which change** |
+| [After a dependency change](#after-a-dependency-change) | the two `cargo tree` greps, and what they mean |
+| [Conventions](#conventions) | English, why-not-what, no new em-dashes, one home per rule |
+| [Invariants](#invariants--do-not-break-these) | **36 rules, in nine groups, indexed at the top of the section** |
+| [Config & deploy notes](#config--deploy-notes) | the configuration reference (the deploy *rules* are invariants) |
+
 ## What this is
 
 bb-auth is a single-binary **auth gate**: it accepts an AWS Cognito `id_token` that a
@@ -51,9 +61,11 @@ One crate, four targets, and the split is load-bearing:
   more than one program must agree on, byte for byte.
 - **[src/bin/bb-auth.rs](src/bin/bb-auth.rs)** — **the gate**, and everything the access file has no
   opinion about: HTTP, the session cookie, id_token validation, the nginx contract, and the
-  three pages it serves ([src/assets/](src/assets/): the sign-in page, the social callback and
-  the error page, each a template whose `__BB_*__` placeholders `render_page` fills). Still
-  **one file**, still read top to bottom.
+  three pages it serves: the sign-in page and the social callback are templates in
+  [src/assets/](src/assets/) whose `__BB_*__` placeholders `render_page` fills, and the error
+  page is built inline in `respond_html`, being one sentence and a link. Still **one file**
+  (about 5,000 lines), still read top to bottom. The GUI is about 8,400 and is navigated by
+  its section order rather than by that slogan.
 - **[src/bin/bb-auth-adm.rs](src/bin/bb-auth-adm.rs)** — the access-file admin CLI: CRUD over
   `applications` / `scopes` / `user_groups` / `denied` / `users` / `api_keys`, key minting,
   and `can EMAIL URL` (would this credential get in?). It links the library, none of the gate.
@@ -139,10 +151,29 @@ one runs on, who calls whom, and which invariant each one is there to hold.
 This repo is developed on Windows but the artifact is a Linux/aarch64 binary.
 
 ```powershell
-# Tests — pure unit tests in src/lib.rs (the access file) and src/bin/bb-auth.rs (the gate),
-# run on the host, no network needed
+# Tests: unit tests in all four targets, run on the host, no network needed. The access
+# file and the writers (src/lib.rs), the gate including its token verifier and its router
+# over a real socket (src/bin/bb-auth.rs), the CLI's argument grammar (src/bin/bb-auth-adm.rs)
+# and the GUI including nine that drive real HTTP (src/bin/bb-auth-web.rs). A handful are
+# cfg(unix) (the SIGHUP reload's fail-soft, the writer's mode preservation) and therefore run
+# on Linux, never on the development host (run them under WSL before a release).
 cargo test
 cargo test session_roundtrip          # a single test by name
+
+# Can THIS binary verify a signature? No env, no config, no network: the offline RS256
+# check a login performs, against a key compiled in. scripts/verify.sh runs it on the host
+# after every deploy, which is the check that was missing when a provider-less build
+# deployed green and failed every login.
+cargo run --bin bb-auth -- --self-test
+
+# Which build is this? Version plus `git describe --dirty`, and all three programs answer.
+cargo run --bin bb-auth -- --version
+
+# Does an env file name everything the gate refuses to start without? The gate's postinst
+# asks the binary this rather than keeping its own list of variables in shell. Run it
+# against a REAL env file: the tracked example deliberately leaves BB_AUTH_HMAC_KEY blank
+# (the install generates one), so it is expected to fail this check.
+cargo run --bin bb-auth -- --check-env /opt/bb-auth/etc/bb-auth.env
 
 # Validate an access file with the real parser (no env, no network). Same check the
 # deploy runs before it restarts the service. Prints each application's area, and the
@@ -200,7 +231,7 @@ bash scripts/package.sh               # arm64; --arch amd64, --no-build, --only,
 # It always builds; -NoBuild repackages the current dist/ instead.
 ./scripts/deploy.ps1 user@host
 ./scripts/deploy.ps1 user@host -Packages bb-auth                # gate only, no admin tools
-./scripts/deploy.ps1 user@host -AccessFile .\deploy\access.json   # also replace the access file
+./scripts/deploy.ps1 user@host -AccessFile <your-access.json>  # also replace the access file
 
 # Health-check a host without deploying to it (also run at the end of every deploy)
 ssh user@host 'sudo bash -s' < ./scripts/verify.sh
@@ -226,7 +257,12 @@ changes. `node e2e/shots.js` takes a scene-name filter for the same reason: the 
 124 screenshots across seven views, and a change to one page needs one of them.
 
 Markdown is linted with markdownlint (`.markdownlint.jsonc`, which documents its own
-invocation): `npx markdownlint-cli2 "**/*.md" "#target" "#dist"`.
+invocation): `npx markdownlint-cli2 "**/*.md" "#target" "#dist" "#e2e/node_modules"`.
+
+There is **no CI**: every check above is run by whoever is making the change, which is why
+the table above says which one matches which edit. `scripts/package.sh` runs the test suite
+itself before it builds, so the one check that must never be skipped before a release is not
+left to memory.
 
 ## After a dependency change
 
@@ -270,9 +306,90 @@ is fatal on failure, so reaching the `listening on …` line proves the fetch, t
   the mechanism is in rustdoc beside the code. When two disagree, the code wins, and the
   loser gets fixed rather than both getting edited into agreement.
 - **Commit messages are a sentence, not a label**: what changed and, above all, why, in the
-  same register as the code comments. Work happens on `main`.
+  same register as the code comments. With no changelog before this one, no pull requests and
+  no tracker, `git log` is the whole design narrative, and that is worth more than a tidy
+  subject line. Going forward, put the claim in a **subject under 72 characters** and expand
+  the same sentence as the body's first line: the current mean is 90, which `--oneline` wraps
+  and GitHub truncates in the middle of the operative clause. Nothing is rewritten
+  retroactively.
+- **Work happens on `main`**, and there is no review step, so two things stand in for one.
+  A change is not done until `cargo test`, `cargo clippy --all-targets` and `cargo fmt` are
+  clean, and nothing runs them for you. And **check `git status` before you build**: this
+  tree has had two sessions editing it at once, an uncommitted change is what
+  `scripts/package.sh` now refuses to package by default (`--allow-dirty` to mean it), and a
+  binary built from one reports a `-dirty` build string forever after.
 
 ## Invariants — do not break these
+
+**The rules, in one place.** Thirty-six of them, grouped. The lead sentence of each is
+its whole claim; the prose under it is the reason, which is the part worth reading before
+changing anything. Seven of these used to sit in "Config & deploy notes" below, so this
+section under-read itself by a fifth, and two of the seven are lockout-class.
+
+[**What lives where**](#what-lives-where)
+
+- The library is the shared files, and nothing else.
+- No editor may write a file the gate would reject.
+
+[**The session cookie**](#the-session-cookie)
+
+- The cookie is a versioned wire format, and exactly one version is accepted.
+
+[**The two files, and what a bad one costs**](#the-two-files-and-what-a-bad-one-costs)
+
+- The access file is the real access gate
+- The settings file is what must change without a restart, and the rule for what goes in it is three-part.
+- What changes who reaches what is fatal; what drops one credential is skipped.
+
+[**Resolving a URL**](#resolving-a-url)
+
+- Two levels of resolution, and they answer differently on purpose.
+- A URL no application covers is reachable by nobody.
+- One matcher serves scheme, host and path.
+
+[**Grants and vetoes**](#grants-and-vetoes)
+
+- One veto, ahead of every grant, on every credential.
+- A scope's `excluded` is the same veto, one level down, and it is checked before the scope's own grant.
+- A scope names people, and that is the only place a grant is written.
+- `anonymous` and `authenticated` grant without listing anybody
+- Static API keys (`bbk_` namespace) act as their user, and may only narrow.
+- Access is enumerated, never assumed.
+
+[**What a 204 hands nginx**](#what-a-204-hands-nginx)
+
+- nginx builds `X-Original-URL`, and must not let `Host:` pick the scope.
+- The gate names the identity; nginx is what makes that trustworthy.
+- The profile claims are decoration, and the encoder is what makes them safe.
+- The set is config; the header name is code.
+
+[**The endpoints, the pages and the redirects**](#the-endpoints-the-pages-and-the-redirects)
+
+- `/auth/session` is not a gate.
+- Sessions are stateless
+- id_token validation
+- There is no canonical service base URL.
+- The gate never redirects a gated request; nginx does.
+- The pages the gate serves are complete on their own, and the operator's stylesheet is an addition to one.
+- Social sign-in is all four env vars or none, fatally.
+- `safe_rd` guards the post-login redirect
+
+[**Dependencies and the build**](#dependencies-and-the-build)
+
+- Dependencies stay pure-Rust, on `ring` or RustCrypto
+- Release profile is size-optimized
+
+[**Deploy and packaging**](#deploy-and-packaging)
+
+- Target layout is a tree
+- Installing `bb-auth-web` is what moves the access file (and the settings file) to `bb-auth-web:bb-auth 0640`
+- `bb-auth-reload.path` is what makes an edit live
+- The access file's name is a config contract
+- The live `access.json` is the copy that is current
+- The deploy is `dpkg -i`, and the packages are where the install lives.
+- `scripts/deploy.sh` is what a package may not do
+
+### What lives where
 
 - **The library is the shared files, and nothing else.** `bb_auth_core` exists because more
   than one program must agree, byte for byte, on what a shared file *means*, so there is
@@ -299,7 +416,16 @@ is fatal on failure, so reaching the `listening on …` line proves the fetch, t
   being a rounded rectangle on one page and a lozenge on the other, or a field from being 12px
   tall here and 7px there. Each of those is somebody editing the file in front of them, which
   is drift invisible from inside either file, so a THING (a button, a field, a card, a tag, a
-  message) is defined once in `BASE_CSS` and both programs emit it. Its limit is where a thing
+  message) is defined once in `BASE_CSS` and both programs emit it. **It reaches the response
+  too**, one step further out and by the same argument: two programs answer a browser with an
+  HTML document, so "what headers does one carry" and "where did this `POST` come from" must
+  not have two answers either. `PAGE_SECURITY_HEADERS`, `page_csp`, `csp_hash` and
+  `request_site` are in the library for that reason, and the drift they end was real: the gate
+  sent `X-Frame-Options` and no `nosniff`, the GUI sent `nosniff` and no `X-Frame-Options`,
+  and the page that could be framed was the one whose forms delete users. What stays each
+  program's own is the **policy**: `request_site` classifies, and the GUI refuses anything but
+  `same-origin` while the gate also accepts `same-site`, because `BB_AUTH_LOGIN_URL` may name
+  a sign-in page on a sibling host. Its limit is where a thing
   stops and an ARRANGEMENT of things starts: the admin's header, tables and phone stacking are
   the GUI's, the centred card and its steps are the gate's, and nothing requires those two to
   agree. What stays in a tool is what has an
@@ -308,9 +434,10 @@ is fatal on failure, so reaching the `listening on …` line proves the fetch, t
   `src/bin/bb-auth.rs` and `src/assets/` — which is still one file, read top to bottom, plus
   three templates it fills. Do not move gate code into the library to "share" it
   with the CLI; the CLI has no business with any of it. The two authorization functions in
-  `bb-auth.rs` (`authorize`, `bearer_apikey_email`) are thin wrappers that add the log line
+  `bb-auth.rs` (`authorize`, `bearer_apikey`) are thin wrappers that add the log line
   and the wall clock to the library's decision — keep them thin, and keep the rule in the
   library, or `bb-auth-adm can` starts answering a different question from the gate.
+
 - **No editor may write a file the gate would reject.** Every mutation is
   serialized, re-parsed, and run through `compile_access` — the gate's own parser, on the
   exact bytes about to land on disk — before the write. `AccessWrite` is that order made
@@ -324,6 +451,9 @@ is fatal on failure, so reaching the `listening on …` line proves the fetch, t
   `root:root` would lock the service out of its own access list. The chown failing is
   therefore a hard abort, not a warning; it is also what makes the *unprivileged* writer
   work at all, so its owner and group are a deploy-time contract, not cosmetics.
+
+### The session cookie
+
 - **The cookie is a versioned wire format, and exactly one version is accepted.** `bb1` is it,
   and there is deliberately no verify-only arm for any other tag. So changing the
   serialization or the signed-message bytes logs out **every** existing user: that is the
@@ -340,6 +470,9 @@ is fatal on failure, so reaching the `listening on …` line proves the fetch, t
   another claim's name, so editing the list must stay a no-logout change. Verify checks the
   signature over the segment **as received** and only then parses it — never parse and
   re-serialize to compare.
+
+### The two files, and what a bad one costs
+
 - **The access file is the real access gate**, re-checked on *every* `/auth/validate` (not just at
   login). Parsed into `RwLock<Access>` — the applications, `denied` in its two halves, and the
   roster indices — hot-reloaded on SIGHUP (`systemctl reload bb-auth`); a reload failure keeps the
@@ -350,6 +483,7 @@ is fatal on failure, so reaching the `listening on …` line proves the fetch, t
   or nothing at all, is a **fatal, explanatory** load error rather than a type mismatch three
   levels down: a file written for another format could otherwise compile to an access table that
   grants differently, which is a lockout, or worse, reported as a successful load.
+
 - **The settings file is what must change without a restart, and the rule for what goes in it
   is three-part.** A setting belongs there iff it is (1) read **per request**, (2) unable to
   lock the operator out when it is wrong, and (3) not a secret. Ten pass, in three sections:
@@ -375,6 +509,7 @@ is fatal on failure, so reaching the `listening on …` line proves the fetch, t
   safe to hand to a GUI: the worst a bad save can do is leave the previous values in force.
   `bb-auth-web` reads it fresh per request instead, because it is the one service that edits
   its own half of it.
+
 - **What changes who reaches what is fatal; what drops one credential is skipped.** Fatal
   (`read_access` returns `Err`: fatal at startup, old table retained on SIGHUP): a malformed URL
   pattern, an `access` that is absent or misspelled, `users`/`groups`/`credentials` on a scope that
@@ -396,6 +531,9 @@ is fatal on failure, so reaching the `listening on …` line proves the fetch, t
   `bb-auth --check-access <file>` runs this same parser and exits 0/1, and `scripts/deploy.sh` calls
   it on the file about to go live and aborts before restarting, so a rejected file can never become
   a `Restart=on-failure` boot loop.
+
+### Resolving a URL
+
 - **Two levels of resolution, and they answer differently on purpose.** Applications **partition**
   the URL space: every `base` is a literal prefix, no two overlap, and every scope pattern lies
   inside its own application's base, so at most one application can answer for a URL and their file
@@ -410,11 +548,22 @@ is fatal on failure, so reaching the `listening on …` line proves the fetch, t
   which is what stops the area `https://x.com/app` from swallowing `https://x.com/application`: the
   same trap as a `*` written with no `/` before it. An application on a wildcard host is therefore
   not expressible, and that is a deliberate cost.
+
 - **A URL no application covers is reachable by nobody.** Since a user carries no URL of their
   own, this is the only fail-closed reading, and it is a posture worth saying out loud: a gated
   location outside every application is a `401` for everyone, including the person who wrote the
   file. `--check-access` prints each application's area so it can be compared with what nginx
   actually gates.
+
+- **One matcher serves scheme, host and path.** A non-final `*` cannot cross `/`, and `://` holds
+  two of them: that single rule is what stops a wildcard leaking across component boundaries, so
+  don't split `glob_match` into three matchers. It is a bottom-up DP, **not** recursive backtracking
+  (which is exponential on many `*`); `glob_many_stars_terminates` pins that. A URL with `..` is
+  rejected at both levels of resolution, from one helper (`sane_url`), and patterns are validated
+  and authority-lowercased once at load (`compile_pattern`).
+
+### Grants and vetoes
+
 - **One veto, ahead of every grant, on every credential.** `denied` outranks everything
   (`decide`, `decide_api_key`, and the gate's `/auth/session`), and it holds two kinds of entry: a
   **uuid**, which vetoes the user and every identifier they have, and a bare **email**, which vetoes
@@ -425,6 +574,7 @@ is fatal on failure, so reaching the `listening on …` line proves the fetch, t
   scope, which grants before it (`decide`): that scope grants with no credential at all, so a vetoed
   client would simply omit theirs. A veto bypassed by sending *less* is not a veto, and offering it
   would be worse than not offering it, because an operator would believe it.
+
 - **A scope's `excluded` is the same veto, one level down, and it is checked before the
   scope's own grant.** `denied` shuts somebody out everywhere; this shuts them out of *here*,
   and the two exist for different jobs rather than as a convenience. It is what makes a
@@ -443,6 +593,7 @@ is fatal on failure, so reaching the `listening on …` line proves the fetch, t
   unknown email as itself (`to_exclusions`, `parse_exclusions`), and `remove_user` and
   `user_group_refs` count an exclusion as a reference like any other — marked `(excluded)`,
   because a sweep that reported the two alike would read as if the user had been let in there.
+
 - **A scope names people, and that is the only place a grant is written.** The rule is against
   **duplication**: a user removed from the roster must not still walk in through a place. Since
   the grant is written on the side of the place and nowhere else, that takes two halves.
@@ -450,14 +601,18 @@ is fatal on failure, so reaching the `listening on …` line proves the fetch, t
   not exist grants nothing; and `remove_user` sweeps every scope and group that named the row it
   removes. Without both, a deleted user who re-registers on Cognito would walk back in
   through a dangling reference.
+
 - **`anonymous` and `authenticated` grant without listing anybody**, which makes them the two
   things an operator most often did not mean to leave open, and why `--check-access` and the startup
-  banner print them by name. `anonymous` needs no credential at all and the `204` names nobody.
+  banner print them by name. `anonymous` needs no credential at all, and a request that presents
+  none is answered with a `204` that names nobody (one that presents a credential is still
+  named, except a vetoed one: see `authorize_login`).
   `authenticated` takes any identity Cognito vouches for, enrolled or not; since self-signup is open
   that means anyone who can register, which is the right grant for an onboarding area and the wrong
   one for anything else. It reaches only the two Cognito-backed credentials: an unknown `bbk_` key
   stays unknown, because Cognito vouches for no key of ours and there would be no identity to hand
   back. Note it multiplies with `allow_unverified_social`.
+
 - **Static API keys (`bbk_` namespace) act as their user, and may only narrow.** The raw key is
   never stored, and the `sha256(bearer)` lookup in `by_key_hash` **is** the verification. A key must
   have a non-denied owner and be unexpired (`decide_api_key`), and then the scope that answers
@@ -471,18 +626,17 @@ is fatal on failure, so reaching the `listening on …` line proves the fetch, t
   key exists nowhere else to retry from. That order is the API's, not the caller's: a mint returns a
   `SealedKey`, and `reveal` takes the `Written` receipt of a completed write, so a dry run has no
   bearer to leak. `key rotate` is the answer to a leak.
+
 - **Access is enumerated, never assumed.** A URL no application covers is open to nobody; a
   `restricted` scope that lists nobody admits nobody; an empty `credentials` list is a fatal error
-  rather than a scope reachable by everything. Blanket coverage is the explicit pattern `*://*/*`,
+  rather than a scope that admits every credential there is. Blanket coverage is the explicit
+  pattern `*://*/*`,
   which an operator has to mean in order to write. Because every scope is defined by URL patterns,
   `BB_AUTH_ORIGINAL_URL_HEADER` is **mandatory**: a request without it resolves to no application
   and is denied. See `UrlScope::allows` and `sane_url`.
-- **One matcher serves scheme, host and path.** A non-final `*` cannot cross `/`, and `://` holds
-  two of them: that single rule is what stops a wildcard leaking across component boundaries, so
-  don't split `glob_match` into three matchers. It is a bottom-up DP, **not** recursive backtracking
-  (which is exponential on many `*`); `glob_many_stars_terminates` pins that. A URL with `..` is
-  rejected at both levels of resolution, from one helper (`sane_url`), and patterns are validated
-  and authority-lowercased once at load (`compile_pattern`).
+
+### What a 204 hands nginx
+
 - **nginx builds `X-Original-URL`, and must not let `Host:` pick the scope.** Hardcode the host per
   server block (`$scheme://$host$uri` is only safe behind a `default_server` that rejects unknown
   Hosts), and use `$uri`, never `$request_uri` — the latter is undecoded and carries the query
@@ -492,6 +646,7 @@ is fatal on failure, so reaching the `listening on …` line proves the fetch, t
   `server` level: the subrequest re-runs the server rewrite phase and would clobber it. A gated
   location that forgets it sends no header and is denied — fail-closed, which is why this is
   survivable. nginx must also forward `Authorization`, and set the header on `/auth/session` too.
+
 - **The gate names the identity; nginx is what makes that trustworthy.** A `204` carries the
   authorized identity in headers derived from `identity_attrs` (`IdentityAttr`), default
   `email` and therefore `X-Auth-Email`, which is what every application behind this gate already
@@ -523,10 +678,11 @@ is fatal on failure, so reaching the `listening on …` line proves the fetch, t
   the credential themselves — the cookie is not a JWT and a `bbk_` key has no token, and a valid
   id_token proves identity, never authorization. On an `authenticated` scope the identity may be in
   no table at all, and it then has no `uuid` to send; enrolling them is the application's business.
+
 - **The profile claims are decoration, and the encoder is what makes them safe.** A `204` may also
   carry OIDC claims from the token — `profile_claims`, empty by default. They are **not**
   identities: they authorize nothing, no field of the access file mentions them, and
-  `authorize_identity` keeps them out of `decide` — otherwise `bb-auth-adm can` would stop
+  `authorize_login` keeps them out of `decide`; otherwise `bb-auth-adm can` would stop
   answering the gate's question. Being self-asserted (any Cognito user edits their own profile,
   `email_verified` or not), nothing downstream may key on them. Three rules to keep: values go out
   **percent-encoded** (`pct_encode`, RFC 3986) and that construction — printable ASCII for *any*
@@ -537,6 +693,7 @@ is fatal on failure, so reaching the `listening on …` line proves the fetch, t
   banner may list them). Capture hygiene (`clean_claim`) is about quality and cookie size, not
   safety: a bad value costs that claim, never the login, which is why `Claims::extra` holds
   `serde_json::Value`s.
+
 - **The set is config; the header name is code.** This holds twice over, for the same reason and
   through the same function. An operator names a *claim* (`profile_claims`) or an
   *attribute* (`identity_attrs`), never a header: `derive_profile_header` maps both
@@ -557,31 +714,25 @@ is fatal on failure, so reaching the `listening on …` line proves the fetch, t
   **config-authoritative** (`profile_headers`): a cookie outlives an edit to the list, so what it
   carries is filtered against the *live* config, never emitted because the credential happened to
   have it.
-- **`/auth/session` is not a gate.** It mints a cookie for any valid id_token whose identifier is
+
+### The endpoints, the pages and the redirects
+
+- **`/auth/session` is not a gate, and it has exactly one door.** The door is
+  `request_site`: a `cross-site` request, and a client that says nothing about where it came
+  from, are refused before the body is read, because minting a session cookie for somebody
+  else's form is login CSRF and `SameSite=Lax` says nothing about it (that attribute governs
+  when a cookie is *sent*, never who may cause one to be *set*). `same-site` passes, since an
+  operator's own sign-in page may sit on a sibling host and the cookie's `Domain` is the site
+  anyway. Past the door it mints a cookie for any valid id_token whose identifier is
   not `denied` and has somewhere to go (a roster row, or any `authenticated` scope exists at all).
   The 403 there is a courtesy so an un-enrolled user hears it at the login page instead of bouncing
   off a 401 later — it must not tighten into an authorization check, and it must not try to guess
   the destination from `rd` (which is the post-login target, not the URL that triggered the login,
   and `safe_rd` may have already replaced it).
+
 - **Sessions are stateless** — no server-side store. Any worker validates any cookie; a restart
   logs nobody out. Don't introduce per-session server state.
-- **Dependencies stay pure-Rust, on `ring` or RustCrypto** (`ureq`+rustls with bundled Mozilla
-  roots via `webpki-roots`; `jsonwebtoken`, `hmac`/`sha2` on RustCrypto). The point is a clean
-  aarch64 cross-compile with **no system
-  OpenSSL or cert store**. Do not add a dep that pulls in `openssl`/native-tls, and do not let
-  rustls or a JWT crate switch to `aws-lc-rs` or a platform verifier: both reintroduce exactly
-  what this rule exists to keep out. Selecting **no** provider is not the safe middle, and it
-  is the half of this rule that has actually broken production: `jsonwebtoken`'s crypto is the
-  `rust_crypto` **feature**, not a default, and with neither feature it compiles happily and
-  installs a verifier factory that is a `panic!`. The gate then starts clean (the JWKS fetch and
-  `from_jwk` never reach the provider) and aborts on the first real login, which under
-  `panic = "abort"` and `Restart=on-failure` is a restart loop rather than a failed request.
-  `cargo tree` cannot catch that one, because there the wrong tree is the one with a crate
-  **missing**; `rsa_signature_verification_works` is what catches it, and is why that test
-  exists. After any dependency bump, check with
-  `cargo tree | grep -iE "openssl|native-tls|aws-lc|schannel|security-framework"`, which must
-  stay empty, and confirm `webpki-roots` is still there. No async runtime
-  (`tiny_http` is blocking + threaded) — keeps the binary and resident memory small.
+
 - **id_token validation** must keep all of: `alg==RS256`, `iss`/`aud`/`exp` enforced (`exp`
   required, 60s leeway), `token_use=="id"`, `email_verified` truthy. The **one** sanctioned
   exception: `allow_unverified_social` accepts `email_verified=false` **only** for federated
@@ -589,11 +740,13 @@ is fatal on failure, so reaching the `listening on …` line proves the fetch, t
   self-signup is open and an unverified native email is attacker-controlled. Off by default. See
   `validate_id_token` / `unverified_social_ok`. It multiplies with `authenticated`: together they mean
   "any social account, unverified email, no enrolment".
+
 - **There is no canonical service base URL.** One gate fronts several hosts and which one is in
   play is decided by the caller, so `/auth/session` learns it from `BB_AUTH_ORIGINAL_URL_HEADER`
   (`origin_of`) — nginx must set that header on the session location too, not just the auth-gate.
   `BB_AUTH_AUTHORIZED_HOSTS` (comma-separated host globs, required) is the *only* authority on
   redirect targets. Don't reintroduce a single base URL.
+
 - **The gate never redirects a gated request; nginx does.** A `401` carries this area's login page
   in `LOGIN_URL_HEADER` (`X-Auth-Login-URL`) — the application's `login_url`, else `BB_AUTH_LOGIN_URL`
   (`login_url_for`) — and nginx lifts it with `auth_request_set` into a request variable, which is
@@ -625,6 +778,7 @@ is fatal on failure, so reaching the `listening on …` line proves the fetch, t
   check. It is deliberately **not** checked against `BB_AUTH_AUTHORIZED_HOSTS`: `read_access` reads
   no env, which is what lets `--check-access` run with no config, and moving the check to startup
   would turn a typo into a boot loop that `--check-access` never saw.
+
 - **The pages the gate serves are complete on their own, and the operator's stylesheet is an
   addition to one.** `/auth/login`, `/auth/callback` and the error page carry their palette
   (`THEME_CSS`), the components built from it (`BASE_CSS`, the same bytes `bb-auth-web`
@@ -643,9 +797,18 @@ is fatal on failure, so reaching the `listening on …` line proves the fetch, t
   quotes, fatal at startup otherwise) or HTML-escaped. Request data reaches a page in exactly
   one place, `data-rd` on the sign-in page's `<body>`, validated with the same
   `rd_url_allowed` `safe_rd` uses and emitted as an escaped attribute, never as JavaScript
-  source. **nginx must leave both locations ungated** (`auth_request off`, exactly as for
+  source. **Every page carries a policy, and the policy is derived rather than written**:
+  `PAGE_SECURITY_HEADERS` on every HTML response, and a `page_csp` of `default-src 'none'`
+  plus exactly what that page uses, which is a per-response nonce (`csp_nonce`) on the two
+  inline blocks, the origins the script talks to, and the two `ui` URLs an operator may have
+  set. This is the page in the estate most worth spending one on: its whole job is to hold a
+  credential for a moment, and it is the one a GUI field can point at a third host. The
+  practical cost is that an inline `style=` attribute or an `on…=` handler no longer applies
+  on these pages, so arrangement goes in `AUTH_CSS` where it belonged anyway
+  (`the_sign_in_page_carries_its_policy_and_the_nonce_it_names` pins the pairing). **nginx must leave both locations ungated** (`auth_request off`, exactly as for
   `/auth/session` and `/auth/logout`): a sign-in page behind the gate answers a signed-out
   visitor with itself, forever.
+
 - **Social sign-in is all four env vars or none, fatally.** `BB_AUTH_OAUTH_DOMAIN`,
   `BB_AUTH_SOCIAL_CLIENT_ID`, `BB_AUTH_SOCIAL_CALLBACK_URL` and `BB_AUTH_SOCIAL_IDPS`
   (`SocialConfig::from_env`). Unset, the sign-in page has no social section at all — no
@@ -657,6 +820,7 @@ is fatal on failure, so reaching the `listening on …` line proves the fetch, t
   then refused here, one redirect later, with nothing on the page to explain it. The callback
   URL must match the app client's registered `redirect_uri` byte for byte, which is the whole
   reason it is one value in one place.
+
 - **`safe_rd` guards the post-login redirect** against open-redirect + response-splitting. **Every**
   candidate — relative, absolute, or the no-`rd` default — goes through the same `rd_url_allowed`
   gate, so a spoofed caller origin still can't escape. Rejected ⇒ fall back to `BB_AUTH_LOGIN_URL`.
@@ -664,16 +828,32 @@ is fatal on failure, so reaching the `listening on …` line proves the fetch, t
   backslashes, and lookalikes like `evilbadbat75.com` / `badbat75.com.evil.com` (a pattern's literal
   dot is what rules those out; `*.x.com` also does not match the apex `x.com`). Any new use of
   request-supplied data in a header/redirect must stay behind this guard.
+
+### Dependencies and the build
+
+- **Dependencies stay pure-Rust, on `ring` or RustCrypto** (`ureq`+rustls with bundled Mozilla
+  roots via `webpki-roots`; `jsonwebtoken`, `hmac`/`sha2` on RustCrypto). The point is a clean
+  aarch64 cross-compile with **no system
+  OpenSSL or cert store**. Do not add a dep that pulls in `openssl`/native-tls, and do not let
+  rustls or a JWT crate switch to `aws-lc-rs` or a platform verifier: both reintroduce exactly
+  what this rule exists to keep out. Selecting **no** provider is not the safe middle, and it
+  is the half of this rule that has actually broken production: `jsonwebtoken`'s crypto is the
+  `rust_crypto` **feature**, not a default, and with neither feature it compiles happily and
+  installs a verifier factory that is a `panic!`. The gate then starts clean (the JWKS fetch and
+  `from_jwk` never reach the provider) and aborts on the first real login, which under
+  `panic = "abort"` and `Restart=on-failure` is a restart loop rather than a failed request.
+  `cargo tree` cannot catch that one, because there the wrong tree is the one with a crate
+  **missing**; `rsa_signature_verification_works` is what catches it, and is why that test
+  exists. After any dependency bump, check with
+  `cargo tree | grep -iE "openssl|native-tls|aws-lc|schannel|security-framework"`, which must
+  stay empty, and confirm `webpki-roots` is still there. No async runtime
+  (`tiny_http` is blocking + threaded) — keeps the binary and resident memory small.
+
 - **Release profile is size-optimized** (`opt-level="z"`, LTO, `panic="abort"`, stripped). Leave
   it that way unless asked.
 
-## Config & deploy notes
+### Deploy and packaging
 
-- Config is env vars (`Config::from_env`; missing required vars are a fatal exit) **plus the
-  settings file** (`compile_settings`) for the six that must be hot. The only secret is
-  `BB_AUTH_HMAC_KEY` (≥32 bytes), and it is in the env file. Full reference:
-  [deploy/bb-auth.env.example](deploy/bb-auth.env.example),
-  [deploy/settings.example.json](deploy/settings.example.json) and `docs/ARCHITECTURE.md` §8/§8a.
 - **Target layout is a tree**: `/opt/bb-auth/{bin/bb-auth, bin/bb-auth-adm, bin/bb-auth-web,
   etc/bb-auth.env, etc/bb-auth-web.env, share/*.example, var/lib/{access,settings}.json}`, units at
   `/usr/lib/systemd/system/{bb-auth.service, bb-auth-web.service, bb-auth-reload.{path,service}}`
@@ -690,6 +870,7 @@ is fatal on failure, so reaching the `listening on …` line proves the fetch, t
   hole is the **directory**, because the write is a temp file renamed into place. Both admin
   tools are **optional in the deploy** (their own packages, `deploy.ps1 -Packages`), and must
   stay that way.
+
 - **Installing `bb-auth-web` is what moves the access file (and the settings file) to
   `bb-auth-web:bb-auth 0640`**
   (its directory `bb-auth-web:bb-auth 0750`); a deploy without it changes no ownership at all,
@@ -701,6 +882,7 @@ is fatal on failure, so reaching the `listening on …` line proves the fetch, t
   `EPERM`. And because the writer *preserves* the owner rather than resetting it, `sudo
   bb-auth-adm` keeps working untouched and leaves the file `bb-auth-web:bb-auth` too — the two
   editors go on sharing one file, which is what the GUI's `rev` check exists for.
+
 - **`bb-auth-reload.path` is what makes an edit live**, from either editor: it watches
   `access.json` **and `settings.json`** and runs `systemctl reload bb-auth`, so neither the GUI
   (unprivileged, and not the gate) nor the CLI operator needs the privilege to signal the
@@ -710,18 +892,26 @@ is fatal on failure, so reaching the `listening on …` line proves the fetch, t
   `PathModified=`: both editors end with a `rename(2)`, seen as `IN_MOVED_TO` on the watched
   directory, and `IN_MODIFY` would only add a reload on a half-written file. It ships with the
   GUI, so a CLI-only host still reloads by hand; a doubled reload costs nothing.
+
 - **The access file's name is a config contract**, so `BB_AUTH_ACCESS_FILE` and the file it names
   are **state a package may not touch**: the file is the only current copy of the access list, and
   the env file is operator-owned precisely so a deploy can never rewrite it. The gate's `postinst`
   therefore checks that the variable names the file this install creates and aborts **before the
   restart** if it does not, because a mismatched path means `--check-access` vouched for a file
   nothing loads. A missing `BB_AUTH_ACCESS_FILE` is caught by the same required-var preflight.
+
 - **The live `access.json` is the copy that is current** — it is edited on the host (`sudo
   bb-auth-adm …; systemctl reload bb-auth`) and a repo copy drifts from it within a week. So
   a redeploy preserves it and `deploy.ps1 -AccessFile` **replaces** it wholesale: never stage a
-  stale file. `bb-auth-adm` is installed to the host precisely so the edit can happen where the
+  stale file. The examples deliberately name `<your-access.json>` and not a path in this
+  repository: `deploy/access.json` is gitignored, is whatever a past session left there, and
+  on at least one checkout was a pre-1.0 document that parses as JSON and that the gate
+  refuses outright. `deploy.ps1` now checks its `version` locally, and `deploy.sh` runs the
+  gate's own parser on it before anything is installed, so a stale file costs a second rather
+  than a red deploy on a mutated host. `bb-auth-adm` is installed to the host precisely so the edit can happen where the
   current file is. It is its own package and optional, and must stay that way: the gate never
   calls it.
+
 - **The deploy is `dpkg -i`, and the packages are where the install lives.** The binaries, the
   units, the service users, the env file, the HMAC key, the empty access file, and the order they
   must happen in all live in `deploy/debian/*/postinst`, and the arrangement is
@@ -736,10 +926,27 @@ is fatal on failure, so reaching the `listening on …` line proves the fetch, t
   and a mismatched path means `--check-access` vouched for a file nothing loads. A redeploy must
   never log anyone out *by accident*, and the one sanctioned exception is a deliberate
   cookie-format bump, which belongs in the release notes.
-- **`scripts/deploy.sh` is what a package may not do**, and nothing else: `dpkg -i` in one
+
+- **A release runs the tests and says which commit it is.** `scripts/package.sh` runs
+  `cargo test --locked` before it builds (`--skip-tests` to repackage bytes already tested)
+  and refuses an uncommitted tree (`--allow-dirty` to mean it); both scripts export
+  `BB_AUTH_BUILD` from `git describe --always --dirty --tags`, which `bb_auth_core::BUILD`
+  reads at compile time, `--version` prints, both banners open with, and the GUI's footer
+  carries. A plain `cargo build` sets nothing and reports `unknown`, which is the honest
+  answer for a binary nobody released. The reason is one incident: a `.deb`
+  version reads `1.1.0-1` for a tagged release, a dirty checkout and a hand-patched
+  experiment alike, and the test that catches a gate with no crypto provider was being run by
+  a human remembering to. **`bb-auth --self-test`** is the other half: the offline RS256
+  verification a login performs, with no env and no network, and `scripts/verify.sh` runs it
+  on the host, because every other check that script has is green on exactly that build.
+- **`scripts/deploy.sh` is what a package may not do**, and nothing else: validating a staged
+  `access.json` with the gate's own parser **before** `dpkg -i`, out of the package about to be
+  installed (it fails closed either way, but a check that runs afterwards means a red deploy on
+  a host that has already been mutated); `dpkg -i` in one
   transaction (not `apt install`, which declines to reinstall an equal version, so a rebuilt
-  `1.0.0-1` would silently not deploy); installing a staged
-  `access.json` after the gate's own parser has vouched for it, with the owner and mode the live
+  `1.1.0-1` would silently not deploy); recording what it replaced under `share/previous/`,
+  because dpkg keeps no archive and a rollback needs somewhere to start; installing the staged
+  `access.json`, with the owner and mode the live
   file already had; and running `scripts/verify.sh`. It deliberately does **not** move aside a
   unit an admin put in `/etc/systemd/system`, which shadows the packaged one forever:
   that directory is the admin's, so the postinsts and `verify.sh` *report* the shadow and the
@@ -748,3 +955,19 @@ is fatal on failure, so reaching the `listening on …` line proves the fetch, t
   there. Keep the host-side logic in those files rather than in a string quoted through
   PowerShell into `ssh` into a remote shell, and keep `verify.sh` read-only so it stays runnable
   by hand on a host nobody is deploying to.
+
+## Config & deploy notes
+
+The rules that govern a deploy are **in the invariants above**, under
+[Deploy and packaging](#deploy-and-packaging): a rule about what a package may not do is
+as much an invariant as a rule about what a scope may not grant, and keeping them here
+meant the file's own instruction to "read the invariants" pointed at four fifths of them.
+What is left below is configuration, which is a reference rather than a rule.
+
+- Config is env vars (`Config::from_env`; missing required vars are a fatal exit) **plus the
+  settings file** (`compile_settings`) for the settings that must be hot. Which ones those
+  are, and the three-part rule that decides it, is stated once in the invariants above and
+  deliberately not counted again here: the two copies had already drifted to "ten" and
+  "six". The only secret is `BB_AUTH_HMAC_KEY` (≥32 bytes), and it is in the env file. Full reference:
+  [deploy/bb-auth.env.example](deploy/bb-auth.env.example),
+  [deploy/settings.example.json](deploy/settings.example.json) and `docs/ARCHITECTURE.md` §8/§8a.

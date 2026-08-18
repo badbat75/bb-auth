@@ -9,6 +9,17 @@ Back button, reloads, resubmits, cookies — does to them.
 It is deliberately **outside** `tests/`: nothing here is a cargo target, and nothing in
 cargo, fmt, clippy or rustdoc may ever pick it up.
 
+**It is run by hand, like every other check in this repository.** Several invariants are
+enforced *only* here (the scripting-disabled walk of the whole GUI, PRG after every
+mutation, the reveal-once bearer surviving a Back button), so run it before a release and
+after any change to the markup, the forms or the routes. `AGENTS.md`'s table says which
+change needs which suite.
+
+The **gate's** two pages are not covered here at all: this suite boots `bb-auth-web` only
+(`lib/server.js`). A sign-in page is the one page where a JavaScript error means nobody gets
+in, and its Cognito flow cannot be exercised by any Rust unit test either, so that gap is
+worth knowing about before it is worth filling.
+
 ## What it needs
 
 - **Node.js** ≥ 20 (uses global `fetch`).
@@ -43,6 +54,7 @@ idempotent and areas are order-independent.
 | --- | --- |
 | `auth.js` | identity comes from `X-Auth-Email` and nowhere else: 401 / 403 / 200, 404 in and outside the base path, 405 on GET of a POST-only route, the same-origin guard on every POST |
 | `crud.js` | full CRUD through the forms — user_groups, applications, scopes (incl. reorder and `excluded`), denied, users, api_keys (mint / reveal-once / edit / rotate / remove) — each asserted against the JSON file's actual state |
+| `settings.js` | the *other* file: the Settings tab over `settings.json`, its own `rev`, and the two refusals that would otherwise be a lockout (an empty administrator list, an administrator removing themselves). 47 checks, and the only area that writes a file the access-file tests never touch |
 | `validation.js` | refused submissions: 400, in-context error, typed input preserved, and **zero bytes written** — incl. the malformed-email refusals on `users · add` and `denied · add` |
 | `conflict.js` | the `rev` check: generic 409 (Back-button recovery hint, en+it), stale-form resubmit, and the mint-specific 409 on a reloaded reveal page (rotate link, exactly one key, en+it) |
 | `i18n.js` | the two display preferences: `?lang=` / `?theme=` answer 302 + a cookie, the choice persists across plain navigations, the 401/403/verdict copy is translated, `html lang=` is the proof; plus the Settings menu, where picking an option applies it on the spot, keeps the rest of the query, and offers `auto` as a real stored choice |

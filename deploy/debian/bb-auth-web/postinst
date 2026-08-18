@@ -131,8 +131,20 @@ configure)
         if [ -d /run/systemd/system ] && [ -x /usr/bin/deb-systemd-invoke ]; then
             # The GUI first, then the watcher. Arming the watcher earlier could fire a
             # reload into a gate that is itself mid-restart from its own postinst.
+            #
+            # `|| true` on the invoke, because a policy-rc.d that declines to start
+            # services is a legitimate answer; the STATE is then asserted, because an
+            # install that reports success while nothing is running is the failure this
+            # whole preflight exists to avoid, arriving one line later.
             deb-systemd-invoke restart bb-auth-web.service >/dev/null || true
             deb-systemd-invoke restart bb-auth-reload.path >/dev/null || true
+            for u in bb-auth-web.service bb-auth-reload.path; do
+                if systemctl is-enabled --quiet "$u" 2>/dev/null                    && ! systemctl is-active --quiet "$u" 2>/dev/null; then
+                    echo "bb-auth-web: $u FAILED to start. The last 30 journal lines:" >&2
+                    journalctl -u "$u" -n 30 --no-pager >&2 || true
+                    exit 1
+                fi
+            done
         fi
         echo "bb-auth-web: answers only through nginx. Gate its location with auth_request"
         echo "bb-auth-web: and inject X-Auth-Email (README, \"The admin GUI behind the gate\")."
