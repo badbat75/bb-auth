@@ -152,9 +152,17 @@ function ConvertTo-WslPath([string]$WinPath) {
 $pkgArgs = "--arch $Arch --revision $Revision"
 if ($NoBuild)    { $pkgArgs += ' --no-build' }
 if ($AllowDirty) { $pkgArgs += ' --allow-dirty' }
-Write-Host "==> building the $Arch packages in WSL ($WslDistro)" -ForegroundColor Cyan
+
+# WHICH COMMIT THESE BYTES ARE, worked out HERE and passed in. The build runs inside WSL,
+# where the checkout is a /mnt/c mount and `git` may not be installed at all: asking there
+# answered "unknown" for every release built the supported way, which is the one path where
+# the answer matters. It also silently disarmed package.sh's refusal to package an
+# uncommitted tree, since a tree it cannot read is never dirty.
+$Build = (git -C $Repo describe --always --dirty --tags 2>$null | Select-Object -First 1)
+if (-not $Build) { $Build = 'unknown' }
+Write-Host "==> building the $Arch packages in WSL ($WslDistro), from $Build" -ForegroundColor Cyan
 $wslRepo = ConvertTo-WslPath $Repo
-wsl -d $WslDistro -- bash -lc "cd `"$wslRepo`" && bash scripts/package.sh $pkgArgs"
+wsl -d $WslDistro -- bash -lc "cd `"$wslRepo`" && BB_AUTH_BUILD='$Build' bash scripts/package.sh $pkgArgs"
 Assert-Native "WSL package build (scripts/package.sh $pkgArgs)"
 
 # --- 2. the artifacts --------------------------------------------------------

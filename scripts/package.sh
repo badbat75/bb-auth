@@ -167,7 +167,13 @@ echo "[pkg] output   : $OUT_DIR"
 # What these bytes are, in a form that survives into the binary (`bb-auth --version`) and
 # into this log. A .deb version cannot answer it: 1.1.0-1 is what a tagged release, a dirty
 # checkout and a hand-patched experiment all report.
-BB_AUTH_BUILD="$(cd "$CRATE_DIR" && git describe --always --dirty --tags 2>/dev/null || echo unknown)"
+# Inherited if somebody already worked it out, and `scripts/deploy.ps1` does: this script
+# often runs inside a WSL distribution where the checkout is a /mnt/c mount and `git` is not
+# installed at all, so asking here would answer "unknown" for every release built the
+# supported way. Whoever has a working git computes it; this only falls back.
+if [ -z "${BB_AUTH_BUILD:-}" ]; then
+  BB_AUTH_BUILD="$(cd "$CRATE_DIR" && git describe --always --dirty --tags 2>/dev/null || echo unknown)"
+fi
 export BB_AUTH_BUILD
 echo "[pkg] build    : $BB_AUTH_BUILD"
 case "$BB_AUTH_BUILD" in

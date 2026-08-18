@@ -75,7 +75,10 @@ section logs anybody out.
   commit the binary was built from, with a `-dirty` marker: `scripts/build.sh` and
   `scripts/package.sh` export it as `BB_AUTH_BUILD` and the binaries read it at compile
   time. A `.deb` version reads the same for a tagged release and for a working tree somebody
-  built by hand.
+  built by hand. `deploy.ps1` works the string out on the Windows side and passes it in,
+  because the build runs inside a WSL distribution where the checkout is a `/mnt/c` mount and
+  `git` may not exist: asking there answered `unknown` for every release built the supported
+  way, and left the dirty-tree refusal unable to fire.
 * **`scripts/package.sh` runs the test suite** before it builds, and refuses an uncommitted
   tree unless `--allow-dirty`. `--skip-tests` exists for repackaging bytes already tested.
 * Builds are `--locked`, and `scripts/build.sh` no longer copies the resolved `Cargo.lock`
