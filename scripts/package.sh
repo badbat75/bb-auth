@@ -194,8 +194,15 @@ esac
 # logic, neither of which changes with the architecture. See the header for why this is
 # not optional by default.
 if [ "$DO_TEST" = 1 ]; then
-  echo "[pkg] tests    : cargo test --locked (host)"
-  ( cd "$CRATE_DIR" && cargo test --locked --quiet ) || {
+  TEST_DIR="${BB_AUTH_TEST_DIR:-$HOME/.cache/bb-auth-test}"
+  echo "[pkg] tests    : cargo test --locked (host, target dir $TEST_DIR)"
+  # Its OWN target directory, on this machine's own filesystem, and not the crate's. The
+  # crate directory is often a /mnt/c mount under WSL, where a Windows cargo and this one
+  # would share a single target/ and where neither cargo nor a rustc wrapper configured on
+  # this machine (sccache, say) can reliably set the permissions it wants: the failure looks
+  # like a broken dependency and is a broken filesystem. build.sh stages the whole crate off
+  # that drive for the same reason; the tests need nothing but somewhere to put objects.
+  ( cd "$CRATE_DIR" && CARGO_TARGET_DIR="$TEST_DIR" cargo test --locked --quiet ) || {
     echo "[pkg] FATAL: the test suite failed; nothing was packaged." >&2
     exit 1; }
 else

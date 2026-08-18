@@ -60,6 +60,14 @@ names another) needs, once:
 - **binutils for the target** (`binutils-aarch64-linux-gnu`), for the GLIBC-floor check;
   without it `package.sh` warns and skips that check rather than failing.
 - **cargo-deb**, which `package.sh` installs at a pinned version if it is missing.
+- **git is optional here**: `deploy.ps1` works the build string out on the Windows side and
+  passes it in as `BB_AUTH_BUILD`, precisely because this distribution may not have git and
+  the checkout is a `/mnt/c` mount either way.
+
+The two builds keep their own target directories under `$HOME` (`bb-auth-build` for the
+cross-compile, `bb-auth-test` for the suite) and never the crate's `target/`: that one is
+shared with a Windows cargo on the same files, which is slow at best and, with a rustc
+wrapper like sccache in play, a permission error that reads like a broken dependency.
 
 ## The normal path
 
