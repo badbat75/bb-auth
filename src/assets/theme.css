@@ -1,0 +1,172 @@
+/* The palette, and nothing else: the one thing every HTML surface in this project must
+   agree on, and the one thing an operator's own stylesheet is expected to replace.
+   Compiled into both binaries as `bb_auth_core::THEME_CSS` (see its rustdoc for why a
+   stylesheet lives in the library at all) and emitted ahead of each program's own layout.
+
+   THE CONTRACT THIS FILE IS: every rule in `bb-auth-web`'s admin layout and in the gate's
+   auth-card layout reads its colours, radii and fonts from the custom properties below and
+   from no literal of its own. That is what makes `ui.stylesheet_url` a *token file*: a
+   deployment restyles both programs by redefining these names, with no knowledge of either
+   layout and no way to break one. Add a literal colour to a layout and that stops being
+   true for whatever it paints.
+
+   THE VALUES ARE THE ONES THE SIGN-IN PAGE IS DESIGNED IN, which is a decision about what a
+   *default* is for. The built-in palette is not a placeholder to be replaced before the
+   product looks finished: it is what every surface looks like when nothing external answers,
+   and the sign-in page is the surface a stranger meets first, so it is the one the rest
+   follows rather than the other way round. The practical consequence is that a deployment
+   whose own token file says the same things (assets.badbat75.com/css/tokens.css does) changes
+   nothing when it is switched on, and a deployment with no token file at all is not a
+   deployment with a half-styled admin interface.
+
+   The one value that deliberately does NOT follow a deployment's own file is `--logo-filter`,
+   which is `none` in every arm here. Inverting a mark is only right when you know how the
+   mark is drawn, and `ui.logo_url` is an operator's asset this file has never seen; a
+   deployment whose logo needs it says so in its own token file, where the logo is known.
+
+   FOUR ARMS, and they are not interchangeable. `:root` carries light, because a browser
+   that has never been told anything is the state everything else is a departure from. The
+   media query gives dark to a dark OS, but only while no explicit light choice is present.
+   The two `[data-theme]` arms are what an explicit choice sets, and they outrank the media
+   query by specificity alone, with no script anywhere. The dark token list is therefore
+   written TWICE, on purpose, and the two copies are kept in step by hand: there is no third
+   place to put it that does not need JavaScript to flip a class.
+
+   An override file must repeat the same four arms to be complete. One that defines only
+   `:root` restyles light and leaves dark as it is here, which is a legitimate thing to
+   ship and not an error. */
+:root{
+  color-scheme:light dark;
+
+  /* Surfaces and text. */
+  --bg:#f6f7fb;
+  /* A decorative layer painted over --bg, and the reason `background` is written
+     `var(--bg-grad),var(--bg)` everywhere rather than as a plain fill: a deployment that
+     wants a flat ground sets it to `none` and every surface goes flat at once. */
+  --bg-grad:radial-gradient(1200px 600px at 50% -10%,#ffffff 0%,#f6f7fb 60%);
+  --card:#ffffff;
+  --card-border:#e3e4ec;
+  --text:#16161b;
+  --muted:#61616e;
+
+  /* Form controls. Their own tokens rather than a reuse of --bg/--card-border, because a
+     dark theme usually wants a field *recessed* below its panel while a light one wants it
+     level with the page, and one token cannot say both. */
+  --input-bg:#f6f7fb;
+  --input-border:#d8d9e4;
+
+  /* The accent, and what is legible on top of it. --on-accent is the text colour for a
+     filled accent surface, never a background of its own. */
+  --accent:#4661f0;
+  --accent-hover:#3550dd;
+  --accent-weak:rgba(70,97,240,.15);
+  --on-accent:#ffffff;
+
+  /* The three states. Each has a foreground and a tint: the foreground is for a border, a
+     word or a filled tag, the tint for the body of a message box. */
+  --ok:#1f8a5c;
+  --ok-bg:rgba(31,138,92,.1);
+  --warn:#8a5a00;
+  --warn-bg:rgba(138,90,0,.1);
+  --error:#cf3b3b;
+  --error-bg:rgba(207,59,59,.1);
+
+  /* The text colour on a FILLED state surface, and it is not --on-accent however much the
+     two look alike here. The accent is a mid blue in both arms, so white sits on it either
+     way; the states are dark on a light ground and deliberately LIGHT on a dark one (a warn
+     that reads as a warning against #16161b is a yellow), so a filled state tag needs the
+     ground's colour on dark and white on light. One token, because a tag and a destructive
+     button are the only things that fill with a state. */
+  --on-state:#ffffff;
+
+  /* Elevation. A shadow is a colour, so it belongs to the theme and not to a layout: the
+     same card that needs a deep one on a dark ground needs a soft one on a light one. */
+  --shadow-lg:0 8px 30px rgba(22,22,27,.10);
+  --shadow-md:0 6px 18px rgba(22,22,27,.10);
+
+  /* A neutral fill for a resting chip or tag: quieter than a state, louder than the card. */
+  --chip:#ecedf5;
+
+  /* How a logo has to be treated to sit on this ground. See the header: this file does not
+     know what an operator's mark looks like, so it does nothing to it, in every arm. */
+  --logo-filter:none;
+
+  /* Shape, size and typography. Not colour: a radius, a step or a font family does not
+     change with the theme, so unlike every token above these are defined exactly once,
+     here, and must never be copied into either dark arm below.
+
+     --r-box is a card, a panel, a menu; --r-ctl is everything a person operates: a field, a
+     button, a tab, a row action. Two radii and no third, which is what keeps the sign-in
+     card and the admin's panels the same object at different sizes. --r-pill is not a
+     control shape at all: it is for a LABEL (a tag, a count), the one thing on either
+     surface that is read rather than clicked. */
+  --r-box:14px;
+  --r-ctl:10px;
+  --r-pill:999px;
+  --fs-sm:.85rem;
+  --font-ui:-apple-system,BlinkMacSystemFont,"Segoe UI",Roboto,Helvetica,Arial,sans-serif;
+  --font-mono:ui-monospace,SFMono-Regular,Consolas,Menlo,monospace;
+}
+
+/* An explicit light choice needs no different tokens (the block above already holds them),
+   only color-scheme narrowed from the default's `light dark` to plain `light`, so the
+   browser's own scrollbars and form controls stop following a dark OS. */
+:root[data-theme=light]{color-scheme:light}
+
+/* Dark for a dark OS, and `:not([data-theme=light])` is what lets an explicit light choice
+   win over it instead of this arm re-applying dark anyway. */
+@media (prefers-color-scheme:dark){:root:not([data-theme=light]){
+  --bg:#16161b;
+  --bg-grad:radial-gradient(1200px 600px at 50% -10%,#23232e 0%,#16161b 60%);
+  --card:#20202a;
+  --card-border:#32323f;
+  --text:#e8e8ee;
+  --muted:#9a9aa8;
+  --input-bg:#1a1a22;
+  --input-border:#3a3a48;
+  --accent:#5b78ff;
+  --accent-hover:#4661f0;
+  --accent-weak:rgba(91,120,255,.15);
+  --on-accent:#ffffff;
+  --ok:#46c98b;
+  --ok-bg:rgba(70,201,139,.12);
+  --warn:#e3b341;
+  --warn-bg:rgba(227,179,65,.12);
+  --error:#ff6b6b;
+  --error-bg:rgba(255,107,107,.12);
+  --on-state:#16161b;
+  --chip:#2a2a36;
+  --logo-filter:none;
+  --shadow-lg:0 18px 50px rgba(0,0,0,.45);
+  --shadow-md:0 8px 24px rgba(0,0,0,.35);
+}}
+
+/* Kept in sync with the media-query arm above by hand; see the header comment. This is the
+   one that wins on a light OS once dark is chosen explicitly, and it narrows color-scheme
+   the same way the light override does, only to `dark`. */
+:root[data-theme=dark]{
+  --bg:#16161b;
+  --bg-grad:radial-gradient(1200px 600px at 50% -10%,#23232e 0%,#16161b 60%);
+  --card:#20202a;
+  --card-border:#32323f;
+  --text:#e8e8ee;
+  --muted:#9a9aa8;
+  --input-bg:#1a1a22;
+  --input-border:#3a3a48;
+  --accent:#5b78ff;
+  --accent-hover:#4661f0;
+  --accent-weak:rgba(91,120,255,.15);
+  --on-accent:#ffffff;
+  --ok:#46c98b;
+  --ok-bg:rgba(70,201,139,.12);
+  --warn:#e3b341;
+  --warn-bg:rgba(227,179,65,.12);
+  --error:#ff6b6b;
+  --error-bg:rgba(255,107,107,.12);
+  --on-state:#16161b;
+  --chip:#2a2a36;
+  --logo-filter:none;
+  --shadow-lg:0 18px 50px rgba(0,0,0,.45);
+  --shadow-md:0 8px 24px rgba(0,0,0,.35);
+  color-scheme:dark;
+}

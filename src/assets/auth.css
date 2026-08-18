@@ -1,0 +1,72 @@
+/* The gate's ARRANGEMENT: one centred card, the steps inside it, and the handful of things
+   only a sign-in page has. Emitted after `bb_auth_core::THEME_CSS` (the palette) and
+   `bb_auth_core::BASE_CSS` (the components), which between them already say what a card, a
+   field, a button and a message box are made of.
+
+   So there is almost nothing here, and that is the point: what this file adds is where things
+   go, not what they look like. The three overrides it does make are each forced by the
+   arrangement and are marked as such — a card that is the whole page wants the deeper
+   elevation, and a two-glyph language toggle is not a button in the sense base.css means.
+   Anything else that wants overriding belongs in base.css instead, where the admin interface
+   gets it too. It still defines NOT ONE COLOUR of its own. */
+
+/* The whole page is one card, centred. `margin:auto` on the card and not `align-items:center`
+   here: it centres while the card is shorter than the viewport and lets it sit at the top and
+   scroll once it is taller, which is the one difference that matters on a phone in
+   landscape. */
+body{display:flex;justify-content:center;padding:24px}
+
+.card{width:100%;max-width:420px;margin:auto;padding:18px 32px 28px;
+  /* The one surface on the page, so it lifts further off the ground than a panel among many
+     does. Same token vocabulary, one step up. */
+  box-shadow:var(--shadow-lg)}
+
+/* Two glyphs in the card's top corner. Deliberately not base.css's button: this is a choice
+   between two words, and giving it a border and a fill would make the busiest thing on the
+   page the one nobody came for. */
+.lang-toggle{text-align:right;font-size:var(--fs-sm);font-weight:700;margin-bottom:8px}
+.lang-toggle button{background:none;border:none;cursor:pointer;padding:2px 4px;
+  color:var(--muted);font:inherit}
+.lang-toggle button:hover{background:none;border:none}
+.lang-toggle button.active{color:var(--accent)}
+.lang-toggle span{color:var(--card-border)}
+
+.brand{text-align:center;margin-bottom:22px}
+.brand img{width:76px;height:76px;object-fit:contain;filter:var(--logo-filter)}
+.brand h1{font-size:1.5rem;font-weight:700;letter-spacing:.5px;margin:12px 0 2px}
+.brand p{color:var(--muted);font-size:.92rem;margin:0}
+
+.field{margin-bottom:16px}
+/* The one-time code: wide tracking and centred, because it is read off another screen and
+   typed in one go. */
+.otp input{letter-spacing:.4em;text-align:center;font-size:1.3rem;font-weight:700}
+
+/* Hidden until it has something to say: `.show` is added with the text, so an empty box can
+   never occupy space above the form. The box itself is base.css's. */
+.msg{display:none;font-size:.9rem}
+.msg.show{display:block}
+
+.hint{text-align:center;margin:16px 2px 0}
+
+/* One page, several steps, one at a time: the whole flow is in the document and `.active` is
+   what is on screen. No page is ever fetched between the email and the code. */
+.step{display:none}
+.step.active{display:block}
+
+.divider{display:flex;align-items:center;color:var(--muted);font-size:.8rem;margin:18px 0 12px}
+.divider::before,.divider::after{content:"";flex:1;height:1px;background:var(--card-border)}
+.divider span{padding:0 12px}
+
+/* An identity provider's button: base.css's rectangle at base.css's radius, filled like a
+   field rather than like an action, because the accent belongs to the one primary button
+   above it and two accents on one card is no accent at all. */
+.social{display:flex;flex-direction:column;gap:10px}
+button.social-btn{width:100%;display:flex;align-items:center;justify-content:center;gap:10px;
+  padding:11px 14px;font-size:.98rem;font-weight:600;color:var(--text);background:var(--input-bg);
+  border-color:var(--input-border)}
+button.social-btn:hover{background:var(--input-bg);border-color:var(--accent)}
+button.social-btn svg{width:18px;height:18px;flex:0 0 auto}
+
+.status{color:var(--muted);font-size:.95rem;margin:0 0 8px;text-align:center}
+
+footer{text-align:center;font-size:.78rem;margin-top:22px}

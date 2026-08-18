@@ -15,9 +15,15 @@
 //! | Method | Path | Caller | Behaviour |
 //! |--------|------|--------|-----------|
 //! | `GET`  | `/auth/validate` | nginx `auth_request`, loopback | 204 + [`IDENTITY_HEADER`] (+ one header per configured [`ProfileClaim`] the credential carries) if a credential authorizes the request, else 401 |
+//! | `GET`  | `/auth/login`    | browser | the sign-in page ([`LOGIN_HTML`]), which runs the Cognito flow and POSTs the id_token back to `/auth/session` |
+//! | `GET`  | `/auth/callback` | browser | the social sign-in callback ([`CALLBACK_HTML`]); `404` when no `BB_AUTH_SOCIAL_*` is configured |
 //! | `POST` | `/auth/session`  | browser | validate the posted `id_token`, set the cookie, 302 → `rd` |
 //! | `GET`  | `/auth/logout`   | browser | clear the cookie, 302 → the login page |
 //! | `GET`  | `/auth/healthz`  | local   | 200 `ok` |
+//!
+//! The first is the only one nginx gates. The other five must be reachable without a
+//! credential, and the two pages most of all: a sign-in page behind an `auth_request` answers
+//! a signed-out visitor with itself, forever.
 //!
 //! # Authorization model
 //!
@@ -85,13 +91,16 @@
 //!
 //! * **`bb-auth.env`**, read once at `ExecStart` ([`Config`]). Everything a change to costs a
 //!   restart or a re-login: the listener and the worker count, the HMAC keys (the only secret
-//!   in the system), the Cognito trust roots, the cookie's name and domain, and the three that
-//!   *are* the lockout if they are wrong: `BB_AUTH_LOGIN_URL`, `BB_AUTH_AUTHORIZED_HOSTS`,
-//!   `BB_AUTH_ORIGINAL_URL_HEADER`.
+//!   in the system), the Cognito trust roots, the cookie's name and domain, the
+//!   `BB_AUTH_SOCIAL_*` group ([`SocialConfig`], where a wrong value is a sign-in that cannot
+//!   complete), and the three that *are* the lockout if they are wrong: `BB_AUTH_LOGIN_URL`,
+//!   `BB_AUTH_AUTHORIZED_HOSTS`, `BB_AUTH_ORIGINAL_URL_HEADER`.
 //! * **the settings file** (`BB_AUTH_SETTINGS_FILE`, [`bb_auth_core::Settings`]), re-read on
-//!   SIGHUP and held in [`State::settings`]. The five that are read per request, cannot lock
-//!   anybody out, and are not secret. They are in a file rather than the environment because a
-//!   process cannot re-read its own environment: that, and not taste, is why the split exists.
+//!   SIGHUP and held in [`State::settings`]. The ones that are read per request, cannot lock
+//!   anybody out, and are not secret: the five the gate answers with, and the `ui` section
+//!   that says how the pages above look ([`look_subs`]), which `bb-auth-web` reads too. They
+//!   are in a file rather than the environment because a process cannot re-read its own
+//!   environment: that, and not taste, is why the split exists.
 //! * **the access file** ([`bb_auth_core::Access`]), re-read on SIGHUP: who reaches what.
 //!
 //! Both files are validated by the parser their editors use, both reload **fail-soft** (a
@@ -118,10 +127,11 @@ use tiny_http::{Header, Request, Response, Server, StatusCode};
 // access file has no opinion about — HTTP, the cookie, id_token validation, the nginx
 // contract — stays here, in one file, read top to bottom.
 use bb_auth_core::{
-    claim_name_ok, compile_host_pattern, compile_login_url, decide, decide_api_key,
-    default_settings_path, header_safe_email, login_url_for, lower_authority, now, read_access,
-    read_settings, sha256_hex, Access, AccessKind, ApiKeyRecord, Decision, IdentityAttr,
-    KeyDecision, ProfileClaim, Settings, Subject, UrlPattern, API_KEY_PREFIX,
+    claim_name_ok, compile_asset_url, compile_host_pattern, compile_login_url, decide,
+    decide_api_key, default_settings_path, header_safe_email, html_escape, login_url_for,
+    lower_authority, now, read_access, read_settings, sha256_hex, stylesheet_link, Access,
+    AccessKind, ApiKeyRecord, Decision, IdentityAttr, KeyDecision, ProfileClaim, Settings, Subject,
+    UrlPattern, API_KEY_PREFIX, BASE_CSS, THEME_CSS,
 };
 
 type HmacSha256 = Hmac<Sha256>;
@@ -393,6 +403,43 @@ struct Config {
     original_url_header: String,
     /// `BB_AUTH_WORKERS`, the number of blocking request threads. At least 1.
     workers: usize,
+    /// The Cognito JSON API endpoint the sign-in page talks to, **derived** from
+    /// [`Config::issuer`] and never configured: it is the same host, and the pool id is the
+    /// only part of the issuer that is not it.
+    ///
+    /// Derived, and that is the whole argument for serving the sign-in page from here. A page
+    /// that names its own endpoint can name a pool this gate does not validate against, and
+    /// the symptom is a login that succeeds in the browser and is refused by the gate a
+    /// redirect later.
+    cognito_endpoint: String,
+    /// The social (hosted-UI) sign-in, or `None` when this deployment has none.
+    social: Option<SocialConfig>,
+}
+
+/// What a social sign-in needs, from `BB_AUTH_SOCIAL_*`: all of it or none of it.
+///
+/// It is env and not settings because it fails the middle part of the settings file's rule: a
+/// wrong client id or a callback URL that does not match the one registered on the app client
+/// is a sign-in that cannot complete, which is a lockout, and a lockout must not be one edit
+/// away in a GUI. The `ui` section next to it is the opposite case, and the two sitting on
+/// either side of that line is the rule working rather than an inconsistency.
+struct SocialConfig {
+    /// `BB_AUTH_SOCIAL_CLIENT_ID`: the app client the hosted UI and the PKCE exchange use,
+    /// which is usually *not* the one the email flow uses. It must be an accepted audience
+    /// too, so `BB_AUTH_AUDIENCES` has to list it: the gate checks that at startup.
+    client_id: String,
+    /// `https://<BB_AUTH_OAUTH_DOMAIN>/oauth2/authorize`, where the browser is sent.
+    authorize_url: String,
+    /// `https://<BB_AUTH_OAUTH_DOMAIN>/oauth2/token`, where the callback exchanges the code.
+    token_url: String,
+    /// `BB_AUTH_SOCIAL_CALLBACK_URL`: the `redirect_uri`, which must match the one registered
+    /// on the Cognito app client **exactly** or the exchange fails with `redirect_mismatch`.
+    /// Normally `https://<this host>/auth/callback`.
+    callback_url: String,
+    /// `BB_AUTH_SOCIAL_IDPS`: which providers the sign-in page offers a button for, in the
+    /// order they appear. Cognito's own `identity_provider` names, e.g. `Google`. See
+    /// [`KNOWN_IDPS`] for which of them come with an icon.
+    idps: Vec<String>,
 }
 
 /// Read an env var, falling back to `default` when unset.
@@ -491,7 +538,7 @@ impl Config {
         // (comma-separated) appends extra app-client ids — a Cognito id_token is
         // accepted if its `aud` matches ANY of them. Unset => only `client_id`.
         // Deduplicated, order-preserving.
-        let client_id = env_req("BB_AUTH_CLIENT_ID");
+        let client_id = env_page_value("BB_AUTH_CLIENT_ID", &env_req("BB_AUTH_CLIENT_ID"));
         let mut audiences = vec![client_id.clone()];
         for extra in env_or("BB_AUTH_AUDIENCES", "").split(',') {
             let extra = extra.trim();
@@ -499,6 +546,21 @@ impl Config {
                 audiences.push(extra.to_string());
             }
         }
+
+        // The Cognito JSON API endpoint the sign-in page posts to: the issuer with its pool id
+        // taken off. Derived rather than configured, so the page can only ever talk to the
+        // pool this gate validates tokens against.
+        let cognito_endpoint = match origin_of(&issuer) {
+            Some(o) => format!("{o}/"),
+            None => {
+                eprintln!(
+                    "[bb-auth] FATAL: BB_AUTH_COGNITO_ISSUER '{issuer}' is not an absolute URL"
+                );
+                std::process::exit(1);
+            }
+        };
+
+        let social = SocialConfig::from_env(&audiences);
 
         Config {
             listen: env_or("BB_AUTH_LISTEN", "127.0.0.1:4181"),
@@ -517,7 +579,122 @@ impl Config {
             }),
             original_url_header: env_or("BB_AUTH_ORIGINAL_URL_HEADER", "X-Original-URL"),
             workers: env_or("BB_AUTH_WORKERS", "4").parse().unwrap_or(4).max(1),
+            cognito_endpoint,
+            social,
         }
+    }
+}
+
+/// Hold an env value to what a page can safely carry in a JavaScript string literal or an
+/// HTML attribute, and exit if it cannot.
+///
+/// The values this guards (a client id, an OAuth domain, an IdP name) are emitted into
+/// `login.html` **raw**, because they are configuration rather than request data and because
+/// escaping them would only produce a page that fails in a way nobody can read. So the
+/// guarantee is made once, here, at startup: printable ASCII rules out the control bytes and
+/// the newline, and the quote characters and the angle brackets are what a string literal or
+/// an attribute could be broken out of. Fatal, and not a skip: a client id that is refused
+/// silently is a login page that cannot sign anybody in.
+fn env_page_value(key: &str, raw: &str) -> String {
+    let v = raw.trim();
+    let bad = !v.bytes().all(|b| b.is_ascii_graphic())
+        || v.contains('"')
+        || v.contains('\'')
+        || v.contains('<')
+        || v.contains('>')
+        || v.contains('\\');
+    if bad {
+        eprintln!(
+            "[bb-auth] FATAL: {key} must be printable ASCII with no quote, angle bracket or \
+             backslash: it is emitted into the sign-in page"
+        );
+        std::process::exit(1);
+    }
+    v.to_string()
+}
+
+impl SocialConfig {
+    /// Read the `BB_AUTH_SOCIAL_*` group: all four together, or none of them.
+    ///
+    /// **All or nothing, fatally.** A half-configured social sign-in draws a button that
+    /// cannot work, and the person who clicks it is told `redirect_mismatch` by Amazon rather
+    /// than anything this deployment could have said. Refusing to start is the only honest
+    /// answer, and it is the same reflex the access file's parser has: what changes who gets
+    /// in is fatal, what drops one credential is skipped.
+    ///
+    /// `audiences` is checked, not stored: a social sign-in mints tokens under its own app
+    /// client, so unless that client id is an accepted audience every social login is
+    /// validated and then refused, one redirect later, with nothing on the page to explain it.
+    fn from_env(audiences: &[String]) -> Option<SocialConfig> {
+        let domain = env_or("BB_AUTH_OAUTH_DOMAIN", "").trim().to_string();
+        let client_id = env_or("BB_AUTH_SOCIAL_CLIENT_ID", "").trim().to_string();
+        let callback = env_or("BB_AUTH_SOCIAL_CALLBACK_URL", "").trim().to_string();
+        let idps_raw = env_or("BB_AUTH_SOCIAL_IDPS", "").trim().to_string();
+        let set = [&domain, &client_id, &callback, &idps_raw]
+            .iter()
+            .filter(|v| !v.is_empty())
+            .count();
+        if set == 0 {
+            return None;
+        }
+        if set < 4 {
+            eprintln!(
+                "[bb-auth] FATAL: social sign-in needs all of BB_AUTH_OAUTH_DOMAIN, \
+                 BB_AUTH_SOCIAL_CLIENT_ID, BB_AUTH_SOCIAL_CALLBACK_URL and \
+                 BB_AUTH_SOCIAL_IDPS, or none of them"
+            );
+            std::process::exit(1);
+        }
+        let domain = env_page_value("BB_AUTH_OAUTH_DOMAIN", &domain);
+        if domain.contains('/') {
+            eprintln!(
+                "[bb-auth] FATAL: BB_AUTH_OAUTH_DOMAIN is a bare host, with no scheme or path"
+            );
+            std::process::exit(1);
+        }
+        let client_id = env_page_value("BB_AUTH_SOCIAL_CLIENT_ID", &client_id);
+        if !audiences.contains(&client_id) {
+            eprintln!(
+                "[bb-auth] FATAL: BB_AUTH_SOCIAL_CLIENT_ID '{client_id}' is not an accepted \
+                 audience: add it to BB_AUTH_AUDIENCES, or every social login will be refused \
+                 after it succeeds"
+            );
+            std::process::exit(1);
+        }
+        // The same validator the settings file's asset URLs go through, which is https-only
+        // and quote-free, plus one rule of its own: this one cannot be root-relative, because
+        // Cognito compares it byte for byte with the `redirect_uri` registered on the client.
+        let callback_url = match compile_asset_url("BB_AUTH_SOCIAL_CALLBACK_URL", &callback) {
+            Ok(Some(u)) if u.starts_with("https://") => u,
+            Ok(_) => {
+                eprintln!(
+                    "[bb-auth] FATAL: BB_AUTH_SOCIAL_CALLBACK_URL must be the absolute https:// \
+                     URL registered on the Cognito app client"
+                );
+                std::process::exit(1);
+            }
+            Err(e) => {
+                eprintln!("[bb-auth] FATAL: {e}");
+                std::process::exit(1);
+            }
+        };
+        let idps: Vec<String> = idps_raw
+            .split(',')
+            .map(str::trim)
+            .filter(|s| !s.is_empty())
+            .map(|s| env_page_value("BB_AUTH_SOCIAL_IDPS", s))
+            .collect();
+        if idps.is_empty() {
+            eprintln!("[bb-auth] FATAL: BB_AUTH_SOCIAL_IDPS names no provider");
+            std::process::exit(1);
+        }
+        Some(SocialConfig {
+            client_id,
+            authorize_url: format!("https://{domain}/oauth2/authorize"),
+            token_url: format!("https://{domain}/oauth2/token"),
+            callback_url,
+            idps,
+        })
     }
 }
 
@@ -1440,45 +1617,343 @@ fn respond_redirect(req: Request, location: &str, set_cookie: Option<&str>) {
     let _ = req.respond(resp);
 }
 
-/// Respond with the minimal styled error page the browser sees on a failed
-/// `/auth/session`. Every interpolated value is escaped by [`html_escape`].
-fn respond_html(req: Request, status: u16, title: &str, msg: &str, login_url: &str) {
-    // Escape everything we interpolate: today the inputs are constants / a
-    // trusted env value, but there is no structural guarantee a future caller
-    // won't pass request data, so never emit raw bytes into the page.
+// ---------------------------------------------------------------------------
+// The gate's own pages
+// ---------------------------------------------------------------------------
+//
+// Three HTML surfaces, and every one of them is complete on its own: the sign-in page, the
+// social callback that finishes an OAuth leg, and the error page a failed `/auth/session`
+// lands on. Nothing here fetches a stylesheet, a font or a script from another host, because
+// the situation these pages exist for is the one where somebody cannot get in, and a sign-in
+// page that needs a CDN to be up has picked exactly the wrong moment to have a dependency.
+//
+// The look is `bb_auth_core::THEME_CSS` (the palette) plus `bb_auth_core::BASE_CSS` (the
+// components) plus [`AUTH_CSS`] (this arrangement of them), in that order, and an operator's
+// own stylesheet (`ui.stylesheet_url`) loads after all three. The first two are the same
+// bytes `bb-auth-web` emits, which is what makes these pages and the admin interface one
+// product rather than two that were once made to match. See the presentation contract in the
+// library.
+
+/// How these pages ARRANGE the shared components: one centred card, the steps inside it, and
+/// the few things only a sign-in page has (the language toggle, the identity-provider
+/// buttons, the divider). What a card, a field, a button or a message box is made of is
+/// `BASE_CSS`, and what a colour is worth is `THEME_CSS`; this file defines neither, which is
+/// what the operator's stylesheet relies on.
+const AUTH_CSS: &str = include_str!("../assets/auth.css");
+
+/// The sign-in page, served at `GET /auth/login`.
+///
+/// **Why the gate serves it.** bb-auth is built for the flow where a page runs Cognito
+/// `USER_AUTH` in the browser and POSTs the resulting id_token to `/auth/session`. That page
+/// needs the app-client id, the issuer's endpoint and the list of hosts a post-login `rd` may
+/// land on, and the gate already holds all three **as the values it validates against**: the
+/// client id is the audience it checks ([`Config::audiences`]), the endpoint is derived from
+/// the issuer whose signature it verifies ([`Config::cognito_endpoint`]), and the hosts are
+/// what [`safe_rd`] enforces. Served from here, the page and the gate cannot disagree about
+/// any of them; served from a static host, every one of the three is a second copy.
+///
+/// **The flow it runs**, all in the page, against the unauthenticated Cognito JSON API with a
+/// public app client and no secret:
+///
+/// 1. email → `InitiateAuth(USER_AUTH, PREFERRED_CHALLENGE=EMAIL_OTP)`. A known user gets an
+///    `EMAIL_OTP` challenge and the code step; `UserNotFoundException` branches to sign-up.
+///    That branch is why the app client must stay at `prevent_user_existence_errors=LEGACY`:
+///    otherwise Cognito answers a fake challenge for unknown users and there is nothing to
+///    branch on.
+/// 2. signing in: `RespondToAuthChallenge(EMAIL_OTP)` → tokens. Signing up: `SignUp` →
+///    `ConfirmSignUp`, whose `Session` is exchanged for tokens with **no second OTP**
+///    (Cognito auto sign-in). That is the whole reason this gate takes an id_token instead of
+///    driving an authorization-code flow itself.
+/// 3. a top-level form POST of the id_token to `/auth/session`, same origin, which answers
+///    `302` to `rd`.
+///
+/// **Substitution** is `__BB_*__` placeholders through [`render_page`], never `format!`: the
+/// file is thick with the `{}` of JavaScript and CSS, and each one would have to be doubled
+/// in a file that everything else reads as JavaScript and CSS. Every value substituted in is
+/// either a validated env value ([`env_page_value`]: printable ASCII, no quotes) or is
+/// HTML-escaped on the way in. Request data reaches the page in exactly one place, `data-rd`
+/// on `<body>`, as an escaped attribute and never as JavaScript source.
+const LOGIN_HTML: &str = include_str!("../assets/login.html");
+
+/// The social callback, served at `GET /auth/callback`, and only when `BB_AUTH_SOCIAL_*` is
+/// configured: with no social client there is no OAuth leg to finish.
+///
+/// It is here for the same reason [`LOGIN_HTML`] is, plus one of its own: this URL is
+/// registered on the Cognito app client as `redirect_uri`, and the value baked into the page
+/// must match it **exactly** or the exchange fails with `redirect_mismatch`. Both now come
+/// from one place, `BB_AUTH_SOCIAL_CALLBACK_URL`.
+///
+/// Cognito redirects here with `?code=…&state=…`; the page exchanges the code and the PKCE
+/// verifier the sign-in page left in `sessionStorage` for tokens, and then delivers the
+/// id_token exactly as the sign-in page does. One extra step in the middle: a federated IdP
+/// that omits `given_name`/`family_name` (personal Microsoft accounts, notably) lands here
+/// with empty name claims, so the page offers a small profile form, writes the answer back
+/// with `UpdateUserAttributes`, and refreshes the id_token before delivering it. Nothing on
+/// this page comes from the request: the code and the state are read by its own script.
+const CALLBACK_HTML: &str = include_str!("../assets/callback.html");
+
+/// What the pages call themselves when `ui.brand_name` says nothing. The binary's own name:
+/// an unconfigured deployment should look unconfigured rather than borrow somebody's brand.
+const DEFAULT_BRAND: &str = "bb-auth";
+
+/// The identity providers this page knows how to draw a button for, as
+/// `(Cognito identity_provider, label, icon)`.
+///
+/// The *set* is code and the *choice* is configuration, the same split
+/// `derive_profile_header` makes for claims: an operator names a provider their user pool
+/// actually federates (`BB_AUTH_SOCIAL_IDPS`), and the icon and label come from here. A name
+/// that is not in this table still gets a button, labelled with the name itself and with no
+/// icon, because a pool may federate an IdP this table has never heard of and refusing to
+/// draw it would be worse than drawing it plainly.
+///
+/// The icons are inline SVG for the reason everything else on these pages is inline: an
+/// `<img>` would be a second request, to a host that is not this one, on the page that most
+/// needs to work when something else is down.
+const KNOWN_IDPS: [(&str, &str, &str); 2] = [
+    (
+        "Google",
+        "Google",
+        r##"<svg viewBox="0 0 48 48" aria-hidden="true"><path fill="#FFC107" d="M43.6 20.5H42V20H24v8h11.3C33.7 32.4 29.3 35 24 35c-6.6 0-12-5.4-12-12s5.4-12 12-12c3.1 0 5.9 1.2 8 3.1l5.7-5.7C34.3 6.1 29.4 4 24 4 12.9 4 4 12.9 4 24s8.9 20 20 20 20-8.9 20-20c0-1.3-.1-2.3-.4-3.5z"/><path fill="#FF3D00" d="M6.3 14.7l6.6 4.8C14.7 15.1 19 12 24 12c3.1 0 5.9 1.2 8 3.1l5.7-5.7C34.3 6.1 29.4 4 24 4 16.3 4 9.7 8.3 6.3 14.7z"/><path fill="#4CAF50" d="M24 44c5.2 0 10-2 13.6-5.2l-6.3-5.3C29.2 35 26.7 36 24 36c-5.3 0-9.7-2.6-11.3-7l-6.5 5C9.5 39.6 16.2 44 24 44z"/><path fill="#1976D2" d="M43.6 20.5H42V20H24v8h11.3c-.8 2.2-2.2 4.1-4 5.5l6.3 5.3C41.9 36.4 44 30.8 44 24c0-1.3-.1-2.3-.4-3.5z"/></svg>"##,
+    ),
+    (
+        "MicrosoftPersonal",
+        "Microsoft",
+        r##"<svg viewBox="0 0 23 23" aria-hidden="true"><path fill="#F25022" d="M1 1h10v10H1z"/><path fill="#7FBA00" d="M12 1h10v10H12z"/><path fill="#00A4EF" d="M1 12h10v10H1z"/><path fill="#FFB900" d="M12 12h10v10H12z"/></svg>"##,
+    ),
+];
+
+/// Substitute `__BB_*__` placeholders into one of the page templates.
+///
+/// A scanner rather than `str::replace` in a loop, and that is a safety property and not a
+/// performance one: **a substituted value is never rescanned**, so a brand name or a URL that
+/// happens to contain `__BB_HEAD__` is text on the page and not a second substitution. It is
+/// also why the templates are placeholders at all rather than a `format!` string: they are
+/// thick with the `{}` of JavaScript and CSS, and every one of those would have to be
+/// doubled, in a file that is also read as JavaScript and CSS by everything else that opens
+/// it.
+///
+/// An unknown `__BB_` sequence is left standing, which is deliberate: it renders visibly on
+/// the page and in the test that reads it, rather than disappearing into a page that is
+/// quietly missing something.
+fn render_page(template: &str, subs: &[(&str, String)]) -> String {
+    let mut out = String::with_capacity(template.len() + 4096);
+    let mut rest = template;
+    while let Some(i) = rest.find("__BB_") {
+        out.push_str(&rest[..i]);
+        let tail = &rest[i..];
+        match subs.iter().find(|(k, _)| tail.starts_with(*k)) {
+            Some((k, v)) => {
+                out.push_str(v);
+                rest = &tail[k.len()..];
+            }
+            None => {
+                out.push_str("__BB_");
+                rest = &tail["__BB_".len()..];
+            }
+        }
+    }
+    out.push_str(rest);
+    out
+}
+
+/// The substitutions every page of the gate's shares: the head, the theme, the brand and the
+/// logo. All four come from the settings file, so all four are live on the next request.
+fn look_subs(settings: &Settings) -> Vec<(&'static str, String)> {
+    vec![
+        (
+            "__BB_HEAD__",
+            format!(
+                "  <style>{THEME_CSS}{BASE_CSS}{AUTH_CSS}</style>\n  {}",
+                stylesheet_link(settings.stylesheet_url.as_deref())
+            ),
+        ),
+        (
+            "__BB_THEME_ATTR__",
+            match settings.theme.attr() {
+                Some(a) => format!(" data-theme=\"{a}\""),
+                None => String::new(),
+            },
+        ),
+        (
+            "__BB_BRAND__",
+            html_escape(settings.brand_name.as_deref().unwrap_or(DEFAULT_BRAND)),
+        ),
+        (
+            // Decorative, so `alt` is empty on purpose: the heading beside it already says
+            // the name, and a screen reader announcing it twice is worse than not at all.
+            "__BB_LOGO__",
+            match settings.logo_url.as_deref() {
+                Some(u) => format!("      <img src=\"{}\" alt=\"\">", html_escape(u)),
+                None => String::new(),
+            },
+        ),
+    ]
+}
+
+/// The social block of the sign-in page: a divider and one button per configured provider, or
+/// nothing at all.
+///
+/// Nothing at all is the important half. With no `BB_AUTH_SOCIAL_*` configured the divider
+/// goes too, and the page's own script finds no `[data-idp]` to bind, so there is no branch
+/// anywhere saying "if social is off" — the markup simply is not there.
+fn social_block(social: Option<&SocialConfig>) -> String {
+    let Some(s) = social else {
+        return String::new();
+    };
+    let mut buttons = String::new();
+    for idp in &s.idps {
+        let (label, icon) = match KNOWN_IDPS.iter().find(|(name, _, _)| name == idp) {
+            Some((_, label, icon)) => (*label, *icon),
+            None => (idp.as_str(), ""),
+        };
+        buttons.push_str(&format!(
+            "        <button type=\"button\" class=\"social-btn\" data-idp=\"{idp}\">\n\
+             \x20         {icon}\n\
+             \x20         <span data-i18n=\"btn_social\" data-i18n-arg=\"{label}\">Continue with {label}</span>\n\
+             \x20       </button>\n",
+            idp = html_escape(idp),
+            label = html_escape(label),
+        ));
+    }
+    format!(
+        "      <div class=\"divider\"><span data-i18n=\"or\">or</span></div>\n\
+         \x20     <div class=\"social\">\n{buttons}      </div>"
+    )
+}
+
+/// Serve `GET /auth/login`.
+///
+/// The one request-supplied value on the page is `rd`, and it is validated **here**, against
+/// the same `BB_AUTH_AUTHORIZED_HOSTS` [`safe_rd`] enforces on the way back out. A rejected
+/// one becomes the empty string rather than an error: the person came here to sign in, and
+/// sending them away over a bad redirect target would be answering a question they did not
+/// ask. It reaches the page as an escaped HTML attribute and never as JavaScript source.
+///
+/// Absolute URLs only, which is what [`rd_url_allowed`] takes. A relative `rd` cannot be
+/// resolved here without knowing which host the browser is on, and this page deliberately
+/// does not depend on nginx setting `BB_AUTH_ORIGINAL_URL_HEADER` on its location: the
+/// login page must be the one location that is impossible to get wrong.
+fn handle_login(req: Request, state: &State) {
+    let rd = query_param(req.url(), "rd")
+        .filter(|r| rd_url_allowed(r, &state.cfg.authorized_hosts))
+        .unwrap_or_default();
+    let page = {
+        let settings = state.settings.read().unwrap();
+        login_page(&state.cfg, &settings, &rd)
+    };
+    respond_page(req, 200, page);
+}
+
+/// Render the sign-in page. Separate from [`handle_login`] so that what the page says can be
+/// asserted without a socket, which is the only way a test can read a page this size.
+fn login_page(cfg: &Config, settings: &Settings, rd: &str) -> String {
+    let mut subs = look_subs(settings);
+    subs.push(("__BB_RD__", html_escape(rd)));
+    subs.push(("__BB_ENDPOINT__", cfg.cognito_endpoint.clone()));
+    subs.push(("__BB_CLIENT_ID__", cfg.audiences[0].clone()));
+    subs.push((
+        "__BB_SOCIAL_CLIENT_ID__",
+        cfg.social
+            .as_ref()
+            .map(|s| s.client_id.clone())
+            .unwrap_or_default(),
+    ));
+    subs.push((
+        "__BB_AUTHORIZE_URL__",
+        cfg.social
+            .as_ref()
+            .map(|s| s.authorize_url.clone())
+            .unwrap_or_default(),
+    ));
+    subs.push((
+        "__BB_CALLBACK_URL__",
+        cfg.social
+            .as_ref()
+            .map(|s| s.callback_url.clone())
+            .unwrap_or_default(),
+    ));
+    subs.push(("__BB_SOCIAL_BUTTONS__", social_block(cfg.social.as_ref())));
+    render_page(LOGIN_HTML, &subs)
+}
+
+/// Serve `GET /auth/callback`, the page that finishes a social sign-in.
+///
+/// A `404` when no social client is configured, because then there is no OAuth leg for it to
+/// finish and a page that offers to retry one would be a lie. It takes nothing from the
+/// request: the code and the state are read by its own script, and the PKCE verifier is in
+/// the browser's `sessionStorage` where the login page left it.
+fn handle_callback(req: Request, state: &State) {
+    let Some(social) = state.cfg.social.as_ref() else {
+        respond_empty(req, 404);
+        return;
+    };
+    let page = {
+        let settings = state.settings.read().unwrap();
+        callback_page(&state.cfg, social, &settings)
+    };
+    respond_page(req, 200, page);
+}
+
+/// Render the callback page. Split from its handler for the reason [`login_page`] is.
+fn callback_page(cfg: &Config, social: &SocialConfig, settings: &Settings) -> String {
+    let mut subs = look_subs(settings);
+    subs.push(("__BB_ENDPOINT__", cfg.cognito_endpoint.clone()));
+    subs.push(("__BB_TOKEN_URL__", social.token_url.clone()));
+    subs.push(("__BB_SOCIAL_CLIENT_ID__", social.client_id.clone()));
+    subs.push(("__BB_CALLBACK_URL__", social.callback_url.clone()));
+    render_page(CALLBACK_HTML, &subs)
+}
+
+/// Respond with a whole HTML document.
+///
+/// `no-store` on all of them: the sign-in page carries a `rd` that belongs to this attempt
+/// and the error page belongs to one failed `POST`, so a cached copy is a page that is right
+/// about a request nobody is making any more. `X-Frame-Options` because a login form in
+/// somebody else's frame is a clickjacking target, and the gate says so itself rather than
+/// relying on the reverse proxy in front of it having said it.
+fn respond_page(req: Request, status: u16, body: String) {
+    let resp = Response::from_string(body)
+        .with_status_code(StatusCode(status))
+        .with_header(h("Content-Type", "text/html; charset=utf-8"))
+        .with_header(h("Cache-Control", "no-store"))
+        .with_header(h("X-Frame-Options", "DENY"));
+    let _ = req.respond(resp);
+}
+
+/// Respond with the error page the browser sees on a failed `/auth/session`: the same card,
+/// the same palette and the same operator stylesheet as the sign-in page it offers to go
+/// back to.
+///
+/// Every interpolated value is escaped by [`html_escape`]. Today the inputs are constants and
+/// a validated env value, but there is no structural guarantee a future caller will not pass
+/// request data, so nothing is emitted raw.
+fn respond_html(req: Request, state: &State, status: u16, title: &str, msg: &str, login_url: &str) {
+    let settings = state.settings.read().unwrap();
+    let head = look_subs(&settings)
+        .into_iter()
+        .find(|(k, _)| *k == "__BB_HEAD__")
+        .map(|(_, v)| v)
+        .unwrap_or_default();
+    let theme = match settings.theme.attr() {
+        Some(a) => format!(" data-theme=\"{a}\""),
+        None => String::new(),
+    };
+    drop(settings);
     let title = html_escape(title);
     let msg = html_escape(msg);
     let login_url = html_escape(login_url);
     let body = format!(
-        "<!doctype html><meta charset=utf-8><meta name=viewport content=\"width=device-width,initial-scale=1\">\
-<title>{title}</title>\
-<style>body{{font-family:-apple-system,Segoe UI,Roboto,sans-serif;background:#16161b;color:#e8e8ee;\
-display:flex;min-height:100vh;margin:0;align-items:center;justify-content:center;text-align:center}}\
-.c{{max-width:420px;padding:32px}}h1{{font-size:1.3rem}}a{{color:#5b78ff}}p{{color:#9a9aa8}}</style>\
-<div class=c><h1>{title}</h1><p>{msg}</p><p><a href=\"{login_url}\">&larr; Back to sign-in</a></p></div>"
+        "<!doctype html>\n<html lang=\"en\"{theme}>\n<head>\n\
+         <meta charset=\"utf-8\">\n\
+         <meta name=\"viewport\" content=\"width=device-width,initial-scale=1\">\n\
+         <title>{title}</title>\n{head}\n</head>\n\
+         <body><main class=\"card\">\n\
+         <div class=\"brand\"><h1>{title}</h1></div>\n\
+         <p class=\"status\">{msg}</p>\n\
+         <p class=\"center hint\"><a href=\"{login_url}\">&larr; Back to sign-in</a></p>\n\
+         </main></body>\n</html>\n"
     );
-    let resp = Response::from_string(body)
-        .with_status_code(StatusCode(status))
-        .with_header(h("Content-Type", "text/html; charset=utf-8"));
-    let _ = req.respond(resp);
-}
-
-/// Escape the HTML-significant characters for safe interpolation into a page /
-/// attribute. Named-entity form so the output is safe in both text and
-/// double-quoted attribute contexts.
-fn html_escape(s: &str) -> String {
-    let mut out = String::with_capacity(s.len());
-    for c in s.chars() {
-        match c {
-            '&' => out.push_str("&amp;"),
-            '<' => out.push_str("&lt;"),
-            '>' => out.push_str("&gt;"),
-            '"' => out.push_str("&quot;"),
-            '\'' => out.push_str("&#39;"),
-            _ => out.push(c),
-        }
-    }
-    out
+    respond_page(req, status, body);
 }
 
 // ---------------------------------------------------------------------------
@@ -1761,7 +2236,7 @@ fn handle_session(mut req: Request, state: &State) {
         .read_to_end(&mut buf)
         .is_err()
     {
-        respond_html(req, 400, "Error", "Invalid request.", &login);
+        respond_html(req, state, 400, "Error", "Invalid request.", &login);
         return;
     }
     let form: HashMap<String, String> = form_urlencoded::parse(&buf).into_owned().collect();
@@ -1769,7 +2244,7 @@ fn handle_session(mut req: Request, state: &State) {
     let id_token = match form.get("id_token") {
         Some(t) if !t.is_empty() => t,
         _ => {
-            respond_html(req, 400, "Error", "Missing token.", &login);
+            respond_html(req, state, 400, "Error", "Missing token.", &login);
             return;
         }
     };
@@ -1780,6 +2255,7 @@ fn handle_session(mut req: Request, state: &State) {
             eprintln!("[bb-auth] session rejected: {e}");
             respond_html(
                 req,
+                state,
                 401,
                 "Sign-in failed",
                 "The access token is invalid or has expired. Please try again.",
@@ -1810,6 +2286,7 @@ fn handle_session(mut req: Request, state: &State) {
         eprintln!("[bb-auth] session denied: {} {why}", ident.email);
         respond_html(
             req,
+            state,
             403,
             "Access not authorized",
             "This email address is not allowed to sign in.",
@@ -2009,6 +2486,16 @@ fn check_settings(path: &str) -> ! {
                     _ => s.admins.join(", "),
                 }
             );
+            // The look, and the stylesheet by name: it is the one setting whose effect an
+            // operator cannot see from the host, since whether it loads is the browser's
+            // business and a page that fails to load one looks like a page that has none.
+            println!(
+                "[bb-auth] {path}: pages: brand '{}', theme {}, stylesheet {}, logo {}",
+                s.brand_name.as_deref().unwrap_or(DEFAULT_BRAND),
+                s.theme.code(),
+                s.stylesheet_url.as_deref().unwrap_or("(built-in only)"),
+                s.logo_url.as_deref().unwrap_or("(none)"),
+            );
             std::process::exit(0);
         }
         Err(e) => {
@@ -2161,6 +2648,19 @@ fn main() {
              (allow_unverified_social in {settings_path})"
         );
     }
+    // The sign-in page it now serves itself, and what it offers on it. Worth a line of its
+    // own because both halves are easy to get wrong from outside: nginx has to leave
+    // /auth/login and /auth/callback ungated, and a social button that is drawn is a button
+    // whose app client and callback URL Cognito has to agree with.
+    eprintln!(
+        "[bb-auth] pages: /auth/login and /auth/callback (leave both UNGATED in nginx) | \
+         cognito={} | social={}",
+        state.cfg.cognito_endpoint,
+        match &state.cfg.social {
+            Some(s) => format!("{} via {}", s.idps.join(","), s.callback_url),
+            None => "(off: no BB_AUTH_SOCIAL_* configured)".to_string(),
+        }
+    );
     // Held only for the banner. Dropped before the workers start, so nothing below this line
     // can hold a read lock across a request and starve the SIGHUP swap.
     drop(settings);
@@ -2183,6 +2683,18 @@ fn main() {
                 ("GET", "/auth/validate") => handle_validate(req, &state),
                 ("POST", "/auth/session") => handle_session(req, &state),
                 ("GET", "/auth/logout") => handle_logout(req, &state),
+                // The two pages, and the two locations nginx must leave UNGATED: a sign-in
+                // page behind an `auth_request` answers a signed-out visitor with itself,
+                // forever.
+                //
+                // `HEAD` as well as `GET`, and these are the only two routes that take it.
+                // Not for tidiness: these URLs REPLACED files nginx served off disk, and
+                // nginx answers `HEAD` on a file. Every probe, uptime check and `curl -I` an
+                // operator already points at the sign-in page has to keep working across
+                // that move, or the cutover breaks something nobody was watching. tiny_http
+                // suppresses the body itself, so the handler needs to know nothing about it.
+                ("GET" | "HEAD", "/auth/login") => handle_login(req, &state),
+                ("GET" | "HEAD", "/auth/callback") => handle_callback(req, &state),
                 ("GET", "/auth/healthz") => {
                     let _ = req.respond(Response::from_string("ok"));
                 }
@@ -2300,7 +2812,9 @@ mod tests {
 
         // The other half, and the one that says this is a signature check rather than a
         // decoder: one flipped base64 digit in the signature, the signed message untouched.
-        let (msg, sig) = TEST_TOKEN.rsplit_once('.').expect("a JWT has three segments");
+        let (msg, sig) = TEST_TOKEN
+            .rsplit_once('.')
+            .expect("a JWT has three segments");
         assert!(sig.starts_with('E'), "fixture drifted: {sig}");
         let forged = format!("{msg}.F{}", &sig[1..]);
         assert!(
@@ -2780,6 +3294,8 @@ mod tests {
             login_url: LOGIN.to_string(),
             original_url_header: "X-Original-URL".to_string(),
             workers: 1,
+            cognito_endpoint: "https://issuer.invalid/".to_string(),
+            social: None,
         }
     }
 
@@ -2850,6 +3366,175 @@ mod tests {
     }
     const LOGIN: &str = "https://login.badbat75.com/";
     const CALLER: &str = "https://search.badbat75.com";
+
+    // --- the gate's own pages -----------------------------------------------
+
+    /// A config with a social sign-in wired up, so the two pages can be rendered whole.
+    fn page_cfg(social: bool) -> Config {
+        let mut cfg = cookie_cfg(None);
+        cfg.audiences = vec!["email-client".to_string(), "social-client".to_string()];
+        cfg.cognito_endpoint = "https://cognito-idp.eu-central-1.amazonaws.com/".to_string();
+        cfg.social = social.then(|| SocialConfig {
+            client_id: "social-client".to_string(),
+            authorize_url: "https://pool.auth.eu-central-1.amazoncognito.com/oauth2/authorize"
+                .to_string(),
+            token_url: "https://pool.auth.eu-central-1.amazoncognito.com/oauth2/token".to_string(),
+            callback_url: "https://auth.badbat75.com/auth/callback".to_string(),
+            idps: vec!["Google".to_string(), "Okta".to_string()],
+        });
+        cfg
+    }
+
+    /// Compiled settings with only the `ui` section set, which is all these pages read.
+    fn ui_settings(ui: bb_auth_core::UiSettings) -> Settings {
+        bb_auth_core::compile_settings(&bb_auth_core::SettingsFile {
+            version: bb_auth_core::SETTINGS_VERSION,
+            ui,
+            ..Default::default()
+        })
+        .unwrap()
+    }
+
+    #[test]
+    fn render_page_substitutes_once_and_leaves_an_unknown_placeholder_standing() {
+        let subs = [
+            ("__BB_A__", "<b>".to_string()),
+            // A value that contains another placeholder: it must land as text, never be
+            // substituted a second time, or a brand name could rewrite the page around it.
+            ("__BB_B__", "__BB_A__".to_string()),
+        ];
+        assert_eq!(render_page("x __BB_A__ y", &subs), "x <b> y");
+        assert_eq!(render_page("__BB_B__", &subs), "__BB_A__");
+        // Unknown placeholders survive verbatim: a template that lost a substitution says so
+        // on the page instead of quietly rendering a gap.
+        assert_eq!(render_page("__BB_NOPE__", &subs), "__BB_NOPE__");
+        assert_eq!(render_page("no placeholders", &subs), "no placeholders");
+    }
+
+    #[test]
+    fn the_login_page_is_whole_self_contained_and_escapes_its_one_request_value() {
+        let cfg = page_cfg(true);
+        let page = login_page(
+            &cfg,
+            &ui_settings(bb_auth_core::UiSettings::default()),
+            "https://search.badbat75.com/?q=a\"b",
+        );
+        // Every placeholder was answered.
+        assert!(!page.contains("__BB_"), "unsubstituted placeholder left");
+        // The palette and the layout are IN the page: no stylesheet, script or font is
+        // fetched from anywhere, which is the property this page exists to have.
+        assert!(page.contains("--accent:"), "the palette is not inlined");
+        assert!(page.contains(".card{"), "the layout is not inlined");
+        assert!(
+            !page.contains("<link"),
+            "unconfigured, so nothing may be linked"
+        );
+        assert!(!page.contains("src=\"http"), "no external script or image");
+        // The one request-supplied value is an escaped attribute, never JavaScript source.
+        assert!(
+            page.contains(r#"data-rd="https://search.badbat75.com/?q=a&quot;b""#),
+            "{page}"
+        );
+        // The client id is the one the gate validates as an audience, by construction.
+        assert!(
+            page.contains(r#"var CLIENT_ID = "email-client";"#),
+            "{page}"
+        );
+        assert!(
+            page.contains(r#"var ENDPOINT = "https://cognito-idp.eu-central-1.amazonaws.com/";"#)
+        );
+        // A known provider gets its icon, an unknown one gets a button anyway.
+        assert!(page.contains(r#"data-idp="Google""#), "{page}");
+        assert!(page.contains(r#"data-idp="Okta""#), "{page}");
+        assert!(
+            page.contains("data-i18n-arg=\"Okta\">Continue with Okta<"),
+            "{page}"
+        );
+    }
+
+    #[test]
+    fn with_no_social_client_the_page_has_no_social_markup_at_all() {
+        let cfg = page_cfg(false);
+        let page = login_page(&cfg, &ui_settings(bb_auth_core::UiSettings::default()), "");
+        assert!(
+            !page.contains("data-idp=\""),
+            "a button with nothing behind it"
+        );
+        // The divider goes with the buttons: nothing on the page hints at a way in that this
+        // deployment does not have.
+        assert!(!page.contains("class=\"divider\""), "{page}");
+        assert!(page.contains(r#"var SOCIAL_CLIENT_ID = "";"#), "{page}");
+    }
+
+    #[test]
+    fn a_rejected_rd_is_dropped_rather_than_carried_to_the_page() {
+        // `handle_login` filters with the same `rd_url_allowed` `safe_rd` uses; this pins the
+        // pairing that makes the two agree.
+        let hosts = bb_hosts();
+        assert!(rd_url_allowed("https://search.badbat75.com/x", &hosts));
+        assert!(!rd_url_allowed("https://evil.example.com/", &hosts));
+        let page = login_page(
+            &page_cfg(false),
+            &ui_settings(bb_auth_core::UiSettings::default()),
+            "",
+        );
+        assert!(page.contains(r#"data-rd=""#), "{page}");
+    }
+
+    #[test]
+    fn the_operator_stylesheet_is_linked_after_the_built_in_one_on_every_page() {
+        let ui = bb_auth_core::UiSettings {
+            stylesheet_url: "https://assets.badbat75.com/css/theme.css".to_string(),
+            logo_url: "/img/logo.png".to_string(),
+            brand_name: "BadBat75".to_string(),
+            theme: "dark".to_string(),
+        };
+        let settings = ui_settings(ui);
+        let cfg = page_cfg(true);
+        for page in [
+            login_page(&cfg, &settings, ""),
+            callback_page(&cfg, cfg.social.as_ref().unwrap(), &settings),
+        ] {
+            let style = page.find("<style>").expect("the built-in stylesheet");
+            let tokens = page.find("--accent:").expect("the palette");
+            let components = page.find(".pill{").expect("the shared components");
+            let layout = page
+                .find(".lang-toggle{")
+                .expect("this page's own arrangement");
+            let link = page.find("<link rel=\"stylesheet\"").expect("the override");
+            // Order is the contract, and it is four deep: the palette, the components that
+            // read it, this page's arrangement of them, then the override, which wins by
+            // source order and therefore needs no `!important` and no knowledge of what it is
+            // overriding. The first two are the same bytes bb-auth-web emits, which is what
+            // makes the sign-in page and the admin interface one product rather than two that
+            // were once made to match.
+            assert!(
+                style < tokens && tokens < components && components < layout && layout < link,
+                "the override must come after the built-in one"
+            );
+            assert!(page.contains(r#"data-theme="dark""#), "{page}");
+            assert!(page.contains("<h1>BadBat75</h1>"), "{page}");
+            assert!(
+                page.contains(r#"<img src="/img/logo.png" alt="">"#),
+                "{page}"
+            );
+        }
+    }
+
+    #[test]
+    fn the_callback_page_names_the_registered_redirect_uri_and_nothing_else() {
+        let cfg = page_cfg(true);
+        let social = cfg.social.as_ref().unwrap();
+        let page = callback_page(
+            &cfg,
+            social,
+            &ui_settings(bb_auth_core::UiSettings::default()),
+        );
+        assert!(!page.contains("__BB_"), "unsubstituted placeholder left");
+        // The value Cognito compares byte for byte with the client's registered callback.
+        assert!(page.contains(r#"var CALLBACK_URL = "https://auth.badbat75.com/auth/callback";"#));
+        assert!(page.contains(r#"var SOCIAL_CLIENT_ID = "social-client";"#));
+    }
 
     #[test]
     fn origin_of_extracts_scheme_and_host() {

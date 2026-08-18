@@ -1,0 +1,195 @@
+/* The components, and the second half of what every HTML surface in this project shares.
+   [`theme.css`] says what a colour, a radius and a font ARE; this file says what a button, a
+   field, a card, a state box and a tag are MADE OF, once, for both programs. Compiled into
+   both binaries as `bb_auth_core::BASE_CSS` and emitted immediately after the palette, ahead
+   of whichever layout the page belongs to.
+
+   WHY IT IS SHARED, when the two layouts are not. A button that is a rounded rectangle on the
+   sign-in page and a lozenge in the admin interface is not two designs, it is one design that
+   drifted, and the drift is invisible to whoever changes only the file they are working in.
+   The rule is therefore mechanical rather than tasteful: if it is a THING (a button, a field,
+   a card, a tag, a message), it is defined here and both surfaces get it. If it is an
+   ARRANGEMENT of things (a centred card with a logo over it, or a header bar with tabs and a
+   table under it), it belongs to the program whose page that is, in `auth.css` or
+   `admin.css`. Composition is the only thing the two are allowed to disagree about, and it is
+   the only thing they have ever needed to.
+
+   Every rule below reads its colours, radii, sizes and fonts from the custom properties in
+   `theme.css` and defines none of its own. That is unchanged and it is what still makes
+   `ui.stylesheet_url` able to restyle everything at once.
+
+   A LAYOUT MAY OVERRIDE WHAT IS HERE, and both do, but only where the page's arrangement
+   forces it: the sign-in card's own elevation, the language toggle's two bare glyph buttons,
+   the admin's compact filter row. An override that is not forced by an arrangement is the
+   drift this file exists to remove; put it here instead, where both surfaces get it. */
+
+/* ---------------------------------------------------------------------------
+   The document
+   --------------------------------------------------------------------------- */
+
+*,*::before,*::after{box-sizing:border-box}
+/* Full height on both, because the ground is a gradient: sized to the content instead, a
+   short page would show its top few hundred pixels and stop. */
+html{height:100%}
+body{min-height:100%;margin:0;background:var(--bg-grad),var(--bg);color:var(--text);
+  font:15px/1.55 var(--font-ui);-webkit-font-smoothing:antialiased}
+a{color:var(--accent)}
+:focus-visible{outline:2px solid var(--accent);outline-offset:2px}
+code,.mono{font-family:var(--font-mono);font-size:.92em}
+
+/* ---------------------------------------------------------------------------
+   Type
+   --------------------------------------------------------------------------- */
+
+h1{font-size:1.25rem;margin:0 0 4px}
+h2{font-size:1rem;margin:26px 0 8px}
+p.lede{color:var(--muted);margin:0 0 18px}
+.hint{color:var(--muted);font-size:var(--fs-sm)}
+.muted{color:var(--muted)}
+.bad{color:var(--error)}
+.center{text-align:center}
+/* A word or a phrase that acts as a link but is not a navigation: a button that reads like
+   one, or an anchor inside a sentence. */
+.link{color:var(--accent);text-decoration:none;cursor:pointer;background:none;border:none;
+  font:inherit;padding:0}
+.link:hover{text-decoration:underline}
+
+/* ---------------------------------------------------------------------------
+   Surfaces
+
+   One object under several names, because the two programs name it after what it holds: the
+   sign-in page's `.card`, the admin's `.panel`, and the four things that are a surface plus a
+   state. Naming them together here is what stops a change to the material reaching one and
+   not the others.
+   --------------------------------------------------------------------------- */
+
+.card,.panel,.msg,.flash,.err,.secret{background:var(--card);
+  border:1px solid var(--card-border);border-radius:var(--r-box);box-shadow:var(--shadow-md);
+  padding:14px 16px}
+/* `.card` carries no flow margin on purpose: it is also the admin's dashboard tile, which
+   lives in a grid where a bottom margin would fight the gap. Everything else here is a block
+   in normal flow and spaces itself. */
+.panel{margin:0 0 16px;overflow-x:auto}
+.msg,.flash,.err,.secret{margin:0 0 16px}
+
+/* A state is a modifier on the surface, never a surface of its own: the state's tint over the
+   card's fill, and a 4px bar down the left edge in the state's own colour. `color` stays
+   `--text` because these classes are also bare utilities above (`.bad{color:var(--error)}`),
+   and a panel carrying its state as one of two classes would otherwise tint every word in it.
+   `.flash`, `.err` and `.secret` are the admin's three fixed-meaning boxes and are listed
+   with the modifier they are, rather than restyled where they are used. */
+.card.ok,.panel.ok,.msg.ok,.flash{border-color:var(--ok);border-left:4px solid var(--ok);
+  background:var(--ok-bg);color:var(--text)}
+.card.warn,.panel.warn,.msg.warn,.secret{border-color:var(--warn);
+  border-left:4px solid var(--warn);background:var(--warn-bg);color:var(--text)}
+.card.bad,.panel.bad,.msg.error,.err{border-color:var(--error);
+  border-left:4px solid var(--error);background:var(--error-bg);color:var(--text)}
+
+/* ---------------------------------------------------------------------------
+   Fields
+
+   One rule for every kind of field, so a text box, a list box and a multi-line box are the
+   same object: same border, same radius, same padding, same focus ring. A select still draws
+   its own arrow and a checkbox its own box, which is the browser's job and the one part of a
+   control that must look native — hence the explicit type list rather than a bare `input`.
+   --------------------------------------------------------------------------- */
+
+input[type=text],input[type=email],input[type=tel],input[type=password],input[type=search],
+select,textarea{font-family:inherit;font-size:1rem;width:100%;padding:10px 12px;
+  color:var(--text);background:var(--input-bg);border:1px solid var(--input-border);
+  border-radius:var(--r-ctl);outline:none;transition:border-color .15s,box-shadow .15s}
+/* 1rem above and not `inherit`: below 16px, mobile Safari zooms the page when a field takes
+   focus, and the one page in this project a stranger meets on a phone is the sign-in form. */
+textarea{line-height:1.5;font-family:var(--font-mono);font-size:.95rem}
+input:focus,select:focus,textarea:focus{border-color:var(--accent);
+  box-shadow:0 0 0 3px var(--accent-weak)}
+input::placeholder,textarea::placeholder{color:var(--muted)}
+/* The one field a refusal is attributed to: border only, so radius, padding and background
+   stay exactly what a plain field has and the focus ring still shows plainly over it. */
+input.invalid,select.invalid,textarea.invalid{border-color:var(--error)}
+/* The label over a field. Sentence case, not the uppercase micro-label an admin tool reaches
+   for: the same words appear over the sign-in form, where that would read as machinery. */
+label.fld,.lbl{display:block;font-size:.82rem;color:var(--muted);font-weight:600;
+  margin:0 0 6px 2px}
+
+/* ---------------------------------------------------------------------------
+   Buttons
+
+   Two objects and no third. A BUTTON is the filled accent action; a PILL is the outlined
+   secondary one, whatever it happens to be doing (a nav tab, a row action, a cancel, a
+   reorder arrow). Both are the same rectangle at the same radius, which is the thing that
+   most visibly says the sign-in page and the admin interface are one product.
+   --------------------------------------------------------------------------- */
+
+button{font-family:inherit;font-size:inherit;padding:9px 16px;border:1px solid var(--accent);
+  border-radius:var(--r-ctl);background:var(--accent);color:var(--on-accent);cursor:pointer;
+  transition:background .15s,border-color .15s,transform .05s}
+button:hover{background:var(--accent-hover);border-color:var(--accent-hover)}
+button:active{transform:translateY(1px)}
+button:disabled{opacity:.6;cursor:default}
+/* The page's one main action, sized to be it: full width and heavier. */
+button.primary{width:100%;margin-top:6px;padding:12px 14px;font-size:1rem;font-weight:700}
+/* --on-state and not --on-accent: the accent is a mid blue in both arms so white sits on it
+   either way, while a state is dark on a light ground and light on a dark one. */
+button.danger{background:var(--error);border-color:var(--error);color:var(--on-state)}
+button.danger:hover{background:var(--error);border-color:var(--error);filter:brightness(1.08)}
+
+/* The pill: one shape for every small control, wherever it sits. `.pills` is the group (the
+   flex row that holds them), `.pill` is the member. Nothing at a call site is allowed to say
+   how a pill looks, which is why no style= attribute appears in either layout. Every pill
+   looks the same at rest on purpose: the only things allowed to change one are its state
+   (selected, hovered, disabled) and the one case where the click's consequence differs in
+   kind (rm). */
+.pills{display:inline-flex;flex-wrap:wrap;gap:6px;align-items:center}
+/* The resting box is currentColor, not --card-border: a --card-border hairline measures about
+   1.3 to 1 against the panel, which is not enough contrast for these to read as controls at
+   all. Every pill carries the box, with no exception. */
+.pill{display:inline-flex;align-items:center;font:inherit;font-size:var(--fs-sm);
+  line-height:1.45;padding:4px 11px;border:1px solid currentColor;border-radius:var(--r-ctl);
+  background:none;color:var(--accent);text-decoration:none;cursor:pointer;white-space:nowrap}
+/* The one destructive member: quieter than the rest at rest (--muted, and the border follows
+   since it is currentColor) and only turns --error on hover, so the consequence is legible
+   right before the click without making the row alarming at rest. */
+.pill.rm{color:var(--muted)}
+/* Has to read on every surface a pill can sit on: the plain panel, a hovered row tinted --bg,
+   a coloured state panel. --card-border is one step off all of them, and the accent border is
+   the half none of those surfaces can cancel out; without both halves a row action's hover is
+   invisible on at least one of them. */
+.pill:hover{background:var(--card-border);border-color:var(--accent)}
+.pill.rm:hover{color:var(--error);border-color:var(--error)}
+.pill[disabled]{color:var(--muted);border-color:var(--card-border);background:none;
+  cursor:default}
+/* A pill with nowhere to go. Not [disabled], because it is a span and not a control: a pager
+   arm at the first or last page has no link at all rather than a link that does nothing. */
+.pill.off{color:var(--muted);border-color:var(--card-border);background:none;cursor:default}
+/* Selected state as a fill, never as a border, for the whole family. Declared last so a
+   selected pill always outranks a hovered one. */
+.pill.on,.pill.on:hover{background:var(--accent);border-color:var(--accent);
+  color:var(--on-accent);font-weight:600}
+
+/* ---------------------------------------------------------------------------
+   Tags, and the one thing that is a pill shape
+
+   A tag is READ, not clicked, and it is the only object in either program that keeps the
+   fully rounded shape: that is what stops the shape from meaning two things at once.
+   --------------------------------------------------------------------------- */
+
+.tag{display:inline-block;padding:1px 8px;border-radius:var(--r-pill);background:var(--chip);
+  font-size:var(--fs-sm);white-space:nowrap}
+.tag.ok{background:var(--ok);color:var(--on-state)}
+.tag.warn{background:var(--warn);color:var(--on-state)}
+.tag.bad{background:var(--error);color:var(--on-state)}
+
+/* ---------------------------------------------------------------------------
+   Waiting
+   --------------------------------------------------------------------------- */
+
+.spinner{width:26px;height:26px;margin:4px auto 14px;border:3px solid var(--card-border);
+  border-top-color:var(--accent);border-radius:50%;animation:bb-spin .8s linear infinite}
+@keyframes bb-spin{to{transform:rotate(360deg)}}
+
+/* ---------------------------------------------------------------------------
+   Footer
+   --------------------------------------------------------------------------- */
+
+footer{color:var(--muted);font-size:var(--fs-sm)}

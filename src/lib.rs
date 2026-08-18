@@ -3102,7 +3102,265 @@ pub struct WebSettings {
     pub admins: Vec<String>,
 }
 
-/// A settings file as it is written: two sections, a version, and whatever else was in it.
+// ---------------------------------------------------------------------------
+// The presentation contract
+// ---------------------------------------------------------------------------
+//
+// What follows is here on the library's own membership rule, and it is worth saying out
+// loud because a stylesheet is not a file on disk that two programs parse. The gate's login
+// page and `bb-auth-web`'s admin GUI must agree, byte for byte, on what `--accent` names,
+// on where an operator's own stylesheet is allowed to land in the cascade, and on how a page
+// declares which arm of the palette it starts in. Two answers to any of those and
+// `ui.stylesheet_url` restyles one surface while the other stands in a different palette.
+//
+// The same argument reaches one step further than the palette, and it took a live comparison
+// of the two surfaces to see how far. A shared vocabulary of colours does not stop a button
+// from being a rounded rectangle on one page and a lozenge on the other, a field from being
+// 12px tall here and 7px there, or a message box from being tinted here and outlined there.
+// Each of those is one program's author changing the file in front of them, which is drift
+// nobody can see from inside either file. So the COMPONENTS are shared too ([`BASE_CSS`]),
+// and the rule for what that means is mechanical: a THING (a button, a field, a card, a tag,
+// a message) is defined once, for both; an ARRANGEMENT of things is not.
+//
+// What is NOT here, therefore: the two layouts. The admin's header, tabs, tables and phone
+// stacking are the GUI's; the centred auth card, its steps and its social buttons are the
+// gate's. Both read the tokens and the components below and define no colour of their own.
+
+/// The palette every HTML surface in this project paints itself from, compiled in from
+/// `src/assets/theme.css`.
+///
+/// It defines custom properties and nothing else. It is emitted **first**, ahead of
+/// [`BASE_CSS`], ahead of each program's own layout and ahead of any override, so the cascade
+/// order is always: tokens, components, layout, operator.
+pub const THEME_CSS: &str = include_str!("assets/theme.css");
+
+/// The components every HTML surface in this project is built from, compiled in from
+/// `src/assets/base.css`: the document, the type scale, the card, the state boxes, the
+/// fields, the buttons, the pills, the tags and the spinner.
+///
+/// It is what makes "the sign-in page and the admin interface are one product" a property of
+/// the code rather than an intention: a control's shape, size and behaviour are written once
+/// and both programs emit the same bytes. It reads its values from [`THEME_CSS`] and defines
+/// no literal of its own, so an operator's `ui.stylesheet_url` still restyles everything by
+/// redefining tokens alone.
+///
+/// Emitted immediately after [`THEME_CSS`] and immediately before whichever layout the page
+/// belongs to, which is what lets a layout override a component where the page's own
+/// arrangement forces it (the auth card's elevation, the admin's compact filter row) without
+/// either of them being able to restyle a control for everybody.
+pub const BASE_CSS: &str = include_str!("assets/base.css");
+
+/// How long a brand name may be. Long enough for a real product name, short enough that it
+/// cannot push a login card's header off a phone: the value is emitted into a page, not into
+/// a header, so this is a layout bound rather than a safety one.
+pub const MAX_BRAND_NAME: usize = 64;
+
+/// Which arm of [`THEME_CSS`] a page starts in.
+///
+/// `System` is the absence of a choice and emits no attribute at all, which is what leaves
+/// `prefers-color-scheme` deciding. The other two are an explicit choice and outrank the
+/// media query by specificity alone, with no script involved. `bb-auth-web` lets an
+/// administrator override this per browser with a cookie; the gate's pages have no such
+/// state and take it as given.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Default)]
+pub enum UiTheme {
+    /// Follow the browser and the OS.
+    #[default]
+    System,
+    Light,
+    Dark,
+}
+
+impl UiTheme {
+    /// The wire spelling: what the settings file holds and what an editor prints.
+    pub fn code(self) -> &'static str {
+        match self {
+            UiTheme::System => "system",
+            UiTheme::Light => "light",
+            UiTheme::Dark => "dark",
+        }
+    }
+
+    /// The `data-theme` attribute for `<html>`, or `None` for `System`, whose whole meaning
+    /// is that the attribute is absent.
+    pub fn attr(self) -> Option<&'static str> {
+        match self {
+            UiTheme::System => None,
+            UiTheme::Light => Some("light"),
+            UiTheme::Dark => Some("dark"),
+        }
+    }
+
+    /// Parse a wire spelling; `None` is "not one of the three". An empty string is `System`,
+    /// because that is a setting left unset rather than a value spelled wrong, and every
+    /// caller turns the `None` into a refusal: a misspelled theme that quietly became
+    /// `system` is a setting an operator would go on believing they had set.
+    pub fn parse(s: &str) -> Option<UiTheme> {
+        match s.trim().to_ascii_lowercase().as_str() {
+            "system" | "" => Some(UiTheme::System),
+            "light" => Some(UiTheme::Light),
+            "dark" => Some(UiTheme::Dark),
+            _ => None,
+        }
+    }
+}
+
+/// Escape the HTML-significant characters for safe interpolation into a page or into a
+/// double-quoted attribute.
+///
+/// Named-entity form so one function serves both contexts. It is in the library because both
+/// HTML-emitting programs need it and there must not be two answers to "what is escaped":
+/// `bb-auth-web` reaches it through `maud`, which escapes its own interpolations, and calls
+/// this only where it hands a whole attribute value over.
+pub fn html_escape(s: &str) -> String {
+    let mut out = String::with_capacity(s.len());
+    for c in s.chars() {
+        match c {
+            '&' => out.push_str("&amp;"),
+            '<' => out.push_str("&lt;"),
+            '>' => out.push_str("&gt;"),
+            '"' => out.push_str("&quot;"),
+            '\'' => out.push_str("&#39;"),
+            _ => out.push(c),
+        }
+    }
+    out
+}
+
+/// The `<link>` that loads an operator's own stylesheet, or the empty string when none is
+/// configured.
+///
+/// One function for both programs, because the *position* is the contract: this is emitted
+/// after the built-in `<style>`, so an override wins by source order alone and needs no
+/// `!important` and no knowledge of the layout it is restyling. The URL has already passed
+/// [`compile_asset_url`], which forbids the quote characters outright; it is escaped here
+/// as well, because "already validated" is a property of today's callers and escaping is a
+/// property of the emission.
+pub fn stylesheet_link(url: Option<&str>) -> String {
+    match url {
+        Some(u) => format!("<link rel=\"stylesheet\" href=\"{}\">", html_escape(u)),
+        None => String::new(),
+    }
+}
+
+/// Validate a URL a page will load an asset from: [`UiSettings::stylesheet_url`] and
+/// [`UiSettings::logo_url`].
+///
+/// Two shapes, and only two. An absolute `https://` URL, held to exactly what
+/// [`compile_login_url`] holds a login page to, because it lands in the same kind of place:
+/// inside an attribute on a page one of these programs emits. Or a root-relative path
+/// (`/css/theme.css`), which is the better answer when the file is served by the same vhost,
+/// since it needs nothing of the deployment's hostname and nothing of a cross-origin CSP.
+///
+/// Empty is not an error, it is the setting being unset: `Ok(None)`, and the built-in
+/// stylesheet stands alone. That is deliberate and load-bearing. A page must never *need* a
+/// second host to be up in order to be usable, so an override is an addition to a complete
+/// page and never the page itself.
+///
+/// Printable ASCII forbids the CR/LF and the spaces; the quote characters and the angle
+/// brackets are refused outright so the value cannot break out of the attribute it is
+/// emitted into. That is belt and braces over the escaping in [`stylesheet_link`], and it is
+/// the belt worth having: this string is written by an administrator through a GUI, which is
+/// one hop further from the code than an env var is.
+pub fn compile_asset_url(field: &str, raw: &str) -> Result<Option<String>, String> {
+    let u = raw.trim();
+    if u.is_empty() {
+        return Ok(None);
+    }
+    let e = |m: &str| Err(format!("{field} '{u}': {m}"));
+    if !u.bytes().all(|b| b.is_ascii_graphic()) {
+        return e("must be printable ASCII (no spaces, no control bytes)");
+    }
+    if u.contains('"') || u.contains('\'') || u.contains('<') || u.contains('>') {
+        return e("must not contain a quote or an angle bracket");
+    }
+    if u.contains('\\') {
+        return e("backslash is not allowed");
+    }
+    if let Some(rest) = u.strip_prefix("https://") {
+        let authority = rest.split(['/', '?', '#']).next().unwrap_or("");
+        if authority.is_empty() {
+            return e("empty host");
+        }
+        if authority.contains('@') {
+            return e("userinfo '@' is not allowed in the host");
+        }
+        return Ok(Some(u.to_string()));
+    }
+    // A single leading slash. `//host/path` is protocol-relative, which is an absolute URL
+    // wearing a relative URL's clothes, and the one shape somebody writes by accident.
+    if u.starts_with('/') && !u.starts_with("//") {
+        return Ok(Some(u.to_string()));
+    }
+    e("must be an absolute https:// URL or a root-relative path starting with '/'")
+}
+
+/// Validate a brand name: the product name a login page puts under its logo.
+///
+/// It is HTML-escaped where it is emitted, so this is not the safety boundary; it is the
+/// quality one. Control characters are refused because they are never intended, and the
+/// length is bounded because the value is laid out, not merely stored. Empty means unset,
+/// and each page falls back to whatever it calls itself.
+pub fn compile_brand_name(raw: &str) -> Result<Option<String>, String> {
+    let n = raw.trim();
+    if n.is_empty() {
+        return Ok(None);
+    }
+    if n.chars().any(|c| c.is_control()) {
+        return Err(format!("brand_name '{n}': contains a control character"));
+    }
+    if n.chars().count() > MAX_BRAND_NAME {
+        return Err(format!(
+            "brand_name: {} characters is longer than the {MAX_BRAND_NAME} allowed",
+            n.chars().count()
+        ));
+    }
+    Ok(Some(n.to_string()))
+}
+
+/// The look, shared by both services: the section that says how a page presents itself, and
+/// never who may see one.
+///
+/// Every field in it passes the three-part rule the settings file exists for. Each is read
+/// **per request**, when a page is rendered. None can lock anybody out: the worst a wrong
+/// value here achieves is an unstyled page or a missing logo, because the built-in
+/// stylesheet is complete on its own and an override is only ever an addition to it. And
+/// none is a secret. A value that fails any of the three belongs in `bb-auth.env`, however
+/// convenient it would be to edit it from a GUI.
+#[derive(Deserialize, Serialize, Clone, Debug, Default, PartialEq, Eq)]
+#[serde(deny_unknown_fields)]
+pub struct UiSettings {
+    /// A stylesheet to load after the built-in one, or empty for none.
+    ///
+    /// It is expected to redefine the custom properties in [`THEME_CSS`] and nothing else:
+    /// that is what makes one file restyle the gate's pages and the admin GUI at once,
+    /// without knowing what either page is made of. It is emitted as an ordinary `<link>`,
+    /// so a host that does not answer costs the page its palette and nothing else.
+    #[serde(default)]
+    pub stylesheet_url: String,
+    /// A logo for the gate's login page, or empty for none, in which case the page shows the
+    /// brand name alone.
+    #[serde(default)]
+    pub logo_url: String,
+    /// The product name a page introduces itself with. Empty means each page falls back to
+    /// its own name, which is what a deployment nobody has told a brand should show.
+    #[serde(default)]
+    pub brand_name: String,
+    /// Which arm of the palette a page starts in: `system` (the default), `light` or `dark`.
+    ///
+    /// The gate's pages have nowhere to keep a per-visitor choice, so for them this is the
+    /// whole answer. `bb-auth-web` treats it as the default an administrator's own cookie
+    /// then overrides, which is why a deployment that pins `dark` here still leaves one free
+    /// to work in light.
+    #[serde(default)]
+    pub theme: String,
+}
+
+/// A settings file as it is written: three sections, a version, and whatever else was in it.
+///
+/// The sections answer three different questions, which is why they are three and not one:
+/// `gate` is how the gate answers a request, `web` is who may use the GUI, and `ui` is how a
+/// page looks to whoever reaches one. The last is the only one *both* programs read.
 ///
 /// Unknown keys are rejected inside each section, for the reason [`AppSpec`] rejects them,
 /// a typo in a setting that narrows behaviour must not be dropped in silence, and preserved
@@ -3116,6 +3374,8 @@ pub struct SettingsFile {
     pub gate: GateSettings,
     #[serde(default)]
     pub web: WebSettings,
+    #[serde(default)]
+    pub ui: UiSettings,
     /// Unknown top-level keys, preserved verbatim across an edit.
     #[serde(flatten)]
     pub extra: Map<String, Value>,
@@ -3141,6 +3401,15 @@ pub struct Settings {
     /// See [`WebSettings::admins`], normalised with [`norm_email`] and deduplicated. May be
     /// empty here; `bb-auth-web` is where that is fatal.
     pub admins: Vec<String>,
+    /// See [`UiSettings::stylesheet_url`]. `None` = no override, and the built-in stylesheet
+    /// is the whole answer.
+    pub stylesheet_url: Option<String>,
+    /// See [`UiSettings::logo_url`].
+    pub logo_url: Option<String>,
+    /// See [`UiSettings::brand_name`]. `None` = each page falls back to its own name.
+    pub brand_name: Option<String>,
+    /// See [`UiSettings::theme`].
+    pub theme: UiTheme,
 }
 
 impl Settings {
@@ -3220,6 +3489,21 @@ pub fn compile_settings(file: &SettingsFile) -> Result<Settings, String> {
         }
     }
 
+    // The look. Fatal on a bad value, with the same reflex the claim list is held to and for
+    // the same reason: a stylesheet URL silently dropped is a deployment that goes on looking
+    // wrong with nothing anywhere saying why. It cannot lock anybody out, which is what earns
+    // it a place in this file at all, but "cannot lock anybody out" is not "may be wrong in
+    // silence".
+    let stylesheet_url = compile_asset_url("stylesheet_url", &file.ui.stylesheet_url)?;
+    let logo_url = compile_asset_url("logo_url", &file.ui.logo_url)?;
+    let brand_name = compile_brand_name(&file.ui.brand_name)?;
+    let theme = UiTheme::parse(&file.ui.theme).ok_or_else(|| {
+        format!(
+            "theme: '{}' is not one of system, light, dark",
+            file.ui.theme.trim()
+        )
+    })?;
+
     Ok(Settings {
         profile_claims,
         identity_attrs,
@@ -3227,6 +3511,10 @@ pub fn compile_settings(file: &SettingsFile) -> Result<Settings, String> {
         social_providers: (!providers.is_empty()).then_some(providers),
         session_ttl: ttl,
         admins,
+        stylesheet_url,
+        logo_url,
+        brand_name,
+        theme,
     })
 }
 
@@ -5065,6 +5353,264 @@ mod tests {
         );
         assert!(s.is_admin("bob@x.com"));
         assert!(!s.is_admin("eve@x.com"));
+    }
+
+    #[test]
+    fn the_ui_section_defaults_to_the_built_in_look() {
+        // A file that says nothing about the look is the common case, and it must compile to
+        // "no override anywhere": each page is complete on its own, and nothing is fetched.
+        let s = settings(r#"{ "version": 1 }"#).unwrap();
+        assert_eq!(s.stylesheet_url, None);
+        assert_eq!(s.logo_url, None);
+        assert_eq!(s.brand_name, None);
+        assert_eq!(s.theme, UiTheme::System);
+        assert_eq!(
+            stylesheet_link(None),
+            "",
+            "nothing configured, nothing linked"
+        );
+    }
+
+    #[test]
+    fn an_asset_url_is_absolute_https_or_root_relative_and_nothing_else() {
+        let ok = |u: &str| compile_asset_url("stylesheet_url", u).unwrap();
+        assert_eq!(ok(""), None, "empty is unset, not an error");
+        assert_eq!(ok("   "), None);
+        assert_eq!(
+            ok("https://assets.x.com/css/theme.css"),
+            Some("https://assets.x.com/css/theme.css".to_string())
+        );
+        assert_eq!(
+            ok("/css/theme.css"),
+            Some("/css/theme.css".to_string()),
+            "same-vhost, which needs no hostname and no cross-origin CSP"
+        );
+
+        let bad = |u: &str| compile_asset_url("stylesheet_url", u).unwrap_err();
+        // http: the page it lands on is https, so this is a mixed-content block at best.
+        assert!(bad("http://assets.x.com/t.css").contains("absolute https"));
+        // Protocol-relative: an absolute URL wearing a relative one's clothes.
+        assert!(bad("//assets.x.com/t.css").contains("absolute https"));
+        assert!(bad("theme.css").contains("absolute https"));
+        assert!(bad("https:///t.css").contains("empty host"));
+        assert!(bad("https://user@evil.x.com/t.css").contains("userinfo"));
+        // The three that could break out of the attribute this value is emitted into.
+        assert!(bad("https://x.com/a\"onload=alert(1)").contains("quote"));
+        assert!(bad("https://x.com/a'b").contains("quote"));
+        assert!(bad("https://x.com/<script>").contains("angle bracket"));
+        assert!(bad("https://x.com/a\\b").contains("backslash"));
+        assert!(bad("https://x.com/a b").contains("printable ASCII"));
+        assert!(bad("https://x.com/a\nb").contains("printable ASCII"));
+    }
+
+    #[test]
+    fn a_link_is_escaped_even_though_the_url_was_already_validated() {
+        // Belt and braces on purpose: "already validated" is a property of today's callers,
+        // and escaping is a property of the emission.
+        assert_eq!(
+            stylesheet_link(Some("https://x.com/t.css?a=1&b=2")),
+            r#"<link rel="stylesheet" href="https://x.com/t.css?a=1&amp;b=2">"#
+        );
+    }
+
+    #[test]
+    fn a_brand_name_is_prose_with_a_bound() {
+        assert_eq!(
+            compile_brand_name("  BadBat75  ").unwrap(),
+            Some("BadBat75".to_string())
+        );
+        assert_eq!(compile_brand_name("").unwrap(), None);
+        // Accents and spaces are exactly what a real name has: this is not an identifier.
+        assert_eq!(
+            compile_brand_name("Società X").unwrap(),
+            Some("Società X".to_string())
+        );
+        assert!(compile_brand_name("a\nb").unwrap_err().contains("control"));
+        let long = "x".repeat(MAX_BRAND_NAME + 1);
+        assert!(compile_brand_name(&long).unwrap_err().contains("longer"));
+    }
+
+    #[test]
+    fn a_misspelled_theme_is_refused_rather_than_quietly_system() {
+        assert_eq!(UiTheme::parse("dark"), Some(UiTheme::Dark));
+        assert_eq!(UiTheme::parse(" LIGHT "), Some(UiTheme::Light));
+        // Blank in the FILE means "no preference", which is what System is.
+        assert_eq!(UiTheme::parse(""), Some(UiTheme::System));
+        assert_eq!(UiTheme::parse("darkk"), None);
+        assert!(refusal(compile_settings(
+            &serde_json::from_str(r#"{ "version": 1, "ui": { "theme": "darkk" } }"#).unwrap()
+        ))
+        .contains("not one of system, light, dark"));
+        // System is the absence of a choice, and says so by emitting no attribute at all.
+        assert_eq!(UiTheme::System.attr(), None);
+        assert_eq!(UiTheme::Dark.attr(), Some("dark"));
+    }
+
+    #[test]
+    fn a_bad_look_refuses_the_file_rather_than_being_skipped() {
+        // The claim list's reflex, for the same reason: a setting silently dropped is a
+        // deployment that goes on looking wrong with nothing anywhere saying why. It cannot
+        // lock anybody out, which is what earns it a place in this file; that is not the same
+        // as being allowed to be wrong in silence.
+        let e = refusal(settings(
+            r#"{ "version": 1, "ui": { "stylesheet_url": "javascript:alert(1)" } }"#,
+        ));
+        assert!(e.contains("stylesheet_url"), "{e}");
+
+        let s = settings(
+            r#"{ "version": 1, "ui": { "stylesheet_url": "https://a.x.com/t.css",
+                 "logo_url": "/img/l.png", "brand_name": "X", "theme": "dark" } }"#,
+        )
+        .unwrap();
+        assert_eq!(s.stylesheet_url.as_deref(), Some("https://a.x.com/t.css"));
+        assert_eq!(s.logo_url.as_deref(), Some("/img/l.png"));
+        assert_eq!(s.brand_name.as_deref(), Some("X"));
+        assert_eq!(s.theme, UiTheme::Dark);
+
+        // An unknown key inside the section is refused, exactly as it is in the other two.
+        assert!(settings(r#"{ "version": 1, "ui": { "stylesheet": "x" } }"#).is_err());
+    }
+
+    #[test]
+    fn the_theme_defines_every_token_in_all_four_arms() {
+        // The dark list is written twice on purpose (see theme.css), and the two copies have
+        // to stay in step by hand. This is what notices when one of them does not.
+        let arms: Vec<&str> = THEME_CSS.split("--bg:").collect();
+        assert_eq!(arms.len(), 4, "one light arm and two dark ones define --bg");
+        for token in [
+            // `--bg-grad:` does not contain `--bg:`, so the split above does not see it and it
+            // has to be listed here like any other. It is in the list at all because the ground
+            // is now a gradient in both arms: a dark arm that forgot it would paint the light
+            // theme's gradient over the dark theme's fill.
+            "--bg-grad:",
+            "--card:",
+            "--card-border:",
+            "--text:",
+            "--muted:",
+            "--input-bg:",
+            "--input-border:",
+            "--accent:",
+            "--accent-hover:",
+            "--accent-weak:",
+            "--on-accent:",
+            "--ok:",
+            "--ok-bg:",
+            "--warn:",
+            "--warn-bg:",
+            "--error:",
+            "--error-bg:",
+            "--on-state:",
+            "--chip:",
+            "--logo-filter:",
+            "--shadow-lg:",
+            "--shadow-md:",
+        ] {
+            assert_eq!(
+                THEME_CSS.matches(token).count(),
+                3,
+                "{token} must be defined in the light arm and in both dark arms"
+            );
+        }
+        // Shape and typography are theme-independent and defined exactly once, in the light
+        // arm: a radius does not change with the palette.
+        for token in [
+            "--r-box:",
+            "--r-ctl:",
+            "--r-pill:",
+            "--fs-sm:",
+            "--font-ui:",
+            "--font-mono:",
+        ] {
+            assert_eq!(
+                THEME_CSS.matches(token).count(),
+                1,
+                "{token} is not a colour"
+            );
+        }
+        // The selectors that make an explicit choice outrank the OS.
+        assert!(THEME_CSS.contains(":root[data-theme=dark]"));
+        assert!(THEME_CSS.contains(":root[data-theme=light]"));
+        assert!(
+            THEME_CSS.contains("@media (prefers-color-scheme:dark){:root:not([data-theme=light])")
+        );
+    }
+
+    /// Everything a CSS comment says, removed. The prose in all four stylesheets talks about
+    /// colours by name and by hex on purpose, so a scan that did not strip comments would be
+    /// a scan of the documentation.
+    #[cfg(test)]
+    fn without_comments(css: &str) -> String {
+        let mut out = String::with_capacity(css.len());
+        let mut rest = css;
+        while let Some(open) = rest.find("/*") {
+            out.push_str(&rest[..open]);
+            match rest[open..].find("*/") {
+                Some(close) => rest = &rest[open + close + 2..],
+                None => return out,
+            }
+        }
+        out.push_str(rest);
+        out
+    }
+
+    #[test]
+    fn only_the_palette_names_a_colour() {
+        // The contract that makes `ui.stylesheet_url` a TOKEN file: a deployment restyles both
+        // programs by redefining custom properties, which only works while every other
+        // stylesheet reads them and states none of its own. One literal in a layout and that
+        // stops being true for whatever it paints, silently and only in one of the two
+        // surfaces — the exact failure this is here to catch.
+        //
+        // Both layouts are checked here, in the library, and not each in its own binary,
+        // because the rule is not "this layout is tidy": it is that the shared files are the
+        // ONLY answer to what a colour is worth, which is a statement about all of them at
+        // once and belongs where the shared files live.
+        for (name, css) in [
+            ("base.css", BASE_CSS),
+            (
+                "auth.css (the gate's layout)",
+                include_str!("assets/auth.css"),
+            ),
+            (
+                "admin.css (bb-auth-web's layout)",
+                include_str!("assets/admin.css"),
+            ),
+        ] {
+            let code = without_comments(css);
+            assert!(
+                !code.contains('#'),
+                "{name} names a colour by hex; it may only read one from theme.css"
+            );
+            assert!(
+                !code.contains("rgb"),
+                "{name} names a colour by channel; it may only read one from theme.css"
+            );
+        }
+    }
+
+    #[test]
+    fn the_components_are_shared_and_the_layouts_only_arrange_them() {
+        // What "one product" means mechanically: the objects a person operates are defined
+        // once, in the file both programs emit, so a change to a button's shape or a field's
+        // height cannot reach one surface and miss the other. The four below are the ones that
+        // had actually drifted when this was written — the sign-in page's rectangles against
+        // the admin's lozenges, its 12px fields against the admin's 7px ones.
+        for object in ["button{", ".pill{", ".tag{", ".card,.panel,"] {
+            assert!(
+                BASE_CSS.contains(object),
+                "{object} belongs to the shared component layer"
+            );
+        }
+        // And the negative half, which is the one that rots: a layout that starts redefining a
+        // control has taken it back, and only its own program will ever see the change.
+        let admin = without_comments(include_str!("assets/admin.css"));
+        let auth = without_comments(include_str!("assets/auth.css"));
+        for layout in [&admin, &auth] {
+            assert!(
+                !layout.contains("\nbutton{") && !layout.contains("\n.pill{"),
+                "a layout may arrange the shared controls, never redefine one"
+            );
+        }
     }
 
     #[test]

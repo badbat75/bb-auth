@@ -18,7 +18,7 @@ For the service's internal structure and config, see
 | **Browser** | The user's UA. Holds the session cookie after login. |
 | **nginx** | Edge on the service host, `:443`. TLS terminator + `auth_request` enforcer. |
 | **bb-auth** | `127.0.0.1:4181`, loopback only. Validates Cognito id_tokens and issues/verifies the session cookie. |
-| **Login page** | `https://login.example.com/`. Email-first UI; runs the Cognito `USER_AUTH` flow in the browser and `POST`s the resulting id_token to bb-auth. |
+| **Login page** | `GET /auth/login` on bb-auth itself, normally `https://auth.example.com/auth/login` (`BB_AUTH_LOGIN_URL` names it, and may name a page of your own instead). Email-first UI; runs the Cognito `USER_AUTH` flow in the browser and `POST`s the resulting id_token back to bb-auth. Served by the gate so that the app-client id, the Cognito endpoint and the allowed `rd` hosts are the very values the gate validates against, not copies of them. |
 | **AWS Cognito** | A user pool + public app client. Issues RS256-signed id_tokens. |
 
 ---
@@ -45,9 +45,13 @@ Key points:
 
 ## Phase 2 — Login on the login page (browser ↔ Cognito)
 
-This phase happens entirely outside bb-auth; bb-auth only sees its result. The
-page talks to Cognito directly on the **public** client using the `USER_AUTH`
-flow.
+This phase happens entirely outside the gate's authorization logic; bb-auth only sees its
+result. The page talks to Cognito directly on the **public** client using the `USER_AUTH`
+flow. bb-auth *serves* that page (`GET /auth/login`, an ungated location) but takes no part
+in the exchange: it hands the browser a document and hears nothing more until Phase 3. The
+page's own configuration comes from the gate's, so the `ClientId` it presents to Cognito is
+by construction the `aud` the gate will check, and the `rd` it carries has already passed
+the same host list `safe_rd` will apply to it.
 
 ### 2a — Returning user (email exists)
 

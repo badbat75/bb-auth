@@ -30,7 +30,18 @@ configure)
 
     # dpkg only creates directories that hold a packaged file, and neither of these
     # does: both hold state this script writes.
-    install -d -o root -g root -m 0755 "$DEST/etc" "$DEST/var" "$DEST/var/lib"
+    #
+    # CREATED IF ABSENT, NEVER RE-CHOWNED. `install -d` resets owner and mode on a
+    # directory that already exists, and var/lib is one another package legitimately owns:
+    # installing bb-auth-web moves it to `bb-auth-web:bb-auth 0750` so the GUI can write
+    # its temp file there before renaming it into place. A gate-only upgrade
+    # (`deploy.ps1 -Packages bb-auth`) would otherwise take the directory back to
+    # `root:root 0755`, and every GUI save from then on would fail with EACCES: silently,
+    # because nothing reads it until somebody presses Save. The same reflex as the env
+    # file and the access file below, applied to the directory that holds them.
+    for d in "$DEST/etc" "$DEST/var" "$DEST/var/lib"; do
+        [ -d "$d" ] || install -d -o root -g root -m 0755 "$d"
+    done
 
     # --- the env file, once ---
     # The HMAC key is generated here and preserved forever after: changing it

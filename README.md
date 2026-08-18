@@ -17,6 +17,13 @@ sign-up and auto-login with no second OTP) and ends up holding an `id_token`.
 bb-auth takes
 that token, validates it, and issues the session cookie.
 
+**It serves that login page itself**, at `/auth/login`, with a social callback at
+`/auth/callback`. Not because the job grew, but because the page needs the app-client id, the
+Cognito endpoint and the list of hosts a post-login redirect may land on, and the gate already
+holds all three *as the values it validates against* — served from anywhere else, each is a
+second copy waiting to disagree. The page is still an ordinary browser-side client of Cognito,
+and `BB_AUTH_LOGIN_URL` can still point at one of your own.
+
 ## Flow
 
 ```text
@@ -40,9 +47,15 @@ nginx error_page 401 → 302  <login-page>/?rd=<original>
 | Method | Path             | Who        | Purpose                                            |
 |--------|------------------|------------|----------------------------------------------------|
 | GET    | `/auth/validate` | nginx only | `auth_request`: 204 naming the identity in one header per configured attribute (default `X-Auth-Email`, plus one per configured profile claim when known) if the session cookie, an `Authorization: Bearer <id_token>`, or a static `Authorization: Bearer bbk_…` API key is admitted by the scope that owns the URL, else 401 + `X-Auth-Login-URL`. An `anonymous` scope answers 204 with no credential, and names nobody. |
+| GET    | `/auth/login`    | browser    | the sign-in page: runs the Cognito flow and POSTs the `id_token` to `/auth/session`. Self-contained (no external stylesheet, script or font), IT/EN, with the social buttons `BB_AUTH_SOCIAL_IDPS` names and none at all when it names none |
+| GET    | `/auth/callback` | browser    | finishes a social sign-in (OAuth code + PKCE). `404` when no `BB_AUTH_SOCIAL_*` is configured |
 | POST   | `/auth/session`  | browser    | validate posted `id_token`, set cookie, 302 → `rd` |
 | GET    | `/auth/logout`   | browser    | clear cookie, 302 → `rd` (guarded) or the login page |
 | GET    | `/auth/healthz`  | local      | liveness                                           |
+
+Only the first is gated. **nginx must leave `/auth/login` and `/auth/callback` ungated**, the
+way it already does for `/auth/session` and `/auth/logout`: a sign-in page behind an
+`auth_request` answers a signed-out visitor with itself, forever.
 
 ## Programmatic access (Bearer)
 
@@ -822,15 +835,17 @@ cost?
 
 **[`deploy/bb-auth.env.example`](deploy/bb-auth.env.example)**: everything a change to
 costs a restart or a re-login: the listener and the worker count, the Cognito trust roots,
-the cookie's name and domain, and `BB_AUTH_LOGIN_URL` / `BB_AUTH_AUTHORIZED_HOSTS` /
+the cookie's name and domain, the `BB_AUTH_SOCIAL_*` group, and `BB_AUTH_LOGIN_URL` /
+`BB_AUTH_AUTHORIZED_HOSTS` /
 `BB_AUTH_ORIGINAL_URL_HEADER`, which *are* the lockout when they are wrong. The only secret
 is `BB_AUTH_HMAC_KEY` (`openssl rand -base64 48`); keep it out of version control and off
 shared storage.
 
-**[`deploy/settings.example.json`](deploy/settings.example.json)**: the six that are read
-per request, cannot lock anybody out, and hold no secret: the profile claims, the identity
-attributes, the social relaxation and its providers, the session lifetime, and who may use
-`bb-auth-web`. They are in a file rather than the environment for one mechanical reason,
+**[`deploy/settings.example.json`](deploy/settings.example.json)**: everything that is read
+per request, cannot lock anybody out, and holds no secret: the profile claims, the identity
+attributes, the social relaxation and its providers, the session lifetime, who may use
+`bb-auth-web`, and the `ui` section — how every page either program serves looks. They are in
+a file rather than the environment for one mechanical reason,
 and not for tidiness: a process cannot re-read its own environment (systemd loads
 `EnvironmentFile=` once, at `ExecStart`), so a value that must change with no restart
 cannot be an environment variable. These take effect on the next request, and the settings
@@ -841,12 +856,47 @@ worst a bad save can do is leave the previous values in force.
 bb-auth-adm settings show                              # what the two services read
 bb-auth-adm settings set --claims given_name,family_name
 bb-auth-adm settings admin add you@example.com         # who may use the GUI
+bb-auth-adm settings set --brand 'Acme' --theme dark   # the look of every page
 bb-auth --check-settings /opt/bb-auth/var/lib/settings.json
 ```
 
-The GUI's **Settings** tab is the same six, in a form, guarded by the same `rev` check every
+The GUI's **Settings** tab is the same file, in a form, guarded by the same `rev` check every
 other form uses. It will not let an administrator remove themselves: that one is
 `bb-auth-adm settings admin rm`, over SSH, on purpose.
+
+### The look (`ui`)
+
+One stylesheet restyles **both** programs, because both read this section: the sign-in page,
+the social callback and the error page the gate serves, and every page of `bb-auth-web`.
+
+| Setting | What it does |
+|---|---|
+| `stylesheet_url` | a stylesheet loaded **after** the built-in one, so it wins by source order. Absolute `https://`, or a path starting with `/` on this host |
+| `logo_url` | shown on the sign-in page above the name. Same two shapes. Empty = the name alone |
+| `brand_name` | what the sign-in page calls this deployment. Empty = each page's own name |
+| `theme` | `system` (default), `light` or `dark`: which palette a page starts in. In `bb-auth-web` it is only the default, and each administrator's own Settings menu overrides it |
+
+Both binaries already carry a **complete** stylesheet, so an unset `stylesheet_url` is a fully
+styled deployment and an unreachable one costs a page its palette and nothing else. That is
+deliberate: a sign-in page must never *need* a second host to be up. Which is also why the
+override is expected to redefine the theme's custom properties (`--bg`, `--card`, `--text`,
+`--accent`, `--r-box`, `--font-ui`, …) and nothing else — it is a *token* file, and knowing
+nothing about either layout is what lets it restyle both.
+
+```css
+/* the shape of one: four arms, because a page follows the OS unless told otherwise.
+   `:root` is the LIGHT arm — it is where a browser starts before anyone says otherwise. */
+:root { --accent:#4661f0; --card:#fff; --r-box:14px; }
+:root[data-theme=light] { color-scheme:light; }
+@media (prefers-color-scheme:dark) { :root:not([data-theme=light]) { --accent:#5b78ff; --card:#20202a; } }
+:root[data-theme=dark] { --accent:#5b78ff; --card:#20202a; }
+```
+
+What a token file cannot change is what a button, a field or a card is *made of*: that is one
+shared stylesheet inside both binaries (`bb_auth_core::BASE_CSS`), which is what makes the
+sign-in page and the admin interface one product rather than two that were once made to
+match. A deployment restyles them together by redefining the names above; neither program can
+restyle a control for itself.
 
 ## Putting a service behind the gate
 
@@ -941,6 +991,19 @@ The binary is service-agnostic. To front a service at `app.example.com`:
            proxy_set_header X-Original-URL https://app.example.com$uri;
            proxy_pass http://127.0.0.1:4181/auth/logout;
        }
+
+       # The sign-in page and its social callback, on whichever vhost signs people
+       # in — normally the one BB_AUTH_LOGIN_URL names, and one is enough for the
+       # whole estate. They are inside no `location /` that carries auth_request
+       # here, but on a vhost where the gate is included at server level they need
+       # `auth_request off;` explicitly: a sign-in page behind the gate answers a
+       # signed-out visitor with itself, forever.
+       # No X-Original-URL: the page takes `rd` from its own query string and
+       # validates it against BB_AUTH_AUTHORIZED_HOSTS, so it needs nothing of
+       # nginx's. That is deliberate — this is the one location that must be
+       # impossible to get wrong.
+       location = /auth/login    { proxy_pass http://127.0.0.1:4181/auth/login; }
+       location = /auth/callback { proxy_pass http://127.0.0.1:4181/auth/callback; }
    }
    ```
 

@@ -66,8 +66,8 @@ the gate is the gate's, and stays in one file.
 
 | Target | What it is |
 |--------|------------|
-| `src/lib.rs` (`bb_auth_core`) | **The access file.** Schema (`AccessFile`), parser (`compile_access`), URL matcher (`glob_match` / `UrlScope`), the two-level resolution (`Access::resolve`, `base_covers`), the grant model (`decide`, `decide_api_key`), identity and key minting (`mint_uuid`, `mint_api_key`), and how a file is edited and written (`open_access_file`, `AccessWrite`, the document mutations). Reads no env, opens no socket, holds no HTTP, prints nothing. |
-| `src/bin/bb-auth.rs` (`bb-auth`) | **The gate**, still a single file read top to bottom: HTTP, config, the session cookie, id_token validation, the nginx contract. |
+| `src/lib.rs` (`bb_auth_core`) | **The access file.** Schema (`AccessFile`), parser (`compile_access`), URL matcher (`glob_match` / `UrlScope`), the two-level resolution (`Access::resolve`, `base_covers`), the grant model (`decide`, `decide_api_key`), identity and key minting (`mint_uuid`, `mint_api_key`), and how a file is edited and written (`open_access_file`, `AccessWrite`, the document mutations). Plus the settings file, and **the presentation contract** (`THEME_CSS` from `src/assets/theme.css`, `BASE_CSS` from `src/assets/base.css`, `UiTheme`, `stylesheet_link`, `html_escape`, `compile_asset_url`): the palette two programs paint from **and the components they build out of it**, on the same membership rule as everything else here. A thing (a button, a field, a card, a tag, a message) is defined once for both; how a page arranges those things is not. Reads no env, opens no socket, holds no HTTP, prints nothing. |
+| `src/bin/bb-auth.rs` (`bb-auth`) | **The gate**, still a single file read top to bottom: HTTP, config, the session cookie, id_token validation, the nginx contract, and the three pages it serves out of `src/assets/` (sign-in, social callback, error). |
 | `src/bin/bb-auth-adm.rs` (`bb-auth-adm`) | **The access-file admin CLI.** CRUD over `applications` / `scopes` / `user_groups` / `denied` / `users` / `api_keys`, key minting and rotation, and `can EMAIL URL` — which calls the library's `decide`, so it answers the question the gate will answer. Every edit and every write is a library call (`AccessWrite`), so it cannot save a file the gate would reject; what is left here is flags, warnings and the wording of a verdict. See §12. |
 | `src/bin/bb-auth-web.rs` (`bb-auth-web`) | **The access-file admin GUI**: server-rendered (`maud`; no page needs JavaScript, the one inline handler is a Settings-menu shortcut with a `<noscript>` submit behind it) over the library, read *and* write — CRUD through `AccessWrite` alone, `POST`-only mutations behind a same-origin check and a `rev` (sha256-of-file) concurrency check. Loopback behind nginx `auth_request`, identity from the `X-Auth-Email` nginx injects plus its own administrator allowlist (`web.admins` in the settings file, read fresh on every request and editable from its own Settings tab). Links the library, none of the gate. |
 
@@ -84,7 +84,8 @@ Inside `src/bin/bb-auth.rs`, in file order:
 | `validate_id_token` | Full JWT validation (see §6). Returns a `UserIdentity`: the verified, lowercased email plus whichever configured profile claims the token asserted (`clean_claim`). |
 | `make_session` / `verify_session` | HMAC-SHA256 signed cookie (see §7). |
 | HTTP helpers | Header/cookie parsing, cookie building, open-redirect `safe_rd`, `pct_encode`, response builders. |
-| `handle_validate` / `handle_session` / `handle_logout` | The three real handlers (plus `/auth/healthz` inline). `/auth/validate` resolves a cookie or bearer credential to an identity, authorizes the request URL against it, and returns the identity in one header per configured attribute, plus one per configured profile claim the credential carried (`bearer_apikey` / `authorize` / `authorize_login` / `original_url` / `identity_headers` / `profile_headers` / `respond_authorized`). |
+| The pages | `LOGIN_HTML`, `CALLBACK_HTML` and `AUTH_CSS`, `include_str!`-ed from `src/assets/`, filled by `render_page` over `__BB_*__` placeholders (single-pass, so a substituted value is never rescanned) and dressed by `look_subs` from the settings file's `ui` section. The head emits `THEME_CSS`, then `BASE_CSS`, then `AUTH_CSS`, then the operator's link: the first two are the same bytes `bb-auth-web` emits, so these pages and the admin interface are one product by construction rather than by intention, and `AUTH_CSS` only says how this page arranges them. Self-contained: the palette, the components, the arrangement, the script and both languages are in the document, and the only external references are an operator's optional stylesheet and logo. `env_page_value` is what makes a config value safe to emit raw. |
+| `handle_validate` / `handle_session` / `handle_logout` / `handle_login` / `handle_callback` | The five real handlers (plus `/auth/healthz` inline). `/auth/validate` resolves a cookie or bearer credential to an identity, authorizes the request URL against it, and returns the identity in one header per configured attribute, plus one per configured profile claim the credential carried (`bearer_apikey` / `authorize` / `authorize_login` / `original_url` / `identity_headers` / `profile_headers` / `respond_authorized`). The last two render the pages above and are the two locations nginx must leave ungated. |
 | `main` | Build config/state, prime JWKS, spawn the worker thread pool, route requests. |
 
 And in `src/lib.rs`:
@@ -126,13 +127,17 @@ And in `src/lib.rs`:
 | Method | Path | Caller | Behavior |
 |--------|------|--------|----------|
 | `GET` | `/auth/validate` | nginx only (`auth_request`) | `204` naming the identity in one header per `identity_attrs` entry (default `X-Auth-Email`) if an accepted credential authorizes the request URL, otherwise `401` + `X-Auth-Login-URL: <this area's login page>`. A `204` also carries one header per `profile_claims` entry the credential knows (percent-encoded; omitted otherwise). Accepts (in order) an `Authorization: Bearer bbk_…` static API key, an `Authorization: Bearer <id_token>`, or the session cookie, and then no credential at all, which only an `anonymous` scope grants (and which names nobody). See §12. |
+| `GET` | `/auth/login[?rd=…]` | browser | The sign-in page: runs the Cognito `USER_AUTH` flow in the browser and POSTs the resulting id_token to `/auth/session`. Self-contained (palette, layout, script and both languages in the document; only the operator's optional stylesheet and logo are external). `rd` is validated here with the same `rd_url_allowed` `safe_rd` uses and dropped if it fails. Social buttons appear only when `BB_AUTH_SOCIAL_*` is configured. |
+| `GET` | `/auth/callback` | browser | Finishes a social sign-in: exchanges the OAuth code and the PKCE verifier for tokens, offers a profile form when the IdP sent no names, and delivers the id_token exactly as the sign-in page does. `404` when no social client is configured. |
 | `POST` | `/auth/session` | browser | Body `application/x-www-form-urlencoded`: `id_token=…&rd=…`. Fully validates the id_token; on success sets the session cookie and `302`s to `rd` (open-redirect guarded). |
 | `GET` | `/auth/logout[?rd=…]` | browser | Sets an expired (Max-Age=0) cookie and `302` → `rd` (same `safe_rd` guard) or, with no `rd`, the login page. Cross-site requests (`Sec-Fetch-Site: cross-site`) are ignored (no cookie clear) to block CSRF-forced logout. Reads nothing about the host it was called on, and the expiring cookie carries the same `Domain` as the minted one, so under a shared `BB_AUTH_COOKIE_DOMAIN` one mounted location logs the browser out of every vhost: see README "One logout endpoint for every vhost". |
 | `GET` | `/auth/healthz` | local | `200 ok`. Liveness probe. |
 
 `/auth/validate` is never exposed publicly; nginx reaches it over loopback
-through the `internal` `/internal/auth-gate` location. `/auth/session` and
-`/auth/logout` are the only public bb-auth routes.
+through the `internal` `/internal/auth-gate` location. `/auth/session`, `/auth/logout`,
+`/auth/login` and `/auth/callback` are the public bb-auth routes, and all four must be
+**ungated** in nginx. The two pages most of all: a sign-in page behind an `auth_request`
+answers a signed-out visitor with itself, forever.
 
 ---
 
@@ -237,9 +242,9 @@ cost?
 **`bb-auth.env`** (see `deploy/bb-auth.env.example`) holds everything a change to costs a
 restart or a re-login. Required vars cause a fatal exit if missing.
 
-**The settings file** (see `deploy/settings.example.json`, and §8a below) holds the six that
-are read per request, cannot lock anybody out when they are wrong, and hold no secret. They
-are in a file rather than the environment for one mechanical reason: **a process cannot
+**The settings file** (see `deploy/settings.example.json`, and §8a below) holds everything
+that is read per request, cannot lock anybody out when it is wrong, and holds no secret. It
+is a file rather than more environment for one mechanical reason: **a process cannot
 re-read its own environment**. systemd loads `EnvironmentFile=` once, at `ExecStart`, so
 nothing in an env file can ever take effect without a restart.
 
@@ -259,6 +264,10 @@ nothing in an env file can ever take effect without a restart.
 | `BB_AUTH_AUTHORIZED_HOSTS` | yes | — | Comma-separated host globs a post-login `rd` may land on, e.g. `example.com,*.example.com`. The sole authority for the `rd` guard (see §9a). `*.x.com` does not match the apex `x.com`. |
 | `BB_AUTH_LOGIN_URL` | yes | — | Where `401`/logout send the user (the login page), and where a rejected `rd` falls back to. |
 | `BB_AUTH_SETTINGS_FILE` | no | `settings.json` beside the access file | Path to the settings file (§8a). Re-read on `SIGHUP` like the access file, fail-soft on both. A missing file is a fatal startup. |
+| `BB_AUTH_OAUTH_DOMAIN` | no | empty | The Cognito hosted-UI domain, as a bare host. One of the four `BB_AUTH_SOCIAL_*`/OAuth values that enable social sign-in on `/auth/login`: **all four or none**, and half of them is a fatal startup. |
+| `BB_AUTH_SOCIAL_CLIENT_ID` | no | empty | The app client the hosted UI and the PKCE exchange use. Must also be an accepted audience (`BB_AUTH_AUDIENCES`), which is checked at startup: without it every social login succeeds at Cognito and is refused here a redirect later. |
+| `BB_AUTH_SOCIAL_CALLBACK_URL` | no | empty | The `redirect_uri`, which must match the one registered on that app client **exactly**. Normally `/auth/callback` on the host serving the sign-in page. |
+| `BB_AUTH_SOCIAL_IDPS` | no | empty | Comma-separated Cognito `identity_provider` names, in the order their buttons appear. `Google` and `MicrosoftPersonal` come with an icon; any other name still gets a button, labelled with the name. |
 | `BB_AUTH_WORKERS` | no | `4` | Thread pool size (min 1). |
 
 The admin GUI is a separate service with a separate env file
@@ -271,8 +280,9 @@ fresh on every request, because this is the one service that can edit it.
 ### 8a. The settings file
 
 `compile_settings` (in the library, so all three programs agree on it) turns it into
-`Settings`. Two sections, one per service; each reads its own and ignores the other's, and
-both go through the same parser, so an edit made by either is one the other would accept.
+`Settings`. Three sections: `gate` and `web` are one per service, and `ui` is the one both
+read. Each service ignores what is not its own, and all of it goes through the same parser,
+so an edit made by either is one the other would accept.
 
 | Setting | Default | Notes |
 |---------|---------|-------|
@@ -282,12 +292,24 @@ both go through the same parser, so an edit made by either is one the other woul
 | `gate.social_providers` | `[]` → any | `providerName`s (case-insensitive, e.g. `Google`, `SignInWithApple`) the relaxation above applies to. No effect unless it is on. |
 | `gate.session_ttl_secs` | `2592000` (30 d) | Applies to cookies minted from then on and to none already in a browser, so changing it logs nobody out. Below 60s is refused (a login loop); above 400 days is warned about (the cap browsers apply to `Max-Age`). |
 | `web.admins` | `[]` | Who may use `bb-auth-web`, matched against the `X-Auth-Email` nginx injects. **Never empty**: the binary refuses to serve without one and both editors refuse to write an empty list. The gate ignores this section. |
+| `ui.stylesheet_url` | `""` → none | A stylesheet loaded **after** each program's built-in one, so it wins by source order. Absolute `https://`, or a path starting with `/` on this host. Read by both services, which is what makes one file restyle the gate's pages and the whole GUI together. Expected to redefine the custom properties in `THEME_CSS` and nothing else. |
+| `ui.logo_url` | `""` → none | Shown on the sign-in page above the name. Same two shapes. |
+| `ui.brand_name` | `""` | What the sign-in page calls this deployment; empty falls back to each page's own name. |
+| `ui.theme` | `"system"` | `system`, `light` or `dark`: which palette a page starts in. For the gate's pages it is the whole answer (they keep no per-visitor state); in `bb-auth-web` it is the default an administrator's own Settings menu overrides. |
+
+The `ui` four pass the "cannot lock anybody out" test for one structural reason: **both
+binaries already carry a complete stylesheet**, so an override is an addition to a working
+page and never the page itself. The worst a wrong value there achieves is a page in the
+wrong colours, and a stylesheet host that is down costs nothing but its palette.
 
 What is **not** in it is the point of it. The listener and the worker count need a rebind;
 the HMAC key is the secret; the Cognito trust roots, the cookie's name and its domain change
-who can log in or log everyone out; and `BB_AUTH_LOGIN_URL`, `BB_AUTH_AUTHORIZED_HOSTS` and
+who can log in or log everyone out; the `BB_AUTH_SOCIAL_*` group is a sign-in that cannot
+complete when it is wrong; and `BB_AUTH_LOGIN_URL`, `BB_AUTH_AUTHORIZED_HOSTS` and
 `BB_AUTH_ORIGINAL_URL_HEADER` *are* the lockout when they are wrong. All of those stay in the
-env file, where changing one is a deliberate act with a restart attached.
+env file, where changing one is a deliberate act with a restart attached. That the sign-in
+page's *look* is hot while its *Cognito wiring* is not is the rule working: one cannot shut
+anybody out, and the other is the only way to.
 
 Edited with `bb-auth-adm settings …` or from `bb-auth-web`'s Settings tab, through the same
 validate-before-write the access file gets (`SettingsWrite`). Checked by hand with

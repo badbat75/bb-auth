@@ -43,14 +43,15 @@ use std::process::ExitCode;
 
 use bb_auth_core::{
     add_api_key, add_application, add_denied, add_scope, add_user, add_user_email, add_user_group,
-    app_mut, app_pos, decide, decide_api_key, default_settings_path, edit_url_list, edit_urls,
-    format_date, key_expiry, key_mut, mint_uuid, move_scope, norm_email, now, open_access_file,
-    open_settings_file, remove_api_key, remove_application, remove_denied, remove_scope,
-    remove_user, remove_user_email, remove_user_group, rename_application, rename_scope,
-    render_access_file, render_settings_file, request_url, rotate_api_key, scope_pos,
-    user_group_mut, user_group_refs, user_label, user_pos, well_formed_uuid, Access, AccessFile,
-    AccessWrite, ApiKeySpec, AppSpec, Decision, KeyDecision, ScopeSpec, SealedKey, SettingsFile,
-    SettingsWrite, Subject, UrlScope, UserSpec, Written, ACCESS_FILE_VERSION, SETTINGS_VERSION,
+    app_mut, app_pos, compile_asset_url, compile_brand_name, decide, decide_api_key,
+    default_settings_path, edit_url_list, edit_urls, format_date, key_expiry, key_mut, mint_uuid,
+    move_scope, norm_email, now, open_access_file, open_settings_file, remove_api_key,
+    remove_application, remove_denied, remove_scope, remove_user, remove_user_email,
+    remove_user_group, rename_application, rename_scope, render_access_file, render_settings_file,
+    request_url, rotate_api_key, scope_pos, user_group_mut, user_group_refs, user_label, user_pos,
+    well_formed_uuid, Access, AccessFile, AccessWrite, ApiKeySpec, AppSpec, Decision, KeyDecision,
+    ScopeSpec, SealedKey, SettingsFile, SettingsWrite, Subject, UiTheme, UrlScope, UserSpec,
+    Written, ACCESS_FILE_VERSION, SETTINGS_VERSION,
 };
 
 const USAGE: &str = "\
@@ -129,11 +130,17 @@ settings                        the OTHER file: what takes effect with no restar
   settings show                 what the gate and the GUI read from it
   settings set [--claims LIST] [--identity LIST] [--session-ttl SECS]
                [--unverified-social true|false] [--providers LIST] [--no-providers]
+               [--brand NAME] [--stylesheet URL] [--logo URL] [--theme system|light|dark]
   settings admin add EMAIL...   who may use bb-auth-web. NEVER empty, never 'everyone'
   settings admin rm EMAIL...
   Default path: settings.json beside the access file; -s/--settings-file, or
-  $BB_AUTH_SETTINGS_FILE. These five are hot BECAUSE they are in a file: a process cannot
+  $BB_AUTH_SETTINGS_FILE. These are hot BECAUSE they are in a file: a process cannot
   re-read its own environment, so an env var could never be one.
+  The last four are the `ui` section, and they are the look of every page BOTH programs
+  emit: the gate's login page and bb-auth-web itself. --stylesheet loads after the built-in
+  stylesheet and is meant to redefine its custom properties, so a deployment restyles both
+  surfaces with one file; unset, or unreachable, and each page keeps the look it was
+  compiled with. Pass an empty value to unset any of them.
 
 --url takes a <scheme>://<host>/<path> glob; repeat it, or comma-separate. `*` never
 crosses '/' unless it is the pattern's last character; blanket coverage is '*://*/*'.
@@ -668,12 +675,38 @@ fn cmd_settings_show(ctx: Ctx) -> Result<ExitCode, String> {
             _ => s.admins.join(", "),
         }
     );
+    println!();
+    println!("ui");
+    // "(built-in)" rather than "(none)" for the two URLs: an unset stylesheet is not a page
+    // with no styling, it is a page wearing the one compiled into the binary, and the
+    // difference is the whole design.
+    println!(
+        "  brand_name              {}",
+        s.brand_name.as_deref().unwrap_or("(each page's own name)")
+    );
+    println!(
+        "  stylesheet_url          {}",
+        s.stylesheet_url.as_deref().unwrap_or("(built-in only)")
+    );
+    println!(
+        "  logo_url                {}",
+        s.logo_url.as_deref().unwrap_or("(none)")
+    );
+    println!(
+        "  theme                   {}{}",
+        s.theme.code(),
+        match s.theme {
+            UiTheme::System => "  (follow the browser and the OS)",
+            _ => "",
+        }
+    );
     Ok(ExitCode::SUCCESS)
 }
 
-/// `settings set`: change one or more of the five. Absent flags leave their setting alone;
+/// `settings set`: change one or more of them. Absent flags leave their setting alone;
 /// `--no-claims` and `--no-providers` are how a list is emptied, the spelling `scope set` and
-/// `key set` already use.
+/// `key set` already use. The four `ui` settings are emptied by passing an empty string, since
+/// each holds one value and "" is what unset means for all of them.
 fn cmd_settings_set(mut ctx: Ctx) -> Result<ExitCode, String> {
     let claims = ctx.flags.take_many("claims")?;
     let no_claims = ctx.flags.take_flag("no-claims")?;
@@ -682,6 +715,10 @@ fn cmd_settings_set(mut ctx: Ctx) -> Result<ExitCode, String> {
     let social = take_tristate(&mut ctx.flags, "unverified-social")?;
     let providers = ctx.flags.take_many("providers")?;
     let no_providers = ctx.flags.take_flag("no-providers")?;
+    let stylesheet = ctx.flags.take_one("stylesheet")?;
+    let logo = ctx.flags.take_one("logo")?;
+    let brand = ctx.flags.take_one("brand")?;
+    let theme = ctx.flags.take_one("theme")?;
     ctx.flags.finish()?;
 
     if !claims.is_empty() && no_claims {
@@ -696,7 +733,11 @@ fn cmd_settings_set(mut ctx: Ctx) -> Result<ExitCode, String> {
         && ttl.is_none()
         && social.is_none()
         && providers.is_empty()
-        && !no_providers;
+        && !no_providers
+        && stylesheet.is_none()
+        && logo.is_none()
+        && brand.is_none()
+        && theme.is_none();
     if nothing {
         return Err("nothing to set (see --help)".into());
     }
@@ -723,6 +764,26 @@ fn cmd_settings_set(mut ctx: Ctx) -> Result<ExitCode, String> {
         doc.gate.social_providers.clear();
     } else if !providers.is_empty() {
         doc.gate.social_providers = providers;
+    }
+    // The `ui` four. Each is validated here rather than left to the write, so the error names
+    // the flag the operator typed instead of the field name in the file; the write validates
+    // them again anyway, which is the guarantee, and this is only the better sentence.
+    if let Some(u) = stylesheet {
+        compile_asset_url("--stylesheet", &u)?;
+        doc.ui.stylesheet_url = u.trim().to_string();
+    }
+    if let Some(u) = logo {
+        compile_asset_url("--logo", &u)?;
+        doc.ui.logo_url = u.trim().to_string();
+    }
+    if let Some(n) = brand {
+        compile_brand_name(&n).map_err(|e| e.replace("brand_name", "--brand"))?;
+        doc.ui.brand_name = n.trim().to_string();
+    }
+    if let Some(t) = theme {
+        let parsed = UiTheme::parse(&t)
+            .ok_or_else(|| format!("--theme: '{t}' is not one of system, light, dark"))?;
+        doc.ui.theme = parsed.code().to_string();
     }
     save_settings(&ctx, &doc)?;
     Ok(ExitCode::SUCCESS)

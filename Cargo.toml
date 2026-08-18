@@ -1,6 +1,6 @@
 [package]
 name = "bb-auth"
-version = "1.0.0"
+version = "1.1.0"
 edition = "2021"
 description = "Minimal, service-agnostic Cognito id_token → session-cookie auth gate (nginx auth_request)"
 license = "MIT"
@@ -150,7 +150,7 @@ The HMAC key and the access file are NOT part of this package. Both are created 
 # no state, and the file it edits belongs to the gate's package.
 [package.metadata.deb.variants.adm]
 name = "bb-auth-adm"
-depends = "bb-auth (= 1.0.0-1), libc6 (>= 2.34)"
+depends = "bb-auth (= 1.1.0-1), libc6 (>= 2.34)"
 assets = [
     ["target/release/bb-auth-adm", "opt/bb-auth/bin/", "755"],
 ]
@@ -162,7 +162,7 @@ CRUD over a bb-auth access file: applications and their scopes, user groups, den
 # which is why this package, and not the gate's, is what sets that ownership.
 [package.metadata.deb.variants.web]
 name = "bb-auth-web"
-depends = "bb-auth (= 1.0.0-1), libc6 (>= 2.34), passwd, init-system-helpers (>= 1.54)"
+depends = "bb-auth (= 1.1.0-1), libc6 (>= 2.34), passwd, init-system-helpers (>= 1.54)"
 maintainer-scripts = "deploy/debian/bb-auth-web"
 assets = [
     ["target/release/bb-auth-web", "opt/bb-auth/bin/", "755"],

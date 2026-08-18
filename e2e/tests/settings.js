@@ -1,6 +1,7 @@
 'use strict';
-// The Settings tab — the OTHER file. Five values the gate reads per request, plus the list
-// of people this GUI opens for, all in one form guarded by the same hidden `rev`.
+// The Settings tab — the OTHER file. The values the gate reads per request, the list
+// of people this GUI opens for, and the look BOTH programs wear, all in one form guarded by
+// the same hidden `rev`.
 //
 // What this area is really about is the boundary. The page must write settings.json and
 // leave access.json alone; its `rev` must fingerprint the file it edits, or an out-of-band
@@ -60,6 +61,56 @@ async function run(ctx, t) {
     t.eq('the saved claims come back', await page.locator('textarea[name=claims]').inputValue(),
       'given_name\nfamily_name');
     t.check('the checkbox is ticked', await page.locator('input[name=social]').isChecked());
+
+    // --- the look, which is the one section BOTH programs read --------------------
+    // It is on this page because it passes the same three-part rule the rest of the file
+    // does, and the proof that it is live is the page you are looking at: save a stylesheet
+    // and the very next render links it.
+    await page.goto(ctx.base + '/config?lang=en');
+    t.eq('no override is configured to start with',
+      await page.locator('input[name=stylesheet]').inputValue(), '');
+    t.check('and the page links nothing at all',
+      (await page.locator('link[rel=stylesheet]').count()) === 0);
+    t.check('while carrying the whole palette itself',
+      (await page.locator('style').innerText()).includes('--accent:'));
+
+    await page.fill('input[name=brand]', 'BadBat75');
+    await page.fill('input[name=stylesheet]', 'https://assets.example.com/css/theme.css');
+    await page.fill('input[name=logo]', '/img/logo.png');
+    await page.selectOption('select[name=ui_theme]', 'dark');
+    t.eq('the look saves', (await submit(page)).status(), 200);
+
+    const look = settings(ctx).ui;
+    t.eq('the stylesheet is written', look.stylesheet_url, 'https://assets.example.com/css/theme.css');
+    t.eq('a root-relative logo is a shape it takes', look.logo_url, '/img/logo.png');
+    t.eq('the brand is trimmed prose', look.brand_name, 'BadBat75');
+    t.eq('and the theme is one of three words', look.theme, 'dark');
+
+    await page.goto(ctx.base + '/config?lang=en');
+    t.eq('the page now links it, once',
+      await page.locator('link[rel=stylesheet]').getAttribute('href'),
+      'https://assets.example.com/css/theme.css');
+    t.eq('the deployment default reaches the html element',
+      await page.locator('html').getAttribute('data-theme'), 'dark');
+    // The visitor's own choice still wins over the deployment's default: the Settings menu
+    // in the header is a preference, not a second copy of this field.
+    await page.goto(ctx.base + '/config?lang=en&theme=light');
+    t.eq('and a visitor override outranks it',
+      await page.locator('html').getAttribute('data-theme'), 'light');
+
+    // A URL the library refuses is refused here, attributed to its own field.
+    await page.goto(ctx.base + '/config?lang=en');
+    const lookBefore = settingsBytes(ctx);
+    await page.fill('input[name=stylesheet]', 'javascript:alert(1)');
+    t.eq('a stylesheet that is not a stylesheet is a 400', (await submit(page)).status(), 400);
+    t.check('with the library own words', (await mainText(page)).includes('stylesheet_url'));
+    t.check('and nothing written', settingsBytes(ctx) === lookBefore);
+
+    // Put it back, so the refusal tests below start from a file that works.
+    await page.goto(ctx.base + '/config?lang=en');
+    await page.fill('input[name=stylesheet]', '');
+    t.eq('and it can be unset again', (await submit(page)).status(), 200);
+    t.eq('empty means unset', settings(ctx).ui.stylesheet_url, '');
 
     // --- the two refusals that keep an administrator in the room -----------------
     const before = settingsBytes(ctx);

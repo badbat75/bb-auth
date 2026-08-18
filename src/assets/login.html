@@ -1,0 +1,552 @@
+<!DOCTYPE html>
+<!-- The gate serves this page at /auth/login. What it is for, why it is not a static file,
+     and how the __PLACEHOLDERS__ in it are filled: see LOGIN_HTML in src/bin/bb-auth.rs. -->
+<html lang="en"__BB_THEME_ATTR__>
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <meta name="robots" content="noindex, nofollow">
+  <title>__BB_BRAND__</title>
+__BB_HEAD__
+</head>
+<body data-rd="__BB_RD__">
+  <main class="card">
+    <div class="lang-toggle">
+      <button type="button" id="lang-it">IT</button><span>·</span><button type="button" id="lang-en">EN</button>
+    </div>
+
+    <div class="brand">
+__BB_LOGO__
+      <h1>__BB_BRAND__</h1>
+      <p data-i18n="brand_sub">Sign in</p>
+    </div>
+
+    <div id="msg" class="msg" role="alert" aria-live="polite"></div>
+
+    <!-- Step 1: email -->
+    <form id="email-form" class="step active" novalidate>
+      <div class="field">
+        <label class="fld" for="email" data-i18n="label_email">Email</label>
+        <input id="email" name="email" type="email" autocomplete="email" data-i18n-ph="ph_email" autofocus required>
+      </div>
+      <button class="primary" type="submit" id="email-btn" data-i18n="btn_continue">Continue</button>
+      <p class="hint" data-i18n="hint_email">Enter your email: we'll send you a code.</p>
+__BB_SOCIAL_BUTTONS__
+    </form>
+
+    <!-- Step 2: registration (only the missing fields; the email is already known) -->
+    <form id="register-form" class="step" novalidate>
+      <p class="hint" id="register-intro"></p>
+      <div class="row" style="display:flex;gap:12px;">
+        <div class="field" style="flex:1;">
+          <label class="fld" for="given_name" data-i18n="label_given">First name</label>
+          <input id="given_name" name="given_name" type="text" autocomplete="given-name" required>
+        </div>
+        <div class="field" style="flex:1;">
+          <label class="fld" for="family_name" data-i18n="label_family">Last name</label>
+          <input id="family_name" name="family_name" type="text" autocomplete="family-name" required>
+        </div>
+      </div>
+      <div class="field">
+        <label class="fld" for="phone" data-i18n="label_phone">Phone (optional)</label>
+        <input id="phone" name="phone" type="tel" autocomplete="tel" data-i18n-ph="ph_phone">
+      </div>
+      <button class="primary" type="submit" id="register-btn" data-i18n="btn_create">Create account</button>
+      <p class="hint">
+        <button type="button" class="link" id="back-1" data-i18n="use_other_email">Use a different email</button>
+      </p>
+    </form>
+
+    <!-- Step 3: one code, whether it confirms a sign-up or completes a sign-in -->
+    <form id="code-form" class="step" novalidate>
+      <p class="hint" id="code-intro"></p>
+      <div class="field otp">
+        <label class="fld" for="code" data-i18n="label_code">Code</label>
+        <input id="code" name="code" type="text" inputmode="numeric" autocomplete="one-time-code"
+               pattern="[0-9]*" maxlength="10" required>
+      </div>
+      <button class="primary" type="submit" id="code-btn" data-i18n="btn_signin">Sign in</button>
+      <p class="hint">
+        <span data-i18n="resend_q">Didn't get it?</span> <button type="button" class="link" id="resend" data-i18n="resend_link">Resend</button>
+        &nbsp;·&nbsp; <button type="button" class="link" id="back-2" data-i18n="use_other_email">Use a different email</button>
+      </p>
+    </form>
+
+    <footer>__BB_BRAND__</footer>
+  </main>
+
+  <script>
+    // ---- what the gate told this page -------------------------------------
+    var ENDPOINT = "__BB_ENDPOINT__";
+    var CLIENT_ID = "__BB_CLIENT_ID__";
+    var SOCIAL_CLIENT_ID = "__BB_SOCIAL_CLIENT_ID__";
+    var AUTHORIZE_URL = "__BB_AUTHORIZE_URL__";
+    var CALLBACK_URL = "__BB_CALLBACK_URL__";
+    // Same origin, always: this page is served BY the gate, so the cookie it sets is
+    // first-party by construction and there is no service base URL to configure.
+    var SESSION_URL = "/auth/session";
+    // Already validated server-side against BB_AUTH_AUTHORIZED_HOSTS, and empty if it was
+    // not allowed. /auth/session validates it again with the same list, which is the real
+    // boundary; this is only what keeps the browser from carrying a value that will be
+    // thrown away.
+    var RD = document.body.getAttribute("data-rd") || "";
+
+    // ---- language ---------------------------------------------------------
+    // The same two languages, the same data-i18n attributes and the same localStorage key
+    // the rest of the estate uses. Inlined rather than fetched, because a sign-in page that
+    // needs a second host to be up in order to have words on it is a sign-in page that fails
+    // in the one situation it exists for.
+    var BB = {
+      lang: (function () {
+        var saved = null;
+        try { saved = localStorage.getItem("bb_lang"); } catch (e) {}
+        if (saved === "it" || saved === "en") { return saved; }
+        var nav = (navigator.language || "en").toLowerCase();
+        return nav.indexOf("it") === 0 ? "it" : "en";
+      })(),
+      i18n: {},
+      onLang: null,
+      t: function (key) {
+        var dict = this.i18n[this.lang];
+        return dict ? (dict[key] || key) : key;
+      },
+      applyLang: function (lang) {
+        this.lang = lang;
+        try { localStorage.setItem("bb_lang", lang); } catch (e) {}
+        document.documentElement.lang = lang;
+        var els = document.querySelectorAll("[data-i18n]");
+        for (var i = 0; i < els.length; i++) {
+          var val = this.i18n[lang] ? this.i18n[lang][els[i].getAttribute("data-i18n")] : null;
+          if (val == null) { continue; }
+          // One string takes an argument: the social buttons, whose provider name is the
+          // gate's configuration and so cannot be a translation key. `{name}` keeps the word
+          // order the language wants instead of gluing a name onto the end of a sentence.
+          var arg = els[i].getAttribute("data-i18n-arg");
+          els[i].textContent = arg ? val.replace("{name}", arg) : val;
+        }
+        var phs = document.querySelectorAll("[data-i18n-ph]");
+        for (var j = 0; j < phs.length; j++) {
+          var pval = this.i18n[lang] ? this.i18n[lang][phs[j].getAttribute("data-i18n-ph")] : null;
+          if (pval != null) { phs[j].setAttribute("placeholder", pval); }
+        }
+        var itBtn = document.getElementById("lang-it");
+        var enBtn = document.getElementById("lang-en");
+        if (itBtn) { itBtn.classList.toggle("active", lang === "it"); }
+        if (enBtn) { enBtn.classList.toggle("active", lang === "en"); }
+        if (this.onLang) { this.onLang(lang); }
+      },
+      initLang: function (i18n, onLang) {
+        this.i18n = i18n || {};
+        this.onLang = onLang || null;
+        var self = this;
+        var itBtn = document.getElementById("lang-it");
+        var enBtn = document.getElementById("lang-en");
+        if (itBtn) { itBtn.addEventListener("click", function () { self.applyLang("it"); }); }
+        if (enBtn) { enBtn.addEventListener("click", function () { self.applyLang("en"); }); }
+        this.applyLang(this.lang);
+      }
+    };
+
+    var BRAND = document.querySelector(".brand h1").textContent;
+    var I18N = {
+      it: {
+        brand_sub: "Accedi a " + BRAND,
+        label_email: "Email",
+        ph_email: "nome@esempio.com",
+        btn_continue: "Continua",
+        hint_email: "Inserisci la tua email: ti invieremo un codice. Se non hai un account, lo creiamo al volo.",
+        or: "oppure",
+        btn_social: "Continua con {name}",
+        register_intro: "Non hai ancora un account con {email}. Completa la registrazione.",
+        label_given: "Nome",
+        label_family: "Cognome",
+        label_phone: "Telefono (opzionale)",
+        ph_phone: "+39 333 1234567",
+        btn_create: "Crea account",
+        use_other_email: "Usa un'altra email",
+        code_intro_login: "Ti abbiamo inviato un codice di accesso a {email}.",
+        code_intro_register: "Ti abbiamo inviato un codice di conferma a {email}.",
+        label_code: "Codice",
+        btn_signin: "Accedi",
+        resend_q: "Non ti è arrivato?",
+        resend_link: "Invia di nuovo",
+        signing_in: "Accesso in corso...",
+        fill_email: "Inserisci un indirizzo email valido.",
+        fill_names: "Inserisci nome e cognome.",
+        enter_code: "Inserisci il codice ricevuto.",
+        bad_phone: "Numero non valido. Usa il formato internazionale, es. +39 333 1234567.",
+        busy_continue: "Verifica...",
+        busy_create: "Creazione...",
+        busy_signin: "Verifica...",
+        resent: "Nuovo codice inviato a {email}.",
+        errors: {
+          UserNotFoundException: "Account non trovato.",
+          UsernameExistsException: "Questa email è già registrata: ti abbiamo inviato un codice per accedere.",
+          CodeMismatchException: "Codice non valido. Controlla e riprova.",
+          ExpiredCodeException: "Il codice è scaduto. Premi \"Invia di nuovo\".",
+          NotAuthorizedException: "Troppi tentativi o sessione scaduta. Riprova.",
+          LimitExceededException: "Troppi tentativi. Attendi qualche minuto e riprova.",
+          TooManyRequestsException: "Troppi tentativi. Attendi qualche minuto e riprova.",
+          InvalidParameterException: "Dati non validi. Controlla i campi.",
+          CodeDeliveryFailureException: "Non è stato possibile inviare l'email. Verifica l'indirizzo.",
+          _default: "Si è verificato un errore. Riprova."
+        }
+      },
+      en: {
+        brand_sub: "Sign in to " + BRAND,
+        label_email: "Email",
+        ph_email: "name@example.com",
+        btn_continue: "Continue",
+        hint_email: "Enter your email: we'll send you a code. No account yet? We'll create one on the fly.",
+        or: "or",
+        btn_social: "Continue with {name}",
+        register_intro: "No account yet for {email}. Finish signing up.",
+        label_given: "First name",
+        label_family: "Last name",
+        label_phone: "Phone (optional)",
+        ph_phone: "+39 333 1234567",
+        btn_create: "Create account",
+        use_other_email: "Use a different email",
+        code_intro_login: "We sent a sign-in code to {email}.",
+        code_intro_register: "We sent a confirmation code to {email}.",
+        label_code: "Code",
+        btn_signin: "Sign in",
+        resend_q: "Didn't get it?",
+        resend_link: "Resend",
+        signing_in: "Signing in...",
+        fill_email: "Enter a valid email address.",
+        fill_names: "Enter your first and last name.",
+        enter_code: "Enter the code you received.",
+        bad_phone: "Invalid number. Use the international format, e.g. +39 333 1234567.",
+        busy_continue: "Checking...",
+        busy_create: "Creating...",
+        busy_signin: "Checking...",
+        resent: "New code sent to {email}.",
+        errors: {
+          UserNotFoundException: "Account not found.",
+          UsernameExistsException: "This email is already registered: we've sent you a code to sign in.",
+          CodeMismatchException: "Invalid code. Check it and try again.",
+          ExpiredCodeException: "The code has expired. Click \"Resend\".",
+          NotAuthorizedException: "Too many attempts or the session expired. Try again.",
+          LimitExceededException: "Too many attempts. Wait a few minutes and try again.",
+          TooManyRequestsException: "Too many attempts. Wait a few minutes and try again.",
+          InvalidParameterException: "Invalid data. Please check the fields.",
+          CodeDeliveryFailureException: "Couldn't send the email. Check the address.",
+          _default: "Something went wrong. Please try again."
+        }
+      }
+    };
+
+    var msgEl = document.getElementById("msg");
+    var stepEmail = document.getElementById("email-form");
+    var stepRegister = document.getElementById("register-form");
+    var stepCode = document.getElementById("code-form");
+
+    var currentEmail = "";
+    var challengeUsername = "";
+    var authSession = "";
+    var signupSession = "";
+    var mode = "login";
+
+    function renderIntros() {
+      document.getElementById("register-intro").textContent =
+        BB.t("register_intro").replace("{email}", currentEmail);
+      var key = mode === "register" ? "code_intro_register" : "code_intro_login";
+      document.getElementById("code-intro").textContent = BB.t(key).replace("{email}", currentEmail);
+    }
+
+    BB.initLang(I18N, function () {
+      if (currentEmail) { renderIntros(); }
+    });
+
+    function showMsg(text, kind) { msgEl.textContent = text; msgEl.className = "msg show " + (kind || "error"); }
+    function clearMsg() { msgEl.className = "msg"; }
+
+    function setStep(el) {
+      [stepEmail, stepRegister, stepCode].forEach(function (s) { s.classList.remove("active"); });
+      el.classList.add("active");
+      clearMsg();
+    }
+
+    function cognito(action, body) {
+      return fetch(ENDPOINT, {
+        method: "POST",
+        headers: {
+          "Content-Type": "application/x-amz-json-1.1",
+          "X-Amz-Target": "AWSCognitoIdentityProviderService." + action
+        },
+        body: JSON.stringify(body)
+      }).then(function (res) {
+        return res.json().catch(function () { return {}; }).then(function (data) {
+          if (!res.ok) {
+            var err = new Error(data.message || "Network error");
+            err.code = (data.__type || "").split("#").pop();
+            throw err;
+          }
+          return data;
+        });
+      });
+    }
+
+    function friendly(err) {
+      var map = I18N[BB.lang].errors;
+      return map[err.code] || map._default;
+    }
+
+    function busy(btn, on, busyKey, idleKey) {
+      btn.disabled = on;
+      btn.textContent = on ? BB.t(busyKey) : BB.t(idleKey);
+    }
+
+    var EMAIL_RE = /^[^\s@]+@[^\s@]+\.[^\s@]+$/;
+
+    // The last step of every path through this page: hand the id_token to the gate with a
+    // top-level form POST, so the response's Set-Cookie is first-party and the 302 it carries
+    // is followed by the browser as a navigation.
+    function deliver(idToken) {
+      showMsg(BB.t("signing_in"), "ok");
+      var f = document.createElement("form");
+      f.method = "POST";
+      f.action = SESSION_URL;
+      function hidden(name, value) {
+        var i = document.createElement("input");
+        i.type = "hidden"; i.name = name; i.value = value;
+        f.appendChild(i);
+      }
+      hidden("id_token", idToken);
+      if (RD) { hidden("rd", RD); }
+      document.body.appendChild(f);
+      f.submit();
+    }
+
+    function startLogin(email, fromResend) {
+      return cognito("InitiateAuth", {
+        AuthFlow: "USER_AUTH",
+        ClientId: CLIENT_ID,
+        AuthParameters: { USERNAME: email, PREFERRED_CHALLENGE: "EMAIL_OTP" }
+      }).then(function (data) {
+        if (data.ChallengeName === "EMAIL_OTP") {
+          authSession = data.Session || "";
+          challengeUsername = (data.ChallengeParameters && data.ChallengeParameters.USERNAME) || email;
+          mode = "login";
+          renderIntros();
+          if (fromResend) {
+            showMsg(BB.t("resent").replace("{email}", email), "ok");
+          } else {
+            setStep(stepCode);
+            document.getElementById("code").focus();
+          }
+          return true;
+        }
+        if (data.AuthenticationResult && data.AuthenticationResult.IdToken) {
+          deliver(data.AuthenticationResult.IdToken);
+          return true;
+        }
+        showMsg(friendly({ code: "_default" }));
+        return false;
+      });
+    }
+
+    stepEmail.addEventListener("submit", function (e) {
+      e.preventDefault();
+      clearMsg();
+      var email = document.getElementById("email").value.trim().toLowerCase();
+      if (!EMAIL_RE.test(email)) { showMsg(BB.t("fill_email")); return; }
+      currentEmail = email;
+
+      var btn = document.getElementById("email-btn");
+      busy(btn, true, "busy_continue", "btn_continue");
+      startLogin(email).catch(function (err) {
+        // The one branch that decides sign-in from sign-up, and the reason the app client
+        // must keep prevent_user_existence_errors=LEGACY.
+        if (err.code === "UserNotFoundException") {
+          mode = "register";
+          renderIntros();
+          setStep(stepRegister);
+          document.getElementById("given_name").focus();
+        } else {
+          showMsg(friendly(err));
+        }
+      }).then(function () {
+        busy(btn, false, "busy_continue", "btn_continue");
+      });
+    });
+
+    stepRegister.addEventListener("submit", function (e) {
+      e.preventDefault();
+      clearMsg();
+      var given = document.getElementById("given_name").value.trim();
+      var family = document.getElementById("family_name").value.trim();
+      if (!given || !family) { showMsg(BB.t("fill_names")); return; }
+
+      var phone = document.getElementById("phone").value.trim().replace(/[\s\-().]/g, "");
+      if (phone && !/^\+[1-9]\d{6,14}$/.test(phone)) { showMsg(BB.t("bad_phone")); return; }
+
+      var attrs = [
+        { Name: "given_name", Value: given },
+        { Name: "family_name", Value: family },
+        { Name: "email", Value: currentEmail }
+      ];
+      if (phone) { attrs.push({ Name: "phone_number", Value: phone }); }
+
+      var btn = document.getElementById("register-btn");
+      busy(btn, true, "busy_create", "btn_create");
+      cognito("SignUp", {
+        ClientId: CLIENT_ID,
+        Username: currentEmail,
+        UserAttributes: attrs
+      }).then(function (data) {
+        signupSession = data.Session || "";
+        mode = "register";
+        renderIntros();
+        setStep(stepCode);
+        document.getElementById("code").focus();
+      }).catch(function (err) {
+        // Somebody registered between the lookup and the submit, or the lookup lied: fall
+        // back to signing them in rather than telling them to start again.
+        if (err.code === "UsernameExistsException") {
+          showMsg(friendly(err), "ok");
+          return startLogin(currentEmail).then(function () {
+            setStep(stepCode);
+            document.getElementById("code").focus();
+          });
+        }
+        showMsg(friendly(err));
+      }).then(function () {
+        busy(btn, false, "busy_create", "btn_create");
+      });
+    });
+
+    // Cognito's auto sign-in: the Session that ConfirmSignUp returns is exchanged for tokens
+    // with no second OTP. That is the whole reason this gate takes an id_token instead of
+    // driving an authorization-code flow itself.
+    function autoSignIn() {
+      return cognito("InitiateAuth", {
+        AuthFlow: "USER_AUTH",
+        ClientId: CLIENT_ID,
+        Session: signupSession,
+        AuthParameters: { USERNAME: currentEmail }
+      }).then(function (data) {
+        if (data.AuthenticationResult && data.AuthenticationResult.IdToken) {
+          deliver(data.AuthenticationResult.IdToken);
+          return true;
+        }
+        return startLogin(currentEmail);
+      });
+    }
+
+    stepCode.addEventListener("submit", function (e) {
+      e.preventDefault();
+      clearMsg();
+      var code = document.getElementById("code").value.trim();
+      if (!code) { showMsg(BB.t("enter_code")); return; }
+
+      var btn = document.getElementById("code-btn");
+      busy(btn, true, "busy_signin", "btn_signin");
+
+      var p;
+      if (mode === "register") {
+        p = cognito("ConfirmSignUp", {
+          ClientId: CLIENT_ID,
+          Username: currentEmail,
+          ConfirmationCode: code
+        }).then(function (data) {
+          if (data.Session) { signupSession = data.Session; }
+          return autoSignIn();
+        });
+      } else {
+        p = cognito("RespondToAuthChallenge", {
+          ChallengeName: "EMAIL_OTP",
+          ClientId: CLIENT_ID,
+          Session: authSession,
+          ChallengeResponses: { USERNAME: challengeUsername || currentEmail, EMAIL_OTP_CODE: code }
+        }).then(function (data) {
+          if (data.AuthenticationResult && data.AuthenticationResult.IdToken) {
+            deliver(data.AuthenticationResult.IdToken);
+          } else {
+            // A challenge that came back without tokens carries a fresh Session; keep it, so
+            // a second attempt at the code is answered rather than rejected outright.
+            if (data.Session) { authSession = data.Session; }
+            throw new Error("retry");
+          }
+        });
+      }
+
+      p.catch(function (err) {
+        showMsg(friendly(err));
+        busy(btn, false, "busy_signin", "btn_signin");
+      });
+    });
+
+    document.getElementById("resend").addEventListener("click", function () {
+      clearMsg();
+      if (mode === "register") {
+        cognito("ResendConfirmationCode", { ClientId: CLIENT_ID, Username: currentEmail })
+          .then(function () { showMsg(BB.t("resent").replace("{email}", currentEmail), "ok"); })
+          .catch(function (err) { showMsg(friendly(err)); });
+      } else {
+        startLogin(currentEmail, true).catch(function (err) { showMsg(friendly(err)); });
+      }
+    });
+
+    function resetToEmail() {
+      authSession = ""; signupSession = ""; mode = "login";
+      document.getElementById("code").value = "";
+      setStep(stepEmail);
+      document.getElementById("email").focus();
+    }
+    document.getElementById("back-1").addEventListener("click", resetToEmail);
+    document.getElementById("back-2").addEventListener("click", resetToEmail);
+
+    // ---- social sign-in (OAuth code + PKCE) -------------------------------
+    // The buttons exist only if the gate rendered them, which it does only when all three
+    // BB_AUTH_SOCIAL_* values are set. So there is nothing to guard here: querySelectorAll
+    // finds nothing and none of this runs.
+    function b64url(bytes) {
+      return btoa(String.fromCharCode.apply(null, bytes))
+        .replace(/\+/g, "-").replace(/\//g, "_").replace(/=+$/, "");
+    }
+    function makeVerifier() {
+      var bytes = new Uint8Array(32);
+      crypto.getRandomValues(bytes);
+      return b64url(bytes);
+    }
+    function sha256B64url(str) {
+      return crypto.subtle.digest("SHA-256", new TextEncoder().encode(str)).then(function (d) {
+        return b64url(new Uint8Array(d));
+      });
+    }
+    function socialLogin(idp) {
+      var verifier = makeVerifier();
+      var state = b64url(crypto.getRandomValues(new Uint8Array(16)));
+      // The callback page is a separate document, so what it needs has to survive a
+      // navigation: sessionStorage, cleared by that page as soon as it has used it.
+      try {
+        sessionStorage.setItem("bb_pkce_verifier", verifier);
+        sessionStorage.setItem("bb_pkce_state", state);
+        sessionStorage.setItem("bb_social_rd", RD);
+        sessionStorage.setItem("bb_social_lang", BB.lang);
+      } catch (e) {}
+      sha256B64url(verifier).then(function (challenge) {
+        var params = new URLSearchParams({
+          response_type: "code",
+          client_id: SOCIAL_CLIENT_ID,
+          redirect_uri: CALLBACK_URL,
+          scope: "openid email profile aws.cognito.signin.user.admin",
+          code_challenge: challenge,
+          code_challenge_method: "S256",
+          identity_provider: idp,
+          state: state
+        });
+        window.location.href = AUTHORIZE_URL + "?" + params.toString();
+      });
+    }
+    var idpButtons = document.querySelectorAll("[data-idp]");
+    for (var b = 0; b < idpButtons.length; b++) {
+      idpButtons[b].addEventListener("click", function () {
+        socialLogin(this.getAttribute("data-idp"));
+      });
+    }
+  </script>
+</body>
+</html>

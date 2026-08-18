@@ -92,6 +92,29 @@
     "purpose, and `bb-auth-adm settings admin rm` is the way to do it anyway."
   ],
 
+  "_comment_ui": [
+    "ui — how every page BOTH programs serve looks: the gate's sign-in page, its social",
+    "callback and its error page, and the whole bb-auth-web GUI. It is the one section they",
+    "share, and it passes the three-part rule above the way the rest do: read when a page is",
+    "rendered, harmless when wrong (an unstyled page, never a locked door), no secret.",
+    "",
+    "stylesheet_url — a stylesheet loaded AFTER the built-in one, so it wins by source order",
+    "and needs no !important. Either an absolute https:// URL or a path starting with / on",
+    "this host. It is meant to redefine the theme's custom properties (--bg, --card, --text,",
+    "--accent, --r-box, --font-ui …) and nothing else: that is what lets ONE file restyle the",
+    "sign-in page and the admin GUI together, knowing nothing about either layout. Both",
+    "binaries carry a complete stylesheet already, so leaving this empty is a fully styled",
+    "deployment, and a URL that does not answer costs a page its palette and nothing more.",
+    "A sign-in page must never NEED a second host to be up.",
+    "logo_url — shown on the sign-in page above the name. Same two shapes. Empty = the name",
+    "alone.",
+    "brand_name — what the sign-in page calls this deployment. Empty = each page's own name.",
+    "theme — system (default), light or dark: which arm of the palette a page starts in. The",
+    "gate's pages have nowhere to keep a per-visitor choice, so for them this is the whole",
+    "answer; in bb-auth-web it is the default that an administrator's own Settings menu then",
+    "overrides in their browser."
+  ],
+
   "gate": {
     "profile_claims": [],
     "identity_attrs": ["email"],
@@ -101,5 +124,11 @@
   },
   "web": {
     "admins": ["you@example.com"]
+  },
+  "ui": {
+    "stylesheet_url": "",
+    "logo_url": "",
+    "brand_name": "",
+    "theme": "system"
   }
 }

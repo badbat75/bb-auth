@@ -83,6 +83,11 @@ function startServer(bin, accessFile, port) {
         BB_AUTH_WEB_LISTEN: `127.0.0.1:${port}`,
         BB_AUTH_WEB_BASE_PATH: '/admin',
         BB_AUTH_WEB_DEFAULT_LANG: 'en',
+        // Root-relative, which is the shape a real deployment uses when the gate and the GUI
+        // share a vhost. Set here so the header's Sign out control exists in every scene and
+        // every screenshot: unset it and the control is absent by design, which is a state
+        // its own unit test covers rather than this suite.
+        BB_AUTH_WEB_LOGOUT_URL: '/auth/logout',
       },
       stdio: ['ignore', 'pipe', 'pipe'],
     });

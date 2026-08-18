@@ -1,0 +1,291 @@
+<!DOCTYPE html>
+<!-- The gate serves this page at /auth/callback, and only when a social sign-in is
+     configured. See CALLBACK_HTML in src/bin/bb-auth.rs. -->
+<html lang="en"__BB_THEME_ATTR__>
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <meta name="robots" content="noindex, nofollow">
+  <title>__BB_BRAND__</title>
+__BB_HEAD__
+</head>
+<body>
+  <main class="card">
+    <div class="brand">
+__BB_LOGO__
+      <h1>__BB_BRAND__</h1>
+    </div>
+
+    <!-- Step: the exchange itself, which is all most sign-ins ever show -->
+    <div id="exchanging" class="step active">
+      <div class="spinner"></div>
+      <p class="status" id="ex-text">Signing in...</p>
+    </div>
+
+    <!-- Step: the profile form, shown only when the IdP sent no names -->
+    <form id="profile-form" class="step" novalidate>
+      <p class="status" id="form-title"></p>
+      <p class="status" id="name-hint"></p>
+      <div id="pmsg" class="msg" role="alert"></div>
+      <div class="field">
+        <label class="fld" for="given_name" id="lbl-given">First name</label>
+        <input id="given_name" type="text" autocomplete="given-name" required>
+      </div>
+      <div class="field">
+        <label class="fld" for="family_name" id="lbl-family">Last name</label>
+        <input id="family_name" type="text" autocomplete="family-name">
+      </div>
+      <button type="submit" class="primary" id="save-btn">Save and continue</button>
+      <p class="center hint">
+        <button type="button" class="link" id="skip-link">Skip for now</button>
+      </p>
+    </form>
+
+    <!-- Step: writing the profile back -->
+    <div id="updating" class="step">
+      <div class="spinner"></div>
+      <p class="status" id="upd-text"></p>
+    </div>
+
+    <p id="retry" class="center hint" hidden>
+      <a class="link" href="/auth/login" id="retry-link"></a>
+    </p>
+  </main>
+
+  <script>
+    var TOKEN_URL = "__BB_TOKEN_URL__";
+    var IDP_ENDPOINT = "__BB_ENDPOINT__";
+    var SOCIAL_CLIENT_ID = "__BB_SOCIAL_CLIENT_ID__";
+    var CALLBACK_URL = "__BB_CALLBACK_URL__";
+    var SESSION_URL = "/auth/session";
+
+    // The language the login page was in when it sent the browser away. This page has no
+    // toggle of its own: it is a step in a flow, not a place, and it is on screen for about
+    // a second.
+    var lang = "en";
+    try { lang = sessionStorage.getItem("bb_social_lang") || "en"; } catch (e) {}
+    var T = {
+      it: {
+        working: "Accesso in corso...", updating: "Aggiornamento...",
+        no_code: "Codice di autorizzazione mancante.",
+        no_verifier: "Sessione scaduta (verificatore PKCE mancante). Ripeti l'accesso.",
+        bad_state: "Stato della sessione non valido. Ripeti l'accesso.",
+        exchange_fail: "Scambio del codice non riuscito.",
+        network: "Errore di rete durante lo scambio.", retry: "Riprova",
+        form_title: "Completa il profilo",
+        form_intro: "Il tuo account non ha un nome. Inseriscilo per completare la registrazione.",
+        name_hint: "Nome dal provider: ", label_given: "Nome", label_family: "Cognome",
+        btn_save: "Salva e continua", skip: "Salta per ora",
+        update_fail: "Aggiornamento non riuscito. Riprova o salta.",
+        fill_given: "Inserisci almeno il nome."
+      },
+      en: {
+        working: "Signing in...", updating: "Updating...",
+        no_code: "Missing authorization code.",
+        no_verifier: "Session expired (PKCE verifier missing). Please sign in again.",
+        bad_state: "Invalid session state. Please sign in again.",
+        exchange_fail: "Code exchange failed.",
+        network: "Network error during exchange.", retry: "Try again",
+        form_title: "Complete your profile",
+        form_intro: "Your account has no name set. Enter it to finish signing up.",
+        name_hint: "Name from provider: ", label_given: "First name", label_family: "Last name",
+        btn_save: "Save and continue", skip: "Skip for now",
+        update_fail: "Update failed. Please retry or skip.",
+        fill_given: "Enter at least your first name."
+      }
+    }[lang] || {};
+
+    var pending = { idToken: "", accessToken: "", refreshToken: "", rd: "" };
+
+    function $(id) { return document.getElementById(id); }
+    function showStep(id) {
+      var steps = ["exchanging", "profile-form", "updating"];
+      for (var i = 0; i < steps.length; i++) { $(steps[i]).classList.remove("active"); }
+      $(id).classList.add("active");
+    }
+    // textContent, never innerHTML: some of what lands here is an error message from Cognito,
+    // and a page that renders a remote string as markup is a page waiting for one to contain
+    // markup.
+    function failExchange(msg) {
+      // The spinner has to stop: a page that says "missing authorization code" while still
+      // spinning is telling somebody to keep waiting for something that is not coming.
+      var s = document.querySelector("#exchanging .spinner");
+      if (s) { s.remove(); }
+      $("ex-text").textContent = msg;
+      $("retry").hidden = false;
+      $("retry-link").textContent = T.retry;
+    }
+    function pmsg(text) { var e = $("pmsg"); e.textContent = text; e.className = "msg show error"; }
+
+    function decodeJwt(jwt) {
+      try {
+        var p = jwt.split(".")[1].replace(/-/g, "+").replace(/_/g, "/");
+        while (p.length % 4) { p += "="; }
+        return JSON.parse(decodeURIComponent(escape(atob(p)))) || {};
+      } catch (e) { return {}; }
+    }
+
+    function deliver(idToken) {
+      var f = document.createElement("form");
+      f.method = "POST"; f.action = SESSION_URL;
+      function hidden(name, value) {
+        var i = document.createElement("input");
+        i.type = "hidden"; i.name = name; i.value = value;
+        f.appendChild(i);
+      }
+      hidden("id_token", idToken);
+      if (pending.rd) { hidden("rd", pending.rd); }
+      document.body.appendChild(f);
+      f.submit();
+    }
+
+    function cognito(action, body) {
+      return fetch(IDP_ENDPOINT, {
+        method: "POST",
+        headers: {
+          "Content-Type": "application/x-amz-json-1.1",
+          "X-Amz-Target": "AWSCognitoIdentityProviderService." + action
+        },
+        body: JSON.stringify(body)
+      }).then(function (res) {
+        if (!res.ok) {
+          return res.json().catch(function () { return {}; }).then(function (d) {
+            throw new Error(d.message || ("HTTP " + res.status));
+          });
+        }
+        return res.json().catch(function () { return {}; });
+      });
+    }
+
+    function refreshIdToken(refreshToken) {
+      var body = new URLSearchParams({
+        grant_type: "refresh_token", client_id: SOCIAL_CLIENT_ID, refresh_token: refreshToken
+      });
+      return fetch(TOKEN_URL, {
+        method: "POST",
+        headers: { "Content-Type": "application/x-www-form-urlencoded" },
+        body: body.toString()
+      }).then(function (res) {
+        return res.json().catch(function () { return {}; }).then(function (d) {
+          if (!res.ok || !d.id_token) { throw new Error(d.error || "refresh failed"); }
+          return d.id_token;
+        });
+      });
+    }
+
+    function showProfile(claims) {
+      var parts = (claims.name || "").trim().split(/\s+/);
+      $("given_name").value = parts[0] || "";
+      $("family_name").value = parts.slice(1).join(" ");
+      $("form-title").textContent = T.form_title;
+      $("name-hint").textContent = claims.name ? (T.name_hint + claims.name) : T.form_intro;
+      $("lbl-given").textContent = T.label_given;
+      $("lbl-family").textContent = T.label_family;
+      $("save-btn").textContent = T.btn_save;
+      $("skip-link").textContent = T.skip;
+      $("pmsg").className = "msg";
+      showStep("profile-form");
+      if (!$("given_name").value) { $("given_name").focus(); } else { $("save-btn").focus(); }
+    }
+
+    $("skip-link").addEventListener("click", function (e) {
+      e.preventDefault();
+      deliver(pending.idToken);
+    });
+
+    $("profile-form").addEventListener("submit", function (e) {
+      e.preventDefault();
+      var given = $("given_name").value.trim();
+      var family = $("family_name").value.trim();
+      if (!given) { pmsg(T.fill_given); return; }
+      var btn = $("save-btn");
+      btn.disabled = true; btn.textContent = T.updating;
+      $("upd-text").textContent = T.updating;
+      showStep("updating");
+
+      var attrs = [{ Name: "given_name", Value: given }];
+      if (family) { attrs.push({ Name: "family_name", Value: family }); }
+      cognito("UpdateUserAttributes", { AccessToken: pending.accessToken, UserAttributes: attrs })
+        .then(function () {
+          // The id_token in hand still carries the empty names; refresh it so the gate
+          // captures the profile claims the person just typed. A refresh that fails is not
+          // worth failing the sign-in over.
+          if (pending.refreshToken) {
+            return refreshIdToken(pending.refreshToken)
+              .then(function (idt) { deliver(idt); })
+              .catch(function () { deliver(pending.idToken); });
+          }
+          deliver(pending.idToken);
+        })
+        .catch(function (err) {
+          btn.disabled = false; btn.textContent = T.btn_save;
+          pmsg(T.update_fail + " (" + (err.message || "") + ")");
+          showStep("profile-form");
+        });
+    });
+
+    // ---- main: validate the parameters, exchange, branch on the name claims ----
+    $("ex-text").textContent = T.working;
+    var params = new URLSearchParams(window.location.search);
+    var code = params.get("code");
+    var state = params.get("state");
+    var error = params.get("error");
+    var verifier = null, expectedState = "";
+    try {
+      verifier = sessionStorage.getItem("bb_pkce_verifier");
+      pending.rd = sessionStorage.getItem("bb_social_rd") || "";
+      expectedState = sessionStorage.getItem("bb_pkce_state") || "";
+    } catch (e) {}
+
+    if (error) {
+      failExchange(params.get("error_description") || error);
+    } else if (!code) {
+      failExchange(T.no_code);
+    } else if (!verifier) {
+      failExchange(T.no_verifier);
+    } else if (expectedState && state !== expectedState) {
+      failExchange(T.bad_state);
+    } else {
+      var body = new URLSearchParams({
+        grant_type: "authorization_code", client_id: SOCIAL_CLIENT_ID,
+        code: code, code_verifier: verifier, redirect_uri: CALLBACK_URL
+      });
+      fetch(TOKEN_URL, {
+        method: "POST",
+        headers: { "Content-Type": "application/x-www-form-urlencoded" },
+        body: body.toString()
+      }).then(function (res) {
+        return res.json().catch(function () { return {}; }).then(function (data) {
+          if (!res.ok || !data.id_token) {
+            throw new Error(data.error || data.error_description || ("HTTP " + res.status));
+          }
+          // The code is spent and the verifier is single-use: clear them before anything
+          // else can go wrong, so a reload cannot replay a leg of this.
+          try {
+            sessionStorage.removeItem("bb_pkce_verifier");
+            sessionStorage.removeItem("bb_pkce_state");
+            sessionStorage.removeItem("bb_social_rd");
+            sessionStorage.removeItem("bb_social_lang");
+          } catch (e) {}
+
+          pending.idToken = data.id_token;
+          pending.accessToken = data.access_token || "";
+          pending.refreshToken = data.refresh_token || "";
+
+          var claims = decodeJwt(data.id_token);
+          var hasNames = (claims.given_name || "").trim() && (claims.family_name || "").trim();
+          // No access token means no way to write the profile back, so there is no point
+          // asking for it.
+          if (hasNames || !pending.accessToken) {
+            deliver(data.id_token);
+          } else {
+            showProfile(claims);
+          }
+        });
+      }).catch(function (err) {
+        failExchange(T.exchange_fail + " (" + (err.message || T.network) + ")");
+      });
+    }
+  </script>
+</body>
+</html>

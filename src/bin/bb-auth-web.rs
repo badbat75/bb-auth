@@ -116,6 +116,7 @@
 //! | `BB_AUTH_WEB_LISTEN` | no | `127.0.0.1:8091` | bind address. Keep it on loopback |
 //! | `BB_AUTH_WEB_BASE_PATH` | no | *(empty)* | URL prefix nginx mounts the GUI at, e.g. `/admin` |
 //! | `BB_AUTH_WEB_DEFAULT_LANG` | no | `en` | `en` or `it`, when the request expresses no preference |
+//! | `BB_AUTH_WEB_LOGOUT_URL` | no | *(empty)* | where the Sign out control points, or no control at all. See [`Config::logout_url`] |
 //!
 //! Read once at startup, like the gate: a change needs a restart. A missing required var is
 //! a fatal exit, in the same words and for the same reason — there is no safe default.
@@ -169,20 +170,35 @@
 //! the file itself. Library error messages render verbatim, in the English the gate and the
 //! CLI already say them in.
 //!
-//! **Theme** is light, dark or system, and [`Theme::System`] is the floor for the same
+//! **Theme** is light, dark or system, and [`UiTheme::System`] is the floor for the same
 //! reason `Auto` is: an existing session's page does not change appearance until someone
-//! chooses. One CSS attribute selector, and no script at all, is what repaints the page; see
-//! [`CSS`] for the two-arm dark rule that makes an explicit choice win over the OS.
+//! chooses. `System` then falls through to the deployment's own `ui.theme` ([`Look`]) before
+//! the OS decides, so pinning one for a whole estate still leaves an administrator free to
+//! work in the other. One CSS attribute selector, and no script at all, is what repaints the
+//! page; the two-arm dark rule that makes an explicit choice win over the OS is in
+//! [`THEME_CSS`], with the rest of the palette.
+//!
+//! **The look is shared with the gate**, which is why neither the palette nor the controls
+//! are in this file at all. Two reasons, and the second was learned by looking at the two
+//! surfaces side by side: `ui.stylesheet_url` restyles this GUI and the gate's sign-in page
+//! from one token file, which only works if both agree on what `--accent` names; and a shared
+//! palette on its own does not stop a button from being a rounded rectangle on one page and a
+//! lozenge on the other, because that is one author editing one file and no test and no
+//! reader can see it from inside either. So the palette is [`THEME_CSS`], the objects a
+//! person operates are [`BASE_CSS`], both come from the library and both programs emit the
+//! same bytes; [`CSS`] is only this program's ARRANGEMENT of them, and it names no colour and
+//! no control of its own.
 
 use bb_auth_core::{
     add_api_key, add_application, add_denied, add_scope, add_user, add_user_email, add_user_group,
-    app_mut, app_pos, decide, default_settings_path, edit_urls, format_date, group_ref, key_expiry,
-    key_mut, move_scope, norm_email, now, open_access_file, open_settings_file, remove_api_key,
-    remove_application, remove_denied, remove_scope, remove_user, remove_user_email,
-    remove_user_group, rename_application, rename_scope, request_url, rotate_api_key, scope_mut,
-    scope_pos, sha256_hex, user_group_mut, user_group_refs, user_label, user_pos, user_refs,
-    Access, AccessFile, AccessWrite, ApiKeySpec, AppSpec, Decision, ScopeSpec, SealedKey,
-    SettingsFile, SettingsWrite, Subject, UserSpec, Written,
+    app_mut, app_pos, compile_asset_url, compile_brand_name, decide, default_settings_path,
+    edit_urls, format_date, group_ref, key_expiry, key_mut, move_scope, norm_email, now,
+    open_access_file, open_settings_file, remove_api_key, remove_application, remove_denied,
+    remove_scope, remove_user, remove_user_email, remove_user_group, rename_application,
+    rename_scope, request_url, rotate_api_key, scope_mut, scope_pos, sha256_hex, stylesheet_link,
+    user_group_mut, user_group_refs, user_label, user_pos, user_refs, Access, AccessFile,
+    AccessWrite, ApiKeySpec, AppSpec, Decision, ScopeSpec, SealedKey, SettingsFile, SettingsWrite,
+    Subject, UiTheme, UserSpec, Written, BASE_CSS, THEME_CSS,
 };
 use maud::{html, Markup, PreEscaped, DOCTYPE};
 use std::io::Read;
@@ -231,273 +247,30 @@ const SETTINGS_ONCHANGE: &str = "this.form.submit()";
 /// handful of people on `web.admins`, not the public.
 const WORKERS: usize = 2;
 
-/// The whole stylesheet, inlined. No external request of any kind — no font, no script, no
-/// image — so the page needs nothing beyond this constant on a laptop, on a phone, or on a
-/// host with no route to the internet. Below 640px the layout adapts (a compact header, table
-/// rows stacked into cards) but ships not one byte more to get there.
+/// This GUI's layout, compiled in from `src/assets/admin.css`: **where things go**, and
+/// nothing about what they look like. The palette is [`THEME_CSS`] and the controls are
+/// [`BASE_CSS`], both of which [`shell`] emits immediately ahead of this, and both of which
+/// the gate emits ahead of its own layout too. That split is the whole point of the
+/// arrangement rather than tidiness: it is what makes this GUI and the sign-in page one
+/// product by construction, so a change to a button's shape or a field's height reaches both
+/// or neither, and what lets `ui.stylesheet_url` restyle them together from one token file
+/// knowing nothing about either layout. A literal colour added here is a thing that file can
+/// no longer restyle; a control's *appearance* added here is drift the sign-in page will
+/// never hear about.
 ///
-/// Light and dark come from `prefers-color-scheme` over a handful of custom properties, and
-/// an explicit choice overrides it through a `data-theme` attribute [`shell`] puts on `html`
-/// (see [`Theme::attr`]) and a selector that outranks the media query. There is still no
-/// script on any page: not for a form, not for a confirmation, not for reordering a scope,
-/// not for opening the Settings menu, and not for the theme it sets either. The override is
-/// CSS specificity, nothing more, which is why the dark token list below is written twice
-/// and kept in sync by hand. (The one handler in the binary, [`SETTINGS_ONCHANGE`], saves a
-/// click on a list box and paints nothing.)
-const CSS: &str = r"
-*,*::before,*::after{box-sizing:border-box}
-:root{color-scheme:light dark;
-  --bg:#f7f7fa;--panel:#fff;--fg:#1c1c21;--muted:#65656f;--line:#e2e2ea;
-  --accent:#3350c8;--ok:#1c6b40;--warn:#8a5a00;--bad:#b3261e;--chip:#eeeef4;--on-accent:#fff;
-  /* Shape and small-text tokens, not colour: a radius or a font-size does not change with
-     the theme, so unlike every token above these are defined exactly once, here, and must
-     never be copied into either dark block below. */
-  --r-box:10px;--r-ctl:7px;--r-pill:999px;--fs-sm:.85rem}
-/* An explicit light choice needs no different tokens (the block above already holds them),
-   only color-scheme narrowed from the System default's `light dark` to plain `light`, so the
-   browser's own scrollbars and form controls stop following a dark OS. */
-:root[data-theme=light]{color-scheme:light}
-/* Dark tokens, written twice on purpose: once here for System (data-theme absent, the only
-   state an unvisited browser is ever in) so the OS still drives, and once below for an
-   explicit dark choice on a light OS. `:not([data-theme=light])` is what lets an explicit
-   light choice win over a dark OS instead of this arm re-applying dark anyway. Keep both
-   lists in sync by hand; there is no third place to define them once without JavaScript to
-   flip a class. */
-@media (prefers-color-scheme:dark){:root:not([data-theme=light]){
-  --bg:#16161b;--panel:#1e1e25;--fg:#e8e8ee;--muted:#9a9aa8;--line:#30303b;
-  --accent:#8aa0ff;--ok:#5fd08a;--warn:#e3b341;--bad:#ff8a80;--chip:#292933;--on-accent:#16161b}}
-/* Kept in sync with the media-query block above by hand; see its comment. This is the arm
-   that wins on a light OS once the operator picks dark explicitly, and it narrows
-   color-scheme the same way the light override above does, only to `dark`. */
-:root[data-theme=dark]{
-  --bg:#16161b;--panel:#1e1e25;--fg:#e8e8ee;--muted:#9a9aa8;--line:#30303b;
-  --accent:#8aa0ff;--ok:#5fd08a;--warn:#e3b341;--bad:#ff8a80;--chip:#292933;--on-accent:#16161b;
-  color-scheme:dark}
-body{margin:0;background:var(--bg);color:var(--fg);
-  font:15px/1.55 -apple-system,Segoe UI,Roboto,Helvetica,Arial,sans-serif}
-a{color:var(--accent)}
-:focus-visible{outline:2px solid var(--accent);outline-offset:2px}
-code,.mono{font-family:ui-monospace,SFMono-Regular,Consolas,Menlo,monospace;font-size:.92em}
-header.top{background:var(--panel);border-bottom:1px solid var(--line);padding:10px 16px}
-/* The gap between the header's three parts (the brand, the tabs, the Settings menu). It has
-   to beat the tabs' own 4px by enough to be read as a boundary: every control in the row
-   looks the same on purpose, so space is the only thing left that says where one group ends,
-   and separating them with a rule or a tint would put back exactly the differentiating trait
-   the pill object exists to remove. */
-.bar{max-width:1000px;margin:0 auto;display:flex;flex-wrap:wrap;gap:20px;align-items:center}
-.brand{font-weight:600;letter-spacing:.02em}
-a.brand{color:inherit;text-decoration:none}
-a.brand:hover{text-decoration:underline}
-.brand .v{color:var(--muted);font-weight:400;font-size:.85em;margin-left:6px}
-nav{display:flex;flex-wrap:wrap;gap:4px;flex:1 1 auto}
-main{max-width:1000px;margin:0 auto;padding:18px 16px 40px}
-h1{font-size:1.25rem;margin:0 0 4px}
-h2{font-size:1rem;margin:26px 0 8px}
-/* A group's own heading, inside a .panel that already carries top padding: the panel's
-   padding and this h2's own top margin would otherwise stack. */
-h2.tight{margin-top:0}
-p.lede{color:var(--muted);margin:0 0 18px}
-/* A lede introducing a subsection (h2), not the page (h1): same voice, one size down so it
-   doesn't compete with the page's own lede above it. */
-p.lede.sub{font-size:.92em;margin:0 0 14px}
-.panel{background:var(--panel);border:1px solid var(--line);border-radius:var(--r-box);
-  padding:14px 16px;margin:0 0 16px;overflow-x:auto}
-/* Modifiers for a panel that is also a state, reusing .flash/.err's left-bar treatment
-   (a 4px accent border over the plain 1px one) without duplicating panel's own box model.
-   `color` is reset to `--fg` on purpose: `bad`/`warn`/`ok` are also bare utility classes
-   below (`.bad{color:var(--bad)}` etc.) and a panel carries its state word as one of its
-   two classes, so without this the inherited color would tint every word inside it, not
-   just the border. */
-.panel.ok{border-color:var(--ok);border-left:4px solid var(--ok);color:var(--fg)}
-.panel.warn{border-color:var(--warn);border-left:4px solid var(--warn);color:var(--fg)}
-.panel.bad{border-color:var(--bad);border-left:4px solid var(--bad);color:var(--fg)}
-table{border-collapse:collapse;width:100%;min-width:420px}
-th,td{text-align:left;padding:7px 10px;border-bottom:1px solid var(--line);vertical-align:top}
-th{font-weight:600;font-size:var(--fs-sm);text-transform:uppercase;letter-spacing:.04em;color:var(--muted)}
-tr:last-child td{border-bottom:0}
-/* Was --chip: the same colour a hovered pill fills with, so a row action's hover was
-   invisible on exactly the two pages that have rows (users, api_keys). --bg leaves --line
-   free for the pill's own hover border below. */
-tbody tr:hover{background:var(--bg)}
-ul.plain{list-style:none;margin:0;padding:0}
-ul.plain li{padding:2px 0}
-ol.scopes{margin:0;padding-left:22px}
-ol.scopes > li{margin:0 0 14px}
-.cards{display:grid;grid-template-columns:repeat(auto-fit,minmax(110px,160px));gap:10px;
-  margin:0 0 18px}
-.card{background:var(--panel);border:1px solid var(--line);border-radius:var(--r-box);
-  padding:14px 16px}
-a.card{display:block;color:inherit;text-decoration:none}
-a.card:hover{border-color:var(--accent)}
-.card .n{font-size:1.6rem;font-weight:600;line-height:1.1}
-.card .l{color:var(--muted);font-size:var(--fs-sm)}
-.tag{display:inline-block;padding:1px 7px;border-radius:var(--r-pill);background:var(--chip);
-  font-size:var(--fs-sm);white-space:nowrap}
-.tag.bad{background:var(--bad);color:var(--on-accent)}
-.tag.warn{background:var(--warn);color:var(--on-accent)}
-.tag.ok{background:var(--ok);color:var(--on-accent)}
-.muted{color:var(--muted)}
-.bad{color:var(--bad)}
-form.can{display:flex;flex-wrap:wrap;gap:10px;align-items:flex-end}
-form.can label{display:flex;flex-direction:column;gap:4px;flex:1 1 240px;font-size:var(--fs-sm);
-  text-transform:uppercase;letter-spacing:.04em;color:var(--muted)}
-/* One rule for both kinds of field, so the Settings menu's list boxes are the same object as
-   every text field in the app: same border, same radius, same padding, same measure. A
-   select still draws its own arrow, which is the browser's job and the one part of a control
-   that must look native. */
-input[type=text],select{font:inherit;padding:7px 9px;border:1px solid var(--line);
-  border-radius:var(--r-ctl);background:var(--bg);color:var(--fg);width:100%}
-/* Per-field measure, keyed off the wire field name text_field() stamps onto the input as
-   `f-<name>` (see its doc comment): a short token stays narrow, an email/name/URL stays
-   readable but never balloons to the panel's full width. Both still shrink below their
-   measure on a narrow viewport because width:100% is left standing. */
-input.f-id,input.f-duration{max-width:14ch}
-input.f-email,input.f-name,input.f-login_url{max-width:40ch}
-input::placeholder{color:var(--muted);font-style:italic}
-/* The one field a refusal is attributed to (see Refusal): border only, so radius, padding
-   and background stay exactly what the plain field has, and the focus ring above (which
-   draws an outline, not a border) still shows plainly over it. */
-input[type=text].invalid,textarea.invalid{border-color:var(--bad)}
-/* The border is 1px solid var(--accent), invisible against the button's own fill, which is
-   the point: it is what makes a filled submit and the outlined cancel pill beside it land on
-   exactly the same footprint as .pill below (same border width, same radius, same padding
-   step). A class selector already outranks this element selector regardless of source order,
-   so the two reorder buttons on an application's page (plain buttons carrying class pill)
-   take the pill shape either way; .pill still follows button here so the object reads as
-   built on top of it. */
-button{font:inherit;padding:6px 14px;border:1px solid var(--accent);border-radius:var(--r-pill);
-  background:var(--accent);color:var(--on-accent);cursor:pointer}
-button.danger{background:var(--bad);border-color:var(--bad)}
-p.primary{margin:16px 0 20px}
-.verdict{font-size:1.05rem;font-weight:600;margin:0 0 6px}
-.verdict.yes{color:var(--ok)}
-.verdict.no{color:var(--bad)}
-footer{max-width:1000px;margin:0 auto;padding:0 16px 30px;color:var(--muted);font-size:var(--fs-sm);
-  display:flex;flex-wrap:wrap;gap:10px;justify-content:space-between}
-form.edit label{display:block;margin:0 0 14px}
-form.edit .lbl{display:block;font-size:var(--fs-sm);text-transform:uppercase;letter-spacing:.04em;
-  color:var(--muted);margin:0 0 4px}
-form.edit .hint{display:block;color:var(--muted);font-size:var(--fs-sm);margin:4px 0 0}
-textarea{font-family:ui-monospace,SFMono-Regular,Consolas,Menlo,monospace;font-size:.92em;
-  padding:7px 9px;border:1px solid var(--line);border-radius:var(--r-ctl);background:var(--bg);
-  color:var(--fg);width:100%;line-height:1.5}
-form.edit .radio{display:flex;gap:8px;align-items:baseline;margin:0 0 6px}
-form.edit .radio input{margin:0}
-.actions{display:flex;flex-wrap:wrap;gap:12px;align-items:center;margin:18px 0 0}
-/* The pill: one shape for every small control, wherever it happens to sit: a nav tab, the
-   Settings menu's own trigger, a row's edit/rotate/remove, the two scope reorder buttons, a
-   form's cancel. .pills is the group (the flex row that holds them); .pill is the member.
-   Nothing at a call site is allowed to say how a pill looks, which is why no style=
-   attribute appears anywhere in this file. Every pill looks the same at rest, on purpose:
-   the only things allowed to change one are its state (selected, hovered, disabled) and the
-   one case where the click's consequence differs in kind (rm). */
-.pills{display:inline-flex;flex-wrap:wrap;gap:6px;align-items:center}
-/* A table cell's action group must not wrap: wrapping is exactly what broke the api_keys
-   row's three actions onto two ragged lines inside a narrow right-aligned cell. The panel
-   already scrolls (overflow-x:auto) if a row's actions ever outgrow the column, so nowrap
-   here costs nothing. */
-td.pills{display:flex;flex-wrap:nowrap;justify-content:flex-end}
-/* The resting box is currentColor, not --line: a --line hairline measures about 1.3 to 1
-   against the panel, which is not enough contrast for these to read as controls at all.
-   Every pill carries the box, with no exception, so a nav tab, a language or theme choice,
-   a row action, a reorder button and cancel all look identical at rest. */
-.pill{display:inline-flex;align-items:center;font:inherit;font-size:var(--fs-sm);
-  line-height:1.45;padding:3px 10px;border:1px solid currentColor;border-radius:var(--r-pill);
-  background:none;color:var(--accent);text-decoration:none;cursor:pointer;white-space:nowrap}
-/* The one destructive member: quieter than the rest at rest (--muted, not --accent, and the
-   border follows along since it is currentColor) and only turns --bad on hover, so the
-   consequence is legible right before the click without making the row alarming at rest. */
-.pill.rm{color:var(--muted)}
-/* Has to read on every surface a pill can sit on: the plain panel, a hovered row tinted
-   --bg, a coloured .panel.ok/.bad/.warn state. --line is one step off all of them, and the
-   accent border is the half none of those surfaces can cancel out; without both halves a row
-   action's hover is invisible on at least one of them. */
-.pill:hover{background:var(--line);border-color:var(--accent)}
-.pill.rm:hover{color:var(--bad);border-color:var(--bad)}
-.pill[disabled]{color:var(--muted);border-color:var(--line);background:none;cursor:default}
-/* Selected state as a fill, never as a border, for the whole family. Declared last so a
-   selected pill always outranks a hovered one. */
-.pill.on,.pill.on:hover{background:var(--accent);border-color:var(--accent);
-  color:var(--on-accent);font-weight:600}
-/* The size step: body-size pills for the nav, for the Settings trigger that sits in the same
-   bar as the nav, for a list page's one creating action, and for a form's way out (cancel),
-   so each sits at the same footprint as the text or button beside it. A size, declared once
-   here for four named contexts, not a call site restyling itself.
-   The Settings summary has to be named separately because it is the one pill in the header
-   that is NOT inside `nav` — it is `details`' own trigger — so `nav .pill` never reached it
-   and it read a step smaller than the tabs beside it. */
-nav .pill,details.settings>summary.pill,p.primary .pill,.actions .pill{font-size:1rem;padding:6px 14px}
-/* A pager arm with nowhere to go. Not [disabled], because it is a span and not a control:
-   the first and last pages have no link at all rather than a link that does nothing. */
-.pill.off{color:var(--muted);border-color:var(--line);background:none;cursor:default}
-/* Every list's filter and pager, above the panel it belongs to. One flex row that wraps, so
-   the pager drops under the search box on a narrow screen instead of squeezing it. The
-   search input takes the same border and radius as a .pill so the row reads as one object. */
-.listctl{display:flex;flex-wrap:wrap;gap:10px;align-items:center;margin:0 0 10px}
-.listctl form{display:flex;gap:6px;align-items:center;margin:0}
-.listctl input[type=search]{font:inherit;font-size:var(--fs-sm);padding:4px 10px;
-  background:var(--panel);color:var(--fg);border:1px solid var(--line);
-  border-radius:var(--r-pill);min-width:min(16rem,60vw)}
-.listctl input[type=search]:focus{outline:none;border-color:var(--accent)}
-.listctl .pager{display:inline-flex;gap:6px;align-items:center}
-/* The Settings menu. `details` is the disclosure widget HTML has had all along: the summary
-   is the trigger and takes the same pill as every other control in the bar, and .menu is the
-   panel it opens, taken out of flow so opening it never reflows the header. What is inside
-   the panel is not styled here at all: it is form.edit's labels and .actions' button, the
-   same two objects every editing form on every page is built from. */
-details.settings{position:relative;margin-left:auto}
-/* Two ways of saying the same thing, because browsers disagree on which one they read: the
-   pill's own display:inline-flex already drops the marker triangle in Chromium, list-style
-   does it in Firefox, and the pseudo-element in WebKit. */
-details.settings > summary{list-style:none}
-details.settings > summary::-webkit-details-marker{display:none}
-.menu{position:absolute;right:0;top:calc(100% + 8px);z-index:10;min-width:230px;
-  background:var(--panel);border:1px solid var(--line);border-radius:var(--r-box);
-  padding:14px 16px;box-shadow:0 8px 24px rgba(0,0,0,.25)}
-/* The panel's own padding is the space below the last field, so the gap above the button is
-   left to .actions and reads exactly as it does in any form on any page. */
-.menu form.edit label:last-of-type{margin-bottom:0}
-.flash{background:var(--panel);border:1px solid var(--ok);border-left:4px solid var(--ok);
-  border-radius:var(--r-box);padding:14px 16px;margin:0 0 16px}
-.err{background:var(--panel);border:1px solid var(--bad);border-left:4px solid var(--bad);
-  border-radius:var(--r-box);padding:14px 16px;margin:0 0 16px;white-space:pre-wrap}
-.secret{border:1px solid var(--warn);border-left:4px solid var(--warn);border-radius:var(--r-box);
-  padding:14px 16px;margin:0 0 16px;background:var(--panel)}
-/* The one string on the page that matters, so it must outrank the paragraph explaining it:
-   bigger than body text (not just bigger than code's own .92em default), roomy padding and
-   line-height, a border of its own so the box reads as a distinct object against .secret's
-   panel background, and a pointer cursor as a visible cue for the user-select:all below. */
-.secret code{display:block;margin:10px 0 0;padding:16px 18px;background:var(--chip);
-  border:1px solid var(--line);border-radius:6px;font-size:1.15em;line-height:1.6;
-  word-break:break-all;user-select:all;cursor:pointer}
-.secret .hint{display:block;color:var(--muted);font-size:.82rem;margin:8px 0 0}
-
-/* Phone layout: a compact single-row header, and every table row becomes a stacked card so
-   no column is ever off-screen. Everything below is scoped to this query; nothing above it
-   changes. */
-@media (max-width:640px){
-  header.top{padding:6px 10px}
-  .bar{gap:6px 8px}
-  .brand{order:1}
-  /* The menu keeps the brand company on the first line, at the right edge, and the tabs get
-     the whole second line to scroll along. One trigger instead of ten pills is what makes
-     that first line fit on a phone at all. */
-  .settings{order:2}
-  .pill{padding:3px 8px}
-  nav .pill,details.settings>summary.pill,p.primary .pill,.actions .pill{font-size:var(--fs-sm);padding:4px 9px}
-  nav{order:3;flex:1 1 100%;flex-wrap:nowrap;overflow-x:auto;gap:1px;padding-bottom:2px}
-  table{min-width:0}
-  table,thead,tbody,tr,td{display:block}
-  thead{position:absolute;width:1px;height:1px;padding:0;margin:-1px;overflow:hidden;
-    clip:rect(0,0,0,0);white-space:nowrap;border:0}
-  tbody tr{border-bottom:1px solid var(--line);padding:8px 0;margin:0 0 2px}
-  tbody tr:last-child{border-bottom:0}
-  td{border-bottom:0;padding:3px 0}
-  td[data-label]::before{content:attr(data-label);display:block;font-weight:600;font-size:.8rem;
-    text-transform:uppercase;letter-spacing:.04em;color:var(--muted)}
-  td.pills{justify-content:flex-start;padding-top:6px}
-}
-";
+/// Still no external request of any kind by default — no font, no script, no image — so the
+/// page needs nothing beyond these three constants on a laptop, on a phone, or on a host with
+/// no route to the internet. An operator's stylesheet is an *addition* to a complete page
+/// ([`Look`]), never a page that only works once it loads. Below 640px the layout adapts (a
+/// compact header, table rows stacked into cards) but ships not one byte more to get there.
+///
+/// Light and dark come from `prefers-color-scheme`, and an explicit choice overrides it through
+/// the `data-theme` attribute [`shell`] puts on `html`; both live in [`THEME_CSS`]. There is
+/// still no script on any page: not for a form, not for a confirmation, not for reordering a
+/// scope, not for opening the Settings menu, and not for the theme it sets either. The override
+/// is CSS specificity, nothing more. (The one handler in the binary, [`SETTINGS_ONCHANGE`],
+/// saves a click on a list box and paints nothing.)
+const CSS: &str = include_str!("../assets/admin.css");
 
 // ---------------------------------------------------------------------------
 // Language
@@ -547,7 +320,7 @@ fn parse_lang(s: &str) -> Option<Lang> {
 ///
 /// It needs a type of its own because [`Lang`] has to stay the two the table actually holds:
 /// every string on the page is looked up by one, so `Auto` could never travel that far. The
-/// theme needs no such second type for exactly the mirror reason: [`Theme::System`] *is* a
+/// theme needs no such second type for exactly the mirror reason: [`UiTheme::System`] *is* a
 /// value the renderer carries all the way to the page, as an absent attribute.
 ///
 /// `Auto` is also the floor, not an extra state bolted on: a session that never expressed a
@@ -592,58 +365,37 @@ fn parse_lang_pref(s: &str) -> Option<LangPref> {
 // Theme
 // ---------------------------------------------------------------------------
 
-/// The three appearances the GUI can render in. `System` is the default: it is what
-/// [`negotiate_theme`] returns for a request that expressed no preference at all, so nobody's
-/// page changes appearance until they choose one.
-#[derive(Clone, Copy, PartialEq, Eq, Debug)]
-enum Theme {
-    Light,
-    Dark,
-    System,
-}
-
-impl Theme {
-    /// The cookie value and the query parameter value: one spelling.
-    fn code(self) -> &'static str {
-        match self {
-            Theme::Light => "light",
-            Theme::Dark => "dark",
-            Theme::System => "system",
-        }
-    }
-
-    /// The `data-theme` attribute [`shell`] puts on `html`, for the CSS in [`CSS`] to key
-    /// off. `None` for `System`: leaving the attribute off the page entirely is what lets the
-    /// `prefers-color-scheme` media query keep deciding, instead of a third value it would
-    /// have to special-case.
-    fn attr(self) -> Option<&'static str> {
-        match self {
-            Theme::Light => Some("light"),
-            Theme::Dark => Some("dark"),
-            Theme::System => None,
-        }
-    }
-
-    /// The label its option in the Settings menu shows. A [`K`] and not a string, unlike
-    /// [`LangPref::label`]: an appearance is prose about the page, so it translates.
-    fn label(self) -> K {
-        match self {
-            Theme::Light => K::ThemeLight,
-            Theme::Dark => K::ThemeDark,
-            Theme::System => K::ThemeSystem,
-        }
+/// The three appearances a page can render in are [`UiTheme`], the library's, and not a
+/// second enum here saying the same three words.
+///
+/// That is the presentation contract's doing rather than convenience: the settings file names
+/// a theme, both programs stamp it onto `html` as `data-theme`, and one selector in
+/// [`THEME_CSS`] keys off it. Two enums would be two spellings of `dark` waiting to disagree.
+/// What stays local is the only part that is this GUI's alone: the label an option shows, and
+/// what a cookie value means, neither of which the gate has any use for.
+///
+/// The label is a [`K`] and not a string, unlike [`LangPref::label`]: an appearance is prose
+/// about the page, so it translates.
+fn theme_label(theme: UiTheme) -> K {
+    match theme {
+        UiTheme::Light => K::ThemeLight,
+        UiTheme::Dark => K::ThemeDark,
+        UiTheme::System => K::ThemeSystem,
     }
 }
 
-/// Parse a theme name, from the query or the cookie. `None` for anything else: an
-/// unrecognised value is not an error, it just means no choice was expressed, and falls back
-/// exactly as a missing cookie does.
-fn parse_theme(s: &str) -> Option<Theme> {
-    match s.trim().to_ascii_lowercase().as_str() {
-        "light" => Some(Theme::Light),
-        "dark" => Some(Theme::Dark),
-        "system" => Some(Theme::System),
-        _ => None,
+/// Parse a theme name out of the query or the cookie, where **empty means no choice** rather
+/// than `System`, which is the one place this differs from [`UiTheme::parse`] and the reason
+/// it is a function and not a call.
+///
+/// A settings file that leaves `theme` blank has said "no preference", and `System` is the
+/// right reading of that. A cookie whose value is blank has not said anything at all, and must
+/// fall back exactly as a missing cookie does, so that a deployment's own default still
+/// applies. `None` for an unrecognised value, for the same reason.
+fn parse_theme(s: &str) -> Option<UiTheme> {
+    match s.trim() {
+        "" => None,
+        v => UiTheme::parse(v),
     }
 }
 
@@ -719,6 +471,7 @@ enum K {
     FileErrorTitle,
     FileErrorHint,
     SignedInAs,
+    SignOut,
     // --- the settings menu ---
     Settings,
     SettingLanguage,
@@ -860,6 +613,15 @@ enum K {
     AdminsHelp,
     AdminsKeepYourself,
     AdminsNeverEmpty,
+    ConfigUi,
+    StylesheetUrl,
+    StylesheetUrlHelp,
+    LogoUrl,
+    LogoUrlHelp,
+    BrandName,
+    BrandNameHelp,
+    DefaultTheme,
+    DefaultThemeHelp,
     Days,
 }
 
@@ -938,6 +700,49 @@ fn t(lang: Lang, key: K) -> &'static str {
             lang,
             "at least one administrator is required: an empty list must never come to mean              'everyone'",
             "serve almeno un amministratore: una lista vuota non deve mai finire per              significare 'chiunque'",
+        ),
+        K::ConfigUi => m(lang, "How the pages look", "Come appaiono le pagine"),
+        K::StylesheetUrl => m(lang, "Stylesheet", "Foglio di stile"),
+        K::StylesheetUrlHelp => m(
+            lang,
+            "A stylesheet loaded after the built-in one, on this interface and on the gate's \
+             own pages: an absolute https:// URL, or a path starting with / on this host. It \
+             is expected to redefine the theme's custom properties and nothing else. Leave it \
+             empty and the built-in look is the whole answer; a URL that does not answer costs \
+             the page its palette and nothing more.",
+            "Un foglio di stile caricato dopo quello incorporato, su questa interfaccia e \
+             sulle pagine del gate: un URL https:// assoluto, oppure un percorso che inizia \
+             con / su questo host. Deve ridefinire le custom property del tema e nient'altro. \
+             Lascialo vuoto e vale l'aspetto incorporato; un URL che non risponde costa alla \
+             pagina la sua palette e nulla di più.",
+        ),
+        K::LogoUrl => m(lang, "Logo", "Logo"),
+        K::LogoUrlHelp => m(
+            lang,
+            "Shown on the gate's login page, above the name. Same two shapes as the \
+             stylesheet. Empty means the name alone.",
+            "Mostrato sulla pagina di accesso del gate, sopra il nome. Stesse due forme del \
+             foglio di stile. Vuoto significa solo il nome.",
+        ),
+        K::BrandName => m(lang, "Name", "Nome"),
+        K::BrandNameHelp => m(
+            lang,
+            "What the login page calls this deployment. Empty and each page falls back to its \
+             own name.",
+            "Come la pagina di accesso chiama questo deployment. Vuoto e ogni pagina ripiega \
+             sul proprio nome.",
+        ),
+        K::DefaultTheme => m(lang, "Default appearance", "Aspetto predefinito"),
+        K::DefaultThemeHelp => m(
+            lang,
+            "Which palette a page starts in for someone who has chosen nothing. The gate's \
+             pages have nowhere to keep a choice, so for them this is the whole answer; here \
+             it is only the default, and the Settings menu above still overrides it in your \
+             own browser.",
+            "Con quale palette parte una pagina per chi non ha scelto nulla. Le pagine del \
+             gate non hanno dove tenere una scelta, quindi per loro è tutta la risposta; qui \
+             è solo il valore predefinito, e il menu Impostazioni qui sopra continua a \
+             prevalere nel tuo browser.",
         ),
         K::Days => m(lang, "days", "giorni"),
         K::MsgSettingsSaved => m(lang, "settings saved", "impostazioni salvate"),
@@ -1142,6 +947,7 @@ fn t(lang: Lang, key: K) -> &'static str {
              subito — senza riavvio né reload.",
         ),
         K::SignedInAs => m(lang, "signed in as", "accesso come"),
+        K::SignOut => m(lang, "Sign out", "Esci"),
         K::Settings => m(lang, "Preferences", "Preferenze"),
         K::SettingLanguage => m(lang, "Language", "Lingua"),
         K::SettingTheme => m(lang, "Theme", "Tema"),
@@ -1625,6 +1431,42 @@ struct Config {
     base_path: String,
     /// `BB_AUTH_WEB_DEFAULT_LANG`, used when a request expresses no preference at all.
     default_lang: Lang,
+    /// `BB_AUTH_WEB_LOGOUT_URL`: where the Sign out control in the header points, or `None`
+    /// for no control at all.
+    ///
+    /// **No control when it is unset**, rather than a guess. This GUI cannot know its own
+    /// public URL: it speaks plain HTTP on loopback, so it knows neither the scheme nor the
+    /// host, and the one thing it *is* handed, the `Host` header, is client-supplied and is
+    /// exactly what the rest of this project refuses to let decide a redirect target. A
+    /// button that logs an administrator out to an address an attacker chose would be a
+    /// phishing gadget, so the address is the operator's to state.
+    ///
+    /// Normally the root-relative `/auth/logout`, which needs no hostname at all when the
+    /// gate and this GUI are on one vhost, and an absolute `https://auth.example.com/auth/logout`
+    /// when they are not.
+    ///
+    /// **It may carry the gate's `?rd=`**, and that is how "sign out, then sign back in, and
+    /// be where you were" is expressed: the gate clears the cookie and redirects there, that
+    /// address is gated, so the `401` sends the browser to the login page carrying it, and the
+    /// login hands it back. Which makes the value the whole round trip, written once:
+    ///
+    /// ```text
+    /// BB_AUTH_WEB_LOGOUT_URL=/auth/logout?rd=https%3A%2F%2Fauth.example.com%2Fadmin%2F
+    /// ```
+    ///
+    /// The `rd` has to be **absolute**, and this is the reason rather than a preference: a
+    /// relative one is resolved by the gate against the caller origin it reads from
+    /// `BB_AUTH_ORIGINAL_URL_HEADER`, and the logout location is deliberately ungated, so
+    /// nginx has no reason to set that header there and normally does not. Without it a
+    /// relative `rd` falls back to the login page, which is fail-soft and silent, and silent
+    /// is the bad half. It also stays the operator's to write for the same reason the address
+    /// itself does: this GUI knows neither its scheme nor its host, and the one thing it is
+    /// handed is a client-supplied `Host`.
+    ///
+    /// With no `rd` the browser lands on the login page and stops there, which is the honest
+    /// destination for someone who just ended their session and is the right default for a
+    /// deployment that has not said otherwise.
+    logout_url: Option<String>,
 }
 
 /// Read an env var, falling back to `default` when unset.
@@ -1692,12 +1534,26 @@ impl Config {
             .ok()
             .filter(|p| !p.trim().is_empty())
             .unwrap_or_else(|| default_settings_path(&access_path));
+        // Validated with the library's own asset-URL rule, which is the right one here for
+        // the same reason it is right for a stylesheet: the value is emitted into an `href`,
+        // and it may be either absolute https or a path on this host. Fatal on a bad one,
+        // not skipped: a Sign out control that quietly went missing is one an administrator
+        // would go on believing they had configured.
+        let logout_url = compile_asset_url(
+            "BB_AUTH_WEB_LOGOUT_URL",
+            &env_or("BB_AUTH_WEB_LOGOUT_URL", ""),
+        )
+        .unwrap_or_else(|e| {
+            eprintln!("[bb-auth-web] FATAL: {e}");
+            std::process::exit(1);
+        });
         Config {
             listen: env_or("BB_AUTH_WEB_LISTEN", "127.0.0.1:8091"),
             access_path,
             settings_path,
             base_path,
             default_lang,
+            logout_url,
         }
     }
 }
@@ -2169,7 +2025,7 @@ fn respond_page(req: Request, status: u16, page: Markup) {
 /// `302` to `location`, setting one preference cookie to `value`. `location` is built from a
 /// [`Route`] and re-encoded query parameters, so it is printable ASCII by construction and
 /// [`h`] cannot panic on it; `value` is always one of a closed enum's own [`Lang::code`] or
-/// [`Theme::code`], never request-supplied.
+/// [`UiTheme::code`], never request-supplied.
 ///
 /// The one redirect both preferences use: see [`respond_lang_redirect`] and
 /// [`respond_theme_redirect`].
@@ -2191,7 +2047,7 @@ fn respond_lang_redirect(req: Request, location: &str, pref: LangPref) {
 }
 
 /// [`respond_preference_redirect`] for a theme choice.
-fn respond_theme_redirect(req: Request, location: &str, theme: Theme) {
+fn respond_theme_redirect(req: Request, location: &str, theme: UiTheme) {
     respond_preference_redirect(req, location, THEME_COOKIE, theme.code());
 }
 
@@ -2244,17 +2100,17 @@ fn negotiate_lang(
     (pref, lang)
 }
 
-/// Which theme to render in. Query, then cookie, then `Theme::System`: most explicit wins,
+/// Which theme to render in. Query, then cookie, then `UiTheme::System`: most explicit wins,
 /// and `System` is the floor rather than a configured default, since there is nothing to
 /// configure; it is what every session already has until it chooses otherwise.
-fn negotiate_theme(query: Option<&str>, cookie: Option<&str>) -> Theme {
+fn negotiate_theme(query: Option<&str>, cookie: Option<&str>) -> UiTheme {
     if let Some(t) = query.and_then(parse_theme) {
         return t;
     }
     if let Some(t) = cookie.and_then(parse_theme) {
         return t;
     }
-    Theme::System
+    UiTheme::System
 }
 
 /// This request's URL with the `param` query parameter dropped: where a preference redirect
@@ -2455,6 +2311,27 @@ fn list_controls(v: &View, l: &Listing, matched: usize, total: usize) -> Markup 
 // The shell
 // ---------------------------------------------------------------------------
 
+/// How this deployment asks its pages to look: the `ui` section of the settings file, as far
+/// as [`shell`] is concerned.
+///
+/// It is a type of its own, and carried beside the visitor's own preference rather than folded
+/// into it, because the two answer different questions and both have to survive to the page.
+/// `theme` here is the deployment's default and `View::theme` is what this browser chose, so
+/// the Settings menu can still show `System` as selected while the page renders dark.
+///
+/// [`Look::default`] is "nothing configured", and it is the honest answer on every page
+/// rendered *before* the settings file has been read: a 401 from a missing identity header and
+/// a 500 from a file that will not compile both happen above that read, and a page that cannot
+/// know the operator's stylesheet must show the built-in one rather than guess.
+#[derive(Clone, Copy, Default)]
+struct Look<'a> {
+    /// `ui.theme`: which arm of the palette a page starts in when the visitor has expressed no
+    /// preference of their own.
+    theme: UiTheme,
+    /// `ui.stylesheet_url`: an operator's own stylesheet, loaded after the built-in one.
+    stylesheet: Option<&'a str>,
+}
+
 /// Everything the page shell needs that is not the page.
 struct View<'a> {
     cfg: &'a Config,
@@ -2463,11 +2340,16 @@ struct View<'a> {
     /// thing as `lang`: `Auto` renders as one of the two and must still come back as `Auto`
     /// (see [`LangPref`]). Both come from one [`negotiate_lang`] call.
     lang_pref: LangPref,
-    /// Which appearance to render in; see [`Theme`]. `System` unless the visitor chose
-    /// otherwise, in which case [`shell`] stamps the choice onto `html` as `data-theme`.
-    /// It is its own chosen-option marker too, `System` included, which is why the theme
-    /// needs no second field beside this one.
-    theme: Theme,
+    /// Which appearance **this browser** asked for; see [`UiTheme`]. `System` unless the
+    /// visitor chose otherwise, and it is its own chosen-option marker in the Settings menu,
+    /// `System` included, which is why the choice needs no second field beside this one.
+    ///
+    /// It is not, on its own, what the page renders in: `System` means "no choice", and
+    /// [`shell`] then falls through to the deployment's own [`Look::theme`] before leaving the
+    /// decision to the OS.
+    theme: UiTheme,
+    /// How this deployment asks the page to look. See [`Look`].
+    look: Look<'a>,
     /// The signed-in administrator, when there is one. `None` suppresses the navigation:
     /// a visitor who got a `401` or a `403` has nowhere to go but the login page.
     admin: Option<&'a str>,
@@ -2521,20 +2403,30 @@ fn shell(v: &View, title: &str, content: Markup) -> Markup {
         LangPref::Fixed(Lang::En),
         LangPref::Fixed(Lang::It),
     ];
-    let themes = [Theme::System, Theme::Light, Theme::Dark];
+    let themes = [UiTheme::System, UiTheme::Light, UiTheme::Dark];
     html! {
         (DOCTYPE)
-        // `data-theme=[v.theme.attr()]` is maud's optional-attribute form: `Theme::System`'s
-        // `None` omits the attribute outright rather than emitting `data-theme=""`, which is
-        // what leaves the `prefers-color-scheme` rule in `CSS` as the one deciding.
-        html lang=(v.lang.code()) data-theme=[v.theme.attr()] {
+        // The theme, resolved here and in one expression, because the fallback order is the
+        // rule: this browser's choice, then the deployment's default, then nothing at all.
+        // `data-theme=[…]` is maud's optional-attribute form, so the `None` two `System`s
+        // produce omits the attribute outright rather than emitting `data-theme=""` — which
+        // is what leaves the `prefers-color-scheme` rule in `THEME_CSS` as the one deciding.
+        html lang=(v.lang.code()) data-theme=[v.theme.attr().or(v.look.theme.attr())] {
             head {
                 meta charset="utf-8";
                 meta name="viewport" content="width=device-width,initial-scale=1";
                 title { "bb-auth-web · " (title) }
-                // The one deliberately raw emission on any page: a compile-time constant,
-                // never request data and never anything read out of the access file.
-                style { (PreEscaped(CSS)) }
+                // The three deliberately raw emissions on any page, and all three are
+                // compile-time constants: never request data and never anything read out of
+                // the access file. The order is the contract — the palette, the components
+                // that read it (the same bytes the gate's pages get), the layout that
+                // arranges them, then (below) whatever the operator wants to say over the top.
+                style { (PreEscaped(THEME_CSS)) (PreEscaped(BASE_CSS)) (PreEscaped(CSS)) }
+                // The operator's own stylesheet, or nothing. Raw because the string is a
+                // whole `<link>` element built by the library, from a URL that has already
+                // passed `compile_asset_url` and is escaped again on the way out; there is
+                // no way to say "an element" in maud without saying it in maud.
+                (PreEscaped(stylesheet_link(v.look.stylesheet)))
             }
             body {
                 header class="top" {
@@ -2563,6 +2455,13 @@ fn shell(v: &View, title: &str, content: Markup) -> Markup {
                         } @else {
                             nav {}
                         }
+                        // The account end of the bar, and it is a `nav` for the same reason
+                        // the tabs are: it makes these two controls flex items of a flex row,
+                        // exactly as the five tabs are. Before this they were a `details` and
+                        // a bare link sitting directly in the bar, which is three different
+                        // structures for one object, and an object whose box depends on which
+                        // structure it happens to be in is not one object.
+                        nav class="acct" {
                         // The Settings menu: `details` is the disclosure widget HTML has had
                         // all along, so the menu opens with no script, and closes by itself
                         // on submit, because submitting reloads the page. The form is a
@@ -2595,7 +2494,7 @@ fn shell(v: &View, title: &str, content: Markup) -> Markup {
                                         select name=(THEME_COOKIE) onchange=(SETTINGS_ONCHANGE) {
                                             @for th in themes {
                                                 option value=(th.code()) selected[th == v.theme] {
-                                                    (v.t(th.label()))
+                                                    (v.t(theme_label(th)))
                                                 }
                                             }
                                         }
@@ -2608,6 +2507,22 @@ fn shell(v: &View, title: &str, content: Markup) -> Markup {
                                     noscript { div class="actions" { button { (v.t(K::Apply)) } } }
                                 }
                             }
+                        }
+                        // Sign out, when the operator has said where to: last in the bar, to
+                        // the right of the preferences menu, which is where a session control
+                        // is looked for. It is the same pill as every other control up here
+                        // and at the same size, and it gets that for being INSIDE the bar
+                        // (`CSS` selects `.bar .pill`) rather than for being named.
+                        //
+                        // Rendered even without an administrator, unlike the tabs: the `403`
+                        // page is exactly where this is most useful, because the way out of
+                        // "you are signed in as somebody who may not use this" is to end that
+                        // session and start another. It is a plain link and not a form: the
+                        // gate's `/auth/logout` is a `GET` that clears the cookie and
+                        // redirects, guarded there against cross-site navigation.
+                        @if let Some(u) = &v.cfg.logout_url {
+                            a class="pill" href=(u) { (v.t(K::SignOut)) }
+                        }
                         }
                     }
                 }
@@ -2737,7 +2652,7 @@ fn form_shell(
 ///
 /// `invalid` marks this as the one field a [`Refusal`] is attributed to: it adds `.invalid`
 /// (the `.f-<name>` class stays, so the width rule still applies) to colour the border
-/// `--bad`, and sets `aria-invalid` plus `aria-describedby` so the association with the
+/// `--error`, and sets `aria-invalid` plus `aria-describedby` so the association with the
 /// message above the form is real for assistive tech, not just a colour.
 fn text_field(
     label: &str,
@@ -3719,12 +3634,16 @@ fn page_can(v: &View, access: &Access, query: &str) -> Markup {
         p class="lede" { (v.t(K::CanIntro)) }
         div class="panel" {
             form class="can" method="get" action=(v.href(&Route::Can)) {
-                label {
+                // `fld` is base.css's field label, the same class the sign-in page puts over
+                // its own inputs: the type comes from there and admin.css only says these two
+                // sit side by side. Without it this form would grow a second answer to what a
+                // label looks like, which is the whole thing base.css exists to prevent.
+                label class="fld" {
                     "email"
                     input type="text" name="email" value=(email_in)
                           placeholder="bob@x.com" autocapitalize="off" spellcheck="false";
                 }
-                label {
+                label class="fld" {
                     "url"
                     input type="text" name="url" value=(url_in)
                           placeholder="https://app.x.com/reports" autocapitalize="off"
@@ -4151,6 +4070,10 @@ struct ConfigForm {
     social: bool,
     providers: String,
     admins: String,
+    stylesheet: String,
+    logo: String,
+    brand: String,
+    theme: String,
 }
 
 impl ConfigForm {
@@ -4163,6 +4086,16 @@ impl ConfigForm {
             social: doc.gate.allow_unverified_social,
             providers: doc.gate.social_providers.join("\n"),
             admins: doc.web.admins.join("\n"),
+            stylesheet: doc.ui.stylesheet_url.clone(),
+            logo: doc.ui.logo_url.clone(),
+            brand: doc.ui.brand_name.clone(),
+            // A file that says nothing renders the list box on `system`, which is what saying
+            // nothing means. Writing it back as the word costs nothing and makes the file read
+            // the way the page does.
+            theme: UiTheme::parse(&doc.ui.theme)
+                .unwrap_or_default()
+                .code()
+                .to_string(),
         }
     }
 
@@ -4176,6 +4109,10 @@ impl ConfigForm {
             social: !f.get("social").is_empty(),
             providers: f.get("providers").to_string(),
             admins: f.get("admins").to_string(),
+            stylesheet: f.get("stylesheet").to_string(),
+            logo: f.get("logo").to_string(),
+            brand: f.get("brand").to_string(),
+            theme: f.get("ui_theme").to_string(),
         }
     }
 
@@ -4208,12 +4145,29 @@ impl ConfigForm {
         if !admins.iter().any(|a| norm_email(a) == admin) {
             return Err(Refusal::on("admins", t(lang, K::AdminsKeepYourself)));
         }
+        // The `ui` fields are attributed to the field that carries them, which is the whole
+        // reason they are checked here and not left to the write: the library's refusal names
+        // the setting, but only this page knows which input the operator has to go back to.
+        // Empty is not a refusal anywhere here; it is the setting being unset.
+        compile_asset_url("stylesheet_url", &self.stylesheet)
+            .map_err(|e| Refusal::on("stylesheet", &e))?;
+        compile_asset_url("logo_url", &self.logo).map_err(|e| Refusal::on("logo", &e))?;
+        compile_brand_name(&self.brand).map_err(|e| Refusal::on("brand", &e))?;
+        // A value this list box cannot produce, so a refusal here means the request was not
+        // this form. It is still a refusal and not a silent `system`: see `UiTheme::parse`.
+        let theme = UiTheme::parse(&self.theme)
+            .ok_or_else(|| Refusal::on("theme", t(lang, K::DefaultThemeHelp)))?;
+
         doc.gate.profile_claims = Self::lines(&self.claims);
         doc.gate.identity_attrs = Self::lines(&self.identity);
         doc.gate.session_ttl_secs = ttl;
         doc.gate.allow_unverified_social = self.social;
         doc.gate.social_providers = Self::lines(&self.providers);
         doc.web.admins = admins;
+        doc.ui.stylesheet_url = self.stylesheet.trim().to_string();
+        doc.ui.logo_url = self.logo.trim().to_string();
+        doc.ui.brand_name = self.brand.trim().to_string();
+        doc.ui.theme = theme.code().to_string();
         Ok(())
     }
 }
@@ -4249,6 +4203,36 @@ fn page_config(v: &View, f: &ConfigForm, err: Option<&Refusal>) -> Markup {
                 (urls_field(v.t(K::Admins), "admins", &f.admins,
                             html! { (v.t(K::AdminsHelp)) " (" (v.t(K::AdminsKeepYourself)) ")" },
                             about("admins")))
+
+                (section_heading(v.t(K::ConfigUi), "ui"))
+                (text_field(v.t(K::BrandName), "brand", &f.brand, "BadBat75",
+                            Some(v.t(K::BrandNameHelp)), about("brand")))
+                (text_field(v.t(K::StylesheetUrl), "stylesheet", &f.stylesheet,
+                            "https://assets.example.com/css/theme.css",
+                            Some(v.t(K::StylesheetUrlHelp)), about("stylesheet")))
+                (text_field(v.t(K::LogoUrl), "logo", &f.logo,
+                            "https://assets.example.com/img/logo.png",
+                            Some(v.t(K::LogoUrlHelp)), about("logo")))
+                // A list box and not three radios, because it is the same choice the Settings
+                // menu in the header offers and it must be the same object: three named
+                // values, one line, no invented furniture.
+                //
+                // `ui_theme` and not `theme`, which is the one field on this page whose wire
+                // name is not the file's own. The header's menu is on every page including
+                // this one, and its own control is `theme`, the cookie; two controls of that
+                // name on one document is a page where "the theme" means two different
+                // things depending on which form you are looking at.
+                label {
+                    span class="lbl" { (v.t(K::DefaultTheme)) }
+                    select name="ui_theme" {
+                        @for th in [UiTheme::System, UiTheme::Light, UiTheme::Dark] {
+                            option value=(th.code()) selected[th.code() == f.theme] {
+                                (v.t(theme_label(th)))
+                            }
+                        }
+                    }
+                    span class="hint" { (v.t(K::DefaultThemeHelp)) }
+                }
             }, v.t(K::Save), false))
             p class="muted" { (v.t(K::ConfigHot)) }
         }
@@ -5189,12 +5173,15 @@ fn handle(mut req: Request, cfg: &Config) {
         query_param(&query, THEME_COOKIE).as_deref(),
         header_value(&req, "Cookie").and_then(|c| cookie_value(c, THEME_COOKIE)),
     );
-    // Nothing is routed yet, so the Settings menu on an error page submits to the root.
+    // Nothing is routed yet, so the Settings menu on an error page submits to the root, and
+    // the page wears the built-in look: everything this closure renders happens *above* the
+    // settings read below, including the one page that exists because that read failed.
     let anon = |at: Route| View {
         cfg,
         lang,
         lang_pref,
         theme,
+        look: Look::default(),
         admin: None,
         at,
         query: "",
@@ -5258,6 +5245,16 @@ fn handle(mut req: Request, cfg: &Config) {
         return;
     }
 
+    // Past the two guards, so every page from here down can be the one this deployment asked
+    // for rather than the built-in one. It is read from the settings this request already
+    // loaded, and not read again: the `ui` section and the `web.admins` that let this request
+    // through must be the same file, or a save landing mid-request could style a page from
+    // one version and admit it on another.
+    let look = Look {
+        theme: settings.theme,
+        stylesheet: settings.stylesheet_url.as_deref(),
+    };
+
     let at = match route(&path, &cfg.base_path) {
         Some(r) => r,
         None => {
@@ -5266,6 +5263,7 @@ fn handle(mut req: Request, cfg: &Config) {
                 lang,
                 lang_pref,
                 theme,
+                look,
                 admin: Some(&email),
                 at: Route::Dashboard,
                 query: "",
@@ -5295,6 +5293,7 @@ fn handle(mut req: Request, cfg: &Config) {
             lang,
             lang_pref,
             theme,
+            look,
             admin: Some(&email),
             at: at.clone(),
             query: "",
@@ -5359,6 +5358,7 @@ fn handle(mut req: Request, cfg: &Config) {
         lang,
         lang_pref,
         theme,
+        look,
         admin: Some(&email),
         at: at.clone(),
         query: &query,
@@ -5921,6 +5921,9 @@ mod tests {
             settings_path: settings_path(path),
             base_path: base.to_string(),
             default_lang: Lang::En,
+            // Configured, so the control renders and the tests below see the shape a real
+            // deployment has. The unset case is its own test.
+            logout_url: Some("/auth/logout".to_string()),
         }
     }
 
@@ -6088,6 +6091,99 @@ mod tests {
         // The access file was not touched: this page edits the other one.
         assert_eq!(read(&path), SAMPLE);
         cleanup(&path);
+    }
+
+    #[test]
+    fn the_settings_page_writes_the_look_and_refuses_one_it_cannot() {
+        let path = scratch("cfg-look", SAMPLE);
+        let cfg = cfg_for(&path, "");
+        let sp = cfg.settings_path.clone();
+        let got = post(
+            &cfg,
+            Route::Config,
+            &settings_fields(
+                &rev_of(&sp),
+                &[
+                    ("brand", "  BadBat75  "),
+                    ("stylesheet", "https://assets.badbat75.com/css/theme.css"),
+                    ("logo", "/img/logo.png"),
+                    ("ui_theme", "dark"),
+                ],
+            ),
+        );
+        assert_eq!(got.location(), "/config?msg=settings-saved");
+        let (_, s) = open_settings_file(&sp).unwrap();
+        assert_eq!(s.brand_name.as_deref(), Some("BadBat75"), "trimmed");
+        assert_eq!(
+            s.stylesheet_url.as_deref(),
+            Some("https://assets.badbat75.com/css/theme.css")
+        );
+        assert_eq!(s.logo_url.as_deref(), Some("/img/logo.png"));
+        assert_eq!(s.theme, UiTheme::Dark);
+
+        // A URL the library refuses is refused HERE, attributed to the field that carries it,
+        // and nothing is written: the same shape every other refusal on this page has.
+        let before = read(&sp);
+        let got = post(
+            &cfg,
+            Route::Config,
+            &settings_fields(&rev_of(&sp), &[("stylesheet", "javascript:alert(1)")]),
+        );
+        let (status, body) = got.page();
+        assert_eq!(status, 400, "{body}");
+        assert!(body.contains("stylesheet_url"), "{body}");
+        assert!(
+            body.contains(r#"class="f-stylesheet invalid""#),
+            "the refusal must point at the field: {body}"
+        );
+        assert_eq!(read(&sp), before, "nothing written");
+        cleanup(&path);
+    }
+
+    #[test]
+    fn the_look_is_the_palette_the_components_the_layout_then_the_operator() {
+        let path = scratch("look-order", SAMPLE);
+        let cfg = cfg_for(&path, "");
+        let (doc, access) = open_access_file(&cfg.access_path).unwrap();
+        let mut v = view(&cfg, Route::Dashboard, "REV");
+        v.look = Look {
+            theme: UiTheme::Dark,
+            stylesheet: Some("https://assets.badbat75.com/css/theme.css"),
+        };
+        let html = shell(&v, "t", page_dashboard(&v, &doc, &access)).into_string();
+
+        // Order is the contract, and it is four deep: the palette, the components that read
+        // it, the layout that arranges them, then an override that wins by source order alone
+        // and therefore needs no `!important` and no knowledge of what it is restyling. The
+        // middle two are the same bytes the gate emits on its own pages.
+        let tokens = html.find("--accent:").expect("the palette is inlined");
+        let components = html.find(".pill{").expect("the components are inlined");
+        let layout = html.find("header.top{").expect("the layout is inlined");
+        let link = html.find("<link rel=\"stylesheet\"").expect("the override");
+        assert!(
+            tokens < components && components < layout && layout < link,
+            "{html}"
+        );
+        // The deployment's default theme reaches the page when the visitor chose nothing.
+        assert!(html.contains(r#"data-theme="dark""#), "{html}");
+        // And the visitor's own choice still outranks it.
+        v.theme = UiTheme::Light;
+        let html = shell(&v, "t", html! {}).into_string();
+        assert!(html.contains(r#"data-theme="light""#), "{html}");
+        cleanup(&path);
+    }
+
+    #[test]
+    fn with_no_stylesheet_configured_the_page_links_nothing_at_all() {
+        // The property the whole arrangement rests on: the built-in look is complete, so a
+        // deployment that configures nothing fetches nothing, and one whose asset host is
+        // down still has a working page.
+        let html = render("look-none", Route::Dashboard);
+        assert!(!html.contains("<link"), "{html}");
+        assert!(
+            html.contains("--accent:"),
+            "the palette must still be there"
+        );
     }
 
     #[test]
@@ -6426,9 +6522,9 @@ mod tests {
 
     #[test]
     fn parse_theme_accepts_the_three_spellings_and_nothing_else() {
-        assert_eq!(parse_theme("light"), Some(Theme::Light));
-        assert_eq!(parse_theme("Dark"), Some(Theme::Dark));
-        assert_eq!(parse_theme(" system "), Some(Theme::System));
+        assert_eq!(parse_theme("light"), Some(UiTheme::Light));
+        assert_eq!(parse_theme("Dark"), Some(UiTheme::Dark));
+        assert_eq!(parse_theme(" system "), Some(UiTheme::System));
         // an unrecognised value is not an error, just no preference expressed
         assert_eq!(parse_theme("blue"), None);
         assert_eq!(parse_theme(""), None);
@@ -6437,14 +6533,14 @@ mod tests {
     #[test]
     fn negotiate_theme_prefers_query_then_cookie_then_system() {
         // query beats the cookie
-        assert_eq!(negotiate_theme(Some("dark"), Some("light")), Theme::Dark);
+        assert_eq!(negotiate_theme(Some("dark"), Some("light")), UiTheme::Dark);
         // cookie beats the default
-        assert_eq!(negotiate_theme(None, Some("light")), Theme::Light);
+        assert_eq!(negotiate_theme(None, Some("light")), UiTheme::Light);
         // System is the floor, with nothing expressed
-        assert_eq!(negotiate_theme(None, None), Theme::System);
+        assert_eq!(negotiate_theme(None, None), UiTheme::System);
         // an unparseable preference is not a preference, so the next source still applies
-        assert_eq!(negotiate_theme(Some("blue"), Some("dark")), Theme::Dark);
-        assert_eq!(negotiate_theme(None, Some("blue")), Theme::System);
+        assert_eq!(negotiate_theme(Some("blue"), Some("dark")), UiTheme::Dark);
+        assert_eq!(negotiate_theme(None, Some("blue")), UiTheme::System);
     }
 
     #[test]
@@ -6462,9 +6558,9 @@ mod tests {
     fn theme_attr_is_none_only_for_system() {
         // `None` is what leaves `data-theme` off the page for System; an explicit choice
         // always carries its own spelling.
-        assert_eq!(Theme::Light.attr(), Some("light"));
-        assert_eq!(Theme::Dark.attr(), Some("dark"));
-        assert_eq!(Theme::System.attr(), None);
+        assert_eq!(UiTheme::Light.attr(), Some("light"));
+        assert_eq!(UiTheme::Dark.attr(), Some("dark"));
+        assert_eq!(UiTheme::System.attr(), None);
     }
 
     #[test]
@@ -6478,7 +6574,7 @@ mod tests {
             html.contains(r#"<html lang="en">"#),
             "System must render no data-theme attribute at all: {html}"
         );
-        v.theme = Theme::Dark;
+        v.theme = UiTheme::Dark;
         let html = shell(&v, "t", html! { "x" }).into_string();
         assert!(
             html.contains(r#"<html lang="en" data-theme="dark">"#),
@@ -6501,7 +6597,7 @@ mod tests {
         assert_eq!(html.matches(" selected>").count(), 2, "{html}");
 
         v.lang_pref = LangPref::Fixed(Lang::It);
-        v.theme = Theme::Dark;
+        v.theme = UiTheme::Dark;
         let html = shell(&v, "t", html! { "x" }).into_string();
         assert!(html.contains(r#"<option value="it" selected>"#), "{html}");
         assert!(html.contains(r#"<option value="dark" selected>"#), "{html}");
@@ -6518,11 +6614,32 @@ mod tests {
             app.contains(r#"<a class="pill" href="/apps">"#),
             "the way back is a pill, not prose: {app}"
         );
-        // The Settings trigger is the one pill in the header that is not inside `nav`, so it
-        // has to be named in the size rule or it reads a step smaller than the tabs beside it.
+        // Three different structures sit in that bar (the nav's tabs, a `details`' summary,
+        // and a bare child), and every one of them must be the same object with the same
+        // click area. The size rule therefore selects the CONTAINER and not the three
+        // structures: a list of them is a list that can miss one, which is what it did.
         assert!(
-            CSS.contains("nav .pill,details.settings>summary.pill,"),
-            "the Settings trigger must share the nav's size step"
+            CSS.contains(".bar .pill,"),
+            "every pill in the header shares one size rule, named by the bar and not one by one"
+        );
+        assert!(
+            !CSS.contains("details.settings>summary.pill,"),
+            "and no rule may go back to naming them one at a time"
+        );
+        // Same size is only half of "the same object": the other half is the same STRUCTURE,
+        // because a flex container blockifies its children and an inline-flex box left on a
+        // text baseline answers a click over its line box rather than over the rectangle a
+        // person can see. So every pill in the header is a flex item of a `nav` — the tabs in
+        // theirs, Preferences and Sign out in `nav.acct`. The summary is the one that cannot
+        // be moved (it must stay inside its `details`), so the CSS makes that `details` a
+        // flex container instead, which blockifies it the same way.
+        assert!(
+            app.contains(r#"<nav class="acct">"#),
+            "the account controls share one flex row: {app}"
+        );
+        assert!(
+            CSS.contains("details.settings{display:flex"),
+            "and the Settings trigger is blockified by its own details"
         );
         assert!(
             app.contains(r#"<summary class="pill">"#),
@@ -6530,6 +6647,64 @@ mod tests {
         );
         // The footer never tells anybody to reload: `bb-auth-reload.path` does it.
         assert!(!app.contains("systemctl reload"), "{app}");
+    }
+
+    #[test]
+    fn sign_out_is_in_the_bar_when_configured_and_absent_when_not() {
+        let html = render("signout", Route::Dashboard);
+        assert!(
+            html.contains(r#"<a class="pill" href="/auth/logout">Sign out</a>"#),
+            "{html}"
+        );
+        // To the RIGHT of the preferences menu, and the same object as everything else in
+        // the bar. Both are easy to get wrong and neither shows up in any other assertion:
+        // the order is DOM order, and the size comes from the bar's own rule, which is why
+        // that rule selects the bar rather than listing the shapes inside it.
+        let (settings_at, signout_at) = (
+            html.find("details class=\"settings\"")
+                .or(html.find("<details class=\"settings\"")),
+            html.find(r#"<a class="pill" href="/auth/logout">"#),
+        );
+        assert!(
+            settings_at < signout_at,
+            "Sign out must come after the menu: {html}"
+        );
+        assert!(
+            CSS.contains(".bar .pill,"),
+            "and share the header's size step, which reaches it for being IN the bar"
+        );
+
+        // A logout URL carrying the gate's `?rd=` reaches the href intact, which is the whole
+        // of "sign out and come back here": the operator states the round trip in one value
+        // and this GUI neither parses it nor adds to it. The `&` an rd with two parameters
+        // would carry comes out escaped, because it is emitted as an attribute and maud
+        // escapes attributes; that is why this asserts on the rendered string.
+        let path = scratch("signout-rd", SAMPLE);
+        let mut cfg = cfg_for(&path, "");
+        cfg.logout_url =
+            Some("/auth/logout?rd=https%3A%2F%2Fauth.example.com%2Fadmin%2F".to_string());
+        let (doc, access) = open_access_file(&cfg.access_path).unwrap();
+        let v = view(&cfg, Route::Dashboard, "REV");
+        let html = shell(&v, "t", page_dashboard(&v, &doc, &access)).into_string();
+        assert!(
+            html.contains(r#"href="/auth/logout?rd=https%3A%2F%2Fauth.example.com%2Fadmin%2F""#),
+            "{html}"
+        );
+        cleanup(&path);
+
+        // Unset means no control at all, rather than a guess: this GUI speaks plain HTTP on
+        // loopback and knows neither its scheme nor its host, and the one thing it is handed
+        // is a client-supplied `Host`. A dead or attacker-chosen link is worse than none.
+        let path = scratch("signout-off", SAMPLE);
+        let mut cfg = cfg_for(&path, "");
+        cfg.logout_url = None;
+        let (doc, access) = open_access_file(&cfg.access_path).unwrap();
+        let v = view(&cfg, Route::Dashboard, "REV");
+        let html = shell(&v, "t", page_dashboard(&v, &doc, &access)).into_string();
+        // The anchor, not the words: `CSS` is emitted inline on every page and its comments
+        // name the control, so a text search finds it whether or not anything is rendered.
+        assert!(!html.contains(r#"href="/auth/logout""#), "{html}");
+        cleanup(&path);
     }
 
     #[test]
@@ -6601,7 +6776,8 @@ mod tests {
             cfg,
             lang: Lang::En,
             lang_pref: LangPref::Auto,
-            theme: Theme::System,
+            theme: UiTheme::System,
+            look: Look::default(),
             admin: Some("admin@x.com"),
             at,
             query: "",

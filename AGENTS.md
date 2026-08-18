@@ -15,6 +15,10 @@ bb-auth is a single-binary **auth gate**: it accepts an AWS Cognito `id_token` t
 browser-side login page already obtained, validates it (RS256 via JWKS), and issues an
 HMAC-signed session cookie that nginx enforces on every request via `auth_request`. It also
 accepts per-request bearer credentials — a Cognito `id_token` or a static `bbk_` API key.
+**It serves that login page itself**, at `/auth/login` (and `/auth/callback` for a social
+sign-in), which is not a widening of the job but a removal of three duplicated values: the
+page needs the app-client id, the issuer's endpoint and the hosts a post-login `rd` may land
+on, and the gate already holds all three as the values it validates against.
 
 The access list is a JSON **access file** (`BB_AUTH_ACCESS_FILE`, default
 `access.json`, and it says *access* rather than *users* because the roster is one section of
@@ -25,7 +29,7 @@ people out of it ahead of that policy; a user is a **uuid** plus the emails
 that resolve to it plus its API keys, and carries no URL at all. A grant is written once,
 on the side of the place. It is service-agnostic — one binary fronts any web service, wired
 per-deployment through `BB_AUTH_*` env vars **and a settings file** (`settings.json` beside
-the access file): the six settings that must change without a restart live there, because a
+the access file): the settings that must change without a restart live there, because a
 process cannot re-read its own environment.
 
 One crate, four targets, and the split is load-bearing:
@@ -36,17 +40,29 @@ One crate, four targets, and the split is load-bearing:
   and written* (`open_access_file`, `AccessWrite`, the document mutations). And
   **the settings file** beside it (`SettingsFile`, `compile_settings`, `SettingsWrite`, plus
   `compile_profile_claims` / `compile_identity_attrs`, which are here because all three
-  programs validate them). Everything more than one program must agree on, byte for
-  byte.
+  programs validate them). And **the presentation contract**: the palette
+  (`THEME_CSS`, [src/assets/theme.css](src/assets/theme.css)), the components built out of it
+  (`BASE_CSS`, [src/assets/base.css](src/assets/base.css)), and `UiTheme` / `stylesheet_link`
+  / `html_escape` / `compile_asset_url` beside them. Same membership rule: two programs emit
+  HTML, and they must agree byte for byte on what `--accent` names, on what a button and a
+  field are made of, and on where an operator's stylesheet lands in the cascade, or the two
+  surfaces drift apart one edit at a time and nobody working inside either file can see it.
+  What is *not* there is either program's **arrangement** of those components. Everything
+  more than one program must agree on, byte for byte.
 - **[src/bin/bb-auth.rs](src/bin/bb-auth.rs)** — **the gate**, and everything the access file has no
-  opinion about: HTTP, the session cookie, id_token validation, the nginx contract. Still
+  opinion about: HTTP, the session cookie, id_token validation, the nginx contract, and the
+  three pages it serves ([src/assets/](src/assets/): the sign-in page, the social callback and
+  the error page, each a template whose `__BB_*__` placeholders `render_page` fills). Still
   **one file**, still read top to bottom.
 - **[src/bin/bb-auth-adm.rs](src/bin/bb-auth-adm.rs)** — the access-file admin CLI: CRUD over
   `applications` / `scopes` / `user_groups` / `denied` / `users` / `api_keys`, key minting,
   and `can EMAIL URL` (would this credential get in?). It links the library, none of the gate.
 - **[src/bin/bb-auth-web.rs](src/bin/bb-auth-web.rs)** — the access-file admin GUI
   (server-rendered, `maud`): the same CRUD as the CLI, made **only** through the library's
-  editing core, plus a **Settings** tab over the settings file. Five tabs, and none of them
+  editing core, plus a **Settings** tab over the settings file, in that file's own three
+  sections: what the gate answers with, who administers this, and how the pages look (the
+  last one being the gate's pages too, which is why one save restyles both programs). Five
+  tabs, and none of them
   is `denied` or `user_groups`: those two are **sections of the users
   page**, groups above the roster, because a group only means anything in terms of the roster
   and both are about people. Settings is last because it is the only tab that is not about
@@ -77,7 +93,10 @@ One crate, four targets, and the split is load-bearing:
 The defining constraint vs. authorization-code OIDC proxies (oauth2-proxy): those drive the
 login themselves and *cannot* accept a token the browser already holds. bb-auth is built for
 the opposite — a login page runs Cognito `USER_AUTH` in the browser (enabling sign-up +
-auto-login with no second OTP) and POSTs the resulting `id_token` to `/auth/session`.
+auto-login with no second OTP) and POSTs the resulting `id_token` to `/auth/session`. The gate
+now ships that page, but the constraint is unchanged and so is the shape: the page is still a
+browser-side client of Cognito that hands the gate a token it did not obtain, and pointing
+`BB_AUTH_LOGIN_URL` at a page of your own instead still works.
 
 ## Where documentation lives
 
@@ -89,7 +108,10 @@ endpoint table and credential order on `bb-auth`'s crate root, the cookie wire f
 grammar on `glob_match`, the `@name` group grammar on `AccessFile::user_groups`, the grant
 model on `Decision` and `Subject`, the reason for the library split on `bb_auth_core`'s
 crate root, the claim→header derivation on `ProfileClaim` and the attribute→header one on
-`IdentityAttr`, the nginx snippets on `Config::original_url_header` and `IDENTITY_ATTRS`.
+`IdentityAttr`, the nginx snippets on `Config::original_url_header` and `IDENTITY_ATTRS`, the
+Cognito flow the sign-in page runs on `LOGIN_HTML` and the OAuth leg on `CALLBACK_HTML`, and
+the palette's four arms and what an override may redefine on `THEME_CSS` (the file itself,
+[src/assets/theme.css](src/assets/theme.css)).
 Don't copy one into the other; when they disagree, the code wins. Rustdoc must stay
 warning-free — a broken intra-doc link is the cheapest rot detector this repo has, and it
 now spans two crates (a gate doc pointing at a moved type must be re-pointed, not
@@ -117,7 +139,8 @@ cargo test session_roundtrip          # a single test by name
 cargo run --bin bb-auth -- --check-access .\deploy\access.example.json
 
 # Validate a SETTINGS file with the parser all three programs use. Prints the derived
-# header for every claim and attribute, and names the GUI's administrators.
+# header for every claim and attribute, names the GUI's administrators, and says how the
+# pages will look (the stylesheet by name: whether it loads is the browser's business).
 cargo run --bin bb-auth -- --check-settings .\deploy\settings.example.json
 
 # Administer an access file (CRUD; every write is validated with the gate's own parser).
@@ -130,11 +153,15 @@ cargo run --bin bb-auth-adm -- -f .\deploy\access.json user add bob@x.com
 cargo run --bin bb-auth-adm -- -f .\deploy\access.json key add bob@x.com --id laptop --duration 365d
 cargo run --bin bb-auth-adm -- -f .\deploy\access.json can bob@x.com https://app.x.com/mpa/admin/panel
 
-# The settings file: the six values that take effect with no restart at all. `-s` names it;
+# The settings file: the values that take effect with no restart at all. `-s` names it;
 # with no `-s` it is settings.json beside the access file, which is what the packages create.
 cargo run --bin bb-auth-adm -- -s .\deploy\settings.json settings show
 cargo run --bin bb-auth-adm -- -s .\deploy\settings.json settings set --claims given_name,family_name
 cargo run --bin bb-auth-adm -- -s .\deploy\settings.json settings admin add bob@x.com
+# The `ui` four: the look of every page BOTH programs serve, so one stylesheet restyles the
+# sign-in page and the admin GUI together. Pass an empty value to unset any of them.
+cargo run --bin bb-auth-adm -- -s .\deploy\settings.json settings set --brand 'BadBat75' --theme dark
+cargo run --bin bb-auth-adm -- -s .\deploy\settings.json settings set --stylesheet 'https://assets.x.com/css/theme.css'
 
 # Browser E2E suite for bb-auth-web (Node + system Edge/Chrome; self-contained — builds,
 # starts and kills its own server on a temp copy of the fixture; see e2e/README.md)
@@ -174,7 +201,10 @@ passed, on code untouched since it passed, tells you nothing you did not already
 
 | What changed | What to run |
 | --- | --- |
-| Only the `CSS` constant in `bb-auth-web.rs` | `cargo build --bin bb-auth-web` (it is a Rust string: it still has to compile) and `node e2e/shots.js <scene>` |
+| `src/assets/admin.css` alone | `cargo test --bin bb-auth-web` and `node e2e/shots.js <scene>` |
+| `src/assets/theme.css` or `src/assets/base.css` | `cargo test` (the palette's four arms are pinned by `the_theme_defines_every_token_in_all_four_arms`, the sharing by `only_the_palette_names_a_colour` and `the_components_are_shared_and_the_layouts_only_arrange_them`) and `node e2e/shots.js config` **and a look at `/auth/login`**: both files are emitted by both programs, so a change to either repaints the admin interface and the sign-in page together, and half of that is invisible to the admin's own suite |
+| `src/assets/auth.css` alone | `cargo test --bin bb-auth` and a look at the page in a browser |
+| `src/assets/*.html` | `cargo test --bin bb-auth` (the page tests read the rendered document) and a look at the page in a browser: no test can tell you a login form is unusable |
 | `maud` markup, or a `K` translation key | the above, plus `cargo test` (several tests assert on rendered HTML) and `node e2e/run.js` |
 | A signature, a handler, the gate, or the library | all of it, plus `cargo clippy --all-targets` |
 | A dependency version | all of it, plus the cross-compile and the dependency check below |
@@ -247,10 +277,25 @@ is fatal on failure, so reaching the `listening on …` line proves the fetch, t
   `compile_profile_claims` / `compile_identity_attrs`: the moment an editor must refuse to
   *write* a bad claim list, the rule that decides one is shared, however much it may look
   like the gate's business. `write_atomically` stays private and
-  serves both writers. What stays in a tool is what has an
+  serves both writers. The same rule, one step further out, is what admits the
+  **presentation contract** (`THEME_CSS`, `BASE_CSS`, `UiTheme`, `stylesheet_link`,
+  `html_escape`, `compile_asset_url`): two programs emit HTML now, and a second answer to
+  "what does `--accent` name" or "where does the operator's stylesheet land in the cascade"
+  would mean `ui.stylesheet_url` restyles one surface and leaves the other standing in another
+  palette. A stylesheet in a library needs that argument made out loud, and the argument is
+  the library's own. **It reaches the components too**, and that half was learned by looking
+  at the two surfaces side by side: a shared vocabulary of colours does not stop a button from
+  being a rounded rectangle on one page and a lozenge on the other, or a field from being 12px
+  tall here and 7px there. Each of those is somebody editing the file in front of them, which
+  is drift invisible from inside either file, so a THING (a button, a field, a card, a tag, a
+  message) is defined once in `BASE_CSS` and both programs emit it. Its limit is where a thing
+  stops and an ARRANGEMENT of things starts: the admin's header, tables and phone stacking are
+  the GUI's, the centred card and its steps are the gate's, and nothing requires those two to
+  agree. What stays in a tool is what has an
   operator: flags, warnings, and the wording of a verdict. HTTP, the cookie, the JWT,
-  the env, the nginx contract are the **gate's**, and stay in `src/bin/bb-auth.rs` — which is
-  still one file, read top to bottom. Do not move gate code into the library to "share" it
+  the env, the nginx contract and the pages themselves are the **gate's**, and stay in
+  `src/bin/bb-auth.rs` and `src/assets/` — which is still one file, read top to bottom, plus
+  three templates it fills. Do not move gate code into the library to "share" it
   with the CLI; the CLI has no business with any of it. The two authorization functions in
   `bb-auth.rs` (`authorize`, `bearer_apikey_email`) are thin wrappers that add the log line
   and the wall clock to the library's decision — keep them thin, and keep the rule in the
@@ -296,17 +341,25 @@ is fatal on failure, so reaching the `listening on …` line proves the fetch, t
   grants differently, which is a lockout, or worse, reported as a successful load.
 - **The settings file is what must change without a restart, and the rule for what goes in it
   is three-part.** A setting belongs there iff it is (1) read **per request**, (2) unable to
-  lock the operator out when it is wrong, and (3) not a secret. Six pass:
+  lock the operator out when it is wrong, and (3) not a secret. Ten pass, in three sections:
   `gate.profile_claims`, `gate.identity_attrs`, `gate.allow_unverified_social`,
-  `gate.social_providers`, `gate.session_ttl_secs`, and `web.admins`. Everything else stays in
+  `gate.social_providers`, `gate.session_ttl_secs`; `web.admins`; and the whole `ui` section
+  (`stylesheet_url`, `logo_url`, `brand_name`, `theme`), which is the **look of every page
+  either program serves** and the one section both of them read. The `ui` four pass the middle
+  part precisely because the built-in stylesheet is complete: the worst a wrong value there
+  achieves is an unstyled page, never a closed door. Everything else stays in
   `bb-auth.env`: the listener and the worker count (a rebind), the HMAC key (the secret), the
   Cognito trust roots and the cookie's name and domain (a change lets nobody in or logs
-  everybody out), and `BB_AUTH_LOGIN_URL` / `BB_AUTH_AUTHORIZED_HOSTS` /
-  `BB_AUTH_ORIGINAL_URL_HEADER`, which **are** the lockout. It is a *file* for one mechanical
-  reason, and not for tidiness: **a process cannot re-read its own environment** (systemd
-  loads `EnvironmentFile=` once, at `ExecStart`), so an env var can never be hot. Do not add a
-  seventh setting because it would be convenient there; check it against the three parts
-  first. It is held in `RwLock<Settings>`, reloaded by the same SIGHUP as the access file and
+  everybody out), the `BB_AUTH_SOCIAL_*` group (a wrong client id or callback URL is a
+  sign-in that cannot complete, which is the lockout wearing a GUI field's clothes), and
+  `BB_AUTH_LOGIN_URL` / `BB_AUTH_AUTHORIZED_HOSTS` /
+  `BB_AUTH_ORIGINAL_URL_HEADER`, which **are** the lockout. The `ui` section and the
+  `BB_AUTH_SOCIAL_*` group sitting on opposite sides of that line, both of them about the same
+  sign-in page, is the rule working rather than an inconsistency. It is a *file* for one
+  mechanical reason, and not for tidiness: **a process cannot re-read its own environment**
+  (systemd loads `EnvironmentFile=` once, at `ExecStart`), so an env var can never be hot. Do
+  not add an eleventh setting because it would be convenient there; check it against the three
+  parts first. It is held in `RwLock<Settings>`, reloaded by the same SIGHUP as the access file and
   **fail-soft in the same way** (a broken file keeps the live values), which is what makes it
   safe to hand to a GUI: the worst a bad save can do is leave the previous values in force.
   `bb-auth-web` reads it fresh per request instead, because it is the one service that edits
@@ -547,6 +600,38 @@ is fatal on failure, so reaching the `listening on …` line proves the fetch, t
   check. It is deliberately **not** checked against `BB_AUTH_AUTHORIZED_HOSTS`: `read_access` reads
   no env, which is what lets `--check-access` run with no config, and moving the check to startup
   would turn a typo into a boot loop that `--check-access` never saw.
+- **The pages the gate serves are complete on their own, and the operator's stylesheet is an
+  addition to one.** `/auth/login`, `/auth/callback` and the error page carry their palette
+  (`THEME_CSS`), the components built from it (`BASE_CSS`, the same bytes `bb-auth-web`
+  emits), their own arrangement of them (`AUTH_CSS`), their script and their two languages
+  **inline**:
+  no font, no CDN, no second host. That is not frugality, it is the situation these pages
+  exist for — somebody cannot get in, and a sign-in page that needs another host to be up has
+  picked the worst possible moment to have a dependency. `ui.stylesheet_url` is emitted
+  *after* the built-in one, so it wins by source order and a host that does not answer costs a
+  page its palette and nothing else; `ui.logo_url` is the only other external reference and is
+  equally optional. Keep `BASE_CSS` and both layouts free of literal colours (`THEME_CSS` is
+  the only place one may appear, and `only_the_palette_names_a_colour` is what says so), or a
+  token file stops being able to restyle what they paint. Substitution
+  is `render_page` over `__BB_*__` placeholders, single-pass so a substituted value is never
+  rescanned, and every value going in is either an `env_page_value` (printable ASCII, no
+  quotes, fatal at startup otherwise) or HTML-escaped. Request data reaches a page in exactly
+  one place, `data-rd` on the sign-in page's `<body>`, validated with the same
+  `rd_url_allowed` `safe_rd` uses and emitted as an escaped attribute, never as JavaScript
+  source. **nginx must leave both locations ungated** (`auth_request off`, exactly as for
+  `/auth/session` and `/auth/logout`): a sign-in page behind the gate answers a signed-out
+  visitor with itself, forever.
+- **Social sign-in is all four env vars or none, fatally.** `BB_AUTH_OAUTH_DOMAIN`,
+  `BB_AUTH_SOCIAL_CLIENT_ID`, `BB_AUTH_SOCIAL_CALLBACK_URL` and `BB_AUTH_SOCIAL_IDPS`
+  (`SocialConfig::from_env`). Unset, the sign-in page has no social section at all — no
+  divider, no button, nothing hinting at a way in this deployment does not have — and
+  `/auth/callback` is a `404`, because there is no OAuth leg to finish. Half-configured is a
+  refusal to start: a button that cannot work tells whoever clicks it `redirect_mismatch`, in
+  Amazon's words, on Amazon's page. The social client id must also be an accepted audience,
+  and that is checked at startup: without it every social login succeeds at Cognito and is
+  then refused here, one redirect later, with nothing on the page to explain it. The callback
+  URL must match the app client's registered `redirect_uri` byte for byte, which is the whole
+  reason it is one value in one place.
 - **`safe_rd` guards the post-login redirect** against open-redirect + response-splitting. **Every**
   candidate — relative, absolute, or the no-`rd` default — goes through the same `rd_url_allowed`
   gate, so a spoofed caller origin still can't escape. Rejected ⇒ fall back to `BB_AUTH_LOGIN_URL`.
