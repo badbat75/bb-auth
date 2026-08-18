@@ -3,8 +3,10 @@
 //!
 //! What `bb-auth-adm` shows on a terminal, this shows in a browser: the roster, the user
 //! groups and who references them, each application's scopes in the order that decides which
-//! one answers, the `denied` veto, every api key's expiry, and the `can EMAIL URL` tester —
-//! answered, as there, by the gate's own [`decide`]. And what `bb-auth-adm` *edits*, this
+//! one answers, the `denied` veto, every api key's expiry, and what `can EMAIL URL` answers,
+//! here a section of the two pages that each hold half of that question (an application's and
+//! a person's) rather than a page of its own, and answered, as there, by the gate's own
+//! [`decide`]. And what `bb-auth-adm` *edits*, this
 //! edits: full CRUD over every section, through the library's editing core and through
 //! nothing else.
 //!
@@ -158,7 +160,7 @@
 //! always did: turn each into a cookie ([`LANG_COOKIE`], [`THEME_COOKIE`]) and redirect the
 //! parameter back out of the URL, so a bookmark or a reload does not carry a preference
 //! around forever. The rest of the query goes back into the form as hidden fields, which is
-//! what keeps a `can` result on screen across a preference change.
+//! what keeps an access-check verdict on screen across a preference change.
 //!
 //! **Language** is English and Italian, from a table compiled into the binary ([`t`]), plus
 //! `Auto`: the choice to make no choice, which resolves per request against the browser's
@@ -405,9 +407,11 @@ fn parse_theme(s: &str) -> Option<UiTheme> {
 /// without translating it does not fall back at runtime, it fails to compile. And because
 /// each arm names both spellings on one line, no key can be half-translated either.
 ///
-/// [`K::Dashboard`], [`K::Groups`], [`K::Apps`], [`K::Users`], [`K::Denied`] and [`K::Can`]
-/// are the nav labels and page headings: descriptive prose *about* a section, not that
-/// section's name. The name itself stays untranslated wherever it appears as itself,
+/// [`K::Dashboard`], [`K::Groups`], [`K::Apps`], [`K::Users`] and [`K::Denied`] are the nav
+/// labels and page headings: descriptive prose *about* a section, not that
+/// section's name. [`K::Can`] reads the same way and heads no section of the file at all:
+/// the access check is not a place, it is a question, and it is asked on the two pages that
+/// each already hold half of it. The name itself stays untranslated wherever it appears as itself,
 /// namely `base`, `urls`, `access`, `login_url`, `api_keys`, `released`, `duration`,
 /// `notes`, `bbk_`, every `@group` reference, and the raw key shown in muted monospace
 /// beside a heading; that is because it is what an operator types into the file and into
@@ -445,7 +449,10 @@ enum K {
     AppsIntro,
     ScopesIntro,
     DeniedIntro,
-    CanIntro,
+    CanIntroUser,
+    CanAnyEmail,
+    CanIntroApp,
+    CanNoIdentifier,
     Submit,
     Authorized,
     VerdictDenied,
@@ -844,12 +851,38 @@ fn t(lang: Lang, key: K) -> &'static str {
              la riga dell\u{2019}utente. Un utente iscritto si veta per uuid, quindi ci vanno \
              dietro tutte le sue email; uno sconosciuto si veta con l\u{2019}email stessa.",
         ),
-        K::CanIntro => m(
+        K::CanIntroUser => m(
+            lang,
+            "Would this person reach a URL? Answered by the gate's own decision function, on \
+             the file as it is on disk right now.",
+            "Questa persona raggiungerebbe un URL? Risponde la funzione di decisione del gate, \
+             sul file così com'è su disco adesso.",
+        ),
+        // Only worth saying where there is more than one address to wonder about, which is why
+        // it is a sentence of its own rather than part of the one above.
+        K::CanAnyEmail => m(
+            lang,
+            "Any of the emails above gives the same answer: each one resolves to this row.",
+            "Ognuna delle email qui sopra dà la stessa risposta: ciascuna risolve a questa \
+             riga.",
+        ),
+        K::CanIntroApp => m(
             lang,
             "Would this credential reach this URL? Answered by the gate's own decision \
-             function, on the file as it is on disk right now.",
+             function, on the file as it is on disk right now, and it names the scope that \
+             answered. Leave the email empty to ask what a client with no credential at all \
+             reaches.",
             "Questa credenziale raggiungerebbe questo URL? Risponde la funzione di decisione \
-             del gate, sul file così com'è su disco adesso.",
+             del gate, sul file così com'è su disco adesso, e nomina lo scope che ha risposto. \
+             Lascia l'email vuota per chiedere cosa raggiunge un client senza alcuna \
+             credenziale.",
+        ),
+        K::CanNoIdentifier => m(
+            lang,
+            "This row has no email, so no credential can ever resolve to it and there is \
+             nothing to check. Add one above.",
+            "Questa riga non ha email, quindi nessuna credenziale può risolversi a essa e non \
+             c'è nulla da verificare. Aggiungine una qui sopra.",
         ),
         K::Submit => m(lang, "Check", "Verifica"),
         K::Authorized => m(lang, "AUTHORIZED", "AUTORIZZATO"),
@@ -1583,7 +1616,6 @@ enum Route {
     /// One roster row, addressed by its uuid: the identity is what the file references,
     /// and an email can be added or dropped without the page moving.
     User(String),
-    Can,
     /// The settings file, which is not a section of the access file at all: the five values
     /// the gate reads per request, and the list of people this GUI opens for.
     Config,
@@ -1641,7 +1673,6 @@ impl Route {
             Route::Denied => "/denied".to_string(),
             Route::Users => "/users".to_string(),
             Route::User(u) => format!("/users/{}", seg(u)),
-            Route::Can => "/can".to_string(),
             Route::Config => "/config".to_string(),
 
             Route::AppAdd => format!("/apps/{ACTION_ADD}"),
@@ -1744,7 +1775,6 @@ impl Route {
             _ => match self.tab() {
                 Route::Apps => "applications",
                 Route::Users => "users",
-                Route::Can => "can",
                 Route::Config => "settings",
                 _ => "bb-auth-web",
             },
@@ -1783,7 +1813,6 @@ fn route(path: &str, base: &str) -> Option<Route> {
     let s = |x: &&str| x.to_string();
     match segs.as_slice() {
         [] | [""] => Some(Route::Dashboard),
-        ["can"] => Some(Route::Can),
         ["config"] => Some(Route::Config),
 
         ["users"] => Some(Route::Users),
@@ -1897,7 +1926,7 @@ fn cookie_value<'a>(cookie_header: &'a str, name: &str) -> Option<&'a str> {
 }
 
 /// The value of query parameter `name`. `form_urlencoded` **is** the right grammar here —
-/// this is what a browser puts in the query string when it submits the `can` form.
+/// this is what a browser puts in the query string when it submits an access check.
 fn query_param(query: &str, name: &str) -> Option<String> {
     form_urlencoded::parse(query.as_bytes())
         .find(|(k, _)| k == name)
@@ -2115,7 +2144,7 @@ fn negotiate_theme(query: Option<&str>, cookie: Option<&str>) -> UiTheme {
 
 /// This request's URL with the `param` query parameter dropped: where a preference redirect
 /// lands, once the choice that parameter carried has become a cookie. The rest of the query
-/// survives, which is what keeps a `can` result on screen across a preference change.
+/// survives, which is what keeps an access-check verdict on screen across a preference change.
 ///
 /// One builder for both preferences, named by the cookie constant at the call site
 /// (`LANG_COOKIE`, `THEME_COOKIE`): each doubles as its query parameter's name, so there is
@@ -2142,9 +2171,9 @@ fn preference_href(cfg: &Config, at: &Route, query: &str, param: &str) -> String
 /// fields for that form to put back.
 ///
 /// The redirect that follows a pick rebuilds the whole URL ([`preference_href`]); a `GET`
-/// form sends its own fields and nothing else, so without this, changing the theme on a `can`
-/// result page would throw the result away. `msg` is deliberately *not* dropped: the flash
-/// belongs to the page the operator is looking at.
+/// form sends its own fields and nothing else, so without this, changing the theme on a page
+/// showing an access-check verdict would throw the verdict away. `msg` is deliberately *not*
+/// dropped: the flash belongs to the page the operator is looking at.
 fn preserved_query(query: &str) -> Vec<(String, String)> {
     form_urlencoded::parse(query.as_bytes())
         .filter(|(k, _)| k != LANG_COOKIE && k != THEME_COOKIE)
@@ -2355,7 +2384,7 @@ struct View<'a> {
     admin: Option<&'a str>,
     /// The route being rendered, for the current tab and the language switch.
     at: Route,
-    /// The query as received, so switching language keeps the `can` form filled in.
+    /// The query as received, so switching language keeps an access check's fields filled in.
     query: &'a str,
     /// sha256 of the access file's exact bytes as this request read them. Every form on the
     /// page carries it, and the `POST` that comes back must still match — see [`mutate`].
@@ -2378,12 +2407,19 @@ impl View<'_> {
 
 /// The chrome around every page: the tabs, the Settings menu, the footer.
 ///
-/// Five tabs, not the access file's four sections plus the dashboard, the tester and the
-/// settings: `denied` shares the `users` tab (see [`Route::tab`]) because both are about
+/// Four tabs, not the access file's four sections plus the dashboard and the settings:
+/// `denied` shares the `users` tab (see [`Route::tab`]) because both are about
 /// people, and the page itself sits at the bottom of [`page_users`] rather than
 /// standing on its own in the bar. The bar reads left to right roughly as the file reads
-/// top to bottom, dashboard in front, then the tester, then the settings, which are last
-/// because they are the *other* file, and the one tab not about who reaches what. Labels are translated, descriptive prose about a section ([`K::Groups`] and
+/// top to bottom, dashboard in front, then the settings, which are last
+/// because they are the *other* file, and the one tab not about who reaches what.
+///
+/// Every tab is a **noun**: a place that owns a section of a file. The access check used to
+/// be a fifth one and was the odd item out for exactly that reason, being a verb that owns
+/// nothing; it is now a section of [`page_user`] and [`page_app`], which is where its
+/// question is actually asked, since each of those pages already answers half of it.
+///
+/// Labels are translated, descriptive prose about a section ([`K::Groups`] and
 /// friends), not the section's own name in the file; that name still appears, untranslated,
 /// beside the heading each tab leads to.
 fn shell(v: &View, title: &str, content: Markup) -> Markup {
@@ -2391,7 +2427,6 @@ fn shell(v: &View, title: &str, content: Markup) -> Markup {
         (Route::Dashboard, v.t(K::Dashboard)),
         (Route::Apps, v.t(K::Apps)),
         (Route::Users, v.t(K::Users)),
-        (Route::Can, v.t(K::Can)),
         (Route::Config, v.t(K::Config)),
     ];
     let current = v.at.tab();
@@ -3121,6 +3156,8 @@ fn page_user(v: &View, doc: &AccessFile, access: &Access, key: &str) -> (u16, Ma
                 }
             }
 
+            (user_check(v, access, u, &uuid))
+
             h2 { "api_keys" }
             p class="primary" { (act(v, &Route::KeyAdd(uuid.clone()), &format!("+ {}", v.t(K::Add)))) }
             div class="panel" {
@@ -3316,9 +3353,15 @@ fn page_apps(v: &View, doc: &AccessFile) -> Markup {
     }
 }
 
-/// `/apps/{app}` — one application: its base, its login page, and its scopes **in file
-/// order**, the number carrying the meaning first-match-wins gives it.
-fn page_app(v: &View, doc: &AccessFile, name: &str) -> (u16, Markup) {
+/// `/apps/{app}` — one application: its base, its login page, its scopes **in file
+/// order**, the number carrying the meaning first-match-wins gives it, and the access check
+/// over the area they divide up.
+///
+/// The check is last because it is the conclusion of the list above it: it names the scope
+/// that answered, which is one of the numbered ones, so what the page shows and what the gate
+/// decides can be read against each other without leaving the page. That is also why this
+/// page needs the compiled [`Access`] and not only the document.
+fn page_app(v: &View, doc: &AccessFile, access: &Access, name: &str) -> (u16, Markup) {
     let a = match app_pos(doc, name).map(|i| &doc.applications[i]) {
         Some(a) => a,
         None => return (404, page_missing(v, v.t(K::NoSuchApp), name, &Route::Apps)),
@@ -3361,6 +3404,8 @@ fn page_app(v: &View, doc: &AccessFile, name: &str) -> (u16, Markup) {
                     }
                 }
             }
+
+            (app_check(v, access, a))
         },
     )
 }
@@ -3616,47 +3661,126 @@ fn denied_list(v: &View, doc: &AccessFile) -> Markup {
     }
 }
 
-/// `/can` — the tester. A `GET` form, and the gate's own [`decide`] behind it.
+/// The access check's one text field, in whichever of the two forms is asking.
+///
+/// `fld` is base.css's field label, the same class the sign-in page puts over its own inputs:
+/// the type comes from there and admin.css only says these sit side by side. Without it this
+/// form would grow a second answer to what a label looks like, which is the whole thing
+/// base.css exists to prevent.
+///
+/// Neither form carries a hidden `lang`, though both replace the whole query when they submit:
+/// by the time a page renders, the language is a cookie (an explicit `?lang=` is redirected
+/// into one first), so it survives a submit on its own, and re-sending it would turn a
+/// [`LangPref::Auto`] preference into a fixed choice on the operator's first check.
+fn check_field(name: &str, value: &str, placeholder: &str) -> Markup {
+    html! {
+        label class="fld" {
+            (name)
+            input type="text" name=(name) value=(value) placeholder=(placeholder)
+                  autocapitalize="off" spellcheck="false";
+        }
+    }
+}
+
+/// The `ok`/`bad` panel one answer lands in, shared by the two pages that ask.
+///
+/// The wrapper is shared and not just [`verdict`], because the left bar's colour is part of
+/// the answer: the one thing an operator scanning a page cannot afford is a verdict that
+/// looks the same whether it granted or refused.
+fn verdict_panel(v: &View, access: &Access, email: &str, url_in: &str) -> Markup {
+    let (granted, markup) = verdict(v, access, email, &request_url(url_in));
+    html! {
+        div class=@if granted { "panel ok" } @else { "panel bad" } { (markup) }
+    }
+}
+
+/// The access check as a section of a person's page: one field, because this page is the
+/// other half of the question.
+///
+/// It sits under `scopes` and above `api_keys` on purpose. `scopes` says what the file
+/// *lists*; this says what [`decide`] *answers*, which is not the same thing the moment an
+/// `excluded`, a `denied` or an `authenticated` scope is involved, and the two belong side by
+/// side. Above `api_keys` because it does not speak for a key: that verdict is
+/// [`bb_auth_core::decide_api_key`]'s, and `bb-auth-adm can --key ID` is where it stays
+/// (naming a key means picking one, which is a second field and a listing, and it is one
+/// invocation away on the host that has the file).
+///
+/// The subject is [`user_label`]'s identifier, which is also this page's `h1`, and any of the
+/// row's emails would give the same answer: an identifier that resolves is folded onto its
+/// uuid at load, so a veto or an exclusion written against one address is written against the
+/// row. A row with no email at all can be asked nothing, and says so rather than quietly
+/// testing a stranger.
+fn user_check(v: &View, access: &Access, u: &UserSpec, uuid: &str) -> Markup {
+    // The identifiers that can actually resolve, which is not the same as the rows in
+    // `emails`: an empty or non-ASCII one is dropped at load, so a row can list two and be
+    // reachable through one.
+    let ids: Vec<String> = u
+        .emails
+        .iter()
+        .map(|e| norm_email(e))
+        .filter(|e| !e.is_empty())
+        .collect();
+    let url_in = query_param(v.query, "url").unwrap_or_default();
+    html! {
+        h2 { (v.t(K::Can)) }
+        @match ids.first() {
+            None => div class="panel" { span class="muted" { (v.t(K::CanNoIdentifier)) } },
+            Some(email) => {
+                p class="lede sub" {
+                    (v.t(K::CanIntroUser))
+                    @if ids.len() > 1 { " " (v.t(K::CanAnyEmail)) }
+                }
+                div class="panel" {
+                    // The canonical spelling of this row's own route: the page renders under
+                    // an email too, and the answer is about the identity either way.
+                    form class="can" method="get" action=(v.href(&Route::User(uuid.to_string()))) {
+                        (check_field("url", &url_in, "https://app.x.com/reports"))
+                        button type="submit" { (v.t(K::Submit)) }
+                    }
+                }
+                @if !url_in.trim().is_empty() {
+                    (verdict_panel(v, access, email, &url_in))
+                }
+            }
+        }
+    }
+}
+
+/// The access check as a section of an application's page: both fields, and the answer names
+/// the scope that gave it, which is one of the numbered scopes listed directly above.
 ///
 /// An email left blank tests [`Subject::Anonymous`] rather than refusing to answer: that is
-/// the only way to check what an `anonymous` scope actually opens. (`bb-auth-adm can --key
-/// ID` also evaluates a `bbk_` key. It stays on the terminal for now: naming a key means
-/// picking one, which is a second field and a listing, and a key's verdict is one
-/// `bb-auth-adm` invocation away on the host that has the file.)
-fn page_can(v: &View, access: &Access, query: &str) -> Markup {
-    let email_in = query_param(query, "email").unwrap_or_default();
-    let url_in = query_param(query, "url").unwrap_or_default();
+/// the only way to check what an `anonymous` scope actually opens, and this is the only one of
+/// the two places that can ask it, since a person's page always has a person.
+///
+/// The url field starts on this area's own `base` rather than empty, so an operator appends a
+/// path instead of retyping a host. It is a *starting point* and not a restriction: whatever
+/// is submitted goes to [`decide`], which resolves it against the whole file, so a URL typed
+/// outside this area is answered honestly and the verdict says which application answered.
+fn app_check(v: &View, access: &Access, a: &AppSpec) -> Markup {
+    let email_in = query_param(v.query, "email").unwrap_or_default();
+    let url_in = query_param(v.query, "url").unwrap_or_default();
     let asked = !url_in.trim().is_empty();
-    let url = request_url(&url_in);
-
+    let url_value = if asked {
+        url_in.clone()
+    } else {
+        a.base
+            .first()
+            .map(|b| b.trim().to_string())
+            .unwrap_or_default()
+    };
     html! {
-        h1 { (section_heading(v.t(K::Can), "can")) }
-        p class="lede" { (v.t(K::CanIntro)) }
+        h2 { (v.t(K::Can)) }
+        p class="lede sub" { (v.t(K::CanIntroApp)) }
         div class="panel" {
-            form class="can" method="get" action=(v.href(&Route::Can)) {
-                // `fld` is base.css's field label, the same class the sign-in page puts over
-                // its own inputs: the type comes from there and admin.css only says these two
-                // sit side by side. Without it this form would grow a second answer to what a
-                // label looks like, which is the whole thing base.css exists to prevent.
-                label class="fld" {
-                    "email"
-                    input type="text" name="email" value=(email_in)
-                          placeholder="bob@x.com" autocapitalize="off" spellcheck="false";
-                }
-                label class="fld" {
-                    "url"
-                    input type="text" name="url" value=(url_in)
-                          placeholder="https://app.x.com/reports" autocapitalize="off"
-                          spellcheck="false";
-                }
-                // Keep the language across a submit: the form replaces the whole query.
-                input type="hidden" name="lang" value=(v.lang.code());
+            form class="can" method="get" action=(v.href(&Route::App(a.name.trim().to_string()))) {
+                (check_field("email", &email_in, "bob@x.com"))
+                (check_field("url", &url_value, "https://app.x.com/reports"))
                 button type="submit" { (v.t(K::Submit)) }
             }
         }
         @if asked {
-            @let (granted, verdict_markup) = verdict(v, access, &email_in, &url);
-            div class=@if granted { "panel ok" } @else { "panel bad" } { (verdict_markup) }
+            (verdict_panel(v, access, &email_in, &url_in))
         }
     }
 }
@@ -5322,9 +5446,9 @@ fn handle(mut req: Request, cfg: &Config) {
 
     // An explicit `?lang=` or `?theme=` is a choice: remember it, then send the browser to
     // the same page without that parameter, so a bookmark or a reload does not carry it
-    // around forever. The rest of the query survives, which is what keeps a `can` result on
-    // screen. The two checks are independent and each returns on its own redirect, which is
-    // what makes the Settings form's single submit work while setting both: the first pass
+    // around forever. The rest of the query survives, which is what keeps an access-check
+    // verdict on screen. The two checks are independent and each returns on its own redirect,
+    // which is what makes the Settings form's single submit work while setting both: the first pass
     // stores the language and leaves `?theme=` standing, the redirect comes straight back in
     // and the second pass stores the theme. Two round trips on loopback, and no coupling
     // between the two preferences anywhere in the code.
@@ -5395,7 +5519,7 @@ fn handle(mut req: Request, cfg: &Config) {
         Route::Dashboard => (200, page_dashboard(&v, &doc, &access), v.t(K::Dashboard)),
         Route::Apps => (200, page_apps(&v, &doc), title),
         Route::App(n) => {
-            let (status, content) = page_app(&v, &doc, n);
+            let (status, content) = page_app(&v, &doc, &access, n);
             (status, content, title)
         }
         Route::Denied => (200, page_denied(&v, &doc), title),
@@ -5407,7 +5531,6 @@ fn handle(mut req: Request, cfg: &Config) {
             let (status, content) = page_user(&v, &doc, &access, e);
             (status, content, title)
         }
-        Route::Can => (200, page_can(&v, &access, &query), title),
         // Answered above, before the access file was opened: it is the one page that does
         // not read it.
         Route::Config => unreachable!("the settings page returns before this match"),
@@ -6318,7 +6441,10 @@ mod tests {
         assert_eq!(route("/groups", ""), Some(Route::Users));
         assert_eq!(route("/apps", ""), Some(Route::Apps));
         assert_eq!(route("/denied", ""), Some(Route::Denied));
-        assert_eq!(route("/can", ""), Some(Route::Can));
+        // The access check is a section of the two pages that hold half of its question, and
+        // no longer a page: it has no route to bookmark, and asking for its old one 404s
+        // rather than landing anywhere that answers a different question.
+        assert_eq!(route("/can", ""), None);
         assert_eq!(route("/nope", ""), None);
         assert_eq!(route("/users/a/b", ""), None);
     }
@@ -6456,19 +6582,22 @@ mod tests {
     #[test]
     fn preference_href_drops_the_parameter_and_keeps_the_rest() {
         let cfg = cfg_for("x.json", "/admin");
+        // An application's page, because that is where a query worth keeping lives now: the
+        // two fields of its access check.
+        let app = Route::App("mpa".to_string());
         assert_eq!(
-            preference_href(&cfg, &Route::Can, "email=bob%40x.com&lang=en", LANG_COOKIE),
-            "/admin/can?email=bob%40x.com"
+            preference_href(&cfg, &app, "email=bob%40x.com&lang=en", LANG_COOKIE),
+            "/admin/apps/mpa?email=bob%40x.com"
         );
         // The other preference survives the first redirect, which is what lets one submit
         // set both: see the two checks in `handle`.
         assert_eq!(
-            preference_href(&cfg, &Route::Can, "lang=en&theme=dark", LANG_COOKIE),
-            "/admin/can?theme=dark"
+            preference_href(&cfg, &app, "lang=en&theme=dark", LANG_COOKIE),
+            "/admin/apps/mpa?theme=dark"
         );
         assert_eq!(
-            preference_href(&cfg, &Route::Can, "lang=en&theme=dark", THEME_COOKIE),
-            "/admin/can?lang=en"
+            preference_href(&cfg, &app, "lang=en&theme=dark", THEME_COOKIE),
+            "/admin/apps/mpa?lang=en"
         );
         assert_eq!(
             preference_href(&cfg, &Route::Dashboard, "", LANG_COOKIE),
@@ -6483,7 +6612,7 @@ mod tests {
         for param in [LANG_COOKIE, THEME_COOKIE] {
             let href = preference_href(
                 &cfg,
-                &Route::Can,
+                &Route::App("mpa".to_string()),
                 "url=https://x/%0d%0aX:+1&lang=it&theme=dark",
                 param,
             );
@@ -6495,7 +6624,7 @@ mod tests {
     #[test]
     fn preserved_query_keeps_everything_the_settings_form_does_not_set() {
         // The form sends its own fields and nothing else, so what it does not put back as a
-        // hidden field is lost: a `can` result, and the flash the page is showing.
+        // hidden field is lost: an access-check verdict, and the flash the page is showing.
         let kept = preserved_query(
             "email=bob%40x.com&url=https%3A%2F%2Fx%2Fa&lang=en&theme=dark&msg=user-added",
         );
@@ -6716,7 +6845,10 @@ mod tests {
         for html in [
             render("nojs-dash", Route::Dashboard),
             render("nojs-users", Route::Users),
-            render("nojs-can", Route::Can),
+            // The two that carry the access check, which is the newest form in the GUI and
+            // the one most likely to reach for a script it may not have.
+            render("nojs-user", Route::User(BOB.to_string())),
+            render("nojs-app", Route::App("mpa".to_string())),
         ] {
             assert!(!html.contains("<script"), "no page may carry a script tag");
             assert!(!html.contains("javascript:"), "{html}");
@@ -6751,15 +6883,16 @@ mod tests {
         // access file, guarded by the rev and the same-origin check, and a display
         // preference is neither.
         let cfg = cfg_for("x.json", "/admin");
-        let mut v = view(&cfg, Route::Can, "REV");
+        let mut v = view(&cfg, Route::App("mpa".to_string()), "REV");
         v.query = "email=bob%40x.com&lang=en&theme=dark";
         let html = shell(&v, "t", html! { "x" }).into_string();
         assert!(
-            html.contains(r#"<form class="edit" method="get" action="/admin/can">"#),
+            html.contains(r#"<form class="edit" method="get" action="/admin/apps/mpa">"#),
             "{html}"
         );
-        // The `can` result survives the round trip; the two parameters the form sets itself
-        // do not come back as hidden fields, or the list boxes could never change them.
+        // The access check's own fields survive the round trip; the two parameters the form
+        // sets itself do not come back as hidden fields, or the list boxes could never
+        // change them.
         assert!(
             html.contains(r#"<input type="hidden" name="email" value="bob@x.com">"#),
             "{html}"
@@ -6802,15 +6935,10 @@ mod tests {
         let content = match &at {
             Route::Dashboard => page_dashboard(&v, &doc, &access),
             Route::Apps => page_apps(&v, &doc),
-            Route::App(n) => page_app(&v, &doc, n).1,
+            Route::App(n) => page_app(&v, &doc, &access, n).1,
             Route::Denied => page_denied(&v, &doc),
             Route::Users => page_users(&v, &doc, &access),
             Route::User(e) => page_user(&v, &doc, &access, e).1,
-            Route::Can => page_can(
-                &v,
-                &access,
-                "email=bob@x.com&url=https://app.x.com/mpa/admin/x",
-            ),
             other => panic!("{other:?} is not a read-only page"),
         };
         let html = shell(&v, "t", content).into_string();
@@ -6870,10 +6998,73 @@ mod tests {
     }
 
     #[test]
-    fn can_page_renders_the_gates_own_verdict() {
-        let html = render("can", Route::Can);
-        assert!(html.contains("AUTHORIZED"), "{html}");
-        assert!(html.contains("X-Auth-Email"));
+    fn the_access_check_answers_on_both_pages_that_ask_it() {
+        // A person's page asks with the identity fixed: one field, and the subject is the row
+        // itself. The `mpa/admin` scope lists Bob through `@admins`, so the gate lets him in.
+        let user = render_of(
+            "check-user",
+            SAMPLE,
+            Route::User(BOB.to_string()),
+            "url=https://app.x.com/mpa/admin/x",
+        );
+        assert!(user.contains("AUTHORIZED"), "{user}");
+        assert!(user.contains("X-Auth-Email"), "{user}");
+        assert!(
+            !user.contains(r#"name="email""#),
+            "the identity is the page, not a field: {user}"
+        );
+
+        // An application's page asks with both, and the same pair gets the same verdict: one
+        // `decide`, two arrangements of the question.
+        let app = render_of(
+            "check-app",
+            SAMPLE,
+            Route::App("mpa".to_string()),
+            "email=bob@x.com&url=https://app.x.com/mpa/admin/x",
+        );
+        assert!(app.contains("AUTHORIZED"), "{app}");
+        assert!(app.contains(r#"name="email""#), "{app}");
+
+        // And a refusal reads as one, on the page that can ask it: an anonymous client on a
+        // restricted scope. The panel's own class is what carries that to the eye.
+        let anon = render_of(
+            "check-anon",
+            SAMPLE,
+            Route::App("mpa".to_string()),
+            "url=https://app.x.com/mpa/admin/x",
+        );
+        assert!(anon.contains("DENIED"), "{anon}");
+        assert!(anon.contains(r#"class="panel bad""#), "{anon}");
+    }
+
+    #[test]
+    fn the_access_check_starts_on_the_area_it_is_asked_about() {
+        // With nothing asked yet, the url field is prefilled with this application's own base:
+        // an operator appends a path instead of retyping a host. And no verdict yet, because
+        // nothing was asked.
+        let html = render("check-empty", Route::App("mpa".to_string()));
+        assert!(
+            html.contains(r#"value="https://app.x.com/mpa""#),
+            "the url field starts on the area: {html}"
+        );
+        assert!(
+            !html.contains("AUTHORIZED") && !html.contains("DENIED"),
+            "{html}"
+        );
+    }
+
+    #[test]
+    fn a_row_with_no_email_has_nothing_to_check() {
+        // No identifier resolves to this row, so there is no question to ask: the section says
+        // so instead of quietly testing the empty subject, which `decide` would read as
+        // anonymous and answer about somebody else entirely.
+        const NO_EMAIL: &str = r#"{ "version": 1,
+          "applications": [],
+          "users": [ { "uuid": "8f14e45f-ceea-467a-9f79-3b4e5c6d7a8b", "emails": [] } ]
+        }"#;
+        let html = render_of("check-noemail", NO_EMAIL, Route::User(BOB.to_string()), "");
+        assert!(html.contains("no email"), "{html}");
+        assert!(!html.contains(r#"name="url""#), "no form to submit: {html}");
     }
 
     #[test]

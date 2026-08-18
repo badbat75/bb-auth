@@ -59,7 +59,7 @@ async function run(ctx, t) {
       admin().excluded, [YOU, 'stranger@example.com']);
     t.check('and the gate agrees: the excluded member of @admins is now DENIED',
       (await (async () => {
-        await page.goto(`${ctx.base}/can?email=you%40example.com&url=${encodeURIComponent('https://app.example.com/app1/admin/panel')}`);
+        await page.goto(`${ctx.base}/apps/app1?email=you%40example.com&url=${encodeURIComponent('https://app.example.com/app1/admin/panel')}`);
         return mainText(page);
       })()).includes('DENIED'));
     await t.shot(page, 'scope-excluded');

@@ -3,8 +3,8 @@
 // implementation detail: it is what makes the bfcache Back-button recovery on the 409
 // reliable, and it means everything the suite tests is plain HTML semantics. PRG is the
 // other half — a successful mutation answers 303 to `?msg=<key>`, so a reload of what
-// the browser shows repeats nothing. And `can` answers with the gate's own decision
-// function, read-only by construction.
+// the browser shows repeats nothing. And the access check answers with the gate's own
+// decision function, read-only by construction.
 //
 // The rule is "no page may need it" rather than "no JavaScript": the Settings list boxes
 // carry one inline handler that saves a click, and the last block here runs the whole GUI
@@ -40,32 +40,53 @@ async function run(ctx, t) {
     t.check('reloading the landing page re-posts nothing', bytes(ctx) === afterSave, 'reload wrote bytes');
     t.check('and stays on the same URL', page.url().includes('?msg=group-saved'), page.url());
 
-    // `can` — would this credential get in? The form is a GET: asking is not an action.
-    await page.goto(ctx.base + '/can');
-    const method = await page.locator('main form').first().evaluate((f) => (f.getAttribute('method') || 'get'));
-    t.eq('the can form is a GET', method.toLowerCase(), 'get');
+    // The access check: would this credential get in? It is a section of the two pages that
+    // hold half of its question, not a page of its own, and its form is a GET on both, because
+    // asking is not an action. The old `/can` is gone, and asking for it says so.
+    const gone = await page.goto(ctx.base + '/can');
+    t.eq('the access check has no page of its own any more', gone.status(), 404);
+
+    await page.goto(ctx.base + '/apps/app1');
+    t.eq('an application page carries exactly one check form',
+      await page.locator('main form.can').count(), 1);
+    const method = await page.locator('main form.can').evaluate((f) => (f.getAttribute('method') || 'get'));
+    t.eq('and it is a GET', method.toLowerCase(), 'get');
+    t.eq("with the url field already on this area's base",
+      await page.locator('main form.can input[name=url]').inputValue(), 'https://app.example.com/app1');
 
     const before = bytes(ctx);
-    const verdict = async (email, url) => {
-      await page.goto(`${ctx.base}/can?email=${encodeURIComponent(email)}&url=${encodeURIComponent(url)}`);
+    // Asked on the page of whichever application owns the URL, which is where an operator is
+    // standing when the question comes up. The application is the area to ask FROM, not a
+    // filter on the answer: `decide` resolves the URL against the whole file either way.
+    const verdict = async (app, email, url) => {
+      await page.goto(`${ctx.base}/apps/${app}?email=${encodeURIComponent(email)}&url=${encodeURIComponent(url)}`);
       return mainText(page);
     };
     // The corners of the grant model, answered by the library's own `decide`:
     t.check('a member of a restricted scope is AUTHORIZED',
-      (await verdict('you@example.com', 'https://app.example.com/app1/admin/panel')).includes('AUTHORIZED'));
+      (await verdict('app1', 'you@example.com', 'https://app.example.com/app1/admin/panel')).includes('AUTHORIZED'));
     t.check('the credential class is the place\'s to decide — a login on an api_key-only scope is DENIED',
-      (await verdict('bot@example.com', 'https://mcp.example.com/mcp/context7/x')).includes('DENIED'));
+      (await verdict('mcp', 'bot@example.com', 'https://mcp.example.com/mcp/context7/x')).includes('DENIED'));
     t.check('denied outranks everything — spammer@ on an authenticated scope is DENIED',
-      (await verdict('spammer@example.com', 'https://app.example.com/app1')).includes('DENIED'));
+      (await verdict('app1', 'spammer@example.com', 'https://app.example.com/app1')).includes('DENIED'));
     t.check('authenticated grants on identity alone — a stranger is AUTHORIZED there',
-      (await verdict('stranger@example.com', 'https://app.example.com/app1')).includes('AUTHORIZED'));
+      (await verdict('app1', 'stranger@example.com', 'https://app.example.com/app1')).includes('AUTHORIZED'));
     t.check('an anonymous scope needs no credential at all',
-      (await verdict('', 'https://app.example.com/app1/healthz')).includes('AUTHORIZED'));
+      (await verdict('app1', '', 'https://app.example.com/app1/healthz')).includes('AUTHORIZED'));
     t.check('a URL no application covers is reachable by nobody',
-      (await verdict('you@example.com', 'https://nowhere.example.com/')).includes('DENIED'));
+      (await verdict('app1', 'you@example.com', 'https://nowhere.example.com/')).includes('DENIED'));
     await t.shot(page, 'can-denied');
 
-    t.check('asking `can` wrote nothing', bytes(ctx) === before, 'can mutated the file');
+    // And the same question from the other side. On a person's page the identity IS the page,
+    // so there is one field and no way to ask about somebody else.
+    await page.goto(`${ctx.base}/users/you%40example.com?url=${encodeURIComponent('https://app.example.com/app1/admin/panel')}`);
+    t.eq("a person's check asks for the url and nothing else",
+      await page.locator('main form.can input').count(), 1);
+    t.check('and answers with the same verdict', (await mainText(page)).includes('AUTHORIZED'));
+    t.check('about the person whose page it is', (await mainText(page)).includes('you@example.com'));
+    await t.shot(page, 'can-on-a-person');
+
+    t.check('asking wrote nothing', bytes(ctx) === before, 'the access check mutated the file');
   } finally {
     await context.close();
   }

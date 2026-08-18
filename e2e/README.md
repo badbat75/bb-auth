@@ -46,7 +46,7 @@ idempotent and areas are order-independent.
 | `validation.js` | refused submissions: 400, in-context error, typed input preserved, and **zero bytes written** — incl. the malformed-email refusals on `users · add` and `denied · add` |
 | `conflict.js` | the `rev` check: generic 409 (Back-button recovery hint, en+it), stale-form resubmit, and the mint-specific 409 on a reloaded reveal page (rotate link, exactly one key, en+it) |
 | `i18n.js` | the two display preferences: `?lang=` / `?theme=` answer 302 + a cookie, the choice persists across plain navigations, the 401/403/verdict copy is translated, `html lang=` is the proof; plus the Settings menu, where picking an option applies it on the spot, keeps the rest of the query, and offers `auto` as a real stored choice |
-| `nojs.js` | no page needs a script: zero `<script>` tags, and the only handler in the GUI is the two Settings list boxes' — then the whole thing again with **scripting disabled**, where the menu grows its submit button back and one click sets both preferences. Plus PRG (a reload after save repeats nothing) and the read-only `can` page answering with the gate's verdicts |
+| `nojs.js` | no page needs a script: zero `<script>` tags, and the only handler in the GUI is the two Settings list boxes' — then the whole thing again with **scripting disabled**, where the menu grows its submit button back and one click sets both preferences. Plus PRG (a reload after save repeats nothing) and the read-only access check, a section of the application and person pages, answering with the gate's verdicts |
 
 ## The visual walk-through (`shots.js`)
 

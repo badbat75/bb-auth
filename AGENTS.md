@@ -61,12 +61,23 @@ One crate, four targets, and the split is load-bearing:
   (server-rendered, `maud`): the same CRUD as the CLI, made **only** through the library's
   editing core, plus a **Settings** tab over the settings file, in that file's own three
   sections: what the gate answers with, who administers this, and how the pages look (the
-  last one being the gate's pages too, which is why one save restyles both programs). Five
+  last one being the gate's pages too, which is why one save restyles both programs). Four
   tabs, and none of them
   is `denied` or `user_groups`: those two are **sections of the users
   page**, groups above the roster, because a group only means anything in terms of the roster
   and both are about people. Settings is last because it is the only tab that is not about
-  the access file at all. Every unordered list carries a filter and a pager, both living
+  the access file at all. **Every tab is a noun**, a place that owns a section of a file, and
+  that is what says where the **access check** goes: it is a verb, it owns nothing, and it was
+  the odd item out for as long as it was a fifth tab. It is now a section of the application
+  page and of the person page (`app_check`, `user_check`), which is where the question is
+  actually asked, because each of those pages already holds half of it: on an application both
+  fields, with `url` starting on that area's own `base` and the verdict naming which of the
+  scopes numbered above it answered; on a person only `url`, since the identity is the page.
+  An email left empty asks what a client with **no** credential reaches, which only the
+  application side can ask, and a row with no email says it has nothing to check rather than
+  quietly testing the empty subject. One `decide`, two arrangements: `verdict` and
+  `verdict_panel` are shared, the forms are not. There is deliberately no `/can` route left,
+  not even a redirect, because there is no single page a bookmark to it could honestly land on. Every unordered list carries a filter and a pager, both living
   entirely in the query string (`Listing`, `list_controls`) since a page here must work with
   scripting off; each list namespaces its two parameters (`uq`/`up`, `gq`/`gp`, …) so several
   on one page do not steal each other's state. **Scopes are deliberately excluded from that**:
@@ -594,7 +605,21 @@ is fatal on failure, so reaching the `listening on …` line proves the fetch, t
   scopes covers the URL: `login_url` says where this area's users sign in, not who may enter.
   **A logout does not**: `/auth/logout` is inside no application's area, so there is no per-area
   logout landing page and adding one would be a field the gate can never reach. The logout link supplies `?rd=` instead, through `safe_rd`; with no `rd` the browser
-  goes to the login page, *not* to `safe_rd`'s caller-root default. Both the global and every application's
+  goes to the login page, *not* to `safe_rd`'s caller-root default. **A link that says nothing falls
+  back to `Referer` (`REFERER_HEADER`), on both browser endpoints and through one function**
+  (`rd_candidate`, used by `logout_target` and `login_rd`). The order is who wrote each one: the
+  `?rd=` for that link, and it means something specific; the `Referer` for nobody in particular,
+  which is why it is **a backup and never the mechanism** (absent under
+  `Referrer-Policy: no-referrer`, absent on a bookmark or a typed URL, trimmed to a bare origin
+  cross-origin, and on a logout often naming a page the person may no longer see, which costs a
+  `401` and one more hop). It is the only header of anyone else's the gate treats as a redirect
+  target, so three rules keep it from being a new surface. It goes through the very gate that
+  endpoint already applies to `rd` (`safe_rd` on the way out of a logout, `rd_url_allowed` before
+  the sign-in page carries it, absolute-only there because that page resolves nothing against
+  nginx), so a link from outside `BB_AUTH_AUTHORIZED_HOSTS` redirects nowhere. A rejected
+  candidate is **discarded, not replaced**: whoever spoke first is answered on its own merits, or
+  a crafted `?rd=` would get to choose which of the two is read. And an empty value counts as
+  nothing said, which is what a template renders from an empty variable. Both the global and every application's
   `login_url` pass `compile_login_url` at load (printable ASCII, absolute https, no `@`, no `\`) —
   that is what makes emitting them into a header, a `Location:` and a page safe with no per-use
   check. It is deliberately **not** checked against `BB_AUTH_AUTHORIZED_HOSTS`: `read_access` reads

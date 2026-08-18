@@ -47,8 +47,8 @@ const VIEWS = [
     lang: 'it',
     // Only where there is something to read: a form's field measures do not change.
     only: ['dashboard', 'users', 'denied', 'apps', 'app-detail', 'can-authorized',
-      'can-denied', 'user-rm', 'key-minted', 'error-refused', 'conflict', 'conflict-mint',
-      'forbidden', 'settings-menu'],
+      'can-denied', 'can-on-a-person', 'user-rm', 'key-minted', 'error-refused', 'conflict',
+      'conflict-mint', 'forbidden', 'settings-menu'],
   },
   // An explicit theme is only worth photographing against the OPPOSITE `colorScheme`:
   // that is the pair that proves the choice beat the operating system. Under a matching
@@ -111,9 +111,13 @@ const SCENES = [
   ['denied', go('/denied')],
   ['users', go('/users')],
   ['user-detail', go('/users/bot%40example.com')],
-  ['can-empty', go('/can')],
-  ['can-authorized', go('/can?email=you%40example.com&url=https%3A%2F%2Fapp.example.com%2Fapp1%2Fadmin%2Fpanel')],
-  ['can-denied', go('/can?email=spammer%40example.com&url=https%3A%2F%2Fapp.example.com%2Fapp1')],
+  // The access check, which is a section of the two pages above rather than a page: on an
+  // application it takes both halves of the question and its url field starts on the area's
+  // own base; on a person the identity is the page and only the url is asked. Both verdicts
+  // are photographed, because granted and refused are two different panels.
+  ['can-authorized', go('/apps/app1?email=you%40example.com&url=https%3A%2F%2Fapp.example.com%2Fapp1%2Fadmin%2Fpanel')],
+  ['can-denied', go('/apps/app1?email=spammer%40example.com&url=https%3A%2F%2Fapp.example.com%2Fapp1')],
+  ['can-on-a-person', go('/users/you%40example.com?url=https%3A%2F%2Fapp.example.com%2Fapp1%2Fadmin%2Fpanel')],
 
   // ---- the forms ---------------------------------------------------------
   ['user-add', go('/users/%2Badd')],

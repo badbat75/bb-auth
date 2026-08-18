@@ -42,7 +42,7 @@ async function run(ctx, t) {
     await context.setExtraHTTPHeaders({ 'X-Auth-Email': 'admin@example.com' });
 
     // The `can` verdict — the operator-facing word — is translated.
-    await page.goto(ctx.base + '/can?email=spammer%40example.com&url=https%3A%2F%2Fapp.example.com%2Fapp1');
+    await page.goto(ctx.base + '/apps/app1?email=spammer%40example.com&url=https%3A%2F%2Fapp.example.com%2Fapp1');
     t.check('the denied verdict reads NEGATO', (await page.locator('main').innerText()).includes('NEGATO'));
 
     // And back: ?lang=en rewrites the cookie.
@@ -58,7 +58,7 @@ async function run(ctx, t) {
     const pick = (sel, value) =>
       Promise.all([page.waitForNavigation(), page.selectOption(`.menu select[name=${sel}]`, value)]);
 
-    const canUrl = '/can?email=spammer%40example.com&url=https%3A%2F%2Fapp.example.com%2Fapp1';
+    const canUrl = '/apps/app1?email=spammer%40example.com&url=https%3A%2F%2Fapp.example.com%2Fapp1';
     await page.goto(ctx.base + canUrl);
     t.check('the menu is closed until it is opened',
       !(await page.locator('details.settings').evaluate((d) => d.open)));

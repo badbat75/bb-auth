@@ -15,10 +15,10 @@
 //! | Method | Path | Caller | Behaviour |
 //! |--------|------|--------|-----------|
 //! | `GET`  | `/auth/validate` | nginx `auth_request`, loopback | 204 + [`IDENTITY_HEADER`] (+ one header per configured [`ProfileClaim`] the credential carries) if a credential authorizes the request, else 401 |
-//! | `GET`  | `/auth/login`    | browser | the sign-in page ([`LOGIN_HTML`]), which runs the Cognito flow and POSTs the id_token back to `/auth/session` |
+//! | `GET`  | `/auth/login`    | browser | the sign-in page ([`LOGIN_HTML`]), which runs the Cognito flow and POSTs the id_token back to `/auth/session`, landing on `?rd=` or, failing that, on the [`REFERER_HEADER`] ([`rd_candidate`]) |
 //! | `GET`  | `/auth/callback` | browser | the social sign-in callback ([`CALLBACK_HTML`]); `404` when no `BB_AUTH_SOCIAL_*` is configured |
 //! | `POST` | `/auth/session`  | browser | validate the posted `id_token`, set the cookie, 302 → `rd` |
-//! | `GET`  | `/auth/logout`   | browser | clear the cookie, 302 → the login page |
+//! | `GET`  | `/auth/logout`   | browser | clear the cookie, 302 → `?rd=`, else the [`REFERER_HEADER`] ([`rd_candidate`]), else the login page |
 //! | `GET`  | `/auth/healthz`  | local   | 200 `ok` |
 //!
 //! The first is the only one nginx gates. The other five must be reachable without a
@@ -278,6 +278,32 @@ const IDENTITY_HEADER: &str = bb_auth_core::IDENTITY_HEADER;
 /// Emitting it is safe without a per-request check: every candidate passed
 /// [`compile_login_url`] at load, which requires printable ASCII.
 const LOGIN_URL_HEADER: &str = "X-Auth-Login-URL";
+
+/// The standard `Referer`: where a browser says it came from, and the second and last thing
+/// [`rd_candidate`] asks when a link carries no `?rd=`. Misspelled since RFC 1945 in 1996 and
+/// never corrected; RFC 9110 section 10.1.3 is where it lives now, and the correctly spelled
+/// relatives are somebody else's (the `Referrer-Policy` response header, `document.referrer`
+/// in the page).
+///
+/// It is **a backup and never the mechanism**, and the reason is that nobody configured it.
+/// It is absent whenever the page that linked here sent `Referrer-Policy: no-referrer`,
+/// whenever a privacy tool or a proxy stripped it, and whenever somebody typed the URL or
+/// used a bookmark; cross-origin it arrives trimmed to a bare origin, because
+/// `strict-origin-when-cross-origin` is the browsers' default. On a logout it also names the
+/// page the person was just on, which is often one they may no longer see, so they land
+/// there, get a `401`, and reach the login page one hop later. None of that is worth
+/// depending on, and all of it is worth having when a link forgot to say anything: a `?rd=`
+/// is what a link says when it means something specific, and this is what is left when it
+/// says nothing at all.
+///
+/// The gate reads it and never emits it, and it is the only header of anyone else's that it
+/// treats as a redirect target, which is why it goes through the very gate a `?rd=` goes
+/// through and is trusted for nothing beyond passing it ([`safe_rd`] on the way out of a
+/// logout, [`rd_url_allowed`] before the sign-in page carries it). A link from outside
+/// `BB_AUTH_AUTHORIZED_HOSTS` is therefore not a redirect anywhere, and a client setting the
+/// header by hand gains nothing but a landing page inside the estate it is signing in to or
+/// out of.
+const REFERER_HEADER: &str = "Referer";
 
 // ---------------------------------------------------------------------------
 // Config
@@ -1833,15 +1859,58 @@ fn social_block(social: Option<&SocialConfig>) -> String {
 /// resolved here without knowing which host the browser is on, and this page deliberately
 /// does not depend on nginx setting `BB_AUTH_ORIGINAL_URL_HEADER` on its location: the
 /// login page must be the one location that is impossible to get wrong.
+///
+/// With no `rd` at all (somebody opened the sign-in page themselves instead of being bounced
+/// here off a `401`), [`REFERER_HEADER`] answers in its place, through the same check: the
+/// browser says where this visitor came from, and after signing in they go back there. It is
+/// a guess and it is allowed to fail, which is the point of it being second: with nothing
+/// usable the page carries no `rd`, `/auth/session` falls back to the caller's root, and the
+/// login still works.
 fn handle_login(req: Request, state: &State) {
-    let rd = query_param(req.url(), "rd")
-        .filter(|r| rd_url_allowed(r, &state.cfg.authorized_hosts))
-        .unwrap_or_default();
+    let rd = login_rd(
+        query_param(req.url(), "rd").as_deref(),
+        header_value(&req, REFERER_HEADER),
+        &state.cfg.authorized_hosts,
+    );
     let page = {
         let settings = state.settings.read().unwrap();
         login_page(&state.cfg, &settings, &rd)
     };
     respond_page(req, 200, page);
+}
+
+/// Where a browser endpoint is told to send somebody: the link's own `?rd=`, else
+/// [`REFERER_HEADER`]. `None` when neither said anything, which is the caller's own business
+/// to answer.
+///
+/// The order is who wrote each one. A `?rd=` was written for *this* link and means something
+/// specific; the `Referer` was written by the browser about a link that meant nothing in
+/// particular, so it is a courtesy and never a contract (see the constant for the several
+/// ways it simply is not there).
+///
+/// An empty value is treated as absent, because that is what a link rendering `?rd=` from an
+/// empty template variable produces. What does **not** happen is falling through on a
+/// *rejected* candidate: whoever spoke first is answered on its own merits, and if its value
+/// does not pass the caller's guard the caller's own default applies. Otherwise a crafted
+/// `?rd=` would silently promote the `Referer`, and the person would land somewhere no part
+/// of the request asked for.
+fn rd_candidate<'a>(rd: Option<&'a str>, referer: Option<&'a str>) -> Option<&'a str> {
+    [rd, referer].into_iter().flatten().find(|v| !v.is_empty())
+}
+
+/// The `rd` the sign-in page is given: [`rd_candidate`]'s two, and only if
+/// [`rd_url_allowed`] takes it. The empty string means the page carries none and
+/// `/auth/session` will decide where the login lands.
+///
+/// The chain is [`logout_target`]'s. What differs is the failure: a rejected candidate here
+/// is dropped rather than replaced, because this page's job is to sign somebody in and
+/// refusing to render it over a bad redirect target answers a question nobody asked. And
+/// absolute URLs only, which is the shape a cross-origin `Referer` already arrives in.
+fn login_rd(rd: Option<&str>, referer: Option<&str>, hosts: &[UrlPattern]) -> String {
+    rd_candidate(rd, referer)
+        .filter(|r| rd_url_allowed(r, hosts))
+        .unwrap_or_default()
+        .to_string()
 }
 
 /// Render the sign-in page. Separate from [`handle_login`] so that what the page says can be
@@ -2314,6 +2383,33 @@ fn handle_session(mut req: Request, state: &State) {
     respond_redirect(req, &rd, Some(&cookie));
 }
 
+/// Where a logout lands: [`rd_candidate`]'s two, and the login page when neither spoke.
+/// Whichever answers is request-supplied data landing in a `Location:`, so it goes through
+/// the one [`safe_rd`] gate and is trusted for nothing but passing it.
+///
+/// A `Referer` here names the page the person was on, which after a logout is often a page
+/// they may no longer see: they land on it, get a `401`, and reach the login page one hop
+/// later. That is the price of a backup nobody configured, and the answer for anyone who
+/// minds the hop is to write the `?rd=` on the link, which is the only thing that can name a
+/// landing place on purpose.
+///
+/// The last arm is why this is a function rather than a `safe_rd` call: with no candidate at
+/// all `safe_rd` defaults to the caller's root, which is the area the browser has just been
+/// signed out of and where its next request is that same `401`. A logout ends at the login
+/// page instead.
+fn logout_target(
+    rd: Option<&str>,
+    referer: Option<&str>,
+    caller_origin: Option<&str>,
+    hosts: &[UrlPattern],
+    login_url: &str,
+) -> String {
+    match rd_candidate(rd, referer) {
+        Some(candidate) => safe_rd(Some(candidate), caller_origin, hosts, login_url),
+        None => login_url.to_string(),
+    }
+}
+
 /// `GET /auth/logout[?rd=…]` — expire the session cookie and `302` away.
 ///
 /// Clears the bb-auth cookie only; the Cognito refresh token the login page may hold is
@@ -2330,10 +2426,16 @@ fn handle_session(mut req: Request, state: &State) {
 /// ```
 ///
 /// `rd` goes through [`safe_rd`] exactly as on `/auth/session`, so it buys no new
-/// open-redirect surface. With no `rd` the browser lands on the login page — *not* on the
-/// caller's root, which is what `safe_rd` would default to and is the wrong end for a
-/// logout. A relative `rd` needs `BB_AUTH_ORIGINAL_URL_HEADER` on this location too; if
-/// nginx omits it the redirect falls back to the login page, which is fail-soft.
+/// open-redirect surface. A relative `rd` needs `BB_AUTH_ORIGINAL_URL_HEADER` on this
+/// location too; if nginx omits it the redirect falls back to the login page, which is
+/// fail-soft.
+///
+/// A link that says nothing is the common case, and there the browser's own
+/// [`REFERER_HEADER`] answers instead, through the same guard: not because it is reliable,
+/// but because it is free and it is the only thing left that knows where the person was.
+/// With neither, the browser lands on the login page, *not* on the caller's root, which is
+/// what `safe_rd` would default to and is the wrong end for a logout. [`logout_target`] is
+/// that order.
 ///
 /// **One endpoint is enough for every vhost**, which is worth knowing before wiring this
 /// into nginx once per service. Nothing here reads the request's host: the handler expires
@@ -2367,16 +2469,13 @@ fn handle_logout(req: Request, state: &State) {
         &cfg.login_url,
         caller_url.as_deref(),
     );
-    let rd = query_param(req.url(), "rd").filter(|v| !v.is_empty());
-    let target = match rd {
-        Some(rd) => safe_rd(
-            Some(&rd),
-            caller_url.as_deref().and_then(origin_of).as_deref(),
-            &cfg.authorized_hosts,
-            &login,
-        ),
-        None => login,
-    };
+    let target = logout_target(
+        query_param(req.url(), "rd").as_deref(),
+        header_value(&req, REFERER_HEADER),
+        caller_url.as_deref().and_then(origin_of).as_deref(),
+        &cfg.authorized_hosts,
+        &login,
+    );
     respond_redirect(req, &target, cookie.as_deref());
 }
 
@@ -3620,6 +3719,75 @@ mod tests {
             safe_rd(Some("/x"), Some("https://evil.com"), &h, LOGIN),
             LOGIN
         );
+    }
+
+    #[test]
+    fn rd_candidate_is_the_link_then_the_browser() {
+        let (rd, refr) = (Some("rd"), Some("refr"));
+        assert_eq!(rd_candidate(rd, refr), Some("rd"));
+        assert_eq!(rd_candidate(None, refr), Some("refr"));
+        assert_eq!(rd_candidate(rd, None), Some("rd"));
+        assert_eq!(rd_candidate(None, None), None);
+        // An empty value is what a template renders from an empty variable, so it counts as
+        // nothing said and the Referer answers.
+        assert_eq!(rd_candidate(Some(""), refr), Some("refr"));
+        assert_eq!(rd_candidate(Some(""), Some("")), None);
+    }
+
+    #[test]
+    fn login_rd_falls_back_to_the_referer() {
+        let h = bb_hosts();
+        let f = |rd: Option<&str>, r: Option<&str>| login_rd(rd, r, &h);
+        let came_from = "https://search.badbat75.com/q";
+        // The link's own rd wins; the Referer answers when there is none, or an empty one.
+        assert_eq!(
+            f(Some("https://mcp.badbat75.com/x"), Some(came_from)),
+            "https://mcp.badbat75.com/x"
+        );
+        assert_eq!(f(None, Some(came_from)), came_from);
+        assert_eq!(f(Some(""), Some(came_from)), came_from);
+        assert_eq!(f(None, None), "");
+        // Same gate as an rd, and a rejected candidate leaves the page with no rd at all
+        // rather than sending the person away: they came here to sign in.
+        assert_eq!(f(None, Some("https://evil.com/")), ""); // a link from anywhere
+        assert_eq!(f(None, Some("http://mcp.badbat75.com/")), "");
+        assert_eq!(f(None, Some("/relative")), ""); // absolute URLs only, on this page
+                                                    // Whoever spoke first is answered on its own merits: a rejected rd does not promote
+                                                    // the Referer, or a crafted link would choose which of the two is read.
+        assert_eq!(f(Some("https://evil.com/"), Some(came_from)), "");
+    }
+
+    #[test]
+    fn logout_target_prefers_the_link_then_the_referer() {
+        let h = bb_hosts();
+        let f = |rd: Option<&str>, r: Option<&str>| logout_target(rd, r, Some(CALLER), &h, LOGIN);
+        let came_from = "https://search.badbat75.com/q";
+        // The rd was written for this link, so it wins over the browser's account of where
+        // the person came from.
+        assert_eq!(
+            f(Some("/bye"), Some(came_from)),
+            "https://search.badbat75.com/bye"
+        );
+        assert_eq!(f(None, Some(came_from)), came_from);
+        assert_eq!(f(Some(""), Some(came_from)), came_from);
+        // A relative candidate resolves against the caller, exactly as a relative rd does.
+        assert_eq!(f(None, Some("/bye")), "https://search.badbat75.com/bye");
+        // Neither: the login page, never safe_rd's caller-root default, which would send the
+        // browser back into the area it was just signed out of.
+        assert_eq!(f(None, None), LOGIN);
+        assert_eq!(f(Some(""), Some("")), LOGIN);
+        assert_eq!(logout_target(None, None, None, &h, LOGIN), LOGIN);
+    }
+
+    #[test]
+    fn logout_target_guards_the_referer_like_an_rd() {
+        let h = bb_hosts();
+        let f = |r: &str| logout_target(None, Some(r), Some(CALLER), &h, LOGIN);
+        assert_eq!(f("https://evil.com/"), LOGIN); // off-host: a link from anywhere
+        assert_eq!(f("//evil.com"), LOGIN); // scheme-relative
+        assert_eq!(f("http://mcp.badbat75.com/"), LOGIN); // not https
+        assert_eq!(f("https://mcp.badbat75.com@evil.com/"), LOGIN); // userinfo
+        assert_eq!(f("/\r\nSet-Cookie: x=1"), LOGIN); // response splitting
     }
 
     #[test]

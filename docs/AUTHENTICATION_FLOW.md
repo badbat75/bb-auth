@@ -226,7 +226,8 @@ A few things are worth emphasizing:
  browser ──GET https://app.example.com/auth/logout[?rd=/app1/goodbye]──▶ bb-auth (handle_logout)
  bb-auth: if Sec-Fetch-Site is not "cross-site":
             Set-Cookie: <cookie>=; Max-Age=0; ...   (expire)
-          302 → safe_rd(rd), or the login page when there is no rd
+          302 → safe_rd(rd), else safe_rd(Referer) when the link carried no rd,
+                else the login page
 ```
 
 Same-origin / same-site / direct navigations (a normal logout link click) clear
@@ -235,7 +236,11 @@ logout) is ignored — the attacker cannot force the victim to log out. If the
 header is absent (a browser that does not send it) the cookie is still cleared.
 
 Where the browser lands is the logout link's choice, guarded by the same `safe_rd` used
-on `/auth/session`. There is no per-area landing page: `/auth/logout` is inside no
+on `/auth/session`; with no `?rd=` on the link, the browser's own `Referer` answers in its
+place, through the same guard (`/auth/login` reads it the same way, for a visitor no `401`
+sent there). It is second because it is the one nobody configured: it is missing under
+`Referrer-Policy: no-referrer`, on a bookmark or a typed URL, and cross-origin it is trimmed
+to a bare origin. There is no per-area landing page: `/auth/logout` is inside no
 application's area, so the gate cannot tell which area is being left — unlike a `401`, which
 happens on a gated URL and therefore can name that application's `login_url` in
 `X-Auth-Login-URL`. A relative `rd` needs `X-Original-URL` on this location too;

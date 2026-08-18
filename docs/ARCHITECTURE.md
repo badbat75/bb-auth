@@ -127,10 +127,10 @@ And in `src/lib.rs`:
 | Method | Path | Caller | Behavior |
 |--------|------|--------|----------|
 | `GET` | `/auth/validate` | nginx only (`auth_request`) | `204` naming the identity in one header per `identity_attrs` entry (default `X-Auth-Email`) if an accepted credential authorizes the request URL, otherwise `401` + `X-Auth-Login-URL: <this area's login page>`. A `204` also carries one header per `profile_claims` entry the credential knows (percent-encoded; omitted otherwise). Accepts (in order) an `Authorization: Bearer bbk_…` static API key, an `Authorization: Bearer <id_token>`, or the session cookie, and then no credential at all, which only an `anonymous` scope grants (and which names nobody). See §12. |
-| `GET` | `/auth/login[?rd=…]` | browser | The sign-in page: runs the Cognito `USER_AUTH` flow in the browser and POSTs the resulting id_token to `/auth/session`. Self-contained (palette, layout, script and both languages in the document; only the operator's optional stylesheet and logo are external). `rd` is validated here with the same `rd_url_allowed` `safe_rd` uses and dropped if it fails. Social buttons appear only when `BB_AUTH_SOCIAL_*` is configured. |
+| `GET` | `/auth/login[?rd=…]` | browser | The sign-in page: runs the Cognito `USER_AUTH` flow in the browser and POSTs the resulting id_token to `/auth/session`. Self-contained (palette, layout, script and both languages in the document; only the operator's optional stylesheet and logo are external). `rd` is validated here with the same `rd_url_allowed` `safe_rd` uses and dropped if it fails; with none, the browser's `Referer` answers in its place, through that same check and absolute-only, since this page resolves nothing against nginx. Social buttons appear only when `BB_AUTH_SOCIAL_*` is configured. |
 | `GET` | `/auth/callback` | browser | Finishes a social sign-in: exchanges the OAuth code and the PKCE verifier for tokens, offers a profile form when the IdP sent no names, and delivers the id_token exactly as the sign-in page does. `404` when no social client is configured. |
 | `POST` | `/auth/session` | browser | Body `application/x-www-form-urlencoded`: `id_token=…&rd=…`. Fully validates the id_token; on success sets the session cookie and `302`s to `rd` (open-redirect guarded). |
-| `GET` | `/auth/logout[?rd=…]` | browser | Sets an expired (Max-Age=0) cookie and `302` → `rd` (same `safe_rd` guard) or, with no `rd`, the login page. Cross-site requests (`Sec-Fetch-Site: cross-site`) are ignored (no cookie clear) to block CSRF-forced logout. Reads nothing about the host it was called on, and the expiring cookie carries the same `Domain` as the minted one, so under a shared `BB_AUTH_COOKIE_DOMAIN` one mounted location logs the browser out of every vhost: see README "One logout endpoint for every vhost". |
+| `GET` | `/auth/logout[?rd=…]` | browser | Sets an expired (Max-Age=0) cookie and `302` → `rd` (same `safe_rd` guard), or, with no `rd`, the browser's `Referer` (same guard), and failing both the login page. Cross-site requests (`Sec-Fetch-Site: cross-site`) are ignored (no cookie clear) to block CSRF-forced logout. Reads nothing about the host it was called on, and the expiring cookie carries the same `Domain` as the minted one, so under a shared `BB_AUTH_COOKIE_DOMAIN` one mounted location logs the browser out of every vhost: see README "One logout endpoint for every vhost". |
 | `GET` | `/auth/healthz` | local | `200 ok`. Liveness probe. |
 
 `/auth/validate` is never exposed publicly; nginx reaches it over loopback
@@ -790,6 +790,24 @@ leaving is whoever wrote the logout link, so `handle_logout` reads `?rd=` and pu
 the same `safe_rd` guard as `/auth/session`. With no `rd` the browser lands on the login
 page, not on the caller's root, which is what `safe_rd` defaults to and is the wrong end for
 a logout.
+
+A link that says nothing is the common case, though, and there the only party left who
+knows anything is the browser: `Referer` (`REFERER_HEADER`) is read in the `rd`'s place,
+through that same guard. `handle_login` reads it the same way, for the visitor who opened the
+sign-in page instead of being bounced there off a `401`. One function is the order for both
+(`rd_candidate`, used by `logout_target` and `login_rd`): the `?rd=` was written for this
+link and means something specific, the `Referer` was written by the browser about a link that
+meant nothing in particular, so the link is read first and a *rejected* candidate does not
+promote the other one. Neither endpoint trusts a value for having arrived in a header, which
+is what makes it safe that a client can send one itself.
+
+`Referer` is second because nobody configured it. It is absent under
+`Referrer-Policy: no-referrer`, absent when a privacy tool or a proxy strips it, absent on a
+typed URL or a bookmark, and trimmed to a bare origin cross-origin
+(`strict-origin-when-cross-origin` is the browsers' default). On a logout it also names a page
+the person may no longer be allowed to see, which costs a `401` and one more hop to the login
+page. That is the price of a backup that costs nothing to have, and a `?rd=` on the link is
+the way to name a landing place on purpose.
 
 ### URL patterns
 

@@ -47,10 +47,10 @@ nginx error_page 401 → 302  <login-page>/?rd=<original>
 | Method | Path             | Who        | Purpose                                            |
 |--------|------------------|------------|----------------------------------------------------|
 | GET    | `/auth/validate` | nginx only | `auth_request`: 204 naming the identity in one header per configured attribute (default `X-Auth-Email`, plus one per configured profile claim when known) if the session cookie, an `Authorization: Bearer <id_token>`, or a static `Authorization: Bearer bbk_…` API key is admitted by the scope that owns the URL, else 401 + `X-Auth-Login-URL`. An `anonymous` scope answers 204 with no credential, and names nobody. |
-| GET    | `/auth/login`    | browser    | the sign-in page: runs the Cognito flow and POSTs the `id_token` to `/auth/session`. Self-contained (no external stylesheet, script or font), IT/EN, with the social buttons `BB_AUTH_SOCIAL_IDPS` names and none at all when it names none |
+| GET    | `/auth/login`    | browser    | the sign-in page: runs the Cognito flow and POSTs the `id_token` to `/auth/session`. Self-contained (no external stylesheet, script or font), IT/EN, with the social buttons `BB_AUTH_SOCIAL_IDPS` names and none at all when it names none. Lands on `?rd=`, else on the `Referer` the browser sent |
 | GET    | `/auth/callback` | browser    | finishes a social sign-in (OAuth code + PKCE). `404` when no `BB_AUTH_SOCIAL_*` is configured |
 | POST   | `/auth/session`  | browser    | validate posted `id_token`, set cookie, 302 → `rd` |
-| GET    | `/auth/logout`   | browser    | clear cookie, 302 → `rd` (guarded) or the login page |
+| GET    | `/auth/logout`   | browser    | clear cookie, 302 → `rd` (guarded), else `Referer` (same guard), else the login page |
 | GET    | `/auth/healthz`  | local      | liveness                                           |
 
 Only the first is gated. **nginx must leave `/auth/login` and `/auth/callback` ungated**, the
@@ -441,9 +441,35 @@ the logout link, so they say it:
 ```
 
 `rd` goes through the same [`safe_rd`](#where-the-post-login-redirect-may-land) guard as on `/auth/session`,
-so it opens no new redirect surface. With no `rd`, the browser lands on the login page. A
-relative `rd` needs `X-Original-URL` on that location too; if nginx omits it, the redirect
-falls back to the login page — fail-soft.
+so it opens no new redirect surface. A relative `rd` needs `X-Original-URL` on that location
+too; if nginx omits it, the redirect falls back to the login page — fail-soft.
+
+#### When the link says nothing: `Referer`
+
+A link that says nothing is the common case, and the only party left who knows anything is
+the browser. With no `?rd=`, the gate reads the standard `Referer` (RFC 9110 §10.1.3, one "r"
+short since 1996 and never corrected) and treats it as the `rd` the link forgot to carry:
+where the person came from is the best guess at where they belong afterwards.
+
+It is a backup and never the mechanism, and the reason is that nobody configured it. It is
+missing whenever the linking page sent `Referrer-Policy: no-referrer`, whenever a privacy tool
+or a proxy stripped it, and whenever somebody typed the URL or used a bookmark; cross-origin
+it arrives trimmed to a bare origin, since `strict-origin-when-cross-origin` is what browsers
+default to. On a logout it also names the page the person was just on, which is often one they
+may no longer see, so they land there, get a `401`, and reach the login page one hop later.
+A `?rd=` on the link is the way to name a landing place on purpose, and the only one.
+
+It buys no new redirect surface, because it goes through the same `safe_rd` guard as an `rd`:
+it must name a `BB_AUTH_AUTHORIZED_HOSTS` host, so a link from anywhere else redirects
+nowhere. A rejected value falls back to the login page instead of being followed, and a
+rejected `?rd=` does **not** promote the `Referer`, or a crafted link would get to choose
+which of the two is read. With neither, the browser lands on the login page.
+
+`/auth/login` reads it the same way, for the visitor who opened the sign-in page themselves
+instead of being bounced there off a `401`: it becomes the `rd` the page replays to
+`/auth/session`, so they go back where they came from once they are in. There it must be an
+absolute `https://` URL, because that page deliberately resolves nothing against nginx, which
+is exactly the shape a cross-origin `Referer` already has.
 
 #### One logout endpoint for every vhost
 
@@ -528,16 +554,24 @@ its `root:bb-auth 0640` ownership. Then reload — see below.
 
 ### Editing it in a browser — `bb-auth-web`
 
-The same file in a browser: a server-rendered admin GUI that needs no JavaScript. Four tabs
-about the access file, and a fifth for the settings file.
+The same file in a browser: a server-rendered admin GUI that needs no JavaScript. Three tabs
+about the access file, and a fourth for the settings file.
 **Users** holds the three sections about people, in the order they nest: the user groups and
 who references each one, then the roster, then the `denied` veto. **Applications** lists each
 one with its area, its scope count and which credential classes get in anywhere inside it,
 and each application's page shows its scopes **numbered in file order** (the number is the
 meaning — first match wins) with their members, their credentials and their `excluded`.
-Every key's expiry is on its owner's page, and the **can** tab is a tester answered by the
-gate's own decision function. **Settings** is the odd one out and reads like it: it edits the
-other file (see [Config](#config)), which is why it is last.
+Every key's expiry is on its owner's page. **Settings** is the odd one out and reads like it:
+it edits the other file (see [Config](#config)), which is why it is last.
+
+The **access check** (`can EMAIL URL` in the browser, answered by the gate's own decision
+function) has no tab, because every tab is a place and it is a question. It is a section of
+the two pages that each hold half of it: at the bottom of an application's page it takes an
+email and a URL, the URL field already on that area's own `base`, and the verdict names which
+of the scopes numbered above it answered; on a person's page it takes only the URL, since the
+identity is the page. Leave the email empty on the application side to ask what a client with
+no credential at all reaches, which is the only way to see what an `anonymous` scope really
+opens.
 
 Every list carries a **filter box and a pager**, both of which are just query parameters — so
 they work with scripting off, survive a language change, and can be bookmarked. Scopes are
@@ -989,6 +1023,8 @@ The binary is service-agnostic. To front a service at `app.example.com`:
            # resolves against this host; without it the logout falls back to the
            # login page.
            proxy_set_header X-Original-URL https://app.example.com$uri;
+           # A `Sign out` with no `?rd=` falls back to the browser's Referer, and
+           # then to the login page. Nothing to configure here for either.
            proxy_pass http://127.0.0.1:4181/auth/logout;
        }
 
@@ -1001,7 +1037,8 @@ The binary is service-agnostic. To front a service at `app.example.com`:
        # No X-Original-URL: the page takes `rd` from its own query string and
        # validates it against BB_AUTH_AUTHORIZED_HOSTS, so it needs nothing of
        # nginx's. That is deliberate — this is the one location that must be
-       # impossible to get wrong.
+       # impossible to get wrong. A visitor who arrives with no `rd` is sent back
+       # to the Referer instead, which is the browser's business, not nginx's.
        location = /auth/login    { proxy_pass http://127.0.0.1:4181/auth/login; }
        location = /auth/callback { proxy_pass http://127.0.0.1:4181/auth/callback; }
    }
@@ -1129,7 +1166,8 @@ authority on where `?rd=…` may send a freshly-logged-in browser:
 - a relative `rd` (`/preferences`) resolves against the **caller's** host, taken from
   `X-Original-URL` on `/auth/session`;
 - an absolute `rd` must be `https://` on a host matching one of the patterns;
-- with no `rd` at all, the browser lands on the caller's root;
+- with no `rd` at all, the browser lands on the caller's root; on `/auth/login` and
+  `/auth/logout` the browser's `Referer` is read in its place, through this same gate;
 - anything rejected — an off-host URL, a control byte, `//evil`, `/\evil`, userinfo
   (`https://app.example.com@evil.com/`), a lookalike (`evilexample.com`) — falls back
   to `BB_AUTH_LOGIN_URL`.
