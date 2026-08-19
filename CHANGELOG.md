@@ -39,6 +39,9 @@ section logs anybody out.
   nonce; the admin GUI uses content hashes, since everything it emits is a constant. One
   practical consequence: an operator's `ui.stylesheet_url` and `ui.logo_url` are now named
   in the policy, so a third host cannot be introduced by a page that has one of them.
+  `font-src` follows the stylesheet and only the stylesheet, so a token file may bring its
+  own `@font-face` from the host it came from (or a `data:` face), and no other host may
+  serve a typeface to these pages.
 * The admin GUI refuses to start on a non-loopback address unless
   `BB_AUTH_WEB_ALLOW_NONLOOPBACK=1` says it was meant. Its only credential is a header
   nginx injects, so a bind to `0.0.0.0` was an unauthenticated remote writer of the access

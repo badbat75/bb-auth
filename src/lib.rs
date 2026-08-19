@@ -3601,6 +3601,21 @@ fn csp_asset_source(url: Option<&str>) -> Option<String> {
 /// rather than the whole [`Settings`], because one caller renders a page from a settings file
 /// it has just read and the other from a snapshot of four fields, and this needs neither.
 ///
+/// **`font-src` follows the stylesheet, and only the stylesheet.** A token file that changes
+/// the estate's typeface has to be able to bring its `@font-face` with it, and there is only
+/// one honest place for those files to live: the host the stylesheet itself came from, which
+/// is a host this deployment has already named. So the origin that may serve the CSS may
+/// serve its fonts, plus `data:` for a face embedded in the file. A third-party font host is
+/// deliberately out of reach: it would be a second external host on the page whose whole
+/// argument is that it needs none, and self-hosting a font beside the stylesheet costs a
+/// copy. With no stylesheet configured the answer is `'none'`, because the built-in CSS asks
+/// for no font at all: it names system faces, which are not fetched.
+///
+/// One thing this cannot do for the operator: a font is fetched in CORS mode even from a
+/// host the policy allows, so the file has to be served with `Access-Control-Allow-Origin`.
+/// A policy that permits it and a server that does not is a font that silently never
+/// arrives.
+///
 /// This is worth having on a login page more than anywhere else in the estate. It is the one
 /// page whose whole job is to hold a credential for a moment, the one page a deployment can
 /// point at an external stylesheet, and the page where a future templating slip would be
@@ -3618,6 +3633,13 @@ pub fn page_csp(
         style.push(' ');
         style.push_str(&s);
     }
+    // Whatever may serve the stylesheet may serve its fonts, and nothing else may. `data:`
+    // for a face embedded in the file itself, which is the other way a token file travels
+    // with its typeface.
+    let font = match csp_asset_source(stylesheet_url) {
+        Some(s) => format!("{s} data:"),
+        None => "'none'".to_string(),
+    };
     // `data:` because a logo is the one asset small enough that a deployment may reasonably
     // inline it rather than serve it, and an image URI cannot script.
     let img = match csp_asset_source(logo_url) {
@@ -3631,8 +3653,8 @@ pub fn page_csp(
     };
     format!(
         "default-src 'none'; script-src {script_src}; style-src {style}; img-src {img}; \
-         connect-src {connect_src}; form-action 'self'; frame-ancestors 'none'; \
-         base-uri 'none'"
+         font-src {font}; connect-src {connect_src}; form-action 'self'; \
+         frame-ancestors 'none'; base-uri 'none'"
     )
 }
 
@@ -6185,6 +6207,8 @@ mod tests {
         let none = csp(None, None);
         assert!(none.contains("style-src 'nonce-N';"), "{none}");
         assert!(none.contains("img-src data:;"), "{none}");
+        // No font at all: the built-in CSS names system faces and fetches nothing.
+        assert!(none.contains("font-src 'none';"), "{none}");
 
         // Both on another host: that origin, and only that origin, joins the two lists.
         let both = csp(
@@ -6198,6 +6222,13 @@ mod tests {
         assert!(
             both.contains("img-src https://assets.badbat75.com data:;"),
             "the logo's origin must be in img-src: {both}"
+        );
+        // A stylesheet may bring its own @font-face, from where it came from and nowhere
+        // else. Here that is the same host as the logo, so the mixed case below is the one
+        // that pins which of the two settings font-src actually follows.
+        assert!(
+            both.contains("font-src https://assets.badbat75.com data:;"),
+            "the stylesheet's origin must be in font-src: {both}"
         );
         // The path is NOT in the policy: a source expression is an origin, and carrying the
         // path would stop the next file on that host from loading.
@@ -6218,6 +6249,16 @@ mod tests {
             "{mixed}"
         );
         assert!(mixed.contains("img-src 'self' data:;"), "{mixed}");
+        // font-src follows the STYLESHEET and not the logo: the typeface travels with the
+        // file that asks for it.
+        assert!(
+            mixed.contains("font-src https://cdn.example.com data:;"),
+            "{mixed}"
+        );
+
+        // A logo but no stylesheet: an image host, and still no font anywhere.
+        let logo_only = csp(None, Some("https://assets.badbat75.com/logo.svg"));
+        assert!(logo_only.contains("font-src 'none';"), "{logo_only}");
 
         // A host with a port keeps it, since an origin is scheme, host AND port.
         let port = csp(Some("https://assets.internal:8443/t.css"), None);
