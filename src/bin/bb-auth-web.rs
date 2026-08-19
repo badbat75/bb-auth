@@ -2850,7 +2850,7 @@ fn shell(v: &View, title: &str, content: Markup) -> Markup {
                         span { (v.t(K::SignedInAs)) " " code { (a) } }
                     }
                     // What these bytes were built from, which the version in the bar cannot
-                    // say: a `.deb` reads 1.1.0-1 for a clean release and for a working tree
+                    // say: a `.deb` reads 1.99.1-1 for a clean release and for a working tree
                     // somebody built by hand, and this is the one place a person can see
                     // which of the two is answering.
                     span class="muted" { code { (version_line("bb-auth-web")) } }
@@ -6702,7 +6702,7 @@ fn find_key<'a>(
 /// shape, minus everything the gate needs and this does not.
 fn main() {
     // The same one-line answer the other two programs give, for the same reason: `dpkg-query`
-    // reports 1.1.0-1 for a release and for a hand-built tree alike.
+    // reports 1.99.1-1 for a release and for a hand-built tree alike.
     if std::env::args().any(|a| a == "--version") {
         println!("{}", version_line("bb-auth-web"));
         return;

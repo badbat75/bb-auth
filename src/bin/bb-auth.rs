@@ -3175,7 +3175,7 @@ fn main() {
             }
         },
         Some("--self-test") => self_test(),
-        // Provenance, and the reason it is worth a flag: a `.deb` version says 1.1.0-1 for a
+        // Provenance, and the reason it is worth a flag: a `.deb` version says 1.99.1-1 for a
         // clean release, a dirty tree and a hand-patched experiment alike, and the answer to
         // "what is actually running" cannot be a guess during an incident.
         Some("--version") => {

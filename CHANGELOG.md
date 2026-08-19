@@ -20,17 +20,42 @@ Versions are the crate's (`Cargo.toml`); packages add a Debian revision
 * **Rollback**: safe by construction while the cookie format is unchanged, because sessions
   are stateless and no state is packaged. See "Rollback" in [README.md](README.md).
 
-## 1.99.1 (2026-08-19)
+## Unreleased
 
-**A release candidate for 2.0.0**, and the version number says so: the configuration surface
-moved far enough in one window that calling it 1.2.0 would have undersold what an upgrade has
-to do. The findings of an architecture and process review, addressed; the gate's whole Cognito
-wiring and the estate it serves moved out of the environment and into the settings file; and a
-confirmation step in front of the five settings that can stop people getting in.
+**Due out as 1.99.1, a release candidate for 2.0.0**, and the version number says so: the
+configuration surface moved far enough in one window that calling it 1.2.0 would have
+undersold what an upgrade has to do. The findings of an architecture and process review,
+addressed; the gate's whole Cognito wiring and the estate it serves moved out of the
+environment and into the settings file; and a confirmation step in front of the five settings
+that can stop people getting in.
+
+**A version gets a section of its own here only once it is tagged and released.** This one is
+neither yet, so it sits under this heading; when it is tagged, this heading becomes its number
+and its date and nothing else moves. That rule is what took 1.1.0 out of this file: it was
+built, deployed and never released, with no tag and no artefact anybody could have installed
+from, and the single host that ran it was running a working tree. It had a section here as
+though it had shipped, which is a version number somebody could have gone looking for. What it
+contained is the first section below, because this release is what actually ships it.
 
 **Nothing here changes the cookie format or the access-file format, so no upgrade in this
 release logs anybody out.** The settings file goes from version 1 to version 3, which needs an
 edit before the binaries land: see "Upgrading" below.
+
+### The gate serves its own sign-in page
+
+* `/auth/login` and `/auth/callback` are the gate's now, complete on their own: no font, no
+  CDN, no second host, because the situation those pages exist for is somebody not being able
+  to get in. `gate.login_url` may still point at a page of your own.
+* **The look is shared**: the palette (`theme.css`) and the components built out of it
+  (`base.css`) live in the library and both programs emit the same bytes, so one
+  `ui.stylesheet_url` restyles the sign-in page and the admin interface together.
+* The admin GUI's access check moved out of a tab of its own and into the application page and
+  the person page, which is where the question is actually asked. There is no `/can` route.
+* Logging out is one endpoint for every vhost, and a link that says nothing falls back to
+  `Referer`.
+* **nginx must leave `/auth/login` and `/auth/callback` ungated**, exactly as it leaves
+  `/auth/session` and `/auth/logout`: a sign-in page behind `auth_request` answers a signed-out
+  visitor with itself, forever.
 
 ### Security
 
@@ -282,27 +307,6 @@ edit before the binaries land: see "Upgrading" below.
   not, deliberately, and says so.
 * AGENTS.md said "ten" settings in one section and "six" in another, and the code comment
   agreed with the wrong one.
-
-## 1.1.0 (2026-08-18)
-
-The gate serves its own sign-in page. `/auth/login` and `/auth/callback` are the gate's
-now, complete on their own: no font, no CDN, no second host, because the situation those
-pages exist for is somebody not being able to get in. `BB_AUTH_LOGIN_URL` may still point
-at a page of your own.
-
-The look is shared: the palette (`theme.css`) and the components built out of it
-(`base.css`) live in the library and both programs emit the same bytes, so one
-`ui.stylesheet_url` restyles the sign-in page and the admin interface together.
-
-The admin GUI's access check moved out of a tab of its own and into the application page
-and the person page, which is where the question is actually asked. There is no `/can`
-route.
-
-Logging out is one endpoint for every vhost, and a link that says nothing falls back to
-`Referer`.
-
-**Upgrade**: cookie format unchanged, so nobody is logged out. nginx must leave
-`/auth/login` and `/auth/callback` **ungated**.
 
 ## 1.0.0 (2026-08-17)
 

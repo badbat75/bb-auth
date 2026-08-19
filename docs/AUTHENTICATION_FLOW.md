@@ -86,8 +86,8 @@ client id.
 
 ### 2c. Social sign-in (the OAuth + PKCE leg)
 
-The other way to reach an `id_token`, added in 1.1.0 and configured entirely in the settings
-file since that file's version 2: `gate.oauth_domain`, `gate.social_callback_url`, and one `gate.social_buttons`
+The other way to reach an `id_token`, configured entirely in the settings file since that
+file's version 2: `gate.oauth_domain`, `gate.social_callback_url`, and one `gate.social_buttons`
 entry per provider carrying **its own app client**, because Cognito federates per app client.
 With any of it missing the sign-in page has no social section at all and `/auth/callback` is a
 `404`; there is nothing on the page hinting at a way in this deployment does not have.

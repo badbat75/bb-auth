@@ -106,7 +106,7 @@ bash scripts/package.sh                    # arm64, the Pi
 bash scripts/package.sh --arch amd64
 bash scripts/package.sh --no-build         # package the binaries already in dist/
 bash scripts/package.sh --only gate,web    # skip a package
-bash scripts/package.sh --revision 2       # 1.1.0-2 instead of 1.1.0-1
+bash scripts/package.sh --revision 2       # 1.99.1-2 instead of 1.99.1-1
 ```
 
 Produces `dist/{bb-auth,bb-auth-adm,bb-auth-web}_<version>-<rev>_<arch>.deb`. Started from
@@ -170,7 +170,7 @@ Installs nothing itself. It does what a package cannot, then checks its work:
 1. **`dpkg -i`, in one transaction**, so the strict `bb-auth (= <version>)` dependency of
    the two admin packages is satisfied by the gate in the same run. Not `apt install`:
    apt declines to reinstall a version equal to the one already there, so a rebuilt
-   `1.1.0-1` would silently not deploy.
+   `1.99.1-1` would silently not deploy.
 2. **Installs a staged `access.json`**, after the gate's own parser has vouched for it,
    with the owner and mode the live file already had. The packages create that file once,
    empty, and never touch it again, which is what makes a redeploy safe, so replacing it

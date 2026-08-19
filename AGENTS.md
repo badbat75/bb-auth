@@ -550,8 +550,8 @@ section under-read itself by a fifth, and two of the seven are lockout-class.
   is not a contradiction but the same rule at a different distance: a form should not be able
   to express a deployment nobody can get into. A fresh install is therefore wired with
   `bb-auth-adm` over SSH, and it has to be, since `bb-auth-web` is itself behind the gate.
-  `gate.login_url` empty means the gate's own `/auth/login`, which since 1.1.0 is a page it
-  actually serves.
+  `gate.login_url` empty means the gate's own `/auth/login`, which is a page it actually
+  serves.
 
   Everything else stays in `bb-auth.env`: the listener and the worker count (a rebind), the
   HMAC key (the secret), the cookie's **name** (renaming it orphans every cookie already
@@ -1010,7 +1010,7 @@ section under-read itself by a fifth, and two of the seven are lockout-class.
   reads at compile time, `--version` prints, both banners open with, and the GUI's footer
   carries. A plain `cargo build` sets nothing and reports `unknown`, which is the honest
   answer for a binary nobody released. The reason is one incident: a `.deb`
-  version reads `1.1.0-1` for a tagged release, a dirty checkout and a hand-patched
+  version reads `1.99.1-1` for a tagged release, a dirty checkout and a hand-patched
   experiment alike, and the test that catches a gate with no crypto provider was being run by
   a human remembering to. **`bb-auth --self-test`** is the other half: the offline RS256
   verification a login performs, with no env and no network, and `scripts/verify.sh` runs it
@@ -1020,7 +1020,7 @@ section under-read itself by a fifth, and two of the seven are lockout-class.
   installed (it fails closed either way, but a check that runs afterwards means a red deploy on
   a host that has already been mutated); `dpkg -i` in one
   transaction (not `apt install`, which declines to reinstall an equal version, so a rebuilt
-  `1.1.0-1` would silently not deploy); recording what it replaced under `share/previous/`,
+  `1.99.1-1` would silently not deploy); recording what it replaced under `share/previous/`,
   because dpkg keeps no archive and a rollback needs somewhere to start; installing the staged
   `access.json`, with the owner and mode the live
   file already had; and running `scripts/verify.sh`. It deliberately does **not** move aside a

@@ -822,7 +822,7 @@ A first install therefore ends *without* starting the gate: it says what to fill
 only what a package may not: validates a staged `access.json` with the gate's own parser
 **before** anything is installed, out of the very package about to be installed; `dpkg -i`
 in one transaction (not `apt install`, which declines to reinstall an equal version, so a
-rebuilt `1.1.0-1` would silently not deploy); records what it is replacing under
+rebuilt `1.99.1-1` would silently not deploy); records what it is replacing under
 `share/previous/` so a rollback has somewhere to start; installs the staged `access.json`
 after `--check-access` has vouched for it a second time, with the owner and mode the live
 file already had; and runs `scripts/verify.sh`.
@@ -1259,15 +1259,15 @@ authoritative answer is to rebuild from the tag:
 cat /opt/bb-auth/share/previous/versions.txt
 
 # roll back to it, all three in one transaction, as the install went in
-sudo dpkg -i /opt/bb-auth/share/previous/bb-auth_1.1.0-1_arm64.deb \
-             /opt/bb-auth/share/previous/bb-auth-adm_1.1.0-1_arm64.deb \
-             /opt/bb-auth/share/previous/bb-auth-web_1.1.0-1_arm64.deb
+sudo dpkg -i /opt/bb-auth/share/previous/bb-auth_<version>_arm64.deb \
+             /opt/bb-auth/share/previous/bb-auth-adm_<version>_arm64.deb \
+             /opt/bb-auth/share/previous/bb-auth-web_<version>_arm64.deb
 sudo bash verify.sh
 ```
 
 ```powershell
 # or from the repository, if the files are gone: check out the tag and deploy it
-git checkout v1.1.0
+git checkout v<previous-version>
 ./scripts/deploy.ps1 user@host
 ```
 

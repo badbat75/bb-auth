@@ -3380,7 +3380,7 @@ pub struct GateSettings {
     ///
     /// Empty means *this gate's own* `/auth/login`, on whatever host the request arrived at,
     /// which is the only page it can promise exists. That default is what makes the value
-    /// optional at all: since 1.1.0 the gate serves the sign-in page itself, so naming one is
+    /// optional at all: the gate serves the sign-in page itself now, so naming one is
     /// how an operator points somewhere *else*, not how they get one.
     ///
     /// It is a setting and not an env var by the same argument as [`GateSettings::client_id`],
