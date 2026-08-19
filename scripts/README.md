@@ -24,9 +24,13 @@ point: what is left below is the part that needs a person.
 3. **The changelog.** A section in [`../CHANGELOG.md`](../CHANGELOG.md), and above all the
    **Cookie format** line: if it changed, say so there, because that is the one change that
    logs every user out and the invariant nominates release notes as where it is announced.
-4. **Commit, then tag.** `git tag -a v1.99.1 -m "…"`, on the commit that is being released.
-   `package.sh` refuses a dirty tree, and every binary bakes in `git describe`, so a tag is
-   what makes `bb-auth --version` on the host read as a release rather than as a hash.
+4. **Commit, then tag — if this is a release.** `git tag -a v2.0.0 -m "…"`, on the commit
+   being released. `package.sh` refuses a dirty tree, and every binary bakes in
+   `git describe`, so a tag is what makes `bb-auth --version` on the host read as a release
+   rather than as a hash. **A release candidate is not tagged**: a `1.99.x` is built,
+   deployed and run without one, on purpose, because a tag says "you can install this and go
+   back to it" and a candidate is not making that promise. Its handle is the commit
+   `--version` prints, which is what a rollback uses instead.
 5. **Build and deploy.** `./scripts/deploy.ps1 user@host`, which packages (running the test
    suite first), ships, installs and verifies. `verify.sh` runs `bb-auth --self-test`, so a
    gate that cannot verify a signature fails the deploy instead of failing every login.

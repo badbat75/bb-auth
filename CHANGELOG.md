@@ -29,13 +29,21 @@ addressed; the gate's whole Cognito wiring and the estate it serves moved out of
 environment and into the settings file; and a confirmation step in front of the five settings
 that can stop people getting in.
 
-**A version gets a section of its own here only once it is tagged and released.** This one is
-neither yet, so it sits under this heading; when it is tagged, this heading becomes its number
-and its date and nothing else moves. That rule is what took 1.1.0 out of this file: it was
-built, deployed and never released, with no tag and no artefact anybody could have installed
-from, and the single host that ran it was running a working tree. It had a section here as
-though it had shipped, which is a version number somebody could have gone looking for. What it
-contained is the first section below, because this release is what actually ships it.
+**A version gets a section of its own here only once it is tagged and released, and a
+release candidate is neither.** 1.99.1 is a version number, not a release: it is built,
+deployed and run, and it is **not tagged**, because a tag is what says "this is a thing you
+can install and go back to" and a candidate is not that. So this section stays under this
+heading through however many 1.99.x there are, and becomes `## 2.0.0` on the day 2.0.0 is
+tagged. That rule is also what took 1.1.0 out of this file: it was built, deployed and never
+released, with no tag and no artefact anybody could have installed from, and the single host
+that ran it was running a working tree. It had a section here as though it had shipped, which
+is a version number somebody could have gone looking for. What it contained is the first
+section below, because this is the release that actually ships it.
+
+The practical consequence is worth knowing before you need it: **an untagged build's handle is
+its commit**, which every binary bakes in and `bb-auth --version` prints
+(`bb-auth 1.99.1 (v1.0.0-18-g0a8d129)`). That is what a rollback checks out when there is no
+tag to check out.
 
 **Nothing here changes the cookie format or the access-file format, so no upgrade in this
 release logs anybody out.** The settings file goes from version 1 to version 3, which needs an
