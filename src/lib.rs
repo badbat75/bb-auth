@@ -3327,6 +3327,28 @@ pub struct GateSettings {
     /// therefore attacker-controlled.
     #[serde(default)]
     pub allow_unverified_social: bool,
+    /// The Cognito **app client** a social sign-in runs through: the `client_id` the hosted
+    /// UI is handed, and the one `/auth/callback` exchanges its code with. It is normally not
+    /// the app client the email flow uses (`BB_AUTH_CLIENT_ID`), and **empty means no social
+    /// sign-in at all**, however completely the `BB_AUTH_SOCIAL_*` group is filled in.
+    ///
+    /// It is the one member of that group that lives here, so the three parts are worth
+    /// stating rather than assuming. It is read **per request**, when the sign-in page is
+    /// rendered and when the callback exchanges a code. It **cannot lock anybody out**: a
+    /// wrong value costs the social buttons and nothing else, because the email path is every
+    /// deployment's real way in and is not involved; and it cannot widen what the gate
+    /// accepts either, because the audiences a token is validated against stay in
+    /// `BB_AUTH_AUDIENCES` and the gate refuses to offer social sign-in through a client id
+    /// that is not already one of them. And it is **not a secret**: it is emitted into the
+    /// sign-in page's script, so every visitor has had it all along.
+    ///
+    /// What moved it out of the environment is that all three programs have an opinion about
+    /// it now. An env var is readable only by the process that was started with it, so the
+    /// admin GUI could only have shown this one by being handed a second copy in its own env
+    /// file, and a value written in two files is a value that drifts with nothing to catch
+    /// it. Here there is one copy, and the two editors write the file the gate reads.
+    #[serde(default)]
+    pub social_client_id: String,
     /// Which social sign-in buttons the page offers, by Cognito `identity_provider` name,
     /// in the order they appear. **Empty means none**, and that is the whole point: a
     /// provider is offered because somebody listed it, never because a deployment happens to
@@ -3377,7 +3399,9 @@ impl Default for GateSettings {
             profile_claims: Vec::new(),
             identity_attrs: default_identity_attrs(),
             allow_unverified_social: false,
-            // Empty on purpose: a social button is offered because somebody listed it.
+            // Empty on purpose, twice over: a deployment has no social app client until
+            // somebody names one, and a button is offered because somebody listed it.
+            social_client_id: String::new(),
             social_buttons: Vec::new(),
             social_providers: Vec::new(),
             session_ttl_secs: default_session_ttl(),
@@ -3912,6 +3936,12 @@ pub struct Settings {
     pub allow_unverified_social: bool,
     /// `None` = any federated provider, which is what an empty list means.
     pub social_providers: Option<Vec<String>>,
+    /// See [`GateSettings::social_client_id`]. Empty = this deployment offers no social
+    /// sign-in, and the gate then serves the same page it serves with no `BB_AUTH_SOCIAL_*`
+    /// configured at all. Whether a non-empty one is *usable* is the gate's question and not
+    /// this file's: it depends on `BB_AUTH_AUDIENCES`, which is env, which this file has no
+    /// way to read.
+    pub social_client_id: String,
     /// See [`GateSettings::social_buttons`]. Empty = the sign-in page offers no social
     /// button at all, exactly as it does when `BB_AUTH_SOCIAL_*` is unset: no divider, no
     /// button, nothing hinting at a way in this page is not offering.
@@ -3972,6 +4002,37 @@ pub fn social_idp_label(name: &str) -> &str {
         .find(|(idp, _)| idp.eq_ignore_ascii_case(name))
         .map(|(_, label)| *label)
         .unwrap_or(name)
+}
+
+/// Validate the social app client id.
+///
+/// Empty is not a refusal: it is how a file says this deployment offers no social sign-in,
+/// and it is the default. Every other refusal in this file is fatal for the usual reason, so
+/// this one is worth naming explicitly as the exception it is not: a value that is *present*
+/// and wrong is still fatal.
+///
+/// The charset is [`compile_social_buttons`]'s, and it carries more weight here than it does
+/// there. This value is substituted into the sign-in page as a JavaScript string literal and
+/// into the query string of Cognito's authorize URL, so restricting it to letters, digits,
+/// `.`, `_` and `-` is what makes both safe by construction rather than by escaping: it is
+/// the same argument the gate's `env_page_value` makes for the values that used to arrive
+/// from the environment, which is exactly where this one arrived from until it became a
+/// setting. A Cognito app client id is 26 lowercase alphanumerics, so nothing this refuses
+/// could have been one.
+pub fn compile_social_client_id(raw: &str) -> Result<String, String> {
+    let id = raw.trim();
+    if id.is_empty() {
+        return Ok(String::new());
+    }
+    if !id
+        .bytes()
+        .all(|b| b.is_ascii_alphanumeric() || b == b'.' || b == b'_' || b == b'-')
+    {
+        return Err(format!(
+            "social_client_id '{id}': a Cognito app client id is letters, digits, '.', '_'              and '-'"
+        ));
+    }
+    Ok(id.to_string())
 }
 
 /// Validate the list of social sign-in buttons a page may offer.
@@ -4080,6 +4141,7 @@ pub fn compile_settings(file: &SettingsFile) -> Result<Settings, String> {
         );
     }
 
+    let social_client_id = compile_social_client_id(&file.gate.social_client_id)?;
     let social_buttons = compile_social_buttons(&file.gate.social_buttons)?;
 
     let mut admins: Vec<String> = Vec::new();
@@ -4120,6 +4182,7 @@ pub fn compile_settings(file: &SettingsFile) -> Result<Settings, String> {
         identity_attrs,
         allow_unverified_social: file.gate.allow_unverified_social,
         social_providers: (!providers.is_empty()).then_some(providers),
+        social_client_id,
         social_buttons,
         session_ttl: ttl,
         admins,
@@ -5929,6 +5992,22 @@ mod tests {
             round.contains("_comment"),
             "an edit must not eat it: {round}"
         );
+    }
+
+    #[test]
+    fn an_app_client_id_is_letters_digits_and_three_punctuation_marks() {
+        assert_eq!(
+            compile_social_client_id("  4h9dq7k2m1n0p3r5s7t9v1w3  ").unwrap(),
+            "4h9dq7k2m1n0p3r5s7t9v1w3"
+        );
+        // Empty is not a refusal: it is how a file says this deployment offers no social
+        // sign-in, and it is the default every settings file starts from.
+        assert_eq!(compile_social_client_id("   ").unwrap(), "");
+        // The two shapes that would matter, and the reason the charset is this narrow: the
+        // value is substituted into a JavaScript string literal on the sign-in page and into
+        // a query string on the way to Cognito.
+        assert!(compile_social_client_id("a\";alert(1);\"").is_err());
+        assert!(compile_social_client_id("two words").is_err());
     }
 
     #[test]

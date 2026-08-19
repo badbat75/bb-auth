@@ -193,9 +193,9 @@
 
 use bb_auth_core::{
     add_api_key, add_application, add_denied, add_scope, add_user, add_user_email, add_user_group,
-    app_mut, app_pos, compile_asset_url, compile_brand_name, csp_hash, decide,
-    default_settings_path, edit_urls, format_date, group_ref, key_expiry, key_mut, move_scope,
-    norm_email, now, open_access_file, open_settings_file, page_csp, parse_exclusion,
+    app_mut, app_pos, compile_asset_url, compile_brand_name, compile_social_client_id, csp_hash,
+    decide, default_settings_path, edit_urls, format_date, group_ref, key_expiry, key_mut,
+    move_scope, norm_email, now, open_access_file, open_settings_file, page_csp, parse_exclusion,
     remove_api_key, remove_application, remove_denied, remove_scope, remove_user,
     remove_user_email, remove_user_group, rename_application, rename_scope, request_site,
     request_url, rotate_api_key, scope_mut, scope_pos, sha256_hex, shadowing_scope,
@@ -621,6 +621,10 @@ enum K {
     UnverifiedSocialHelp,
     SocialButtons,
     SocialButtonsHelp,
+    SocialClientId,
+    SocialClientIdHelp,
+    ColShownAs,
+    ColAudience,
     SocialProviders,
     SocialProvidersHelp,
     Admins,
@@ -715,6 +719,18 @@ fn t(lang: Lang, key: K) -> &'static str {
             "Which buttons the sign-in page offers. None ticked means none offered, and the email path is unaffected either way. Microsoft here is the personal account (outlook.com, hotmail.com), not a work or school one: an Entra ID tenant is a separate provider on the user pool. A provider also has to be federated by the app client (BB_AUTH_SOCIAL_IDPS on the host), or no button is drawn for it; one configured from bb-auth-adm that this build does not know appears here too.",
             "Quali pulsanti offre la pagina di accesso. Nessuna spunta significa nessun pulsante, e in ogni caso l'accesso via email non cambia. Microsoft qui è l'account personale (outlook.com, hotmail.com), non uno aziendale o scolastico: un tenant Entra ID è un provider separato sul pool. Il provider deve anche essere federato dall'app client (BB_AUTH_SOCIAL_IDPS sull'host), altrimenti il pulsante non viene disegnato; uno configurato da bb-auth-adm che questa build non conosce compare comunque qui.",
         ),
+        K::SocialClientId => m(
+            lang,
+            "Social sign-in app client",
+            "App client dell'accesso social",
+        ),
+        K::SocialClientIdHelp => m(
+            lang,
+            "The Cognito app client a social sign-in runs through: the client_id the hosted UI is handed, and the one the callback exchanges its code with. Empty offers no social sign-in at all. It has to be an audience the gate already accepts (BB_AUTH_AUDIENCES on the host), or no button is drawn: this field can move social sign-in between app clients an operator has declared, never add one.",
+            "L'app client Cognito attraverso cui passa l'accesso social: il client_id consegnato alla hosted UI e quello con cui il callback scambia il codice. Vuoto significa nessun accesso social. Deve essere una audience che il gate gia' accetta (BB_AUTH_AUDIENCES sull'host), altrimenti nessun pulsante viene disegnato: questo campo puo' spostare l'accesso social fra app client gia' dichiarati, mai aggiungerne uno.",
+        ),
+        K::ColShownAs => m(lang, "shown as", "mostrato come"),
+        K::ColAudience => m(lang, "app client (aud)", "app client (aud)"),
         K::SocialProviders => m(lang, "Providers", "Provider"),
         K::SocialProvidersHelp => m(
             lang,
@@ -2709,8 +2725,20 @@ fn list_rows(v: &View, total: usize, shown: usize, rows: Markup) -> Markup {
     }
 }
 
-/// The social sign-in switches: one checkbox per provider, and a hidden field naming the set
-/// the page drew them for.
+/// The social sign-in switches: a row per provider, and a hidden field naming the set the
+/// page drew them for.
+///
+/// **A table, because a button is three facts and only one of them is a choice.** What a
+/// visitor reads on it, the `identity_provider` Cognito matches byte for byte, and the app
+/// client the sign-in runs through are three different things that a stacked list of
+/// checkboxes ran together: `Microsoft` is the word on the button and `MicrosoftPersonal` is
+/// the name Amazon knows, and an operator comparing this page with the Cognito console has to
+/// see which is which. Only the first column takes input; the other two are what the row is.
+///
+/// The app client is the same in every row today, since one `gate.social_client_id` serves
+/// them all, and it is shown per row anyway: the question the column answers is "which app
+/// client does *this* button use", and answering it once above the table would be answering a
+/// different one.
 ///
 /// The set is [`SOCIAL_IDPS`] plus anything already in the file that is not in it, in that
 /// order. The second half is what keeps this page honest about a file it did not write:
@@ -2721,20 +2749,40 @@ fn list_rows(v: &View, total: usize, shown: usize, rows: Markup) -> Markup {
 ///
 /// The hidden field is what makes that work without this function and `read` having to agree
 /// twice: the form states what it offered, and the reader believes the form.
-fn social_choices(v: &View, enabled: &[String], invalid: bool) -> Markup {
+fn social_choices(v: &View, enabled: &[String], client_id: &str, invalid: bool) -> Markup {
     let offered = known_and_configured(enabled);
     html! {
         div class=@if invalid { "invalid" } @else { "" } {
             span class="lbl" { (v.t(K::SocialButtons)) }
             input type="hidden" name="idps" value=(offered.join(" "));
-            @for idp in &offered {
-                label class="radio" {
-                    input type="checkbox" name=(idp_field(idp)) value="on"
-                          checked[enabled.iter().any(|e| e.eq_ignore_ascii_case(idp))];
-                    span { (social_idp_label(idp)) }
-                    // The Cognito name, because that is what has to match on Amazon's side
-                    // and an operator comparing the two should not have to know the mapping.
-                    " " span class="muted mono" { (idp) }
+            table {
+                thead { tr {
+                    th { (v.t(K::ColShownAs)) }
+                    // Cognito's own field name, untranslated, because it is what has to match
+                    // on Amazon's side and a translated column heading would suggest it does
+                    // not.
+                    th class="mono" { "identity_provider" }
+                    th { (v.t(K::ColAudience)) }
+                } }
+                tbody {
+                    @for idp in &offered {
+                        tr {
+                            td data-label=(v.t(K::ColShownAs)) {
+                                label class="radio" {
+                                    input type="checkbox" name=(idp_field(idp)) value="on"
+                                          checked[enabled.iter().any(|e| e.eq_ignore_ascii_case(idp))];
+                                    span { (social_idp_label(idp)) }
+                                }
+                            }
+                            td class="mono" data-label="identity_provider" { (idp) }
+                            td class="mono muted" data-label=(v.t(K::ColAudience)) {
+                                // An em-dash as data rather than prose: the cell has no value
+                                // to show, and a blank one would read as a value nobody
+                                // bothered to look up.
+                                @if client_id.trim().is_empty() { "—" } @else { (client_id.trim()) }
+                            }
+                        }
+                    }
                 }
             }
             span class="hint" { (v.t(K::SocialButtonsHelp)) }
@@ -4340,6 +4388,9 @@ struct ConfigForm {
     ttl: String,
     social: bool,
     providers: String,
+    /// The app client a social sign-in runs through, `gate.social_client_id`. Empty is a
+    /// value here and not a missing one: it means this deployment offers no social sign-in.
+    client_id: String,
     /// The enabled social providers, by Cognito `identity_provider` name. A list rather than
     /// a textarea because the page offers a checkbox each: see [`social_choices`].
     buttons: Vec<String>,
@@ -4359,6 +4410,7 @@ impl ConfigForm {
             ttl: doc.gate.session_ttl_secs.to_string(),
             social: doc.gate.allow_unverified_social,
             providers: doc.gate.social_providers.join("\n"),
+            client_id: doc.gate.social_client_id.clone(),
             buttons: doc.gate.social_buttons.clone(),
             admins: doc.web.admins.join("\n"),
             stylesheet: doc.ui.stylesheet_url.clone(),
@@ -4383,6 +4435,7 @@ impl ConfigForm {
             // `false` rather than a value to parse.
             social: !f.get("social").is_empty(),
             providers: f.get("providers").to_string(),
+            client_id: f.get("aud").to_string(),
             // The page says which providers it drew a checkbox for, and this keeps the ones
             // whose box came back ticked. Reading the offered set off the form rather than
             // re-deriving it here is what makes a provider this build has never heard of
@@ -4434,6 +4487,9 @@ impl ConfigForm {
         // reason they are checked here and not left to the write: the library's refusal names
         // the setting, but only this page knows which input the operator has to go back to.
         // Empty is not a refusal anywhere here; it is the setting being unset.
+        // Same reason as the `ui` fields below: the library would refuse this on the way to
+        // disk anyway, but only this page knows which input to send the operator back to.
+        compile_social_client_id(&self.client_id).map_err(|e| Refusal::on("aud", &e))?;
         compile_asset_url("stylesheet_url", &self.stylesheet)
             .map_err(|e| Refusal::on("stylesheet", &e))?;
         compile_asset_url("logo_url", &self.logo).map_err(|e| Refusal::on("logo", &e))?;
@@ -4448,6 +4504,7 @@ impl ConfigForm {
         doc.gate.session_ttl_secs = ttl;
         doc.gate.allow_unverified_social = self.social;
         doc.gate.social_providers = Self::lines(&self.providers);
+        doc.gate.social_client_id = self.client_id.trim().to_string();
         doc.gate.social_buttons = self.buttons.clone();
         doc.web.admins = admins;
         doc.ui.stylesheet_url = self.stylesheet.trim().to_string();
@@ -4505,15 +4562,21 @@ fn page_config(v: &View, f: &ConfigForm, err: Option<&Refusal>) -> Markup {
             }
             div class="panel" {
                 h2 class="tight" { (section_heading(v.t(K::ConfigSignIn), "gate")) }
+                // The app client first, because it is what the buttons below run through:
+                // with none, the table underneath is a list of things this deployment cannot
+                // offer, and the em-dash in its last column says so on every row.
+                (text_field(v.t(K::SocialClientId), "aud", &f.client_id,
+                            "1h2j3k4l5m6n7o8p9q0r1s2t3u",
+                            Some(v.t(K::SocialClientIdHelp)), about("aud")))
                 // A different question from the provider list above: that one says whose
                 // unverified email is accepted, this one says what a visitor is offered.
                 //
-                // Checkboxes and not a list of names to type, because the answer is a choice
+                // Switches and not a list of names to type, because the answer is a choice
                 // among a handful of things this project knows by name, and a free-text field
                 // invites a spelling Cognito will not match (`Microsoft` for
                 // `MicrosoftPersonal`, say) with nothing to catch it but a button that never
                 // appears.
-                (social_choices(v, &f.buttons, about("buttons")))
+                (social_choices(v, &f.buttons, &f.client_id, about("buttons")))
             }
             div class="panel" {
                 h2 class="tight" { (section_heading(v.t(K::ConfigAdminLook), "web + ui")) }
@@ -6448,7 +6511,10 @@ mod tests {
             ("claims", ""),
             ("ttl", "2592000"),
             ("providers", ""),
-            ("buttons", ""),
+            // The set the page says it drew a switch for; a test that ticks one adds its
+            // own `idp-<name>` beside it, exactly as a browser would.
+            ("idps", ""),
+            ("aud", ""),
             ("admins", "admin@x.com"),
         ];
         for (k, v) in over {
@@ -6603,6 +6669,61 @@ mod tests {
     /// `bb-auth-adm` can add, still gets a switch of its own and survives a save that did not
     /// touch it: the page names what it offered in a hidden field, so nothing it displayed
     /// can vanish because the reader forgot it existed.
+    #[test]
+    fn the_settings_page_says_which_app_client_the_buttons_run_through() {
+        let path = scratch("cfg-aud", SAMPLE);
+        let sp = settings_path(&path);
+        let cfg = cfg_for(&path, "");
+        // Deliberately not the placeholder the field renders, or the count below would
+        // include it and stop meaning "the field plus one cell per row".
+        const AUD: &str = "9z8y7x6w5v4u3t2s1r0q9p8o7n";
+
+        let got = post(
+            &cfg,
+            Route::Config,
+            &settings_fields(
+                &rev_of(&sp),
+                &[
+                    ("aud", AUD),
+                    ("idps", "Google MicrosoftPersonal"),
+                    ("idp-Google", "on"),
+                ],
+            ),
+        );
+        assert!(matches!(got, Got::Redirect(_)), "{got:?}");
+        let (doc, s) = open_settings_file(&sp).unwrap();
+        assert_eq!(doc.gate.social_client_id, AUD);
+        assert_eq!(s.social_client_id, AUD);
+
+        // The table carries it on every row, because the column answers "which app client
+        // does THIS button use" and today every button uses the same one. Three occurrences:
+        // the field it is edited in, and one cell per provider.
+        let rev = rev_of(&sp);
+        let v = view(&cfg, Route::Config, &rev);
+        let html = page_config(&v, &ConfigForm::of(&doc), None).into_string();
+        assert_eq!(html.matches(AUD).count(), 3, "{html}");
+        assert!(html.contains("identity_provider"), "{html}");
+
+        // A value that could not be an app client is refused on the field it was typed in,
+        // and the file is left exactly as it was.
+        let got = post(
+            &cfg,
+            Route::Config,
+            &settings_fields(&rev_of(&sp), &[("aud", "two words")]),
+        );
+        match got {
+            Got::Page(status, body) => {
+                assert_eq!(status, 400, "the form again, with the message on the field");
+                assert!(body.contains("social_client_id"), "{body}");
+            }
+            other => panic!("{other:?}"),
+        }
+        assert_eq!(
+            open_settings_file(&sp).unwrap().0.gate.social_client_id,
+            AUD
+        );
+    }
+
     #[test]
     fn the_settings_page_writes_which_social_buttons_are_offered() {
         let path = scratch("cfg-buttons", SAMPLE);

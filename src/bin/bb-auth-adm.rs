@@ -43,10 +43,10 @@ use std::process::ExitCode;
 
 use bb_auth_core::{
     add_api_key, add_application, add_denied, add_scope, add_user, add_user_email, add_user_group,
-    app_mut, app_pos, compile_asset_url, compile_brand_name, decide, decide_api_key,
-    default_settings_path, edit_url_list, edit_urls, format_date, key_expiry, key_mut, mint_uuid,
-    move_scope, norm_email, now, open_access_file, open_settings_file, parse_exclusion,
-    remove_api_key, remove_application, remove_denied, remove_scope, remove_user,
+    app_mut, app_pos, compile_asset_url, compile_brand_name, compile_social_client_id, decide,
+    decide_api_key, default_settings_path, edit_url_list, edit_urls, format_date, key_expiry,
+    key_mut, mint_uuid, move_scope, norm_email, now, open_access_file, open_settings_file,
+    parse_exclusion, remove_api_key, remove_application, remove_denied, remove_scope, remove_user,
     remove_user_email, remove_user_group, rename_application, rename_scope, request_url,
     rotate_api_key, scope_pos, shadowing_scope, user_group_mut, user_group_refs, user_label,
     user_pos, version_line, well_formed_uuid, Access, AccessFile, AccessWrite, ApiKeySpec, AppSpec,
@@ -132,13 +132,17 @@ settings                        the OTHER file: what takes effect with no restar
   settings show                 what the gate and the GUI read from it
   settings set [--claims LIST] [--identity LIST] [--session-ttl SECS]
                [--unverified-social true|false] [--providers LIST] [--no-providers]
-               [--social-buttons LIST] [--no-social-buttons]
+               [--social-client-id ID] [--social-buttons LIST] [--no-social-buttons]
                [--brand NAME] [--stylesheet URL] [--logo URL] [--theme system|light|dark]
   settings admin add EMAIL...   who may use bb-auth-web. NEVER empty, never 'everyone'
   settings admin rm EMAIL...
   Default path: settings.json beside the access file; -s/--settings-file, or
   $BB_AUTH_SETTINGS_FILE. These are hot BECAUSE they are in a file: a process cannot
   re-read its own environment, so an env var could never be one.
+  --social-client-id is the Cognito app client a social sign-in runs through, and it is
+  here rather than in bb-auth.env because all three programs have an opinion about it. The
+  gate only draws a button through an app client BB_AUTH_AUDIENCES already accepts, so a
+  wrong value costs the social buttons and never the email path.
   The last four are the `ui` section, and they are the look of every page BOTH programs
   emit: the gate's login page and bb-auth-web itself. --stylesheet loads after the built-in
   stylesheet and is meant to redefine its custom properties, so a deployment restyles both
@@ -693,6 +697,13 @@ fn cmd_settings_show(ctx: Ctx) -> Result<ExitCode, String> {
         }
     );
     println!(
+        "  social_client_id        {}",
+        match s.social_client_id.as_str() {
+            "" => "(none: no social sign-in)",
+            id => id,
+        }
+    );
+    println!(
         "  social_buttons          {}",
         match s.social_buttons.len() {
             0 => "(none: the sign-in page offers no social button)".to_string(),
@@ -752,6 +763,7 @@ fn cmd_settings_set(mut ctx: Ctx) -> Result<ExitCode, String> {
     let ttl = ctx.flags.take_one("session-ttl")?;
     let social = take_tristate(&mut ctx.flags, "unverified-social")?;
     let providers = ctx.flags.take_many("providers")?;
+    let client_id = ctx.flags.take_one("social-client-id")?;
     let buttons = ctx.flags.take_many("social-buttons")?;
     let no_buttons = ctx.flags.take_flag("no-social-buttons")?;
     let no_providers = ctx.flags.take_flag("no-providers")?;
@@ -777,6 +789,7 @@ fn cmd_settings_set(mut ctx: Ctx) -> Result<ExitCode, String> {
         && social.is_none()
         && providers.is_empty()
         && !no_providers
+        && client_id.is_none()
         && buttons.is_empty()
         && !no_buttons
         && stylesheet.is_none()
@@ -809,6 +822,14 @@ fn cmd_settings_set(mut ctx: Ctx) -> Result<ExitCode, String> {
         doc.gate.social_providers.clear();
     } else if !providers.is_empty() {
         doc.gate.social_providers = providers;
+    }
+    // The app client every social button runs through. Empty is how a deployment says it
+    // offers no social sign-in, so it needs no `--no-` spelling of its own. Validated here as
+    // well as at the write, for the reason the `ui` values are: the message then names the
+    // flag that was typed rather than the field it lands in.
+    if let Some(id) = client_id {
+        doc.gate.social_client_id = compile_social_client_id(&id)
+            .map_err(|e| e.replace("social_client_id", "--social-client-id"))?;
     }
     // Which social buttons the sign-in page offers. Emptying it takes the whole section off
     // the page, which is the same page a deployment with no `BB_AUTH_SOCIAL_*` at all serves.

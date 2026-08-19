@@ -111,7 +111,7 @@ form.can label.fld{display:flex;flex-direction:column;gap:4px;flex:1 1 240px;mar
    readable but never balloons to the panel's full width. Both still shrink below their
    measure on a narrow viewport because base.css's width:100% is left standing. */
 input.f-id,input.f-duration{max-width:14ch}
-input.f-email,input.f-name,input.f-login_url{max-width:40ch}
+input.f-email,input.f-name,input.f-login_url,input.f-aud{max-width:40ch}
 form.edit label{display:block;margin:0 0 14px}
 form.edit .hint{display:block;margin:4px 0 0}
 form.edit .radio{display:flex;gap:8px;align-items:baseline;margin:0 0 6px}

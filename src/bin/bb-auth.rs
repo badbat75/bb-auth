@@ -18,7 +18,7 @@
 //! |--------|------|--------|-----------|
 //! | `GET`  | `/auth/validate` | nginx `auth_request`, loopback | 204 + [`IDENTITY_HEADER`] (+ one header per configured [`ProfileClaim`] the credential carries) if a credential authorizes the request, else 401 |
 //! | `GET`, `HEAD` | `/auth/login` | browser | the sign-in page ([`LOGIN_HTML`]), which runs the Cognito flow and POSTs the id_token back to `/auth/session`, landing on `?rd=` or, failing that, on the [`REFERER_HEADER`] ([`rd_candidate`]) |
-//! | `GET`, `HEAD` | `/auth/callback` | browser | the social sign-in callback ([`CALLBACK_HTML`]); `404` when no `BB_AUTH_SOCIAL_*` is configured |
+//! | `GET`, `HEAD` | `/auth/callback` | browser | the social sign-in callback ([`CALLBACK_HTML`]); `404` unless [`social_now`] says this deployment has a usable app client |
 //! | `POST` | `/auth/session`  | browser | validate the posted `id_token`, set the cookie, 302 → `rd` |
 //! | `GET`  | `/auth/logout`   | browser | clear the cookie, 302 → `?rd=`, else the [`REFERER_HEADER`] ([`rd_candidate`]), else the login page |
 //! | `GET`  | `/auth/healthz`  | local   | 200 `ok` |
@@ -94,8 +94,9 @@
 //! * **`bb-auth.env`**, read once at `ExecStart` ([`Config`]). Everything a change to costs a
 //!   restart or a re-login: the listener and the worker count, the HMAC keys (the only secret
 //!   in the system), the Cognito trust roots, the cookie's name and domain, the
-//!   `BB_AUTH_SOCIAL_*` group ([`SocialConfig`], where a wrong value is a sign-in that cannot
-//!   complete), and the three that *are* the lockout if they are wrong: `BB_AUTH_LOGIN_URL`,
+//!   `BB_AUTH_SOCIAL_*` group bar its app client ([`SocialConfig`], where a wrong value is a
+//!   sign-in that cannot complete), and the three that *are* the lockout if they are wrong:
+//!   `BB_AUTH_LOGIN_URL`,
 //!   `BB_AUTH_AUTHORIZED_HOSTS`, `BB_AUTH_ORIGINAL_URL_HEADER`.
 //! * **the settings file** (`BB_AUTH_SETTINGS_FILE`, [`bb_auth_core::Settings`]), re-read on
 //!   SIGHUP and held in [`State::settings`]. The ones that are read per request, cannot lock
@@ -445,18 +446,19 @@ struct Config {
     social: Option<SocialConfig>,
 }
 
-/// What a social sign-in needs, from `BB_AUTH_SOCIAL_*`: all of it or none of it.
+/// What a social sign-in needs from `BB_AUTH_SOCIAL_*`: all of it or none of it.
 ///
 /// It is env and not settings because it fails the middle part of the settings file's rule: a
-/// wrong client id or a callback URL that does not match the one registered on the app client
-/// is a sign-in that cannot complete, which is a lockout, and a lockout must not be one edit
-/// away in a GUI. The `ui` section next to it is the opposite case, and the two sitting on
-/// either side of that line is the rule working rather than an inconsistency.
+/// callback URL that does not match the one registered on the app client is a sign-in that
+/// cannot complete, which is a lockout, and a lockout must not be one edit away in a GUI. The
+/// `ui` section next to it is the opposite case, and the two sitting on either side of that
+/// line is the rule working rather than an inconsistency.
+///
+/// **The app client is not here**, and it is the one part of a social sign-in that is not:
+/// it is [`bb_auth_core::GateSettings::social_client_id`] in the settings file, which states
+/// the three-part argument for it. What that costs this type is that it no longer describes a
+/// working social sign-in on its own, which is what [`social_now`] is for.
 struct SocialConfig {
-    /// `BB_AUTH_SOCIAL_CLIENT_ID`: the app client the hosted UI and the PKCE exchange use,
-    /// which is usually *not* the one the email flow uses. It must be an accepted audience
-    /// too, so `BB_AUTH_AUDIENCES` has to list it: the gate checks that at startup.
-    client_id: String,
     /// `https://<BB_AUTH_OAUTH_DOMAIN>/oauth2/authorize`, where the browser is sent.
     authorize_url: String,
     /// `https://<BB_AUTH_OAUTH_DOMAIN>/oauth2/token`, where the callback exchanges the code.
@@ -683,7 +685,7 @@ impl Config {
             }
         };
 
-        let social = SocialConfig::from_env(&audiences);
+        let social = SocialConfig::from_env();
 
         Config {
             listen: env_or("BB_AUTH_LISTEN", "127.0.0.1:4181"),
@@ -737,7 +739,7 @@ fn env_page_value(key: &str, raw: &str) -> String {
 }
 
 impl SocialConfig {
-    /// Read the `BB_AUTH_SOCIAL_*` group: all four together, or none of them.
+    /// Read the `BB_AUTH_SOCIAL_*` group: all three together, or none of them.
     ///
     /// **All or nothing, fatally.** A half-configured social sign-in draws a button that
     /// cannot work, and the person who clicks it is told `redirect_mismatch` by Amazon rather
@@ -745,26 +747,36 @@ impl SocialConfig {
     /// answer, and it is the same reflex the access file's parser has: what changes who gets
     /// in is fatal, what drops one credential is skipped.
     ///
-    /// `audiences` is checked, not stored: a social sign-in mints tokens under its own app
-    /// client, so unless that client id is an accepted audience every social login is
-    /// validated and then refused, one redirect later, with nothing on the page to explain it.
-    fn from_env(audiences: &[String]) -> Option<SocialConfig> {
+    /// The app client is the fourth thing a social sign-in needs, and it is deliberately not
+    /// checked here: it arrives from the settings file, it changes without a restart, and a
+    /// value that changes without a restart may never be fatal at startup, or the next reboot
+    /// meets a boot loop somebody wrote in a GUI weeks earlier. [`warn_social`] says what is
+    /// missing instead, at startup and after every reload.
+    fn from_env() -> Option<SocialConfig> {
         let domain = env_or("BB_AUTH_OAUTH_DOMAIN", "").trim().to_string();
-        let client_id = env_or("BB_AUTH_SOCIAL_CLIENT_ID", "").trim().to_string();
         let callback = env_or("BB_AUTH_SOCIAL_CALLBACK_URL", "").trim().to_string();
         let idps_raw = env_or("BB_AUTH_SOCIAL_IDPS", "").trim().to_string();
-        let set = [&domain, &client_id, &callback, &idps_raw]
+        // The value moved to the settings file, and an environment variable that is read by
+        // nobody is worse than one that was never there: an operator can see it, believe it,
+        // and edit it for an afternoon. Say so once, where they will be looking for a reason.
+        if !env_or("BB_AUTH_SOCIAL_CLIENT_ID", "").trim().is_empty() {
+            eprintln!(
+                "[bb-auth] WARNING: BB_AUTH_SOCIAL_CLIENT_ID is set and is NO LONGER READ. \
+                 The app client is gate.social_client_id in the settings file: set it with \
+                 `bb-auth-adm settings set --social-client-id <id>` and delete the variable"
+            );
+        }
+        let set = [&domain, &callback, &idps_raw]
             .iter()
             .filter(|v| !v.is_empty())
             .count();
         if set == 0 {
             return None;
         }
-        if set < 4 {
+        if set < 3 {
             eprintln!(
                 "[bb-auth] FATAL: social sign-in needs all of BB_AUTH_OAUTH_DOMAIN, \
-                 BB_AUTH_SOCIAL_CLIENT_ID, BB_AUTH_SOCIAL_CALLBACK_URL and \
-                 BB_AUTH_SOCIAL_IDPS, or none of them"
+                 BB_AUTH_SOCIAL_CALLBACK_URL and BB_AUTH_SOCIAL_IDPS, or none of them"
             );
             std::process::exit(1);
         }
@@ -772,15 +784,6 @@ impl SocialConfig {
         if domain.contains('/') {
             eprintln!(
                 "[bb-auth] FATAL: BB_AUTH_OAUTH_DOMAIN is a bare host, with no scheme or path"
-            );
-            std::process::exit(1);
-        }
-        let client_id = env_page_value("BB_AUTH_SOCIAL_CLIENT_ID", &client_id);
-        if !audiences.contains(&client_id) {
-            eprintln!(
-                "[bb-auth] FATAL: BB_AUTH_SOCIAL_CLIENT_ID '{client_id}' is not an accepted \
-                 audience: add it to BB_AUTH_AUDIENCES, or every social login will be refused \
-                 after it succeeds"
             );
             std::process::exit(1);
         }
@@ -812,7 +815,6 @@ impl SocialConfig {
             std::process::exit(1);
         }
         Some(SocialConfig {
-            client_id,
             authorize_url: format!("https://{domain}/oauth2/authorize"),
             token_url: format!("https://{domain}/oauth2/token"),
             callback_url,
@@ -978,10 +980,14 @@ fn reload_settings_from(state: &State, path: &str) {
                 .collect::<Vec<_>>()
                 .join(",");
             let ttl = new.session_ttl;
+            // Said before the swap, because it is about the values that are about to become
+            // live, and because it reads as the reason for the line below it.
+            warn_social(&state.cfg, &new);
+            let social = social_state(&state.cfg, &new);
             *state.settings.write().unwrap() = new; // fail-safe: atomic swap
             eprintln!(
                 "[bb-auth] settings reloaded (SIGHUP): identity={a}, {c} profile claims, \
-                 session_ttl={ttl}s"
+                 session_ttl={ttl}s, social={social}"
             );
         }
         Err(e) => eprintln!("[bb-auth] settings reload FAILED, keeping current ones: {e}"),
@@ -2095,6 +2101,112 @@ fn look_subs(settings: &Settings, nonce: &str) -> Vec<(&'static str, String)> {
     ]
 }
 
+/// The social sign-in as it stands right now: the environment's half and the settings file's
+/// half, or `None` when the two do not add up to a sign-in that could work.
+///
+/// Three things have to hold, and they deliberately come from two places. The env group has
+/// to be configured (the OAuth domain, the callback URL Cognito compares byte for byte, and
+/// the providers this app client federates); `gate.social_client_id` has to name an app
+/// client; and that client id has to be one of the audiences this gate already validates
+/// tokens against. The last is what keeps a hot file from widening anything: a save can turn
+/// social sign-in off, or move it to another app client the operator has already declared in
+/// `BB_AUTH_AUDIENCES`, and it can do nothing else. A token minted for a client id nobody
+/// declared would be refused by [`validate_id_token`] anyway, one redirect later, with
+/// nothing on the page to explain it; refusing to draw the button is the same answer, given
+/// early enough to read.
+///
+/// **Fail-soft, and it has to stay that way.** This is read per request and the settings half
+/// changes with no restart, so an unusable value costs the social section of the sign-in page
+/// and never the login itself.
+fn social_now<'c, 's>(
+    cfg: &'c Config,
+    settings: &'s Settings,
+) -> Option<(&'c SocialConfig, &'s str)> {
+    let social = cfg.social.as_ref()?;
+    let id = settings.social_client_id.as_str();
+    if id.is_empty() || !cfg.audiences.iter().any(|a| a == id) {
+        return None;
+    }
+    Some((social, id))
+}
+
+/// What social sign-in is doing, in one phrase, for the startup banner: the providers and the
+/// app client when it can run, and the reason when it cannot.
+fn social_state(cfg: &Config, settings: &Settings) -> String {
+    match (cfg.social.as_ref(), social_now(cfg, settings)) {
+        (None, _) => "(off: no BB_AUTH_SOCIAL_* configured)".to_string(),
+        (Some(_), None) if settings.social_client_id.is_empty() => {
+            "(off: gate.social_client_id names no app client)".to_string()
+        }
+        (Some(_), None) => format!(
+            "(off: gate.social_client_id '{}' is not an accepted audience)",
+            settings.social_client_id
+        ),
+        (Some(s), Some((_, id))) => {
+            format!("{} as {id} via {}", s.idps.join(","), s.callback_url)
+        }
+    }
+}
+
+/// The warnings that need both files at once.
+///
+/// The environment says what this pool *can* federate and the settings file says what the
+/// page offers and through which app client, so this is the only place both are visible:
+/// `--check-settings` reads no env and `--check-env` reads no settings, by design. Called at
+/// startup and after every settings reload, because the half that can be wrong is the half
+/// that changes without a restart.
+fn warn_social(cfg: &Config, settings: &Settings) {
+    let Some(social) = cfg.social.as_ref() else {
+        if !settings.social_client_id.is_empty() {
+            eprintln!(
+                "[bb-auth] WARNING: gate.social_client_id names an app client but \
+                 BB_AUTH_OAUTH_DOMAIN, BB_AUTH_SOCIAL_CALLBACK_URL and BB_AUTH_SOCIAL_IDPS \
+                 are unset, so there is no social sign-in to run it through"
+            );
+        }
+        return;
+    };
+    if settings.social_client_id.is_empty() {
+        eprintln!(
+            "[bb-auth] WARNING: BB_AUTH_SOCIAL_* is configured but gate.social_client_id is \
+             empty, so the sign-in page offers no social button at all (set it with: \
+             bb-auth-adm settings set --social-client-id <app client id>)"
+        );
+        return;
+    }
+    if social_now(cfg, settings).is_none() {
+        eprintln!(
+            "[bb-auth] WARNING: gate.social_client_id '{}' is not an accepted audience, so no \
+             social button is drawn: a token minted for it would be refused after the login \
+             had already succeeded. Add it to BB_AUTH_AUDIENCES, or correct the setting",
+            settings.social_client_id
+        );
+        return;
+    }
+    let stray: Vec<&str> = settings
+        .social_buttons
+        .iter()
+        .filter(|w| !social.idps.iter().any(|h| h.eq_ignore_ascii_case(w)))
+        .map(String::as_str)
+        .collect();
+    if !stray.is_empty() {
+        eprintln!(
+            "[bb-auth] WARNING: social_buttons names [{}], which BB_AUTH_SOCIAL_IDPS does \
+             not federate: no button is drawn for them, because it would send a visitor \
+             to Cognito with an identity_provider this app client may not have",
+            stray.join(",")
+        );
+    }
+    if settings.social_buttons.is_empty() {
+        eprintln!(
+            "[bb-auth] WARNING: social sign-in is configured but social_buttons is empty, so \
+             the sign-in page offers no social button at all (enable one with: \
+             bb-auth-adm settings set --social-buttons {})",
+            social.idps.join(",")
+        );
+    }
+}
+
 /// The social block of the sign-in page: a divider and one button per configured provider, or
 /// nothing at all.
 ///
@@ -2220,30 +2332,29 @@ fn login_page(cfg: &Config, settings: &Settings, rd: &str, nonce: &str) -> Strin
     subs.push(("__BB_RD__", html_escape(rd)));
     subs.push(("__BB_ENDPOINT__", cfg.cognito_endpoint.clone()));
     subs.push(("__BB_CLIENT_ID__", cfg.audiences[0].clone()));
+    // One question, asked once: is there a social sign-in that could actually work? Every
+    // value below is empty when there is not, and the block is not drawn at all, so a page
+    // cannot end up with a button whose app client the gate would refuse a token from.
+    let social = social_now(cfg, settings);
     subs.push((
         "__BB_SOCIAL_CLIENT_ID__",
-        cfg.social
-            .as_ref()
-            .map(|s| s.client_id.clone())
-            .unwrap_or_default(),
+        social.map(|(_, id)| id.to_string()).unwrap_or_default(),
     ));
     subs.push((
         "__BB_AUTHORIZE_URL__",
-        cfg.social
-            .as_ref()
-            .map(|s| s.authorize_url.clone())
+        social
+            .map(|(s, _)| s.authorize_url.clone())
             .unwrap_or_default(),
     ));
     subs.push((
         "__BB_CALLBACK_URL__",
-        cfg.social
-            .as_ref()
-            .map(|s| s.callback_url.clone())
+        social
+            .map(|(s, _)| s.callback_url.clone())
             .unwrap_or_default(),
     ));
     subs.push((
         "__BB_SOCIAL_BUTTONS__",
-        social_block(cfg.social.as_ref(), &settings.social_buttons),
+        social_block(social.map(|(s, _)| s), &settings.social_buttons),
     ));
     render_page(LOGIN_HTML, &subs)
 }
@@ -2255,33 +2366,42 @@ fn login_page(cfg: &Config, settings: &Settings, rd: &str, nonce: &str) -> Strin
 /// request: the code and the state are read by its own script, and the PKCE verifier is in
 /// the browser's `sessionStorage` where the login page left it.
 fn handle_callback(req: Request, state: &State) {
-    let Some(social) = state.cfg.social.as_ref() else {
-        respond_empty(req, 404);
-        return;
-    };
     let nonce = csp_nonce();
     // This page's script POSTs to the token endpoint of the OAuth domain and then hands the
-    // id_token to `/auth/session`, which `form-action 'self'` already covers.
-    let (page, csp) = {
+    // id_token to `/auth/session`, which `form-action 'self'` already covers. Rendered under
+    // the read lock and answered outside it, so the 404 arm and the 200 arm hold it for the
+    // same short moment.
+    let rendered = {
         let settings = state.settings.read().unwrap();
-        let page = callback_page(&state.cfg, social, &settings, &nonce);
-        let token_origin = origin_of(&social.token_url).unwrap_or_default();
-        let csp = gate_csp(
-            &settings,
-            &nonce,
-            &[&state.cfg.cognito_endpoint, &token_origin],
-        );
-        (page, csp)
+        social_now(&state.cfg, &settings).map(|(social, client_id)| {
+            let page = callback_page(&state.cfg, social, client_id, &settings, &nonce);
+            let token_origin = origin_of(&social.token_url).unwrap_or_default();
+            let csp = gate_csp(
+                &settings,
+                &nonce,
+                &[&state.cfg.cognito_endpoint, &token_origin],
+            );
+            (page, csp)
+        })
     };
-    respond_page(req, 200, page, &csp);
+    match rendered {
+        Some((page, csp)) => respond_page(req, 200, page, &csp),
+        None => respond_empty(req, 404),
+    }
 }
 
 /// Render the callback page. Split from its handler for the reason [`login_page`] is.
-fn callback_page(cfg: &Config, social: &SocialConfig, settings: &Settings, nonce: &str) -> String {
+fn callback_page(
+    cfg: &Config,
+    social: &SocialConfig,
+    client_id: &str,
+    settings: &Settings,
+    nonce: &str,
+) -> String {
     let mut subs = look_subs(settings, nonce);
     subs.push(("__BB_ENDPOINT__", cfg.cognito_endpoint.clone()));
     subs.push(("__BB_TOKEN_URL__", social.token_url.clone()));
-    subs.push(("__BB_SOCIAL_CLIENT_ID__", social.client_id.clone()));
+    subs.push(("__BB_SOCIAL_CLIENT_ID__", client_id.to_string()));
     subs.push(("__BB_CALLBACK_URL__", social.callback_url.clone()));
     render_page(CALLBACK_HTML, &subs)
 }
@@ -2952,6 +3072,16 @@ fn check_settings(path: &str) -> ! {
             for c in &s.profile_claims {
                 println!("[bb-auth] {path}: claim '{}' -> {}", c.claim, c.header);
             }
+            // Named and not judged: whether this app client is one the gate accepts tokens
+            // from depends on BB_AUTH_AUDIENCES, which is env, which this check deliberately
+            // does not read. The gate says that half at startup.
+            println!(
+                "[bb-auth] {path}: social app client: {}",
+                match s.social_client_id.as_str() {
+                    "" => "(none: no social sign-in)",
+                    id => id,
+                }
+            );
             println!(
                 "[bb-auth] {path}: social buttons: {}",
                 match s.social_buttons.len() {
@@ -3129,6 +3259,14 @@ fn check_env(path: &str) -> ! {
         if !v.is_empty() {
             present.push(k.trim());
         }
+    }
+    // A variable that is set and read by nobody, said where the deploy will show it: this
+    // check runs from the postinst, before the restart, which is the moment an operator is
+    // still looking at the upgrade that moved it.
+    if present.contains(&"BB_AUTH_SOCIAL_CLIENT_ID") {
+        println!(
+            "[bb-auth] {path}: WARNING: BB_AUTH_SOCIAL_CLIENT_ID is set and is no longer              read. The app client is gate.social_client_id in the settings file:              `bb-auth-adm settings set --social-client-id <id>`, then delete the variable"
+        );
     }
     let missing: Vec<&str> = REQUIRED_ENV
         .iter()
@@ -3346,41 +3484,15 @@ fn main() {
         "[bb-auth] pages: /auth/login and /auth/callback (leave both UNGATED in nginx) | \
          cognito={} | social={} | buttons={}",
         state.cfg.cognito_endpoint,
-        match &state.cfg.social {
-            Some(s) => format!("{} via {}", s.idps.join(","), s.callback_url),
-            None => "(off: no BB_AUTH_SOCIAL_* configured)".to_string(),
-        },
+        social_state(&state.cfg, &settings),
         match settings.social_buttons.len() {
             0 => "(none offered)".to_string(),
             _ => settings.social_buttons.join(","),
         }
     );
-    // The two lists have to agree, and this is the only place that can see both: the settings
+    // The two files have to agree, and this is the only place that can see both: the settings
     // file knows nothing of the environment, so `--check-settings` cannot say it.
-    if let Some(social) = &state.cfg.social {
-        let stray: Vec<&str> = settings
-            .social_buttons
-            .iter()
-            .filter(|w| !social.idps.iter().any(|h| h.eq_ignore_ascii_case(w)))
-            .map(String::as_str)
-            .collect();
-        if !stray.is_empty() {
-            eprintln!(
-                "[bb-auth] WARNING: social_buttons names [{}], which BB_AUTH_SOCIAL_IDPS does \
-                 not federate: no button is drawn for them, because it would send a visitor \
-                 to Cognito with an identity_provider this app client may not have",
-                stray.join(",")
-            );
-        }
-        if settings.social_buttons.is_empty() {
-            eprintln!(
-                "[bb-auth] WARNING: BB_AUTH_SOCIAL_* is configured but social_buttons is \
-                 empty, so the sign-in page offers no social button at all (enable one with: \
-                 bb-auth-adm settings set --social-buttons {})",
-                social.idps.join(",")
-            );
-        }
-    }
+    warn_social(&state.cfg, &settings);
     // Held only for the banner. Dropped before the workers start, so nothing below this line
     // can hold a read lock across a request and starve the SIGHUP swap.
     drop(settings);
@@ -4149,7 +4261,6 @@ mod tests {
         cfg.audiences = vec!["email-client".to_string(), "social-client".to_string()];
         cfg.cognito_endpoint = "https://cognito-idp.eu-central-1.amazonaws.com/".to_string();
         cfg.social = social.then(|| SocialConfig {
-            client_id: "social-client".to_string(),
             authorize_url: "https://pool.auth.eu-central-1.amazoncognito.com/oauth2/authorize"
                 .to_string(),
             token_url: "https://pool.auth.eu-central-1.amazoncognito.com/oauth2/token".to_string(),
@@ -4166,6 +4277,9 @@ mod tests {
             version: bb_auth_core::SETTINGS_VERSION,
             gate: bb_auth_core::GateSettings {
                 social_buttons: buttons.iter().map(|b| b.to_string()).collect(),
+                // The app client `page_cfg` declares as an audience: without it there is no
+                // social sign-in for a button to belong to, which is the pairing itself.
+                social_client_id: "social-client".to_string(),
                 ..Default::default()
             },
             ..Default::default()
@@ -4280,6 +4394,48 @@ mod tests {
     }
 
     #[test]
+    fn the_app_client_comes_from_the_settings_and_has_to_be_an_accepted_audience() {
+        // `page_cfg` accepts two audiences, `email-client` and `social-client`, and
+        // federates Google and Okta. Everything below varies only the settings half.
+        let cfg = page_cfg(true);
+        let with = |id: &str| {
+            let mut s = settings_with_buttons(&["Google"]);
+            s.social_client_id = id.to_string();
+            s
+        };
+
+        // What the file says is what the page carries, and it is what the callback will
+        // exchange its code with.
+        let page = login_page(&cfg, &with("social-client"), "", "n0nce");
+        assert!(
+            page.contains(r#"var SOCIAL_CLIENT_ID = "social-client";"#),
+            "{page}"
+        );
+        assert!(page.contains(r#"data-idp="Google""#), "{page}");
+
+        // An app client nobody declared as an audience draws nothing: a token minted for it
+        // would be refused by this gate after the login had already succeeded, so the button
+        // is the wrong place to find that out. The env group is configured throughout, which
+        // is what makes this the settings half alone.
+        let stray = login_page(&cfg, &with("someone-elses-client"), "", "n0nce");
+        assert!(!stray.contains("data-idp="), "{stray}");
+        assert!(!stray.contains(r#"class="divider""#), "{stray}");
+        assert!(stray.contains(r#"var SOCIAL_CLIENT_ID = "";"#), "{stray}");
+
+        // Empty is how a deployment says it offers no social sign-in at all, and it is the
+        // same page as a deployment with no BB_AUTH_SOCIAL_* configured.
+        let off = login_page(&cfg, &with(""), "", "n0nce");
+        assert!(!off.contains("data-idp="), "{off}");
+
+        // The same question decides whether /auth/callback exists at all, and it needs both
+        // halves: the settings alone are not a social sign-in either.
+        assert!(social_now(&cfg, &with("social-client")).is_some());
+        assert!(social_now(&cfg, &with("someone-elses-client")).is_none());
+        assert!(social_now(&cfg, &with("")).is_none());
+        assert!(social_now(&page_cfg(false), &with("social-client")).is_none());
+    }
+
+    #[test]
     fn with_no_social_client_the_page_has_no_social_markup_at_all() {
         let cfg = page_cfg(false);
         // Buttons enabled, so what this asserts is the ABSENCE of a social client and not an
@@ -4329,7 +4485,13 @@ mod tests {
         let cfg = page_cfg(true);
         for page in [
             login_page(&cfg, &settings, "", "n0nce"),
-            callback_page(&cfg, cfg.social.as_ref().unwrap(), &settings, "n0nce"),
+            callback_page(
+                &cfg,
+                cfg.social.as_ref().unwrap(),
+                "social-client",
+                &settings,
+                "n0nce",
+            ),
         ] {
             let style = page.find("<style ").expect("the built-in stylesheet");
             let tokens = page.find("--accent:").expect("the palette");
@@ -4364,6 +4526,7 @@ mod tests {
         let page = callback_page(
             &cfg,
             social,
+            "social-client",
             &ui_settings(bb_auth_core::UiSettings::default()),
             "n0nce",
         );

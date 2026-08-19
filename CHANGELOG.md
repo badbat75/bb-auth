@@ -64,6 +64,23 @@ section logs anybody out.
 
 ### The settings file
 
+* **`gate.social_client_id`**, and with it `BB_AUTH_SOCIAL_CLIENT_ID` is **no longer read**.
+  The Cognito app client a social sign-in runs through moved from the env file to the
+  settings file, because all three programs have an opinion about it and an env var is
+  readable only by the process that was started with it: the admin GUI could only have shown
+  it by being handed a second copy, and a value written in two files drifts. It is the
+  twelfth setting and the one member of the `BB_AUTH_SOCIAL_*` group to cross that line, so
+  it was argued against the three-part rule rather than moved: read per request, unable to
+  lock anybody out (a wrong value costs the social buttons, never the email path), and no
+  secret, since the sign-in page has always emitted it into its own script. It cannot widen
+  what the gate accepts either: the audiences stay in `BB_AUTH_AUDIENCES`, and no button is
+  drawn through an app client that is not already one of them, which is what the env var's
+  fatal startup check became. Fail-soft on purpose, because a hot file may never be fatal:
+  with no app client, or an unusable one, the social section is simply not drawn and the gate
+  says which of the two it was at startup and after every reload.
+  **Upgrading a deployment with social sign-in requires moving the value**:
+  `bb-auth-adm settings set --social-client-id <id>`, then delete the variable from
+  `bb-auth.env`. The gate warns while it is still there.
 * **`gate.social_buttons`**: which social sign-in buttons the page offers, by Cognito
   `identity_provider` name, in the order they appear, changed with no restart and from the
   admin GUI, where it is a checkbox per provider (`Google`, and `Microsoft` meaning the
@@ -82,6 +99,36 @@ section logs anybody out.
   what the application receives; the sign-in page; administration and look) rather than one
   form with three headings named after the file's own sections. The file is unchanged: each
   box still names the key it writes.
+* The social buttons are a **table** on that page, a row per provider: what a visitor reads
+  on the button, the `identity_provider` Cognito matches byte for byte, and the app client the
+  sign-in runs through, with the tick in the first column the only thing to fill in. A
+  stacked list of checkboxes ran the three together, and the first two differ exactly where
+  it matters: `Microsoft` is the word on the button and `MicrosoftPersonal` is the name
+  Amazon knows.
+
+### The built-in palette
+
+* **The dark arm's accent moved for contrast, and `--on-accent` moved with it**:
+  `--accent` `#5b78ff` to `#6a85ff`, `--accent-hover` to the old `#5b78ff`, `--accent-weak`
+  to match, and `--on-accent` `#ffffff` to `#16161b`. Against the dark `--card`, the old blue
+  measured 4.28:1 as link text, under the 4.5:1 WCAG AA asks of body text. It could not be
+  fixed alone: the same token fills buttons, white on it was already 3.77:1, and lightening
+  the blue makes that worse. Text on the card wants a relative luminance of at least .243,
+  white on the fill wants at most .183, and no single colour is both, so the pair had to move
+  together. The new values measure 4.93:1 and 5.51:1. The light arm is unchanged and already
+  passed at 4.96:1 in both roles.
+* **Visible consequence**: on a dark theme, text on a filled accent surface is now dark rather
+  than white. That affects `button`, `button:hover` and `.pill.on`, which is every primary
+  action on the sign-in page and every selected pill in the admin GUI. It is the rule this
+  palette already applied to filled STATE surfaces (`--on-state`), and the accent was the last
+  token exempt from it.
+* **A deployment with its own `ui.stylesheet_url` sees nothing change** if that file already
+  redefines these four tokens, which a complete token file does. One that redefines `--accent`
+  but not `--on-accent` should check the pairing: it will now inherit a dark `--on-accent`
+  under whatever blue it chose.
+* No cookie, access-file or settings-file format is touched, so nobody is logged out. The
+  admin GUI's `style-src` hash is computed from the emitted bytes at build time and needs no
+  manual update.
 
 ### Availability
 

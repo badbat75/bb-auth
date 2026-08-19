@@ -86,16 +86,17 @@ client id.
 
 ### 2c. Social sign-in (the OAuth + PKCE leg)
 
-The other way to reach an `id_token`, added in 1.1.0 and configured all-or-nothing by the
-four `BB_AUTH_SOCIAL_*` variables. Unset, the sign-in page has no social section at all and
-`/auth/callback` is a `404`; there is nothing on the page hinting at a way in this
-deployment does not have.
+The other way to reach an `id_token`, added in 1.1.0. It is configured all-or-nothing by the
+three `BB_AUTH_SOCIAL_*` variables plus `gate.social_client_id` in the settings file, and that
+last one has to name an app client the gate already accepts as an audience. With any of it
+missing the sign-in page has no social section at all and `/auth/callback` is a `404`; there
+is nothing on the page hinting at a way in this deployment does not have.
 
 ```text
  browser: click "Continue with Google" on /auth/login
    page generates a PKCE verifier + a random state, stores both in sessionStorage
    page ▶ https://<oauth-domain>/oauth2/authorize
-            ?client_id=<BB_AUTH_SOCIAL_CLIENT_ID>
+            ?client_id=<gate.social_client_id>
             &redirect_uri=<BB_AUTH_SOCIAL_CALLBACK_URL>   (byte-for-byte the registered one)
             &identity_provider=Google&response_type=code&scope=openid+email+profile
             &code_challenge=S256(verifier)&code_challenge_method=S256&state=<state>
