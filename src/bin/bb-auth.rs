@@ -5018,6 +5018,70 @@ mod tests {
         );
     }
 
+    /// A deployment that sets the two `ui` URLs: the page asks for them and the policy lets
+    /// them through, which only holds if both are derived from the same two settings.
+    ///
+    /// The failure this exists for is silent from every angle: the header is there, the
+    /// `<link>` and the `<img>` are there, the asset host is up, and the browser fetches
+    /// neither, because the policy names a different host or none. Nothing in the response
+    /// says so; the operator sees a login page rendered as bare HTML and no logo, which is
+    /// what an unreachable asset host looks like too.
+    #[test]
+    fn a_configured_stylesheet_and_logo_are_in_the_page_and_in_the_policy() {
+        let ui = bb_auth_core::UiSettings {
+            stylesheet_url: "https://assets.badbat75.com/css/theme.css".to_string(),
+            logo_url: "https://assets.badbat75.com/img/logo.svg".to_string(),
+            brand_name: "BadBat75".to_string(),
+            theme: "dark".to_string(),
+        };
+        let mut st = token_state(ui_settings(ui));
+        st.cfg = page_cfg(true);
+        let base = serve(st);
+        let mut r = agent().get(format!("{base}/auth/login")).call().unwrap();
+        assert_eq!(r.status(), 200);
+        let csp = r
+            .headers()
+            .get("Content-Security-Policy")
+            .unwrap()
+            .to_str()
+            .unwrap()
+            .to_string();
+        let body = r.body_mut().read_to_string().unwrap();
+
+        // The page asks for both, by their full URL.
+        assert!(
+            body.contains(
+                r#"<link rel="stylesheet" href="https://assets.badbat75.com/css/theme.css">"#
+            ),
+            "the operator's stylesheet must be linked: {body}"
+        );
+        assert!(
+            body.contains(r#"<img src="https://assets.badbat75.com/img/logo.svg" alt="">"#),
+            "the operator's logo must be in the page"
+        );
+        // And the policy admits that host for both, by origin and not by path.
+        assert!(
+            csp.contains("https://assets.badbat75.com;")
+                || csp.contains("https://assets.badbat75.com "),
+            "{csp}"
+        );
+        for directive in ["style-src", "img-src"] {
+            let d = csp
+                .split(';')
+                .map(str::trim)
+                .find(|d| d.starts_with(directive))
+                .unwrap_or_else(|| panic!("{directive} in {csp}"));
+            assert!(
+                d.contains("https://assets.badbat75.com"),
+                "{directive} must admit the host the page asks: {d}"
+            );
+        }
+        // The inline blocks are still nonce-covered, so adding an external host does not
+        // quietly relax what the page itself may run.
+        assert!(csp.contains("script-src 'nonce-"), "{csp}");
+        assert!(!csp.contains("unsafe-inline"), "{csp}");
+    }
+
     #[test]
     fn a_logout_clears_the_cookie_and_only_refuses_a_cross_site_one() {
         let base = serve(token_state(gate_settings("{}")));

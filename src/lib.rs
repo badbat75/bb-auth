@@ -6161,6 +6161,72 @@ mod tests {
         }
     }
 
+    /// The two settings a deployment can point at another host, and the policy that has to
+    /// let them through.
+    ///
+    /// This is the pairing with something to get wrong. `ui.stylesheet_url` and
+    /// `ui.logo_url` are the only external references either program emits, and the same
+    /// two values feed the `<link>`/`<img>` and the policy that decides whether the browser
+    /// will fetch them. Derive the policy from anything but those values and a deployment
+    /// with a logo gets a page that renders without one, with nothing in the response to say
+    /// why: the header is present, the element is present, and the browser refuses.
+    ///
+    /// Three shapes each, because [`compile_asset_url`] admits exactly three: an absolute
+    /// `https://` URL (its origin joins the policy), a root-relative path (`'self'` does),
+    /// and unset (nothing does, and the built-in stylesheet stands alone).
+    #[test]
+    fn the_policy_admits_exactly_the_asset_hosts_the_settings_name() {
+        let csp = |style: Option<&str>, logo: Option<&str>| {
+            page_csp("'nonce-N'", "'nonce-N'", style, logo, &[])
+        };
+
+        // Neither set: nothing external may load, and an image may still be a data: URI,
+        // which cannot script and is the one way a logo travels inside the page.
+        let none = csp(None, None);
+        assert!(none.contains("style-src 'nonce-N';"), "{none}");
+        assert!(none.contains("img-src data:;"), "{none}");
+
+        // Both on another host: that origin, and only that origin, joins the two lists.
+        let both = csp(
+            Some("https://assets.badbat75.com/css/theme.css"),
+            Some("https://assets.badbat75.com/img/logo.svg"),
+        );
+        assert!(
+            both.contains("style-src 'nonce-N' https://assets.badbat75.com;"),
+            "the stylesheet's origin must be in style-src: {both}"
+        );
+        assert!(
+            both.contains("img-src https://assets.badbat75.com data:;"),
+            "the logo's origin must be in img-src: {both}"
+        );
+        // The path is NOT in the policy: a source expression is an origin, and carrying the
+        // path would stop the next file on that host from loading.
+        assert!(!both.contains("/css/theme.css"), "{both}");
+        assert!(!both.contains("/img/logo.svg"), "{both}");
+
+        // Root-relative, which is the better answer when the same vhost serves them: the
+        // page's own origin, spelled the way a policy spells it.
+        let own = csp(Some("/css/theme.css"), Some("/img/logo.svg"));
+        assert!(own.contains("style-src 'nonce-N' 'self';"), "{own}");
+        assert!(own.contains("img-src 'self' data:;"), "{own}");
+
+        // One of each, which is an ordinary deployment: a shared asset host for the
+        // stylesheet, the logo served beside the page.
+        let mixed = csp(Some("https://cdn.example.com/t.css"), Some("/logo.png"));
+        assert!(
+            mixed.contains("style-src 'nonce-N' https://cdn.example.com;"),
+            "{mixed}"
+        );
+        assert!(mixed.contains("img-src 'self' data:;"), "{mixed}");
+
+        // A host with a port keeps it, since an origin is scheme, host AND port.
+        let port = csp(Some("https://assets.internal:8443/t.css"), None);
+        assert!(
+            port.contains("style-src 'nonce-N' https://assets.internal:8443;"),
+            "{port}"
+        );
+    }
+
     /// Every symbol the operating manual pins a rule to still exists.
     ///
     /// `cargo doc` catches a broken intra-doc link, which the manual calls the cheapest rot
