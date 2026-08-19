@@ -131,12 +131,11 @@ use tiny_http::{Header, Request, Response, ResponseBox, Server, StatusCode};
 // access file has no opinion about — HTTP, the cookie, id_token validation, the nginx
 // contract — stays here, in one file, read top to bottom.
 use bb_auth_core::{
-    claim_name_ok, compile_host_pattern, decide, decide_api_key, default_settings_path,
-    header_safe_email, html_escape, login_url_for, now, page_csp, read_access, read_settings,
-    request_site, request_url, sha256_hex, social_idp_label, stylesheet_link, version_line, Access,
-    AccessKind, ApiKeyRecord, Decision, IdentityAttr, KeyDecision, ProfileClaim, RequestSite,
-    Settings, SocialButton, Subject, UrlPattern, API_KEY_PREFIX, BASE_CSS, PAGE_SECURITY_HEADERS,
-    THEME_CSS,
+    claim_name_ok, decide, decide_api_key, default_settings_path, header_safe_email, html_escape,
+    login_url_for, now, page_csp, read_access, read_settings, request_site, request_url,
+    sha256_hex, social_idp_label, stylesheet_link, version_line, Access, AccessKind, ApiKeyRecord,
+    Decision, IdentityAttr, KeyDecision, ProfileClaim, RequestSite, Settings, SocialButton,
+    Subject, UrlPattern, API_KEY_PREFIX, BASE_CSS, PAGE_SECURITY_HEADERS, THEME_CSS,
 };
 
 type HmacSha256 = Hmac<Sha256>;
@@ -384,21 +383,12 @@ struct Config {
     /// Session-cookie signing/verifying keys, from `BB_AUTH_HMAC_KEY{,_ID}` and
     /// `BB_AUTH_HMAC_ACCEPTED_KEYS`.
     hmac_keys: HmacKeys,
-    /// `BB_AUTH_COGNITO_ISSUER`, with no trailing slash. The JWKS URL is derived from it.
-    issuer: String,
     /// `BB_AUTH_COOKIE_NAME`, the session cookie's name. Default `bb_session`.
-    cookie_name: String,
-    /// `BB_AUTH_COOKIE_DOMAIN`. `None` = a host-only cookie (per-service login); a parent
-    /// domain (`.example.com`) shares one session across every service behind the gate.
-    cookie_domain: Option<String>,
-    /// Hosts a post-login `rd` may land on (`BB_AUTH_AUTHORIZED_HOSTS`), as globs matched
-    /// against the host alone, e.g. `badbat75.com,*.badbat75.com`.
     ///
-    /// This is the *only* authority for [`safe_rd`]. There is no canonical service base
-    /// URL: one gate fronts several hosts, and which one is in play is decided by the
-    /// caller. Enumerate the apex explicitly — `*.x.com` does not match `x.com`. Pair it
-    /// with `BB_AUTH_COOKIE_DOMAIN=.<domain>` to share the session cookie across siblings.
-    authorized_hosts: Vec<UrlPattern>,
+    /// The cookie's *domain* is not here: it is `gate.cookie_domain` in the settings file.
+    /// The name stays because renaming it orphans every cookie already issued with no way to
+    /// clear them, and unlike the domain there is no reason anyone would ever change it.
+    cookie_name: String,
     /// `BB_AUTH_LOGIN_URL`, e.g. `https://login.example.com/`. Where a logout and every
     /// rejected `rd` land, and what a `401` names in [`LOGIN_URL_HEADER`], unless the
 
@@ -428,15 +418,21 @@ struct Config {
     original_url_header: String,
     /// `BB_AUTH_WORKERS`, the number of blocking request threads. At least 1.
     workers: usize,
-    /// The Cognito JSON API endpoint the sign-in page talks to, **derived** from
-    /// [`Config::issuer`] and never configured: it is the same host, and the pool id is the
-    /// only part of the issuer that is not it.
-    ///
-    /// Derived, and that is the whole argument for serving the sign-in page from here. A page
-    /// that names its own endpoint can name a pool this gate does not validate against, and
-    /// the symptom is a login that succeeds in the browser and is refused by the gate a
-    /// redirect later.
-    cognito_endpoint: String,
+}
+
+/// The Cognito JSON API endpoint the sign-in page talks to: the live issuer's origin, since
+/// the pool id is the only part of an issuer URL that is not it.
+///
+/// **Derived and never configured**, which is the whole argument for serving the sign-in page
+/// from here: a page that named its own endpoint could name a pool this gate does not validate
+/// against, and the symptom would be a login that succeeds in the browser and is refused by
+/// the gate a redirect later. It is computed per use rather than held, because the issuer is a
+/// setting now and a held copy would be the stale half of a reload.
+fn cognito_endpoint(settings: &Settings) -> String {
+    match origin_of(&settings.issuer) {
+        Some(o) => format!("{o}/"),
+        None => String::new(),
+    }
 }
 
 /// Read an env var, falling back to `default` when unset.
@@ -593,55 +589,12 @@ impl Config {
         }
         by_id.insert(active_id.clone(), active_key);
 
-        let issuer = env_req("BB_AUTH_COGNITO_ISSUER")
-            .trim_end_matches('/')
-            .to_string();
-        let cookie_domain = match env_or("BB_AUTH_COOKIE_DOMAIN", "") {
-            s if s.is_empty() => None,
-            s => Some(s),
-        };
-        // The redirect scope: which hosts a post-login `rd` may land on. Required —
-        // there is no default, and an empty list would make every login bounce back to
-        // the login page.
-        let authorized_hosts: Vec<UrlPattern> = env_req("BB_AUTH_AUTHORIZED_HOSTS")
-            .split(',')
-            .map(str::trim)
-            .filter(|s| !s.is_empty())
-            .map(|h| {
-                compile_host_pattern(h).unwrap_or_else(|e| {
-                    eprintln!("[bb-auth] FATAL: BB_AUTH_AUTHORIZED_HOSTS: {e}");
-                    std::process::exit(1);
-                })
-            })
-            .collect();
-        if authorized_hosts.is_empty() {
-            eprintln!("[bb-auth] FATAL: BB_AUTH_AUTHORIZED_HOSTS is empty");
-            std::process::exit(1);
-        }
-
-        // The Cognito JSON API endpoint the sign-in page posts to: the issuer with its pool id
-        // taken off. Derived rather than configured, so the page can only ever talk to the
-        // pool this gate validates tokens against.
-        let cognito_endpoint = match origin_of(&issuer) {
-            Some(o) => format!("{o}/"),
-            None => {
-                eprintln!(
-                    "[bb-auth] FATAL: BB_AUTH_COGNITO_ISSUER '{issuer}' is not an absolute URL"
-                );
-                std::process::exit(1);
-            }
-        };
-
         Config {
             listen: env_or("BB_AUTH_LISTEN", "127.0.0.1:4181"),
             hmac_keys: HmacKeys { by_id, active_id },
-            issuer,
             cookie_name: env_or("BB_AUTH_COOKIE_NAME", "bb_session"),
-            cookie_domain,
-            authorized_hosts,
             original_url_header: env_or("BB_AUTH_ORIGINAL_URL_HEADER", "X-Original-URL"),
             workers: env_or("BB_AUTH_WORKERS", "4").parse().unwrap_or(4).max(1),
-            cognito_endpoint,
         }
     }
 }
@@ -650,10 +603,17 @@ impl Config {
 // State
 // ---------------------------------------------------------------------------
 
-/// Cognito's public signing keys, by `kid`, with the time of the last successful fetch.
+/// Cognito's public signing keys, by `kid`, with the time of the last successful fetch and
+/// the issuer they came from.
+///
+/// The issuer is in here because it is a setting now, so "are these the right keys?" stopped
+/// being answerable from the process's own configuration. Holding it beside the keys is what
+/// lets a reload notice the pool changed, and what stops this pool's tokens from ever being
+/// checked against the other one's keys.
 struct JwksCache {
     keys: HashMap<String, DecodingKey>,
     last_refresh: Instant,
+    issuer: String,
 }
 
 /// Everything a worker thread needs. Shared immutably behind an [`Arc`]; the two
@@ -795,6 +755,33 @@ fn reload_settings(state: &State) {
 fn reload_settings_from(state: &State, path: &str) {
     match read_settings(path) {
         Ok(new) => {
+            // The pool is a setting, and it is the one that cannot simply be swapped: the
+            // keys in hand belong to the old issuer, and a gate holding half of this pair
+            // checks one pool's tokens against the other's keys, which is every login failing
+            // on a signature it cannot explain. So the fetch happens first and the swap is
+            // all or nothing, in the same fail-soft direction as everything else here: a new
+            // issuer that does not answer leaves the old settings AND the old keys live.
+            let live_issuer = state.jwks.read().unwrap().issuer.clone();
+            if !new.issuer.is_empty() && new.issuer != live_issuer {
+                match fetch_jwks(&new.issuer) {
+                    Ok(keys) => {
+                        let mut c = state.jwks.write().unwrap();
+                        c.keys = keys;
+                        c.last_refresh = Instant::now();
+                        c.issuer = new.issuer.clone();
+                        eprintln!("[bb-auth] issuer changed, JWKS refetched: {}", new.issuer);
+                    }
+                    Err(e) => {
+                        eprintln!(
+                            "[bb-auth] settings reload FAILED, keeping current ones: the new \
+                             issuer {} did not answer ({e}), and swapping it without its keys \
+                             would refuse every login",
+                            new.issuer
+                        );
+                        return;
+                    }
+                }
+            }
             let c = new.profile_claims.len();
             let a = new
                 .identity_attrs
@@ -926,7 +913,14 @@ fn fetch_jwks(issuer: &str) -> Result<HashMap<String, DecodingKey>, String> {
 /// for the same reason: the eager retry it replaced turned a dead issuer into an unbounded
 /// stream of 3-second fetches.
 fn refresh_jwks_if_due(state: &State) {
-    let due = state.jwks.read().unwrap().last_refresh.elapsed() > JWKS_TTL;
+    let issuer = state.settings.read().unwrap().issuer.clone();
+    if issuer.is_empty() {
+        return;
+    }
+    let due = {
+        let c = state.jwks.read().unwrap();
+        c.last_refresh.elapsed() > JWKS_TTL || c.issuer != issuer
+    };
     if !due {
         return;
     }
@@ -934,15 +928,19 @@ fn refresh_jwks_if_due(state: &State) {
     let Ok(_guard) = state.jwks_refresh.try_lock() else {
         return;
     };
-    let still_due = state.jwks.read().unwrap().last_refresh.elapsed() > JWKS_TTL;
+    let still_due = {
+        let c = state.jwks.read().unwrap();
+        c.last_refresh.elapsed() > JWKS_TTL || c.issuer != issuer
+    };
     if !still_due {
         return;
     }
-    match fetch_jwks(&state.cfg.issuer) {
+    match fetch_jwks(&issuer) {
         Ok(new) => {
             let mut c = state.jwks.write().unwrap();
             c.keys = new;
             c.last_refresh = Instant::now();
+            c.issuer = issuer;
         }
         Err(e) => {
             eprintln!("[bb-auth] JWKS refresh failed: {e}");
@@ -1135,7 +1133,13 @@ fn validate_id_token(token: &str, state: &State) -> Result<UserIdentity, String>
     // install passes through rather than one an editor can write.
     let aud: Vec<&str> = settings.audiences.iter().map(String::as_str).collect();
     v.set_audience(&aud);
-    v.set_issuer(&[&state.cfg.issuer]);
+    // The pool, out of the same read. Said here rather than left to an empty `set_issuer`,
+    // so a deployment nobody has named a Cognito for reads as the configuration gap it is
+    // instead of as a token that failed validation.
+    if settings.issuer.is_empty() {
+        return Err("no issuer is configured, so no token can be validated".into());
+    }
+    v.set_issuer(&[settings.issuer.as_str()]);
     v.set_required_spec_claims(&["exp", "aud", "iss"]);
     v.validate_exp = true;
     v.leeway = 60;
@@ -1410,12 +1414,12 @@ fn pct_encode(s: &str) -> String {
 /// any host under that domain signs the browser out of all of them: see [`handle_logout`].
 /// Give the clear a different `Domain` or `Path` than the mint and it stops matching, the
 /// browser keeps the cookie it had, and the logout silently succeeds at nothing.
-fn build_cookie(cfg: &Config, value: &str, max_age: i64) -> String {
+fn build_cookie(cfg: &Config, settings: &Settings, value: &str, max_age: i64) -> String {
     let mut c = format!(
         "{}={}; Max-Age={}; Path=/; HttpOnly; Secure; SameSite=Lax",
         cfg.cookie_name, value, max_age
     );
-    if let Some(d) = &cfg.cookie_domain {
+    if let Some(d) = &settings.cookie_domain {
         c.push_str(&format!("; Domain={d}"));
     }
     c
@@ -1751,7 +1755,7 @@ const AUTH_CSS: &str = include_str!("../assets/auth.css");
 /// needs the app-client id, the issuer's endpoint and the list of hosts a post-login `rd` may
 /// land on, and the gate already holds all three **as the values it validates against**: the
 /// client id is one it accepts as an audience ([`bb_auth_core::Settings::audiences`]), the endpoint is derived from
-/// the issuer whose signature it verifies ([`Config::cognito_endpoint`]), and the hosts are
+/// the issuer whose signature it verifies ([`cognito_endpoint`]), and the hosts are
 /// what [`safe_rd`] enforces. Served from here, the page and the gate cannot disagree about
 /// any of them; served from a static host, every one of the three is a second copy.
 ///
@@ -2037,18 +2041,21 @@ fn social_block(buttons: &[SocialButton]) -> String {
 /// usable the page carries no `rd`, `/auth/session` falls back to the caller's root, and the
 /// login still works.
 fn handle_login(req: Request, state: &State) {
-    let rd = login_rd(
-        query_param(req.url(), "rd").as_deref(),
-        header_value(&req, REFERER_HEADER),
-        &state.cfg.authorized_hosts,
-    );
     let nonce = csp_nonce();
     // The page's script speaks to exactly one host, the issuer's own API endpoint, and the
-    // social leg is a top-level navigation rather than a fetch.
+    // social leg is a top-level navigation rather than a fetch. One read covers all of it,
+    // the redirect scope included: where a login may land and where its page may talk are one
+    // operator decision, and a reload between the two would apply half of it.
     let (page, csp) = {
         let settings = state.settings.read().unwrap();
-        let page = login_page(&state.cfg, &settings, &rd, &nonce);
-        let csp = gate_csp(&settings, &nonce, &[&state.cfg.cognito_endpoint]);
+        let rd = login_rd(
+            query_param(req.url(), "rd").as_deref(),
+            header_value(&req, REFERER_HEADER),
+            &settings.authorized_hosts,
+        );
+        let endpoint = cognito_endpoint(&settings);
+        let page = login_page(&settings, &rd, &nonce);
+        let csp = gate_csp(&settings, &nonce, &[&endpoint]);
         (page, csp)
     };
     respond_page(req, 200, page, &csp);
@@ -2090,10 +2097,10 @@ fn login_rd(rd: Option<&str>, referer: Option<&str>, hosts: &[UrlPattern]) -> St
 
 /// Render the sign-in page. Separate from [`handle_login`] so that what the page says can be
 /// asserted without a socket, which is the only way a test can read a page this size.
-fn login_page(cfg: &Config, settings: &Settings, rd: &str, nonce: &str) -> String {
+fn login_page(settings: &Settings, rd: &str, nonce: &str) -> String {
     let mut subs = look_subs(settings, nonce);
     subs.push(("__BB_RD__", html_escape(rd)));
-    subs.push(("__BB_ENDPOINT__", cfg.cognito_endpoint.clone()));
+    subs.push(("__BB_ENDPOINT__", cognito_endpoint(settings)));
     // The app client the email flow runs against. Empty is a deployment nobody has told
     // which app client it is, and the page then cannot complete a login: the gate says so at
     // startup rather than here, because a page is the wrong place to explain a config gap.
@@ -2158,13 +2165,10 @@ fn handle_callback(req: Request, state: &State) {
         let settings = state.settings.read().unwrap();
         social_ready(&settings).map(|(domain, callback)| {
             let (_, token_url) = oauth_urls(domain);
-            let page = callback_page(&state.cfg, &token_url, callback, &settings, &nonce);
+            let page = callback_page(&token_url, callback, &settings, &nonce);
             let token_origin = origin_of(&token_url).unwrap_or_default();
-            let csp = gate_csp(
-                &settings,
-                &nonce,
-                &[&state.cfg.cognito_endpoint, &token_origin],
-            );
+            let endpoint = cognito_endpoint(&settings);
+            let csp = gate_csp(&settings, &nonce, &[&endpoint, &token_origin]);
             (page, csp)
         })
     };
@@ -2175,15 +2179,9 @@ fn handle_callback(req: Request, state: &State) {
 }
 
 /// Render the callback page. Split from its handler for the reason [`login_page`] is.
-fn callback_page(
-    cfg: &Config,
-    token_url: &str,
-    callback_url: &str,
-    settings: &Settings,
-    nonce: &str,
-) -> String {
+fn callback_page(token_url: &str, callback_url: &str, settings: &Settings, nonce: &str) -> String {
     let mut subs = look_subs(settings, nonce);
-    subs.push(("__BB_ENDPOINT__", cfg.cognito_endpoint.clone()));
+    subs.push(("__BB_ENDPOINT__", cognito_endpoint(settings)));
     subs.push(("__BB_TOKEN_URL__", token_url.to_string()));
     // No app client here on purpose: the one to exchange with is whichever the clicked button
     // named, and only the page that clicked it knows that.
@@ -2662,17 +2660,27 @@ fn handle_session(mut req: Request, state: &State) {
     // /auth/validate. A relative `rd` resolves against it; without it we can only fall
     // back to the login page.
     let caller_origin = caller_url.as_deref().and_then(origin_of);
-    let rd = safe_rd(
-        form.get("rd").map(String::as_str),
-        caller_origin.as_deref(),
-        &cfg.authorized_hosts,
-        &login,
-    );
-    // The lifetime the cookie is minted with is read now, not at startup: an edit to it
-    // applies to sessions from here on and to no cookie already in a browser, which is what
-    // keeps changing it out of the logout business.
-    let ttl = state.settings.read().unwrap().session_ttl;
-    let cookie = build_cookie(cfg, &make_session(&ident, ttl, &cfg.hmac_keys), ttl as i64);
+    // One read for where this login may land, how long it lasts and which domain its cookie
+    // carries. All three are read NOW rather than at startup, which for the lifetime is what
+    // keeps an edit to it out of the logout business (it applies to sessions from here on and
+    // to no cookie already in a browser) and for the other two is simply where they live.
+    let (rd, cookie) = {
+        let settings = state.settings.read().unwrap();
+        let rd = safe_rd(
+            form.get("rd").map(String::as_str),
+            caller_origin.as_deref(),
+            &settings.authorized_hosts,
+            &login,
+        );
+        let ttl = settings.session_ttl;
+        let cookie = build_cookie(
+            cfg,
+            &settings,
+            &make_session(&ident, ttl, &cfg.hmac_keys),
+            ttl as i64,
+        );
+        (rd, cookie)
+    };
     eprintln!("[bb-auth] session granted: {} -> {rd}", ident.email);
     respond_redirect(req, &rd, Some(&cookie));
 }
@@ -2751,23 +2759,35 @@ fn handle_logout(req: Request, state: &State) {
     let cross_site = header_value(&req, "Sec-Fetch-Site")
         .map(|v| v.eq_ignore_ascii_case("cross-site"))
         .unwrap_or(false);
-    let cookie = if cross_site {
-        None
-    } else {
-        Some(build_cookie(cfg, "", 0))
+    // One read, and it ends before the access table is touched. Holding both locks at once,
+    // in an order nothing else in this file uses, is the only way these two could ever
+    // deadlock against a waiting SIGHUP writer, and a logout is far too rare for the copy to
+    // be worth thinking about.
+    let (cookie, global, hosts) = {
+        let settings = state.settings.read().unwrap();
+        let cookie = if cross_site {
+            None
+        } else {
+            Some(build_cookie(cfg, &settings, "", 0))
+        };
+        (
+            cookie,
+            global_login(&settings).to_string(),
+            settings.authorized_hosts.clone(),
+        )
     };
 
     let caller_url = original_url(&req, cfg);
     let login = login_url_for(
         &state.access.read().unwrap(),
-        global_login(&state.settings.read().unwrap()),
+        &global,
         caller_url.as_deref(),
     );
     let target = logout_target(
         query_param(req.url(), "rd").as_deref(),
         header_value(&req, REFERER_HEADER),
         caller_url.as_deref().and_then(origin_of).as_deref(),
-        &cfg.authorized_hosts,
+        &hosts,
         &login,
     );
     respond_redirect(req, &target, cookie.as_deref());
@@ -2945,12 +2965,7 @@ fn check_settings(path: &str) -> ! {
 /// variable would have defeated the preflight in silence. Now the postinst asks the binary
 /// (`--check-env`), and `the_required_env_list_matches_the_code` is what keeps this list
 /// honest about its own callers.
-const REQUIRED_ENV: [&str; 4] = [
-    "BB_AUTH_HMAC_KEY",
-    "BB_AUTH_COGNITO_ISSUER",
-    "BB_AUTH_AUTHORIZED_HOSTS",
-    "BB_AUTH_ACCESS_FILE",
-];
+const REQUIRED_ENV: [&str; 2] = ["BB_AUTH_HMAC_KEY", "BB_AUTH_ACCESS_FILE"];
 
 /// Variables this gate once read and no longer does, with where the value went.
 ///
@@ -2958,7 +2973,13 @@ const REQUIRED_ENV: [&str; 4] = [
 /// operator can see it, believe it, and edit it for an afternoon. This list is what lets
 /// `--check-env` say so during the upgrade that retired it, on the host, before the postinst
 /// restarts anything. Entries can be dropped once no deployment could still carry them.
-const RETIRED_ENV: [(&str, &str); 9] = [
+const RETIRED_ENV: [(&str, &str); 12] = [
+    ("BB_AUTH_COGNITO_ISSUER", "gate.issuer in the settings file"),
+    ("BB_AUTH_COOKIE_DOMAIN", "gate.cookie_domain"),
+    (
+        "BB_AUTH_AUTHORIZED_HOSTS",
+        "gate.authorized_hosts, as a list",
+    ),
     ("BB_AUTH_CLIENT_ID", "gate.client_id in the settings file"),
     ("BB_AUTH_LOGIN_URL", "gate.login_url"),
     (
@@ -3204,10 +3225,21 @@ fn main() {
         .unwrap_or_else(|| default_settings_path(&access_path));
     let settings = load_settings(&settings_path);
 
-    let initial = fetch_jwks(&cfg.issuer).unwrap_or_else(|e| {
-        eprintln!("[bb-auth] FATAL: initial JWKS fetch failed: {e}");
-        std::process::exit(1);
-    });
+    // The pool's signing keys. A configured issuer that does not answer is still **fatal**,
+    // which is what makes reaching the `listening on` line below proof that the fetch, the
+    // parse and every `from_jwk` worked. An issuer that is not configured at all is not
+    // fatal, for the reason an empty `client_id` is not: a package creates this file and
+    // cannot know the value, and refusing to start over it would be a boot loop on every
+    // first install. That case is loud further down instead.
+    let initial_issuer = settings.issuer.clone();
+    let initial = if initial_issuer.is_empty() {
+        HashMap::new()
+    } else {
+        fetch_jwks(&initial_issuer).unwrap_or_else(|e| {
+            eprintln!("[bb-auth] FATAL: initial JWKS fetch failed: {e}");
+            std::process::exit(1);
+        })
+    };
 
     let listen = cfg.listen.clone();
     let workers = cfg.workers;
@@ -3243,6 +3275,7 @@ fn main() {
         jwks: RwLock::new(JwksCache {
             keys: initial,
             last_refresh: Instant::now(),
+            issuer: initial_issuer,
         }),
         jwks_refresh: Mutex::new(()),
     });
@@ -3285,7 +3318,10 @@ fn main() {
     eprintln!(
         "[bb-auth] {} listening on {listen} | issuer={} | aud={} | apps={app_n} | scopes={scope_n} | users={user_n} | api_keys={key_n} | denied={denied_n} | identity={identity_attrs} | claims={claim_names} | workers={workers}",
         version_line("bb-auth"),
-        state.cfg.issuer,
+        match settings.issuer.as_str() {
+            "" => "(none: no pool is configured, so no token can be validated)",
+            i => i,
+        },
         match settings.audiences.len() {
             0 => "(none: no app client is configured, so no login can complete)".to_string(),
             _ => settings.audiences.join(","),
@@ -3326,7 +3362,7 @@ fn main() {
     eprintln!(
         "[bb-auth] pages: /auth/login and /auth/callback (leave both UNGATED in nginx) | \
          cognito={} | client={} | login={} | social={}",
-        state.cfg.cognito_endpoint,
+        cognito_endpoint(&settings),
         settings.client_id,
         global_login(&settings),
         social_state(&settings)
@@ -3338,6 +3374,22 @@ fn main() {
     if settings.client_id.is_empty() {
         eprintln!(
             "[bb-auth] WARNING: gate.client_id names no app client, so NO LOGIN CAN COMPLETE              (every id_token is refused for its audience). Set it with: bb-auth-adm settings              set --client-id <app client id>"
+        );
+    }
+    // The other two that stop a login before it starts, said as loudly and for the same
+    // reason: a package creates this file with none of them, so a first install is expected
+    // to meet these lines, and every one of them names the command that ends it.
+    if settings.issuer.is_empty() {
+        eprintln!(
+            "[bb-auth] WARNING: gate.issuer names no Cognito user pool, so NO TOKEN CAN BE \
+             VALIDATED. Set it with: bb-auth-adm settings set --issuer <issuer url>"
+        );
+    }
+    if settings.authorized_hosts.is_empty() {
+        eprintln!(
+            "[bb-auth] WARNING: gate.authorized_hosts is empty, so EVERY post-login redirect \
+             is refused and every login lands back on the sign-in page. Set it with: \
+             bb-auth-adm settings set --authorized-hosts <host,host>"
         );
     }
     // Held only for the banner. Dropped before the workers start, so nothing below this line
@@ -3354,19 +3406,19 @@ fn main() {
     // fatal would turn a typo in a file into a boot loop that `--check-access` never saw,
     // because `--check-access` has no hosts list to check against.
     {
+        let hosts = state.settings.read().unwrap().authorized_hosts.clone();
         let access = state.access.read().unwrap();
         let stray: Vec<String> = access
             .apps
             .iter()
             .filter_map(|a| {
                 let u = a.login_url.as_deref()?;
-                (!rd_url_allowed(u, &state.cfg.authorized_hosts))
-                    .then(|| format!("{}: {u}", a.name))
+                (!rd_url_allowed(u, &hosts)).then(|| format!("{}: {u}", a.name))
             })
             .collect();
         if !stray.is_empty() {
             eprintln!(
-                "[bb-auth] WARNING: login_url outside BB_AUTH_AUTHORIZED_HOSTS, so a 401 and a \
+                "[bb-auth] WARNING: login_url outside gate.authorized_hosts, so a 401 and a \
                  logout can send a browser off the estate [{}]",
                 stray.join(", ")
             );
@@ -4013,20 +4065,30 @@ mod tests {
         assert_eq!(cookie_value("", "bb_session"), None);
     }
 
-    /// Only two fields matter to `build_cookie`; the rest are placeholders so the literal
-    /// compiles.
-    fn cookie_cfg(domain: Option<&str>) -> Config {
+    /// Only the cookie's name matters to `build_cookie` now; the rest are placeholders so
+    /// the literal compiles. Its *domain* is in the settings beside it: see `cookie_settings`.
+    fn cookie_cfg() -> Config {
         Config {
             listen: "127.0.0.1:4181".to_string(),
             hmac_keys: keys_one(),
-            issuer: "https://issuer.invalid".to_string(),
             cookie_name: "bb_session".to_string(),
-            cookie_domain: domain.map(str::to_string),
-            authorized_hosts: bb_hosts(),
             original_url_header: "X-Original-URL".to_string(),
             workers: 1,
-            cognito_endpoint: "https://issuer.invalid/".to_string(),
         }
+    }
+
+    /// Compiled settings carrying just a cookie domain, which is the other half of what
+    /// `build_cookie` reads.
+    fn cookie_settings(domain: Option<&str>) -> Settings {
+        bb_auth_core::compile_settings(&bb_auth_core::SettingsFile {
+            version: bb_auth_core::SETTINGS_VERSION,
+            gate: bb_auth_core::GateSettings {
+                cookie_domain: domain.unwrap_or_default().to_string(),
+                ..Default::default()
+            },
+            ..Default::default()
+        })
+        .unwrap()
     }
 
     /// The line a single, estate-wide logout endpoint stands on: a browser matches a
@@ -4036,9 +4098,10 @@ mod tests {
     /// logout reports success, and every other host stays signed in.
     #[test]
     fn clearing_a_cookie_targets_the_same_cookie_it_minted() {
-        let cfg = cookie_cfg(Some(".badbat75.com"));
-        let minted = build_cookie(&cfg, "bb1.k1.9999999999.ZWI.", 2_592_000);
-        let cleared = build_cookie(&cfg, "", 0);
+        let cfg = cookie_cfg();
+        let st = cookie_settings(Some(".badbat75.com"));
+        let minted = build_cookie(&cfg, &st, "bb1.k1.9999999999.ZWI.", 2_592_000);
+        let cleared = build_cookie(&cfg, &st, "", 0);
         for attr in [
             "bb_session=",
             "Path=/",
@@ -4055,9 +4118,9 @@ mod tests {
 
         // Host-only deployment (no cookie domain): neither carries a Domain, so the two
         // still address one cookie. What must never happen is one of them carrying it.
-        let host_only = cookie_cfg(None);
-        assert!(!build_cookie(&host_only, "v", 60).contains("Domain"));
-        assert!(!build_cookie(&host_only, "", 0).contains("Domain"));
+        let host_only = cookie_settings(None);
+        assert!(!build_cookie(&cfg, &host_only, "v", 60).contains("Domain"));
+        assert!(!build_cookie(&cfg, &host_only, "", 0).contains("Domain"));
     }
 
     #[test]
@@ -4088,12 +4151,21 @@ mod tests {
     }
 
     /// The usual deployment: the apex plus every subdomain, enumerated.
+    /// The estate these tests are set on. One list, because the hosts are a setting now and
+    /// a fixture that compiled them separately from the one it writes into a settings file
+    /// would be testing two estates that happen to agree.
+    const BB_HOSTS: [&str; 2] = ["badbat75.com", "*.badbat75.com"];
     fn bb_hosts() -> Vec<UrlPattern> {
-        ["badbat75.com", "*.badbat75.com"]
+        BB_HOSTS
             .iter()
-            .map(|h| compile_host_pattern(h).unwrap())
+            .map(|h| bb_auth_core::compile_host_pattern(h).unwrap())
             .collect()
     }
+    /// The pool the fixture token was minted by, and therefore the only issuer that can
+    /// validate it. A setting now, so every fixture that reaches a token or renders a page
+    /// carries it.
+    const TEST_ISSUER: &str =
+        "https://cognito-idp.eu-central-1.amazonaws.com/eu-central-1_TESTPOOL";
     const LOGIN: &str = "https://login.badbat75.com/";
     /// The two OAuth endpoints `social_settings`'s domain derives, spelled out where a page
     /// test needs them without a settings file in hand.
@@ -4102,14 +4174,6 @@ mod tests {
     const CALLER: &str = "https://search.badbat75.com";
 
     // --- the gate's own pages -----------------------------------------------
-
-    /// The environment half of a page: the pool's own endpoint, and nothing about app
-    /// clients, which now all come from the settings file.
-    fn page_cfg() -> Config {
-        let mut cfg = cookie_cfg(None);
-        cfg.cognito_endpoint = "https://cognito-idp.eu-central-1.amazonaws.com/".to_string();
-        cfg
-    }
 
     /// Compiled settings that enable the given social buttons, which is what decides whether
     /// the sign-in page offers any: the env group only says what the pool federates.
@@ -4124,6 +4188,7 @@ mod tests {
         bb_auth_core::compile_settings(&bb_auth_core::SettingsFile {
             version: bb_auth_core::SETTINGS_VERSION,
             gate: bb_auth_core::GateSettings {
+                issuer: TEST_ISSUER.to_string(),
                 client_id: "email-client".to_string(),
                 oauth_domain: domain.to_string(),
                 social_callback_url: if domain.is_empty() {
@@ -4147,10 +4212,16 @@ mod tests {
         .unwrap()
     }
 
-    /// Compiled settings with only the `ui` section set, which is all these pages read.
+    /// Compiled settings with only the `ui` section set, which is all these pages read of
+    /// their own, plus the pool: the endpoint the page's script talks to is derived from it,
+    /// so a page fixture without one renders a page that can reach nothing.
     fn ui_settings(ui: bb_auth_core::UiSettings) -> Settings {
         bb_auth_core::compile_settings(&bb_auth_core::SettingsFile {
             version: bb_auth_core::SETTINGS_VERSION,
+            gate: bb_auth_core::GateSettings {
+                issuer: TEST_ISSUER.to_string(),
+                ..Default::default()
+            },
             ui,
             ..Default::default()
         })
@@ -4175,9 +4246,7 @@ mod tests {
 
     #[test]
     fn the_login_page_is_whole_self_contained_and_escapes_its_one_request_value() {
-        let cfg = page_cfg();
         let page = login_page(
-            &cfg,
             &settings_with_buttons(&[("Google", "google-client"), ("Okta", "okta-client")]),
             "https://search.badbat75.com/?q=a\"b",
             "n0nce",
@@ -4224,12 +4293,9 @@ mod tests {
     /// on Amazon's page, one redirect from somebody who was only trying to sign in.
     #[test]
     fn every_button_carries_its_own_app_client() {
-        let cfg = page_cfg();
-
         // Two providers, two app clients: the arrangement a single client id could not
         // express, and the reason the audience sits on the row rather than on the file.
         let page = login_page(
-            &cfg,
             &settings_with_buttons(&[("Google", "google-client"), ("Okta", "okta-client")]),
             "",
             "n0nce",
@@ -4251,7 +4317,6 @@ mod tests {
 
         // File order is display order, because it is the operator's order.
         let both = login_page(
-            &cfg,
             &settings_with_buttons(&[("Okta", "okta-client"), ("Google", "google-client")]),
             "",
             "n0nce",
@@ -4266,7 +4331,7 @@ mod tests {
         // No hosted-UI domain, which is the only way a file can say "no social sign-in":
         // `compile_settings` refuses buttons without one, so there is one such state and not
         // two that look different.
-        let page = login_page(&page_cfg(), &social_settings("", &[]), "", "n0nce");
+        let page = login_page(&social_settings("", &[]), "", "n0nce");
         assert!(!page.contains("data-idp="), "{page}");
         assert!(!page.contains(r#"class="divider""#), "{page}");
         assert!(page.contains(r#"var AUTHORIZE_URL = "";"#), "{page}");
@@ -4297,7 +4362,6 @@ mod tests {
         assert!(rd_url_allowed("https://search.badbat75.com/x", &hosts));
         assert!(!rd_url_allowed("https://evil.example.com/", &hosts));
         let page = login_page(
-            &page_cfg(),
             &ui_settings(bb_auth_core::UiSettings::default()),
             "",
             "n0nce",
@@ -4314,10 +4378,9 @@ mod tests {
             theme: "dark".to_string(),
         };
         let settings = ui_settings(ui);
-        let cfg = page_cfg();
         for page in [
-            login_page(&cfg, &settings, "", "n0nce"),
-            callback_page(&cfg, TOKEN_URL, CALLBACK_URL, &settings, "n0nce"),
+            login_page(&settings, "", "n0nce"),
+            callback_page(TOKEN_URL, CALLBACK_URL, &settings, "n0nce"),
         ] {
             let style = page.find("<style ").expect("the built-in stylesheet");
             let tokens = page.find("--accent:").expect("the palette");
@@ -4348,7 +4411,6 @@ mod tests {
     #[test]
     fn the_callback_page_names_the_registered_redirect_uri_and_no_app_client() {
         let page = callback_page(
-            &page_cfg(),
             TOKEN_URL,
             CALLBACK_URL,
             &ui_settings(bb_auth_core::UiSettings::default()),
@@ -4536,7 +4598,7 @@ mod tests {
         assert!(!rd_url_allowed("https://badbat75.com.evil.com/", &h));
 
         // The apex is NOT implied by the wildcard — it has to be listed.
-        let only_sub = vec![compile_host_pattern("*.badbat75.com").unwrap()];
+        let only_sub = vec![bb_auth_core::compile_host_pattern("*.badbat75.com").unwrap()];
         assert!(rd_url_allowed("https://mcp.badbat75.com/", &only_sub));
         assert!(!rd_url_allowed("https://badbat75.com/", &only_sub));
     }
@@ -4802,11 +4864,12 @@ mod tests {
             "bb-auth-it".to_string(),
             DecodingKey::from_jwk(&set.keys[0]).expect("fixture JWK becomes a key"),
         );
-        let mut cfg = cookie_cfg(None);
-        cfg.issuer =
-            "https://cognito-idp.eu-central-1.amazonaws.com/eu-central-1_TESTPOOL".to_string();
+        // The issuer these keys belong to is the settings', so the cache is seeded with
+        // whatever the fixture settings name: a cache that disagreed with them would trigger
+        // a refetch against a pool no test has a server for.
+        let issuer = settings.issuer.clone();
         State {
-            cfg,
+            cfg: cookie_cfg(),
             access: RwLock::new(gate_access("token")),
             settings: RwLock::new(settings),
             #[cfg(unix)]
@@ -4816,6 +4879,7 @@ mod tests {
             jwks: RwLock::new(JwksCache {
                 keys,
                 last_refresh: Instant::now(),
+                issuer,
             }),
             jwks_refresh: Mutex::new(()),
         }
@@ -4839,6 +4903,14 @@ mod tests {
         // logout expects the configured page rather than the gate's own default.
         if file.gate.login_url.is_empty() {
             file.gate.login_url = LOGIN.to_string();
+        }
+        // And so are the pool and the estate, which between them decide whether a token
+        // validates at all and whether a login may land anywhere but the sign-in page.
+        if file.gate.issuer.is_empty() {
+            file.gate.issuer = TEST_ISSUER.to_string();
+        }
+        if file.gate.authorized_hosts.is_empty() {
+            file.gate.authorized_hosts = BB_HOSTS.iter().map(|h| h.to_string()).collect();
         }
         bb_auth_core::compile_settings(&file).unwrap()
     }
@@ -5092,9 +5164,7 @@ mod tests {
 
     #[test]
     fn the_sign_in_page_carries_its_policy_and_the_nonce_it_names() {
-        let mut st = token_state(gate_settings("{}"));
-        st.cfg = page_cfg();
-        let base = serve(st);
+        let base = serve(token_state(gate_settings("{}")));
         let mut r = agent().get(format!("{base}/auth/login")).call().unwrap();
         assert_eq!(r.status(), 200);
         for (k, v) in PAGE_SECURITY_HEADERS {
@@ -5158,9 +5228,7 @@ mod tests {
             brand_name: "BadBat75".to_string(),
             theme: "dark".to_string(),
         };
-        let mut st = token_state(ui_settings(ui));
-        st.cfg = page_cfg();
-        let base = serve(st);
+        let base = serve(token_state(ui_settings(ui)));
         let mut r = agent().get(format!("{base}/auth/login")).call().unwrap();
         assert_eq!(r.status(), 200);
         let csp = r
@@ -5211,9 +5279,11 @@ mod tests {
         // The default that makes the setting optional: since the gate serves the sign-in page
         // itself, naming one is how an operator points somewhere ELSE. A path and not a URL,
         // because this process knows neither its own scheme nor its own host.
-        let mut file: bb_auth_core::SettingsFile =
-            serde_json::from_str(r#"{ "version": 2, "gate": { "client_id": "testclient" } }"#)
-                .unwrap();
+        let mut file: bb_auth_core::SettingsFile = serde_json::from_str(&format!(
+            r#"{{ "version": {}, "gate": {{ "client_id": "testclient" }} }}"#,
+            bb_auth_core::SETTINGS_VERSION
+        ))
+        .unwrap();
         file.gate.login_url = String::new();
         let settings = bb_auth_core::compile_settings(&file).unwrap();
         assert_eq!(global_login(&settings), "/auth/login");

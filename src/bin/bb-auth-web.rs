@@ -194,16 +194,18 @@
 use bb_auth_core::{
     add_api_key, add_application, add_denied, add_scope, add_user, add_user_email, add_user_group,
     app_mut, app_pos, compile_app_client_id, compile_asset_url, compile_brand_name,
-    compile_login_url, compile_oauth_domain, csp_hash, decide, default_settings_path, edit_urls,
-    format_date, group_ref, key_expiry, key_mut, move_scope, norm_email, now, open_access_file,
-    open_settings_file, page_csp, parse_exclusion, remove_api_key, remove_application,
-    remove_denied, remove_scope, remove_user, remove_user_email, remove_user_group,
-    rename_application, rename_scope, request_site, request_url, rotate_api_key, scope_mut,
-    scope_pos, sha256_hex, shadowing_scope, social_idp_label, stylesheet_link, user_group_mut,
-    user_group_refs, user_label, user_pos, user_refs, version_line, Access, AccessFile,
-    AccessWrite, ApiKeySpec, AppSpec, Decision, RequestSite, ScopeSpec, SealedKey, SettingsFile,
-    SettingsWrite, SocialButtonSpec, Subject, UiTheme, UserSpec, WiredButton, Written, BASE_CSS,
-    IDENTITY_HEADER, PAGE_SECURITY_HEADERS, SOCIAL_IDPS, THEME_CSS,
+    compile_cookie_domain, compile_host_pattern, compile_issuer, compile_login_url,
+    compile_oauth_domain, cookie_domain_covers, csp_hash, decide, default_settings_path, edit_urls,
+    format_date, group_ref, guarded_changes, key_expiry, key_mut, move_scope, norm_email, now,
+    open_access_file, open_settings_file, page_csp, parse_exclusion, remove_api_key,
+    remove_application, remove_denied, remove_scope, remove_user, remove_user_email,
+    remove_user_group, rename_application, rename_scope, request_site, request_url, rotate_api_key,
+    scope_mut, scope_pos, sha256_hex, shadowing_scope, social_idp_label, stylesheet_link,
+    user_group_mut, user_group_refs, user_label, user_pos, user_refs, version_line, Access,
+    AccessFile, AccessWrite, ApiKeySpec, AppSpec, Decision, GateSettings, GuardedSetting,
+    RequestSite, ScopeSpec, SealedKey, SettingsFile, SettingsWrite, SocialButtonSpec, Subject,
+    UiTheme, UserSpec, WiredButton, Written, BASE_CSS, IDENTITY_HEADER, PAGE_SECURITY_HEADERS,
+    SOCIAL_IDPS, THEME_CSS,
 };
 use maud::{html, Markup, PreEscaped, DOCTYPE};
 use std::io::Read;
@@ -636,6 +638,26 @@ enum K {
     ColAudience,
     SocialProviders,
     SocialProvidersHelp,
+    Issuer,
+    IssuerHelp,
+    IssuerNeeded,
+    CookieDomain,
+    CookieDomainHelp,
+    AuthorizedHosts,
+    AuthorizedHostsHelp,
+    AuthorizedHostsNeeded,
+    ConfirmTitle,
+    ConfirmLede,
+    ConfirmSafety,
+    ConfirmSave,
+    ColSetting,
+    ColNow,
+    ColAfter,
+    RiskIssuer,
+    RiskClientId,
+    RiskLoginUrl,
+    RiskCookieDomain,
+    RiskAuthorizedHosts,
     Admins,
     AdminsHelp,
     AdminsKeepYourself,
@@ -770,6 +792,123 @@ fn t(lang: Lang, key: K) -> &'static str {
             lang,
             "One per line, matched against the token's providerName. Empty means any federated provider.",
             "Uno per riga, confrontati con il providerName del token. Vuoto significa qualsiasi provider federato.",
+        ),
+        K::Issuer => m(lang, "User pool (issuer)", "User pool (issuer)"),
+        K::IssuerHelp => m(
+            lang,
+            "The Cognito user pool this deployment trusts: every id_token is checked against \
+             its iss and signed by its keys. It is also the one pool the app clients below \
+             can belong to.",
+            "Lo user pool Cognito di cui questo deployment si fida: ogni id_token viene \
+             verificato contro il suo iss ed è firmato dalle sue chiavi. È anche l'unico pool \
+             a cui gli app client qui sotto possono appartenere.",
+        ),
+        K::IssuerNeeded => m(
+            lang,
+            "a user pool is required: with none, no token can be validated and no login can \
+             complete",
+            "serve uno user pool: senza, nessun token può essere validato e nessun accesso \
+             può concludersi",
+        ),
+        K::CookieDomain => m(lang, "Cookie domain", "Dominio del cookie"),
+        K::CookieDomainHelp => m(
+            lang,
+            "The domain the session cookie is sent to, such as .example.com, which is what \
+             makes one login cover every service behind the gate. Empty binds the session to \
+             a single host. Changing it does not sign anybody out: it does something worse, \
+             so this page asks first.",
+            "Il dominio a cui viene inviato il cookie di sessione, ad esempio .example.com, \
+             che è ciò che fa valere un solo accesso per tutti i servizi dietro il gate. \
+             Vuoto lega la sessione a un host solo. Cambiarlo non disconnette nessuno: fa \
+             qualcosa di peggio, quindi questa pagina chiede prima.",
+        ),
+        K::AuthorizedHosts => m(lang, "Authorized hosts", "Host autorizzati"),
+        K::AuthorizedHostsHelp => m(
+            lang,
+            "One host per line, the only places a browser may be sent after signing in. \
+             Wildcards are allowed (*.example.com), and the apex has to be listed on its own \
+             because *.example.com does not match example.com. Every one of them must be \
+             reachable by the cookie domain above.",
+            "Un host per riga, gli unici posti in cui un browser può essere mandato dopo \
+             l'accesso. I wildcard sono ammessi (*.example.com) e il dominio nudo va elencato \
+             a parte, perché *.example.com non corrisponde a example.com. Ognuno deve essere \
+             raggiungibile dal dominio del cookie qui sopra.",
+        ),
+        K::AuthorizedHostsNeeded => m(
+            lang,
+            "at least one host is required: with none, every post-login redirect is refused \
+             and everybody lands back on the sign-in page",
+            "serve almeno un host: senza, ogni redirect dopo l'accesso viene rifiutato e \
+             tutti tornano alla pagina di accesso",
+        ),
+        K::ConfirmTitle => m(
+            lang,
+            "This can stop people getting in",
+            "Questa modifica può impedire l'accesso",
+        ),
+        K::ConfirmLede => m(
+            lang,
+            "Nothing has been saved. Read what each change costs, then confirm it, or go back \
+             and edit the value below.",
+            "Non è stato salvato niente. Leggi che cosa comporta ogni modifica, poi confermala \
+             oppure torna sul campo qui sotto e correggilo.",
+        ),
+        K::ConfirmSafety => m(
+            lang,
+            "None of this invalidates a session cookie, so your own login survives the change \
+             and you can put it back. If it does not, bb-auth-adm over SSH is the way back.",
+            "Niente di tutto questo invalida un cookie di sessione, quindi il tuo accesso \
+             sopravvive alla modifica e puoi rimetterla com'era. Se non bastasse, la via di \
+             ritorno è bb-auth-adm via SSH.",
+        ),
+        K::ConfirmSave => m(lang, "Confirm and save", "Conferma e salva"),
+        K::ColSetting => m(lang, "setting", "impostazione"),
+        K::ColNow => m(lang, "now", "adesso"),
+        K::ColAfter => m(lang, "after saving", "dopo il salvataggio"),
+        K::RiskIssuer => m(
+            lang,
+            "Every id_token is checked against this pool's iss and its signing keys. Point it \
+             at the wrong pool and no login completes. On reload the gate fetches the new \
+             pool's keys first, and keeps the old pool if they do not answer.",
+            "Ogni id_token viene verificato contro l'iss di questo pool e le sue chiavi di \
+             firma. Puntalo al pool sbagliato e nessun accesso si conclude. Al reload il gate \
+             scarica prima le chiavi del nuovo pool, e se non rispondono tiene il vecchio.",
+        ),
+        K::RiskClientId => m(
+            lang,
+            "The app client the email sign-in runs through, and one of the audiences a token \
+             is accepted for. Wrong, and every id_token is refused for its aud.",
+            "L'app client con cui gira l'accesso via email, e una delle audience per cui un \
+             token viene accettato. Sbagliato, e ogni id_token viene rifiutato per il suo aud.",
+        ),
+        K::RiskLoginUrl => m(
+            lang,
+            "Where a 401 sends a browser. Wrong, and everybody who is not signed in lands on \
+             a page that is not there.",
+            "Dove un 401 manda il browser. Sbagliato, e chiunque non abbia una sessione \
+             finisce su una pagina che non esiste.",
+        ),
+        K::RiskCookieDomain => m(
+            lang,
+            "This one does something worse than shut a door. Every session cookie already \
+             issued keeps the OLD domain, so it stays valid until it expires and the logout \
+             can no longer clear it: a logout that silently succeeds at nothing, for everybody \
+             who signed in before this save. Putting the old value back makes those cookies \
+             clearable again.",
+            "Questa fa qualcosa di peggio che chiudere una porta. Ogni cookie di sessione già \
+             emesso conserva il dominio VECCHIO, quindi resta valido fino alla scadenza e il \
+             logout non riesce più a cancellarlo: un logout che riesce in silenzio senza fare \
+             niente, per chiunque abbia fatto accesso prima di questo salvataggio. Rimettere \
+             il valore di prima rende di nuovo cancellabili quei cookie.",
+        ),
+        K::RiskAuthorizedHosts => m(
+            lang,
+            "A host taken off this list can no longer be redirected to after a login, so \
+             anyone signing in for it lands back on the sign-in page instead. Adding one is \
+             not asked about; only removing is.",
+            "Un host tolto da questa lista non può più essere la destinazione dopo un \
+             accesso, quindi chi entra per quell'host torna alla pagina di accesso. \
+             Aggiungerne uno non viene chiesto; solo toglierne.",
         ),
         K::Admins => m(lang, "Administrators", "Amministratori"),
         K::AdminsHelp => m(
@@ -4465,6 +4604,13 @@ struct ConfigForm {
     client_id: String,
     /// `gate.login_url`. Empty = the gate's own `/auth/login`.
     login_url: String,
+    /// `gate.issuer`, the Cognito user pool. This form refuses to write an empty one, for the
+    /// reason it refuses an empty `client_id`: both mean no login can complete.
+    issuer: String,
+    /// `gate.cookie_domain`. Empty = a host-only cookie.
+    cookie_domain: String,
+    /// `gate.authorized_hosts`, one per line.
+    hosts: String,
     /// `gate.oauth_domain`, the hosted UI's bare host. Empty = no social sign-in.
     domain: String,
     /// `gate.social_callback_url`. Empty = no social sign-in.
@@ -4490,6 +4636,9 @@ impl ConfigForm {
             providers: doc.gate.social_providers.join("\n"),
             client_id: doc.gate.client_id.clone(),
             login_url: doc.gate.login_url.clone(),
+            issuer: doc.gate.issuer.clone(),
+            cookie_domain: doc.gate.cookie_domain.clone(),
+            hosts: doc.gate.authorized_hosts.join("\n"),
             domain: doc.gate.oauth_domain.clone(),
             callback: doc.gate.social_callback_url.clone(),
             // A bare-name entry is the pre-2 shape, which `compile_settings` refuses; it is
@@ -4529,6 +4678,9 @@ impl ConfigForm {
             providers: f.get("providers").to_string(),
             client_id: f.get("client_id").to_string(),
             login_url: f.get("login_url").to_string(),
+            issuer: f.get("issuer").to_string(),
+            cookie_domain: f.get("cookie_domain").to_string(),
+            hosts: f.get("hosts").to_string(),
             domain: f.get("domain").to_string(),
             callback: f.get("callback").to_string(),
             // The page says which providers it drew a row for, and this keeps the ones whose
@@ -4594,6 +4746,40 @@ impl ConfigForm {
         if !self.login_url.trim().is_empty() {
             compile_login_url(&self.login_url).map_err(|e| Refusal::on("login_url", &e))?;
         }
+        // The pool, held to the same standard as the app client above and refused empty for
+        // the same reason: this form should not be able to write a deployment where no login
+        // can complete. A fresh install has no pool yet and no way to reach this page either,
+        // so the first one is set with `bb-auth-adm` over SSH.
+        let issuer = compile_issuer(&self.issuer).map_err(|e| Refusal::on("issuer", &e))?;
+        if issuer.is_empty() {
+            return Err(Refusal::on("issuer", t(lang, K::IssuerNeeded)));
+        }
+        let cookie_domain = compile_cookie_domain(&self.cookie_domain)
+            .map_err(|e| Refusal::on("cookie_domain", &e))?;
+        let hosts = Self::lines(&self.hosts);
+        if hosts.is_empty() {
+            return Err(Refusal::on("hosts", t(lang, K::AuthorizedHostsNeeded)));
+        }
+        for h in &hosts {
+            compile_host_pattern(h).map_err(|e| Refusal::on("hosts", &e))?;
+        }
+        // The cross-check the library makes on the way to disk, made here as well so that it
+        // names the field an operator has to go back to. The two inputs are neighbours on
+        // this page precisely because of it.
+        if !cookie_domain.is_empty() {
+            if let Some(stray) = hosts
+                .iter()
+                .find(|h| !cookie_domain_covers(&cookie_domain, h))
+            {
+                return Err(Refusal::on(
+                    "hosts",
+                    format!(
+                        "'{stray}' is outside cookie_domain '{cookie_domain}': a login would \
+                         redirect there and the browser would send no session cookie"
+                    ),
+                ));
+            }
+        }
         compile_oauth_domain(&self.domain).map_err(|e| Refusal::on("domain", &e))?;
         compile_asset_url("social_callback_url", &self.callback)
             .map_err(|e| Refusal::on("callback", &e))?;
@@ -4629,6 +4815,9 @@ impl ConfigForm {
         doc.gate.social_providers = Self::lines(&self.providers);
         doc.gate.client_id = client_id;
         doc.gate.login_url = self.login_url.trim().to_string();
+        doc.gate.issuer = issuer;
+        doc.gate.cookie_domain = cookie_domain;
+        doc.gate.authorized_hosts = hosts;
         doc.gate.oauth_domain = self.domain.trim().to_string();
         doc.gate.social_callback_url = self.callback.trim().to_string();
         doc.gate.social_buttons = self
@@ -4650,12 +4839,116 @@ impl ConfigForm {
     }
 }
 
-fn page_config(v: &View, f: &ConfigForm, err: Option<&Refusal>) -> Markup {
+/// A save held for confirmation: the guarded settings this form would change, each with what
+/// it is going from and to.
+///
+/// It is a type rather than a list of tuples because the page renders it AND the hidden field
+/// is built from it, and those two have to be about the same values. A confirmation that
+/// showed one thing and authorised another would be a worse guard than none at all.
+struct Confirm {
+    /// `(which, before, after)`, in [`guarded_changes`]'s order.
+    changes: Vec<(GuardedSetting, String, String)>,
+    /// What the hidden field carries and what the next `POST` is checked against: the sha256
+    /// of the values being confirmed, rather than the values themselves. One field to check
+    /// instead of five, and no list has to survive a round trip through an attribute.
+    ///
+    /// It binds a confirmation to exactly the change it was shown for: edit the field again
+    /// on the confirmation page and the token no longer matches, so the page asks again about
+    /// the new value instead of writing it on the strength of an answer about the old one.
+    token: String,
+}
+
+impl Confirm {
+    /// What `new` changes about `old` that is worth stopping for, or `None` for a save that
+    /// takes nothing away.
+    fn of(old: &GateSettings, new: &GateSettings) -> Option<Confirm> {
+        let changes: Vec<(GuardedSetting, String, String)> = guarded_changes(old, new)
+            .into_iter()
+            .map(|c| (c, guarded_value(c, old), guarded_value(c, new)))
+            .collect();
+        if changes.is_empty() {
+            return None;
+        }
+        let token = sha256_hex(
+            &changes
+                .iter()
+                .map(|(c, _, after)| format!("{}={after}", c.field()))
+                .collect::<Vec<_>>()
+                .join("\n"),
+        );
+        Some(Confirm { changes, token })
+    }
+}
+
+/// One guarded setting's value, spelled the one way the page shows it and the token is built
+/// from. Both come through here, so the two cannot disagree.
+fn guarded_value(which: GuardedSetting, gate: &GateSettings) -> String {
+    match which {
+        GuardedSetting::Issuer => gate.issuer.trim().to_string(),
+        GuardedSetting::ClientId => gate.client_id.trim().to_string(),
+        GuardedSetting::LoginUrl => gate.login_url.trim().to_string(),
+        GuardedSetting::CookieDomain => gate.cookie_domain.trim().to_string(),
+        GuardedSetting::AuthorizedHosts => gate.authorized_hosts.join(" "),
+    }
+}
+
+/// What each guarded setting costs when it is wrong, in the reader's language. The library
+/// says *which* settings are guarded, because both editors have to agree on that; the
+/// sentence is this program's, because it is addressed to whoever is looking at the form.
+fn guarded_risk(which: GuardedSetting) -> K {
+    match which {
+        GuardedSetting::Issuer => K::RiskIssuer,
+        GuardedSetting::ClientId => K::RiskClientId,
+        GuardedSetting::LoginUrl => K::RiskLoginUrl,
+        GuardedSetting::CookieDomain => K::RiskCookieDomain,
+        GuardedSetting::AuthorizedHosts => K::RiskAuthorizedHosts,
+    }
+}
+
+fn page_config(
+    v: &View,
+    f: &ConfigForm,
+    err: Option<&Refusal>,
+    confirm: Option<&Confirm>,
+) -> Markup {
     let about = |name| err.is_some_and(|e| e.is(name));
     let days = f.ttl.trim().parse::<u64>().unwrap_or(0) / 86_400;
     html! {
         h1 { (v.t(K::Config)) }
         p class="lede" { (v.t(K::ConfigIntro)) }
+        // A save that takes one of the five guarded settings away is SHOWN before it is
+        // written, and the form below is re-rendered with the values that are waiting, so
+        // the answer to "no, not that" is to edit the field rather than to start again.
+        @if let Some(c) = confirm {
+            div class="panel warn" {
+                h2 class="tight" { (v.t(K::ConfirmTitle)) }
+                p class="lede" { (v.t(K::ConfirmLede)) }
+                table {
+                    thead { tr {
+                        th { (v.t(K::ColSetting)) }
+                        th { (v.t(K::ColNow)) }
+                        th { (v.t(K::ColAfter)) }
+                    } }
+                    tbody {
+                        @for (which, before, after) in &c.changes {
+                            tr {
+                                td data-label=(v.t(K::ColSetting)) {
+                                    div class="mono" { (which.field()) }
+                                    span class="hint" { (v.t(guarded_risk(*which))) }
+                                }
+                                td class="mono" data-label=(v.t(K::ColNow)) {
+                                    (if before.is_empty() { "\u{2014}" } else { before })
+                                }
+                                td class="mono" data-label=(v.t(K::ColAfter)) {
+                                    (if after.is_empty() { "\u{2014}" } else { after })
+                                }
+                            }
+                        }
+                    }
+                }
+                p class="muted" { (v.t(K::ConfirmSafety)) }
+            }
+        }
         // FOUR BOXES, ONE FORM. The grouping is by what a setting decides, not by which
         // section of the file it lands in: an operator asking "who gets in, and for how
         // long" should not have to read past what the application receives to find out, and
@@ -4699,9 +4992,21 @@ fn page_config(v: &View, f: &ConfigForm, err: Option<&Refusal>) -> Markup {
                 h2 class="tight" { (section_heading(v.t(K::ConfigSignIn), "gate")) }
                 // Where people sign in at all, first: it is the page the two below only
                 // add a way into.
+                // The pool first: everything else in this box is a way into it.
+                (text_field(v.t(K::Issuer), "issuer", &f.issuer,
+                            "https://cognito-idp.eu-central-1.amazonaws.com/eu-central-1_xxxxxxxxx",
+                            Some(v.t(K::IssuerHelp)), about("issuer")))
                 (text_field(v.t(K::GlobalLoginUrl), "login_url", &f.login_url,
                             "https://auth.example.com/auth/login",
                             Some(v.t(K::GlobalLoginUrlHelp)), about("login_url")))
+                // These two are neighbours because they are checked against each other: a
+                // host the cookie cannot reach is refused, and an operator told so has to be
+                // able to see both without scrolling.
+                (text_field(v.t(K::CookieDomain), "cookie_domain", &f.cookie_domain,
+                            ".example.com",
+                            Some(v.t(K::CookieDomainHelp)), about("cookie_domain")))
+                (urls_field(v.t(K::AuthorizedHosts), "hosts", &f.hosts,
+                            html! { (v.t(K::AuthorizedHostsHelp)) }, about("hosts")))
                 // Where the browser goes and where it comes back to, above the table of who
                 // it goes as: both are one per deployment, and both are Amazon's to agree
                 // with, so they read as the frame the rows sit in.
@@ -4752,7 +5057,11 @@ fn page_config(v: &View, f: &ConfigForm, err: Option<&Refusal>) -> Markup {
                     span class="hint" { (v.t(K::DefaultThemeHelp)) }
                 }
             }
-        }, v.t(K::Save), false))
+            @if let Some(c) = confirm {
+                input type="hidden" name="confirm" value=(c.token);
+            }
+        }, if confirm.is_some() { v.t(K::ConfirmSave) } else { v.t(K::Save) },
+           confirm.is_some()))
         p class="muted" { (v.t(K::ConfigHot)) }
     }
 }
@@ -5017,18 +5326,30 @@ fn mutate(v: &View, form: &Form) -> Outcome {
     // needs the first and has no use for the second.
     if v.at == Route::Config {
         let f = ConfigForm::read(form);
-        let r = (|| -> Result<(), Refusal> {
+        let r = (|| -> Result<Option<Confirm>, Refusal> {
             let (mut doc, _) = open_settings_file(path)?;
+            // What the file says now, kept before the form touches it: the five guarded
+            // settings are compared against this and not against whatever the form mentions.
+            let before = doc.gate.clone();
             f.apply(&mut doc, v.admin.unwrap_or_default(), v.lang)?;
+            // A save that takes one of the five away is shown and held rather than written,
+            // until a `POST` comes back carrying the token the shown page named. It is not an
+            // error, so it is not a 400: nothing is wrong with the form, it is a step.
+            if let Some(c) = Confirm::of(&before, &doc.gate) {
+                if form.get("confirm").trim() != c.token {
+                    return Ok(Some(c));
+                }
+            }
             // The library is the only door here too: `prepare` compiles the exact bytes with
             // the parser the gate uses, `commit` writes the bytes it compiled.
             SettingsWrite::prepare(&doc)?.commit(path)?;
             audit(v.admin.unwrap_or("?"), "settings set", path);
-            Ok(())
+            Ok(None)
         })();
         return match r {
-            Ok(()) => Outcome::Done(Route::Config, Msg::SettingsSaved),
-            Err(e) => Outcome::Page(400, title, page_config(v, &f, Some(&e))),
+            Ok(None) => Outcome::Done(Route::Config, Msg::SettingsSaved),
+            Ok(Some(c)) => Outcome::Page(200, title, page_config(v, &f, None, Some(&c))),
+            Err(e) => Outcome::Page(400, title, page_config(v, &f, Some(&e), None)),
         };
     }
 
@@ -5868,6 +6189,14 @@ fn handle(mut req: Request, cfg: &Config) {
             header_value(&req, "Origin"),
             header_value(&req, "Host"),
         );
+        // The same fingerprint a `GET` renders, and for the same reason: whatever this POST
+        // answers with is a form somebody may submit again. It used to be empty, which made
+        // every page a POST produced a dead end: fix the field a refusal named, press Save,
+        // and the answer was a 409 about a file nobody else had touched. Nothing here has
+        // written yet, so these are the bytes the page about to be rendered was built from,
+        // which is exactly what `rev` is defined to be.
+        let raw = std::fs::read_to_string(edited_file(cfg, &at)).unwrap_or_default();
+        let rev = sha256_hex(&raw);
         let v = View {
             cfg,
             lang,
@@ -5877,7 +6206,7 @@ fn handle(mut req: Request, cfg: &Config) {
             admin: Some(&email),
             at: at.clone(),
             query: "",
-            rev: "",
+            rev: &rev,
             msg: None,
             identity: identity.clone(),
         };
@@ -5953,7 +6282,7 @@ fn handle(mut req: Request, cfg: &Config) {
     // administrator list is fixed.
     if at == Route::Config {
         let content = match open_settings_file(&cfg.settings_path) {
-            Ok((doc, _)) => page_config(&v, &ConfigForm::of(&doc), None),
+            Ok((doc, _)) => page_config(&v, &ConfigForm::of(&doc), None, None),
             Err(e) => page_file_error(&v, &e),
         };
         respond_page(req, 200, shell(&v, v.t(K::Config), content), &v.look);
@@ -6515,7 +6844,16 @@ mod tests {
     /// Written beside its access file under that file's own unique name rather than at the
     /// derived default, because the default is one `settings.json` per *directory* and every
     /// test here shares the temp directory. Tests run in parallel.
-    const SETTINGS: &str = r#"{ "version": 2, "gate": { "client_id": "email-client" },
+    /// The pool the fixture deployment belongs to. A constant because the fixture file and
+    /// every form post have to name the SAME one: a test that changed it by accident would be
+    /// answered by the confirmation page rather than by a save, which is correct behaviour and
+    /// a baffling test failure.
+    const TEST_ISSUER: &str = "https://cognito-idp.eu-central-1.amazonaws.com/eu-central-1_TEST";
+    const TEST_HOSTS: &str = "badbat75.com
+*.badbat75.com";
+    const SETTINGS: &str = r#"{ "version": 3, "gate": { "client_id": "email-client",
+        "issuer": "https://cognito-idp.eu-central-1.amazonaws.com/eu-central-1_TEST",
+        "authorized_hosts": ["badbat75.com", "*.badbat75.com"] },
         "web": { "admins": ["admin@x.com"] } }"#;
 
     fn settings_path(access_path: &str) -> String {
@@ -6618,6 +6956,34 @@ mod tests {
 
     /// Drive one `POST` exactly as [`handle`] does, minus the HTTP: parse the body, build
     /// the view, call [`mutate`], and turn the outcome into what a browser would see.
+    /// The token a held save renders into its hidden field, or `None` if this page is not
+    /// one. Read out of the HTML rather than recomputed, because that is what a browser does
+    /// and a test that recomputed it would agree with the code by construction.
+    fn confirm_token(html: &str) -> Option<String> {
+        const NEEDLE: &str = r#"name="confirm" value=""#;
+        let rest = &html[html.find(NEEDLE)? + NEEDLE.len()..];
+        Some(rest[..rest.find('"')?].to_string())
+    }
+
+    /// Save a settings form the way a person does: post it, and when the page comes back
+    /// asking about a guarded change, read its token and post again.
+    ///
+    /// Every settings test that writes goes through here, because that second post IS what
+    /// saving means on this page now. A test that skipped it would be exercising a save this
+    /// GUI does not have.
+    fn post_settings(cfg: &Config, sp: &str, over: &[(&str, &str)]) -> Got {
+        let first = post(cfg, Route::Config, &settings_fields(&rev_of(sp), over));
+        let held = match &first {
+            Got::Page(200, html) => confirm_token(html),
+            _ => None,
+        };
+        let Some(token) = held else { return first };
+        let rev = rev_of(sp);
+        let mut fields = settings_fields(&rev, over);
+        fields.push(("confirm", &token));
+        post(cfg, Route::Config, &fields)
+    }
+
     fn post(cfg: &Config, at: Route, fields: &[(&str, &str)]) -> Got {
         let v = view(cfg, at, "");
         let form = Form::parse(&body_of(fields));
@@ -6656,6 +7022,13 @@ mod tests {
             // deployment with none is one where no login can complete and this form refuses
             // to write that.
             ("client_id", "email-client"),
+            // The pool and the estate: guarded settings, so every save carries them
+            // unchanged and the confirmation step stays out of the way of tests that are
+            // about something else. `the_settings_page_asks_before_it_can_lock_anybody_out`
+            // is the one that changes them on purpose.
+            ("issuer", TEST_ISSUER),
+            ("cookie_domain", ""),
+            ("hosts", TEST_HOSTS),
             ("domain", ""),
             ("callback", ""),
             // The set the page says it drew a row for; a test that ticks one adds its own
@@ -6821,20 +7194,17 @@ mod tests {
         const EMAIL_AUD: &str = "9z8y7x6w5v4u3t2s1r0q9p8o7n";
         const GOOGLE_AUD: &str = "4f5g6h7j8k9l0m1n2p3q4r5s6t";
 
-        let got = post(
+        let got = post_settings(
             &cfg,
-            Route::Config,
-            &settings_fields(
-                &rev_of(&sp),
-                &[
-                    ("client_id", EMAIL_AUD),
-                    ("domain", "pool.auth.eu-central-1.amazoncognito.com"),
-                    ("callback", "https://auth.x.com/auth/callback"),
-                    ("idps", "Google MicrosoftPersonal"),
-                    ("idp-Google", "on"),
-                    ("aud-Google", GOOGLE_AUD),
-                ],
-            ),
+            &sp,
+            &[
+                ("client_id", EMAIL_AUD),
+                ("domain", "pool.auth.eu-central-1.amazoncognito.com"),
+                ("callback", "https://auth.x.com/auth/callback"),
+                ("idps", "Google MicrosoftPersonal"),
+                ("idp-Google", "on"),
+                ("aud-Google", GOOGLE_AUD),
+            ],
         );
         assert!(matches!(got, Got::Redirect(_)), "{got:?}");
         let (doc, s) = open_settings_file(&sp).unwrap();
@@ -6851,7 +7221,7 @@ mod tests {
         // it has rather than borrowing its neighbour's.
         let rev = rev_of(&sp);
         let v = view(&cfg, Route::Config, &rev);
-        let html = page_config(&v, &ConfigForm::of(&doc), None).into_string();
+        let html = page_config(&v, &ConfigForm::of(&doc), None, None).into_string();
         assert!(
             html.contains(&format!(r#"name="client_id" value="{EMAIL_AUD}""#)),
             "{html}"
@@ -6905,6 +7275,152 @@ mod tests {
         assert!(matches!(got, Got::Page(400, _)), "{got:?}");
     }
 
+    /// The two-step, which is the whole guard: a save that takes away one of the five things
+    /// people get in through is SHOWN and held, and only a second post carrying the token
+    /// that page rendered writes it.
+    ///
+    /// What this pins beyond "it asks" is the two halves that make asking worth anything. The
+    /// held save must write **nothing** (a guard that half-applied would be worse than none),
+    /// and the token must be about the value it was shown for, or the confirmation would be a
+    /// blanket permission to write whatever the next post happens to carry.
+    #[test]
+    fn the_settings_page_asks_before_it_can_lock_anybody_out() {
+        let path = scratch("cfg-guard", SAMPLE);
+        let sp = settings_path(&path);
+        let cfg = cfg_for(&path, "");
+        const OTHER_POOL: &str = "https://cognito-idp.eu-west-1.amazonaws.com/eu-west-1_OTHER";
+
+        // Moving the pool: held, with the reason on the page and the file untouched.
+        let held = post(
+            &cfg,
+            Route::Config,
+            &settings_fields(&rev_of(&sp), &[("issuer", OTHER_POOL)]),
+        );
+        let (status, html) = held.page();
+        assert_eq!(status, 200, "a question, not a refusal");
+        assert!(html.contains("can stop people getting in"), "{html}");
+        assert!(html.contains(OTHER_POOL), "the new value is shown");
+        assert!(html.contains(TEST_ISSUER), "and so is the one it replaces");
+        assert_eq!(
+            open_settings_file(&sp).unwrap().0.gate.issuer,
+            TEST_ISSUER,
+            "a held save must write nothing at all"
+        );
+
+        // The token is about that value. Answering with it while posting a different one is
+        // refused the same way, which is what stops a confirmation being a blank cheque.
+        let token = confirm_token(html).expect("the page carries its token");
+        let elsewhere = post(
+            &cfg,
+            Route::Config,
+            &settings_fields(
+                &rev_of(&sp),
+                &[
+                    (
+                        "issuer",
+                        "https://cognito-idp.eu-west-1.amazonaws.com/eu-west-1_THIRD",
+                    ),
+                    ("confirm", &token),
+                ],
+            ),
+        );
+        assert_eq!(elsewhere.page().0, 200, "a stale token confirms nothing");
+        assert_eq!(open_settings_file(&sp).unwrap().0.gate.issuer, TEST_ISSUER);
+
+        // Answered, it writes.
+        let done = post_settings(&cfg, &sp, &[("issuer", OTHER_POOL)]);
+        assert!(matches!(done, Got::Redirect(_)), "{done:?}");
+        assert_eq!(open_settings_file(&sp).unwrap().0.gate.issuer, OTHER_POOL);
+
+        // Two more shapes that must NOT ask, because a confirmation on every save is a button
+        // people learn to click. Adding a host widens where a login may land and can lock
+        // nobody out...
+        let added = post(
+            &cfg,
+            Route::Config,
+            &settings_fields(
+                &rev_of(&sp),
+                &[
+                    ("issuer", OTHER_POOL),
+                    ("hosts", "badbat75.com\n*.badbat75.com\nextra.badbat75.com"),
+                ],
+            ),
+        );
+        assert!(matches!(added, Got::Redirect(_)), "{added:?}");
+
+        // ...and neither can filling in a value that was empty, whatever it is filled with.
+        let first_time = post(
+            &cfg,
+            Route::Config,
+            &settings_fields(
+                &rev_of(&sp),
+                &[
+                    ("issuer", OTHER_POOL),
+                    ("hosts", "badbat75.com\n*.badbat75.com\nextra.badbat75.com"),
+                    ("cookie_domain", ".badbat75.com"),
+                ],
+            ),
+        );
+        assert!(matches!(first_time, Got::Redirect(_)), "{first_time:?}");
+        // And now that it has one, moving it is the one change that orphans every cookie
+        // already issued, so it is asked about like the rest. The estate has to move with it,
+        // because a cookie that cannot reach a listed host is refused outright and a refusal
+        // outranks a question: there is nothing to confirm about a file that cannot be saved.
+        let moved = post(
+            &cfg,
+            Route::Config,
+            &settings_fields(
+                &rev_of(&sp),
+                &[
+                    ("issuer", OTHER_POOL),
+                    ("hosts", "other.com\n*.other.com"),
+                    ("cookie_domain", ".other.com"),
+                ],
+            ),
+        );
+        let (status, html) = moved.page();
+        assert_eq!(status, 200);
+        // Both of them, in one panel: this save takes two things away, and an operator has to
+        // see the pair rather than the first of them.
+        assert!(
+            html.contains("cookie_domain") && html.contains("authorized_hosts"),
+            "{html}"
+        );
+
+        cleanup(&path);
+    }
+
+    /// A host the cookie can never reach is refused on the way in, not warned about: the
+    /// failure it prevents leaves no trace anywhere, since the login works, the redirect
+    /// lands, and the browser simply sends no cookie.
+    #[test]
+    fn the_settings_page_refuses_a_host_outside_the_cookie_domain() {
+        let path = scratch("cfg-reach", SAMPLE);
+        let sp = settings_path(&path);
+        let cfg = cfg_for(&path, "");
+        let got = post(
+            &cfg,
+            Route::Config,
+            &settings_fields(
+                &rev_of(&sp),
+                &[
+                    ("cookie_domain", ".badbat75.com"),
+                    ("hosts", "badbat75.com\n*.badbat75.com\napp.elsewhere.com"),
+                ],
+            ),
+        );
+        let (status, html) = got.page();
+        assert_eq!(status, 400);
+        assert!(html.contains("app.elsewhere.com"), "{html}");
+        // Attributed to the field an operator has to go back to, which is why this check is
+        // made here as well as in the library.
+        assert!(
+            html.contains(r#"name="hosts" class="invalid"#) || html.contains("invalid"),
+            "{html}"
+        );
+        cleanup(&path);
+    }
+
     #[test]
     fn the_settings_page_writes_which_social_buttons_are_offered() {
         let path = scratch("cfg-buttons", SAMPLE);
@@ -6921,7 +7437,7 @@ mod tests {
             ("aud-MicrosoftPersonal", "microsoft-client"),
         ];
 
-        let got = post(&cfg, Route::Config, &settings_fields(&rev_of(&sp), wired));
+        let got = post_settings(&cfg, &sp, wired);
         assert!(matches!(got, Got::Redirect(_)), "{got:?}");
         let (_, s) = open_settings_file(&sp).unwrap();
         assert_eq!(
@@ -6970,7 +7486,7 @@ mod tests {
         let rev = rev_of(&sp);
         let v = view(&cfg, Route::Config, &rev);
         let (doc, _) = open_settings_file(&sp).unwrap();
-        let html = page_config(&v, &ConfigForm::of(&doc), None).into_string();
+        let html = page_config(&v, &ConfigForm::of(&doc), None, None).into_string();
         assert!(html.contains(r#"name="idp-Okta""#), "a row for it: {html}");
         assert!(
             html.contains(r#"name="aud-Okta" value="okta-client""#),
@@ -7054,8 +7570,12 @@ mod tests {
         let rev = rev_of(&sp);
         let v = view(&cfg, Route::Config, &rev);
         let (doc, _) = open_settings_file(&sp).unwrap();
-        let html =
-            shell(&v, "settings", page_config(&v, &ConfigForm::of(&doc), None)).into_string();
+        let html = shell(
+            &v,
+            "settings",
+            page_config(&v, &ConfigForm::of(&doc), None, None),
+        )
+        .into_string();
         assert_eq!(rev_in(&html), rev_of(&sp));
         assert_ne!(rev_of(&sp), rev_of(&path));
 
@@ -8814,7 +9334,7 @@ mod tests {
         // deployment that has configured its look looks like.
         std::fs::write(
             settings_path(&path),
-            r#"{ "version": 2, "gate": { "client_id": "email-client" },
+            r#"{ "version": 3, "gate": { "client_id": "email-client" },
                  "web": { "admins": ["admin@x.com"] },
                  "ui": { "stylesheet_url": "https://assets.example.com/tokens.css" } }"#,
         )

@@ -171,7 +171,7 @@ Inside bb-auth (`handle_session`):
    only moment the claims are readable, which is why the cookie carries them: on a later
    request there is no token to consult.
 5. **`safe_rd(rd)`:** the redirect target must resolve to an `https://` URL whose host
-   matches `BB_AUTH_AUTHORIZED_HOSTS`. An absolute path (no `//`, no `/\`) resolves
+   matches `gate.authorized_hosts`. An absolute path (no `//`, no `/\`) resolves
    against the caller's own host, which nginx supplies via `X-Original-URL` on this
    very request; with no `rd` at all the browser lands on that host's root. Any
    control byte (incl. CR/LF) is rejected. Anything else falls back to the login page.
@@ -292,7 +292,7 @@ without it the redirect falls back to the login page.
 
 The host in that URL need not be the application's own. Nothing in the handler reads it, and
 the expiring cookie carries the same `Domain` as the minted one, so with a
-`BB_AUTH_COOKIE_DOMAIN` shared across the estate a single logout location clears the session
+`gate.cookie_domain` shared across the estate a single logout location clears the session
 for every service behind the gate, provided the link stays same-site (a cross-site one is
 the case the guard above ignores). See README "One logout endpoint for every vhost".
 

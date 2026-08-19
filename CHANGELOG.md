@@ -7,7 +7,7 @@ every user out, and the invariant that says so nominates release notes as the pl
 be announced. There were none.
 
 Versions are the crate's (`Cargo.toml`); packages add a Debian revision
-(`1.1.0-1`), which is bumped by `--revision` when the same code is repackaged.
+(`1.99.1-1`), which is bumped by `--revision` when the same code is repackaged.
 
 ## Standing facts
 
@@ -15,15 +15,22 @@ Versions are the crate's (`Cargo.toml`); packages add a Debian revision
   upgrade logs nobody out.
 * **Access file format**: `"version": 1`. A file declaring anything else is refused, with
   an explanation, rather than compiled into a different set of grants.
-* **Settings file format**: `"version": 1`.
+* **Settings file format**: `"version": 3`. Versions 1 and 2 are each refused with a
+  sentence naming the fields to move in, rather than a type error three levels down.
 * **Rollback**: safe by construction while the cookie format is unchanged, because sessions
   are stateless and no state is packaged. See "Rollback" in [README.md](README.md).
 
-## Unreleased
+## 1.99.1 (2026-08-19)
 
-The findings of an architecture and process review, addressed. Nothing here changes the
-cookie format, the access-file format or the settings-file format, so no upgrade in this
-section logs anybody out.
+**A release candidate for 2.0.0**, and the version number says so: the configuration surface
+moved far enough in one window that calling it 1.2.0 would have undersold what an upgrade has
+to do. The findings of an architecture and process review, addressed; the gate's whole Cognito
+wiring and the estate it serves moved out of the environment and into the settings file; and a
+confirmation step in front of the five settings that can stop people getting in.
+
+**Nothing here changes the cookie format or the access-file format, so no upgrade in this
+release logs anybody out.** The settings file goes from version 1 to version 3, which needs an
+edit before the binaries land: see "Upgrading" below.
 
 ### Security
 
@@ -62,7 +69,62 @@ section logs anybody out.
   suspension, and with an `authenticated` scope anywhere in the file they could simply
   re-register.
 
-### The settings file, now at `"version": 2`
+### The settings file, now at `"version": 3`
+
+* **The user pool, the cookie's domain and the authorized hosts moved in too**, and three more
+  environment variables are no longer read: `BB_AUTH_COGNITO_ISSUER`, `BB_AUTH_COOKIE_DOMAIN`
+  and `BB_AUTH_AUTHORIZED_HOSTS`, replaced by `gate.issuer`, `gate.cookie_domain` and
+  `gate.authorized_hosts` (a list, not a comma-separated string). `bb-auth.env` is down to
+  seven values: the listener, the worker count, the HMAC key and its two rotation companions,
+  the cookie's **name**, and the path of the access file.
+
+  **What this costs is worth stating, because it retires an argument rather than adding one.**
+  Version 2 was safe to hand to a browser-editable file because the *pool* stayed in the
+  environment, so the file could only choose among the app clients of an issuer that was
+  already trusted. With `gate.issuer` in the file that sentence is no longer true, and the
+  honest replacement is that this file is trusted as much as the gate itself: whoever can write
+  it can already write the access file beside it and the admin list inside it.
+
+  Two of the three do not pass the settings file's own three-part rule cleanly.
+  **`gate.issuer` is not read per request** but once, to fetch a JWKS, so a `SIGHUP` that sees
+  a new pool fetches its keys first and swaps the keys and the settings together or swaps
+  neither: a gate holding half of that pair would check one pool's tokens against the other's
+  keys. And **`gate.cookie_domain` cannot log anybody out, which is worse than if it could**:
+  a browser matches a clearing `Set-Cookie` on `(name, Domain, Path)`, so every cookie already
+  issued under the old domain stays valid for its full lifetime *and* `/auth/logout` can no
+  longer clear it. Putting the old value back makes those cookies clearable again.
+
+  **What the move buys** is a check that was not expressible while the two lived in different
+  files: `gate.cookie_domain` must reach every host in `gate.authorized_hosts`, or the file is
+  refused. A host the cookie cannot reach is a login that succeeds, redirects, sends no cookie,
+  gets a `401` and lands back on the sign-in page it came from, for ever, with nothing anywhere
+  saying why.
+
+* **Five settings now take two steps to change**, in both editors: `gate.issuer`,
+  `gate.client_id`, `gate.login_url`, `gate.cookie_domain`, and *removing* an entry from
+  `gate.authorized_hosts`. `bb-auth-adm` prints what each change costs and writes nothing
+  without `--yes`; `bb-auth-web` renders a panel naming the old and the new value and holds the
+  save until a second `POST` carries the token that page rendered. Asking rather than refusing,
+  because none of them invalidates a cookie: whoever makes the edit still holds a session and
+  can undo it, and `bb-auth-adm` over SSH is the way back if not.
+
+  It is five and not fifteen on purpose, and it fires on what is **taken away**: filling in a
+  value that was empty is a deployment being finished, not a risk, and *adding* an authorized
+  host cannot stop a login. A confirmation that fires on every save is a button people learn to
+  click without reading, which is worse than no confirmation because it is also an alibi.
+
+* **`bb-auth-web` refuses to write an empty `issuer`, `client_id` or `authorized_hosts`**,
+  while the gate tolerates all three and says so loudly at startup. That is the same rule at
+  two distances rather than a contradiction: a package creates this file and cannot know any of
+  those values, so refusing to start would be a boot loop on every first install, but a *form*
+  should not be able to express a deployment nobody can get into. A fresh install is therefore
+  wired with `bb-auth-adm` over SSH, and has to be: `bb-auth-web` is itself behind the gate.
+
+* **Fixed: a page returned by a `POST` carried an empty `rev`**, so submitting it again was a
+  `409` about a file nobody else had touched. Fix the field a refusal named, press Save, and
+  the answer was a conflict. It never mattered before because every refusal page was reached by
+  reloading; the confirmation step above is *designed* to be submitted again, which is how the
+  browser suite found it.
 
 * **Every Cognito app client this gate is part of is now in the settings file**, and six
   environment variables are no longer read: `BB_AUTH_CLIENT_ID`, `BB_AUTH_AUDIENCES`,
@@ -76,9 +138,9 @@ section logs anybody out.
   app client it was minted for in `aud`, so naming an app client in this file is what makes
   its tokens acceptable; `BB_AUTH_AUDIENCES` existed only to repeat that by hand. Two lists
   that had to agree with a third are now one, and the startup warning that used to say they
-  did not is gone with them. The safety argument is that the **pool** stays in the
-  environment: `BB_AUTH_COGNITO_ISSUER` is what a token is validated against, so this file
-  chooses among the app clients of one issuer and can never reach another.
+  did not is gone with them. The safety argument at the time was that the **pool** stayed in
+  the environment, so this file could only choose among the app clients of one issuer; the
+  version-3 entry above is where that argument was retired and replaced.
 
   **Each social button carries its own app client**, because Cognito federates per app
   client: which providers a client offers is a property of that client, so two providers may
@@ -87,11 +149,14 @@ section logs anybody out.
   exchanges its code with that one.
 
   **Upgrading is a two-step, in this order.** Write the new settings file first: the running
-  gate refuses it (unknown fields, and `"version": 2`), keeps the values it already has, and
-  says so in the journal, so nothing goes down. Then deploy. Doing it the other way round
-  leaves the new binaries with a file they refuse, and a settings file the gate cannot read is
-  fatal at startup. `bb-auth --check-settings <file>` validates the new shape before either
-  step, and `--check-env` names every retired variable still sitting in `bb-auth.env`.
+  gate refuses it (unknown fields, and a version it does not know), keeps the values it already
+  has, and says so in the journal, so nothing goes down. Then deploy. Doing it the other way
+  round leaves the new binaries with a file they refuse, and a settings file the gate cannot
+  read is fatal at startup, which under `Restart=on-failure` is a boot loop.
+  `bb-auth --check-settings <file>` validates the new shape before either step, and
+  `--check-env` names every retired variable still sitting in `bb-auth.env`. Coming from
+  version 1, both moves happen in the same edit; coming from version 2, only the three fields
+  the entry above names have to be added.
 * ~~**`gate.social_client_id`**~~, introduced and removed on the same day, along with
   `BB_AUTH_SOCIAL_CLIENT_ID`.
   The Cognito app client a social sign-in runs through moved from the env file to the

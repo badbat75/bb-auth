@@ -112,6 +112,45 @@ async function run(ctx, t) {
     t.eq('and it can be unset again', (await submit(page)).status(), 200);
     t.eq('empty means unset', settings(ctx).ui.stylesheet_url, '');
 
+    // --- the two-step, on the five that can shut the door -----------------------
+    // A save that takes away one of the things people get in through is SHOWN before it is
+    // written. It matters here rather than only in a unit test because it is a second form
+    // round trip with no script behind it: the panel, the hidden token and the button are
+    // the whole mechanism, and nojs.js runs this same page with scripting off.
+    await page.goto(ctx.base + '/config?lang=en');
+    const poolBefore = settings(ctx).gate.issuer;
+    const otherPool = 'https://cognito-idp.eu-west-1.amazonaws.com/eu-west-1_OTHER';
+    await page.fill('input[name=issuer]', otherPool);
+    t.eq('moving the pool is held, not refused', (await submit(page)).status(), 200);
+    const held = await mainText(page);
+    t.check('the page says what it costs', held.includes('stop people getting in'), held.slice(0, 300));
+    t.check('and shows both values', held.includes(otherPool) && held.includes(poolBefore));
+    t.eq('nothing was written', settings(ctx).gate.issuer, poolBefore);
+
+    // The confirmation is the same form, so the pending value is still in the field and the
+    // token is in the page. Submitting it again is what a person does with the button.
+    t.eq('the pending value is still in the form',
+      await page.locator('input[name=issuer]').inputValue(), otherPool);
+    t.check('and the token is with it',
+      (await page.locator('input[name=confirm]').count()) === 1);
+    t.eq('confirming writes it', (await submit(page)).status(), 200);
+    t.eq('the pool moved', settings(ctx).gate.issuer, otherPool);
+
+    // Put it back, confirming again, so what follows starts from the fixture's own pool.
+    await page.goto(ctx.base + '/config?lang=en');
+    await page.fill('input[name=issuer]', poolBefore);
+    await submit(page);
+    await submit(page);
+    t.eq('and back', settings(ctx).gate.issuer, poolBefore);
+
+    // A host the cookie can never reach is a refusal rather than a question: there is
+    // nothing to confirm about a file the gate would not accept.
+    await page.goto(ctx.base + '/config?lang=en');
+    await page.fill('input[name=cookie_domain]', '.example.com');
+    await page.fill('textarea[name=hosts]', 'example.com\n*.example.com\napp.elsewhere.com');
+    t.eq('an unreachable host is a 400', (await submit(page)).status(), 400);
+    t.check('naming the host', (await mainText(page)).includes('app.elsewhere.com'));
+
     // --- the two refusals that keep an administrator in the room -----------------
     const before = settingsBytes(ctx);
     await page.fill('textarea[name=admins]', 'second@example.com');

@@ -120,10 +120,15 @@ function startServer(bin, accessFile, port) {
 const SETTINGS_FIXTURE =
   JSON.stringify(
     {
-      version: 2,
-      // The app client the email flow uses: a settings file without one is a deployment
-      // where no login can complete, and the Settings page refuses to write that.
-      gate: { client_id: 'email-client' },
+      version: 3,
+      // The three the Settings page refuses to write empty, because each of them is a
+      // deployment where nobody can get in: the app client the email flow uses, the pool
+      // whose tokens are accepted, and the hosts a login may land on.
+      gate: {
+        client_id: 'email-client',
+        issuer: 'https://cognito-idp.eu-central-1.amazonaws.com/eu-central-1_EXAMPLE',
+        authorized_hosts: ['example.com', '*.example.com'],
+      },
       web: { admins: ['admin@example.com'] },
     },
     null,

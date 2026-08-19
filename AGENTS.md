@@ -486,62 +486,96 @@ section under-read itself by a fifth, and two of the seven are lockout-class.
 
 - **The settings file is what must change without a restart, and the rule for what goes in it
   is three-part.** A setting belongs there iff it is (1) read **per request**, (2) unable to
-  lock the operator out when it is wrong, and (3) not a secret. Fifteen pass, in three
-  sections: `gate.client_id`, `gate.login_url`, `gate.profile_claims`,
-  `gate.identity_attrs`, `gate.allow_unverified_social`, `gate.social_providers`,
-  `gate.oauth_domain`, `gate.social_callback_url`, `gate.social_buttons`,
-  `gate.session_ttl_secs`; `web.admins`; and the whole `ui` section (`stylesheet_url`,
-  `logo_url`, `brand_name`, `theme`), which is the **look of every page either program
-  serves** and the one section both of them read. The `ui` four pass the middle part precisely
-  because the built-in stylesheet is complete: the worst a wrong value there achieves is an
-  unstyled page, never a closed door.
+  lock the operator out **irreversibly**, and (3) not a secret. Eighteen pass, in three
+  sections: `gate.issuer`, `gate.client_id`, `gate.login_url`, `gate.cookie_domain`,
+  `gate.authorized_hosts`, `gate.profile_claims`, `gate.identity_attrs`,
+  `gate.allow_unverified_social`, `gate.social_providers`, `gate.oauth_domain`,
+  `gate.social_callback_url`, `gate.social_buttons`, `gate.session_ttl_secs`; `web.admins`;
+  and the whole `ui` section (`stylesheet_url`, `logo_url`, `brand_name`, `theme`), which is
+  the **look of every page either program serves** and the one section both of them read. The
+  `ui` four pass the middle part precisely because the built-in stylesheet is complete: the
+  worst a wrong value there achieves is an unstyled page, never a closed door.
 
-  **The whole Cognito wiring is in that list, and the argument for it is one sentence: the
-  pool is not.** `BB_AUTH_COGNITO_ISSUER` stays in the environment, so what this file chooses
-  among is the app clients of one pool that the environment already trusts, and no save can
-  reach another one. Given that, `gate.client_id` and every `gate.social_buttons` audience
-  *are* the accepted audiences (`Settings::audiences`, derived) — which is not a widening but
-  the end of a duplication: `BB_AUTH_AUDIENCES` and `BB_AUTH_SOCIAL_IDPS` were two lists that
-  had to agree with a third by hand, and a list that has to agree with another by hand is the
-  bug this repository keeps writing warnings about. What moved them was that all three
-  programs have an opinion about them now: an env var is readable only by the process that was
-  started with it, so the GUI could have shown one only by being handed a second copy in its
-  own env file, and a value written in two files drifts with nothing to catch it.
+  **Part 2 is not "cannot break a login", and saying so is what makes the list honest.**
+  Several of these can. The test is whether the person who made the edit can still undo it,
+  and nothing in this file invalidates a cookie: a bad save leaves every session already
+  minted standing, including the one the editor is holding, and `bb-auth-adm` over SSH is the
+  way back if not. That is the line the HMAC key falls on the wrong side of, since getting it
+  wrong logs **everybody** out at once, including the person who could fix it.
 
-  **Two of them can stop new logins, and that is stated rather than hidden.** A wrong
-  `gate.client_id` means every id_token is refused for its audience; a wrong `gate.login_url`
-  sends a `401` somewhere useless. Neither invalidates a cookie, which is the whole
-  difference: sessions already minted keep working, so whoever made the edit still holds one
-  and can undo it, and `bb-auth-adm` over SSH is the way back if not. That is why they sit
-  here and the HMAC key does not: getting the key wrong logs **everybody** out at once,
-  including the person who could fix it. `gate.client_id` empty is tolerated rather than
-  refused, because a package creates this file and cannot know the value; the gate says so
-  loudly at startup instead of refusing to start, which on a first install would be a boot
-  loop. `gate.login_url` empty means the gate's own `/auth/login`, which since 1.1.0 is a page
-  it actually serves.
+  **The whole Cognito wiring is here, the pool included, and what that cost is stated rather
+  than glossed.** `gate.client_id` and every `gate.social_buttons` audience *are* the accepted
+  audiences (`Settings::audiences`, derived), which ended a real duplication: `BB_AUTH_AUDIENCES`
+  and `BB_AUTH_SOCIAL_IDPS` were two lists that had to agree with a third by hand, and a list
+  that has to agree with another by hand is the bug this repository keeps writing warnings
+  about. What moved them was that all three programs have an opinion about them: an env var is
+  readable only by the process that was started with it, so the GUI could have shown one only
+  by being handed a second copy in its own env file, and a value written in two files drifts
+  with nothing to catch it. For a while the safety argument was that the **pool** stayed in the
+  environment, so the file could only choose among the app clients of an issuer the environment
+  already trusted. `gate.issuer` retired that sentence, and the honest replacement is: **this
+  file is trusted as much as the gate itself**, because whoever can write it can already write
+  the access file beside it and the admin list inside it.
+
+  **Three of them do not pass cleanly, and each is worth its own line.** `gate.issuer` fails
+  part 1: it is read once, to fetch a JWKS, so a reload has to re-fetch and then swap keys and
+  settings **together or neither** (`reload_settings_from`), because a gate holding half of that
+  pair checks one pool's tokens against the other's keys. `gate.cookie_domain` fails part 2 in a
+  way nothing else here does: it cannot log anybody out, it does something worse, which is
+  orphan every cookie already issued so that `/auth/logout` stops clearing them (a browser
+  matches a clearing `Set-Cookie` on `(name, Domain, Path)`: see `build_cookie`). And
+  `gate.authorized_hosts` was the boundary that kept `gate.login_url` from being a redirect
+  gadget. What the move buys, and what was not expressible while those two lived in different
+  files, is that **`cookie_domain` must reach every host in `authorized_hosts` or the file is
+  refused** (`cookie_domain_covers`): a host the cookie cannot reach is a login that lands,
+  sends no cookie, gets a `401` and bounces back to the sign-in page for ever, with nothing
+  anywhere saying why.
+
+  **Five of them can stop people getting in, so both editors ask before writing one.**
+  `issuer`, `client_id`, `login_url`, `cookie_domain`, and *removing* an `authorized_hosts`
+  entry: `guarded_changes` is the one list, in the library, because two editors that disagreed
+  about which fields those are would make the guard a property of which editor you happened to
+  open. The wording is each program's own (`--yes` and a printed block on the CLI, a panel and
+  a second `POST` in the GUI), because it is addressed to an operator. Asking is enough rather
+  than refusing for the reason part 2 gives: no cookie is invalidated. **It is five and not
+  fifteen on purpose** — a confirmation that fires on every save is a button people learn to
+  click without reading, which is worse than no confirmation because it is also an alibi — and
+  it fires on what is *taken away*, never on a value being set for the first time (an empty
+  field being filled in can only be a deployment being finished), and never on *adding* a host.
+
+  Empty is tolerated on all three of the new ones, and on `client_id`, because a package
+  creates this file and cannot know any of them: the gate says so loudly at startup instead of
+  refusing to start, which on a first install would be a boot loop. The GUI is stricter than
+  the gate and refuses to *write* an empty `issuer`, `client_id` or `authorized_hosts`, which
+  is not a contradiction but the same rule at a different distance: a form should not be able
+  to express a deployment nobody can get into. A fresh install is therefore wired with
+  `bb-auth-adm` over SSH, and it has to be, since `bb-auth-web` is itself behind the gate.
+  `gate.login_url` empty means the gate's own `/auth/login`, which since 1.1.0 is a page it
+  actually serves.
 
   Everything else stays in `bb-auth.env`: the listener and the worker count (a rebind), the
-  HMAC key (the secret), the Cognito **issuer** and the cookie's name and domain (a change
-  lets nobody in or logs everybody out), and `BB_AUTH_AUTHORIZED_HOSTS` /
-  `BB_AUTH_ORIGINAL_URL_HEADER`, which **are** the lockout. `BB_AUTH_AUTHORIZED_HOSTS` staying
-  there is what keeps `gate.login_url` from being a redirect gadget: the file says where the
-  sign-in page is, the environment says which hosts a redirect may land on, and only the
-  second is a security boundary.
+  HMAC key (the secret), the cookie's **name** (renaming it orphans every cookie already
+  issued, and unlike the domain nobody has a reason to), `BB_AUTH_ACCESS_FILE` (the file this
+  one is found beside, which cannot live inside it), and `BB_AUTH_ORIGINAL_URL_HEADER`, which
+  **is** the lockout.
 
   It is a *file* for one mechanical reason, and not for tidiness: **a process cannot re-read
   its own environment** (systemd loads `EnvironmentFile=` once, at `ExecStart`), so an env var
-  can never be hot. Do not add a sixteenth setting because it would be convenient there; check
-  it against the three parts first, and say the argument out loud the way the ones above are.
+  can never be hot. Do not add a nineteenth setting because it would be convenient there;
+  check it against the three parts first, and say the argument out loud the way the ones above
+  are, including the part it fails.
   It is held in `RwLock<Settings>`, reloaded by the same SIGHUP as the access file and
   **fail-soft in the same way** (a broken file keeps the live values), which is what makes it
   safe to hand to a GUI: the worst a bad save can do is leave the previous values in force.
   `bb-auth-web` reads it fresh per request instead, because it is the one service that edits
   its own half of it.
 
-  The file declares `"version": 2`. Version 1 is refused with a sentence rather than a type
-  error three levels down, for the reason the access file's own version check gives: it was
-  written before the app clients moved into this file, and no parser can guess which client
-  each of its bare-name buttons belonged to.
+  The file declares `"version": 3`, and both older formats are refused with a **sentence**
+  rather than a type error three levels down, for the reason the access file's own version
+  check gives. Version 1 predates the app clients, and no parser can guess which client each
+  of its bare-name buttons belonged to; version 2 predates the pool, and the three values it
+  is missing were in an env file the gate can no longer read. Each refusal names the fields to
+  move in and points at the CHANGELOG.
 
 - **What changes who reaches what is fatal; what drops one credential is skipped.** Fatal
   (`read_access` returns `Err`: fatal at startup, old table retained on SIGHUP): a malformed URL
@@ -777,7 +811,7 @@ section under-read itself by a fifth, and two of the seven are lockout-class.
 - **There is no canonical service base URL.** One gate fronts several hosts and which one is in
   play is decided by the caller, so `/auth/session` learns it from `BB_AUTH_ORIGINAL_URL_HEADER`
   (`origin_of`) — nginx must set that header on the session location too, not just the auth-gate.
-  `BB_AUTH_AUTHORIZED_HOSTS` (comma-separated host globs, required) is the *only* authority on
+  `gate.authorized_hosts` (host globs in the settings file) is the *only* authority on
   redirect targets. Don't reintroduce a single base URL.
 
 - **The gate never redirects a gated request; nginx does.** A `401` carries this area's login page
@@ -802,13 +836,13 @@ section under-read itself by a fifth, and two of the seven are lockout-class.
   target, so three rules keep it from being a new surface. It goes through the very gate that
   endpoint already applies to `rd` (`safe_rd` on the way out of a logout, `rd_url_allowed` before
   the sign-in page carries it, absolute-only there because that page resolves nothing against
-  nginx), so a link from outside `BB_AUTH_AUTHORIZED_HOSTS` redirects nowhere. A rejected
+  nginx), so a link from outside `gate.authorized_hosts` redirects nowhere. A rejected
   candidate is **discarded, not replaced**: whoever spoke first is answered on its own merits, or
   a crafted `?rd=` would get to choose which of the two is read. And an empty value counts as
   nothing said, which is what a template renders from an empty variable. Both the global and every application's
   `login_url` pass `compile_login_url` at load (printable ASCII, absolute https, no `@`, no `\`) —
   that is what makes emitting them into a header, a `Location:` and a page safe with no per-use
-  check. It is deliberately **not** checked against `BB_AUTH_AUTHORIZED_HOSTS`: `read_access` reads
+  check. It is deliberately **not** checked against `gate.authorized_hosts`: `read_access` reads
   no env, which is what lets `--check-access` run with no config, and moving the check to startup
   would turn a typo into a boot loop that `--check-access` never saw.
 

@@ -5,15 +5,27 @@
     "",
     "What is in here and what is not is decided by one rule. A setting lives in this file",
     "iff it (1) is read per request, so a new value takes effect on the next one, (2) cannot",
-    "lock the operator out if it is wrong, and (3) is not a secret. Everything else stays in",
-    "bb-auth.env, on the host: the listener, the worker count, the HMAC key, the Cognito",
-    "ISSUER (the pool itself), the cookie's name and domain, BB_AUTH_AUTHORIZED_HOSTS and",
-    "BB_AUTH_ORIGINAL_URL_HEADER.",
+    "lock the operator out irreversibly, and (3) is not a secret. What is left in bb-auth.env",
+    "is the listener, the worker count, the HMAC key, the cookie's NAME, the path of the",
+    "access file, and BB_AUTH_ORIGINAL_URL_HEADER.",
     "",
-    "WHICH COGNITO APP CLIENTS THIS GATE IS PART OF is decided here, by gate.client_id and by",
-    "the audience of every gate.social_buttons entry: together they are the audiences an",
-    "id_token may carry. That is not a widening, because the POOL is the env file's: this",
-    "file chooses among the app clients of the issuer above and can never reach another one.",
+    "THE WHOLE COGNITO WIRING IS HERE, the pool included: gate.issuer is the user pool whose",
+    "iss and signing keys every id_token is checked against, gate.client_id is the app client",
+    "the email flow uses, and each gate.social_buttons audience is the app client that",
+    "federates that provider. The app clients ARE the accepted audiences.",
+    "",
+    "SO IS THE ESTATE: gate.cookie_domain and gate.authorized_hosts, which are checked",
+    "against each other, because a host the cookie cannot reach is a login that lands, sends",
+    "no cookie, gets a 401 and bounces back to the sign-in page for ever, with nothing",
+    "anywhere saying why.",
+    "",
+    "FIVE OF THESE CAN STOP PEOPLE GETTING IN: issuer, client_id, login_url, cookie_domain,",
+    "and taking a host off authorized_hosts. Both editors ask before writing one (`--yes` on",
+    "bb-auth-adm, a panel and a second click in bb-auth-web), and asking is enough rather",
+    "than refusing because none of them invalidates a cookie: whoever makes the edit still",
+    "holds a session and can undo it. It is five and not fifteen on purpose, since a",
+    "confirmation that fires on every save is a button people learn to click without",
+    "reading.",
     "",
     "It is a file rather than more env vars for one mechanical reason: a process cannot",
     "re-read its own environment. systemd loads EnvironmentFile= once, at ExecStart, so",
@@ -31,7 +43,7 @@
     "across an edit, which is what makes these blocks survive a save from either editor."
   ],
 
-  "version": 2,
+  "version": 3,
 
   "_comment_profile_claims": [
     "gate.profile_claims — OIDC claims to hand to the application on a 204, in the order the",
@@ -72,6 +84,45 @@
     "gate.social_providers narrows it to named IdPs, matched case-insensitively against the",
     "token's identities[].providerName. Empty = any federated provider. Prefer listing only",
     "providers that verify the email."
+  ],
+
+  "_comment_issuer": [
+    "gate.issuer — the Cognito USER POOL this deployment trusts: the value every id_token's",
+    "`iss` must equal, and the host its JWKS is fetched from. Absolute https, no trailing",
+    "slash. EMPTY MEANS NO TOKEN CAN BE VALIDATED, which is the state a fresh install is in;",
+    "the gate starts anyway and says so loudly, because a package creates this file and",
+    "cannot know the value. Set the first one with `bb-auth-adm settings set --issuer ...`",
+    "over SSH: bb-auth-web is itself behind the gate, so on a fresh install there is no",
+    "login to reach it with.",
+    "It is the one setting here that is NOT read per request: it is read once, to fetch the",
+    "signing keys. The reload pays for that, and pays for it atomically: a SIGHUP that sees a",
+    "new pool fetches its JWKS first and swaps the keys and the settings together or swaps",
+    "neither, because a gate holding half of that pair checks one pool's tokens against the",
+    "other's keys."
+  ],
+
+  "_comment_cookie_domain": [
+    "gate.cookie_domain — the session cookie's Domain, with or without the leading dot RFC",
+    "6265 ignores. EMPTY is a host-only cookie, which only serves a deployment where the gate",
+    "and the application are one host; a parent domain (.example.com) is what makes one login",
+    "cover every service behind the gate.",
+    "CHANGING IT DOES NOT LOG ANYBODY OUT, AND THAT IS THE PROBLEM. A browser matches a",
+    "clearing Set-Cookie on (name, Domain, Path), so every cookie already issued under the old",
+    "domain stays valid for its full lifetime AND /auth/logout can no longer clear it: a",
+    "logout that silently succeeds at nothing, for everybody who signed in before the edit.",
+    "The way back is to put the old value back, which makes those cookies clearable again."
+  ],
+
+  "_comment_authorized_hosts": [
+    "gate.authorized_hosts — the hosts a post-login `rd` may land on, as host globs. The ONLY",
+    "authority on where a redirect may go. There is no 'service base URL': one gate fronts",
+    "several hosts and which one is in play is decided by the caller.",
+    "Same wildcards a scope's urls use: `*` = any run of characters, `&` = exactly one.",
+    "`*.example.com` does NOT match the bare apex, so list it too if you want it.",
+    "EMPTY REFUSES EVERY REDIRECT TARGET THERE IS, so every login lands on the sign-in page",
+    "instead of where the visitor was going: useless, fail-closed, and tolerated for the",
+    "reason an empty client_id is.",
+    "Every entry must be reachable by cookie_domain above, or this file is refused."
   ],
 
   "_comment_client_id": [
@@ -162,8 +213,11 @@
   ],
 
   "gate": {
+    "issuer": "",
     "client_id": "",
     "login_url": "",
+    "cookie_domain": "",
+    "authorized_hosts": ["example.com", "*.example.com"],
     "profile_claims": [],
     "identity_attrs": ["email"],
     "allow_unverified_social": false,

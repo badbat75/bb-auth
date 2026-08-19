@@ -24,7 +24,7 @@ point: what is left below is the part that needs a person.
 3. **The changelog.** A section in [`../CHANGELOG.md`](../CHANGELOG.md), and above all the
    **Cookie format** line: if it changed, say so there, because that is the one change that
    logs every user out and the invariant nominates release notes as where it is announced.
-4. **Commit, then tag.** `git tag -a v1.2.0 -m "…"`, on the commit that is being released.
+4. **Commit, then tag.** `git tag -a v1.99.1 -m "…"`, on the commit that is being released.
    `package.sh` refuses a dirty tree, and every binary bakes in `git describe`, so a tag is
    what makes `bb-auth --version` on the host read as a release rather than as a hash.
 5. **Build and deploy.** `./scripts/deploy.ps1 user@host`, which packages (running the test

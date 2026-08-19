@@ -138,7 +138,7 @@ same goes for README's operator-facing version.
 | `GET`, `HEAD` | `/auth/login[?rd=…]` | browser | The sign-in page: runs the Cognito `USER_AUTH` flow in the browser and POSTs the resulting id_token to `/auth/session`. Self-contained (palette, layout, script and both languages in the document; only the operator's optional stylesheet and logo are external). `rd` is validated here with the same `rd_url_allowed` `safe_rd` uses and dropped if it fails; with none, the browser's `Referer` answers in its place, through that same check and absolute-only, since this page resolves nothing against nginx. Social buttons appear only when `gate.oauth_domain`, `gate.social_callback_url` and at least one `gate.social_buttons` entry add up to a social sign-in that could work. |
 | `GET`, `HEAD` | `/auth/callback` | browser | Finishes a social sign-in: exchanges the OAuth code and the PKCE verifier for tokens, offers a profile form when the IdP sent no names, and delivers the id_token exactly as the sign-in page does. `404` when no social client is configured. |
 | `POST` | `/auth/session` | browser | Body `application/x-www-form-urlencoded`: `id_token=…&rd=…`. Fully validates the id_token; on success sets the session cookie and `302`s to `rd` (open-redirect guarded). |
-| `GET` | `/auth/logout[?rd=…]` | browser | Sets an expired (Max-Age=0) cookie and `302` → `rd` (same `safe_rd` guard), or, with no `rd`, the browser's `Referer` (same guard), and failing both the login page. Cross-site requests (`Sec-Fetch-Site: cross-site`) are ignored (no cookie clear) to block CSRF-forced logout. Reads nothing about the host it was called on, and the expiring cookie carries the same `Domain` as the minted one, so under a shared `BB_AUTH_COOKIE_DOMAIN` one mounted location logs the browser out of every vhost: see README "One logout endpoint for every vhost". |
+| `GET` | `/auth/logout[?rd=…]` | browser | Sets an expired (Max-Age=0) cookie and `302` → `rd` (same `safe_rd` guard), or, with no `rd`, the browser's `Referer` (same guard), and failing both the login page. Cross-site requests (`Sec-Fetch-Site: cross-site`) are ignored (no cookie clear) to block CSRF-forced logout. Reads nothing about the host it was called on, and the expiring cookie carries the same `Domain` as the minted one, so under a shared `gate.cookie_domain` one mounted location logs the browser out of every vhost: see README "One logout endpoint for every vhost". |
 | `GET` | `/auth/healthz` | local | `200 ok`. Liveness probe. |
 
 `/auth/validate` is never exposed publicly; nginx reaches it over loopback
@@ -160,7 +160,7 @@ ever issuing a cookie:
    deduped with double-checked locking (`Mutex`-guarded) so concurrent workers
    don't all fetch in parallel on a cold/stale cache.
 3. **Signature + standard claims** via `jsonwebtoken`:
-   - `exp` validated (60 s leeway), `iss == BB_AUTH_COGNITO_ISSUER`,
+   - `exp` validated (60 s leeway), `iss == gate.issuer`,
      `aud` ∈ accepted audiences (`gate.client_id` plus every `gate.social_buttons` audience);
      `exp`/`aud`/`iss` are mandatory.
 4. **Cognito-specific claims:** `token_use == "id"` (rejects access tokens) and
@@ -226,7 +226,7 @@ sig = HMAC_SHA256("bb1.<keyid>.<exp>.<b64url(email)>.<b64url(claims_json)>", key
 - **HMAC-SHA256** over the cookie prefix up to (but not including) the signature.
   Verification is constant-time (`Mac::verify_slice`).
 - **Attributes:** `HttpOnly`, `Secure`, `SameSite=Lax`, `Path=/`, host-only on
-  the service host (a `Domain` can be set via `BB_AUTH_COOKIE_DOMAIN` but is
+  the service host (a `Domain` can be set via `gate.cookie_domain` but is
   empty by default).
 - **TTL:** ~30 days (`gate.session_ttl_secs`, §8a).
 
@@ -261,13 +261,10 @@ nothing in an env file can ever take effect without a restart.
 | `BB_AUTH_HMAC_KEY` | yes | — | Active session-signing secret. **≥ 32 bytes.** Generated once at deploy time; the only secret in the system. |
 | `BB_AUTH_HMAC_KEY_ID` | no | `default` | Key id stamped into new cookies. Must match `[A-Za-z0-9_-]+` (no `.`). Bump on rotation so older keys can still verify. |
 | `BB_AUTH_HMAC_ACCEPTED_KEYS` | no | empty | Comma-separated `id:key` entries accepted for verification during rotation (`key` = `openssl rand -base64 48`). Active key always verifies; this is for previous keys. |
-| `BB_AUTH_COGNITO_ISSUER` | yes | — | The Cognito user-pool issuer URL, `https://cognito-idp.<region>.amazonaws.com/<user-pool-id>`. Trailing `/` stripped. JWKS URL is derived from this. |
 | `BB_AUTH_ACCESS_FILE` | yes | — | Path to the JSON access file (`applications`, `user_groups`, `denied`, and the roster of users with their `bbk_` API keys; see §12). Loaded at startup, hot-reloaded on `SIGHUP`. The name is a contract with the operator-owned env file a deploy never rewrites. |
 | `BB_AUTH_ORIGINAL_URL_HEADER` | no | `X-Original-URL` | Request header carrying the original request URL (scheme + host + normalised path). Set by nginx on the `auth_request` subrequest (from a `$bb_url` captured in the gated location — **not** from `$uri`, see §12) **and** on `/auth/session` (there a plain `https://app.example.com$uri` is correct). Drives URL scoping, and on `/auth/session` tells bb-auth which host the login is on. Query/fragment are stripped; missing ⇒ fail closed. |
 | `BB_AUTH_LISTEN` | no | `127.0.0.1:4181` | Bind address. Loopback only — nginx fronts it. |
-| `BB_AUTH_COOKIE_NAME` | no | `bb_session` | |
-| `BB_AUTH_COOKIE_DOMAIN` | no | empty → host-only | Set to a parent domain for cross-service SSO. |
-| `BB_AUTH_AUTHORIZED_HOSTS` | yes | — | Comma-separated host globs a post-login `rd` may land on, e.g. `example.com,*.example.com`. The sole authority for the `rd` guard (see §8b). `*.x.com` does not match the apex `x.com`. |
+| `BB_AUTH_COOKIE_NAME` | no | `bb_session` | The cookie's **name** only. Its domain and its lifetime are settings (§8a). Renaming it orphans every cookie already issued, which is why it is here and the domain is not. |
 | `BB_AUTH_SETTINGS_FILE` | no | `settings.json` beside the access file | Path to the settings file (§8a). Re-read on `SIGHUP` like the access file, fail-soft on both. A missing file is a fatal startup. |
 | `BB_AUTH_WORKERS` | no | `4` | Thread pool size (min 1). |
 
@@ -311,17 +308,35 @@ binaries already carry a complete stylesheet**, so an override is an addition to
 page and never the page itself. The worst a wrong value there achieves is a page in the
 wrong colours, and a stylesheet host that is down costs nothing but its palette.
 
-What is **not** in it is the point of it. The listener and the worker count need a rebind;
-the HMAC key is the secret; the Cognito trust roots, the cookie's name and its domain change
-who can log in or log everyone out; and `BB_AUTH_AUTHORIZED_HOSTS` and
-`BB_AUTH_ORIGINAL_URL_HEADER` *are* the lockout when they are wrong. The Cognito app clients
-and the sign-in wiring are the other way round and moved INTO the file in its version 2: the
-pool
-stays here, so the file chooses among the app clients of one issuer, and everything it can
-choose is something all three programs need to read. All of those stay in the
-env file, where changing one is a deliberate act with a restart attached. That the sign-in
-page's *look* is hot while most of its *Cognito wiring* is not is the rule working: one
-cannot shut anybody out, and the other is the only way to.
+What is **not** in it is a short list, and after version 3 it is nearly the whole env file:
+the listener and the worker count need a rebind; the HMAC key is the secret; the cookie's
+**name** orphans every cookie already issued; `BB_AUTH_ACCESS_FILE` is the file this one is
+found beside and cannot live inside it; and `BB_AUTH_ORIGINAL_URL_HEADER` *is* the lockout
+when it is wrong.
+
+Everything Cognito moved INTO the file, in two steps: the app clients and the sign-in wiring
+in version 2, the **pool** (`gate.issuer`) in version 3, along with the cookie's domain and
+the hosts a post-login redirect may land on. The argument version 2 rested on — the pool is in
+the environment, so the file can only choose among the app clients of an issuer that is
+already trusted — is retired by version 3 rather than quietly untrue, and what replaces it is
+that this file is trusted as much as the gate: whoever can write it can already write the
+access file beside it and the admin list inside it.
+
+Three of the eighteen do not pass the three-part rule cleanly, which is stated rather than
+glossed. `gate.issuer` is not read per request but once, to fetch a JWKS, so a reload
+re-fetches and swaps keys and settings **together or neither**. `gate.cookie_domain` cannot
+log anybody out but does something worse: every cookie already issued keeps the old `Domain`,
+so it stays valid and `/auth/logout` can no longer clear it. And `gate.authorized_hosts` used
+to be the boundary that kept `gate.login_url` from being a redirect gadget. What the move buys
+is the check that was not expressible while those two lived in different files: **a host the
+cookie cannot reach is refused**, because it is a login that lands, sends no cookie, gets a
+`401` and bounces back to the sign-in page for ever.
+
+Five of them can stop people getting in (`issuer`, `client_id`, `login_url`, `cookie_domain`,
+and *removing* an `authorized_hosts` entry), so both editors ask before writing one and
+neither refuses: no cookie is invalidated, so whoever made the edit still holds a session and
+can undo it. `guarded_changes` is the single list, in the library, so the two editors cannot
+disagree about which fields those are.
 
 Edited with `bb-auth-adm settings …` or from `bb-auth-web`'s Settings tab, through the same
 validate-before-write the access file gets (`SettingsWrite`). Checked by hand with
@@ -334,7 +349,7 @@ is one; unknown keys at the top level are preserved, which is where `_comment` l
 There is no canonical service base URL: one gate fronts several hosts, and which one is
 in play is decided by the caller. `safe_rd` therefore takes two inputs beyond the `rd`
 itself — the **caller origin** (`scheme://host` of the `/auth/session` request, from
-`BB_AUTH_ORIGINAL_URL_HEADER`) and **`BB_AUTH_AUTHORIZED_HOSTS`**, the only authority on
+`BB_AUTH_ORIGINAL_URL_HEADER`) and **`gate.authorized_hosts`**, the only authority on
 where a redirect may land.
 
 | `rd` | resolves to |
@@ -497,7 +512,7 @@ own), and `SupplementaryGroups=bb-auth` is what lets the write restore the file'
   — and is best narrowed (via `social_providers`) to IdPs that actually
   verify the email (Google, Apple). Leaving it off keeps the strict invariant.
 - **`rd` is open-redirect-guarded:** it must resolve to an `https://` URL whose host
-  matches `BB_AUTH_AUTHORIZED_HOSTS` — an absolute path resolves against the caller's
+  matches `gate.authorized_hosts` — an absolute path resolves against the caller's
   host, and no `//` or `/\` counts as a path (browsers normalise the latter to a
   scheme-relative off-host redirect). Any control byte (incl. CR/LF) is also rejected,
   so attacker-supplied bytes can never reach the `Location` header (no response
@@ -794,7 +809,7 @@ Both the global and the per-application value pass `compile_login_url` at load: 
 ASCII, absolute `https://`, no userinfo `@`, no backslash. That is what lets the gate emit
 them into a header, a `Location:` and a page with no per-use check; a CR/LF would otherwise
 be a response-splitting gadget, and `h()` panics on a non-ASCII header value. It is **not**
-checked against `BB_AUTH_AUTHORIZED_HOSTS`, and cannot be: `read_access` reads no env, which
+checked against `gate.authorized_hosts`, and cannot be: `read_access` reads no env, which
 is precisely what lets `--check-access` validate a file with no config and no network. Moving
 that check to startup would turn an operator's typo into a fatal boot under
 `Restart=on-failure` that `--check-access` never saw.

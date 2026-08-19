@@ -44,15 +44,16 @@ use std::process::ExitCode;
 use bb_auth_core::{
     add_api_key, add_application, add_denied, add_scope, add_user, add_user_email, add_user_group,
     app_mut, app_pos, compile_app_client_id, compile_asset_url, compile_brand_name,
-    compile_login_url, compile_oauth_domain, decide, decide_api_key, default_settings_path,
-    edit_url_list, edit_urls, format_date, key_expiry, key_mut, mint_uuid, move_scope, norm_email,
-    now, open_access_file, open_settings_file, parse_exclusion, remove_api_key, remove_application,
+    compile_cookie_domain, compile_host_pattern, compile_issuer, compile_login_url,
+    compile_oauth_domain, decide, decide_api_key, default_settings_path, edit_url_list, edit_urls,
+    format_date, guarded_changes, key_expiry, key_mut, mint_uuid, move_scope, norm_email, now,
+    open_access_file, open_settings_file, parse_exclusion, remove_api_key, remove_application,
     remove_denied, remove_scope, remove_user, remove_user_email, remove_user_group,
     rename_application, rename_scope, request_url, rotate_api_key, scope_pos, shadowing_scope,
     user_group_mut, user_group_refs, user_label, user_pos, version_line, well_formed_uuid, Access,
-    AccessFile, AccessWrite, ApiKeySpec, AppSpec, Decision, KeyDecision, ScopeSpec, SealedKey,
-    SettingsFile, SettingsWrite, SocialButtonSpec, Subject, UiTheme, UserSpec, WiredButton,
-    Written, ACCESS_FILE_VERSION, SETTINGS_VERSION,
+    AccessFile, AccessWrite, ApiKeySpec, AppSpec, Decision, GateSettings, GuardedSetting,
+    KeyDecision, ScopeSpec, SealedKey, SettingsFile, SettingsWrite, SocialButtonSpec, Subject,
+    UiTheme, UserSpec, WiredButton, Written, ACCESS_FILE_VERSION, SETTINGS_VERSION,
 };
 
 const USAGE: &str = "\
@@ -133,22 +134,32 @@ settings                        the OTHER file: what takes effect with no restar
   settings show                 what the gate and the GUI read from it
   settings set [--claims LIST] [--identity LIST] [--session-ttl SECS]
                [--unverified-social true|false] [--providers LIST] [--no-providers]
-               [--login-url URL] [--client-id ID] [--oauth-domain HOST]
-               [--social-callback-url URL]
+               [--issuer URL] [--login-url URL] [--client-id ID]
+               [--cookie-domain DOMAIN] [--authorized-hosts LIST] [--no-authorized-hosts]
+               [--oauth-domain HOST] [--social-callback-url URL]
                [--social-buttons IDP=APPCLIENT,...] [--no-social-buttons]
                [--brand NAME] [--stylesheet URL] [--logo URL] [--theme system|light|dark]
+               [--yes]
   settings admin add EMAIL...   who may use bb-auth-web. NEVER empty, never 'everyone'
   settings admin rm EMAIL...
   Default path: settings.json beside the access file; -s/--settings-file, or
   $BB_AUTH_SETTINGS_FILE. These are hot BECAUSE they are in a file: a process cannot
   re-read its own environment, so an env var could never be one.
-  The Cognito app clients live here and nowhere else. --client-id is the one the email
-  flow uses; every --social-buttons entry is `provider=app client`, because Cognito
-  federates per app client and two providers may sit on two of them. Together they ARE the
-  accepted audiences: an id_token carries the app client it was minted for in `aud`, so
-  naming an app client here is what makes the gate accept its tokens. The pool they must
-  belong to is BB_AUTH_COGNITO_ISSUER, which stays in the env file, so this file chooses
-  among the app clients of one pool and can never reach another.
+  The whole Cognito wiring lives here and nowhere else: --issuer is the user pool whose
+  `iss` and signing keys every id_token is checked against, --client-id is the app client
+  the email flow uses, and every --social-buttons entry is `provider=app client`, because
+  Cognito federates per app client and two providers may sit on two of them. The app
+  clients ARE the accepted audiences: an id_token carries the one it was minted for in
+  `aud`, so naming it here is what makes the gate accept its tokens.
+  --cookie-domain is the session cookie's Domain (empty = a host-only cookie), and
+  --authorized-hosts the host globs a post-login redirect may land on, which is the only
+  authority on where one may go. The two are checked against each other: a host the cookie
+  cannot reach is refused, because a login that redirects there sends no cookie and lands
+  back on the sign-in page for ever.
+  FIVE of these can stop people getting in (--issuer, --client-id, --login-url,
+  --cookie-domain, and removing an --authorized-hosts entry), so changing one asks first
+  and --yes is how you mean it. None of them invalidates a cookie, which is why asking is
+  enough: your own session survives the edit, so you can always undo it.
   The last four are the `ui` section, and they are the look of every page BOTH programs
   emit: the gate's login page and bb-auth-web itself. --stylesheet loads after the built-in
   stylesheet and is meant to redefine its custom properties, so a deployment restyles both
@@ -674,6 +685,31 @@ fn cmd_settings_show(ctx: Ctx) -> Result<ExitCode, String> {
     println!();
     println!("gate");
     println!(
+        "  issuer                  {}",
+        match s.issuer.as_str() {
+            "" => "(none: no token can be validated)",
+            i => i,
+        }
+    );
+    println!(
+        "  cookie_domain           {}",
+        s.cookie_domain
+            .as_deref()
+            .unwrap_or("(none: a host-only cookie, so one host only)")
+    );
+    println!(
+        "  authorized_hosts        {}",
+        match s.authorized_hosts.len() {
+            0 => "(none: every post-login redirect is refused)".to_string(),
+            _ => s
+                .authorized_hosts
+                .iter()
+                .map(|h| String::from_utf8_lossy(h.as_bytes()).into_owned())
+                .collect::<Vec<_>>()
+                .join(", "),
+        }
+    );
+    println!(
         "  identity_attrs          {}",
         s.identity_attrs
             .iter()
@@ -802,6 +838,11 @@ fn cmd_settings_set(mut ctx: Ctx) -> Result<ExitCode, String> {
     let providers = ctx.flags.take_many("providers")?;
     let login_url = ctx.flags.take_one("login-url")?;
     let client_id = ctx.flags.take_one("client-id")?;
+    let issuer = ctx.flags.take_one("issuer")?;
+    let cookie_domain = ctx.flags.take_one("cookie-domain")?;
+    let hosts = ctx.flags.take_many("authorized-hosts")?;
+    let no_hosts = ctx.flags.take_flag("no-authorized-hosts")?;
+    let yes = ctx.flags.take_flag("yes")?;
     let domain = ctx.flags.take_one("oauth-domain")?;
     let callback = ctx.flags.take_one("social-callback-url")?;
     let buttons = ctx.flags.take_many("social-buttons")?;
@@ -822,6 +863,9 @@ fn cmd_settings_set(mut ctx: Ctx) -> Result<ExitCode, String> {
     if !buttons.is_empty() && no_buttons {
         return Err("--social-buttons and --no-social-buttons contradict each other".into());
     }
+    if !hosts.is_empty() && no_hosts {
+        return Err("--authorized-hosts and --no-authorized-hosts contradict each other".into());
+    }
     let nothing = claims.is_empty()
         && !no_claims
         && identity.is_empty()
@@ -831,6 +875,10 @@ fn cmd_settings_set(mut ctx: Ctx) -> Result<ExitCode, String> {
         && !no_providers
         && login_url.is_none()
         && client_id.is_none()
+        && issuer.is_none()
+        && cookie_domain.is_none()
+        && hosts.is_empty()
+        && !no_hosts
         && domain.is_none()
         && callback.is_none()
         && buttons.is_empty()
@@ -844,6 +892,9 @@ fn cmd_settings_set(mut ctx: Ctx) -> Result<ExitCode, String> {
     }
 
     let mut doc = load_settings(&ctx)?;
+    // What the file said before any of this, so the five that can shut the door can be
+    // compared against it rather than against whatever the flags happen to mention.
+    let before = doc.gate.clone();
     if no_claims {
         doc.gate.profile_claims.clear();
     } else if !claims.is_empty() {
@@ -878,6 +929,21 @@ fn cmd_settings_set(mut ctx: Ctx) -> Result<ExitCode, String> {
     }
     if let Some(id) = client_id {
         doc.gate.client_id = compile_app_client_id("--client-id", &id)?;
+    }
+    if let Some(u) = issuer {
+        doc.gate.issuer = compile_issuer(&u).map_err(|e| e.replace("issuer", "--issuer"))?;
+    }
+    if let Some(d) = cookie_domain {
+        doc.gate.cookie_domain =
+            compile_cookie_domain(&d).map_err(|e| e.replace("cookie_domain", "--cookie-domain"))?;
+    }
+    if no_hosts {
+        doc.gate.authorized_hosts.clear();
+    } else if !hosts.is_empty() {
+        for h in &hosts {
+            compile_host_pattern(h).map_err(|e| format!("--authorized-hosts: {e}"))?;
+        }
+        doc.gate.authorized_hosts = hosts;
     }
     if let Some(d) = domain {
         doc.gate.oauth_domain =
@@ -929,8 +995,80 @@ fn cmd_settings_set(mut ctx: Ctx) -> Result<ExitCode, String> {
             .ok_or_else(|| format!("--theme: '{t}' is not one of system, light, dark"))?;
         doc.ui.theme = parsed.code().to_string();
     }
+    // The five that can stop people getting in. Asked about rather than refused, because
+    // none of them invalidates a cookie: whoever is running this still holds a session, so
+    // the change is undoable from the wrong side of it.
+    let changes = guarded_changes(&before, &doc.gate);
+    if !changes.is_empty() && !yes {
+        eprintln!(
+            "[bb-auth-adm] this changes {} setting(s) that decide whether anybody can get in:\n",
+            changes.len()
+        );
+        for c in &changes {
+            eprintln!(
+                "  {}\n    {} -> {}\n    {}\n",
+                c.field(),
+                guarded_value(c, &before),
+                guarded_value(c, &doc.gate),
+                guarded_risk(c),
+            );
+        }
+        eprintln!(
+            "None of this invalidates a session cookie, so your own login survives it and you \
+             can put it back.\nNothing was written. Re-run with --yes to mean it."
+        );
+        return Ok(ExitCode::FAILURE);
+    }
     save_settings(&ctx, &doc)?;
     Ok(ExitCode::SUCCESS)
+}
+
+/// One guarded setting's value, as the confirmation prints it: what is there now on the left
+/// and what would replace it on the right.
+fn guarded_value(which: &GuardedSetting, gate: &GateSettings) -> String {
+    let or_none = |s: &str| match s.trim() {
+        "" => "(none)".to_string(),
+        v => v.to_string(),
+    };
+    match which {
+        GuardedSetting::Issuer => or_none(&gate.issuer),
+        GuardedSetting::ClientId => or_none(&gate.client_id),
+        GuardedSetting::LoginUrl => or_none(&gate.login_url),
+        GuardedSetting::CookieDomain => or_none(&gate.cookie_domain),
+        GuardedSetting::AuthorizedHosts => or_none(&gate.authorized_hosts.join(", ")),
+    }
+}
+
+/// What each guarded setting costs when it is wrong. The wording is this tool's rather than
+/// the library's, because it is addressed to whoever typed the flag: the library holds only
+/// which settings are guarded, so the two editors cannot disagree about that.
+fn guarded_risk(which: &GuardedSetting) -> &'static str {
+    match which {
+        GuardedSetting::Issuer => {
+            "Every id_token is checked against this pool's `iss` and its signing keys. Point it \
+             at the wrong pool and no login completes. On reload the gate fetches the new \
+             pool's keys first and keeps the old pool if they do not answer."
+        }
+        GuardedSetting::ClientId => {
+            "The app client the email sign-in runs through, and one of the audiences a token \
+             is accepted for. Wrong, and every id_token is refused for its `aud`."
+        }
+        GuardedSetting::LoginUrl => {
+            "Where a 401 sends a browser. Wrong, and everybody who is not signed in lands on \
+             a page that is not there."
+        }
+        GuardedSetting::CookieDomain => {
+            "This one does something worse than shut a door. Every session cookie already \
+             issued keeps the OLD domain, so it stays valid until it expires and /auth/logout \
+             can no longer clear it: a logout that silently succeeds at nothing. Putting the \
+             old value back makes those cookies clearable again."
+        }
+        GuardedSetting::AuthorizedHosts => {
+            "A host taken off this list can no longer be redirected to after a login, so \
+             anyone signing in for it lands back on the sign-in page instead. Adding one is \
+             not guarded; only removing is."
+        }
+    }
 }
 
 /// `settings admin add|rm`: who may use `bb-auth-web`.

@@ -127,9 +127,18 @@ pub fn lower_authority(url: &str) -> String {
 }
 
 /// A compiled URL pattern (a scope's `urls`): normalised bytes.
-#[derive(Clone)]
+#[derive(Clone, PartialEq, Eq)]
 pub struct UrlPattern {
     pat: Vec<u8>,
+}
+
+impl std::fmt::Debug for UrlPattern {
+    /// The pattern as it was written. Derived, a `Vec<u8>` of ASCII prints as a list of
+    /// numbers, and this type is inside [`Settings`], which tests compare and whose failure
+    /// message is the whole value of comparing it.
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "{}", String::from_utf8_lossy(&self.pat))
+    }
 }
 
 impl UrlPattern {
@@ -2963,24 +2972,41 @@ pub fn remove_denied(doc: &mut AccessFile, who: &[String]) -> usize {
 // takes effect without a restart**. A process cannot re-read its own environment: systemd
 // loads `EnvironmentFile=` once, at `ExecStart`, so a setting that must change while the
 // gate keeps serving cannot live in an env var, whatever else recommends one. That is the
-// whole argument, and it is why the rest of the configuration (the listener, the worker
-// count, the HMAC key, the Cognito trust roots, the login page, the authorized hosts, the
-// original-URL header) stays in `bb-auth.env` where it has always been.
+// whole argument, and it is what is left in `bb-auth.env`: the listener, the worker count,
+// the HMAC key, the cookie's name, the path of the access file, and the original-URL header.
 //
 // The membership rule here is as narrow as the access file's, and deliberately so. A
 // setting belongs in this file iff all three hold:
 //
 // 1. it is read **per request**, so a new value takes effect on the next one: no socket to
 //    rebind, no credential to re-issue, no cache to invalidate;
-// 2. a wrong value **cannot lock the operator out**. `BB_AUTH_LOGIN_URL`, `_AUTHORIZED_HOSTS`
-//    and `_ORIGINAL_URL_HEADER` all fail that test outright, and `_COOKIE_NAME` fails it
-//    softly by logging everyone out mid-edit;
+// 2. a wrong value **cannot lock the operator out irreversibly**. The test is not "cannot
+//    break a login", since several of these can; it is whether the person who made the edit
+//    can still undo it. Nothing here invalidates a cookie, so a bad save leaves every session
+//    already minted standing, including the one the editor is holding, and `bb-auth-adm` over
+//    SSH is the way back if not. `BB_AUTH_ORIGINAL_URL_HEADER` fails that outright, and
+//    `_COOKIE_NAME` fails it by orphaning every cookie already issued;
 // 3. it is **not a secret**. The one credential in the system stays in the gate's env file,
 //    which no other service reads and no editor writes.
 //
-// Ten settings pass, in three sections, and the file is shaped like what reads them: `gate`
-// is the five the gate answers with, `web` is the one the GUI's own door is made of, and `ui`
-// is the four that say how a page looks. The `ui` four pass the middle part for a reason
+// Eighteen settings pass, in three sections, and the file is shaped like what reads them:
+// `gate` is the thirteen the gate answers with, `web` is the one the GUI's own door is made
+// of, and `ui` is the four that say how a page looks.
+//
+// **Three of them arrived last and not one passes cleanly**, which belongs here rather than
+// in each field's own doc, because what they have in common is the argument they cost.
+// `issuer` fails part 1: it is read once, to fetch a JWKS, so a reload has to re-fetch and
+// then swap keys and settings together or neither. `cookie_domain` fails part 2 in a way
+// nothing else here does: it cannot log anybody out, it does something worse, which is orphan
+// every cookie already issued so that a logout stops clearing them, and both editors make it
+// a two-step for that reason alone. And `authorized_hosts` was the boundary that made
+// `login_url` safe in a file an administrator edits from a browser: the file said where
+// people sign in, the environment said which hosts a redirect could land on, and only the
+// second was a security boundary. With both in here that sentence is retired, and what
+// replaces it covers all three: **this file is trusted as much as the gate itself**, because
+// whoever can write it can already write the access file beside it and the admin list inside
+// it. What the move buys, and what was not expressible while these lived in two places, is
+// that `cookie_domain` must reach every host in `authorized_hosts` or the file is refused. The `ui` four pass the middle part for a reason
 // worth stating, because they are the ones that look like they should not: the built-in
 // stylesheet is COMPLETE, so an override is only ever an addition to a page that already
 // works, and the worst a wrong value there achieves is an unstyled page rather than a closed
@@ -2995,7 +3021,7 @@ pub fn remove_denied(doc: &mut AccessFile, who: &[String]) -> usize {
 // compiled, and `write_atomically` stays private so there is no other door.
 
 /// The settings file's `version`. Exactly one accepted value, like the access file's.
-pub const SETTINGS_VERSION: u32 = 2;
+pub const SETTINGS_VERSION: u32 = 3;
 
 /// The file name [`default_settings_path`] builds, and the one the packages create.
 pub const DEFAULT_SETTINGS_FILE: &str = "settings.json";
@@ -3405,6 +3431,54 @@ pub struct GateSettings {
     /// others, which is what keeps changing it out of the logout business.
     #[serde(default = "default_session_ttl")]
     pub session_ttl_secs: u64,
+    /// The Cognito **user pool**: the `iss` every id_token must carry, and the host its JWKS
+    /// is fetched from. Absolute https, no trailing slash. Empty means no login can complete.
+    ///
+    /// It is the one setting in this file that is **not read per request**, so it is here in
+    /// spite of the membership rule rather than because of it, and the cost is paid in the
+    /// reload: a SIGHUP that sees a new value fetches that issuer's JWKS first and swaps the
+    /// keys and the settings together, or swaps neither. Half of that pair applied is a gate
+    /// checking this pool's tokens against the other pool's keys, which is every login
+    /// failing on a signature.
+    ///
+    /// What it costs is stated with the other two at the top of this section: it used to be
+    /// the reason the app clients were safe in a file a browser can edit (the file could only
+    /// choose among the clients of a pool the environment already trusted), and that sentence
+    /// is now retired rather than quietly untrue.
+    #[serde(default)]
+    pub issuer: String,
+    /// The session cookie's `Domain`, with or without a leading dot. Empty is a **host-only**
+    /// cookie, which only serves a deployment where the gate and the application are one
+    /// host; a parent domain is what makes one session cover every service behind the gate.
+    ///
+    /// **Changing it does not log anybody out, and that is the problem.** A browser matches a
+    /// clearing `Set-Cookie` on `(name, Domain, Path)`, so every cookie already issued under
+    /// the old domain stays valid for its full lifetime and `/auth/logout` can no longer
+    /// clear it: a logout that silently succeeds at nothing, for everybody who signed in
+    /// before the edit. The way back is to put the old value back, which makes those cookies
+    /// clearable again. Both editors therefore make this a **two-step** with the consequences
+    /// on screen, which is the one place in this file where saying it once is not enough.
+    #[serde(default)]
+    pub cookie_domain: String,
+    /// The hosts a post-login `rd` may land on, as host globs (`badbat75.com`,
+    /// `*.badbat75.com`). The **only** authority on where a redirect may go: see
+    /// [`compile_host_pattern`], and note that `*.x.com` does not match the apex `x.com`,
+    /// which has to be listed.
+    ///
+    /// Empty refuses every redirect target there is, so every login lands on the sign-in page
+    /// instead of where the visitor was going. That is useless but fail-closed, and it is
+    /// tolerated for the reason an empty `client_id` is: a package creates this file and
+    /// cannot know the answer, and a gate that refused to start over it would be a boot loop
+    /// on every first install.
+    ///
+    /// It sits beside [`GateSettings::login_url`] now, which used to be the thing it guarded.
+    /// What compensates is the check that only became possible once the two were in one file:
+    /// [`GateSettings::cookie_domain`] must reach every host listed here, or
+    /// [`compile_settings`] refuses the file. A host the cookie cannot reach is a redirect
+    /// into a `401`, a bounce back to the sign-in page, and a loop with nothing in the
+    /// journal to say why.
+    #[serde(default)]
+    pub authorized_hosts: Vec<String>,
 }
 
 fn default_identity_attrs() -> Vec<String> {
@@ -3433,6 +3507,11 @@ impl Default for GateSettings {
             social_buttons: Vec::new(),
             social_providers: Vec::new(),
             session_ttl_secs: default_session_ttl(),
+            // Empty for the same reason, one step further: a fresh file names no pool, no
+            // cookie domain and no redirect target, and says so loudly rather than guessing.
+            issuer: String::new(),
+            cookie_domain: String::new(),
+            authorized_hosts: Vec::new(),
         }
     }
 }
@@ -3988,6 +4067,13 @@ pub struct Settings {
     pub social_buttons: Vec<SocialButton>,
     /// See [`GateSettings::session_ttl_secs`].
     pub session_ttl: u64,
+    /// See [`GateSettings::issuer`], trailing slash removed. Empty accepts no token at all.
+    pub issuer: String,
+    /// See [`GateSettings::cookie_domain`], lowercased and kept exactly as written, leading
+    /// dot and all, because that is what goes into the header. `None` = a host-only cookie.
+    pub cookie_domain: Option<String>,
+    /// See [`GateSettings::authorized_hosts`], compiled. Empty refuses every redirect target.
+    pub authorized_hosts: Vec<UrlPattern>,
     /// See [`WebSettings::admins`], normalised with [`norm_email`] and deduplicated. May be
     /// empty here; `bb-auth-web` is where that is fatal.
     pub admins: Vec<String>,
@@ -4135,6 +4221,198 @@ pub fn compile_oauth_domain(raw: &str) -> Result<String, String> {
     Ok(d.to_string())
 }
 
+/// Validate the Cognito issuer: the absolute https URL an id_token's `iss` must equal, with
+/// any trailing slash removed.
+///
+/// The same guard [`compile_login_url`] applies, for a longer list of reasons: this value is
+/// fetched from over the network, compared byte for byte against a token claim, and emitted
+/// into the sign-in page's `connect-src` as the one origin that page's script may talk to.
+/// Printable ASCII is what makes the last of those safe with no escaping at all.
+///
+/// A query or a fragment is refused rather than trimmed. Cognito's `iss` is an origin and a
+/// pool id and nothing else, so a value carrying either was written by somebody who meant a
+/// different URL, and trimming it would build a JWKS URL they never asked for.
+pub fn compile_issuer(raw: &str) -> Result<String, String> {
+    let e = |m: &str| Err(format!("issuer '{raw}': {m}"));
+    let u = raw.trim().trim_end_matches('/');
+    if u.is_empty() {
+        return Ok(String::new());
+    }
+    if !u.bytes().all(|b| b.is_ascii_graphic()) {
+        return e("must be printable ASCII (no spaces, no control bytes)");
+    }
+    let rest = match u.strip_prefix("https://") {
+        Some(r) => r,
+        None => return e("must be an absolute https:// URL"),
+    };
+    let authority = rest.split(['/', '?', '#']).next().unwrap_or("");
+    if authority.is_empty() {
+        return e("empty host");
+    }
+    if authority.contains('@') || u.contains('\\') {
+        return e("userinfo '@' and backslashes are not allowed");
+    }
+    if u.contains('?') || u.contains('#') {
+        return e("must be the bare issuer URL: no query, no fragment");
+    }
+    Ok(u.to_string())
+}
+
+/// Validate the session cookie's `Domain`: a bare domain, optionally with the leading dot
+/// RFC 6265 ignores, and never a scheme, a port or a path.
+///
+/// A single label is refused with a sentence of its own, because it is the mistake that looks
+/// most like it should work: a browser will not store a cookie for `com` (a public suffix) and
+/// has no use for one on a bare hostname that is not the request's own. What is wanted there
+/// is the registrable domain the services share.
+pub fn compile_cookie_domain(raw: &str) -> Result<String, String> {
+    let e = |m: &str| Err(format!("cookie_domain '{raw}': {m}"));
+    let d = raw.trim().to_ascii_lowercase();
+    if d.is_empty() {
+        return Ok(String::new());
+    }
+    let bare = d.strip_prefix('.').unwrap_or(&d);
+    if bare.is_empty()
+        || !bare
+            .bytes()
+            .all(|b| b.is_ascii_alphanumeric() || b == b'.' || b == b'-')
+        || bare.starts_with('-')
+        || bare.starts_with('.')
+        || bare.ends_with('.')
+        || bare.ends_with('-')
+        || bare.contains("..")
+    {
+        return e(
+            "is not a bare domain: letters, digits, '.' and '-', an optional leading dot, and \
+             no scheme, port or path",
+        );
+    }
+    if !bare.contains('.') {
+        return e(
+            "is a single label, which a browser stores for nothing: name the registrable \
+             domain the services share, such as '.example.com'",
+        );
+    }
+    Ok(d)
+}
+
+/// What a `Domain=` attribute actually reaches: the value without the optional leading dot,
+/// which RFC 6265 ignores. The one place that dot is taken off, so nothing compares two
+/// spellings of one domain and calls them different.
+pub fn cookie_domain_host(domain: &str) -> &str {
+    domain.strip_prefix('.').unwrap_or(domain)
+}
+
+/// Whether a cookie on `domain` is sent to every host `pattern` can match.
+///
+/// Textual rather than a glob intersection, and sound because a host pattern's suffix is
+/// literal: everything `*.x.com` matches ends in `.x.com`, so a cookie on `x.com` reaches all
+/// of it. The dot carries the whole check on both sides. `*x.com`, written without one, is
+/// **not** covered and must not be, since it matches `evilx.com`, which no cookie on `x.com`
+/// is ever sent to.
+pub fn cookie_domain_covers(domain: &str, pattern: &str) -> bool {
+    let d = cookie_domain_host(domain);
+    let p = pattern.trim().to_ascii_lowercase();
+    p == d || p.ends_with(&format!(".{d}"))
+}
+
+/// A setting whose change can stop people getting in, and which both editors therefore make a
+/// **two-step** rather than a save.
+///
+/// Which fields these are is in this crate for the crate's own membership rule: two programs
+/// edit this file, and one that wrote in silence what the other stopped to ask about would
+/// make the guard a property of which editor you happened to open. The *wording* is not here.
+/// That has an operator on the other end, so the CLI prints sentences and the GUI renders a
+/// panel in two languages, and neither belongs in a library.
+///
+/// **It is five and not fifteen on purpose.** A confirmation that fires on every save is a
+/// button people learn to click without reading, which is worse than no confirmation at all
+/// because it is also an alibi. What earns a place here is the pair of properties that makes a
+/// confirmation the right instrument in the first place: the value can stop a **new** login,
+/// and it invalidates no cookie, so whoever made the edit still holds a session and can undo
+/// it. The `ui` four cost a palette; the social wiring costs one way in of several; neither is
+/// this.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum GuardedSetting {
+    /// The pool. Every id_token is then checked against another issuer's `iss` and keys.
+    Issuer,
+    /// The email flow's app client. Every id_token is refused for its audience.
+    ClientId,
+    /// Where a `401` sends a browser. A wrong one is a sign-in page that is not there.
+    LoginUrl,
+    /// The cookie's `Domain`, and the only one here that does something worse than shut a
+    /// door: see [`GateSettings::cookie_domain`].
+    CookieDomain,
+    /// Where a post-login redirect may land. Only a **removal** is guarded.
+    AuthorizedHosts,
+}
+
+impl GuardedSetting {
+    /// The field's name in the file, which is also the name both editors post it under.
+    pub fn field(self) -> &'static str {
+        match self {
+            GuardedSetting::Issuer => "issuer",
+            GuardedSetting::ClientId => "client_id",
+            GuardedSetting::LoginUrl => "login_url",
+            GuardedSetting::CookieDomain => "cookie_domain",
+            GuardedSetting::AuthorizedHosts => "authorized_hosts",
+        }
+    }
+}
+
+/// Which guarded settings `new` changes relative to `old`: what an editor must confirm before
+/// writing, and empty when there is nothing to stop for.
+///
+/// Two rules keep this quiet enough to be read, and both say the same thing: **a confirmation
+/// is about what is taken away, never about what is set for the first time.** A field that was
+/// empty and now is not can only be a deployment being finished, so it passes; a field that
+/// had a value passes only if the value is unchanged. And for the host list, only a **removal**
+/// counts: adding a host cannot stop a login, it widens where one may land, which is a
+/// different conversation and one [`compile_settings`] already has with `cookie_domain`.
+///
+/// Comparison is on the normalised value, so a leading dot, a trailing slash, surrounding
+/// space or a change of case is not a change. Two editors that disagreed about that would
+/// disagree about when to ask.
+pub fn guarded_changes(old: &GateSettings, new: &GateSettings) -> Vec<GuardedSetting> {
+    let mut out = Vec::new();
+    let scalar = |o: &str, n: &str| {
+        let (o, n) = (o.trim(), n.trim());
+        !o.is_empty() && o != n
+    };
+    if scalar(
+        old.issuer.trim_end_matches('/'),
+        new.issuer.trim().trim_end_matches('/'),
+    ) {
+        out.push(GuardedSetting::Issuer);
+    }
+    if scalar(&old.client_id, &new.client_id) {
+        out.push(GuardedSetting::ClientId);
+    }
+    if scalar(&old.login_url, &new.login_url) {
+        out.push(GuardedSetting::LoginUrl);
+    }
+    if scalar(
+        cookie_domain_host(&old.cookie_domain.trim().to_ascii_lowercase()),
+        cookie_domain_host(&new.cookie_domain.trim().to_ascii_lowercase()),
+    ) {
+        out.push(GuardedSetting::CookieDomain);
+    }
+    let host_set = |v: &[String]| -> Vec<String> {
+        v.iter()
+            .map(|h| h.trim().to_ascii_lowercase())
+            .filter(|h| !h.is_empty())
+            .collect()
+    };
+    let (before, after) = (
+        host_set(&old.authorized_hosts),
+        host_set(&new.authorized_hosts),
+    );
+    if before.iter().any(|h| !after.contains(h)) {
+        out.push(GuardedSetting::AuthorizedHosts);
+    }
+    out
+}
+
 /// Validate the social sign-in buttons: a provider and an app client each.
 ///
 /// **Fatal on a bad entry, like a claim name and for the same reason.** A silently skipped
@@ -4227,6 +4505,14 @@ pub fn compile_settings(file: &SettingsFile) -> Result<Settings, String> {
                  gate.social_callback_url, give every gate.social_buttons entry its own \
                  audience, and bump the version; see the CHANGELOG"
             ),
+            2 => format!(
+                "\"version\": 2 was written before the pool, the cookie domain and the \
+                 authorized hosts moved into this file (expected {SETTINGS_VERSION}). Copy \
+                 BB_AUTH_COGNITO_ISSUER into gate.issuer, BB_AUTH_COOKIE_DOMAIN into \
+                 gate.cookie_domain and BB_AUTH_AUTHORIZED_HOSTS into gate.authorized_hosts \
+                 (as a list), bump the version, and take all three out of bb-auth.env; see \
+                 the CHANGELOG"
+            ),
             v => format!("\"version\": {v} is not this format (expected {SETTINGS_VERSION})"),
         });
     }
@@ -4283,6 +4569,40 @@ pub fn compile_settings(file: &SettingsFile) -> Result<Settings, String> {
         "" => String::new(),
         raw => compile_login_url(raw).map_err(|e| format!("login_url: {e}"))?,
     };
+    let issuer = compile_issuer(&file.gate.issuer)?;
+    let cookie_domain = compile_cookie_domain(&file.gate.cookie_domain)?;
+    let mut authorized_hosts: Vec<UrlPattern> =
+        Vec::with_capacity(file.gate.authorized_hosts.len());
+    for raw in &file.gate.authorized_hosts {
+        if raw.trim().is_empty() {
+            continue;
+        }
+        authorized_hosts
+            .push(compile_host_pattern(raw).map_err(|e| format!("authorized_hosts: {e}"))?);
+    }
+    // The check that only became possible once these two stopped living in different files,
+    // and the reason the move is worth what it cost. A host the cookie cannot reach is not a
+    // subtle misconfiguration: the login succeeds, the redirect lands, the browser sends no
+    // session cookie, nginx answers 401, and the browser goes back to the sign-in page it
+    // just came from, for ever, with nothing anywhere saying why.
+    if !cookie_domain.is_empty() {
+        let stray: Vec<&str> = file
+            .gate
+            .authorized_hosts
+            .iter()
+            .map(|h| h.trim())
+            .filter(|h| !h.is_empty() && !cookie_domain_covers(&cookie_domain, h))
+            .collect();
+        if !stray.is_empty() {
+            return Err(format!(
+                "authorized_hosts: {} outside cookie_domain '{}', so a login would redirect \
+                 there and the browser would send no session cookie: a 401, a bounce back to \
+                 the sign-in page, and a loop",
+                stray.join(", "),
+                cookie_domain
+            ));
+        }
+    }
     let oauth_domain = compile_oauth_domain(&file.gate.oauth_domain)?;
     let social_callback_url =
         match compile_asset_url("social_callback_url", &file.gate.social_callback_url)? {
@@ -4362,6 +4682,9 @@ pub fn compile_settings(file: &SettingsFile) -> Result<Settings, String> {
         social_callback_url,
         social_buttons,
         session_ttl: ttl,
+        issuer,
+        cookie_domain: (!cookie_domain.is_empty()).then_some(cookie_domain),
+        authorized_hosts,
         admins,
         stylesheet_url,
         logo_url,
@@ -6137,7 +6460,7 @@ mod tests {
     fn a_minimal_settings_file_is_the_behaviour_every_earlier_version_had() {
         // Both sections absent. What comes out has to be exactly what the gate did before
         // there was a settings file, or an upgrade would change behaviour by omission.
-        let s = settings(r#"{ "version": 2 }"#).unwrap();
+        let s = settings(r#"{ "version": 3 }"#).unwrap();
         assert!(s.profile_claims.is_empty());
         // No app client either, which is the state a package's fresh file is in: tolerated,
         // and it compiles to a gate that accepts no token rather than to a refusal.
@@ -6154,24 +6477,163 @@ mod tests {
     #[test]
     fn the_version_is_checked_the_way_the_access_file_checks_its_own() {
         // No version at all deserializes to 0, which is not this format either.
-        for json in [r#"{}"#, r#"{ "version": 3 }"#] {
+        for json in [r#"{}"#, r#"{ "version": 4 }"#] {
             assert!(refusal(settings(json)).contains("version"), "{json}");
         }
-        // Version 1 gets a sentence rather than a number: it is the one older format that
-        // exists in the wild, and what it needs is not "try again" but three new fields.
+        // The two older formats get a sentence rather than a number, because both exist in
+        // the wild and what each needs is not "try again" but a named list of fields to move
+        // in. Version 1 predates the app clients; version 2 predates the pool.
         let one = refusal(settings(r#"{ "version": 1 }"#));
         assert!(
             one.contains("client_id") && one.contains("CHANGELOG"),
             "{one}"
         );
+        let two = refusal(settings(r#"{ "version": 2 }"#));
+        assert!(
+            two.contains("gate.issuer")
+                && two.contains("gate.cookie_domain")
+                && two.contains("gate.authorized_hosts"),
+            "{two}"
+        );
+    }
+
+    /// The check that only became possible once these two stopped living in two files, and
+    /// the reason the move was worth its cost. The failure it prevents has no error anywhere:
+    /// the login works, the redirect lands, the browser sends no cookie, and the person is
+    /// back on the sign-in page they just came from.
+    #[test]
+    fn a_cookie_domain_must_reach_every_authorized_host() {
+        let f = |domain: &str, hosts: &str| {
+            settings(&format!(
+                r#"{{ "version": 3, "gate": {{ "cookie_domain": "{domain}",
+                     "authorized_hosts": [{hosts}] }} }}"#
+            ))
+        };
+        // The apex and the wildcard are both under `.badbat75.com`, dot and all.
+        assert!(f(".badbat75.com", r#""badbat75.com", "*.badbat75.com""#).is_ok());
+        // With or without the leading dot: RFC 6265 ignores it, so this file must too.
+        assert!(f("badbat75.com", r#""*.badbat75.com""#).is_ok());
+        // A second estate the cookie is never sent to.
+        let e = refusal(f(".badbat75.com", r#""badbat75.com", "app.other.com""#));
+        assert!(
+            e.contains("app.other.com") && e.contains("cookie_domain"),
+            "{e}"
+        );
+        // The lookalike the dot exists to catch: `*badbat75.com` matches `evilbadbat75.com`,
+        // which no cookie on badbat75.com reaches.
+        assert!(f(".badbat75.com", r#""*badbat75.com""#).is_err());
+        // A host-only cookie says nothing about where a redirect may land, so there is
+        // nothing to check and the check does not invent one.
+        assert!(f("", r#""app.other.com""#).is_ok());
+    }
+
+    #[test]
+    fn a_cookie_domain_is_a_domain_and_an_issuer_is_an_absolute_url() {
+        for bad in [
+            "https://x.com", // a URL, not a domain
+            "x.com:443",     // a port
+            "x.com/path",    // a path
+            "com",           // a single label a browser stores for nothing
+            ".",             // and its degenerate spelling
+            "-x.com",
+            "x..com",
+        ] {
+            assert!(compile_cookie_domain(bad).is_err(), "{bad}");
+        }
+        // Kept as written, lowercased, because those bytes go into the header.
+        assert_eq!(
+            compile_cookie_domain(" .BadBat75.com ").unwrap(),
+            ".badbat75.com"
+        );
+        assert_eq!(compile_cookie_domain("").unwrap(), "");
+
+        for bad in [
+            "cognito-idp.eu-central-1.amazonaws.com/pool", // no scheme
+            "http://x.com/pool",                           // not https
+            "https://user@x.com/pool",                     // userinfo
+            "https://x.com/pool?a=1",                      // a query
+            "https://x.com/pool#f",                        // a fragment
+            "https://x.com/po ol",                         // a space
+        ] {
+            assert!(compile_issuer(bad).is_err(), "{bad}");
+        }
+        // The trailing slash is dropped, because `iss` is compared byte for byte.
+        assert_eq!(
+            compile_issuer("https://x.com/pool/").unwrap(),
+            "https://x.com/pool"
+        );
+    }
+
+    /// A confirmation is about what is taken away. The rule is small enough to state and
+    /// exactly the sort of thing that rots into "ask about everything", which is a button
+    /// people learn to click without reading.
+    #[test]
+    fn a_guarded_setting_asks_about_a_change_and_never_about_a_first_value() {
+        let g = |issuer: &str, client: &str, domain: &str, hosts: &[&str]| GateSettings {
+            issuer: issuer.to_string(),
+            client_id: client.to_string(),
+            cookie_domain: domain.to_string(),
+            authorized_hosts: hosts.iter().map(|h| h.to_string()).collect(),
+            ..Default::default()
+        };
+        let live = g("https://iss/p", "cid", ".x.com", &["x.com", "*.x.com"]);
+
+        // Nothing to confirm: the same values, and the spellings that mean the same values.
+        assert!(guarded_changes(&live, &live).is_empty());
+        let same = g("https://iss/p/", "cid", "X.com", &[" *.X.COM ", "x.com"]);
+        assert!(
+            guarded_changes(&live, &same).is_empty(),
+            "{:?}",
+            guarded_changes(&live, &same)
+        );
+
+        // An empty deployment being filled in is not a risk, whatever it is filled with.
+        let fresh = GateSettings::default();
+        assert!(guarded_changes(&fresh, &live).is_empty());
+
+        // Each of the four scalars, one at a time.
+        for (new, want) in [
+            (
+                g("https://other/p", "cid", ".x.com", &["x.com", "*.x.com"]),
+                GuardedSetting::Issuer,
+            ),
+            (
+                g("https://iss/p", "other", ".x.com", &["x.com", "*.x.com"]),
+                GuardedSetting::ClientId,
+            ),
+            (
+                g("https://iss/p", "cid", ".y.com", &["x.com", "*.x.com"]),
+                GuardedSetting::CookieDomain,
+            ),
+            (
+                g("https://iss/p", "cid", ".x.com", &["x.com"]),
+                GuardedSetting::AuthorizedHosts,
+            ),
+        ] {
+            assert_eq!(guarded_changes(&live, &new), vec![want], "{:?}", want);
+        }
+
+        // Adding a host cannot stop a login, so it is not on this list; removing one can.
+        let wider = g(
+            "https://iss/p",
+            "cid",
+            ".x.com",
+            &["x.com", "*.x.com", "z.com"],
+        );
+        assert!(guarded_changes(&live, &wider).is_empty());
+
+        // Emptying a value that had one is the most dangerous shape of all, and is caught by
+        // the same rule rather than by a case of its own.
+        let gone = g("", "", "", &[]);
+        assert_eq!(guarded_changes(&live, &gone).len(), 4);
     }
 
     #[test]
     fn an_unknown_key_inside_a_section_is_refused_and_one_at_the_top_is_kept() {
         // The same split the access file makes: strict where a typo would drop a setting
         // that narrows behaviour, permissive where `_comment` lives.
-        assert!(settings(r#"{ "version": 2, "gate": { "profil_claims": [] } }"#).is_err());
-        assert!(settings(r#"{ "version": 2, "web": { "admin": [] } }"#).is_err());
+        assert!(settings(r#"{ "version": 3, "gate": { "profil_claims": [] } }"#).is_err());
+        assert!(settings(r#"{ "version": 3, "web": { "admin": [] } }"#).is_err());
 
         let doc: SettingsFile =
             serde_json::from_str(r#"{ "version": 1, "_comment": "hi" }"#).unwrap();
@@ -6206,18 +6668,18 @@ mod tests {
     #[test]
     fn a_session_ttl_that_is_a_login_loop_is_refused() {
         for ttl in [0, 1, MIN_SESSION_TTL - 1] {
-            let json = format!(r#"{{ "version": 2, "gate": {{ "session_ttl_secs": {ttl} }} }}"#);
+            let json = format!(r#"{{ "version": 3, "gate": {{ "session_ttl_secs": {ttl} }} }}"#);
             assert!(refusal(settings(&json)).contains("floor"), "{ttl}");
         }
         // The floor itself is fine, and so is a year.
-        assert!(settings(r#"{ "version": 2, "gate": { "session_ttl_secs": 60 } }"#).is_ok());
-        assert!(settings(r#"{ "version": 2, "gate": { "session_ttl_secs": 31536000 } }"#).is_ok());
+        assert!(settings(r#"{ "version": 3, "gate": { "session_ttl_secs": 60 } }"#).is_ok());
+        assert!(settings(r#"{ "version": 3, "gate": { "session_ttl_secs": 31536000 } }"#).is_ok());
     }
 
     #[test]
     fn an_empty_provider_list_means_any_provider() {
         let s = settings(
-            r#"{ "version": 2, "gate": { "allow_unverified_social": true,
+            r#"{ "version": 3, "gate": { "allow_unverified_social": true,
                  "social_providers": [] } }"#,
         )
         .unwrap();
@@ -6228,7 +6690,7 @@ mod tests {
         );
 
         let s = settings(
-            r#"{ "version": 2, "gate": { "allow_unverified_social": true,
+            r#"{ "version": 3, "gate": { "allow_unverified_social": true,
                  "social_providers": ["Google", " SignInWithApple "] } }"#,
         )
         .unwrap();
@@ -6244,7 +6706,7 @@ mod tests {
         // direction to be wrong in, and a gate that refused to start over a list it never
         // reads would be a lockout caused by the GUI's half of the file.
         let s = settings(
-            r#"{ "version": 2, "web": { "admins": ["Bob@X.com", "not an email", "",
+            r#"{ "version": 3, "web": { "admins": ["Bob@X.com", "not an email", "",
                  "bob@x.com"] } }"#,
         )
         .unwrap();
@@ -6261,7 +6723,7 @@ mod tests {
     fn the_ui_section_defaults_to_the_built_in_look() {
         // A file that says nothing about the look is the common case, and it must compile to
         // "no override anywhere": each page is complete on its own, and nothing is fetched.
-        let s = settings(r#"{ "version": 2 }"#).unwrap();
+        let s = settings(r#"{ "version": 3 }"#).unwrap();
         assert_eq!(s.stylesheet_url, None);
         assert_eq!(s.logo_url, None);
         assert_eq!(s.brand_name, None);
@@ -6340,7 +6802,7 @@ mod tests {
         assert_eq!(UiTheme::parse(""), Some(UiTheme::System));
         assert_eq!(UiTheme::parse("darkk"), None);
         assert!(refusal(compile_settings(
-            &serde_json::from_str(r#"{ "version": 2, "ui": { "theme": "darkk" } }"#).unwrap()
+            &serde_json::from_str(r#"{ "version": 3, "ui": { "theme": "darkk" } }"#).unwrap()
         ))
         .contains("not one of system, light, dark"));
         // System is the absence of a choice, and says so by emitting no attribute at all.
@@ -6355,12 +6817,12 @@ mod tests {
         // lock anybody out, which is what earns it a place in this file; that is not the same
         // as being allowed to be wrong in silence.
         let e = refusal(settings(
-            r#"{ "version": 2, "ui": { "stylesheet_url": "javascript:alert(1)" } }"#,
+            r#"{ "version": 3, "ui": { "stylesheet_url": "javascript:alert(1)" } }"#,
         ));
         assert!(e.contains("stylesheet_url"), "{e}");
 
         let s = settings(
-            r#"{ "version": 2, "ui": { "stylesheet_url": "https://a.x.com/t.css",
+            r#"{ "version": 3, "ui": { "stylesheet_url": "https://a.x.com/t.css",
                  "logo_url": "/img/l.png", "brand_name": "X", "theme": "dark" } }"#,
         )
         .unwrap();
@@ -6370,7 +6832,7 @@ mod tests {
         assert_eq!(s.theme, UiTheme::Dark);
 
         // An unknown key inside the section is refused, exactly as it is in the other two.
-        assert!(settings(r#"{ "version": 2, "ui": { "stylesheet": "x" } }"#).is_err());
+        assert!(settings(r#"{ "version": 3, "ui": { "stylesheet": "x" } }"#).is_err());
     }
 
     #[test]

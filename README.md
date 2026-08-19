@@ -461,7 +461,7 @@ may no longer see, so they land there, get a `401`, and reach the login page one
 A `?rd=` on the link is the way to name a landing place on purpose, and the only one.
 
 It buys no new redirect surface, because it goes through the same `safe_rd` guard as an `rd`:
-it must name a `BB_AUTH_AUTHORIZED_HOSTS` host, so a link from anywhere else redirects
+it must name a `gate.authorized_hosts` host, so a link from anywhere else redirects
 nowhere. A rejected value falls back to the login page instead of being followed, and a
 rejected `?rd=` does **not** promote the `Referer`, or a crafted link would get to choose
 which of the two is read. With neither, the browser lands on the login page.
@@ -475,7 +475,7 @@ is exactly the shape a cross-origin `Referer` already has.
 #### One logout endpoint for every vhost
 
 Wiring `/auth/logout` into every server block is avoidable, and worth avoiding: with
-`BB_AUTH_COOKIE_DOMAIN` set to a parent domain the session is **one cookie** for the whole
+`gate.cookie_domain` set to a parent domain the session is **one cookie** for the whole
 estate, and the handler reads nothing about the host it was called on. So mount it once, on
 whichever vhost you keep for auth, and point every application's `Sign out` at it
 absolutely:
@@ -499,14 +499,14 @@ The clear reaches the whole estate because the expiring cookie carries the same 
 and `Path` as the minted one, which is what a browser matches a `Set-Cookie` against
 (`build_cookie`, pinned by `clearing_a_cookie_targets_the_same_cookie_it_minted`). With no
 `rd` every application can use the identical link and the browser lands on the login page;
-with one, list its host in `BB_AUTH_AUTHORIZED_HOSTS` like any other redirect target, and
+with one, list its host in `gate.authorized_hosts` like any other redirect target, and
 remember that `*.example.com` does not match the bare apex.
 
 Two conditions, and both are structural rather than a matter of care. The applications and
 the endpoint must share a **registrable domain**, because a `Sign out` across two of them is
 a cross-site navigation and the CSRF guard ignores exactly that: a service on a different
 domain is not covered and keeps its own logout location. And a **host-only cookie** (no
-`BB_AUTH_COOKIE_DOMAIN`, i.e. the per-service login of the next section) cannot work this
+`gate.cookie_domain`, i.e. the per-service login of the next section) cannot work this
 way at all: there is a separate cookie per host, and only the host that set one can clear
 it.
 
@@ -878,35 +878,44 @@ Two files, and which one a setting is in is decided by one question: what does c
 cost?
 
 **[`deploy/bb-auth.env.example`](deploy/bb-auth.env.example)**: everything a change to
-costs a restart or a re-login: the listener and the worker count, the Cognito trust roots,
-the cookie's name and domain, the Cognito **issuer**, and `BB_AUTH_AUTHORIZED_HOSTS` /
-`BB_AUTH_ORIGINAL_URL_HEADER`, which *are* the lockout when they are wrong. The Cognito **app
-clients** are not there: which ones this gate is part of is `gate.client_id` and the audience
-of each `gate.social_buttons` entry in the settings file, and the issuer above is what makes
-that safe — the file chooses among the app clients of one pool and can never reach another. The only secret
+costs a restart or a re-login, which after 1.99.1 is a short list: the listener and the worker
+count, the HMAC key, the session cookie's **name**, where the access file is, and
+`BB_AUTH_ORIGINAL_URL_HEADER`, which *is* the lockout when it is wrong. The cookie's name is
+there and its domain is not, which looks arbitrary and is not: renaming it orphans every
+cookie already issued, and unlike the domain nobody has a reason to. The only secret
 is `BB_AUTH_HMAC_KEY` (`openssl rand -base64 48`); keep it out of version control and off
 shared storage.
 
 **[`deploy/settings.example.json`](deploy/settings.example.json)**: everything that is read
-per request, cannot lock anybody out, and holds no secret: the profile claims, the identity
-attributes, the social relaxation and its providers, **where people sign in, which Cognito
-app clients this deployment is part of, and which social buttons the page offers**, the
+per request, cannot lock anybody out irreversibly, and holds no secret: the profile claims,
+the identity attributes, the social relaxation and its providers, **the whole Cognito wiring
+(the user pool, the app clients, where people sign in and which social buttons the page
+offers) and the estate (the session cookie's domain and the hosts a login may land on)**, the
 session lifetime, who may use `bb-auth-web`, and the `ui` section — how every page either
-program serves looks. The whole Cognito wiring is there because all three programs have an
-opinion about it and an env var is readable only by the process that was started with it: the
-admin GUI could have shown one only by being handed a second copy, and a value written in two
-files drifts. What keeps that safe is that the **pool** stays in `bb-auth.env`, so the file
-chooses among the app clients of one issuer. In the admin GUI it is one table, a row per way
-in: what a visitor reads, the `identity_provider` Cognito matches, and the app client it runs
-through, with the tick the only writable column and the email row always there. Microsoft
-means the personal account rather than an Entra ID tenant, so nobody has to remember that
-Cognito spells it `MicrosoftPersonal`. They are in
+program serves looks. All of it is there because all three programs have an opinion about it
+and an env var is readable only by the process that was started with it: the admin GUI could
+have shown one only by being handed a second copy, and a value written in two files drifts.
+The cookie domain and the authorized hosts being in one file is what lets the file **refuse a
+host the cookie can never reach**, which is a login that lands, sends no cookie and bounces
+back to the sign-in page for ever, with nothing anywhere saying why. In the admin GUI the ways
+in are one table, a row per way: what a visitor reads, the `identity_provider` Cognito
+matches, and the app client it runs through, with the tick the only writable column and the
+email row always there. Microsoft means the personal account rather than an Entra ID tenant,
+so nobody has to remember that Cognito spells it `MicrosoftPersonal`. They are in
 a file rather than the environment for one mechanical reason,
 and not for tidiness: a process cannot re-read its own environment (systemd loads
 `EnvironmentFile=` once, at `ExecStart`), so a value that must change with no restart
 cannot be an environment variable. These take effect on the next request, and the settings
 file is reloaded by the same SIGHUP as the access file, fail-soft in the same way: the
 worst a bad save can do is leave the previous values in force.
+
+**Five of them can stop people getting in** — the pool, the email flow's app client, the
+sign-in page's URL, the cookie's domain, and taking a host off the authorized list — so both
+editors ask before writing one, rather than refusing: none of them invalidates a cookie, so
+whoever makes the edit still holds a session and can undo it. On the CLI that is `--yes` after
+a printed block naming what each change costs; in the GUI it is a panel and a second click.
+The list is deliberately five and not fifteen, because a confirmation that fires on every save
+is a button people learn to click without reading.
 
 ```bash
 bb-auth-adm settings show                              # what the two services read
@@ -1064,7 +1073,7 @@ The binary is service-agnostic. To front a service at `app.example.com`:
        # `auth_request off;` explicitly: a sign-in page behind the gate answers a
        # signed-out visitor with itself, forever.
        # No X-Original-URL: the page takes `rd` from its own query string and
-       # validates it against BB_AUTH_AUTHORIZED_HOSTS, so it needs nothing of
+       # validates it against gate.authorized_hosts, so it needs nothing of
        # nginx's. That is deliberate — this is the one location that must be
        # impossible to get wrong. A visitor who arrives with no `rd` is sent back
        # to the Referer instead, which is the browser's business, not nginx's.
@@ -1086,18 +1095,19 @@ The binary is service-agnostic. To front a service at `app.example.com`:
    `proxy_set_header` only overrides the names it lists, so an unlisted one travels
    straight through from the client.
 2. **Cross-service SSO vs per-service login** — pure configuration:
-   - *SSO (one login across a domain):* set `BB_AUTH_COOKIE_DOMAIN=.example.com`
-     so the session cookie is shared, and list every sibling in
-     `BB_AUTH_AUTHORIZED_HOSTS=example.com,*.example.com` so the `rd`
-     open-redirect guard accepts them.
-   - *Per-service login:* run a separate bb-auth instance per service, with a
-     host-only cookie and `BB_AUTH_AUTHORIZED_HOSTS=app.example.com`.
+   - *SSO (one login across a domain):* set `gate.cookie_domain` to
+     `.example.com` so the session cookie is shared, and list every sibling in
+     `gate.authorized_hosts` so the `rd` open-redirect guard accepts them. The
+     file refuses a host the cookie cannot reach, which is that pairing made
+     unbreakable rather than merely documented.
+   - *Per-service login:* run a separate bb-auth instance per service, with an
+     empty `gate.cookie_domain` (host-only) and one host listed.
 3. **Login page**: it must POST the `id_token` to the *right* service's
    `/auth/session`. For multiple services, derive the target from the validated
    `rd` instead of a fixed base.
 
 Step 3 is the only per-service behaviour change; the SSO scope in step 2 is pure
-configuration (`BB_AUTH_COOKIE_DOMAIN` + `BB_AUTH_AUTHORIZED_HOSTS`).
+configuration (`gate.cookie_domain` + `gate.authorized_hosts`).
 
 ### The admin GUI behind the gate
 
@@ -1188,14 +1198,14 @@ Three operator notes, and the first is the one that matters:
   only overrides the names it lists, so an unlisted one travels straight through from the
   client.
 
-The vhost's host must also match `BB_AUTH_AUTHORIZED_HOSTS`, or the `401 → login → back
+The vhost's host must also match `gate.authorized_hosts`, or the `401 → login → back
 here` round trip lands on the login page instead (`*.badbat75.com` covers
 `auth.badbat75.com`).
 
 ### Where the post-login redirect may land
 
 There is no canonical "service base URL" — one gate fronts several hosts, and which
-one is in play is decided by the caller. So `BB_AUTH_AUTHORIZED_HOSTS` is the sole
+one is in play is decided by the caller. So `gate.authorized_hosts` is the sole
 authority on where `?rd=…` may send a freshly-logged-in browser:
 
 - a relative `rd` (`/preferences`) resolves against the **caller's** host, taken from
@@ -1225,7 +1235,7 @@ Reporting something that lets somebody in, and what is in scope:
   the scopes it restricts itself to. Revoke by removing the key (or the user) from the
   access file + reload. Keys bypass Cognito, so treat the raw bearer like a password and
   prefer restricting it to the scopes it needs.
-- `rd` is open-redirect-guarded to `BB_AUTH_AUTHORIZED_HOSTS`.
+- `rd` is open-redirect-guarded to `gate.authorized_hosts`.
 - Login-CSRF (an attacker POSTing *their* token to log a victim into the
   attacker's account) is possible in theory but low-impact for a read gate;
   accepted. Revisit with a state/nonce if the gate ever fronts something sensitive.
