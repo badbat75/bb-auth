@@ -129,8 +129,11 @@ button:active{transform:translateY(1px)}
 button:disabled{opacity:.6;cursor:default}
 /* The page's one main action, sized to be it: full width and heavier. */
 button.primary{width:100%;margin-top:6px;padding:12px 14px;font-size:1rem;font-weight:700}
-/* --on-state and not --on-accent: the accent is a mid blue in both arms so white sits on it
-   either way, while a state is dark on a light ground and light on a dark one. */
+/* --on-state and not --on-accent: a state is dark on a light ground and light on a dark one,
+   so what is legible on a filled state is not what is legible on a filled accent. Since
+   2026-08-19 the two tokens happen to agree on dark (the accent moved for contrast and took
+   --on-accent with it), which changes nothing here: this rule names the one that belongs to
+   a state, so it keeps following the states when the accent moves again. */
 button.danger{background:var(--error);border-color:var(--error);color:var(--on-state)}
 button.danger:hover{background:var(--error);border-color:var(--error);filter:brightness(1.08)}
 

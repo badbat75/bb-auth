@@ -32,6 +32,20 @@
    written TWICE, on purpose, and the two copies are kept in step by hand: there is no third
    place to put it that does not need JavaScript to flip a class.
 
+   AN OVERRIDE FILE MOVES `--accent` AND `--on-accent` TOGETHER, in every arm it touches,
+   and that became a rule on 2026-08-19 rather than having always been one. While the accent
+   was a mid blue in both arms, white sat on it either way: a file that redefined only
+   `--accent` inherited a value that happened to work for any accent dark enough to carry
+   white, so the pairing never came up. The dark arm's `--on-accent` is now the ground colour,
+   so what a lone `--accent` inherits there is DARK text, and a deployment whose own accent is
+   dark gets dark on dark. It gets it on the two surfaces that fill with the accent, a button
+   and a selected pill, which between them are the most clicked things either program draws.
+   `--accent-hover` and `--accent-weak` travel with the pair for a smaller reason: a hover
+   that is not one step from rest reads as a different control, and a weak tint that is not
+   the accent's is a tint of nothing. The reason the pair cannot be split is measured on
+   `--accent` below: that one token is both link text on `--card` and the fill under
+   `--on-accent`, and those two requirements pull in opposite directions.
+
    An override file must repeat the same four arms to be complete, and the reason is
    specificity rather than tidiness. One that defines only `:root` (0,1,0) is outranked by
    both `[data-theme]` arms and by the guarded media query (0,2,0), so on a deployment that
@@ -67,7 +81,23 @@
   --input-border:#d8d9e4;
 
   /* The accent, and what is legible on top of it. --on-accent is the text colour for a
-     filled accent surface, never a background of its own. */
+     filled accent surface, never a background of its own.
+
+     THE DARK ARM'S VALUES ARE DECIDED BY CONTRAST, and the two requirements on this token
+     pull opposite ways, which is why they are decided together and not one at a time. The
+     accent is BOTH link text on --card and the fill under --on-accent. Measured against the
+     dark --card, the blue this file shipped until 2026-08-19 (#5b78ff) gave 4.28:1 as text,
+     under the 4.5:1 that WCAG AA asks of body text; and white on it was already 3.77:1.
+     Lightening the blue fixes the first and worsens the second: text wants a relative
+     luminance of at least .243 against that card, white-on-fill wants at most .183, and no
+     single colour is both. So the pair moved together. #6a85ff gives 4.93:1 as text and
+     5.51:1 under #16161b, and --accent-hover inherited the old accent so that hover stays
+     exactly one step darker than rest. The light arm needs none of this: #4661f0 measures
+     4.96:1 both as text on white and under white as a fill.
+
+     The consequence for a layout is that on dark, text on a filled accent surface is now
+     DARK. That is this file's own dark-arm rule, the one --on-state states below; the
+     accent was simply the last token still exempt from it. */
   --accent:#4661f0;
   --accent-hover:#3550dd;
   --accent-weak:rgba(70,97,240,.15);
@@ -82,12 +112,16 @@
   --error:#cf3b3b;
   --error-bg:rgba(207,59,59,.1);
 
-  /* The text colour on a FILLED state surface, and it is not --on-accent however much the
-     two look alike here. The accent is a mid blue in both arms, so white sits on it either
-     way; the states are dark on a light ground and deliberately LIGHT on a dark one (a warn
-     that reads as a warning against #16161b is a yellow), so a filled state tag needs the
-     ground's colour on dark and white on light. One token, because a tag and a destructive
-     button are the only things that fill with a state. */
+  /* The text colour on a FILLED state surface. It is NOT --on-accent, and until 2026-08-19
+     the reason was that the two differed: the accent was a mid blue in both arms so white sat
+     on it either way, while the states are dark on a light ground and deliberately LIGHT on a
+     dark one (a warn that reads as a warning against #16161b is a yellow), so a filled state
+     tag needs the ground's colour on dark and white on light. The accent has since moved for
+     contrast and the two now hold the SAME value on dark, which is exactly the moment to say
+     why they are still two names: they answer different questions about different fills, and
+     one of them is free to move again. Merging them would make the next accent change silently
+     repaint every state tag. One token for the states, because a tag and a destructive button
+     are the only things that fill with a state. */
   --on-state:#ffffff;
 
   /* Elevation. A shadow is a colour, so it belongs to the theme and not to a layout: the
@@ -135,10 +169,10 @@
   --muted:#9a9aa8;
   --input-bg:#1a1a22;
   --input-border:#3a3a48;
-  --accent:#5b78ff;
-  --accent-hover:#4661f0;
-  --accent-weak:rgba(91,120,255,.15);
-  --on-accent:#ffffff;
+  --accent:#6a85ff;
+  --accent-hover:#5b78ff;
+  --accent-weak:rgba(106,133,255,.15);
+  --on-accent:#16161b;
   --ok:#46c98b;
   --ok-bg:rgba(70,201,139,.12);
   --warn:#e3b341;
@@ -164,10 +198,10 @@
   --muted:#9a9aa8;
   --input-bg:#1a1a22;
   --input-border:#3a3a48;
-  --accent:#5b78ff;
-  --accent-hover:#4661f0;
-  --accent-weak:rgba(91,120,255,.15);
-  --on-accent:#ffffff;
+  --accent:#6a85ff;
+  --accent-hover:#5b78ff;
+  --accent-weak:rgba(106,133,255,.15);
+  --on-accent:#16161b;
   --ok:#46c98b;
   --ok-bg:rgba(70,201,139,.12);
   --warn:#e3b341;
