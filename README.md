@@ -887,8 +887,12 @@ shared storage.
 
 **[`deploy/settings.example.json`](deploy/settings.example.json)**: everything that is read
 per request, cannot lock anybody out, and holds no secret: the profile claims, the identity
-attributes, the social relaxation and its providers, the session lifetime, who may use
-`bb-auth-web`, and the `ui` section — how every page either program serves looks. They are in
+attributes, the social relaxation and its providers, **which social buttons the sign-in page
+offers**, the session lifetime, who may use `bb-auth-web`, and the `ui` section — how every
+page either program serves looks. Note where the line falls on social sign-in: the
+`BB_AUTH_SOCIAL_*` group is env because it decides whether the OAuth leg can complete at
+all, while `gate.social_buttons` is a setting because it decides only what a visitor is
+offered, and a provider needs to be in both to get a button. They are in
 a file rather than the environment for one mechanical reason,
 and not for tidiness: a process cannot re-read its own environment (systemd loads
 `EnvironmentFile=` once, at `ExecStart`), so a value that must change with no restart

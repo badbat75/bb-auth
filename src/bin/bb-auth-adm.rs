@@ -132,6 +132,7 @@ settings                        the OTHER file: what takes effect with no restar
   settings show                 what the gate and the GUI read from it
   settings set [--claims LIST] [--identity LIST] [--session-ttl SECS]
                [--unverified-social true|false] [--providers LIST] [--no-providers]
+               [--social-buttons LIST] [--no-social-buttons]
                [--brand NAME] [--stylesheet URL] [--logo URL] [--theme system|light|dark]
   settings admin add EMAIL...   who may use bb-auth-web. NEVER empty, never 'everyone'
   settings admin rm EMAIL...
@@ -692,6 +693,13 @@ fn cmd_settings_show(ctx: Ctx) -> Result<ExitCode, String> {
         }
     );
     println!(
+        "  social_buttons          {}",
+        match s.social_buttons.len() {
+            0 => "(none: the sign-in page offers no social button)".to_string(),
+            _ => s.social_buttons.join(", "),
+        }
+    );
+    println!(
         "  session_ttl_secs        {} ({} days)",
         s.session_ttl,
         s.session_ttl / 86_400
@@ -744,6 +752,8 @@ fn cmd_settings_set(mut ctx: Ctx) -> Result<ExitCode, String> {
     let ttl = ctx.flags.take_one("session-ttl")?;
     let social = take_tristate(&mut ctx.flags, "unverified-social")?;
     let providers = ctx.flags.take_many("providers")?;
+    let buttons = ctx.flags.take_many("social-buttons")?;
+    let no_buttons = ctx.flags.take_flag("no-social-buttons")?;
     let no_providers = ctx.flags.take_flag("no-providers")?;
     let stylesheet = ctx.flags.take_one("stylesheet")?;
     let logo = ctx.flags.take_one("logo")?;
@@ -757,6 +767,9 @@ fn cmd_settings_set(mut ctx: Ctx) -> Result<ExitCode, String> {
     if !providers.is_empty() && no_providers {
         return Err("--providers and --no-providers contradict each other".into());
     }
+    if !buttons.is_empty() && no_buttons {
+        return Err("--social-buttons and --no-social-buttons contradict each other".into());
+    }
     let nothing = claims.is_empty()
         && !no_claims
         && identity.is_empty()
@@ -764,6 +777,8 @@ fn cmd_settings_set(mut ctx: Ctx) -> Result<ExitCode, String> {
         && social.is_none()
         && providers.is_empty()
         && !no_providers
+        && buttons.is_empty()
+        && !no_buttons
         && stylesheet.is_none()
         && logo.is_none()
         && brand.is_none()
@@ -794,6 +809,13 @@ fn cmd_settings_set(mut ctx: Ctx) -> Result<ExitCode, String> {
         doc.gate.social_providers.clear();
     } else if !providers.is_empty() {
         doc.gate.social_providers = providers;
+    }
+    // Which social buttons the sign-in page offers. Emptying it takes the whole section off
+    // the page, which is the same page a deployment with no `BB_AUTH_SOCIAL_*` at all serves.
+    if no_buttons {
+        doc.gate.social_buttons.clear();
+    } else if !buttons.is_empty() {
+        doc.gate.social_buttons = buttons;
     }
     // The `ui` four. Each is validated here rather than left to the write, so the error names
     // the flag the operator typed instead of the field name in the file; the write validates

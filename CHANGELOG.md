@@ -62,6 +62,22 @@ section logs anybody out.
   suspension, and with an `authenticated` scope anywhere in the file they could simply
   re-register.
 
+### The settings file
+
+* **`gate.social_buttons`**: which social sign-in buttons the page offers, by Cognito
+  `identity_provider` name, in the order they appear, changed with no restart and from the
+  admin GUI. **Empty offers none**, so a provider is shown because somebody enabled it and
+  not because the deployment happens to federate it. It is the eleventh setting and was
+  checked against the three-part rule before it was added: read per request, unable to lock
+  anybody out (the email path is untouched), not a secret. `BB_AUTH_SOCIAL_IDPS` keeps its
+  own job, which is a different one: it says what the app client federates, and a button
+  needs both. **Upgrading a deployment that had social buttons requires setting this**, or
+  the sign-in page will offer none.
+* The Settings page is now four boxes grouped by what a setting decides (access policy;
+  what the application receives; the sign-in page; administration and look) rather than one
+  form with three headings named after the file's own sections. The file is unchanged: each
+  box still names the key it writes.
+
 ### Availability
 
 * A `recv()` error is now fatal. `tiny_http` reports at most one accept error per listener

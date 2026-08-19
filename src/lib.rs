@@ -3327,8 +3327,31 @@ pub struct GateSettings {
     /// therefore attacker-controlled.
     #[serde(default)]
     pub allow_unverified_social: bool,
+    /// Which social sign-in buttons the page offers, by Cognito `identity_provider` name,
+    /// in the order they appear. **Empty means none**, and that is the whole point: a
+    /// provider is offered because somebody listed it, never because a deployment happens to
+    /// federate it.
+    ///
+    /// It is not the same question as `BB_AUTH_SOCIAL_IDPS`, and the split is the reason this
+    /// is a setting at all. The env group says what this deployment *can* do: the OAuth
+    /// domain, the app client, the callback URL registered with Cognito byte for byte, and
+    /// the providers that app client federates. Get one of those wrong and social sign-in
+    /// cannot complete for anybody, which is why they are env vars and fatal. This says what
+    /// the page *offers today*, which is a decision an operator changes on a Tuesday: turning
+    /// a provider off here removes a button and touches nothing else, and the email path,
+    /// which is every deployment's real way in, is not involved either way.
+    ///
+    /// A name listed here that the env group does not federate is ignored, with a warning at
+    /// startup: drawing it would send a visitor to Cognito with an `identity_provider` its
+    /// app client may not have, and Amazon would explain that in Amazon's words on Amazon's
+    /// page.
+    #[serde(default)]
+    pub social_buttons: Vec<String>,
     /// Narrows the relaxation above to these IdPs, matched case-insensitively against the
     /// token's `identities[].providerName`. Empty = any federated provider.
+    ///
+    /// Not to be confused with [`GateSettings::social_buttons`] above, which decides what is
+    /// *offered*; this one decides whose unverified email is *accepted*.
     #[serde(default)]
     pub social_providers: Vec<String>,
     /// The session cookie's lifetime in seconds. Affects cookies minted from now on and no
@@ -3354,6 +3377,8 @@ impl Default for GateSettings {
             profile_claims: Vec::new(),
             identity_attrs: default_identity_attrs(),
             allow_unverified_social: false,
+            // Empty on purpose: a social button is offered because somebody listed it.
+            social_buttons: Vec::new(),
             social_providers: Vec::new(),
             session_ttl_secs: default_session_ttl(),
         }
@@ -3887,6 +3912,10 @@ pub struct Settings {
     pub allow_unverified_social: bool,
     /// `None` = any federated provider, which is what an empty list means.
     pub social_providers: Option<Vec<String>>,
+    /// See [`GateSettings::social_buttons`]. Empty = the sign-in page offers no social
+    /// button at all, exactly as it does when `BB_AUTH_SOCIAL_*` is unset: no divider, no
+    /// button, nothing hinting at a way in this page is not offering.
+    pub social_buttons: Vec<String>,
     /// See [`GateSettings::session_ttl_secs`].
     pub session_ttl: u64,
     /// See [`WebSettings::admins`], normalised with [`norm_email`] and deduplicated. May be
@@ -3908,6 +3937,49 @@ impl Settings {
     pub fn is_admin(&self, email: &str) -> bool {
         self.admins.iter().any(|a| a == email)
     }
+}
+
+/// Validate the list of social sign-in buttons a page may offer.
+///
+/// **Fatal on a bad entry, like a claim name and for the same reason.** A silently skipped
+/// entry here is a button an operator configured, cannot see, and has nowhere to look for:
+/// there is no error, no log line at the moment it matters, and the page simply does not
+/// offer what the file says it offers. Refusing the file says it once, in the editor, before
+/// it is live.
+///
+/// The charset is Cognito's own for an `identity_provider`: letters, digits, and `._-`. It is
+/// not a list of known providers, because a user pool may federate a SAML or OIDC provider
+/// under any name its administrator chose, and this file has no way to know which. What it
+/// can refuse is a value that could never be one: a space, a quote, an angle bracket, a
+/// percent sign. That value would land in a query parameter and in an HTML attribute, and
+/// while both are escaped where they are emitted, a name that cannot work is worth catching
+/// where it is written rather than where it fails.
+///
+/// Duplicates are refused rather than deduplicated: two buttons for one provider is not what
+/// anybody meant, and quietly dropping one would hide a copy-paste from an operator who is
+/// looking straight at the list.
+pub fn compile_social_buttons(raw: &[String]) -> Result<Vec<String>, String> {
+    let mut out: Vec<String> = Vec::with_capacity(raw.len());
+    for entry in raw {
+        let name = entry.trim();
+        if name.is_empty() {
+            continue;
+        }
+        if !name
+            .bytes()
+            .all(|b| b.is_ascii_alphanumeric() || b == b'.' || b == b'_' || b == b'-')
+        {
+            return Err(format!(
+                "social_buttons '{name}': a Cognito identity_provider name is letters, digits, \
+                 '.', '_' and '-'"
+            ));
+        }
+        if out.iter().any(|k| k.eq_ignore_ascii_case(name)) {
+            return Err(format!("social_buttons: '{name}' is listed twice"));
+        }
+        out.push(name.to_string());
+    }
+    Ok(out)
 }
 
 /// Turn a settings document into the compiled settings, or say why it cannot be one.
@@ -3973,6 +4045,8 @@ pub fn compile_settings(file: &SettingsFile) -> Result<Settings, String> {
         );
     }
 
+    let social_buttons = compile_social_buttons(&file.gate.social_buttons)?;
+
     let mut admins: Vec<String> = Vec::new();
     for raw in &file.web.admins {
         let e = norm_email(raw);
@@ -4011,6 +4085,7 @@ pub fn compile_settings(file: &SettingsFile) -> Result<Settings, String> {
         identity_attrs,
         allow_unverified_social: file.gate.allow_unverified_social,
         social_providers: (!providers.is_empty()).then_some(providers),
+        social_buttons,
         session_ttl: ttl,
         admins,
         stylesheet_url,

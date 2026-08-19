@@ -486,9 +486,10 @@ section under-read itself by a fifth, and two of the seven are lockout-class.
 
 - **The settings file is what must change without a restart, and the rule for what goes in it
   is three-part.** A setting belongs there iff it is (1) read **per request**, (2) unable to
-  lock the operator out when it is wrong, and (3) not a secret. Ten pass, in three sections:
-  `gate.profile_claims`, `gate.identity_attrs`, `gate.allow_unverified_social`,
-  `gate.social_providers`, `gate.session_ttl_secs`; `web.admins`; and the whole `ui` section
+  lock the operator out when it is wrong, and (3) not a secret. Eleven pass, in three
+  sections: `gate.profile_claims`, `gate.identity_attrs`, `gate.allow_unverified_social`,
+  `gate.social_providers`, `gate.social_buttons`, `gate.session_ttl_secs`; `web.admins`; and
+  the whole `ui` section
   (`stylesheet_url`, `logo_url`, `brand_name`, `theme`), which is the **look of every page
   either program serves** and the one section both of them read. The `ui` four pass the middle
   part precisely because the built-in stylesheet is complete: the worst a wrong value there
@@ -500,7 +501,16 @@ section under-read itself by a fifth, and two of the seven are lockout-class.
   `BB_AUTH_LOGIN_URL` / `BB_AUTH_AUTHORIZED_HOSTS` /
   `BB_AUTH_ORIGINAL_URL_HEADER`, which **are** the lockout. The `ui` section and the
   `BB_AUTH_SOCIAL_*` group sitting on opposite sides of that line, both of them about the same
-  sign-in page, is the rule working rather than an inconsistency. It is a *file* for one
+  sign-in page, is the rule working rather than an inconsistency.
+  `gate.social_buttons` is the eleventh, and it was checked against the three parts before it
+  was added rather than after: it is read when the sign-in page is rendered, it cannot lock
+  anybody out (turning every button off leaves the email path, which is every deployment's
+  real way in, untouched), and it is not a secret. It sits opposite `BB_AUTH_SOCIAL_IDPS` for
+  the same reason the `ui` section sits opposite the rest of that group: the env says what
+  this pool *can* federate and is lockout-class, the setting says what the page *offers
+  today* and is a Tuesday decision. A button needs both, and a name enabled that the pool
+  does not federate draws nothing and warns at startup, because that is the one place both
+  lists are visible at once. It is a *file* for one
   mechanical reason, and not for tidiness: **a process cannot re-read its own environment**
   (systemd loads `EnvironmentFile=` once, at `ExecStart`), so an env var can never be hot. Do
   not add an eleventh setting because it would be convenient there; check it against the three

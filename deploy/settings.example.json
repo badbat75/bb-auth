@@ -69,6 +69,21 @@
     "providers that verify the email."
   ],
 
+  "_comment_social_buttons": [
+    "gate.social_buttons — which social buttons the sign-in page OFFERS, by Cognito",
+    "identity_provider name, in the order they appear. EMPTY OFFERS NONE: a provider is",
+    "shown because somebody listed it here, never because the deployment happens to federate",
+    "it. Changing it takes effect on the next request, with no restart.",
+    "It is a different question from social_providers above, and from BB_AUTH_SOCIAL_IDPS in",
+    "the env file. The env group says what this pool CAN do (the OAuth domain, the app",
+    "client, the callback URL Cognito registered byte for byte, and the providers that app",
+    "client federates); get one of those wrong and social sign-in cannot complete for",
+    "anybody, which is why they are env vars. This says what the page offers TODAY. A button",
+    "needs both: a name enabled here that BB_AUTH_SOCIAL_IDPS does not federate draws",
+    "nothing and is reported at startup, because the button would send a visitor to Cognito",
+    "with an identity_provider this app client may not have."
+  ],
+
   "_comment_session_ttl_secs": [
     "gate.session_ttl_secs — the session cookie's lifetime, in seconds. Applies to cookies",
     "minted from now on and to no cookie already in a browser, so changing it logs nobody",
@@ -120,6 +135,7 @@
     "identity_attrs": ["email"],
     "allow_unverified_social": false,
     "social_providers": [],
+    "social_buttons": [],
     "session_ttl_secs": 2592000
   },
   "web": {

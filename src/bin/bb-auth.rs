@@ -465,9 +465,15 @@ struct SocialConfig {
     /// on the Cognito app client **exactly** or the exchange fails with `redirect_mismatch`.
     /// Normally `https://<this host>/auth/callback`.
     callback_url: String,
-    /// `BB_AUTH_SOCIAL_IDPS`: which providers the sign-in page offers a button for, in the
-    /// order they appear. Cognito's own `identity_provider` names, e.g. `Google`. See
-    /// [`KNOWN_IDPS`] for which of them come with an icon.
+    /// `BB_AUTH_SOCIAL_IDPS`: which providers this deployment's app client federates, by
+    /// Cognito's own `identity_provider` name, e.g. `Google`.
+    ///
+    /// It says what the pool CAN do, and no longer what the page offers: that is
+    /// `gate.social_buttons` in the settings file, which an operator changes without a
+    /// restart. A provider gets a button only if it is in both, because a name here that
+    /// nobody enabled is a capability nobody asked for, and a name enabled that is not here
+    /// would send a visitor to Cognito with an `identity_provider` this app client may not
+    /// have. See [`KNOWN_IDPS`] for which of them come with an icon.
     idps: Vec<String>,
 }
 
@@ -2094,13 +2100,24 @@ fn look_subs(settings: &Settings, nonce: &str) -> Vec<(&'static str, String)> {
 /// Nothing at all is the important half. With no `BB_AUTH_SOCIAL_*` configured the divider
 /// goes too, and the page's own script finds no `[data-idp]` to bind, so there is no branch
 /// anywhere saying "if social is off" — the markup simply is not there.
-fn social_block(social: Option<&SocialConfig>) -> String {
+fn social_block(social: Option<&SocialConfig>, enabled: &[String]) -> String {
     let Some(s) = social else {
         return String::new();
     };
+    // The operator's order, and the operator's choice: a provider appears because
+    // `gate.social_buttons` lists it, and only if the env group says this pool federates it.
+    // An empty list is the same page as no social configuration at all, which is deliberate:
+    // there is one way for the section to be absent, not two that look different.
+    let offered: Vec<&String> = enabled
+        .iter()
+        .filter(|want| s.idps.iter().any(|have| have.eq_ignore_ascii_case(want)))
+        .collect();
+    if offered.is_empty() {
+        return String::new();
+    }
     let mut buttons = String::new();
-    for idp in &s.idps {
-        let (label, icon) = match KNOWN_IDPS.iter().find(|(name, _, _)| name == idp) {
+    for idp in offered {
+        let (label, icon) = match KNOWN_IDPS.iter().find(|(name, _, _)| *name == idp.as_str()) {
             Some((_, label, icon)) => (*label, *icon),
             None => (idp.as_str(), ""),
         };
@@ -2218,7 +2235,10 @@ fn login_page(cfg: &Config, settings: &Settings, rd: &str, nonce: &str) -> Strin
             .map(|s| s.callback_url.clone())
             .unwrap_or_default(),
     ));
-    subs.push(("__BB_SOCIAL_BUTTONS__", social_block(cfg.social.as_ref())));
+    subs.push((
+        "__BB_SOCIAL_BUTTONS__",
+        social_block(cfg.social.as_ref(), &settings.social_buttons),
+    ));
     render_page(LOGIN_HTML, &subs)
 }
 
@@ -2926,6 +2946,13 @@ fn check_settings(path: &str) -> ! {
             for c in &s.profile_claims {
                 println!("[bb-auth] {path}: claim '{}' -> {}", c.claim, c.header);
             }
+            println!(
+                "[bb-auth] {path}: social buttons: {}",
+                match s.social_buttons.len() {
+                    0 => "(none: the sign-in page offers no social button)".to_string(),
+                    _ => s.social_buttons.join(", "),
+                }
+            );
             if s.allow_unverified_social {
                 let scope = match &s.social_providers {
                     Some(p) => p.join(", "),
@@ -3311,13 +3338,43 @@ fn main() {
     // whose app client and callback URL Cognito has to agree with.
     eprintln!(
         "[bb-auth] pages: /auth/login and /auth/callback (leave both UNGATED in nginx) | \
-         cognito={} | social={}",
+         cognito={} | social={} | buttons={}",
         state.cfg.cognito_endpoint,
         match &state.cfg.social {
             Some(s) => format!("{} via {}", s.idps.join(","), s.callback_url),
             None => "(off: no BB_AUTH_SOCIAL_* configured)".to_string(),
+        },
+        match settings.social_buttons.len() {
+            0 => "(none offered)".to_string(),
+            _ => settings.social_buttons.join(","),
         }
     );
+    // The two lists have to agree, and this is the only place that can see both: the settings
+    // file knows nothing of the environment, so `--check-settings` cannot say it.
+    if let Some(social) = &state.cfg.social {
+        let stray: Vec<&str> = settings
+            .social_buttons
+            .iter()
+            .filter(|w| !social.idps.iter().any(|h| h.eq_ignore_ascii_case(w)))
+            .map(String::as_str)
+            .collect();
+        if !stray.is_empty() {
+            eprintln!(
+                "[bb-auth] WARNING: social_buttons names [{}], which BB_AUTH_SOCIAL_IDPS does \
+                 not federate: no button is drawn for them, because it would send a visitor \
+                 to Cognito with an identity_provider this app client may not have",
+                stray.join(",")
+            );
+        }
+        if settings.social_buttons.is_empty() {
+            eprintln!(
+                "[bb-auth] WARNING: BB_AUTH_SOCIAL_* is configured but social_buttons is \
+                 empty, so the sign-in page offers no social button at all (enable one with: \
+                 bb-auth-adm settings set --social-buttons {})",
+                social.idps.join(",")
+            );
+        }
+    }
     // Held only for the banner. Dropped before the workers start, so nothing below this line
     // can hold a read lock across a request and starve the SIGHUP swap.
     drop(settings);
@@ -4096,6 +4153,20 @@ mod tests {
         cfg
     }
 
+    /// Compiled settings that enable the given social buttons, which is what decides whether
+    /// the sign-in page offers any: the env group only says what the pool federates.
+    fn settings_with_buttons(buttons: &[&str]) -> Settings {
+        bb_auth_core::compile_settings(&bb_auth_core::SettingsFile {
+            version: bb_auth_core::SETTINGS_VERSION,
+            gate: bb_auth_core::GateSettings {
+                social_buttons: buttons.iter().map(|b| b.to_string()).collect(),
+                ..Default::default()
+            },
+            ..Default::default()
+        })
+        .unwrap()
+    }
+
     /// Compiled settings with only the `ui` section set, which is all these pages read.
     fn ui_settings(ui: bb_auth_core::UiSettings) -> Settings {
         bb_auth_core::compile_settings(&bb_auth_core::SettingsFile {
@@ -4127,7 +4198,7 @@ mod tests {
         let cfg = page_cfg(true);
         let page = login_page(
             &cfg,
-            &ui_settings(bb_auth_core::UiSettings::default()),
+            &settings_with_buttons(&["Google", "Okta"]),
             "https://search.badbat75.com/?q=a\"b",
             "n0nce",
         );
@@ -4164,12 +4235,53 @@ mod tests {
         );
     }
 
+    /// A provider is offered because somebody enabled it, and for no other reason.
+    ///
+    /// The env group says what this deployment's app client federates and the settings say
+    /// what the page offers today, so a button needs both. The middle case below is the one
+    /// most worth a test: enabling something the pool does not federate must not draw a
+    /// button, because that button leads to Cognito explaining the mistake in Amazon's words
+    /// on Amazon's page, one redirect from somebody who was only trying to sign in.
+    #[test]
+    fn a_social_button_appears_only_where_the_pool_and_the_settings_agree() {
+        let cfg = page_cfg(true); // this pool federates Google and Okta
+        let rendered =
+            |buttons: &[&str]| login_page(&cfg, &settings_with_buttons(buttons), "", "n0nce");
+
+        // Enabled and federated: a button.
+        let one = rendered(&["Google"]);
+        assert!(one.contains(r#"data-idp="Google""#), "{one}");
+        assert!(!one.contains(r#"data-idp="Okta""#), "only what was enabled");
+        assert!(one.contains(r#"class="divider""#), "the section is there");
+
+        // Enabled but NOT federated: no button, and no divider either. The section is
+        // absent rather than empty.
+        let none = rendered(&["Facebook"]);
+        assert!(!none.contains("data-idp="), "{none}");
+        assert!(!none.contains(r#"class="divider""#), "{none}");
+
+        // Nothing enabled: the same page as a deployment with no social configuration at
+        // all. One way for the section to be missing, not two that look different.
+        let off = rendered(&[]);
+        assert!(!off.contains("data-idp="), "{off}");
+        assert!(!off.contains(r#"class="divider""#), "{off}");
+
+        // Order is the operator's, not the environment's.
+        let both = rendered(&["Okta", "Google"]);
+        let okta = both.find(r#"data-idp="Okta""#).expect("okta");
+        let google = both.find(r#"data-idp="Google""#).expect("google");
+        assert!(okta < google, "the settings order is the display order");
+    }
+
     #[test]
     fn with_no_social_client_the_page_has_no_social_markup_at_all() {
         let cfg = page_cfg(false);
+        // Buttons enabled, so what this asserts is the ABSENCE of a social client and not an
+        // empty settings list: with no `BB_AUTH_SOCIAL_*` there is nothing to offer whatever
+        // the settings say.
         let page = login_page(
             &cfg,
-            &ui_settings(bb_auth_core::UiSettings::default()),
+            &settings_with_buttons(&["Google", "Okta"]),
             "",
             "n0nce",
         );

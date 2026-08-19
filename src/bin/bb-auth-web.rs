@@ -605,8 +605,10 @@ enum K {
     // --- the settings page ---
     Config,
     ConfigIntro,
-    ConfigGate,
-    ConfigWeb,
+    ConfigAccess,
+    ConfigHandover,
+    ConfigSignIn,
+    ConfigAdminLook,
     ConfigHot,
     ProfileClaims,
     ProfileClaimsHelp,
@@ -617,13 +619,14 @@ enum K {
     SessionTtlBad,
     UnverifiedSocial,
     UnverifiedSocialHelp,
+    SocialButtons,
+    SocialButtonsHelp,
     SocialProviders,
     SocialProvidersHelp,
     Admins,
     AdminsHelp,
     AdminsKeepYourself,
     AdminsNeverEmpty,
-    ConfigUi,
     StylesheetUrl,
     StylesheetUrlHelp,
     LogoUrl,
@@ -655,8 +658,14 @@ fn t(lang: Lang, key: K) -> &'static str {
             "The settings that take effect with no restart. Everything else bb-auth is configured with stays in its env file, on the host.",
             "Le impostazioni che hanno effetto senza riavvio. Tutto il resto della configurazione di bb-auth resta nel suo file di environment, sull'host.",
         ),
-        K::ConfigGate => m(lang, "What the gate answers with", "Come risponde il gate"),
-        K::ConfigWeb => m(lang, "Who administers this", "Chi amministra questo"),
+        K::ConfigAccess => m(lang, "Access policy", "Politica di accesso"),
+        K::ConfigHandover => m(
+            lang,
+            "What the application receives",
+            "Cosa riceve l'applicazione",
+        ),
+        K::ConfigSignIn => m(lang, "The sign-in page", "La pagina di accesso"),
+        K::ConfigAdminLook => m(lang, "Administration and look", "Amministrazione e aspetto"),
         K::ConfigHot => m(
             lang,
             "Saved here, live on the next request.",
@@ -700,6 +709,12 @@ fn t(lang: Lang, key: K) -> &'static str {
             "Only for federated logins (Google, Apple…), never for native Cognito users, whose sign-up is open and whose unverified email is attacker-controlled.",
             "Solo per accessi federati (Google, Apple…), mai per utenti Cognito nativi: la loro registrazione è aperta e un'email non verificata è controllata da chi attacca.",
         ),
+        K::SocialButtons => m(lang, "Social sign-in buttons", "Pulsanti di accesso social"),
+        K::SocialButtonsHelp => m(
+            lang,
+            "One Cognito identity_provider name per line, in the order they appear on the sign-in page. Empty offers none. A provider also has to be federated by the app client (BB_AUTH_SOCIAL_IDPS on the host), or no button is drawn for it.",
+            "Un nome identity_provider di Cognito per riga, nell'ordine in cui appaiono nella pagina di accesso. Vuoto non ne offre nessuno. Il provider deve anche essere federato dall'app client (BB_AUTH_SOCIAL_IDPS sull'host), altrimenti il pulsante non viene disegnato.",
+        ),
         K::SocialProviders => m(lang, "Providers", "Provider"),
         K::SocialProvidersHelp => m(
             lang,
@@ -722,7 +737,6 @@ fn t(lang: Lang, key: K) -> &'static str {
             "at least one administrator is required: an empty list must never come to mean 'everyone'",
             "serve almeno un amministratore: una lista vuota non deve mai finire per significare 'chiunque'",
         ),
-        K::ConfigUi => m(lang, "How the pages look", "Come appaiono le pagine"),
         K::StylesheetUrl => m(lang, "Stylesheet", "Foglio di stile"),
         K::StylesheetUrlHelp => m(
             lang,
@@ -4275,6 +4289,7 @@ struct ConfigForm {
     ttl: String,
     social: bool,
     providers: String,
+    buttons: String,
     admins: String,
     stylesheet: String,
     logo: String,
@@ -4291,6 +4306,7 @@ impl ConfigForm {
             ttl: doc.gate.session_ttl_secs.to_string(),
             social: doc.gate.allow_unverified_social,
             providers: doc.gate.social_providers.join("\n"),
+            buttons: doc.gate.social_buttons.join("\n"),
             admins: doc.web.admins.join("\n"),
             stylesheet: doc.ui.stylesheet_url.clone(),
             logo: doc.ui.logo_url.clone(),
@@ -4314,6 +4330,7 @@ impl ConfigForm {
             // `false` rather than a value to parse.
             social: !f.get("social").is_empty(),
             providers: f.get("providers").to_string(),
+            buttons: f.get("buttons").to_string(),
             admins: f.get("admins").to_string(),
             stylesheet: f.get("stylesheet").to_string(),
             logo: f.get("logo").to_string(),
@@ -4369,6 +4386,7 @@ impl ConfigForm {
         doc.gate.session_ttl_secs = ttl;
         doc.gate.allow_unverified_social = self.social;
         doc.gate.social_providers = Self::lines(&self.providers);
+        doc.gate.social_buttons = Self::lines(&self.buttons);
         doc.web.admins = admins;
         doc.ui.stylesheet_url = self.stylesheet.trim().to_string();
         doc.ui.logo_url = self.logo.trim().to_string();
@@ -4384,20 +4402,19 @@ fn page_config(v: &View, f: &ConfigForm, err: Option<&Refusal>) -> Markup {
     html! {
         h1 { (v.t(K::Config)) }
         p class="lede" { (v.t(K::ConfigIntro)) }
-        div class="panel" {
-            (form_shell(v, err, html! {
-                (section_heading(v.t(K::ConfigGate), "gate"))
-                (urls_field(v.t(K::IdentityAttrs), "identity", &f.identity,
-                            html! { (v.t(K::IdentityAttrsHelp)) }, about("identity")))
-                (urls_field(v.t(K::ProfileClaims), "claims", &f.claims,
-                            html! { (v.t(K::ProfileClaimsHelp)) }, about("claims")))
-                // The hint carries both halves: what this value is in days, which is the
-                // only way a number of seconds reads as a lifetime, and what changing it
-                // does to sessions that already exist. The second half used to appear only
-                // as the refusal on a typo, which is the one moment nobody is reading it.
-                (text_field(v.t(K::SessionTtl), "ttl", &f.ttl, "2592000",
-                            Some(&format!("{days} {}. {}", v.t(K::Days), v.t(K::SessionTtlHelp))),
-                            about("ttl")))
+        // FOUR BOXES, ONE FORM. The grouping is by what a setting decides, not by which
+        // section of the file it lands in: an operator asking "who gets in, and for how
+        // long" should not have to read past what the application receives to find out, and
+        // the two questions are answered by fields that happen to be neighbours in the file.
+        // The file keeps its own three sections unchanged, so each box still names the key
+        // it writes; where a box spans two, it names both.
+        //
+        // One form and one save, because the `rev` guard is over the whole file: four forms
+        // would be four fingerprints and three chances to lose an edit somebody else made
+        // between them.
+        (form_shell(v, err, html! {
+            div class="panel" {
+                (section_heading(v.t(K::ConfigAccess), "gate"))
                 // The scope form's own furniture, because a checkbox here is the same thing
                 // it is there and inventing a second one would show.
                 div {
@@ -4409,13 +4426,33 @@ fn page_config(v: &View, f: &ConfigForm, err: Option<&Refusal>) -> Markup {
                 }
                 (urls_field(v.t(K::SocialProviders), "providers", &f.providers,
                             html! { (v.t(K::SocialProvidersHelp)) }, about("providers")))
-
-                (section_heading(v.t(K::ConfigWeb), "web"))
+                // The hint carries both halves: what this value is in days, which is the
+                // only way a number of seconds reads as a lifetime, and what changing it
+                // does to sessions that already exist. The second half used to appear only
+                // as the refusal on a typo, which is the one moment nobody is reading it.
+                (text_field(v.t(K::SessionTtl), "ttl", &f.ttl, "2592000",
+                            Some(&format!("{days} {}. {}", v.t(K::Days), v.t(K::SessionTtlHelp))),
+                            about("ttl")))
+            }
+            div class="panel" {
+                (section_heading(v.t(K::ConfigHandover), "gate"))
+                (urls_field(v.t(K::IdentityAttrs), "identity", &f.identity,
+                            html! { (v.t(K::IdentityAttrsHelp)) }, about("identity")))
+                (urls_field(v.t(K::ProfileClaims), "claims", &f.claims,
+                            html! { (v.t(K::ProfileClaimsHelp)) }, about("claims")))
+            }
+            div class="panel" {
+                (section_heading(v.t(K::ConfigSignIn), "gate"))
+                // A different question from the provider list above: that one says whose
+                // unverified email is accepted, this one says what a visitor is offered.
+                (urls_field(v.t(K::SocialButtons), "buttons", &f.buttons,
+                            html! { (v.t(K::SocialButtonsHelp)) }, about("buttons")))
+            }
+            div class="panel" {
+                (section_heading(v.t(K::ConfigAdminLook), "web + ui"))
                 (urls_field(v.t(K::Admins), "admins", &f.admins,
                             html! { (v.t(K::AdminsHelp)) " (" (v.t(K::AdminsKeepYourself)) ")" },
                             about("admins")))
-
-                (section_heading(v.t(K::ConfigUi), "ui"))
                 (text_field(v.t(K::BrandName), "brand", &f.brand, "BadBat75",
                             Some(v.t(K::BrandNameHelp)), about("brand")))
                 (text_field(v.t(K::StylesheetUrl), "stylesheet", &f.stylesheet,
@@ -4444,9 +4481,9 @@ fn page_config(v: &View, f: &ConfigForm, err: Option<&Refusal>) -> Markup {
                     }
                     span class="hint" { (v.t(K::DefaultThemeHelp)) }
                 }
-            }, v.t(K::Save), false))
-            p class="muted" { (v.t(K::ConfigHot)) }
-        }
+            }
+        }, v.t(K::Save), false))
+        p class="muted" { (v.t(K::ConfigHot)) }
     }
 }
 
@@ -6344,6 +6381,7 @@ mod tests {
             ("claims", ""),
             ("ttl", "2592000"),
             ("providers", ""),
+            ("buttons", ""),
             ("admins", "admin@x.com"),
         ];
         for (k, v) in over {
@@ -6487,6 +6525,57 @@ mod tests {
             html.contains("--accent:"),
             "the palette must still be there"
         );
+    }
+
+    /// The social buttons are a settings field like any other, and the page is where an
+    /// operator turns one on: the whole reason this is not the env var it used to be.
+    #[test]
+    fn the_settings_page_writes_which_social_buttons_are_offered() {
+        let path = scratch("cfg-buttons", SAMPLE);
+        let sp = settings_path(&path);
+        let cfg = cfg_for(&path, "");
+
+        // Two, in the order they were typed, which is the order the page will show them.
+        let got = post(
+            &cfg,
+            Route::Config,
+            &settings_fields(
+                &rev_of(&sp),
+                &[(
+                    "buttons",
+                    "Google
+MicrosoftPersonal",
+                )],
+            ),
+        );
+        assert!(matches!(got, Got::Redirect(_)), "{got:?}");
+        let (doc, s) = open_settings_file(&sp).unwrap();
+        assert_eq!(doc.gate.social_buttons, ["Google", "MicrosoftPersonal"]);
+        assert_eq!(s.social_buttons, ["Google", "MicrosoftPersonal"]);
+
+        // And emptying the field takes the section off the sign-in page, which is a thing an
+        // operator does deliberately and must not need the env file for.
+        let got = post(
+            &cfg,
+            Route::Config,
+            &settings_fields(&rev_of(&sp), &[("buttons", "")]),
+        );
+        assert!(matches!(got, Got::Redirect(_)), "{got:?}");
+        assert!(open_settings_file(&sp).unwrap().1.social_buttons.is_empty());
+
+        // A name that could never be a Cognito identity_provider is refused in context, with
+        // nothing written: the same shape every other refusal on this page has.
+        let before = read(&sp);
+        let got = post(
+            &cfg,
+            Route::Config,
+            &settings_fields(&rev_of(&sp), &[("buttons", "Google Inc")]),
+        );
+        let (status, body) = got.page();
+        assert_eq!(status, 400, "{body}");
+        assert!(body.contains("social_buttons"), "{body}");
+        assert_eq!(read(&sp), before, "nothing written");
+        cleanup(&path);
     }
 
     #[test]
