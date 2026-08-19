@@ -66,8 +66,13 @@ section logs anybody out.
 
 * **`gate.social_buttons`**: which social sign-in buttons the page offers, by Cognito
   `identity_provider` name, in the order they appear, changed with no restart and from the
-  admin GUI. **Empty offers none**, so a provider is shown because somebody enabled it and
-  not because the deployment happens to federate it. It is the eleventh setting and was
+  admin GUI, where it is a checkbox per provider (`Google`, and `Microsoft` meaning the
+  personal account rather than an Entra ID tenant) instead of a list of names to type: a name
+  Cognito will not match is a button that never appears with nothing to say why. A provider
+  configured from `bb-auth-adm` that this build does not know gets a checkbox of its own, so
+  the page can never drop what it cannot name. **Empty offers none**, so a provider is shown
+  because somebody enabled it and not because the deployment happens to federate it. It is
+  the eleventh setting and was
   checked against the three-part rule before it was added: read per request, unable to lock
   anybody out (the email path is untouched), not a secret. `BB_AUTH_SOCIAL_IDPS` keeps its
   own job, which is a different one: it says what the app client federates, and a button

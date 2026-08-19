@@ -199,10 +199,10 @@ use bb_auth_core::{
     remove_api_key, remove_application, remove_denied, remove_scope, remove_user,
     remove_user_email, remove_user_group, rename_application, rename_scope, request_site,
     request_url, rotate_api_key, scope_mut, scope_pos, sha256_hex, shadowing_scope,
-    stylesheet_link, user_group_mut, user_group_refs, user_label, user_pos, user_refs,
-    version_line, Access, AccessFile, AccessWrite, ApiKeySpec, AppSpec, Decision, RequestSite,
-    ScopeSpec, SealedKey, SettingsFile, SettingsWrite, Subject, UiTheme, UserSpec, Written,
-    BASE_CSS, IDENTITY_HEADER, PAGE_SECURITY_HEADERS, THEME_CSS,
+    social_idp_label, stylesheet_link, user_group_mut, user_group_refs, user_label, user_pos,
+    user_refs, version_line, Access, AccessFile, AccessWrite, ApiKeySpec, AppSpec, Decision,
+    RequestSite, ScopeSpec, SealedKey, SettingsFile, SettingsWrite, Subject, UiTheme, UserSpec,
+    Written, BASE_CSS, IDENTITY_HEADER, PAGE_SECURITY_HEADERS, SOCIAL_IDPS, THEME_CSS,
 };
 use maud::{html, Markup, PreEscaped, DOCTYPE};
 use std::io::Read;
@@ -712,8 +712,8 @@ fn t(lang: Lang, key: K) -> &'static str {
         K::SocialButtons => m(lang, "Social sign-in buttons", "Pulsanti di accesso social"),
         K::SocialButtonsHelp => m(
             lang,
-            "One Cognito identity_provider name per line, in the order they appear on the sign-in page. Empty offers none. A provider also has to be federated by the app client (BB_AUTH_SOCIAL_IDPS on the host), or no button is drawn for it.",
-            "Un nome identity_provider di Cognito per riga, nell'ordine in cui appaiono nella pagina di accesso. Vuoto non ne offre nessuno. Il provider deve anche essere federato dall'app client (BB_AUTH_SOCIAL_IDPS sull'host), altrimenti il pulsante non viene disegnato.",
+            "Which buttons the sign-in page offers. None ticked means none offered, and the email path is unaffected either way. Microsoft here is the personal account (outlook.com, hotmail.com), not a work or school one: an Entra ID tenant is a separate provider on the user pool. A provider also has to be federated by the app client (BB_AUTH_SOCIAL_IDPS on the host), or no button is drawn for it; one configured from bb-auth-adm that this build does not know appears here too.",
+            "Quali pulsanti offre la pagina di accesso. Nessuna spunta significa nessun pulsante, e in ogni caso l'accesso via email non cambia. Microsoft qui è l'account personale (outlook.com, hotmail.com), non uno aziendale o scolastico: un tenant Entra ID è un provider separato sul pool. Il provider deve anche essere federato dall'app client (BB_AUTH_SOCIAL_IDPS sull'host), altrimenti il pulsante non viene disegnato; uno configurato da bb-auth-adm che questa build non conosce compare comunque qui.",
         ),
         K::SocialProviders => m(lang, "Providers", "Provider"),
         K::SocialProvidersHelp => m(
@@ -2709,6 +2709,57 @@ fn list_rows(v: &View, total: usize, shown: usize, rows: Markup) -> Markup {
     }
 }
 
+/// The social sign-in switches: one checkbox per provider, and a hidden field naming the set
+/// the page drew them for.
+///
+/// The set is [`SOCIAL_IDPS`] plus anything already in the file that is not in it, in that
+/// order. The second half is what keeps this page honest about a file it did not write:
+/// `bb-auth-adm` accepts any well-formed `identity_provider` name, a user pool may federate a
+/// SAML or OIDC provider under a name nobody here anticipated, and a page that rendered only
+/// the two it knows would quietly drop the third on the next save. Rendered, it is named in
+/// the hidden field, so [`ConfigForm::read`] can keep it.
+///
+/// The hidden field is what makes that work without this function and `read` having to agree
+/// twice: the form states what it offered, and the reader believes the form.
+fn social_choices(v: &View, enabled: &[String], invalid: bool) -> Markup {
+    let offered = known_and_configured(enabled);
+    html! {
+        div class=@if invalid { "invalid" } @else { "" } {
+            span class="lbl" { (v.t(K::SocialButtons)) }
+            input type="hidden" name="idps" value=(offered.join(" "));
+            @for idp in &offered {
+                label class="radio" {
+                    input type="checkbox" name=(idp_field(idp)) value="on"
+                          checked[enabled.iter().any(|e| e.eq_ignore_ascii_case(idp))];
+                    span { (social_idp_label(idp)) }
+                    // The Cognito name, because that is what has to match on Amazon's side
+                    // and an operator comparing the two should not have to know the mapping.
+                    " " span class="muted mono" { (idp) }
+                }
+            }
+            span class="hint" { (v.t(K::SocialButtonsHelp)) }
+        }
+    }
+}
+
+/// The providers to draw a switch for: the ones this project knows, then any others the file
+/// already enables, each exactly once.
+fn known_and_configured(enabled: &[String]) -> Vec<String> {
+    let mut out: Vec<String> = SOCIAL_IDPS.iter().map(|(idp, _)| idp.to_string()).collect();
+    for e in enabled {
+        if !out.iter().any(|k| k.eq_ignore_ascii_case(e)) {
+            out.push(e.clone());
+        }
+    }
+    out
+}
+
+/// The form field name for one provider's checkbox. One function, because the renderer and
+/// the reader must spell it the same way and there is no third caller to keep them honest.
+fn idp_field(idp: &str) -> String {
+    format!("idp-{idp}")
+}
+
 /// A rounded label — a `denied` badge, an expiry state, a scope's `access`.
 fn tag(class: &str, text: &str) -> Markup {
     html! { span class=(format!("tag {class}")) { (text) } }
@@ -4289,7 +4340,9 @@ struct ConfigForm {
     ttl: String,
     social: bool,
     providers: String,
-    buttons: String,
+    /// The enabled social providers, by Cognito `identity_provider` name. A list rather than
+    /// a textarea because the page offers a checkbox each: see [`social_choices`].
+    buttons: Vec<String>,
     admins: String,
     stylesheet: String,
     logo: String,
@@ -4306,7 +4359,7 @@ impl ConfigForm {
             ttl: doc.gate.session_ttl_secs.to_string(),
             social: doc.gate.allow_unverified_social,
             providers: doc.gate.social_providers.join("\n"),
-            buttons: doc.gate.social_buttons.join("\n"),
+            buttons: doc.gate.social_buttons.clone(),
             admins: doc.web.admins.join("\n"),
             stylesheet: doc.ui.stylesheet_url.clone(),
             logo: doc.ui.logo_url.clone(),
@@ -4330,7 +4383,16 @@ impl ConfigForm {
             // `false` rather than a value to parse.
             social: !f.get("social").is_empty(),
             providers: f.get("providers").to_string(),
-            buttons: f.get("buttons").to_string(),
+            // The page says which providers it drew a checkbox for, and this keeps the ones
+            // whose box came back ticked. Reading the offered set off the form rather than
+            // re-deriving it here is what makes a provider this build has never heard of
+            // survive a save: it was rendered, so it is named, so it can be kept.
+            buttons: f
+                .get("idps")
+                .split_whitespace()
+                .filter(|idp| f.checked(&format!("idp-{idp}")))
+                .map(str::to_string)
+                .collect(),
             admins: f.get("admins").to_string(),
             stylesheet: f.get("stylesheet").to_string(),
             logo: f.get("logo").to_string(),
@@ -4386,7 +4448,7 @@ impl ConfigForm {
         doc.gate.session_ttl_secs = ttl;
         doc.gate.allow_unverified_social = self.social;
         doc.gate.social_providers = Self::lines(&self.providers);
-        doc.gate.social_buttons = Self::lines(&self.buttons);
+        doc.gate.social_buttons = self.buttons.clone();
         doc.web.admins = admins;
         doc.ui.stylesheet_url = self.stylesheet.trim().to_string();
         doc.ui.logo_url = self.logo.trim().to_string();
@@ -4414,7 +4476,7 @@ fn page_config(v: &View, f: &ConfigForm, err: Option<&Refusal>) -> Markup {
         // between them.
         (form_shell(v, err, html! {
             div class="panel" {
-                (section_heading(v.t(K::ConfigAccess), "gate"))
+                h2 class="tight" { (section_heading(v.t(K::ConfigAccess), "gate")) }
                 // The scope form's own furniture, because a checkbox here is the same thing
                 // it is there and inventing a second one would show.
                 div {
@@ -4435,21 +4497,26 @@ fn page_config(v: &View, f: &ConfigForm, err: Option<&Refusal>) -> Markup {
                             about("ttl")))
             }
             div class="panel" {
-                (section_heading(v.t(K::ConfigHandover), "gate"))
+                h2 class="tight" { (section_heading(v.t(K::ConfigHandover), "gate")) }
                 (urls_field(v.t(K::IdentityAttrs), "identity", &f.identity,
                             html! { (v.t(K::IdentityAttrsHelp)) }, about("identity")))
                 (urls_field(v.t(K::ProfileClaims), "claims", &f.claims,
                             html! { (v.t(K::ProfileClaimsHelp)) }, about("claims")))
             }
             div class="panel" {
-                (section_heading(v.t(K::ConfigSignIn), "gate"))
+                h2 class="tight" { (section_heading(v.t(K::ConfigSignIn), "gate")) }
                 // A different question from the provider list above: that one says whose
                 // unverified email is accepted, this one says what a visitor is offered.
-                (urls_field(v.t(K::SocialButtons), "buttons", &f.buttons,
-                            html! { (v.t(K::SocialButtonsHelp)) }, about("buttons")))
+                //
+                // Checkboxes and not a list of names to type, because the answer is a choice
+                // among a handful of things this project knows by name, and a free-text field
+                // invites a spelling Cognito will not match (`Microsoft` for
+                // `MicrosoftPersonal`, say) with nothing to catch it but a button that never
+                // appears.
+                (social_choices(v, &f.buttons, about("buttons")))
             }
             div class="panel" {
-                (section_heading(v.t(K::ConfigAdminLook), "web + ui"))
+                h2 class="tight" { (section_heading(v.t(K::ConfigAdminLook), "web + ui")) }
                 (urls_field(v.t(K::Admins), "admins", &f.admins,
                             html! { (v.t(K::AdminsHelp)) " (" (v.t(K::AdminsKeepYourself)) ")" },
                             about("admins")))
@@ -6527,54 +6594,90 @@ mod tests {
         );
     }
 
-    /// The social buttons are a settings field like any other, and the page is where an
-    /// operator turns one on: the whole reason this is not the env var it used to be.
+    /// The social buttons are checkboxes, and what a checkbox cannot show it must not
+    /// destroy.
+    ///
+    /// Three things are pinned here. Ticking one writes it. Unticking everything empties the
+    /// list, which takes the whole section off the sign-in page and is a thing an operator
+    /// does deliberately. And a provider this build has never heard of, which only
+    /// `bb-auth-adm` can add, still gets a switch of its own and survives a save that did not
+    /// touch it: the page names what it offered in a hidden field, so nothing it displayed
+    /// can vanish because the reader forgot it existed.
     #[test]
     fn the_settings_page_writes_which_social_buttons_are_offered() {
         let path = scratch("cfg-buttons", SAMPLE);
         let sp = settings_path(&path);
         let cfg = cfg_for(&path, "");
+        let both = &[
+            ("idps", "Google MicrosoftPersonal"),
+            ("idp-Google", "on"),
+            ("idp-MicrosoftPersonal", "on"),
+        ];
 
-        // Two, in the order they were typed, which is the order the page will show them.
-        let got = post(
-            &cfg,
-            Route::Config,
-            &settings_fields(
-                &rev_of(&sp),
-                &[(
-                    "buttons",
-                    "Google
-MicrosoftPersonal",
-                )],
-            ),
-        );
+        let got = post(&cfg, Route::Config, &settings_fields(&rev_of(&sp), both));
         assert!(matches!(got, Got::Redirect(_)), "{got:?}");
         let (doc, s) = open_settings_file(&sp).unwrap();
         assert_eq!(doc.gate.social_buttons, ["Google", "MicrosoftPersonal"]);
         assert_eq!(s.social_buttons, ["Google", "MicrosoftPersonal"]);
 
-        // And emptying the field takes the section off the sign-in page, which is a thing an
-        // operator does deliberately and must not need the env file for.
+        // One of the two, which is the ordinary edit: a browser sends no field at all for an
+        // unticked box, so this is what "turn Microsoft off" arrives as.
         let got = post(
             &cfg,
             Route::Config,
-            &settings_fields(&rev_of(&sp), &[("buttons", "")]),
+            &settings_fields(
+                &rev_of(&sp),
+                &[("idps", "Google MicrosoftPersonal"), ("idp-Google", "on")],
+            ),
+        );
+        assert!(matches!(got, Got::Redirect(_)), "{got:?}");
+        assert_eq!(
+            open_settings_file(&sp).unwrap().1.social_buttons,
+            ["Google"]
+        );
+
+        // None: the section leaves the sign-in page.
+        let got = post(
+            &cfg,
+            Route::Config,
+            &settings_fields(&rev_of(&sp), &[("idps", "Google MicrosoftPersonal")]),
         );
         assert!(matches!(got, Got::Redirect(_)), "{got:?}");
         assert!(open_settings_file(&sp).unwrap().1.social_buttons.is_empty());
 
-        // A name that could never be a Cognito identity_provider is refused in context, with
-        // nothing written: the same shape every other refusal on this page has.
-        let before = read(&sp);
+        // A provider from outside the table: the page renders a switch for it, and a save
+        // that leaves it ticked keeps it.
+        std::fs::write(
+            &sp,
+            r#"{ "version": 1, "web": { "admins": ["admin@x.com"] },
+                 "gate": { "social_buttons": ["Okta"] } }"#,
+        )
+        .unwrap();
+        let rev = rev_of(&sp);
+        let v = view(&cfg, Route::Config, &rev);
+        let (doc, _) = open_settings_file(&sp).unwrap();
+        let html = page_config(&v, &ConfigForm::of(&doc), None).into_string();
+        assert!(
+            html.contains(r#"name="idp-Okta""#),
+            "a switch for it: {html}"
+        );
+        assert!(
+            html.contains(r#"value="Google MicrosoftPersonal Okta""#),
+            "{html}"
+        );
         let got = post(
             &cfg,
             Route::Config,
-            &settings_fields(&rev_of(&sp), &[("buttons", "Google Inc")]),
+            &settings_fields(
+                &rev_of(&sp),
+                &[
+                    ("idps", "Google MicrosoftPersonal Okta"),
+                    ("idp-Okta", "on"),
+                ],
+            ),
         );
-        let (status, body) = got.page();
-        assert_eq!(status, 400, "{body}");
-        assert!(body.contains("social_buttons"), "{body}");
-        assert_eq!(read(&sp), before, "nothing written");
+        assert!(matches!(got, Got::Redirect(_)), "{got:?}");
+        assert_eq!(open_settings_file(&sp).unwrap().1.social_buttons, ["Okta"]);
         cleanup(&path);
     }
 

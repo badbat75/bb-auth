@@ -892,7 +892,10 @@ offers**, the session lifetime, who may use `bb-auth-web`, and the `ui` section 
 page either program serves looks. Note where the line falls on social sign-in: the
 `BB_AUTH_SOCIAL_*` group is env because it decides whether the OAuth leg can complete at
 all, while `gate.social_buttons` is a setting because it decides only what a visitor is
-offered, and a provider needs to be in both to get a button. They are in
+offered, and a provider needs to be in both to get a button. In the admin GUI that setting
+is a checkbox per provider (Google, and Microsoft meaning the personal account rather than
+an Entra ID tenant), so nobody has to remember that Cognito spells the second one
+`MicrosoftPersonal`. They are in
 a file rather than the environment for one mechanical reason,
 and not for tidiness: a process cannot re-read its own environment (systemd loads
 `EnvironmentFile=` once, at `ExecStart`), so a value that must change with no restart

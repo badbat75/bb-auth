@@ -3939,6 +3939,41 @@ impl Settings {
     }
 }
 
+/// The social identity providers this project knows by name, as `(identity_provider, label)`.
+///
+/// Two programs have an opinion about this list now, which is what puts it here rather than
+/// in either of them: the gate draws a button per enabled provider, and the admin GUI offers
+/// a checkbox per provider to enable. A second table would mean a provider an operator can
+/// switch on and no button, or a button whose name the switch spells differently, and the
+/// spelling is not cosmetic: the first field is what Cognito is sent as `identity_provider`,
+/// and Amazon matches it exactly.
+///
+/// What is NOT here is the icon, which stays in the gate beside the pages that draw it: an
+/// inline SVG is presentation, the admin GUI has no use for one, and the membership rule is
+/// about what more than one program must agree on rather than about keeping like with like.
+///
+/// **`MicrosoftPersonal` is the personal-account provider**, the one behind an `outlook.com`
+/// or `hotmail.com` address, and it is deliberately not the work-and-school one: an Entra ID
+/// tenant is a different provider, configured separately on the user pool under whatever name
+/// its administrator gave it, and offering the two under one label would be telling somebody
+/// their work account will work when it will not.
+///
+/// A pool may federate a provider this table has never heard of, which is why nothing here is
+/// a whitelist: [`compile_social_buttons`] takes any well-formed name, the gate labels an
+/// unknown one with the name itself, and the GUI shows it as a checkbox of its own so that
+/// enabling it from `bb-auth-adm` does not make the page unable to represent the file.
+pub const SOCIAL_IDPS: [(&str, &str); 2] =
+    [("Google", "Google"), ("MicrosoftPersonal", "Microsoft")];
+
+/// What a person calls `name`, or the name itself when this project has never heard of it.
+pub fn social_idp_label(name: &str) -> &str {
+    SOCIAL_IDPS
+        .iter()
+        .find(|(idp, _)| idp.eq_ignore_ascii_case(name))
+        .map(|(_, label)| *label)
+        .unwrap_or(name)
+}
+
 /// Validate the list of social sign-in buttons a page may offer.
 ///
 /// **Fatal on a bad entry, like a claim name and for the same reason.** A silently skipped

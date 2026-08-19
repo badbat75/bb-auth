@@ -131,10 +131,10 @@ use tiny_http::{Header, Request, Response, ResponseBox, Server, StatusCode};
 use bb_auth_core::{
     claim_name_ok, compile_asset_url, compile_host_pattern, compile_login_url, decide,
     decide_api_key, default_settings_path, header_safe_email, html_escape, login_url_for, now,
-    page_csp, read_access, read_settings, request_site, request_url, sha256_hex, stylesheet_link,
-    version_line, Access, AccessKind, ApiKeyRecord, Decision, IdentityAttr, KeyDecision,
-    ProfileClaim, RequestSite, Settings, Subject, UrlPattern, API_KEY_PREFIX, BASE_CSS,
-    PAGE_SECURITY_HEADERS, THEME_CSS,
+    page_csp, read_access, read_settings, request_site, request_url, sha256_hex, social_idp_label,
+    stylesheet_link, version_line, Access, AccessKind, ApiKeyRecord, Decision, IdentityAttr,
+    KeyDecision, ProfileClaim, RequestSite, Settings, Subject, UrlPattern, API_KEY_PREFIX,
+    BASE_CSS, PAGE_SECURITY_HEADERS, THEME_CSS,
 };
 
 type HmacSha256 = Hmac<Sha256>;
@@ -473,7 +473,7 @@ struct SocialConfig {
     /// restart. A provider gets a button only if it is in both, because a name here that
     /// nobody enabled is a capability nobody asked for, and a name enabled that is not here
     /// would send a visitor to Cognito with an `identity_provider` this app client may not
-    /// have. See [`KNOWN_IDPS`] for which of them come with an icon.
+    /// have. See [`IDP_ICONS`] for which of them come with a mark.
     idps: Vec<String>,
 }
 
@@ -1961,28 +1961,29 @@ const CALLBACK_HTML: &str = include_str!("../assets/callback.html");
 /// an unconfigured deployment should look unconfigured rather than borrow somebody's brand.
 const DEFAULT_BRAND: &str = "bb-auth";
 
-/// The identity providers this page knows how to draw a button for, as
-/// `(Cognito identity_provider, label, icon)`.
+/// The mark this page draws beside a provider's name, as `(Cognito identity_provider, icon)`.
+///
+/// The names and the labels are the library's [`bb_auth_core::SOCIAL_IDPS`], because the admin GUI offers a
+/// switch per provider and the two must agree on what each one is called. The icon is not
+/// shared: it is an inline SVG on a page, the GUI has no use for one, and the membership rule
+/// is about what more than one program must agree on rather than about keeping like with
+/// like.
 ///
 /// The *set* is code and the *choice* is configuration, the same split
-/// `derive_profile_header` makes for claims: an operator names a provider their user pool
-/// actually federates (`BB_AUTH_SOCIAL_IDPS`), and the icon and label come from here. A name
-/// that is not in this table still gets a button, labelled with the name itself and with no
-/// icon, because a pool may federate an IdP this table has never heard of and refusing to
-/// draw it would be worse than drawing it plainly.
+/// `derive_profile_header` makes for claims. A provider this table has never heard of still
+/// gets a button, labelled with its own name and with no icon, because a pool may federate an
+/// IdP nobody here anticipated and refusing to draw it would be worse than drawing it plainly.
 ///
 /// The icons are inline SVG for the reason everything else on these pages is inline: an
 /// `<img>` would be a second request, to a host that is not this one, on the page that most
 /// needs to work when something else is down.
-const KNOWN_IDPS: [(&str, &str, &str); 2] = [
+const IDP_ICONS: [(&str, &str); 2] = [
     (
-        "Google",
         "Google",
         r##"<svg viewBox="0 0 48 48" aria-hidden="true"><path fill="#FFC107" d="M43.6 20.5H42V20H24v8h11.3C33.7 32.4 29.3 35 24 35c-6.6 0-12-5.4-12-12s5.4-12 12-12c3.1 0 5.9 1.2 8 3.1l5.7-5.7C34.3 6.1 29.4 4 24 4 12.9 4 4 12.9 4 24s8.9 20 20 20 20-8.9 20-20c0-1.3-.1-2.3-.4-3.5z"/><path fill="#FF3D00" d="M6.3 14.7l6.6 4.8C14.7 15.1 19 12 24 12c3.1 0 5.9 1.2 8 3.1l5.7-5.7C34.3 6.1 29.4 4 24 4 16.3 4 9.7 8.3 6.3 14.7z"/><path fill="#4CAF50" d="M24 44c5.2 0 10-2 13.6-5.2l-6.3-5.3C29.2 35 26.7 36 24 36c-5.3 0-9.7-2.6-11.3-7l-6.5 5C9.5 39.6 16.2 44 24 44z"/><path fill="#1976D2" d="M43.6 20.5H42V20H24v8h11.3c-.8 2.2-2.2 4.1-4 5.5l6.3 5.3C41.9 36.4 44 30.8 44 24c0-1.3-.1-2.3-.4-3.5z"/></svg>"##,
     ),
     (
         "MicrosoftPersonal",
-        "Microsoft",
         r##"<svg viewBox="0 0 23 23" aria-hidden="true"><path fill="#F25022" d="M1 1h10v10H1z"/><path fill="#7FBA00" d="M12 1h10v10H12z"/><path fill="#00A4EF" d="M1 12h10v10H1z"/><path fill="#FFB900" d="M12 12h10v10H12z"/></svg>"##,
     ),
 ];
@@ -2117,10 +2118,15 @@ fn social_block(social: Option<&SocialConfig>, enabled: &[String]) -> String {
     }
     let mut buttons = String::new();
     for idp in offered {
-        let (label, icon) = match KNOWN_IDPS.iter().find(|(name, _, _)| *name == idp.as_str()) {
-            Some((_, label, icon)) => (*label, *icon),
-            None => (idp.as_str(), ""),
-        };
+        // The label is the library's, so a person reads the same word here and on the
+        // checkbox that enabled it; the icon is this page's, and an unknown provider simply
+        // has none.
+        let label = social_idp_label(idp);
+        let icon = IDP_ICONS
+            .iter()
+            .find(|(name, _)| name.eq_ignore_ascii_case(idp))
+            .map(|(_, svg)| *svg)
+            .unwrap_or("");
         buttons.push_str(&format!(
             "        <button type=\"button\" class=\"social-btn\" data-idp=\"{idp}\">\n\
              \x20         {icon}\n\
