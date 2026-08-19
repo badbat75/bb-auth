@@ -5388,6 +5388,43 @@ fn parse_group_members(doc: &AccessFile, text: &str) -> Result<Vec<String>, Stri
 // The request
 // ---------------------------------------------------------------------------
 
+/// A view for a page that answers before this request is anybody: nothing is routed yet, so
+/// the Settings menu on it submits to the root, and it names no administrator.
+///
+/// The **look is a parameter**, and that is the whole point of this signature. Two of the
+/// pages built from it render *before* the settings file has been read and can only wear the
+/// built-in look, because the file that would say otherwise is exactly what is missing or
+/// broken. The other two render *after* a successful read, and there the deployment has said
+/// how its pages look: a `403` in a different palette from every other page of the same
+/// installation looks like a page belonging to a different service, which is the opposite of
+/// what an operator set `ui.stylesheet_url` to get. Passing it in makes each call site say
+/// which of the two it is.
+///
+/// A function rather than a closure because [`Look`] borrows the settings it came from, and a
+/// closure cannot name that lifetime.
+fn anon_view<'a>(
+    cfg: &'a Config,
+    lang: Lang,
+    lang_pref: LangPref,
+    theme: UiTheme,
+    look: Look<'a>,
+) -> View<'a> {
+    View {
+        cfg,
+        lang,
+        lang_pref,
+        theme,
+        look,
+        admin: None,
+        // Every caller is an error page, and an error page belongs to no tab.
+        at: Route::Dashboard,
+        query: "",
+        rev: "",
+        msg: None,
+        identity: vec![IDENTITY_HEADER.to_string()],
+    }
+}
+
 /// Serve one request: identify, authorize, route, then either render or mutate.
 ///
 /// The order is the point. Identity and the admin allowlist come **before** the router and
@@ -5411,29 +5448,14 @@ fn handle(mut req: Request, cfg: &Config) {
         query_param(&query, THEME_COOKIE).as_deref(),
         header_value(&req, "Cookie").and_then(|c| cookie_value(c, THEME_COOKIE)),
     );
-    // Nothing is routed yet, so the Settings menu on an error page submits to the root, and
-    // the page wears the built-in look: everything this closure renders happens *above* the
-    // settings read below, including the one page that exists because that read failed.
-    let anon = |at: Route| View {
-        cfg,
-        lang,
-        lang_pref,
-        theme,
-        look: Look::default(),
-        admin: None,
-        at,
-        query: "",
-        rev: "",
-        msg: None,
-        identity: vec![IDENTITY_HEADER.to_string()],
-    };
-
     // Identity comes from nginx and from nowhere else. A missing header is a broken
     // deployment, not an anonymous visitor — say so, and fail closed.
     let raw_email = match header_value(&req, IDENTITY_HEADER) {
         Some(e) if !e.trim().is_empty() => e.to_string(),
         _ => {
-            let v = anon(Route::Dashboard);
+            // The built-in look, and here there is no other: the settings have not been
+            // read yet, and a request with no identity at all is not going to reach them.
+            let v = anon_view(cfg, lang, lang_pref, theme, Look::default());
             let page = notice(
                 "bad",
                 v.t(K::NoIdentityTitle),
@@ -5454,7 +5476,9 @@ fn handle(mut req: Request, cfg: &Config) {
     let settings = match open_settings_file(&cfg.settings_path) {
         Ok((_, s)) => s,
         Err(e) => {
-            let v = anon(Route::Dashboard);
+            // The built-in look: the file that would describe another one is the file this
+            // page exists to report on.
+            let v = anon_view(cfg, lang, lang_pref, theme, Look::default());
             respond_page(
                 req,
                 500,
@@ -5464,8 +5488,15 @@ fn handle(mut req: Request, cfg: &Config) {
             return;
         }
     };
+    // The settings are readable from here down, so every page below wears what they say.
+    // `web.admins` being empty or not naming this identity says nothing about the `ui`
+    // section, and there is no reason for those two pages to look like a different product.
+    let look = Look {
+        theme: settings.theme,
+        stylesheet: settings.stylesheet_url.as_deref(),
+    };
     if settings.admins.is_empty() {
-        let v = anon(Route::Dashboard);
+        let v = anon_view(cfg, lang, lang_pref, theme, look);
         let e = format!("{}: {}", cfg.settings_path, v.t(K::AdminsNeverEmpty));
         respond_page(
             req,
@@ -5476,7 +5507,7 @@ fn handle(mut req: Request, cfg: &Config) {
         return;
     }
     if !settings.is_admin(&email) {
-        let v = anon(Route::Dashboard);
+        let v = anon_view(cfg, lang, lang_pref, theme, look);
         let page = notice(
             "bad",
             v.t(K::NotAdminTitle),
@@ -5486,17 +5517,10 @@ fn handle(mut req: Request, cfg: &Config) {
         return;
     }
 
-    // Past the two guards, so every page from here down can be the one this deployment asked
-    // for rather than the built-in one. It is read from the settings this request already
-    // loaded, and not read again: the `ui` section and the `web.admins` that let this request
-    // through must be the same file, or a save landing mid-request could style a page from
-    // one version and admit it on another.
-    let look = Look {
-        theme: settings.theme,
-        stylesheet: settings.stylesheet_url.as_deref(),
-    };
-    // From the same settings read, for the same reason the look is: what the access check
-    // predicts and what admitted this request must come from one version of the file.
+    // From the same settings read the look came from, and for the same reason: what the
+    // access check predicts and what admitted this request must come from one version of the
+    // file. A save landing mid-request must not style a page from one version and admit it on
+    // another.
     let identity: Vec<String> = settings
         .identity_attrs
         .iter()
@@ -8262,6 +8286,91 @@ mod tests {
     }
 
     // --- the server ---------------------------------------------------------
+
+    /// Which pages wear the deployment's look, and which cannot.
+    ///
+    /// The refusals are pages of the same installation as every other, so an administrator's
+    /// colleague who is not on `web.admins` must not be told so in a palette nobody
+    /// recognises. The two that render *before* the settings are read are the exception, and
+    /// not a lapse: the file that would describe another look is the file that is missing or
+    /// broken, so the built-in one is the only honest answer they have.
+    #[test]
+    fn a_refusal_wears_the_deployment_look_once_the_settings_can_be_read() {
+        let path = scratch("look-403", SAMPLE);
+        // A settings file that names an administrator AND a stylesheet, which is what a
+        // deployment that has configured its look looks like.
+        std::fs::write(
+            settings_path(&path),
+            r#"{ "version": 1, "web": { "admins": ["admin@x.com"] },
+                 "ui": { "stylesheet_url": "https://assets.example.com/tokens.css" } }"#,
+        )
+        .unwrap();
+        let served = cfg_for(&path, "");
+        let server = Server::http("127.0.0.1:0").expect("bind an ephemeral port");
+        let port = server.server_addr().to_ip().expect("an ip address").port();
+        std::thread::spawn(move || {
+            for req in server.incoming_requests() {
+                handle(req, &served);
+            }
+        });
+        let at = |p: &str| format!("http://127.0.0.1:{port}{p}");
+        const LINK: &str =
+            r#"<link rel="stylesheet" href="https://assets.example.com/tokens.css">"#;
+
+        // Authenticated, not an administrator: the settings were read to find that out, so
+        // the page they are refused with is the one this deployment asked for.
+        let mut r = client()
+            .get(at("/"))
+            .header(IDENTITY_HEADER, "someone@x.com")
+            .call()
+            .expect("a response");
+        assert_eq!(r.status(), 403);
+        let csp = r
+            .headers()
+            .get("Content-Security-Policy")
+            .unwrap()
+            .to_str()
+            .unwrap()
+            .to_string();
+        let body = r.body_mut().read_to_string().unwrap();
+        assert!(
+            body.contains(LINK),
+            "the 403 must carry the operator's stylesheet"
+        );
+        assert!(
+            csp.contains("https://assets.example.com"),
+            "and the policy must admit it: {csp}"
+        );
+
+        // The administrator's own page, for contrast: same look, which is the point.
+        let mut r = client()
+            .get(at("/"))
+            .header(IDENTITY_HEADER, "admin@x.com")
+            .call()
+            .expect("a response");
+        assert_eq!(r.status(), 200);
+        assert!(r.body_mut().read_to_string().unwrap().contains(LINK));
+
+        // And the one that cannot: no identity header at all is answered above the settings
+        // read, so it wears the built-in look and links nothing.
+        let mut r = client().get(at("/")).call().expect("a response");
+        assert_eq!(r.status(), 401);
+        assert!(
+            !r.body_mut().read_to_string().unwrap().contains("<link"),
+            "a page rendered before the settings are read may link nothing"
+        );
+
+        // Nor can the page that exists BECAUSE the settings are unreadable.
+        std::fs::write(settings_path(&path), "{ not json").unwrap();
+        let mut r = client()
+            .get(at("/"))
+            .header(IDENTITY_HEADER, "admin@x.com")
+            .call()
+            .expect("a response");
+        assert_eq!(r.status(), 500);
+        assert!(!r.body_mut().read_to_string().unwrap().contains("<link"));
+        cleanup(&path);
+    }
 
     #[test]
     fn serving_enforces_the_identity_header_and_the_admin_allowlist() {

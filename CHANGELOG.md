@@ -46,6 +46,11 @@ section logs anybody out.
   `BB_AUTH_WEB_ALLOW_NONLOOPBACK=1` says it was meant. Its only credential is a header
   nginx injects, so a bind to `0.0.0.0` was an unauthenticated remote writer of the access
   list.
+* The admin GUI's refusals wear the deployment's look once the settings can be read: a
+  `403` for somebody who is authenticated but not on `web.admins` used to render in the
+  built-in palette, which on a themed installation looks like a page of another service.
+  The two pages that answer *before* the settings are read keep the built-in look, because
+  the file that would describe another one is exactly what is missing or broken.
 * An `anonymous` scope no longer names a **vetoed** identity in `X-Auth-Email`. The veto
   cannot close an area that is open with no credential at all, but it now stops the gate
   introducing that person to the application behind it.
