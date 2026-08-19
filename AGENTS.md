@@ -119,7 +119,7 @@ the opposite — a login page runs Cognito `USER_AUTH` in the browser (enabling 
 auto-login with no second OTP) and POSTs the resulting `id_token` to `/auth/session`. The gate
 now ships that page, but the constraint is unchanged and so is the shape: the page is still a
 browser-side client of Cognito that hands the gate a token it did not obtain, and pointing
-`BB_AUTH_LOGIN_URL` at a page of your own instead still works.
+`gate.login_url` at a page of your own instead still works.
 
 ## Where documentation lives
 
@@ -371,7 +371,7 @@ section under-read itself by a fifth, and two of the seven are lockout-class.
 - There is no canonical service base URL.
 - The gate never redirects a gated request; nginx does.
 - The pages the gate serves are complete on their own, and the operator's stylesheet is an addition to one.
-- Social sign-in is three env vars or none, fatally, and one setting that fails soft.
+- Social sign-in is four settings that stand or fall together, and none of them is an env var.
 - `safe_rd` guards the post-login redirect
 
 [**Dependencies and the build**](#dependencies-and-the-build)
@@ -424,8 +424,8 @@ section under-read itself by a fifth, and two of the seven are lockout-class.
   sent `X-Frame-Options` and no `nosniff`, the GUI sent `nosniff` and no `X-Frame-Options`,
   and the page that could be framed was the one whose forms delete users. What stays each
   program's own is the **policy**: `request_site` classifies, and the GUI refuses anything but
-  `same-origin` while the gate also accepts `same-site`, because `BB_AUTH_LOGIN_URL` may name
-  a sign-in page on a sibling host. Its limit is where a thing
+  `same-origin` while the gate also accepts `same-site`, because `gate.login_url` may name a
+  sign-in page on a sibling host. Its limit is where a thing
   stops and an ARRANGEMENT of things starts: the admin's header, tables and phone stacking are
   the GUI's, the centred card and its steps are the gate's, and nothing requires those two to
   agree. What stays in a tool is what has an
@@ -486,53 +486,62 @@ section under-read itself by a fifth, and two of the seven are lockout-class.
 
 - **The settings file is what must change without a restart, and the rule for what goes in it
   is three-part.** A setting belongs there iff it is (1) read **per request**, (2) unable to
-  lock the operator out when it is wrong, and (3) not a secret. Twelve pass, in three
-  sections: `gate.profile_claims`, `gate.identity_attrs`, `gate.allow_unverified_social`,
-  `gate.social_providers`, `gate.social_client_id`, `gate.social_buttons`,
-  `gate.session_ttl_secs`; `web.admins`; and the whole `ui` section
-  (`stylesheet_url`, `logo_url`, `brand_name`, `theme`), which is the **look of every page
-  either program serves** and the one section both of them read. The `ui` four pass the middle
-  part precisely because the built-in stylesheet is complete: the worst a wrong value there
-  achieves is an unstyled page, never a closed door. Everything else stays in
-  `bb-auth.env`: the listener and the worker count (a rebind), the HMAC key (the secret), the
-  Cognito trust roots and the cookie's name and domain (a change lets nobody in or logs
-  everybody out), what is left of the `BB_AUTH_SOCIAL_*` group (a callback URL that is not
-  the one registered on the app client is a sign-in that cannot complete, which is the
-  lockout wearing a GUI field's clothes), and
-  `BB_AUTH_LOGIN_URL` / `BB_AUTH_AUTHORIZED_HOSTS` /
-  `BB_AUTH_ORIGINAL_URL_HEADER`, which **are** the lockout. The `ui` section and the
-  `BB_AUTH_SOCIAL_*` group sitting on opposite sides of that line, both of them about the same
-  sign-in page, is the rule working rather than an inconsistency.
-  `gate.social_buttons` is the eleventh, and it was checked against the three parts before it
-  was added rather than after: it is read when the sign-in page is rendered, it cannot lock
-  anybody out (turning every button off leaves the email path, which is every deployment's
-  real way in, untouched), and it is not a secret. It sits opposite `BB_AUTH_SOCIAL_IDPS` for
-  the same reason the `ui` section sits opposite the rest of that group: the env says what
-  this pool *can* federate and is lockout-class, the setting says what the page *offers
-  today* and is a Tuesday decision. A button needs both, and a name enabled that the pool
-  does not federate draws nothing and warns at startup, because that is the one place both
-  lists are visible at once.
-  `gate.social_client_id` is the twelfth, and it is the one member of the `BB_AUTH_SOCIAL_*`
-  group that crossed the line, so it was argued rather than moved. It is read per request,
-  when the sign-in page is rendered and when the callback exchanges a code; it cannot lock
-  anybody out, because a wrong value costs the social buttons and leaves the email path
-  standing; and it is not a secret, since the page emits it into its own script and every
-  visitor has always read it there. What it must never become is a way to *widen* what the
-  gate accepts: the accepted audiences stay in `BB_AUTH_AUDIENCES`, and `social_now` draws no
-  button through an app client that is not already one of them, so a save can move social
-  sign-in between clients an operator has declared and can do nothing else. What moved it is
-  that all three programs have an opinion about it now: an env var is readable only by the
-  process that was started with it, so the GUI could only have shown this one by being handed
-  a second copy in its own env file, and a value written in two files drifts with nothing to
-  catch it. It is a *file* for one
-  mechanical reason, and not for tidiness: **a process cannot re-read its own environment**
-  (systemd loads `EnvironmentFile=` once, at `ExecStart`), so an env var can never be hot. Do
-  not add a thirteenth setting because it would be convenient there; check it against the
-  three parts first. It is held in `RwLock<Settings>`, reloaded by the same SIGHUP as the access file and
+  lock the operator out when it is wrong, and (3) not a secret. Fifteen pass, in three
+  sections: `gate.client_id`, `gate.login_url`, `gate.profile_claims`,
+  `gate.identity_attrs`, `gate.allow_unverified_social`, `gate.social_providers`,
+  `gate.oauth_domain`, `gate.social_callback_url`, `gate.social_buttons`,
+  `gate.session_ttl_secs`; `web.admins`; and the whole `ui` section (`stylesheet_url`,
+  `logo_url`, `brand_name`, `theme`), which is the **look of every page either program
+  serves** and the one section both of them read. The `ui` four pass the middle part precisely
+  because the built-in stylesheet is complete: the worst a wrong value there achieves is an
+  unstyled page, never a closed door.
+
+  **The whole Cognito wiring is in that list, and the argument for it is one sentence: the
+  pool is not.** `BB_AUTH_COGNITO_ISSUER` stays in the environment, so what this file chooses
+  among is the app clients of one pool that the environment already trusts, and no save can
+  reach another one. Given that, `gate.client_id` and every `gate.social_buttons` audience
+  *are* the accepted audiences (`Settings::audiences`, derived) — which is not a widening but
+  the end of a duplication: `BB_AUTH_AUDIENCES` and `BB_AUTH_SOCIAL_IDPS` were two lists that
+  had to agree with a third by hand, and a list that has to agree with another by hand is the
+  bug this repository keeps writing warnings about. What moved them was that all three
+  programs have an opinion about them now: an env var is readable only by the process that was
+  started with it, so the GUI could have shown one only by being handed a second copy in its
+  own env file, and a value written in two files drifts with nothing to catch it.
+
+  **Two of them can stop new logins, and that is stated rather than hidden.** A wrong
+  `gate.client_id` means every id_token is refused for its audience; a wrong `gate.login_url`
+  sends a `401` somewhere useless. Neither invalidates a cookie, which is the whole
+  difference: sessions already minted keep working, so whoever made the edit still holds one
+  and can undo it, and `bb-auth-adm` over SSH is the way back if not. That is why they sit
+  here and the HMAC key does not: getting the key wrong logs **everybody** out at once,
+  including the person who could fix it. `gate.client_id` empty is tolerated rather than
+  refused, because a package creates this file and cannot know the value; the gate says so
+  loudly at startup instead of refusing to start, which on a first install would be a boot
+  loop. `gate.login_url` empty means the gate's own `/auth/login`, which since 1.1.0 is a page
+  it actually serves.
+
+  Everything else stays in `bb-auth.env`: the listener and the worker count (a rebind), the
+  HMAC key (the secret), the Cognito **issuer** and the cookie's name and domain (a change
+  lets nobody in or logs everybody out), and `BB_AUTH_AUTHORIZED_HOSTS` /
+  `BB_AUTH_ORIGINAL_URL_HEADER`, which **are** the lockout. `BB_AUTH_AUTHORIZED_HOSTS` staying
+  there is what keeps `gate.login_url` from being a redirect gadget: the file says where the
+  sign-in page is, the environment says which hosts a redirect may land on, and only the
+  second is a security boundary.
+
+  It is a *file* for one mechanical reason, and not for tidiness: **a process cannot re-read
+  its own environment** (systemd loads `EnvironmentFile=` once, at `ExecStart`), so an env var
+  can never be hot. Do not add a sixteenth setting because it would be convenient there; check
+  it against the three parts first, and say the argument out loud the way the ones above are.
+  It is held in `RwLock<Settings>`, reloaded by the same SIGHUP as the access file and
   **fail-soft in the same way** (a broken file keeps the live values), which is what makes it
   safe to hand to a GUI: the worst a bad save can do is leave the previous values in force.
   `bb-auth-web` reads it fresh per request instead, because it is the one service that edits
   its own half of it.
+
+  The file declares `"version": 2`. Version 1 is refused with a sentence rather than a type
+  error three levels down, for the reason the access file's own version check gives: it was
+  written before the app clients moved into this file, and no parser can guess which client
+  each of its bare-name buttons belonged to.
 
 - **What changes who reaches what is fatal; what drops one credential is skipped.** Fatal
   (`read_access` returns `Err`: fatal at startup, old table retained on SIGHUP): a malformed URL
@@ -772,8 +781,8 @@ section under-read itself by a fifth, and two of the seven are lockout-class.
   redirect targets. Don't reintroduce a single base URL.
 
 - **The gate never redirects a gated request; nginx does.** A `401` carries this area's login page
-  in `LOGIN_URL_HEADER` (`X-Auth-Login-URL`) — the application's `login_url`, else `BB_AUTH_LOGIN_URL`
-  (`login_url_for`) — and nginx lifts it with `auth_request_set` into a request variable, which is
+  in `LOGIN_URL_HEADER` (`X-Auth-Login-URL`) — the application's `login_url`, else
+  `gate.login_url`, else this gate's own `/auth/login` (`login_url_for`, `global_login`) — and nginx lifts it with `auth_request_set` into a request variable, which is
   what stops a later `proxy_pass` clobbering `$upstream_http_*`. (`auth_request_set` does read a
   `401` subrequest's headers — verified against nginx 1.26.) nginx must route it through a `map`
   with the global URL as the default arm: an unset variable makes `return 302 $bb_login?rd=…` emit a
@@ -833,28 +842,30 @@ section under-read itself by a fifth, and two of the seven are lockout-class.
   `/auth/session` and `/auth/logout`): a sign-in page behind the gate answers a signed-out
   visitor with itself, forever.
 
-- **Social sign-in is three env vars or none, fatally, and one setting that fails soft.**
-  `BB_AUTH_OAUTH_DOMAIN`, `BB_AUTH_SOCIAL_CALLBACK_URL` and `BB_AUTH_SOCIAL_IDPS`
-  (`SocialConfig::from_env`), plus `gate.social_client_id` in the settings file. With none of
-  them the sign-in page has no social section at all: no divider, no button, nothing hinting
-  at a way in this deployment does not have, and `/auth/callback` is a `404`, because there is
-  no OAuth leg to finish. Half-configured **env** is a refusal to start: a button that cannot
-  work tells whoever clicks it `redirect_mismatch`, in Amazon's words, on Amazon's page.
-  The app client is deliberately **not** fatal, and must not become so: it arrives from a file
-  that reloads without a restart, so a fatal there is a boot loop somebody wrote in a GUI
-  weeks earlier and the next reboot met. It fails soft in one place instead (`social_now`):
-  with no app client, or one that is not an accepted audience, the whole social section is
-  simply not drawn, and `warn_social` says which of the two it was at startup and after every
-  reload. That audience check is what the env var's startup check became, and it is what keeps
-  a hot file from widening anything: a token minted for a client id nobody declared would be
-  refused by the gate one redirect after the login succeeded, so refusing to draw the button
-  is the same answer given early enough to read. The callback URL must match the app client's
-  registered `redirect_uri` byte for byte, which is the whole reason it is one value in one
-  place.
+- **Social sign-in is four settings that stand or fall together, and none of them is an env
+  var.** `gate.oauth_domain` (the hosted UI, a bare host), `gate.social_callback_url` (the
+  `redirect_uri`), and one `gate.social_buttons` entry per provider, each carrying its own
+  `audience`: the app client that federates it. With none of them the sign-in page has no
+  social section at all — no divider, no button, nothing hinting at a way in this deployment
+  does not have — and `/auth/callback` is a `404`, because there is no OAuth leg to finish.
+  **The app client is per button because Cognito federates per app client**: which identity
+  providers a client offers is a property of that client, so two providers may live on two of
+  them, and one value for all of them made that arrangement inexpressible. The price is that
+  the login page must carry the client id on the button (`data-client-id`) and stash it in
+  `sessionStorage` beside the PKCE verifier, because the callback is a second document and
+  has to exchange its code with the same client the authorize call named.
+  A **half-configured** file is refused by `compile_settings` rather than by the gate's
+  startup: buttons with no domain or no callback URL, or a button with no app client, are
+  errors on the way to disk, which is where an editor can still say so. What the file cannot
+  check is whether Cognito agrees with it — that the callback URL is registered byte for byte
+  on each of those clients, and that each client really federates its provider — and it does
+  not try: whoever clicks a button that Amazon disagrees with is told `redirect_mismatch`, in
+  Amazon's words, on Amazon's page.
 
 - **`safe_rd` guards the post-login redirect** against open-redirect + response-splitting. **Every**
   candidate — relative, absolute, or the no-`rd` default — goes through the same `rd_url_allowed`
-  gate, so a spoofed caller origin still can't escape. Rejected ⇒ fall back to `BB_AUTH_LOGIN_URL`.
+  gate, so a spoofed caller origin still can't escape. Rejected ⇒ fall back to
+  `gate.login_url` (or the gate's own page, which is what empty means).
   The gate is https-only and rejects `//`, `/\`, control bytes incl. CR/LF, userinfo `@`,
   backslashes, and lookalikes like `evilbadbat75.com` / `badbat75.com.evil.com` (a pattern's literal
   dot is what rules those out; `*.x.com` also does not match the apex `x.com`). Any new use of

@@ -118,7 +118,17 @@ function startServer(bin, accessFile, port) {
  * nothing names one, so the suite exercises that default rather than a path of its own.
  */
 const SETTINGS_FIXTURE =
-  JSON.stringify({ version: 1, web: { admins: ['admin@example.com'] } }, null, 2) + '\n';
+  JSON.stringify(
+    {
+      version: 2,
+      // The app client the email flow uses: a settings file without one is a deployment
+      // where no login can complete, and the Settings page refuses to write that.
+      gate: { client_id: 'email-client' },
+      web: { admins: ['admin@example.com'] },
+    },
+    null,
+    2
+  ) + '\n';
 
 /**
  * Everything above, in the one order that works, and the teardown that undoes it.

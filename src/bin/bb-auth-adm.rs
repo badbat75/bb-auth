@@ -43,15 +43,16 @@ use std::process::ExitCode;
 
 use bb_auth_core::{
     add_api_key, add_application, add_denied, add_scope, add_user, add_user_email, add_user_group,
-    app_mut, app_pos, compile_asset_url, compile_brand_name, compile_social_client_id, decide,
-    decide_api_key, default_settings_path, edit_url_list, edit_urls, format_date, key_expiry,
-    key_mut, mint_uuid, move_scope, norm_email, now, open_access_file, open_settings_file,
-    parse_exclusion, remove_api_key, remove_application, remove_denied, remove_scope, remove_user,
-    remove_user_email, remove_user_group, rename_application, rename_scope, request_url,
-    rotate_api_key, scope_pos, shadowing_scope, user_group_mut, user_group_refs, user_label,
-    user_pos, version_line, well_formed_uuid, Access, AccessFile, AccessWrite, ApiKeySpec, AppSpec,
-    Decision, KeyDecision, ScopeSpec, SealedKey, SettingsFile, SettingsWrite, Subject, UiTheme,
-    UserSpec, Written, ACCESS_FILE_VERSION, SETTINGS_VERSION,
+    app_mut, app_pos, compile_app_client_id, compile_asset_url, compile_brand_name,
+    compile_login_url, compile_oauth_domain, decide, decide_api_key, default_settings_path,
+    edit_url_list, edit_urls, format_date, key_expiry, key_mut, mint_uuid, move_scope, norm_email,
+    now, open_access_file, open_settings_file, parse_exclusion, remove_api_key, remove_application,
+    remove_denied, remove_scope, remove_user, remove_user_email, remove_user_group,
+    rename_application, rename_scope, request_url, rotate_api_key, scope_pos, shadowing_scope,
+    user_group_mut, user_group_refs, user_label, user_pos, version_line, well_formed_uuid, Access,
+    AccessFile, AccessWrite, ApiKeySpec, AppSpec, Decision, KeyDecision, ScopeSpec, SealedKey,
+    SettingsFile, SettingsWrite, SocialButtonSpec, Subject, UiTheme, UserSpec, WiredButton,
+    Written, ACCESS_FILE_VERSION, SETTINGS_VERSION,
 };
 
 const USAGE: &str = "\
@@ -132,17 +133,22 @@ settings                        the OTHER file: what takes effect with no restar
   settings show                 what the gate and the GUI read from it
   settings set [--claims LIST] [--identity LIST] [--session-ttl SECS]
                [--unverified-social true|false] [--providers LIST] [--no-providers]
-               [--social-client-id ID] [--social-buttons LIST] [--no-social-buttons]
+               [--login-url URL] [--client-id ID] [--oauth-domain HOST]
+               [--social-callback-url URL]
+               [--social-buttons IDP=APPCLIENT,...] [--no-social-buttons]
                [--brand NAME] [--stylesheet URL] [--logo URL] [--theme system|light|dark]
   settings admin add EMAIL...   who may use bb-auth-web. NEVER empty, never 'everyone'
   settings admin rm EMAIL...
   Default path: settings.json beside the access file; -s/--settings-file, or
   $BB_AUTH_SETTINGS_FILE. These are hot BECAUSE they are in a file: a process cannot
   re-read its own environment, so an env var could never be one.
-  --social-client-id is the Cognito app client a social sign-in runs through, and it is
-  here rather than in bb-auth.env because all three programs have an opinion about it. The
-  gate only draws a button through an app client BB_AUTH_AUDIENCES already accepts, so a
-  wrong value costs the social buttons and never the email path.
+  The Cognito app clients live here and nowhere else. --client-id is the one the email
+  flow uses; every --social-buttons entry is `provider=app client`, because Cognito
+  federates per app client and two providers may sit on two of them. Together they ARE the
+  accepted audiences: an id_token carries the app client it was minted for in `aud`, so
+  naming an app client here is what makes the gate accept its tokens. The pool they must
+  belong to is BB_AUTH_COGNITO_ISSUER, which stays in the env file, so this file chooses
+  among the app clients of one pool and can never reach another.
   The last four are the `ui` section, and they are the look of every page BOTH programs
   emit: the gate's login page and bb-auth-web itself. --stylesheet loads after the built-in
   stylesheet and is meant to redefine its custom properties, so a deployment restyles both
@@ -697,17 +703,48 @@ fn cmd_settings_show(ctx: Ctx) -> Result<ExitCode, String> {
         }
     );
     println!(
-        "  social_client_id        {}",
-        match s.social_client_id.as_str() {
-            "" => "(none: no social sign-in)",
+        "  login_url               {}",
+        match s.login_url.as_str() {
+            "" => "(none: the gate's own /auth/login)",
+            url => url,
+        }
+    );
+    println!(
+        "  client_id               {}",
+        match s.client_id.as_str() {
+            "" => "(none: no login can complete)",
             id => id,
         }
+    );
+    println!(
+        "  oauth_domain            {}",
+        s.oauth_domain
+            .as_deref()
+            .unwrap_or("(none: no social sign-in)")
+    );
+    println!(
+        "  social_callback_url     {}",
+        s.social_callback_url.as_deref().unwrap_or("(none)")
     );
     println!(
         "  social_buttons          {}",
         match s.social_buttons.len() {
             0 => "(none: the sign-in page offers no social button)".to_string(),
-            _ => s.social_buttons.join(", "),
+            _ => s
+                .social_buttons
+                .iter()
+                .map(|b| format!("{}={}", b.idp, b.audience))
+                .collect::<Vec<_>>()
+                .join(", "),
+        }
+    );
+    // Derived, and printed as such: there is no list to keep in step, which is the whole
+    // reason the app clients moved into this file.
+    println!(
+        "  (audiences)             {}",
+        match s.audiences.len() {
+            0 => "(none)".to_string(),
+            _ => s.audiences.join(", "),
         }
     );
     println!(
@@ -763,7 +800,10 @@ fn cmd_settings_set(mut ctx: Ctx) -> Result<ExitCode, String> {
     let ttl = ctx.flags.take_one("session-ttl")?;
     let social = take_tristate(&mut ctx.flags, "unverified-social")?;
     let providers = ctx.flags.take_many("providers")?;
-    let client_id = ctx.flags.take_one("social-client-id")?;
+    let login_url = ctx.flags.take_one("login-url")?;
+    let client_id = ctx.flags.take_one("client-id")?;
+    let domain = ctx.flags.take_one("oauth-domain")?;
+    let callback = ctx.flags.take_one("social-callback-url")?;
     let buttons = ctx.flags.take_many("social-buttons")?;
     let no_buttons = ctx.flags.take_flag("no-social-buttons")?;
     let no_providers = ctx.flags.take_flag("no-providers")?;
@@ -789,7 +829,10 @@ fn cmd_settings_set(mut ctx: Ctx) -> Result<ExitCode, String> {
         && social.is_none()
         && providers.is_empty()
         && !no_providers
+        && login_url.is_none()
         && client_id.is_none()
+        && domain.is_none()
+        && callback.is_none()
         && buttons.is_empty()
         && !no_buttons
         && stylesheet.is_none()
@@ -823,20 +866,48 @@ fn cmd_settings_set(mut ctx: Ctx) -> Result<ExitCode, String> {
     } else if !providers.is_empty() {
         doc.gate.social_providers = providers;
     }
-    // The app client every social button runs through. Empty is how a deployment says it
-    // offers no social sign-in, so it needs no `--no-` spelling of its own. Validated here as
-    // well as at the write, for the reason the `ui` values are: the message then names the
-    // flag that was typed rather than the field it lands in.
-    if let Some(id) = client_id {
-        doc.gate.social_client_id = compile_social_client_id(&id)
-            .map_err(|e| e.replace("social_client_id", "--social-client-id"))?;
+    // The Cognito wiring. Each value is validated here as well as at the write, for the
+    // reason the `ui` values are: the message then names the flag that was typed rather than
+    // the field it lands in. Empty is how each of them is unset, so none needs a `--no-`
+    // spelling of its own.
+    if let Some(u) = login_url {
+        if !u.trim().is_empty() {
+            compile_login_url(&u).map_err(|e| format!("--login-url: {e}"))?;
+        }
+        doc.gate.login_url = u.trim().to_string();
     }
-    // Which social buttons the sign-in page offers. Emptying it takes the whole section off
-    // the page, which is the same page a deployment with no `BB_AUTH_SOCIAL_*` at all serves.
+    if let Some(id) = client_id {
+        doc.gate.client_id = compile_app_client_id("--client-id", &id)?;
+    }
+    if let Some(d) = domain {
+        doc.gate.oauth_domain =
+            compile_oauth_domain(&d).map_err(|e| e.replace("oauth_domain", "--oauth-domain"))?;
+    }
+    if let Some(u) = callback {
+        compile_asset_url("--social-callback-url", &u)?;
+        doc.gate.social_callback_url = u.trim().to_string();
+    }
+    // Which social buttons the sign-in page offers, and the app client each runs through.
+    // Emptying the list takes the whole section off the page, which is the same page a
+    // deployment with no oauth_domain at all serves.
     if no_buttons {
         doc.gate.social_buttons.clear();
     } else if !buttons.is_empty() {
-        doc.gate.social_buttons = buttons;
+        doc.gate.social_buttons = buttons
+            .iter()
+            .map(|entry| match entry.split_once('=') {
+                Some((idp, aud)) => Ok(SocialButtonSpec::Wired(WiredButton {
+                    idp: idp.trim().to_string(),
+                    audience: aud.trim().to_string(),
+                })),
+                // Refused rather than guessed: there is no app client to fall back on any
+                // more, and a button without one could not be drawn.
+                None => Err(format!(
+                    "--social-buttons: '{entry}' has no app client; write it as \
+                     provider=<app client id>"
+                )),
+            })
+            .collect::<Result<Vec<_>, String>>()?;
     }
     // The `ui` four. Each is validated here rather than left to the write, so the error names
     // the flag the operator typed instead of the field name in the file; the write validates

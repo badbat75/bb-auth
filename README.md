@@ -23,7 +23,7 @@ that token, validates it, and issues the session cookie.
 Cognito endpoint and the list of hosts a post-login redirect may land on, and the gate already
 holds all three *as the values it validates against* — served from anywhere else, each is a
 second copy waiting to disagree. The page is still an ordinary browser-side client of Cognito,
-and `BB_AUTH_LOGIN_URL` can still point at one of your own.
+and `gate.login_url` can still point at one of your own.
 
 ## Flow
 
@@ -49,7 +49,7 @@ nginx error_page 401 → 302  <login-page>/?rd=<original>
 |--------|------------------|------------|----------------------------------------------------|
 | GET    | `/auth/validate` | nginx only | `auth_request`: 204 naming the identity in one header per configured attribute (default `X-Auth-Email`, plus one per configured profile claim when known) if the session cookie, an `Authorization: Bearer <id_token>`, or a static `Authorization: Bearer bbk_…` API key is admitted by the scope that owns the URL, else 401 + `X-Auth-Login-URL`. An `anonymous` scope answers 204 with no credential at all, and then names nobody; a request that *did* carry a credential is still named on it, except a `denied` one, which is never named. |
 | GET, HEAD | `/auth/login`    | browser    | the sign-in page: runs the Cognito flow and POSTs the `id_token` to `/auth/session`. Self-contained (no external stylesheet, script or font), IT/EN, with the social buttons `gate.social_buttons` enables (and none at all when it enables none, or when this deployment has no usable social app client). Lands on `?rd=`, else on the `Referer` the browser sent |
-| GET, HEAD | `/auth/callback` | browser    | finishes a social sign-in (OAuth code + PKCE). `404` unless this deployment has a usable social app client: the `BB_AUTH_SOCIAL_*` group *and* a `gate.social_client_id` the gate accepts as an audience |
+| GET, HEAD | `/auth/callback` | browser    | finishes a social sign-in (OAuth code + PKCE). `404` unless this deployment has a social sign-in at all: `gate.oauth_domain` and `gate.social_callback_url` in the settings file |
 | POST   | `/auth/session`  | browser    | validate posted `id_token`, set cookie, 302 → `rd` |
 | GET    | `/auth/logout`   | browser    | clear cookie, 302 → `rd` (guarded), else `Referer` (same guard), else the login page |
 | GET    | `/auth/healthz`  | local      | liveness                                           |
@@ -280,7 +280,7 @@ An application owns a **literal** URL area and a list of named scopes.
 
 - **`name`** — `[A-Za-z0-9_-]+`, unique in the file, and the left half of `application/scope`.
 - **`base`** — one or more literal URL prefixes, **no wildcards**. Every pattern of every scope must lie inside one of them, and **no two applications may overlap**, anywhere in the file. Together those make applications a partition of the URL space: at most one can answer for a URL, so their order carries no meaning.
-- **`login_url`** — an absolute `https://` login page for this whole area, overriding `BB_AUTH_LOGIN_URL` (see [Per-application login page](#per-application-login-page)). Validated at load: printable ASCII, https, no userinfo `@`, no backslash, because it ends up in a header and a redirect.
+- **`login_url`** — an absolute `https://` login page for this whole area, overriding `gate.login_url` (see [Per-application login page](#per-application-login-page)). Validated at load: printable ASCII, https, no userinfo `@`, no backslash, because it ends up in a header and a redirect.
 - **`scopes`** — see below. Order is meaning.
 
 The area is compared at a **path boundary**, which is why `https://x.com/app` covers
@@ -402,7 +402,7 @@ already does for `X-Auth-Email`:
 # here is what keeps @bb_signin from emitting a *relative* `Location: ?rd=…`,
 # which redirects the browser to the gated path it just came from: a loop.
 map $bb_login $bb_login_safe {
-    ""      https://login.example.com/;   # = BB_AUTH_LOGIN_URL
+    ""      https://login.example.com/;   # = gate.login_url
     default $bb_login;
 }
 
@@ -416,7 +416,7 @@ location /app1 {
 location @bb_signin { return 302 $bb_login_safe?rd=$scheme://$host$request_uri; }
 ```
 
-The header carries the application's `login_url`, or `BB_AUTH_LOGIN_URL` when it declares none.
+The header carries the application's `login_url`, or `gate.login_url` when it declares none, or the gate's own `/auth/login`.
 `auth_request_set` copies it into a request variable, which is what stops a later
 `proxy_pass` from clobbering `$upstream_http_*`; it reads the subrequest's headers even
 though the subrequest answered `401`, which is the whole reason this works. Without the
@@ -879,29 +879,28 @@ cost?
 
 **[`deploy/bb-auth.env.example`](deploy/bb-auth.env.example)**: everything a change to
 costs a restart or a re-login: the listener and the worker count, the Cognito trust roots,
-the cookie's name and domain, the `BB_AUTH_SOCIAL_*` group (bar the app client, which is a
-setting), and `BB_AUTH_LOGIN_URL` /
-`BB_AUTH_AUTHORIZED_HOSTS` /
-`BB_AUTH_ORIGINAL_URL_HEADER`, which *are* the lockout when they are wrong. The only secret
+the cookie's name and domain, the Cognito **issuer**, and `BB_AUTH_AUTHORIZED_HOSTS` /
+`BB_AUTH_ORIGINAL_URL_HEADER`, which *are* the lockout when they are wrong. The Cognito **app
+clients** are not there: which ones this gate is part of is `gate.client_id` and the audience
+of each `gate.social_buttons` entry in the settings file, and the issuer above is what makes
+that safe — the file chooses among the app clients of one pool and can never reach another. The only secret
 is `BB_AUTH_HMAC_KEY` (`openssl rand -base64 48`); keep it out of version control and off
 shared storage.
 
 **[`deploy/settings.example.json`](deploy/settings.example.json)**: everything that is read
 per request, cannot lock anybody out, and holds no secret: the profile claims, the identity
-attributes, the social relaxation and its providers, **which app client a social sign-in
-runs through and which buttons the sign-in page offers**, the session lifetime, who may use
-`bb-auth-web`, and the `ui` section — how every page either program serves looks. Note where
-the line falls on social sign-in: what is left of the `BB_AUTH_SOCIAL_*` group is env because
-it decides whether the OAuth leg can complete at all, while `gate.social_buttons` is a setting
-because it decides only what a visitor is offered, and a provider needs to be in both to get a
-button. `gate.social_client_id` is a setting for a third reason: all three programs have an
-opinion about it, and an env var is readable only by the process that was started with it. It
-can never widen anything, because the gate draws no button through an app client that is not
-already one of its accepted audiences (`BB_AUTH_AUDIENCES`, which stays env). In the admin GUI
-the two are one table, a row per provider: what a visitor reads on the button, the
-`identity_provider` Cognito matches, and the app client it runs through, with the tick in the
-first column the only thing to fill in. Microsoft there means the personal account rather than
-an Entra ID tenant, so nobody has to remember that Cognito spells it `MicrosoftPersonal`. They are in
+attributes, the social relaxation and its providers, **where people sign in, which Cognito
+app clients this deployment is part of, and which social buttons the page offers**, the
+session lifetime, who may use `bb-auth-web`, and the `ui` section — how every page either
+program serves looks. The whole Cognito wiring is there because all three programs have an
+opinion about it and an env var is readable only by the process that was started with it: the
+admin GUI could have shown one only by being handed a second copy, and a value written in two
+files drifts. What keeps that safe is that the **pool** stays in `bb-auth.env`, so the file
+chooses among the app clients of one issuer. In the admin GUI it is one table, a row per way
+in: what a visitor reads, the `identity_provider` Cognito matches, and the app client it runs
+through, with the tick the only writable column and the email row always there. Microsoft
+means the personal account rather than an Entra ID tenant, so nobody has to remember that
+Cognito spells it `MicrosoftPersonal`. They are in
 a file rather than the environment for one mechanical reason,
 and not for tidiness: a process cannot re-read its own environment (systemd loads
 `EnvironmentFile=` once, at `ExecStart`), so a value that must change with no restart
@@ -1059,7 +1058,7 @@ The binary is service-agnostic. To front a service at `app.example.com`:
        }
 
        # The sign-in page and its social callback, on whichever vhost signs people
-       # in — normally the one BB_AUTH_LOGIN_URL names, and one is enough for the
+       # in — normally the one gate.login_url names, and one is enough for the
        # whole estate. They are inside no `location /` that carries auth_request
        # here, but on a vhost where the gate is included at server level they need
        # `auth_request off;` explicitly: a sign-in page behind the gate answers a
@@ -1208,7 +1207,7 @@ authority on where `?rd=…` may send a freshly-logged-in browser:
   the caller's root, which would be the area the person was just signed out of;
 - anything rejected — an off-host URL, a control byte, `//evil`, `/\evil`, userinfo
   (`https://app.example.com@evil.com/`), a lookalike (`evilexample.com`) — falls back
-  to `BB_AUTH_LOGIN_URL`.
+  to `gate.login_url`.
 
 Every candidate, including one resolved against the caller, goes through the same host
 gate, so even a misconfigured proxy cannot turn this into an open redirect. Note that

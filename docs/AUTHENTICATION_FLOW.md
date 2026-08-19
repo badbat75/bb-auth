@@ -18,7 +18,7 @@ For the service's internal structure and config, see
 | **Browser** | The user's UA. Holds the session cookie after login. |
 | **nginx** | Edge on the service host, `:443`. TLS terminator + `auth_request` enforcer. |
 | **bb-auth** | `127.0.0.1:4181`, loopback only. Validates Cognito id_tokens and issues/verifies the session cookie. |
-| **Login page** | `GET /auth/login` on bb-auth itself, normally `https://auth.example.com/auth/login` (`BB_AUTH_LOGIN_URL` names it, and may name a page of your own instead). Email-first UI; runs the Cognito `USER_AUTH` flow in the browser and `POST`s the resulting id_token back to bb-auth. Served by the gate so that the app-client id, the Cognito endpoint and the allowed `rd` hosts are the very values the gate validates against, not copies of them. |
+| **Login page** | `GET /auth/login` on bb-auth itself, normally `https://auth.example.com/auth/login` (`gate.login_url` names it, and may name a page of your own instead). Email-first UI; runs the Cognito `USER_AUTH` flow in the browser and `POST`s the resulting id_token back to bb-auth. Served by the gate so that the app-client id, the Cognito endpoint and the allowed `rd` hosts are the very values the gate validates against, not copies of them. |
 | **AWS Cognito** | A user pool + public app client. Issues RS256-signed id_tokens. |
 
 ---
@@ -86,22 +86,24 @@ client id.
 
 ### 2c. Social sign-in (the OAuth + PKCE leg)
 
-The other way to reach an `id_token`, added in 1.1.0. It is configured all-or-nothing by the
-three `BB_AUTH_SOCIAL_*` variables plus `gate.social_client_id` in the settings file, and that
-last one has to name an app client the gate already accepts as an audience. With any of it
-missing the sign-in page has no social section at all and `/auth/callback` is a `404`; there
-is nothing on the page hinting at a way in this deployment does not have.
+The other way to reach an `id_token`, added in 1.1.0 and configured entirely in the settings
+file since that file's version 2: `gate.oauth_domain`, `gate.social_callback_url`, and one `gate.social_buttons`
+entry per provider carrying **its own app client**, because Cognito federates per app client.
+With any of it missing the sign-in page has no social section at all and `/auth/callback` is a
+`404`; there is nothing on the page hinting at a way in this deployment does not have.
 
 ```text
  browser: click "Continue with Google" on /auth/login
    page generates a PKCE verifier + a random state, stores both in sessionStorage
+   page also stores the clicked button's app client: the callback is a second document
+   and has to exchange with the same client this authorize call names
    page ▶ https://<oauth-domain>/oauth2/authorize
-            ?client_id=<gate.social_client_id>
-            &redirect_uri=<BB_AUTH_SOCIAL_CALLBACK_URL>   (byte-for-byte the registered one)
+            ?client_id=<this button's audience>
+            &redirect_uri=<gate.social_callback_url>   (byte-for-byte the registered one)
             &identity_provider=Google&response_type=code&scope=openid+email+profile
             &code_challenge=S256(verifier)&code_challenge_method=S256&state=<state>
  ── Cognito hosted UI ▶ the identity provider ▶ back to Cognito ──
- Cognito ▶ GET <BB_AUTH_SOCIAL_CALLBACK_URL>?code=…&state=…     (this is /auth/callback)
+ Cognito ▶ GET <gate.social_callback_url>?code=…&state=…        (this is /auth/callback)
    page checks state against the stored one, unconditionally
    page ▶ POST https://<oauth-domain>/oauth2/token
             grant_type=authorization_code, client_id, code, code_verifier, redirect_uri
@@ -140,10 +142,11 @@ Inside bb-auth (`handle_session`):
 2. **`validate_id_token`:**
    - header `alg == RS256`; read `kid`.
    - look up `kid` in the JWKS cache (refresh once per 60 s on a miss).
-   - verify signature + `exp` (60 s leeway) + `iss` + `aud` against
-     **`BB_AUTH_AUDIENCES`**, which is a list: a deployment with a social sign-in has at
-     least two app clients (the login page's and the hosted UI's), and a token is accepted
-     when its `aud` is any of them. Require `exp`/`aud`/`iss` present.
+   - verify signature + `exp` (60 s leeway) + `iss` + `aud` against **the app clients the
+     settings file names** (`gate.client_id` plus every `gate.social_buttons` audience,
+     derived into `Settings::audiences`): a deployment with a social sign-in has at least
+     two, and a token is accepted when its `aud` is any of them. Require `exp`/`aud`/`iss`
+     present.
    - require `token_use == "id"` and `email_verified` truthy. Exception: if
      `allow_unverified_social` is on, an `email_verified=false` token is
      accepted when it carries a federated `identities` entry (a social login),

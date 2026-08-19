@@ -62,9 +62,38 @@ section logs anybody out.
   suspension, and with an `authenticated` scope anywhere in the file they could simply
   re-register.
 
-### The settings file
+### The settings file, now at `"version": 2`
 
-* **`gate.social_client_id`**, and with it `BB_AUTH_SOCIAL_CLIENT_ID` is **no longer read**.
+* **Every Cognito app client this gate is part of is now in the settings file**, and six
+  environment variables are no longer read: `BB_AUTH_CLIENT_ID`, `BB_AUTH_AUDIENCES`,
+  `BB_AUTH_LOGIN_URL`, `BB_AUTH_OAUTH_DOMAIN`, `BB_AUTH_SOCIAL_CALLBACK_URL` and
+  `BB_AUTH_SOCIAL_IDPS`. What replaces them is `gate.client_id` (the email flow's app
+  client), `gate.login_url` (where people sign in, empty meaning the gate's own
+  `/auth/login`), `gate.oauth_domain`, `gate.social_callback_url`, and a `gate.social_buttons`
+  list whose entries are now `{ "idp": …, "audience": … }`.
+
+  **The audiences are derived from those and no longer configured.** An id_token carries the
+  app client it was minted for in `aud`, so naming an app client in this file is what makes
+  its tokens acceptable; `BB_AUTH_AUDIENCES` existed only to repeat that by hand. Two lists
+  that had to agree with a third are now one, and the startup warning that used to say they
+  did not is gone with them. The safety argument is that the **pool** stays in the
+  environment: `BB_AUTH_COGNITO_ISSUER` is what a token is validated against, so this file
+  chooses among the app clients of one issuer and can never reach another.
+
+  **Each social button carries its own app client**, because Cognito federates per app
+  client: which providers a client offers is a property of that client, so two providers may
+  live on two of them and a single value could not express it. The sign-in page puts the
+  clicked button's client id in `sessionStorage` beside the PKCE verifier, and the callback
+  exchanges its code with that one.
+
+  **Upgrading is a two-step, in this order.** Write the new settings file first: the running
+  gate refuses it (unknown fields, and `"version": 2`), keeps the values it already has, and
+  says so in the journal, so nothing goes down. Then deploy. Doing it the other way round
+  leaves the new binaries with a file they refuse, and a settings file the gate cannot read is
+  fatal at startup. `bb-auth --check-settings <file>` validates the new shape before either
+  step, and `--check-env` names every retired variable still sitting in `bb-auth.env`.
+* ~~**`gate.social_client_id`**~~, introduced and removed on the same day, along with
+  `BB_AUTH_SOCIAL_CLIENT_ID`.
   The Cognito app client a social sign-in runs through moved from the env file to the
   settings file, because all three programs have an opinion about it and an env var is
   readable only by the process that was started with it: the admin GUI could only have shown
@@ -99,12 +128,13 @@ section logs anybody out.
   what the application receives; the sign-in page; administration and look) rather than one
   form with three headings named after the file's own sections. The file is unchanged: each
   box still names the key it writes.
-* The social buttons are a **table** on that page, a row per provider: what a visitor reads
-  on the button, the `identity_provider` Cognito matches byte for byte, and the app client the
-  sign-in runs through, with the tick in the first column the only thing to fill in. A
-  stacked list of checkboxes ran the three together, and the first two differ exactly where
-  it matters: `Microsoft` is the word on the button and `MicrosoftPersonal` is the name
-  Amazon knows.
+* The ways in are a **table** on that page, a row per way: what a visitor reads, the
+  `identity_provider` Cognito matches byte for byte, and the app client the sign-in runs
+  through. The email row is in it and has no tick, because the email path is not something a
+  deployment turns off and its app client is the same kind of value as every other row's.
+  A stacked list of checkboxes ran those three facts together, and the first two differ
+  exactly where it matters: `Microsoft` is the word on the button and `MicrosoftPersonal` is
+  the name Amazon knows.
 
 ### The built-in palette
 

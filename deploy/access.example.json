@@ -78,7 +78,7 @@
       "name": "app1",
       "base": ["https://app.example.com/app1"],
       "login_url": "https://signup.example.com/",
-      "notes": "the login page here overrides BB_AUTH_LOGIN_URL for this whole area",
+      "notes": "the login page here overrides gate.login_url for this whole area",
       "scopes": [
         {
           "name": "healthz",

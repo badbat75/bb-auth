@@ -96,7 +96,7 @@ And in `src/lib.rs`:
 |---------|---------|
 | `glob_match` / `compile_pattern` / `UrlScope` | The one URL matcher: every scope's `urls` goes through it. Validates and normalises patterns at load, then matches a request URL with `*` / `&` wildcards, denying a missing URL and any `..`. See §12. |
 | `AppRecord` / `ScopeRecord` / `Access::resolve` / `base_covers` | The two levels: applications partition the URL space by literal area (so at most one answers, and `base_covers` compares at a path boundary), and scopes inside one are first-match-wins in file order. `login_url_for` names the area's login page. See §12. |
-| `compile_login_url` | Validates `BB_AUTH_LOGIN_URL` and every application's `login_url`: printable ASCII, absolute `https://`, no userinfo `@`, no backslash. What makes emitting them in `X-Auth-Login-URL`, a `Location:` and a page safe with no per-use check. |
+| `compile_login_url` | Validates `gate.login_url` and every application's `login_url`: printable ASCII, absolute `https://`, no userinfo `@`, no backslash. What makes emitting them in `X-Auth-Login-URL`, a `Location:` and a page safe with no per-use check. |
 | `decide` / `decide_api_key` / `Subject` | The grant model as a value (`Decision` / `KeyDecision`): resolve the URL, an `anonymous` scope grants ahead of the veto, then `denied`, then the scope's kind, the credential class, the roster, membership and the key's own restriction. The single authorization point, shared by the gate and both editors. See §12. |
 | `AccessFile` / `compile_access` / `read_access` | The document model (what `bb-auth-adm` edits, `notes` and `_comment` round-tripping untouched) and the parser that turns it into the runtime table. |
 | `mint_api_key` | 256 bits from the OS CSPRNG, `bbk_` + base64url; returns the bearer and the `sha256` the file stores. |
@@ -135,7 +135,7 @@ same goes for README's operator-facing version.
 | Method | Path | Caller | Behavior |
 |--------|------|--------|----------|
 | `GET` | `/auth/validate` | nginx only (`auth_request`) | `204` naming the identity in one header per `identity_attrs` entry (default `X-Auth-Email`) if an accepted credential authorizes the request URL, otherwise `401` + `X-Auth-Login-URL: <this area's login page>`. A `204` also carries one header per `profile_claims` entry the credential knows (percent-encoded; omitted otherwise). Accepts (in order) an `Authorization: Bearer bbk_…` static API key, an `Authorization: Bearer <id_token>`, or the session cookie, and then no credential at all, which only an `anonymous` scope grants. A request with no credential names nobody; one that carried a valid credential is still named, so the header is bimodal on such a scope and an application there must treat it as "if you know who this is, say so". A **vetoed** identity is never named. See §12. |
-| `GET`, `HEAD` | `/auth/login[?rd=…]` | browser | The sign-in page: runs the Cognito `USER_AUTH` flow in the browser and POSTs the resulting id_token to `/auth/session`. Self-contained (palette, layout, script and both languages in the document; only the operator's optional stylesheet and logo are external). `rd` is validated here with the same `rd_url_allowed` `safe_rd` uses and dropped if it fails; with none, the browser's `Referer` answers in its place, through that same check and absolute-only, since this page resolves nothing against nginx. Social buttons appear only when `BB_AUTH_SOCIAL_*` and `gate.social_client_id` together add up to a social sign-in that could work. |
+| `GET`, `HEAD` | `/auth/login[?rd=…]` | browser | The sign-in page: runs the Cognito `USER_AUTH` flow in the browser and POSTs the resulting id_token to `/auth/session`. Self-contained (palette, layout, script and both languages in the document; only the operator's optional stylesheet and logo are external). `rd` is validated here with the same `rd_url_allowed` `safe_rd` uses and dropped if it fails; with none, the browser's `Referer` answers in its place, through that same check and absolute-only, since this page resolves nothing against nginx. Social buttons appear only when `gate.oauth_domain`, `gate.social_callback_url` and at least one `gate.social_buttons` entry add up to a social sign-in that could work. |
 | `GET`, `HEAD` | `/auth/callback` | browser | Finishes a social sign-in: exchanges the OAuth code and the PKCE verifier for tokens, offers a profile form when the IdP sent no names, and delivers the id_token exactly as the sign-in page does. `404` when no social client is configured. |
 | `POST` | `/auth/session` | browser | Body `application/x-www-form-urlencoded`: `id_token=…&rd=…`. Fully validates the id_token; on success sets the session cookie and `302`s to `rd` (open-redirect guarded). |
 | `GET` | `/auth/logout[?rd=…]` | browser | Sets an expired (Max-Age=0) cookie and `302` → `rd` (same `safe_rd` guard), or, with no `rd`, the browser's `Referer` (same guard), and failing both the login page. Cross-site requests (`Sec-Fetch-Site: cross-site`) are ignored (no cookie clear) to block CSRF-forced logout. Reads nothing about the host it was called on, and the expiring cookie carries the same `Domain` as the minted one, so under a shared `BB_AUTH_COOKIE_DOMAIN` one mounted location logs the browser out of every vhost: see README "One logout endpoint for every vhost". |
@@ -161,7 +161,7 @@ ever issuing a cookie:
    don't all fetch in parallel on a cold/stale cache.
 3. **Signature + standard claims** via `jsonwebtoken`:
    - `exp` validated (60 s leeway), `iss == BB_AUTH_COGNITO_ISSUER`,
-     `aud` ∈ accepted audiences (`BB_AUTH_CLIENT_ID` plus any `BB_AUTH_AUDIENCES`);
+     `aud` ∈ accepted audiences (`gate.client_id` plus every `gate.social_buttons` audience);
      `exp`/`aud`/`iss` are mandatory.
 4. **Cognito-specific claims:** `token_use == "id"` (rejects access tokens) and
    `email_verified` truthy (accepts JSON `true` or the string `"true"`).
@@ -262,19 +262,13 @@ nothing in an env file can ever take effect without a restart.
 | `BB_AUTH_HMAC_KEY_ID` | no | `default` | Key id stamped into new cookies. Must match `[A-Za-z0-9_-]+` (no `.`). Bump on rotation so older keys can still verify. |
 | `BB_AUTH_HMAC_ACCEPTED_KEYS` | no | empty | Comma-separated `id:key` entries accepted for verification during rotation (`key` = `openssl rand -base64 48`). Active key always verifies; this is for previous keys. |
 | `BB_AUTH_COGNITO_ISSUER` | yes | — | The Cognito user-pool issuer URL, `https://cognito-idp.<region>.amazonaws.com/<user-pool-id>`. Trailing `/` stripped. JWKS URL is derived from this. |
-| `BB_AUTH_CLIENT_ID` | yes | — | The public app client used by the login page; always an accepted `id_token.aud`. |
-| `BB_AUTH_AUDIENCES` | no | empty | Comma-separated extra accepted `aud`s (Cognito app client ids), e.g. a separate social-login client. `BB_AUTH_CLIENT_ID` is always accepted; a token is valid if its `aud` matches any. Read at startup → needs `restart`, not `reload`. |
 | `BB_AUTH_ACCESS_FILE` | yes | — | Path to the JSON access file (`applications`, `user_groups`, `denied`, and the roster of users with their `bbk_` API keys; see §12). Loaded at startup, hot-reloaded on `SIGHUP`. The name is a contract with the operator-owned env file a deploy never rewrites. |
 | `BB_AUTH_ORIGINAL_URL_HEADER` | no | `X-Original-URL` | Request header carrying the original request URL (scheme + host + normalised path). Set by nginx on the `auth_request` subrequest (from a `$bb_url` captured in the gated location — **not** from `$uri`, see §12) **and** on `/auth/session` (there a plain `https://app.example.com$uri` is correct). Drives URL scoping, and on `/auth/session` tells bb-auth which host the login is on. Query/fragment are stripped; missing ⇒ fail closed. |
 | `BB_AUTH_LISTEN` | no | `127.0.0.1:4181` | Bind address. Loopback only — nginx fronts it. |
 | `BB_AUTH_COOKIE_NAME` | no | `bb_session` | |
 | `BB_AUTH_COOKIE_DOMAIN` | no | empty → host-only | Set to a parent domain for cross-service SSO. |
 | `BB_AUTH_AUTHORIZED_HOSTS` | yes | — | Comma-separated host globs a post-login `rd` may land on, e.g. `example.com,*.example.com`. The sole authority for the `rd` guard (see §8b). `*.x.com` does not match the apex `x.com`. |
-| `BB_AUTH_LOGIN_URL` | yes | — | Where `401`/logout send the user (the login page), and where a rejected `rd` falls back to. |
 | `BB_AUTH_SETTINGS_FILE` | no | `settings.json` beside the access file | Path to the settings file (§8a). Re-read on `SIGHUP` like the access file, fail-soft on both. A missing file is a fatal startup. |
-| `BB_AUTH_OAUTH_DOMAIN` | no | empty | The Cognito hosted-UI domain, as a bare host. One of the three `BB_AUTH_SOCIAL_*`/OAuth values that enable social sign-in on `/auth/login`: **all three or none**, and half of them is a fatal startup. The fourth thing it needs, the app client, is `gate.social_client_id` in the settings file. |
-| `BB_AUTH_SOCIAL_CALLBACK_URL` | no | empty | The `redirect_uri`, which must match the one registered on that app client **exactly**. Normally `/auth/callback` on the host serving the sign-in page. |
-| `BB_AUTH_SOCIAL_IDPS` | no | empty | Comma-separated Cognito `identity_provider` names, in the order their buttons appear. `Google` and `MicrosoftPersonal` come with an icon; any other name still gets a button, labelled with the name. |
 | `BB_AUTH_WORKERS` | no | `4` | Thread pool size (min 1). |
 
 The admin GUI is a separate service with a separate env file
@@ -300,8 +294,11 @@ so an edit made by either is one the other would accept.
 | `gate.identity_attrs` | `["email"]` | Which identity attributes a `204` names (§12). `email` and `uuid` are the only two that exist. **Empty is refused**: a `204` that names nobody breaks every application behind the gate, in silence. |
 | `gate.allow_unverified_social` | `false` | Accepts `email_verified=false` tokens **only** for federated/social logins (those carrying an `identities` claim); native Cognito users stay strict. |
 | `gate.social_providers` | `[]` → any | `providerName`s (case-insensitive, e.g. `Google`, `SignInWithApple`) the relaxation above applies to. No effect unless it is on. |
-| `gate.social_client_id` | `""` → no social sign-in | The Cognito **app client** a social sign-in runs through: the `client_id` the hosted UI is handed and the one `/auth/callback` exchanges its code with, normally not the one the email flow uses. Empty offers no social sign-in whatever the env group says. It has to be an accepted audience already (`BB_AUTH_CLIENT_ID` or `BB_AUTH_AUDIENCES`, both env), or no button is drawn and the gate says so at startup and after every reload: this setting moves social sign-in between app clients the operator has declared and can never add one. |
-| `gate.social_buttons` | `[]` → none | Which social buttons `/auth/login` offers, by `identity_provider` name, in the order given. The admin GUI renders it as a table, a row per provider (`SOCIAL_IDPS`, plus one for any name already in the file that it does not know): the button's label, its `identity_provider`, and the app client above, with the tick the only writable column. Empty offers none, which is the same page a deployment with no `BB_AUTH_SOCIAL_*` serves. A name the app client does not federate (`BB_AUTH_SOCIAL_IDPS`) draws nothing and warns at startup. Not to be confused with `social_providers` above: that one decides whose unverified email is accepted, this one what a visitor is shown. |
+| `gate.client_id` | `""` → no login can complete | The Cognito **app client the email flow uses**: what `/auth/login` runs `USER_AUTH` against, and the first accepted audience. Empty is tolerated, because a package creates this file and cannot know the value, and reported loudly at startup. |
+| `gate.login_url` | `""` → the gate's own `/auth/login` | Where a `401` sends people, and where a rejected redirect target lands. Absolute https when set; an application's own `login_url` in the access file overrides it for that area. |
+| `gate.oauth_domain` | `""` → no social sign-in | Cognito's hosted UI, as a bare host with no scheme and no path. The authorize and token URLs are derived from it. |
+| `gate.social_callback_url` | `""` → no social sign-in | The `redirect_uri`, which Cognito compares **byte for byte** with the one registered on every app client in `social_buttons`. |
+| `gate.social_buttons` | `[]` → none | Which social buttons `/auth/login` offers, in the order given, and **the app client each runs through**: `{ "idp": "Google", "audience": "<app client id>" }`. The app client is per button because Cognito federates per app client. Empty offers none, which is the same page a deployment with no `oauth_domain` serves. The admin GUI renders it as a table, a row per way in (the email row first, then `SOCIAL_IDPS`, then any name already in the file), with the tick the only writable column besides the app clients. Not to be confused with `social_providers` above: that one decides whose unverified email is accepted, this one what a visitor is shown. |
 | `gate.session_ttl_secs` | `2592000` (30 d) | Applies to cookies minted from then on and to none already in a browser, so changing it logs nobody out. Below 60s is refused (a login loop); above 400 days is warned about (the cap browsers apply to `Max-Age`). |
 | `web.admins` | `[]` | Who may use `bb-auth-web`, matched against the `X-Auth-Email` nginx injects. **Never empty**: the binary refuses to serve without one and both editors refuse to write an empty list. The gate ignores this section. |
 | `ui.stylesheet_url` | `""` → none | A stylesheet loaded **after** each program's built-in one, so it wins by source order. Absolute `https://`, or a path starting with `/` on this host. Read by both services, which is what makes one file restyle the gate's pages and the whole GUI together. Expected to redefine the custom properties in `THEME_CSS` and nothing else. |
@@ -316,10 +313,12 @@ wrong colours, and a stylesheet host that is down costs nothing but its palette.
 
 What is **not** in it is the point of it. The listener and the worker count need a rebind;
 the HMAC key is the secret; the Cognito trust roots, the cookie's name and its domain change
-who can log in or log everyone out; the `BB_AUTH_SOCIAL_*` group is a sign-in that cannot
-complete when it is wrong (its app client being the one member that is a setting, since it
-can only ever move social sign-in between app clients this gate already accepts); and `BB_AUTH_LOGIN_URL`, `BB_AUTH_AUTHORIZED_HOSTS` and
-`BB_AUTH_ORIGINAL_URL_HEADER` *are* the lockout when they are wrong. All of those stay in the
+who can log in or log everyone out; and `BB_AUTH_AUTHORIZED_HOSTS` and
+`BB_AUTH_ORIGINAL_URL_HEADER` *are* the lockout when they are wrong. The Cognito app clients
+and the sign-in wiring are the other way round and moved INTO the file in its version 2: the
+pool
+stays here, so the file chooses among the app clients of one issuer, and everything it can
+choose is something all three programs need to read. All of those stay in the
 env file, where changing one is a deliberate act with a restart attached. That the sign-in
 page's *look* is hot while most of its *Cognito wiring* is not is the rule working: one
 cannot shut anybody out, and the other is the only way to.
@@ -343,7 +342,7 @@ where a redirect may land.
 | absent / empty | the caller's root, `https://<caller-host>/` |
 | `/preferences` (absolute path) | `https://<caller-host>/preferences` |
 | `https://sibling.example.com/x` | itself, if the host matches a pattern |
-| anything else, or a rejected host | `BB_AUTH_LOGIN_URL` |
+| anything else, or a rejected host | `gate.login_url`, else the gate's own `/auth/login` |
 
 Every candidate — including one resolved against the caller — passes through the same
 `rd_url_allowed` gate, so even a spoofed caller origin cannot produce an off-domain
@@ -758,7 +757,7 @@ the key has not expired. What the key may then *reach* is `decide`'s, through
 
 ### Per-application login page, and why logout has none
 
-An application's `login_url` overrides `BB_AUTH_LOGIN_URL` for its whole area
+An application's `login_url` overrides `gate.login_url` for its whole area
 (`login_url_for`); it names the login page on `/auth/validate`'s `401`, the fallback for a
 rejected `rd`, and the link on `/auth/session`'s error pages. There is no ambiguity to
 resolve: areas do not overlap, so at most one application answers, and it answers
@@ -772,7 +771,7 @@ clobbering `$upstream_http_*`):
 
 ```nginx
 map $bb_login $bb_login_safe {          # http{} level
-    ""      https://login.example.com/; # = BB_AUTH_LOGIN_URL
+    ""      https://login.example.com/; # = gate.login_url
     default $bb_login;
 }
 location /app1 {

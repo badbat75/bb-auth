@@ -18,7 +18,7 @@
 //! |--------|------|--------|-----------|
 //! | `GET`  | `/auth/validate` | nginx `auth_request`, loopback | 204 + [`IDENTITY_HEADER`] (+ one header per configured [`ProfileClaim`] the credential carries) if a credential authorizes the request, else 401 |
 //! | `GET`, `HEAD` | `/auth/login` | browser | the sign-in page ([`LOGIN_HTML`]), which runs the Cognito flow and POSTs the id_token back to `/auth/session`, landing on `?rd=` or, failing that, on the [`REFERER_HEADER`] ([`rd_candidate`]) |
-//! | `GET`, `HEAD` | `/auth/callback` | browser | the social sign-in callback ([`CALLBACK_HTML`]); `404` unless [`social_now`] says this deployment has a usable app client |
+//! | `GET`, `HEAD` | `/auth/callback` | browser | the social sign-in callback ([`CALLBACK_HTML`]); `404` unless [`social_ready`] says this deployment has a social sign-in |
 //! | `POST` | `/auth/session`  | browser | validate the posted `id_token`, set the cookie, 302 → `rd` |
 //! | `GET`  | `/auth/logout`   | browser | clear the cookie, 302 → `?rd=`, else the [`REFERER_HEADER`] ([`rd_candidate`]), else the login page |
 //! | `GET`  | `/auth/healthz`  | local   | 200 `ok` |
@@ -94,10 +94,11 @@
 //! * **`bb-auth.env`**, read once at `ExecStart` ([`Config`]). Everything a change to costs a
 //!   restart or a re-login: the listener and the worker count, the HMAC keys (the only secret
 //!   in the system), the Cognito trust roots, the cookie's name and domain, the
-//!   `BB_AUTH_SOCIAL_*` group bar its app client ([`SocialConfig`], where a wrong value is a
-//!   sign-in that cannot complete), and the three that *are* the lockout if they are wrong:
-//!   `BB_AUTH_LOGIN_URL`,
-//!   `BB_AUTH_AUTHORIZED_HOSTS`, `BB_AUTH_ORIGINAL_URL_HEADER`.
+//!   and the two that *are* the lockout if they are wrong: `BB_AUTH_AUTHORIZED_HOSTS` and
+//!   `BB_AUTH_ORIGINAL_URL_HEADER`. **The Cognito app clients are not here**: they are
+//!   `gate.client_id` and the audience of each `gate.social_buttons` entry in the settings
+//!   file, and so is `gate.login_url`, because all three programs have an opinion about them
+//!   and an env var is readable only by the process that was started with it.
 //! * **the settings file** (`BB_AUTH_SETTINGS_FILE`, [`bb_auth_core::Settings`]), re-read on
 //!   SIGHUP and held in [`State::settings`]. The ones that are read per request, cannot lock
 //!   anybody out, and are not secret: the five the gate answers with, and the `ui` section
@@ -130,12 +131,12 @@ use tiny_http::{Header, Request, Response, ResponseBox, Server, StatusCode};
 // access file has no opinion about — HTTP, the cookie, id_token validation, the nginx
 // contract — stays here, in one file, read top to bottom.
 use bb_auth_core::{
-    claim_name_ok, compile_asset_url, compile_host_pattern, compile_login_url, decide,
-    decide_api_key, default_settings_path, header_safe_email, html_escape, login_url_for, now,
-    page_csp, read_access, read_settings, request_site, request_url, sha256_hex, social_idp_label,
-    stylesheet_link, version_line, Access, AccessKind, ApiKeyRecord, Decision, IdentityAttr,
-    KeyDecision, ProfileClaim, RequestSite, Settings, Subject, UrlPattern, API_KEY_PREFIX,
-    BASE_CSS, PAGE_SECURITY_HEADERS, THEME_CSS,
+    claim_name_ok, compile_host_pattern, decide, decide_api_key, default_settings_path,
+    header_safe_email, html_escape, login_url_for, now, page_csp, read_access, read_settings,
+    request_site, request_url, sha256_hex, social_idp_label, stylesheet_link, version_line, Access,
+    AccessKind, ApiKeyRecord, Decision, IdentityAttr, KeyDecision, ProfileClaim, RequestSite,
+    Settings, SocialButton, Subject, UrlPattern, API_KEY_PREFIX, BASE_CSS, PAGE_SECURITY_HEADERS,
+    THEME_CSS,
 };
 
 type HmacSha256 = Hmac<Sha256>;
@@ -280,7 +281,7 @@ const IDENTITY_HEADER: &str = bb_auth_core::IDENTITY_HEADER;
 /// application resolves. `/auth/logout` has no such luck: see [`handle_logout`].
 ///
 /// Emitting it is safe without a per-request check: every candidate passed
-/// [`compile_login_url`] at load, which requires printable ASCII.
+/// [`bb_auth_core::compile_login_url`] at load, which requires printable ASCII.
 const LOGIN_URL_HEADER: &str = "X-Auth-Login-URL";
 
 /// The standard `Referer`: where a browser says it came from, and the second and last thing
@@ -385,10 +386,6 @@ struct Config {
     hmac_keys: HmacKeys,
     /// `BB_AUTH_COGNITO_ISSUER`, with no trailing slash. The JWKS URL is derived from it.
     issuer: String,
-    /// Accepted token audiences (Cognito app client ids). Always contains
-    /// `BB_AUTH_CLIENT_ID` at index 0; `BB_AUTH_AUDIENCES` appends extras (e.g. a
-    /// separate social-login client). A token is accepted if its `aud` matches any entry.
-    audiences: Vec<String>,
     /// `BB_AUTH_COOKIE_NAME`, the session cookie's name. Default `bb_session`.
     cookie_name: String,
     /// `BB_AUTH_COOKIE_DOMAIN`. `None` = a host-only cookie (per-service login); a parent
@@ -404,9 +401,7 @@ struct Config {
     authorized_hosts: Vec<UrlPattern>,
     /// `BB_AUTH_LOGIN_URL`, e.g. `https://login.example.com/`. Where a logout and every
     /// rejected `rd` land, and what a `401` names in [`LOGIN_URL_HEADER`], unless the
-    /// application that speaks for the URL overrides it ([`login_url_for`]). Validated by
-    /// [`compile_login_url`] at startup.
-    login_url: String,
+
     /// Name of the request header carrying the original request URL — scheme, host and
     /// normalised path. `BB_AUTH_ORIGINAL_URL_HEADER`, default `X-Original-URL`.
     ///
@@ -442,41 +437,6 @@ struct Config {
     /// the symptom is a login that succeeds in the browser and is refused by the gate a
     /// redirect later.
     cognito_endpoint: String,
-    /// The social (hosted-UI) sign-in, or `None` when this deployment has none.
-    social: Option<SocialConfig>,
-}
-
-/// What a social sign-in needs from `BB_AUTH_SOCIAL_*`: all of it or none of it.
-///
-/// It is env and not settings because it fails the middle part of the settings file's rule: a
-/// callback URL that does not match the one registered on the app client is a sign-in that
-/// cannot complete, which is a lockout, and a lockout must not be one edit away in a GUI. The
-/// `ui` section next to it is the opposite case, and the two sitting on either side of that
-/// line is the rule working rather than an inconsistency.
-///
-/// **The app client is not here**, and it is the one part of a social sign-in that is not:
-/// it is [`bb_auth_core::GateSettings::social_client_id`] in the settings file, which states
-/// the three-part argument for it. What that costs this type is that it no longer describes a
-/// working social sign-in on its own, which is what [`social_now`] is for.
-struct SocialConfig {
-    /// `https://<BB_AUTH_OAUTH_DOMAIN>/oauth2/authorize`, where the browser is sent.
-    authorize_url: String,
-    /// `https://<BB_AUTH_OAUTH_DOMAIN>/oauth2/token`, where the callback exchanges the code.
-    token_url: String,
-    /// `BB_AUTH_SOCIAL_CALLBACK_URL`: the `redirect_uri`, which must match the one registered
-    /// on the Cognito app client **exactly** or the exchange fails with `redirect_mismatch`.
-    /// Normally `https://<this host>/auth/callback`.
-    callback_url: String,
-    /// `BB_AUTH_SOCIAL_IDPS`: which providers this deployment's app client federates, by
-    /// Cognito's own `identity_provider` name, e.g. `Google`.
-    ///
-    /// It says what the pool CAN do, and no longer what the page offers: that is
-    /// `gate.social_buttons` in the settings file, which an operator changes without a
-    /// restart. A provider gets a button only if it is in both, because a name here that
-    /// nobody enabled is a capability nobody asked for, and a name enabled that is not here
-    /// would send a visitor to Cognito with an `identity_provider` this app client may not
-    /// have. See [`IDP_ICONS`] for which of them come with a mark.
-    idps: Vec<String>,
 }
 
 /// Read an env var, falling back to `default` when unset.
@@ -659,19 +619,6 @@ impl Config {
             std::process::exit(1);
         }
 
-        // `client_id` is always an accepted audience; `BB_AUTH_AUDIENCES`
-        // (comma-separated) appends extra app-client ids — a Cognito id_token is
-        // accepted if its `aud` matches ANY of them. Unset => only `client_id`.
-        // Deduplicated, order-preserving.
-        let client_id = env_page_value("BB_AUTH_CLIENT_ID", &env_req("BB_AUTH_CLIENT_ID"));
-        let mut audiences = vec![client_id.clone()];
-        for extra in env_or("BB_AUTH_AUDIENCES", "").split(',') {
-            let extra = extra.trim();
-            if !extra.is_empty() && !audiences.iter().any(|a| a == extra) {
-                audiences.push(extra.to_string());
-            }
-        }
-
         // The Cognito JSON API endpoint the sign-in page posts to: the issuer with its pool id
         // taken off. Derived rather than configured, so the page can only ever talk to the
         // pool this gate validates tokens against.
@@ -685,141 +632,17 @@ impl Config {
             }
         };
 
-        let social = SocialConfig::from_env();
-
         Config {
             listen: env_or("BB_AUTH_LISTEN", "127.0.0.1:4181"),
             hmac_keys: HmacKeys { by_id, active_id },
             issuer,
-            audiences,
             cookie_name: env_or("BB_AUTH_COOKIE_NAME", "bb_session"),
             cookie_domain,
             authorized_hosts,
-            // The global fallback for every application that declares no `login_url`. Validated
-            // with the same parser, so nothing that reaches a header or a page can carry
-            // a CR/LF — including the value `safe_rd` falls back to.
-            login_url: compile_login_url(&env_req("BB_AUTH_LOGIN_URL")).unwrap_or_else(|e| {
-                eprintln!("[bb-auth] FATAL: BB_AUTH_LOGIN_URL: {e}");
-                std::process::exit(1);
-            }),
             original_url_header: env_or("BB_AUTH_ORIGINAL_URL_HEADER", "X-Original-URL"),
             workers: env_or("BB_AUTH_WORKERS", "4").parse().unwrap_or(4).max(1),
             cognito_endpoint,
-            social,
         }
-    }
-}
-
-/// Hold an env value to what a page can safely carry in a JavaScript string literal or an
-/// HTML attribute, and exit if it cannot.
-///
-/// The values this guards (a client id, an OAuth domain, an IdP name) are emitted into
-/// `login.html` **raw**, because they are configuration rather than request data and because
-/// escaping them would only produce a page that fails in a way nobody can read. So the
-/// guarantee is made once, here, at startup: printable ASCII rules out the control bytes and
-/// the newline, and the quote characters and the angle brackets are what a string literal or
-/// an attribute could be broken out of. Fatal, and not a skip: a client id that is refused
-/// silently is a login page that cannot sign anybody in.
-fn env_page_value(key: &str, raw: &str) -> String {
-    let v = raw.trim();
-    let bad = !v.bytes().all(|b| b.is_ascii_graphic())
-        || v.contains('"')
-        || v.contains('\'')
-        || v.contains('<')
-        || v.contains('>')
-        || v.contains('\\');
-    if bad {
-        eprintln!(
-            "[bb-auth] FATAL: {key} must be printable ASCII with no quote, angle bracket or \
-             backslash: it is emitted into the sign-in page"
-        );
-        std::process::exit(1);
-    }
-    v.to_string()
-}
-
-impl SocialConfig {
-    /// Read the `BB_AUTH_SOCIAL_*` group: all three together, or none of them.
-    ///
-    /// **All or nothing, fatally.** A half-configured social sign-in draws a button that
-    /// cannot work, and the person who clicks it is told `redirect_mismatch` by Amazon rather
-    /// than anything this deployment could have said. Refusing to start is the only honest
-    /// answer, and it is the same reflex the access file's parser has: what changes who gets
-    /// in is fatal, what drops one credential is skipped.
-    ///
-    /// The app client is the fourth thing a social sign-in needs, and it is deliberately not
-    /// checked here: it arrives from the settings file, it changes without a restart, and a
-    /// value that changes without a restart may never be fatal at startup, or the next reboot
-    /// meets a boot loop somebody wrote in a GUI weeks earlier. [`warn_social`] says what is
-    /// missing instead, at startup and after every reload.
-    fn from_env() -> Option<SocialConfig> {
-        let domain = env_or("BB_AUTH_OAUTH_DOMAIN", "").trim().to_string();
-        let callback = env_or("BB_AUTH_SOCIAL_CALLBACK_URL", "").trim().to_string();
-        let idps_raw = env_or("BB_AUTH_SOCIAL_IDPS", "").trim().to_string();
-        // The value moved to the settings file, and an environment variable that is read by
-        // nobody is worse than one that was never there: an operator can see it, believe it,
-        // and edit it for an afternoon. Say so once, where they will be looking for a reason.
-        if !env_or("BB_AUTH_SOCIAL_CLIENT_ID", "").trim().is_empty() {
-            eprintln!(
-                "[bb-auth] WARNING: BB_AUTH_SOCIAL_CLIENT_ID is set and is NO LONGER READ. \
-                 The app client is gate.social_client_id in the settings file: set it with \
-                 `bb-auth-adm settings set --social-client-id <id>` and delete the variable"
-            );
-        }
-        let set = [&domain, &callback, &idps_raw]
-            .iter()
-            .filter(|v| !v.is_empty())
-            .count();
-        if set == 0 {
-            return None;
-        }
-        if set < 3 {
-            eprintln!(
-                "[bb-auth] FATAL: social sign-in needs all of BB_AUTH_OAUTH_DOMAIN, \
-                 BB_AUTH_SOCIAL_CALLBACK_URL and BB_AUTH_SOCIAL_IDPS, or none of them"
-            );
-            std::process::exit(1);
-        }
-        let domain = env_page_value("BB_AUTH_OAUTH_DOMAIN", &domain);
-        if domain.contains('/') {
-            eprintln!(
-                "[bb-auth] FATAL: BB_AUTH_OAUTH_DOMAIN is a bare host, with no scheme or path"
-            );
-            std::process::exit(1);
-        }
-        // The same validator the settings file's asset URLs go through, which is https-only
-        // and quote-free, plus one rule of its own: this one cannot be root-relative, because
-        // Cognito compares it byte for byte with the `redirect_uri` registered on the client.
-        let callback_url = match compile_asset_url("BB_AUTH_SOCIAL_CALLBACK_URL", &callback) {
-            Ok(Some(u)) if u.starts_with("https://") => u,
-            Ok(_) => {
-                eprintln!(
-                    "[bb-auth] FATAL: BB_AUTH_SOCIAL_CALLBACK_URL must be the absolute https:// \
-                     URL registered on the Cognito app client"
-                );
-                std::process::exit(1);
-            }
-            Err(e) => {
-                eprintln!("[bb-auth] FATAL: {e}");
-                std::process::exit(1);
-            }
-        };
-        let idps: Vec<String> = idps_raw
-            .split(',')
-            .map(str::trim)
-            .filter(|s| !s.is_empty())
-            .map(|s| env_page_value("BB_AUTH_SOCIAL_IDPS", s))
-            .collect();
-        if idps.is_empty() {
-            eprintln!("[bb-auth] FATAL: BB_AUTH_SOCIAL_IDPS names no provider");
-            std::process::exit(1);
-        }
-        Some(SocialConfig {
-            authorize_url: format!("https://{domain}/oauth2/authorize"),
-            token_url: format!("https://{domain}/oauth2/token"),
-            callback_url,
-            idps,
-        })
     }
 }
 
@@ -982,8 +805,7 @@ fn reload_settings_from(state: &State, path: &str) {
             let ttl = new.session_ttl;
             // Said before the swap, because it is about the values that are about to become
             // live, and because it reads as the reason for the line below it.
-            warn_social(&state.cfg, &new);
-            let social = social_state(&state.cfg, &new);
+            let social = social_state(&new);
             *state.settings.write().unwrap() = new; // fail-safe: atomic swap
             eprintln!(
                 "[bb-auth] settings reloaded (SIGHUP): identity={a}, {c} profile claims, \
@@ -1285,7 +1107,8 @@ fn clean_claim(v: &serde_json::Value) -> Option<String> {
 /// email, plus whichever [`bb_auth_core::GateSettings::profile_claims`] the token asserts ([`clean_claim`]).
 ///
 /// Enforces all of: `alg == RS256`, a known `kid`, the signature, `exp` (required,
-/// 60 s leeway), `iss`, `aud` against [`Config::audiences`], `token_use == "id"`,
+/// 60 s leeway), `iss`, `aud` against [`bb_auth_core::Settings::audiences`],
+/// `token_use == "id"`,
 /// [`header_safe_email`], and a truthy `email_verified`. The single sanctioned exception
 /// to the last one is [`unverified_social_ok`].
 ///
@@ -1301,8 +1124,16 @@ fn validate_id_token(token: &str, state: &State) -> Result<UserIdentity, String>
     let kid = header.kid.ok_or("token has no kid")?;
     let key = decoding_key(state, &kid).ok_or("unknown signing key (kid)")?;
 
+    // One read of the live settings for the whole of this token: the audiences, the
+    // relaxation and the claim list are one operator decision, and a reload landing between
+    // any two of them would apply half of it.
+    let settings = state.settings.read().unwrap();
     let mut v = Validation::new(Algorithm::RS256);
-    let aud: Vec<&str> = state.cfg.audiences.iter().map(String::as_str).collect();
+    // The app clients this deployment is part of, from that file: `client_id` and every
+    // button's audience. A file that names none accepts no token, which is the honest reading
+    // of a gate nobody has told which app client it belongs to, and it is a state a fresh
+    // install passes through rather than one an editor can write.
+    let aud: Vec<&str> = settings.audiences.iter().map(String::as_str).collect();
     v.set_audience(&aud);
     v.set_issuer(&[&state.cfg.issuer]);
     v.set_required_spec_claims(&["exp", "aud", "iss"]);
@@ -1860,7 +1691,8 @@ fn authorized_response(granted: &Granted, settings: &Settings) -> ResponseBox {
 
 /// Respond `401` to a rejected `auth_request`, naming the login page in
 /// [`LOGIN_URL_HEADER`] so nginx can redirect there. `login_url` came from
-/// [`login_url_for`], hence passed [`compile_login_url`], hence cannot make [`h`] panic.
+/// [`login_url_for`], hence passed [`bb_auth_core::compile_login_url`] or is
+/// [`OWN_LOGIN_PATH`], hence cannot make [`h`] panic.
 fn respond_unauthorized(req: Request, login_url: &str) {
     debug_assert!(
         login_url.bytes().all(|b| b.is_ascii_graphic()),
@@ -1918,7 +1750,7 @@ const AUTH_CSS: &str = include_str!("../assets/auth.css");
 /// `USER_AUTH` in the browser and POSTs the resulting id_token to `/auth/session`. That page
 /// needs the app-client id, the issuer's endpoint and the list of hosts a post-login `rd` may
 /// land on, and the gate already holds all three **as the values it validates against**: the
-/// client id is the audience it checks ([`Config::audiences`]), the endpoint is derived from
+/// client id is one it accepts as an audience ([`bb_auth_core::Settings::audiences`]), the endpoint is derived from
 /// the issuer whose signature it verifies ([`Config::cognito_endpoint`]), and the hosts are
 /// what [`safe_rd`] enforces. Served from here, the page and the gate cannot disagree about
 /// any of them; served from a static host, every one of the three is a second copy.
@@ -1941,7 +1773,8 @@ const AUTH_CSS: &str = include_str!("../assets/auth.css");
 /// **Substitution** is `__BB_*__` placeholders through [`render_page`], never `format!`: the
 /// file is thick with the `{}` of JavaScript and CSS, and each one would have to be doubled
 /// in a file that everything else reads as JavaScript and CSS. Every value substituted in is
-/// either a validated env value ([`env_page_value`]: printable ASCII, no quotes) or is
+/// either a value the settings parser vouched for (an app client id, an OAuth domain: see
+/// [`bb_auth_core::compile_app_client_id`], printable ASCII with no quotes) or is
 /// HTML-escaped on the way in. Request data reaches the page in exactly one place, `data-rd`
 /// on `<body>`, as an escaped attribute and never as JavaScript source.
 const LOGIN_HTML: &str = include_str!("../assets/login.html");
@@ -2101,110 +1934,45 @@ fn look_subs(settings: &Settings, nonce: &str) -> Vec<(&'static str, String)> {
     ]
 }
 
-/// The social sign-in as it stands right now: the environment's half and the settings file's
-/// half, or `None` when the two do not add up to a sign-in that could work.
+/// Cognito's two hosted-UI endpoints for a domain: where a browser is sent, and where the
+/// callback exchanges its code. Derived rather than configured, so the two can never name
+/// different pools, which is the same argument `cognito_endpoint` is derived under.
+fn oauth_urls(domain: &str) -> (String, String) {
+    (
+        format!("https://{domain}/oauth2/authorize"),
+        format!("https://{domain}/oauth2/token"),
+    )
+}
+
+/// The social sign-in this deployment offers right now: the hosted-UI domain and the
+/// `redirect_uri`, or `None` when it offers none.
 ///
-/// Three things have to hold, and they deliberately come from two places. The env group has
-/// to be configured (the OAuth domain, the callback URL Cognito compares byte for byte, and
-/// the providers this app client federates); `gate.social_client_id` has to name an app
-/// client; and that client id has to be one of the audiences this gate already validates
-/// tokens against. The last is what keeps a hot file from widening anything: a save can turn
-/// social sign-in off, or move it to another app client the operator has already declared in
-/// `BB_AUTH_AUDIENCES`, and it can do nothing else. A token minted for a client id nobody
-/// declared would be refused by [`validate_id_token`] anyway, one redirect later, with
-/// nothing on the page to explain it; refusing to draw the button is the same answer, given
-/// early enough to read.
-///
-/// **Fail-soft, and it has to stay that way.** This is read per request and the settings half
-/// changes with no restart, so an unusable value costs the social section of the sign-in page
-/// and never the login itself.
-fn social_now<'c, 's>(
-    cfg: &'c Config,
-    settings: &'s Settings,
-) -> Option<(&'c SocialConfig, &'s str)> {
-    let social = cfg.social.as_ref()?;
-    let id = settings.social_client_id.as_str();
-    if id.is_empty() || !cfg.audiences.iter().any(|a| a == id) {
-        return None;
+/// Both halves come from the settings file, and [`bb_auth_core::compile_settings`] has
+/// already refused a file that names buttons without them, so this is a question about
+/// whether social sign-in is configured at all and never about whether it is coherent. The
+/// per-button app client is on the button, because Cognito federates per app client.
+fn social_ready(settings: &Settings) -> Option<(&str, &str)> {
+    match (&settings.oauth_domain, &settings.social_callback_url) {
+        (Some(d), Some(c)) => Some((d.as_str(), c.as_str())),
+        _ => None,
     }
-    Some((social, id))
 }
 
 /// What social sign-in is doing, in one phrase, for the startup banner: the providers and the
-/// app client when it can run, and the reason when it cannot.
-fn social_state(cfg: &Config, settings: &Settings) -> String {
-    match (cfg.social.as_ref(), social_now(cfg, settings)) {
-        (None, _) => "(off: no BB_AUTH_SOCIAL_* configured)".to_string(),
-        (Some(_), None) if settings.social_client_id.is_empty() => {
-            "(off: gate.social_client_id names no app client)".to_string()
-        }
-        (Some(_), None) => format!(
-            "(off: gate.social_client_id '{}' is not an accepted audience)",
-            settings.social_client_id
-        ),
-        (Some(s), Some((_, id))) => {
-            format!("{} as {id} via {}", s.idps.join(","), s.callback_url)
-        }
-    }
-}
-
-/// The warnings that need both files at once.
-///
-/// The environment says what this pool *can* federate and the settings file says what the
-/// page offers and through which app client, so this is the only place both are visible:
-/// `--check-settings` reads no env and `--check-env` reads no settings, by design. Called at
-/// startup and after every settings reload, because the half that can be wrong is the half
-/// that changes without a restart.
-fn warn_social(cfg: &Config, settings: &Settings) {
-    let Some(social) = cfg.social.as_ref() else {
-        if !settings.social_client_id.is_empty() {
-            eprintln!(
-                "[bb-auth] WARNING: gate.social_client_id names an app client but \
-                 BB_AUTH_OAUTH_DOMAIN, BB_AUTH_SOCIAL_CALLBACK_URL and BB_AUTH_SOCIAL_IDPS \
-                 are unset, so there is no social sign-in to run it through"
-            );
-        }
-        return;
+/// app client each runs through, or the reason there is nothing to draw.
+fn social_state(settings: &Settings) -> String {
+    let Some((domain, callback)) = social_ready(settings) else {
+        return "(off: no oauth_domain and no social_callback_url)".to_string();
     };
-    if settings.social_client_id.is_empty() {
-        eprintln!(
-            "[bb-auth] WARNING: BB_AUTH_SOCIAL_* is configured but gate.social_client_id is \
-             empty, so the sign-in page offers no social button at all (set it with: \
-             bb-auth-adm settings set --social-client-id <app client id>)"
-        );
-        return;
+    if settings.social_buttons.is_empty() {
+        return format!("(off: {domain} is configured but no button is)");
     }
-    if social_now(cfg, settings).is_none() {
-        eprintln!(
-            "[bb-auth] WARNING: gate.social_client_id '{}' is not an accepted audience, so no \
-             social button is drawn: a token minted for it would be refused after the login \
-             had already succeeded. Add it to BB_AUTH_AUDIENCES, or correct the setting",
-            settings.social_client_id
-        );
-        return;
-    }
-    let stray: Vec<&str> = settings
+    let wired: Vec<String> = settings
         .social_buttons
         .iter()
-        .filter(|w| !social.idps.iter().any(|h| h.eq_ignore_ascii_case(w)))
-        .map(String::as_str)
+        .map(|b| format!("{} as {}", b.idp, b.audience))
         .collect();
-    if !stray.is_empty() {
-        eprintln!(
-            "[bb-auth] WARNING: social_buttons names [{}], which BB_AUTH_SOCIAL_IDPS does \
-             not federate: no button is drawn for them, because it would send a visitor \
-             to Cognito with an identity_provider this app client may not have",
-            stray.join(",")
-        );
-    }
-    if settings.social_buttons.is_empty() {
-        eprintln!(
-            "[bb-auth] WARNING: social sign-in is configured but social_buttons is empty, so \
-             the sign-in page offers no social button at all (enable one with: \
-             bb-auth-adm settings set --social-buttons {})",
-            social.idps.join(",")
-        );
-    }
+    format!("{} via {callback}", wired.join(", "))
 }
 
 /// The social block of the sign-in page: a divider and one button per configured provider, or
@@ -2213,44 +1981,39 @@ fn warn_social(cfg: &Config, settings: &Settings) {
 /// Nothing at all is the important half. With no `BB_AUTH_SOCIAL_*` configured the divider
 /// goes too, and the page's own script finds no `[data-idp]` to bind, so there is no branch
 /// anywhere saying "if social is off" — the markup simply is not there.
-fn social_block(social: Option<&SocialConfig>, enabled: &[String]) -> String {
-    let Some(s) = social else {
-        return String::new();
-    };
-    // The operator's order, and the operator's choice: a provider appears because
-    // `gate.social_buttons` lists it, and only if the env group says this pool federates it.
+fn social_block(buttons: &[SocialButton]) -> String {
     // An empty list is the same page as no social configuration at all, which is deliberate:
     // there is one way for the section to be absent, not two that look different.
-    let offered: Vec<&String> = enabled
-        .iter()
-        .filter(|want| s.idps.iter().any(|have| have.eq_ignore_ascii_case(want)))
-        .collect();
-    if offered.is_empty() {
+    if buttons.is_empty() {
         return String::new();
     }
-    let mut buttons = String::new();
-    for idp in offered {
-        // The label is the library's, so a person reads the same word here and on the
-        // checkbox that enabled it; the icon is this page's, and an unknown provider simply
-        // has none.
-        let label = social_idp_label(idp);
+    let mut out = String::new();
+    for b in buttons {
+        // The label is the library's, so a person reads the same word here and in the row of
+        // the admin table that enabled it; the icon is this page's, and a provider it has
+        // never heard of simply has none.
+        let label = social_idp_label(&b.idp);
         let icon = IDP_ICONS
             .iter()
-            .find(|(name, _)| name.eq_ignore_ascii_case(idp))
+            .find(|(name, _)| name.eq_ignore_ascii_case(&b.idp))
             .map(|(_, svg)| *svg)
             .unwrap_or("");
-        buttons.push_str(&format!(
-            "        <button type=\"button\" class=\"social-btn\" data-idp=\"{idp}\">\n\
+        // The app client rides on the button because it is the button's: the script reads it
+        // when this one is clicked and stores it for the callback, which is what lets two
+        // providers sign in through two different app clients on one page.
+        out.push_str(&format!(
+            "        <button type=\"button\" class=\"social-btn\" data-idp=\"{idp}\" data-client-id=\"{aud}\">\n\
              \x20         {icon}\n\
              \x20         <span data-i18n=\"btn_social\" data-i18n-arg=\"{label}\">Continue with {label}</span>\n\
              \x20       </button>\n",
-            idp = html_escape(idp),
+            idp = html_escape(&b.idp),
+            aud = html_escape(&b.audience),
             label = html_escape(label),
         ));
     }
     format!(
         "      <div class=\"divider\"><span data-i18n=\"or\">or</span></div>\n\
-         \x20     <div class=\"social\">\n{buttons}      </div>"
+         \x20     <div class=\"social\">\n{out}      </div>"
     )
 }
 
@@ -2331,40 +2094,60 @@ fn login_page(cfg: &Config, settings: &Settings, rd: &str, nonce: &str) -> Strin
     let mut subs = look_subs(settings, nonce);
     subs.push(("__BB_RD__", html_escape(rd)));
     subs.push(("__BB_ENDPOINT__", cfg.cognito_endpoint.clone()));
-    subs.push(("__BB_CLIENT_ID__", cfg.audiences[0].clone()));
-    // One question, asked once: is there a social sign-in that could actually work? Every
-    // value below is empty when there is not, and the block is not drawn at all, so a page
-    // cannot end up with a button whose app client the gate would refuse a token from.
-    let social = social_now(cfg, settings);
-    subs.push((
-        "__BB_SOCIAL_CLIENT_ID__",
-        social.map(|(_, id)| id.to_string()).unwrap_or_default(),
-    ));
+    // The app client the email flow runs against. Empty is a deployment nobody has told
+    // which app client it is, and the page then cannot complete a login: the gate says so at
+    // startup rather than here, because a page is the wrong place to explain a config gap.
+    subs.push(("__BB_CLIENT_ID__", settings.client_id.clone()));
+    // The social half, asked once. Each button carries its own app client, so there is no
+    // page-wide client id any more: what is page-wide is where the browser is sent and where
+    // it comes back to.
+    let social = social_ready(settings);
     subs.push((
         "__BB_AUTHORIZE_URL__",
         social
-            .map(|(s, _)| s.authorize_url.clone())
+            .map(|(domain, _)| oauth_urls(domain).0)
             .unwrap_or_default(),
     ));
     subs.push((
         "__BB_CALLBACK_URL__",
-        social
-            .map(|(s, _)| s.callback_url.clone())
-            .unwrap_or_default(),
+        social.map(|(_, cb)| cb.to_string()).unwrap_or_default(),
     ));
     subs.push((
         "__BB_SOCIAL_BUTTONS__",
-        social_block(social.map(|(s, _)| s), &settings.social_buttons),
+        social_block(&settings.social_buttons),
     ));
     render_page(LOGIN_HTML, &subs)
 }
 
+/// The sign-in page this gate serves itself, as a path.
+///
+/// It is what [`global_login`] answers with when the settings file names none, and a path
+/// rather than a URL because the gate knows neither its own scheme nor its own host: a
+/// relative `Location` resolves against whatever vhost the request arrived at, which is the
+/// one place a sign-in page is certainly reachable from.
+const OWN_LOGIN_PATH: &str = "/auth/login";
+
+/// Where people sign in, for an application that names no page of its own: the settings
+/// file's value, or this gate's own page.
+///
+/// Never empty, which is what lets every caller emit it into a header or a `Location` with no
+/// second check: `compile_login_url` vouched for the configured value at load, and the
+/// default is a constant.
+fn global_login(settings: &Settings) -> &str {
+    match settings.login_url.as_str() {
+        "" => OWN_LOGIN_PATH,
+        url => url,
+    }
+}
+
 /// Serve `GET /auth/callback`, the page that finishes a social sign-in.
 ///
-/// A `404` when no social client is configured, because then there is no OAuth leg for it to
-/// finish and a page that offers to retry one would be a lie. It takes nothing from the
-/// request: the code and the state are read by its own script, and the PKCE verifier is in
-/// the browser's `sessionStorage` where the login page left it.
+/// A `404` when this deployment has no social sign-in at all, because then there is no OAuth
+/// leg for it to finish and a page that offers to retry one would be a lie. It takes nothing
+/// from the request: the code and the state are read by its own script, and the PKCE verifier
+/// **and the app client the login page picked** are in `sessionStorage` where that page left
+/// them. That is what lets one callback finish a leg started through any of several app
+/// clients: the page that chose one is the page that remembers it.
 fn handle_callback(req: Request, state: &State) {
     let nonce = csp_nonce();
     // This page's script POSTs to the token endpoint of the OAuth domain and then hands the
@@ -2373,9 +2156,10 @@ fn handle_callback(req: Request, state: &State) {
     // same short moment.
     let rendered = {
         let settings = state.settings.read().unwrap();
-        social_now(&state.cfg, &settings).map(|(social, client_id)| {
-            let page = callback_page(&state.cfg, social, client_id, &settings, &nonce);
-            let token_origin = origin_of(&social.token_url).unwrap_or_default();
+        social_ready(&settings).map(|(domain, callback)| {
+            let (_, token_url) = oauth_urls(domain);
+            let page = callback_page(&state.cfg, &token_url, callback, &settings, &nonce);
+            let token_origin = origin_of(&token_url).unwrap_or_default();
             let csp = gate_csp(
                 &settings,
                 &nonce,
@@ -2393,16 +2177,17 @@ fn handle_callback(req: Request, state: &State) {
 /// Render the callback page. Split from its handler for the reason [`login_page`] is.
 fn callback_page(
     cfg: &Config,
-    social: &SocialConfig,
-    client_id: &str,
+    token_url: &str,
+    callback_url: &str,
     settings: &Settings,
     nonce: &str,
 ) -> String {
     let mut subs = look_subs(settings, nonce);
     subs.push(("__BB_ENDPOINT__", cfg.cognito_endpoint.clone()));
-    subs.push(("__BB_TOKEN_URL__", social.token_url.clone()));
-    subs.push(("__BB_SOCIAL_CLIENT_ID__", client_id.to_string()));
-    subs.push(("__BB_CALLBACK_URL__", social.callback_url.clone()));
+    subs.push(("__BB_TOKEN_URL__", token_url.to_string()));
+    // No app client here on purpose: the one to exchange with is whichever the clicked button
+    // named, and only the page that clicked it knows that.
+    subs.push(("__BB_CALLBACK_URL__", callback_url.to_string()));
     render_page(CALLBACK_HTML, &subs)
 }
 
@@ -2731,7 +2516,11 @@ fn handle_validate(req: Request, state: &State) {
             // Which login page nginx should send them to. Resolved from the application
             // even though nothing granted: `login_url` says where this area's users sign
             // in, not who may enter.
-            login_url_for(&access, &cfg.login_url, url.as_deref()),
+            login_url_for(
+                &access,
+                global_login(&state.settings.read().unwrap()),
+                url.as_deref(),
+            ),
         )
     };
     if anonymous {
@@ -2768,7 +2557,7 @@ fn handle_session(mut req: Request, state: &State) {
     let caller_url = original_url(&req, cfg);
     let login = login_url_for(
         &state.access.read().unwrap(),
-        &cfg.login_url,
+        global_login(&state.settings.read().unwrap()),
         caller_url.as_deref(),
     );
 
@@ -2971,7 +2760,7 @@ fn handle_logout(req: Request, state: &State) {
     let caller_url = original_url(&req, cfg);
     let login = login_url_for(
         &state.access.read().unwrap(),
-        &cfg.login_url,
+        global_login(&state.settings.read().unwrap()),
         caller_url.as_deref(),
     );
     let target = logout_target(
@@ -3072,23 +2861,43 @@ fn check_settings(path: &str) -> ! {
             for c in &s.profile_claims {
                 println!("[bb-auth] {path}: claim '{}' -> {}", c.claim, c.header);
             }
-            // Named and not judged: whether this app client is one the gate accepts tokens
-            // from depends on BB_AUTH_AUDIENCES, which is env, which this check deliberately
-            // does not read. The gate says that half at startup.
+            // The app clients, which are also the audiences: a Cognito id_token carries the
+            // app client it was minted for in `aud`, so naming an app client here IS saying
+            // which tokens the gate accepts. Printed rather than judged: whether Cognito has
+            // ever heard of one of these is not a question a file can answer.
             println!(
-                "[bb-auth] {path}: social app client: {}",
-                match s.social_client_id.as_str() {
-                    "" => "(none: no social sign-in)",
+                "[bb-auth] {path}: sign-in page: {}",
+                match s.login_url.as_str() {
+                    "" => "(none: the gate's own /auth/login, on the calling host)",
+                    url => url,
+                }
+            );
+            println!(
+                "[bb-auth] {path}: email app client: {}",
+                match s.client_id.as_str() {
+                    "" => "(none: no login can complete)",
                     id => id,
                 }
             );
             println!(
-                "[bb-auth] {path}: social buttons: {}",
-                match s.social_buttons.len() {
-                    0 => "(none: the sign-in page offers no social button)".to_string(),
-                    _ => s.social_buttons.join(", "),
+                "[bb-auth] {path}: accepted audiences: {}",
+                match s.audiences.len() {
+                    0 => "(none)".to_string(),
+                    _ => s.audiences.join(", "),
                 }
             );
+            match (&s.oauth_domain, &s.social_callback_url) {
+                (Some(d), Some(c)) => {
+                    println!("[bb-auth] {path}: social sign-in via {d}, back to {c}")
+                }
+                _ => println!("[bb-auth] {path}: social sign-in: (off)"),
+            }
+            for b in &s.social_buttons {
+                println!(
+                    "[bb-auth] {path}: button '{}' through app client {}",
+                    b.idp, b.audience
+                );
+            }
             if s.allow_unverified_social {
                 let scope = match &s.social_providers {
                     Some(p) => p.join(", "),
@@ -3136,13 +2945,41 @@ fn check_settings(path: &str) -> ! {
 /// variable would have defeated the preflight in silence. Now the postinst asks the binary
 /// (`--check-env`), and `the_required_env_list_matches_the_code` is what keeps this list
 /// honest about its own callers.
-const REQUIRED_ENV: [&str; 6] = [
+const REQUIRED_ENV: [&str; 4] = [
     "BB_AUTH_HMAC_KEY",
     "BB_AUTH_COGNITO_ISSUER",
     "BB_AUTH_AUTHORIZED_HOSTS",
-    "BB_AUTH_CLIENT_ID",
-    "BB_AUTH_LOGIN_URL",
     "BB_AUTH_ACCESS_FILE",
+];
+
+/// Variables this gate once read and no longer does, with where the value went.
+///
+/// A variable that is set and read by nobody is worse than one that was never there: an
+/// operator can see it, believe it, and edit it for an afternoon. This list is what lets
+/// `--check-env` say so during the upgrade that retired it, on the host, before the postinst
+/// restarts anything. Entries can be dropped once no deployment could still carry them.
+const RETIRED_ENV: [(&str, &str); 9] = [
+    ("BB_AUTH_CLIENT_ID", "gate.client_id in the settings file"),
+    ("BB_AUTH_LOGIN_URL", "gate.login_url"),
+    (
+        "BB_AUTH_AUDIENCES",
+        "derived: the app clients gate.client_id and gate.social_buttons name",
+    ),
+    ("BB_AUTH_OAUTH_DOMAIN", "gate.oauth_domain"),
+    (
+        "BB_AUTH_SOCIAL_CLIENT_ID",
+        "the audience of each gate.social_buttons entry",
+    ),
+    ("BB_AUTH_SOCIAL_CALLBACK_URL", "gate.social_callback_url"),
+    (
+        "BB_AUTH_SOCIAL_IDPS",
+        "the idp of each gate.social_buttons entry",
+    ),
+    ("BB_AUTH_SESSION_TTL_SECS", "gate.session_ttl_secs"),
+    (
+        "BB_AUTH_ALLOW_UNVERIFIED_SOCIAL",
+        "gate.allow_unverified_social",
+    ),
 ];
 
 /// A JWKS holding one RSA public key, and an id_token signed by its private half. Both were
@@ -3260,13 +3097,16 @@ fn check_env(path: &str) -> ! {
             present.push(k.trim());
         }
     }
-    // A variable that is set and read by nobody, said where the deploy will show it: this
+    // Variables that are set and read by nobody, said where the deploy will show them: this
     // check runs from the postinst, before the restart, which is the moment an operator is
-    // still looking at the upgrade that moved it.
-    if present.contains(&"BB_AUTH_SOCIAL_CLIENT_ID") {
-        println!(
-            "[bb-auth] {path}: WARNING: BB_AUTH_SOCIAL_CLIENT_ID is set and is no longer              read. The app client is gate.social_client_id in the settings file:              `bb-auth-adm settings set --social-client-id <id>`, then delete the variable"
-        );
+    // still looking at the upgrade that moved them.
+    for (name, went) in RETIRED_ENV {
+        if present.contains(&name) {
+            println!(
+                "[bb-auth] {path}: WARNING: {name} is set and is NO LONGER READ ({went}). \
+                 Delete it from this file"
+            );
+        }
     }
     let missing: Vec<&str> = REQUIRED_ENV
         .iter()
@@ -3446,7 +3286,10 @@ fn main() {
         "[bb-auth] {} listening on {listen} | issuer={} | aud={} | apps={app_n} | scopes={scope_n} | users={user_n} | api_keys={key_n} | denied={denied_n} | identity={identity_attrs} | claims={claim_names} | workers={workers}",
         version_line("bb-auth"),
         state.cfg.issuer,
-        state.cfg.audiences.join(","),
+        match settings.audiences.len() {
+            0 => "(none: no app client is configured, so no login can complete)".to_string(),
+            _ => settings.audiences.join(","),
+        },
     );
     // A browser silently drops a cookie over ~4 KB, which would look like a login loop
     // rather than an error. Warn while it is still a config question.
@@ -3482,17 +3325,21 @@ fn main() {
     // whose app client and callback URL Cognito has to agree with.
     eprintln!(
         "[bb-auth] pages: /auth/login and /auth/callback (leave both UNGATED in nginx) | \
-         cognito={} | social={} | buttons={}",
+         cognito={} | client={} | login={} | social={}",
         state.cfg.cognito_endpoint,
-        social_state(&state.cfg, &settings),
-        match settings.social_buttons.len() {
-            0 => "(none offered)".to_string(),
-            _ => settings.social_buttons.join(","),
-        }
+        settings.client_id,
+        global_login(&settings),
+        social_state(&settings)
     );
-    // The two files have to agree, and this is the only place that can see both: the settings
-    // file knows nothing of the environment, so `--check-settings` cannot say it.
-    warn_social(&state.cfg, &settings);
+    // The one setting whose absence stops every new login. Loud, because the symptom is a
+    // sign-in page that looks fine and a token the gate then refuses for its audience, and
+    // because a package creates this file empty: a fresh install is expected to meet this
+    // line once and never again.
+    if settings.client_id.is_empty() {
+        eprintln!(
+            "[bb-auth] WARNING: gate.client_id names no app client, so NO LOGIN CAN COMPLETE              (every id_token is refused for its audience). Set it with: bb-auth-adm settings              set --client-id <app client id>"
+        );
+    }
     // Held only for the banner. Dropped before the workers start, so nothing below this line
     // can hold a read lock across a request and starve the SIGHUP swap.
     drop(settings);
@@ -4173,15 +4020,12 @@ mod tests {
             listen: "127.0.0.1:4181".to_string(),
             hmac_keys: keys_one(),
             issuer: "https://issuer.invalid".to_string(),
-            audiences: vec!["client".to_string()],
             cookie_name: "bb_session".to_string(),
             cookie_domain: domain.map(str::to_string),
             authorized_hosts: bb_hosts(),
-            login_url: LOGIN.to_string(),
             original_url_header: "X-Original-URL".to_string(),
             workers: 1,
             cognito_endpoint: "https://issuer.invalid/".to_string(),
-            social: None,
         }
     }
 
@@ -4251,35 +4095,51 @@ mod tests {
             .collect()
     }
     const LOGIN: &str = "https://login.badbat75.com/";
+    /// The two OAuth endpoints `social_settings`'s domain derives, spelled out where a page
+    /// test needs them without a settings file in hand.
+    const TOKEN_URL: &str = "https://pool.auth.eu-central-1.amazoncognito.com/oauth2/token";
+    const CALLBACK_URL: &str = "https://auth.badbat75.com/auth/callback";
     const CALLER: &str = "https://search.badbat75.com";
 
     // --- the gate's own pages -----------------------------------------------
 
-    /// A config with a social sign-in wired up, so the two pages can be rendered whole.
-    fn page_cfg(social: bool) -> Config {
+    /// The environment half of a page: the pool's own endpoint, and nothing about app
+    /// clients, which now all come from the settings file.
+    fn page_cfg() -> Config {
         let mut cfg = cookie_cfg(None);
-        cfg.audiences = vec!["email-client".to_string(), "social-client".to_string()];
         cfg.cognito_endpoint = "https://cognito-idp.eu-central-1.amazonaws.com/".to_string();
-        cfg.social = social.then(|| SocialConfig {
-            authorize_url: "https://pool.auth.eu-central-1.amazoncognito.com/oauth2/authorize"
-                .to_string(),
-            token_url: "https://pool.auth.eu-central-1.amazoncognito.com/oauth2/token".to_string(),
-            callback_url: "https://auth.badbat75.com/auth/callback".to_string(),
-            idps: vec!["Google".to_string(), "Okta".to_string()],
-        });
         cfg
     }
 
     /// Compiled settings that enable the given social buttons, which is what decides whether
     /// the sign-in page offers any: the env group only says what the pool federates.
-    fn settings_with_buttons(buttons: &[&str]) -> Settings {
+    fn settings_with_buttons(buttons: &[(&str, &str)]) -> Settings {
+        social_settings("pool.auth.eu-central-1.amazoncognito.com", buttons)
+    }
+
+    /// Compiled settings for a deployment whose social sign-in is wired to `domain`, with one
+    /// button per `(identity_provider, app client)` pair. An empty `domain` is a deployment
+    /// with no social sign-in at all, which the compiler only accepts with no buttons.
+    fn social_settings(domain: &str, buttons: &[(&str, &str)]) -> Settings {
         bb_auth_core::compile_settings(&bb_auth_core::SettingsFile {
             version: bb_auth_core::SETTINGS_VERSION,
             gate: bb_auth_core::GateSettings {
-                social_buttons: buttons.iter().map(|b| b.to_string()).collect(),
-                // The app client `page_cfg` declares as an audience: without it there is no
-                // social sign-in for a button to belong to, which is the pairing itself.
-                social_client_id: "social-client".to_string(),
+                client_id: "email-client".to_string(),
+                oauth_domain: domain.to_string(),
+                social_callback_url: if domain.is_empty() {
+                    String::new()
+                } else {
+                    "https://auth.badbat75.com/auth/callback".to_string()
+                },
+                social_buttons: buttons
+                    .iter()
+                    .map(|(idp, aud)| {
+                        bb_auth_core::SocialButtonSpec::Wired(bb_auth_core::WiredButton {
+                            idp: idp.to_string(),
+                            audience: aud.to_string(),
+                        })
+                    })
+                    .collect(),
                 ..Default::default()
             },
             ..Default::default()
@@ -4315,10 +4175,10 @@ mod tests {
 
     #[test]
     fn the_login_page_is_whole_self_contained_and_escapes_its_one_request_value() {
-        let cfg = page_cfg(true);
+        let cfg = page_cfg();
         let page = login_page(
             &cfg,
-            &settings_with_buttons(&["Google", "Okta"]),
+            &settings_with_buttons(&[("Google", "google-client"), ("Okta", "okta-client")]),
             "https://search.badbat75.com/?q=a\"b",
             "n0nce",
         );
@@ -4363,98 +4223,70 @@ mod tests {
     /// button, because that button leads to Cognito explaining the mistake in Amazon's words
     /// on Amazon's page, one redirect from somebody who was only trying to sign in.
     #[test]
-    fn a_social_button_appears_only_where_the_pool_and_the_settings_agree() {
-        let cfg = page_cfg(true); // this pool federates Google and Okta
-        let rendered =
-            |buttons: &[&str]| login_page(&cfg, &settings_with_buttons(buttons), "", "n0nce");
+    fn every_button_carries_its_own_app_client() {
+        let cfg = page_cfg();
 
-        // Enabled and federated: a button.
-        let one = rendered(&["Google"]);
-        assert!(one.contains(r#"data-idp="Google""#), "{one}");
-        assert!(!one.contains(r#"data-idp="Okta""#), "only what was enabled");
-        assert!(one.contains(r#"class="divider""#), "the section is there");
+        // Two providers, two app clients: the arrangement a single client id could not
+        // express, and the reason the audience sits on the row rather than on the file.
+        let page = login_page(
+            &cfg,
+            &settings_with_buttons(&[("Google", "google-client"), ("Okta", "okta-client")]),
+            "",
+            "n0nce",
+        );
+        assert!(
+            page.contains(r#"data-idp="Google" data-client-id="google-client""#),
+            "{page}"
+        );
+        assert!(
+            page.contains(r#"data-idp="Okta" data-client-id="okta-client""#),
+            "{page}"
+        );
+        assert!(page.contains(r#"class="divider""#), "the section is there");
+        // The email flow's own app client is the page's, and it is a different value.
+        assert!(
+            page.contains(r#"var CLIENT_ID = "email-client";"#),
+            "{page}"
+        );
 
-        // Enabled but NOT federated: no button, and no divider either. The section is
-        // absent rather than empty.
-        let none = rendered(&["Facebook"]);
-        assert!(!none.contains("data-idp="), "{none}");
-        assert!(!none.contains(r#"class="divider""#), "{none}");
-
-        // Nothing enabled: the same page as a deployment with no social configuration at
-        // all. One way for the section to be missing, not two that look different.
-        let off = rendered(&[]);
-        assert!(!off.contains("data-idp="), "{off}");
-        assert!(!off.contains(r#"class="divider""#), "{off}");
-
-        // Order is the operator's, not the environment's.
-        let both = rendered(&["Okta", "Google"]);
+        // File order is display order, because it is the operator's order.
+        let both = login_page(
+            &cfg,
+            &settings_with_buttons(&[("Okta", "okta-client"), ("Google", "google-client")]),
+            "",
+            "n0nce",
+        );
         let okta = both.find(r#"data-idp="Okta""#).expect("okta");
         let google = both.find(r#"data-idp="Google""#).expect("google");
         assert!(okta < google, "the settings order is the display order");
     }
 
     #[test]
-    fn the_app_client_comes_from_the_settings_and_has_to_be_an_accepted_audience() {
-        // `page_cfg` accepts two audiences, `email-client` and `social-client`, and
-        // federates Google and Okta. Everything below varies only the settings half.
-        let cfg = page_cfg(true);
-        let with = |id: &str| {
-            let mut s = settings_with_buttons(&["Google"]);
-            s.social_client_id = id.to_string();
-            s
-        };
-
-        // What the file says is what the page carries, and it is what the callback will
-        // exchange its code with.
-        let page = login_page(&cfg, &with("social-client"), "", "n0nce");
-        assert!(
-            page.contains(r#"var SOCIAL_CLIENT_ID = "social-client";"#),
-            "{page}"
-        );
-        assert!(page.contains(r#"data-idp="Google""#), "{page}");
-
-        // An app client nobody declared as an audience draws nothing: a token minted for it
-        // would be refused by this gate after the login had already succeeded, so the button
-        // is the wrong place to find that out. The env group is configured throughout, which
-        // is what makes this the settings half alone.
-        let stray = login_page(&cfg, &with("someone-elses-client"), "", "n0nce");
-        assert!(!stray.contains("data-idp="), "{stray}");
-        assert!(!stray.contains(r#"class="divider""#), "{stray}");
-        assert!(stray.contains(r#"var SOCIAL_CLIENT_ID = "";"#), "{stray}");
-
-        // Empty is how a deployment says it offers no social sign-in at all, and it is the
-        // same page as a deployment with no BB_AUTH_SOCIAL_* configured.
-        let off = login_page(&cfg, &with(""), "", "n0nce");
-        assert!(!off.contains("data-idp="), "{off}");
-
-        // The same question decides whether /auth/callback exists at all, and it needs both
-        // halves: the settings alone are not a social sign-in either.
-        assert!(social_now(&cfg, &with("social-client")).is_some());
-        assert!(social_now(&cfg, &with("someone-elses-client")).is_none());
-        assert!(social_now(&cfg, &with("")).is_none());
-        assert!(social_now(&page_cfg(false), &with("social-client")).is_none());
+    fn with_no_social_wiring_the_page_has_no_social_markup_at_all() {
+        // No hosted-UI domain, which is the only way a file can say "no social sign-in":
+        // `compile_settings` refuses buttons without one, so there is one such state and not
+        // two that look different.
+        let page = login_page(&page_cfg(), &social_settings("", &[]), "", "n0nce");
+        assert!(!page.contains("data-idp="), "{page}");
+        assert!(!page.contains(r#"class="divider""#), "{page}");
+        assert!(page.contains(r#"var AUTHORIZE_URL = "";"#), "{page}");
+        assert!(page.contains(r#"var CALLBACK_URL = "";"#), "{page}");
     }
 
     #[test]
-    fn with_no_social_client_the_page_has_no_social_markup_at_all() {
-        let cfg = page_cfg(false);
-        // Buttons enabled, so what this asserts is the ABSENCE of a social client and not an
-        // empty settings list: with no `BB_AUTH_SOCIAL_*` there is nothing to offer whatever
-        // the settings say.
-        let page = login_page(
-            &cfg,
-            &settings_with_buttons(&["Google", "Okta"]),
-            "",
-            "n0nce",
+    fn the_audiences_are_the_app_clients_the_file_names() {
+        // Nothing else in the system says which app clients this gate is part of, so the
+        // list is derived rather than kept in step by hand: the email flow's, then each
+        // button's, deduplicated and in file order.
+        let s = settings_with_buttons(&[("Google", "google-client"), ("Okta", "okta-client")]);
+        assert_eq!(
+            s.audiences,
+            ["email-client", "google-client", "okta-client"]
         );
-        assert!(
-            !page.contains("data-idp=\""),
-            "a button with nothing behind it"
-        );
-        // The divider goes with the buttons: nothing on the page hints at a way in that this
-        // deployment does not have.
-        assert!(!page.contains("class=\"divider\""), "{page}");
-        assert!(page.contains(r#"var SOCIAL_CLIENT_ID = "";"#), "{page}");
+
+        // Two buttons through one app client name it once.
+        let shared = settings_with_buttons(&[("Google", "one-client"), ("Okta", "one-client")]);
+        assert_eq!(shared.audiences, ["email-client", "one-client"]);
     }
 
     #[test]
@@ -4465,7 +4297,7 @@ mod tests {
         assert!(rd_url_allowed("https://search.badbat75.com/x", &hosts));
         assert!(!rd_url_allowed("https://evil.example.com/", &hosts));
         let page = login_page(
-            &page_cfg(false),
+            &page_cfg(),
             &ui_settings(bb_auth_core::UiSettings::default()),
             "",
             "n0nce",
@@ -4482,16 +4314,10 @@ mod tests {
             theme: "dark".to_string(),
         };
         let settings = ui_settings(ui);
-        let cfg = page_cfg(true);
+        let cfg = page_cfg();
         for page in [
             login_page(&cfg, &settings, "", "n0nce"),
-            callback_page(
-                &cfg,
-                cfg.social.as_ref().unwrap(),
-                "social-client",
-                &settings,
-                "n0nce",
-            ),
+            callback_page(&cfg, TOKEN_URL, CALLBACK_URL, &settings, "n0nce"),
         ] {
             let style = page.find("<style ").expect("the built-in stylesheet");
             let tokens = page.find("--accent:").expect("the palette");
@@ -4520,20 +4346,24 @@ mod tests {
     }
 
     #[test]
-    fn the_callback_page_names_the_registered_redirect_uri_and_nothing_else() {
-        let cfg = page_cfg(true);
-        let social = cfg.social.as_ref().unwrap();
+    fn the_callback_page_names_the_registered_redirect_uri_and_no_app_client() {
         let page = callback_page(
-            &cfg,
-            social,
-            "social-client",
+            &page_cfg(),
+            TOKEN_URL,
+            CALLBACK_URL,
             &ui_settings(bb_auth_core::UiSettings::default()),
             "n0nce",
         );
         assert!(!page.contains("__BB_"), "unsubstituted placeholder left");
         // The value Cognito compares byte for byte with the client's registered callback.
         assert!(page.contains(r#"var CALLBACK_URL = "https://auth.badbat75.com/auth/callback";"#));
-        assert!(page.contains(r#"var SOCIAL_CLIENT_ID = "social-client";"#));
+        // And no app client of its own: it exchanges with whichever one the button that
+        // started this leg named, which only sessionStorage knows.
+        assert!(page.contains(r#"var SOCIAL_CLIENT_ID = "";"#), "{page}");
+        assert!(
+            page.contains(r#"sessionStorage.getItem("bb_social_client")"#),
+            "{page}"
+        );
     }
 
     #[test]
@@ -4975,7 +4805,6 @@ mod tests {
         let mut cfg = cookie_cfg(None);
         cfg.issuer =
             "https://cognito-idp.eu-central-1.amazonaws.com/eu-central-1_TESTPOOL".to_string();
-        cfg.audiences = vec!["testclient".to_string()];
         State {
             cfg,
             access: RwLock::new(gate_access("token")),
@@ -4995,8 +4824,22 @@ mod tests {
     /// Compiled settings from a gate section written as JSON, which is how an operator
     /// writes them and therefore what these tests should be exercising.
     fn gate_settings(gate: &str) -> Settings {
-        let file: bb_auth_core::SettingsFile =
-            serde_json::from_str(&format!(r#"{{ "version": 1, "gate": {gate} }}"#)).unwrap();
+        let mut file: bb_auth_core::SettingsFile = serde_json::from_str(&format!(
+            r#"{{ "version": {}, "gate": {gate} }}"#,
+            bb_auth_core::SETTINGS_VERSION
+        ))
+        .unwrap();
+        // The app client the fixture token was minted for, and therefore the only audience
+        // these tests accept. It is a setting now, so a gate section that does not mention it
+        // gets the fixture's rather than an empty audience list and a token nobody accepts.
+        if file.gate.client_id.is_empty() {
+            file.gate.client_id = "testclient".to_string();
+        }
+        // Where people sign in is a setting too now, and every test that reads a 401 or a
+        // logout expects the configured page rather than the gate's own default.
+        if file.gate.login_url.is_empty() {
+            file.gate.login_url = LOGIN.to_string();
+        }
         bb_auth_core::compile_settings(&file).unwrap()
     }
 
@@ -5250,7 +5093,7 @@ mod tests {
     #[test]
     fn the_sign_in_page_carries_its_policy_and_the_nonce_it_names() {
         let mut st = token_state(gate_settings("{}"));
-        st.cfg = page_cfg(true);
+        st.cfg = page_cfg();
         let base = serve(st);
         let mut r = agent().get(format!("{base}/auth/login")).call().unwrap();
         assert_eq!(r.status(), 200);
@@ -5316,7 +5159,7 @@ mod tests {
             theme: "dark".to_string(),
         };
         let mut st = token_state(ui_settings(ui));
-        st.cfg = page_cfg(true);
+        st.cfg = page_cfg();
         let base = serve(st);
         let mut r = agent().get(format!("{base}/auth/login")).call().unwrap();
         assert_eq!(r.status(), 200);
@@ -5361,6 +5204,23 @@ mod tests {
         // quietly relax what the page itself may run.
         assert!(csp.contains("script-src 'nonce-"), "{csp}");
         assert!(!csp.contains("unsafe-inline"), "{csp}");
+    }
+
+    #[test]
+    fn with_no_login_url_configured_the_gate_names_its_own_page() {
+        // The default that makes the setting optional: since the gate serves the sign-in page
+        // itself, naming one is how an operator points somewhere ELSE. A path and not a URL,
+        // because this process knows neither its own scheme nor its own host.
+        let mut file: bb_auth_core::SettingsFile =
+            serde_json::from_str(r#"{ "version": 2, "gate": { "client_id": "testclient" } }"#)
+                .unwrap();
+        file.gate.login_url = String::new();
+        let settings = bb_auth_core::compile_settings(&file).unwrap();
+        assert_eq!(global_login(&settings), "/auth/login");
+
+        let base = serve(token_state(settings));
+        let r = agent().get(format!("{base}/auth/logout")).call().unwrap();
+        assert_eq!(r.headers().get("Location").unwrap(), "/auth/login");
     }
 
     #[test]

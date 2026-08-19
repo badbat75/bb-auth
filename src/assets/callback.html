@@ -55,7 +55,11 @@ __BB_LOGO__
   <script nonce="__BB_NONCE__">
     var TOKEN_URL = "__BB_TOKEN_URL__";
     var IDP_ENDPOINT = "__BB_ENDPOINT__";
-    var SOCIAL_CLIENT_ID = "__BB_SOCIAL_CLIENT_ID__";
+    // The app client is not substituted into this page: the sign-in page put the one its
+    // clicked button named into sessionStorage, and the exchange has to use that exact one.
+    // A page carrying a client id of its own would be right only while every button shared
+    // one, which is exactly the arrangement per-button app clients exist to end.
+    var SOCIAL_CLIENT_ID = "";
     var CALLBACK_URL = "__BB_CALLBACK_URL__";
     var SESSION_URL = "/auth/session";
 
@@ -233,6 +237,7 @@ __BB_LOGO__
     var verifier = null, expectedState = "";
     try {
       verifier = sessionStorage.getItem("bb_pkce_verifier");
+      SOCIAL_CLIENT_ID = sessionStorage.getItem("bb_social_client") || "";
       pending.rd = sessionStorage.getItem("bb_social_rd") || "";
       expectedState = sessionStorage.getItem("bb_pkce_state") || "";
     } catch (e) {}
@@ -241,7 +246,11 @@ __BB_LOGO__
       failExchange(params.get("error_description") || error);
     } else if (!code) {
       failExchange(T.no_code);
-    } else if (!verifier) {
+    } else if (!verifier || !SOCIAL_CLIENT_ID) {
+      // Both were written by the same page in the same moment, so one without the other is a
+      // leg that cannot be finished: a stale tab from before this deployment named its app
+      // clients, or storage cleared mid-flight. Same answer either way, and it is the honest
+      // one: start again.
       failExchange(T.no_verifier);
       // Unconditional, and not `expectedState && state !== expectedState`: an empty stored
       // state used to mean "skip the check", which is a fail-open written in the shape of a
@@ -269,6 +278,7 @@ __BB_LOGO__
           try {
             sessionStorage.removeItem("bb_pkce_verifier");
             sessionStorage.removeItem("bb_pkce_state");
+            sessionStorage.removeItem("bb_social_client");
             sessionStorage.removeItem("bb_social_rd");
             sessionStorage.removeItem("bb_social_lang");
           } catch (e) {}

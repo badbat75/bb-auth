@@ -7,8 +7,13 @@
     "iff it (1) is read per request, so a new value takes effect on the next one, (2) cannot",
     "lock the operator out if it is wrong, and (3) is not a secret. Everything else stays in",
     "bb-auth.env, on the host: the listener, the worker count, the HMAC key, the Cognito",
-    "trust roots, the cookie's name and domain, BB_AUTH_LOGIN_URL, BB_AUTH_AUTHORIZED_HOSTS",
-    "and BB_AUTH_ORIGINAL_URL_HEADER.",
+    "ISSUER (the pool itself), the cookie's name and domain, BB_AUTH_AUTHORIZED_HOSTS and",
+    "BB_AUTH_ORIGINAL_URL_HEADER.",
+    "",
+    "WHICH COGNITO APP CLIENTS THIS GATE IS PART OF is decided here, by gate.client_id and by",
+    "the audience of every gate.social_buttons entry: together they are the audiences an",
+    "id_token may carry. That is not a widening, because the POOL is the env file's: this",
+    "file chooses among the app clients of the issuer above and can never reach another one.",
     "",
     "It is a file rather than more env vars for one mechanical reason: a process cannot",
     "re-read its own environment. systemd loads EnvironmentFile= once, at ExecStart, so",
@@ -26,7 +31,7 @@
     "across an edit, which is what makes these blocks survive a save from either editor."
   ],
 
-  "version": 1,
+  "version": 2,
 
   "_comment_profile_claims": [
     "gate.profile_claims — OIDC claims to hand to the application on a 204, in the order the",
@@ -69,34 +74,45 @@
     "providers that verify the email."
   ],
 
-  "_comment_social_client_id": [
-    "gate.social_client_id — the Cognito APP CLIENT a social sign-in runs through: the",
-    "client_id the hosted UI is handed, and the one /auth/callback exchanges its code with.",
-    "It is normally NOT the app client the email flow uses (BB_AUTH_CLIENT_ID). EMPTY MEANS",
-    "NO SOCIAL SIGN-IN, however completely the BB_AUTH_SOCIAL_* group is filled in.",
-    "It is the one member of that group that lives here, and it passes the three-part rule:",
-    "read when the sign-in page is rendered, harmless when wrong (the social buttons go away,",
-    "the email path does not), and no secret, since the page emits it into its own script.",
-    "It cannot widen anything either. The gate draws no button unless this id is already one",
-    "of the audiences it validates tokens against (BB_AUTH_CLIENT_ID plus BB_AUTH_AUDIENCES,",
-    "both env), so this field moves social sign-in between app clients an operator has",
-    "declared and can never add one. When it cannot be used the gate says which of the two",
-    "reasons it was, at startup and after every reload."
+  "_comment_client_id": [
+    "gate.client_id — the Cognito APP CLIENT the email flow uses: the one the sign-in page",
+    "runs USER_AUTH against, and the first audience a token is accepted for. EMPTY MEANS NO",
+    "LOGIN CAN COMPLETE, which is the state a fresh install is in; the gate starts anyway and",
+    "says so at startup, because a package creates this file and cannot know the value.",
+    "It is the one setting here that can stop NEW logins. It cannot invalidate a cookie, so",
+    "whoever gets it wrong still holds their session and can undo it, and `bb-auth-adm` over",
+    "SSH is the way back if not."
+  ],
+
+  "_comment_login_url": [
+    "gate.login_url — where people sign in: the page a 401 names for nginx to redirect to,",
+    "and the page a rejected redirect target falls back to. EMPTY MEANS the gate's own",
+    "/auth/login, on whatever host the request arrived at, which is what a deployment that",
+    "has not moved its sign-in page wants. Absolute https when it is set.",
+    "An application in the access file may override it for its own area (login_url there).",
+    "Whatever it names, nginx must leave /auth/login and /auth/callback UNGATED."
+  ],
+
+  "_comment_social_wiring": [
+    "gate.oauth_domain / gate.social_callback_url — the Cognito hosted UI this deployment",
+    "sends people to, as a bare host, and the redirect_uri it comes back to. Empty means no",
+    "social sign-in at all. The callback URL must be registered BYTE FOR BYTE on every app",
+    "client named below, which is Amazon's rule: get it wrong and whoever clicks a button is",
+    "told redirect_mismatch, in Amazon's words, on Amazon's page."
   ],
 
   "_comment_social_buttons": [
-    "gate.social_buttons — which social buttons the sign-in page OFFERS, by Cognito",
-    "identity_provider name, in the order they appear. EMPTY OFFERS NONE: a provider is",
-    "shown because somebody listed it here, never because the deployment happens to federate",
-    "it. Changing it takes effect on the next request, with no restart.",
-    "It is a different question from social_providers above, and from BB_AUTH_SOCIAL_IDPS in",
-    "the env file. The env group says what this pool CAN do (the OAuth domain, the callback",
-    "URL Cognito registered byte for byte, and the providers the app client federates); get",
-    "one of those wrong and social sign-in cannot complete for anybody, which is why they are",
-    "env vars. This says what the page offers TODAY. A button",
-    "needs both: a name enabled here that BB_AUTH_SOCIAL_IDPS does not federate draws",
-    "nothing and is reported at startup, because the button would send a visitor to Cognito",
-    "with an identity_provider this app client may not have."
+    "gate.social_buttons — which social buttons the sign-in page OFFERS, in the order they",
+    "appear, and THE APP CLIENT EACH ONE RUNS THROUGH. EMPTY OFFERS NONE: a provider is shown",
+    "because somebody wrote it here, never because the deployment happens to federate it.",
+    "Changing it takes effect on the next request, with no restart.",
+    "Each entry is { \"idp\": <Cognito identity_provider>, \"audience\": <app client id> }. The",
+    "app client is per button because Cognito federates per app client: which providers a",
+    "client offers is a property of that client, so two providers may live on two of them and",
+    "one value for all of them could not say so. A bare name, which is what this list held",
+    "before, is refused with a sentence rather than a type error.",
+    "It is a different question from social_providers above: that one decides whose",
+    "unverified email is accepted, this one what a visitor is shown."
   ],
 
   "_comment_session_ttl_secs": [
@@ -146,11 +162,14 @@
   ],
 
   "gate": {
+    "client_id": "",
+    "login_url": "",
     "profile_claims": [],
     "identity_attrs": ["email"],
     "allow_unverified_social": false,
     "social_providers": [],
-    "social_client_id": "",
+    "oauth_domain": "",
+    "social_callback_url": "",
     "social_buttons": [],
     "session_ttl_secs": 2592000
   },

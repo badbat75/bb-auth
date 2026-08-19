@@ -79,7 +79,8 @@ __BB_SOCIAL_BUTTONS__
     // ---- what the gate told this page -------------------------------------
     var ENDPOINT = "__BB_ENDPOINT__";
     var CLIENT_ID = "__BB_CLIENT_ID__";
-    var SOCIAL_CLIENT_ID = "__BB_SOCIAL_CLIENT_ID__";
+    // No social client id here: each button carries its own in data-client-id, because
+    // Cognito federates per app client and two providers may live on two of them.
     var AUTHORIZE_URL = "__BB_AUTHORIZE_URL__";
     var CALLBACK_URL = "__BB_CALLBACK_URL__";
     // Same origin, always: this page is served BY the gate, so the cookie it sets is
@@ -516,21 +517,24 @@ __BB_SOCIAL_BUTTONS__
         return b64url(new Uint8Array(d));
       });
     }
-    function socialLogin(idp) {
+    function socialLogin(idp, clientId) {
       var verifier = makeVerifier();
       var state = b64url(crypto.getRandomValues(new Uint8Array(16)));
       // The callback page is a separate document, so what it needs has to survive a
-      // navigation: sessionStorage, cleared by that page as soon as it has used it.
+      // navigation: sessionStorage, cleared by that page as soon as it has used it. The app
+      // client is in there too, and it has to be: the token exchange must name the same
+      // client the authorize call did, and only this page knows which button was clicked.
       try {
         sessionStorage.setItem("bb_pkce_verifier", verifier);
         sessionStorage.setItem("bb_pkce_state", state);
+        sessionStorage.setItem("bb_social_client", clientId);
         sessionStorage.setItem("bb_social_rd", RD);
         sessionStorage.setItem("bb_social_lang", BB.lang);
       } catch (e) {}
       sha256B64url(verifier).then(function (challenge) {
         var params = new URLSearchParams({
           response_type: "code",
-          client_id: SOCIAL_CLIENT_ID,
+          client_id: clientId,
           redirect_uri: CALLBACK_URL,
           scope: "openid email profile aws.cognito.signin.user.admin",
           code_challenge: challenge,
@@ -544,7 +548,7 @@ __BB_SOCIAL_BUTTONS__
     var idpButtons = document.querySelectorAll("[data-idp]");
     for (var b = 0; b < idpButtons.length; b++) {
       idpButtons[b].addEventListener("click", function () {
-        socialLogin(this.getAttribute("data-idp"));
+        socialLogin(this.getAttribute("data-idp"), this.getAttribute("data-client-id"));
       });
     }
   </script>

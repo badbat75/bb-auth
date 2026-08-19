@@ -1784,7 +1784,8 @@ pub fn compile_access(file: &AccessFile) -> Result<Access, String> {
             // without a word. See [`ApiKeySpec`] for why this warns rather than refuses.
             for name in k.extra.keys().filter(|n| n.as_str() != "notes") {
                 eprintln!(
-                    "[bb-auth] WARNING: {uuid} key '{key_id}': unknown field '{name}' is                      ignored (a misspelled 'scopes' or 'duration' widens the key)"
+                    "[bb-auth] WARNING: {uuid} key '{key_id}': unknown field '{name}' is \
+                     ignored (a misspelled 'scopes' or 'duration' widens the key)"
                 );
             }
             let hash = k.key_hash.trim().to_ascii_lowercase();
@@ -2994,7 +2995,7 @@ pub fn remove_denied(doc: &mut AccessFile, who: &[String]) -> usize {
 // compiled, and `write_atomically` stays private so there is no other door.
 
 /// The settings file's `version`. Exactly one accepted value, like the access file's.
-pub const SETTINGS_VERSION: u32 = 1;
+pub const SETTINGS_VERSION: u32 = 2;
 
 /// The file name [`default_settings_path`] builds, and the one the packages create.
 pub const DEFAULT_SETTINGS_FILE: &str = "settings.json";
@@ -3327,48 +3328,72 @@ pub struct GateSettings {
     /// therefore attacker-controlled.
     #[serde(default)]
     pub allow_unverified_social: bool,
-    /// The Cognito **app client** a social sign-in runs through: the `client_id` the hosted
-    /// UI is handed, and the one `/auth/callback` exchanges its code with. It is normally not
-    /// the app client the email flow uses (`BB_AUTH_CLIENT_ID`), and **empty means no social
-    /// sign-in at all**, however completely the `BB_AUTH_SOCIAL_*` group is filled in.
+    /// The Cognito **app client the email flow uses**: the `client_id` the sign-in page runs
+    /// `USER_AUTH` against, and the first audience a token is accepted for.
     ///
-    /// It is the one member of that group that lives here, so the three parts are worth
-    /// stating rather than assuming. It is read **per request**, when the sign-in page is
-    /// rendered and when the callback exchanges a code. It **cannot lock anybody out**: a
-    /// wrong value costs the social buttons and nothing else, because the email path is every
-    /// deployment's real way in and is not involved; and it cannot widen what the gate
-    /// accepts either, because the audiences a token is validated against stay in
-    /// `BB_AUTH_AUDIENCES` and the gate refuses to offer social sign-in through a client id
-    /// that is not already one of them. And it is **not a secret**: it is emitted into the
-    /// sign-in page's script, so every visitor has had it all along.
+    /// **Empty is tolerated and means no login can complete**, which is the state a fresh
+    /// install is in before an operator says which app client this deployment is. It is a
+    /// warning and not a refusal for the reason `web.admins` is one: a package creates this
+    /// file, and a gate that refused to start over a value the install cannot know would be a
+    /// boot loop on every first install. Sessions already minted keep working either way,
+    /// since this is read when a token is validated and never when a cookie is.
     ///
-    /// What moved it out of the environment is that all three programs have an opinion about
-    /// it now. An env var is readable only by the process that was started with it, so the
-    /// admin GUI could only have shown this one by being handed a second copy in its own env
-    /// file, and a value written in two files is a value that drifts with nothing to catch
-    /// it. Here there is one copy, and the two editors write the file the gate reads.
+    /// It is the one setting here that can stop **new** logins, so where it sits against the
+    /// three-part rule is worth stating rather than assuming. It is read per request; it is
+    /// not a secret, since the sign-in page emits it into its own script; and while a wrong
+    /// value does shut the door on new logins, it shuts it in the one way that is recoverable
+    /// from the wrong side: no cookie is invalidated, so whoever made the edit still holds a
+    /// session and can undo it, and `bb-auth-adm` over SSH is the way back if not. What it
+    /// must never become is a way to reach another *pool*: `BB_AUTH_COGNITO_ISSUER` stays in
+    /// the environment, so this file can only ever choose among the app clients of the pool
+    /// the gate already trusts.
     #[serde(default)]
-    pub social_client_id: String,
-    /// Which social sign-in buttons the page offers, by Cognito `identity_provider` name,
-    /// in the order they appear. **Empty means none**, and that is the whole point: a
+    pub client_id: String,
+    /// **Where people sign in**: the page a `401` names, and the page a rejected redirect
+    /// target falls back to. Absolute https, validated by [`compile_login_url`].
+    ///
+    /// Empty means *this gate's own* `/auth/login`, on whatever host the request arrived at,
+    /// which is the only page it can promise exists. That default is what makes the value
+    /// optional at all: since 1.1.0 the gate serves the sign-in page itself, so naming one is
+    /// how an operator points somewhere *else*, not how they get one.
+    ///
+    /// It is a setting and not an env var by the same argument as [`GateSettings::client_id`],
+    /// and it is the other value here that can stop **new** logins if it is wrong: it cannot
+    /// invalidate a cookie, so whoever made the edit still holds a session and can undo it.
+    /// What keeps it from being a redirect gadget is unchanged and stays in the environment:
+    /// `BB_AUTH_AUTHORIZED_HOSTS` is the only authority on where a post-login redirect may
+    /// land, and it is not in this file.
+    #[serde(default)]
+    pub login_url: String,
+    /// The Cognito **hosted-UI domain**, as a bare host with no scheme and no path, e.g.
+    /// `pool.auth.eu-central-1.amazoncognito.com`. Empty means this deployment offers no
+    /// social sign-in at all.
+    ///
+    /// It is configured rather than derived because a pool's hosted UI can sit on a custom
+    /// domain, so the issuer does not give it away.
+    #[serde(default)]
+    pub oauth_domain: String,
+    /// The `redirect_uri` a social sign-in comes back to, which Cognito compares **byte for
+    /// byte** with the one registered on each app client below. Normally `/auth/callback` on
+    /// the host that serves the sign-in page. Empty means no social sign-in.
+    #[serde(default)]
+    pub social_callback_url: String,
+    /// Which social sign-in buttons the page offers, in the order they appear, and **the app
+    /// client each one runs through**. Empty offers none, which is the whole point: a
     /// provider is offered because somebody listed it, never because a deployment happens to
     /// federate it.
     ///
-    /// It is not the same question as `BB_AUTH_SOCIAL_IDPS`, and the split is the reason this
-    /// is a setting at all. The env group says what this deployment *can* do: the OAuth
-    /// domain, the app client, the callback URL registered with Cognito byte for byte, and
-    /// the providers that app client federates. Get one of those wrong and social sign-in
-    /// cannot complete for anybody, which is why they are env vars and fatal. This says what
-    /// the page *offers today*, which is a decision an operator changes on a Tuesday: turning
-    /// a provider off here removes a button and touches nothing else, and the email path,
-    /// which is every deployment's real way in, is not involved either way.
+    /// The app client is per button rather than per deployment because Cognito federates per
+    /// app client: which identity providers a client offers is a property of that client, so
+    /// two providers may perfectly well live on two of them, and one value for all of them
+    /// would have made that arrangement inexpressible. Each has to be registered with the
+    /// `social_callback_url` above, which is Amazon's rule and not this file's.
     ///
-    /// A name listed here that the env group does not federate is ignored, with a warning at
-    /// startup: drawing it would send a visitor to Cognito with an `identity_provider` its
-    /// app client may not have, and Amazon would explain that in Amazon's words on Amazon's
-    /// page.
+    /// Every audience the gate accepts comes from here and from [`GateSettings::client_id`],
+    /// which is what makes this file the whole answer to "which app clients is this gate part
+    /// of". The pool they belong to is `BB_AUTH_COGNITO_ISSUER` and stays in the environment.
     #[serde(default)]
-    pub social_buttons: Vec<String>,
+    pub social_buttons: Vec<SocialButtonSpec>,
     /// Narrows the relaxation above to these IdPs, matched case-insensitively against the
     /// token's `identities[].providerName`. Empty = any federated provider.
     ///
@@ -3399,9 +3424,12 @@ impl Default for GateSettings {
             profile_claims: Vec::new(),
             identity_attrs: default_identity_attrs(),
             allow_unverified_social: false,
-            // Empty on purpose, twice over: a deployment has no social app client until
-            // somebody names one, and a button is offered because somebody listed it.
-            social_client_id: String::new(),
+            // Empty on purpose: a fresh file names no app client, offers no social sign-in,
+            // and a button exists because somebody wrote one.
+            client_id: String::new(),
+            login_url: String::new(),
+            oauth_domain: String::new(),
+            social_callback_url: String::new(),
             social_buttons: Vec::new(),
             social_providers: Vec::new(),
             session_ttl_secs: default_session_ttl(),
@@ -3936,16 +3964,28 @@ pub struct Settings {
     pub allow_unverified_social: bool,
     /// `None` = any federated provider, which is what an empty list means.
     pub social_providers: Option<Vec<String>>,
-    /// See [`GateSettings::social_client_id`]. Empty = this deployment offers no social
-    /// sign-in, and the gate then serves the same page it serves with no `BB_AUTH_SOCIAL_*`
-    /// configured at all. Whether a non-empty one is *usable* is the gate's question and not
-    /// this file's: it depends on `BB_AUTH_AUDIENCES`, which is env, which this file has no
-    /// way to read.
-    pub social_client_id: String,
-    /// See [`GateSettings::social_buttons`]. Empty = the sign-in page offers no social
-    /// button at all, exactly as it does when `BB_AUTH_SOCIAL_*` is unset: no divider, no
-    /// button, nothing hinting at a way in this page is not offering.
-    pub social_buttons: Vec<String>,
+    /// See [`GateSettings::client_id`]. May be empty, which is a deployment that cannot
+    /// complete a login yet; the gate says so at startup rather than refusing to start.
+    pub client_id: String,
+    /// Every app client a token may be minted for: [`Settings::client_id`] first, then each
+    /// button's, deduplicated and in file order. **Derived, never configured**, which is what
+    /// removed the last list in this system that had to agree with another one by hand.
+    ///
+    /// Empty when no app client is named at all, and that is a state to keep working rather
+    /// than to refuse: `aud` is a required claim, so an empty list accepts no token, which is
+    /// the honest reading of a deployment that has not said which app clients it is part of.
+    pub audiences: Vec<String>,
+    /// See [`GateSettings::login_url`]. Empty = the gate's own `/auth/login`, and the gate
+    /// is where that default is applied, because only it knows the path it serves.
+    pub login_url: String,
+    /// See [`GateSettings::oauth_domain`]. `None` = no social sign-in.
+    pub oauth_domain: Option<String>,
+    /// See [`GateSettings::social_callback_url`]. `None` = no social sign-in.
+    pub social_callback_url: Option<String>,
+    /// See [`GateSettings::social_buttons`]. Empty = the sign-in page offers no social button
+    /// at all: no divider, no button, nothing hinting at a way in this page is not offering.
+    /// Never non-empty without the two above, which [`compile_settings`] enforces.
+    pub social_buttons: Vec<SocialButton>,
     /// See [`GateSettings::session_ttl_secs`].
     pub session_ttl: u64,
     /// See [`WebSettings::admins`], normalised with [`norm_email`] and deduplicated. May be
@@ -4004,22 +4044,57 @@ pub fn social_idp_label(name: &str) -> &str {
         .unwrap_or(name)
 }
 
-/// Validate the social app client id.
+/// One social sign-in button as the file writes it: the provider, and the app client it runs
+/// through.
 ///
-/// Empty is not a refusal: it is how a file says this deployment offers no social sign-in,
-/// and it is the default. Every other refusal in this file is fatal for the usual reason, so
-/// this one is worth naming explicitly as the exception it is not: a value that is *present*
-/// and wrong is still fatal.
+/// The bare-string arm is the shape this field had before the app clients moved into this
+/// file, and it exists to be **refused with a sentence** rather than to be supported. A type
+/// error three levels down would say `invalid type: string` about a file somebody's previous
+/// version wrote, which is the least useful moment to be terse; this is the same reflex the
+/// access file's `version` check has.
+#[derive(Deserialize, Serialize, Clone, Debug, PartialEq, Eq)]
+#[serde(untagged)]
+pub enum SocialButtonSpec {
+    /// `{ "idp": "Google", "audience": "…" }`, the only shape that compiles.
+    Wired(WiredButton),
+    /// `"Google"`, written by a version that had one app client for every button.
+    Name(String),
+}
+
+/// The object arm of [`SocialButtonSpec`].
+#[derive(Deserialize, Serialize, Clone, Debug, PartialEq, Eq)]
+#[serde(deny_unknown_fields)]
+pub struct WiredButton {
+    /// Cognito's own `identity_provider` name, e.g. `Google`.
+    pub idp: String,
+    /// The app client this provider is federated by, and the `aud` its tokens carry.
+    #[serde(default)]
+    pub audience: String,
+}
+
+/// One social sign-in button, compiled: both halves present and well formed.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct SocialButton {
+    /// Cognito's own `identity_provider` name.
+    pub idp: String,
+    /// The app client the hosted UI is handed and the callback exchanges its code with.
+    pub audience: String,
+}
+
+/// Validate one Cognito app client id, for the setting `what` names.
 ///
-/// The charset is [`compile_social_buttons`]'s, and it carries more weight here than it does
-/// there. This value is substituted into the sign-in page as a JavaScript string literal and
-/// into the query string of Cognito's authorize URL, so restricting it to letters, digits,
-/// `.`, `_` and `-` is what makes both safe by construction rather than by escaping: it is
-/// the same argument the gate's `env_page_value` makes for the values that used to arrive
-/// from the environment, which is exactly where this one arrived from until it became a
-/// setting. A Cognito app client id is 26 lowercase alphanumerics, so nothing this refuses
-/// could have been one.
-pub fn compile_social_client_id(raw: &str) -> Result<String, String> {
+/// Empty is not a refusal here: it is the caller that decides whether an absent app client is
+/// a warning (the email flow's, on a file a package just created) or an error (a button's,
+/// which cannot be drawn without one).
+///
+/// The charset is the `identity_provider` one, and it carries more weight than it does there.
+/// This value is substituted into the sign-in page as a JavaScript string literal, into an
+/// HTML attribute on a button, and into the query string of Cognito's authorize URL, so
+/// restricting it to letters, digits, `.`, `_` and `-` is what makes all three safe by
+/// construction rather than by escaping: the same argument the gate's `env_page_value` makes
+/// for the values these arrived as until they became settings. A Cognito app client id is 26
+/// lowercase alphanumerics, so nothing this refuses could have been one.
+pub fn compile_app_client_id(what: &str, raw: &str) -> Result<String, String> {
     let id = raw.trim();
     if id.is_empty() {
         return Ok(String::new());
@@ -4029,19 +4104,45 @@ pub fn compile_social_client_id(raw: &str) -> Result<String, String> {
         .all(|b| b.is_ascii_alphanumeric() || b == b'.' || b == b'_' || b == b'-')
     {
         return Err(format!(
-            "social_client_id '{id}': a Cognito app client id is letters, digits, '.', '_'              and '-'"
+            "{what}: '{id}' is not an app client id, which is letters, digits, '.', '_' and '-'"
         ));
     }
     Ok(id.to_string())
 }
 
-/// Validate the list of social sign-in buttons a page may offer.
+/// Validate the hosted-UI domain: a bare host, which is what the two OAuth URLs are built out
+/// of.
+///
+/// No scheme and no path, and that is checked rather than stripped, because a value that
+/// carries either was written by somebody who meant a URL and would otherwise be turned into
+/// one that quietly resolves somewhere else.
+pub fn compile_oauth_domain(raw: &str) -> Result<String, String> {
+    let d = raw.trim();
+    if d.is_empty() {
+        return Ok(String::new());
+    }
+    if !d
+        .bytes()
+        .all(|b| b.is_ascii_alphanumeric() || b == b'.' || b == b'-')
+        || d.starts_with('.')
+        || d.ends_with('.')
+    {
+        return Err(format!(
+            "oauth_domain: '{d}' is not a bare host, which is letters, digits, '.' and '-' \
+             with no scheme and no path"
+        ));
+    }
+    Ok(d.to_string())
+}
+
+/// Validate the social sign-in buttons: a provider and an app client each.
 ///
 /// **Fatal on a bad entry, like a claim name and for the same reason.** A silently skipped
 /// entry here is a button an operator configured, cannot see, and has nowhere to look for:
 /// there is no error, no log line at the moment it matters, and the page simply does not
 /// offer what the file says it offers. Refusing the file says it once, in the editor, before
-/// it is live.
+/// it is live. An entry with no app client is one of those: it could not draw a button, so it
+/// is refused rather than dropped.
 ///
 /// The charset is Cognito's own for an `identity_provider`: letters, digits, and `._-`. It is
 /// not a list of known providers, because a user pool may federate a SAML or OIDC provider
@@ -4054,12 +4155,23 @@ pub fn compile_social_client_id(raw: &str) -> Result<String, String> {
 /// Duplicates are refused rather than deduplicated: two buttons for one provider is not what
 /// anybody meant, and quietly dropping one would hide a copy-paste from an operator who is
 /// looking straight at the list.
-pub fn compile_social_buttons(raw: &[String]) -> Result<Vec<String>, String> {
-    let mut out: Vec<String> = Vec::with_capacity(raw.len());
+pub fn compile_social_buttons(raw: &[SocialButtonSpec]) -> Result<Vec<SocialButton>, String> {
+    let mut out: Vec<SocialButton> = Vec::with_capacity(raw.len());
     for entry in raw {
-        let name = entry.trim();
+        let wired = match entry {
+            SocialButtonSpec::Wired(w) => w,
+            // The pre-2 shape, answered with the sentence a type error could not have said.
+            SocialButtonSpec::Name(n) => {
+                return Err(format!(
+                    "social_buttons: '{n}' is a bare provider name, which was the shape before \
+                     each button carried its own app client. Write it as {{ \"idp\": \"{n}\", \
+                     \"audience\": \"<app client id>\" }}"
+                ))
+            }
+        };
+        let name = wired.idp.trim();
         if name.is_empty() {
-            continue;
+            return Err("social_buttons: an entry names no identity_provider".to_string());
         }
         if !name
             .bytes()
@@ -4070,10 +4182,23 @@ pub fn compile_social_buttons(raw: &[String]) -> Result<Vec<String>, String> {
                  '.', '_' and '-'"
             ));
         }
-        if out.iter().any(|k| k.eq_ignore_ascii_case(name)) {
+        if out.iter().any(|k| k.idp.eq_ignore_ascii_case(name)) {
             return Err(format!("social_buttons: '{name}' is listed twice"));
         }
-        out.push(name.to_string());
+        let audience = compile_app_client_id(
+            &format!("social_buttons '{name}': audience"),
+            &wired.audience,
+        )?;
+        if audience.is_empty() {
+            return Err(format!(
+                "social_buttons '{name}': names no app client, so no button could be drawn for \
+                 it. Cognito federates per app client, so this is the one that offers {name}"
+            ));
+        }
+        out.push(SocialButton {
+            idp: name.to_string(),
+            audience,
+        });
     }
     Ok(out)
 }
@@ -4091,10 +4216,19 @@ pub fn compile_social_buttons(raw: &[String]) -> Result<Vec<String>, String> {
 /// refuses, and the point of a shared parser is that it cannot.
 pub fn compile_settings(file: &SettingsFile) -> Result<Settings, String> {
     if file.version != SETTINGS_VERSION {
-        return Err(format!(
-            "\"version\": {} is not this format (expected {SETTINGS_VERSION})",
-            file.version
-        ));
+        // Explanatory for the one version that exists in the wild, terse for anything else:
+        // a file that says 1 was written before the Cognito app clients moved into it, and
+        // its `social_client_id` and bare-name buttons cannot be read into this shape without
+        // guessing which client each button belonged to.
+        return Err(match file.version {
+            1 => format!(
+                "\"version\": 1 was written before the app clients moved into this file \
+                 (expected {SETTINGS_VERSION}). Set gate.client_id, gate.oauth_domain and \
+                 gate.social_callback_url, give every gate.social_buttons entry its own \
+                 audience, and bump the version; see the CHANGELOG"
+            ),
+            v => format!("\"version\": {v} is not this format (expected {SETTINGS_VERSION})"),
+        });
     }
     let profile_claims = compile_profile_claims(&file.gate.profile_claims)
         .map_err(|e| format!("profile_claims: {e}"))?;
@@ -4141,8 +4275,47 @@ pub fn compile_settings(file: &SettingsFile) -> Result<Settings, String> {
         );
     }
 
-    let social_client_id = compile_social_client_id(&file.gate.social_client_id)?;
+    // The app clients, and the audience list they derive. Nothing else in this system says
+    // which app clients the gate is part of, which is what makes the derivation safe: there
+    // is no second list to disagree with.
+    let client_id = compile_app_client_id("client_id", &file.gate.client_id)?;
+    let login_url = match file.gate.login_url.trim() {
+        "" => String::new(),
+        raw => compile_login_url(raw).map_err(|e| format!("login_url: {e}"))?,
+    };
+    let oauth_domain = compile_oauth_domain(&file.gate.oauth_domain)?;
+    let social_callback_url =
+        match compile_asset_url("social_callback_url", &file.gate.social_callback_url)? {
+            Some(u) if !u.starts_with("https://") => {
+                return Err(
+                    "social_callback_url: must be the absolute https:// URL registered on the app \
+                 client, because Cognito compares it byte for byte"
+                        .to_string(),
+                )
+            }
+            other => other,
+        };
     let social_buttons = compile_social_buttons(&file.gate.social_buttons)?;
+    // A button with nowhere to send the browser, or nowhere for it to come back to, is the
+    // half-configured social sign-in that used to be a fatal startup when this lived in the
+    // environment. It is still refused, one level earlier: in the editor, on the file.
+    if !social_buttons.is_empty() && (oauth_domain.is_empty() || social_callback_url.is_none()) {
+        return Err(format!(
+            "social_buttons: {} button(s) configured, but oauth_domain or social_callback_url \
+             is empty, so there is nowhere to send a visitor and nowhere for them to come back \
+             to",
+            social_buttons.len()
+        ));
+    }
+    let mut audiences: Vec<String> = Vec::with_capacity(1 + social_buttons.len());
+    if !client_id.is_empty() {
+        audiences.push(client_id.clone());
+    }
+    for b in &social_buttons {
+        if !audiences.contains(&b.audience) {
+            audiences.push(b.audience.clone());
+        }
+    }
 
     let mut admins: Vec<String> = Vec::new();
     for raw in &file.web.admins {
@@ -4182,7 +4355,11 @@ pub fn compile_settings(file: &SettingsFile) -> Result<Settings, String> {
         identity_attrs,
         allow_unverified_social: file.gate.allow_unverified_social,
         social_providers: (!providers.is_empty()).then_some(providers),
-        social_client_id,
+        client_id,
+        audiences,
+        login_url,
+        oauth_domain: (!oauth_domain.is_empty()).then_some(oauth_domain),
+        social_callback_url,
         social_buttons,
         session_ttl: ttl,
         admins,
@@ -5960,8 +6137,12 @@ mod tests {
     fn a_minimal_settings_file_is_the_behaviour_every_earlier_version_had() {
         // Both sections absent. What comes out has to be exactly what the gate did before
         // there was a settings file, or an upgrade would change behaviour by omission.
-        let s = settings(r#"{ "version": 1 }"#).unwrap();
+        let s = settings(r#"{ "version": 2 }"#).unwrap();
         assert!(s.profile_claims.is_empty());
+        // No app client either, which is the state a package's fresh file is in: tolerated,
+        // and it compiles to a gate that accepts no token rather than to a refusal.
+        assert!(s.client_id.is_empty());
+        assert!(s.audiences.is_empty());
         assert_eq!(s.identity_attrs.len(), 1);
         assert_eq!(s.identity_attrs[0].header, IDENTITY_HEADER);
         assert!(!s.allow_unverified_social);
@@ -5973,17 +6154,24 @@ mod tests {
     #[test]
     fn the_version_is_checked_the_way_the_access_file_checks_its_own() {
         // No version at all deserializes to 0, which is not this format either.
-        for json in [r#"{}"#, r#"{ "version": 2 }"#] {
+        for json in [r#"{}"#, r#"{ "version": 3 }"#] {
             assert!(refusal(settings(json)).contains("version"), "{json}");
         }
+        // Version 1 gets a sentence rather than a number: it is the one older format that
+        // exists in the wild, and what it needs is not "try again" but three new fields.
+        let one = refusal(settings(r#"{ "version": 1 }"#));
+        assert!(
+            one.contains("client_id") && one.contains("CHANGELOG"),
+            "{one}"
+        );
     }
 
     #[test]
     fn an_unknown_key_inside_a_section_is_refused_and_one_at_the_top_is_kept() {
         // The same split the access file makes: strict where a typo would drop a setting
         // that narrows behaviour, permissive where `_comment` lives.
-        assert!(settings(r#"{ "version": 1, "gate": { "profil_claims": [] } }"#).is_err());
-        assert!(settings(r#"{ "version": 1, "web": { "admin": [] } }"#).is_err());
+        assert!(settings(r#"{ "version": 2, "gate": { "profil_claims": [] } }"#).is_err());
+        assert!(settings(r#"{ "version": 2, "web": { "admin": [] } }"#).is_err());
 
         let doc: SettingsFile =
             serde_json::from_str(r#"{ "version": 1, "_comment": "hi" }"#).unwrap();
@@ -5997,34 +6185,39 @@ mod tests {
     #[test]
     fn an_app_client_id_is_letters_digits_and_three_punctuation_marks() {
         assert_eq!(
-            compile_social_client_id("  4h9dq7k2m1n0p3r5s7t9v1w3  ").unwrap(),
+            compile_app_client_id("client_id", "  4h9dq7k2m1n0p3r5s7t9v1w3  ").unwrap(),
             "4h9dq7k2m1n0p3r5s7t9v1w3"
         );
-        // Empty is not a refusal: it is how a file says this deployment offers no social
-        // sign-in, and it is the default every settings file starts from.
-        assert_eq!(compile_social_client_id("   ").unwrap(), "");
+        // Empty is not a refusal here: whether an absent app client is a warning or an error
+        // is the caller's question, and the two callers answer it differently.
+        assert_eq!(compile_app_client_id("client_id", "   ").unwrap(), "");
         // The two shapes that would matter, and the reason the charset is this narrow: the
-        // value is substituted into a JavaScript string literal on the sign-in page and into
-        // a query string on the way to Cognito.
-        assert!(compile_social_client_id("a\";alert(1);\"").is_err());
-        assert!(compile_social_client_id("two words").is_err());
+        // value is substituted into a JavaScript string literal on the sign-in page, into an
+        // HTML attribute on a button, and into a query string on the way to Cognito.
+        assert!(compile_app_client_id("client_id", "a\";alert(1);\"").is_err());
+        assert!(compile_app_client_id("client_id", "two words").is_err());
+        // The message names the setting the caller was talking about, because a table of app
+        // clients has more than one and "app client id" alone would not say which.
+        let e =
+            compile_app_client_id("social_buttons 'Google': audience", "two words").unwrap_err();
+        assert!(e.starts_with("social_buttons 'Google': audience"), "{e}");
     }
 
     #[test]
     fn a_session_ttl_that_is_a_login_loop_is_refused() {
         for ttl in [0, 1, MIN_SESSION_TTL - 1] {
-            let json = format!(r#"{{ "version": 1, "gate": {{ "session_ttl_secs": {ttl} }} }}"#);
+            let json = format!(r#"{{ "version": 2, "gate": {{ "session_ttl_secs": {ttl} }} }}"#);
             assert!(refusal(settings(&json)).contains("floor"), "{ttl}");
         }
         // The floor itself is fine, and so is a year.
-        assert!(settings(r#"{ "version": 1, "gate": { "session_ttl_secs": 60 } }"#).is_ok());
-        assert!(settings(r#"{ "version": 1, "gate": { "session_ttl_secs": 31536000 } }"#).is_ok());
+        assert!(settings(r#"{ "version": 2, "gate": { "session_ttl_secs": 60 } }"#).is_ok());
+        assert!(settings(r#"{ "version": 2, "gate": { "session_ttl_secs": 31536000 } }"#).is_ok());
     }
 
     #[test]
     fn an_empty_provider_list_means_any_provider() {
         let s = settings(
-            r#"{ "version": 1, "gate": { "allow_unverified_social": true,
+            r#"{ "version": 2, "gate": { "allow_unverified_social": true,
                  "social_providers": [] } }"#,
         )
         .unwrap();
@@ -6035,7 +6228,7 @@ mod tests {
         );
 
         let s = settings(
-            r#"{ "version": 1, "gate": { "allow_unverified_social": true,
+            r#"{ "version": 2, "gate": { "allow_unverified_social": true,
                  "social_providers": ["Google", " SignInWithApple "] } }"#,
         )
         .unwrap();
@@ -6051,7 +6244,7 @@ mod tests {
         // direction to be wrong in, and a gate that refused to start over a list it never
         // reads would be a lockout caused by the GUI's half of the file.
         let s = settings(
-            r#"{ "version": 1, "web": { "admins": ["Bob@X.com", "not an email", "",
+            r#"{ "version": 2, "web": { "admins": ["Bob@X.com", "not an email", "",
                  "bob@x.com"] } }"#,
         )
         .unwrap();
@@ -6068,7 +6261,7 @@ mod tests {
     fn the_ui_section_defaults_to_the_built_in_look() {
         // A file that says nothing about the look is the common case, and it must compile to
         // "no override anywhere": each page is complete on its own, and nothing is fetched.
-        let s = settings(r#"{ "version": 1 }"#).unwrap();
+        let s = settings(r#"{ "version": 2 }"#).unwrap();
         assert_eq!(s.stylesheet_url, None);
         assert_eq!(s.logo_url, None);
         assert_eq!(s.brand_name, None);
@@ -6147,7 +6340,7 @@ mod tests {
         assert_eq!(UiTheme::parse(""), Some(UiTheme::System));
         assert_eq!(UiTheme::parse("darkk"), None);
         assert!(refusal(compile_settings(
-            &serde_json::from_str(r#"{ "version": 1, "ui": { "theme": "darkk" } }"#).unwrap()
+            &serde_json::from_str(r#"{ "version": 2, "ui": { "theme": "darkk" } }"#).unwrap()
         ))
         .contains("not one of system, light, dark"));
         // System is the absence of a choice, and says so by emitting no attribute at all.
@@ -6162,12 +6355,12 @@ mod tests {
         // lock anybody out, which is what earns it a place in this file; that is not the same
         // as being allowed to be wrong in silence.
         let e = refusal(settings(
-            r#"{ "version": 1, "ui": { "stylesheet_url": "javascript:alert(1)" } }"#,
+            r#"{ "version": 2, "ui": { "stylesheet_url": "javascript:alert(1)" } }"#,
         ));
         assert!(e.contains("stylesheet_url"), "{e}");
 
         let s = settings(
-            r#"{ "version": 1, "ui": { "stylesheet_url": "https://a.x.com/t.css",
+            r#"{ "version": 2, "ui": { "stylesheet_url": "https://a.x.com/t.css",
                  "logo_url": "/img/l.png", "brand_name": "X", "theme": "dark" } }"#,
         )
         .unwrap();
@@ -6177,7 +6370,7 @@ mod tests {
         assert_eq!(s.theme, UiTheme::Dark);
 
         // An unknown key inside the section is refused, exactly as it is in the other two.
-        assert!(settings(r#"{ "version": 1, "ui": { "stylesheet": "x" } }"#).is_err());
+        assert!(settings(r#"{ "version": 2, "ui": { "stylesheet": "x" } }"#).is_err());
     }
 
     #[test]
