@@ -54,6 +54,10 @@ main{max-width:1000px;margin:0 auto;padding:18px 16px 40px}
 /* A group's own heading, inside a .panel that already carries top padding: the panel's
    padding and this h2's own top margin would otherwise stack. */
 h2.tight{margin-top:0}
+/* The access check's heading is a jump target: both check forms submit to `#check`, so the
+   answer arrives where the question was asked instead of at the top of a fresh document.
+   The margin is what keeps the heading off the very top edge of the viewport when it does. */
+h2[id]{scroll-margin-top:18px}
 /* A lede introducing a subsection (h2), not the page (h1): same voice, one size down so it
    doesn't compete with the page's own lede above it. */
 p.lede.sub{font-size:.92em;margin:0 0 14px}

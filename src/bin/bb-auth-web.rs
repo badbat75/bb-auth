@@ -4084,6 +4084,15 @@ fn check_field(name: &str, value: &str, placeholder: &str) -> Markup {
 /// The wrapper is shared and not just [`verdict`], because the left bar's colour is part of
 /// the answer: the one thing an operator scanning a page cannot afford is a verdict that
 /// looks the same whether it granted or refused.
+/// The id the access check's heading carries, and the fragment both check forms submit to.
+///
+/// A `GET` form lands on a fresh document at the top of the page, which on an application or
+/// a person is several screens above the question that was just asked: the operator types a
+/// URL, presses the button, and the answer arrives out of sight. The fragment on the form's
+/// `action` survives submission (the browser replaces the query and keeps the fragment), so
+/// the answer arrives where the question was asked, with no script anywhere near it.
+const CHECK_ANCHOR: &str = "check";
+
 fn verdict_panel(v: &View, access: &Access, email: &str, url_in: &str) -> Markup {
     let (granted, markup) = verdict(v, access, email, &request_url(url_in));
     html! {
@@ -4119,7 +4128,7 @@ fn user_check(v: &View, access: &Access, u: &UserSpec, uuid: &str) -> Markup {
         .collect();
     let url_in = query_param(v.query, "url").unwrap_or_default();
     html! {
-        h2 { (v.t(K::Can)) }
+        h2 id=(CHECK_ANCHOR) { (v.t(K::Can)) }
         @match ids.first() {
             None => div class="panel" { span class="muted" { (v.t(K::CanNoIdentifier)) } },
             Some(email) => {
@@ -4130,7 +4139,8 @@ fn user_check(v: &View, access: &Access, u: &UserSpec, uuid: &str) -> Markup {
                 div class="panel" {
                     // The canonical spelling of this row's own route: the page renders under
                     // an email too, and the answer is about the identity either way.
-                    form class="can" method="get" action=(v.href(&Route::User(uuid.to_string()))) {
+                    form class="can" method="get"
+                         action=(format!("{}#{CHECK_ANCHOR}", v.href(&Route::User(uuid.to_string())))) {
                         (check_field("url", &url_in, "https://app.x.com/reports"))
                         button type="submit" { (v.t(K::Submit)) }
                     }
@@ -4167,10 +4177,12 @@ fn app_check(v: &View, access: &Access, a: &AppSpec) -> Markup {
             .unwrap_or_default()
     };
     html! {
-        h2 { (v.t(K::Can)) }
+        h2 id=(CHECK_ANCHOR) { (v.t(K::Can)) }
         p class="lede sub" { (v.t(K::CanIntroApp)) }
         div class="panel" {
-            form class="can" method="get" action=(v.href(&Route::App(a.name.trim().to_string()))) {
+            form class="can" method="get"
+                 action=(format!("{}#{CHECK_ANCHOR}",
+                                 v.href(&Route::App(a.name.trim().to_string())))) {
                 (check_field("email", &email_in, "bob@x.com"))
                 (check_field("url", &url_value, "https://app.x.com/reports"))
                 button type="submit" { (v.t(K::Submit)) }

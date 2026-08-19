@@ -225,6 +225,14 @@ edit before the binaries land: see "Upgrading" below.
   admin GUI's `style-src` hash is computed from the emitted bytes at build time and needs no
   manual update.
 
+### The admin interface
+
+* **The access check answers where it was asked.** Both check forms submit to `#check`, which
+  the section's heading carries, so the verdict arrives in front of the person who asked for
+  it instead of at the top of a fresh document several screens above it. A `GET` form keeps
+  the fragment of its `action` and replaces only the query, so this costs one attribute and
+  no script.
+
 ### Availability
 
 * A `recv()` error is now fatal. `tiny_http` reports at most one accept error per listener
@@ -233,7 +241,7 @@ edit before the binaries land: see "Upgrading" below.
 * An unknown `kid` no longer serialises every worker behind one JWKS fetch. The refresh
   lock is taken with `try_lock`, the fetch timeout is 3s, and a failure is cached for 10s.
 * The gate warns at startup when an application's `login_url` is outside
-  `BB_AUTH_AUTHORIZED_HOSTS`, and when it is listening on a non-loopback address.
+  `gate.authorized_hosts`, and when it is listening on a non-loopback address.
 * `session_ttl_secs` has a ceiling as well as a floor, and the cookie's expiry is computed
   with a saturating add.
 

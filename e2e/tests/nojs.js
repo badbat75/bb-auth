@@ -86,6 +86,31 @@ async function run(ctx, t) {
     t.check('about the person whose page it is', (await mainText(page)).includes('you@example.com'));
     await t.shot(page, 'can-on-a-person');
 
+    // The answer arrives where the question was asked. A GET form lands on a fresh document
+    // at the top of the page, which on an application is several screens above the form: the
+    // fragment on the action is what stops the verdict appearing out of sight, and it has to
+    // survive form submission for that to work, which is a browser behaviour rather than
+    // something the server can check.
+    await page.goto(ctx.base + '/apps/app1');
+    await page.fill('main form.can input[name=url]', 'https://app.example.com/app1/admin/panel');
+    await page.fill('main form.can input[name=email]', 'you@example.com');
+    await Promise.all([
+      page.waitForNavigation(),
+      page.click('main form.can button[type=submit]'),
+    ]);
+    t.check('the check submits back to its own anchor', page.url().endsWith('#check'), page.url());
+    t.eq('which the heading carries', await page.locator('h2#check').count(), 1);
+    t.check('and the verdict is there', (await mainText(page)).includes('AUTHORIZED'));
+
+    // Same on a person, where the form has one field and the same problem.
+    await page.goto(ctx.base + '/users/you%40example.com');
+    await page.fill('main form.can input[name=url]', 'https://app.example.com/app1/admin/panel');
+    await Promise.all([
+      page.waitForNavigation(),
+      page.click('main form.can button[type=submit]'),
+    ]);
+    t.check("a person's check does too", page.url().endsWith('#check'), page.url());
+
     t.check('asking wrote nothing', bytes(ctx) === before, 'the access check mutated the file');
   } finally {
     await context.close();
