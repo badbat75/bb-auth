@@ -3065,8 +3065,12 @@ pub const IDENTITY_HEADER: &str = "X-Auth-Email";
 /// Read from `BB_AUTH_BUILD` at compile time, which is what `scripts/build.sh` and
 /// `scripts/package.sh` set from the checkout they are building. `option_env!` and not
 /// `env!` because a plain `cargo build` on a workstation sets nothing and must still
-/// compile: it then reports `unknown`, which is honest. The release path is the one that
-/// matters, and there the string names the commit and says whether the tree was clean.
+/// compile: it then reports `unknown`, which is honest.
+///
+/// It is the **commit** and nothing else (`g0a8d129`, plus `-dirty` when the tree was not
+/// committed), because the version half of the identity is already compiled in by cargo and
+/// must not be spelled a second time by a shell script that could get it wrong.
+/// [`version_id`] is what puts the two together.
 ///
 /// It is in the library because all three programs print it, and because a version string
 /// that meant different things in different binaries of one release would be worse than
@@ -3078,16 +3082,27 @@ pub const BUILD: &str = match option_env!("BB_AUTH_BUILD") {
     None => "unknown",
 };
 
+/// What this build **is**: `v1.99.1-g0a8d129`, or `…-dirty`, or `…-unknown` for a plain
+/// `cargo build` that no release script set anything for.
+///
+/// One string, where this used to be two facts side by side. The old shape printed the crate
+/// version and then `git describe`'s output, and **`git describe` anchors on the last tag**:
+/// a release candidate is deliberately never tagged, so on the host it read
+/// `1.99.1 (v1.0.0-18-g0a8d129)` — the true version, followed by a string that opens with a
+/// version eighteen commits and one minor number out of date. Read quickly, it said `v1.0.0`.
+///
+/// So the version comes from cargo, which cannot be wrong about it, the commit comes from
+/// [`BUILD`], and they are joined here. It still answers both questions the old pair
+/// answered: `dpkg-query -W` agrees with the version prefix, and the suffix is what an
+/// incident needs, since an untagged build's only handle is its commit.
+pub fn version_id() -> String {
+    format!("v{}-{BUILD}", env!("CARGO_PKG_VERSION"))
+}
+
 /// The one line every program answers `--version` with, and the one the gate opens its
 /// journal with.
-///
-/// Two facts, and they answer different questions. The **version** is what the packaging
-/// promises: `dpkg-query -W` agrees with it, and it is what a dependency between the three
-/// packages is written against. The **build** is what the bytes actually are, and it is the
-/// one an incident needs: a `-dirty` suffix says the tree was not committed, and a bare hash
-/// says the release was never tagged. Neither is a substitute for the other.
 pub fn version_line(program: &str) -> String {
-    format!("{program} {} ({BUILD})", env!("CARGO_PKG_VERSION"))
+    format!("{program} {}", version_id())
 }
 
 /// Claim names bb-auth consumes itself, and so cannot propagate.

@@ -166,7 +166,8 @@ cargo test session_roundtrip          # a single test by name
 # deployed green and failed every login.
 cargo run --bin bb-auth -- --self-test
 
-# Which build is this? Version plus `git describe --dirty`, and all three programs answer.
+# Which build is this? `v<version>-g<commit>`, `-dirty` when the tree was not committed,
+# and all three programs answer it.
 cargo run --bin bb-auth -- --version
 
 # Does an env file name everything the gate refuses to start without? The gate's postinst
@@ -1006,10 +1007,12 @@ section under-read itself by a fifth, and two of the seven are lockout-class.
 - **A release runs the tests and says which commit it is.** `scripts/package.sh` runs
   `cargo test --locked` before it builds (`--skip-tests` to repackage bytes already tested)
   and refuses an uncommitted tree (`--allow-dirty` to mean it); both scripts export
-  `BB_AUTH_BUILD` from `git describe --always --dirty --tags`, which `bb_auth_core::BUILD`
-  reads at compile time, `--version` prints, both banners open with, and the GUI's footer
-  carries. A plain `cargo build` sets nothing and reports `unknown`, which is the honest
-  answer for a binary nobody released. The reason is one incident: a `.deb`
+  `BB_AUTH_BUILD` as the **commit alone** (`g0a8d129`, `-dirty` when the tree was not
+  committed), which `bb_auth_core::BUILD` reads at compile time and `version_id()` joins to
+  cargo's own version: `v1.99.1-g0a8d129`, what `--version` prints, both banners open with
+  and the GUI's footer carries. Not `git describe`, which anchors on the last **tag** and so
+  opened with `v1.0.0` on every untagged candidate. A plain `cargo build` sets nothing and
+  reports `v<version>-unknown`, which is the honest answer for a binary nobody released. The reason is one incident: a `.deb`
   version reads `1.99.1-1` for a tagged release, a dirty checkout and a hand-patched
   experiment alike, and the test that catches a gate with no crypto provider was being run by
   a human remembering to. **`bb-auth --self-test`** is the other half: the offline RS256

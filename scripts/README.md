@@ -26,8 +26,8 @@ point: what is left below is the part that needs a person.
    logs every user out and the invariant nominates release notes as where it is announced.
 4. **Commit, then tag — if this is a release.** `git tag -a v2.0.0 -m "…"`, on the commit
    being released. `package.sh` refuses a dirty tree, and every binary bakes in
-   `git describe`, so a tag is what makes `bb-auth --version` on the host read as a release
-   rather than as a hash. **A release candidate is not tagged**: a `1.99.x` is built,
+   the commit, so `bb-auth --version` on the host reads `v<version>-g<commit>` and names the
+   exact bytes whether or not anybody tagged them. **A release candidate is not tagged**: a `1.99.x` is built,
    deployed and run without one, on purpose, because a tag says "you can install this and go
    back to it" and a candidate is not making that promise. Its handle is the commit
    `--version` prints, which is what a rollback uses instead.

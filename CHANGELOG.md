@@ -41,9 +41,13 @@ is a version number somebody could have gone looking for. What it contained is t
 section below, because this is the release that actually ships it.
 
 The practical consequence is worth knowing before you need it: **an untagged build's handle is
-its commit**, which every binary bakes in and `bb-auth --version` prints
-(`bb-auth 1.99.1 (v1.0.0-18-g0a8d129)`). That is what a rollback checks out when there is no
-tag to check out.
+its commit**, which every binary bakes in and `--version` prints. That string changed shape in
+this release for exactly this reason: it used to be the crate version followed by
+`git describe`, and describe anchors on the last **tag**, so an untagged candidate read
+`bb-auth 1.99.1 (v1.0.0-18-g0a8d129)` — the true version, then a string opening with a version
+one minor number and eighteen commits out of date. It now reads `bb-auth v1.99.1-g0a8d129`:
+cargo's version, which cannot be wrong, and the commit, which is what a rollback checks out
+when there is no tag to check out.
 
 **Nothing here changes the cookie format or the access-file format, so no upgrade in this
 release logs anybody out.** The settings file goes from version 1 to version 3, which needs an

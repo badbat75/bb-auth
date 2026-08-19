@@ -171,8 +171,17 @@ echo "[pkg] output   : $OUT_DIR"
 # often runs inside a WSL distribution where the checkout is a /mnt/c mount and `git` is not
 # installed at all, so asking here would answer "unknown" for every release built the
 # supported way. Whoever has a working git computes it; this only falls back.
+# The COMMIT and not `git describe`, for the reason build.sh spells out where it does the
+# same thing: a release candidate is never tagged, so describe would name a stale tag.
 if [ -z "${BB_AUTH_BUILD:-}" ]; then
-  BB_AUTH_BUILD="$(cd "$CRATE_DIR" && git describe --always --dirty --tags 2>/dev/null || echo unknown)"
+  BB_AUTH_BUILD="$(cd "$CRATE_DIR" && git rev-parse --short=7 HEAD 2>/dev/null)" || BB_AUTH_BUILD=""
+  if [ -n "$BB_AUTH_BUILD" ]; then
+    (cd "$CRATE_DIR" && git diff-index --quiet HEAD -- 2>/dev/null) ||
+      BB_AUTH_BUILD="$BB_AUTH_BUILD-dirty"
+    BB_AUTH_BUILD="g$BB_AUTH_BUILD"
+  else
+    BB_AUTH_BUILD="unknown"
+  fi
 fi
 export BB_AUTH_BUILD
 echo "[pkg] build    : $BB_AUTH_BUILD"

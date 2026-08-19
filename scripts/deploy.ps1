@@ -158,8 +158,16 @@ if ($AllowDirty) { $pkgArgs += ' --allow-dirty' }
 # answered "unknown" for every release built the supported way, which is the one path where
 # the answer matters. It also silently disarmed package.sh's refusal to package an
 # uncommitted tree, since a tree it cannot read is never dirty.
-$Build = (git -C $Repo describe --always --dirty --tags 2>$null | Select-Object -First 1)
-if (-not $Build) { $Build = 'unknown' }
+# The commit, not `git describe`: a release candidate is never tagged, so describe would
+# open with the version of a tag several releases back. See the note in scripts/build.sh.
+$Build = (git -C $Repo rev-parse --short=7 HEAD 2>$null | Select-Object -First 1)
+if ($Build) {
+    git -C $Repo diff-index --quiet HEAD -- 2>$null
+    if ($LASTEXITCODE -ne 0) { $Build = "$Build-dirty" }
+    $Build = "g$Build"
+} else {
+    $Build = 'unknown'
+}
 Write-Host "==> building the $Arch packages in WSL ($WslDistro), from $Build" -ForegroundColor Cyan
 $wslRepo = ConvertTo-WslPath $Repo
 wsl -d $WslDistro -- bash -lc "cd `"$wslRepo`" && BB_AUTH_BUILD='$Build' bash scripts/package.sh $pkgArgs"

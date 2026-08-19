@@ -36,8 +36,19 @@ BUILD_DIR="${BB_AUTH_BUILD_DIR:-$HOME/.cache/bb-auth-build}"
 # crate with no .git of its own. `bb_auth_core::BUILD` reads this variable at compile time
 # and `--version` prints it; with git unavailable it degrades to "unknown" rather than
 # failing the build.
+# The COMMIT, and deliberately not `git describe`: describe anchors on the last TAG, and a
+# release candidate is never tagged, so it would open with the version of a tag several
+# releases back. The version half of the identity is cargo's own, and `version_id()` joins
+# the two, so no shell script here can be wrong about a number it does not read.
 if [ -z "${BB_AUTH_BUILD:-}" ]; then
-  BB_AUTH_BUILD="$(cd "$CRATE_DIR" && git describe --always --dirty --tags 2>/dev/null || echo unknown)"
+  BB_AUTH_BUILD="$(cd "$CRATE_DIR" && git rev-parse --short=7 HEAD 2>/dev/null)" || BB_AUTH_BUILD=""
+  if [ -n "$BB_AUTH_BUILD" ]; then
+    (cd "$CRATE_DIR" && git diff-index --quiet HEAD -- 2>/dev/null) ||
+      BB_AUTH_BUILD="$BB_AUTH_BUILD-dirty"
+    BB_AUTH_BUILD="g$BB_AUTH_BUILD"
+  else
+    BB_AUTH_BUILD="unknown"
+  fi
 fi
 export BB_AUTH_BUILD
 
