@@ -244,10 +244,20 @@ const STATES = [
     await page.goto(ctx.base + '/users');
     await page.hover('details.settings > summary');
   }],
+  // The two surfaces where the text colour flips between the arms, which is what makes them
+  // worth a frame each: a filled accent surface carries --on-accent, white on light and dark
+  // on dark since 2026-08-19, and both of these are one. The tab is also the only pill whose
+  // hover fill is photographed anywhere.
+  ['hover-tab', async (page, ctx) => {
+    await page.goto(ctx.base + '/users');
+    await page.hover('nav a:not(.on)');
+  }],
+  ['hover-submit', async (page, ctx) => {
+    await page.goto(ctx.base + '/users/%2Badd');
+    await page.hover('main form button[type=submit]');
+  }],
   // The list box, which is the one control type the GUI gained with the Settings menu and
-  // the only one that lives on no page a `goto` can reach. Its hovered sibling, the Apply
-  // button, is deliberately not here: no `button` in this stylesheet has a hover rule, so
-  // there would be nothing in the frame to look at.
+  // the only one that lives on no page a `goto` can reach.
   ['focus-select', async (page, ctx) => {
     await page.goto(ctx.base + '/users');
     await page.click('details.settings > summary');
