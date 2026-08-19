@@ -32,9 +32,20 @@
    written TWICE, on purpose, and the two copies are kept in step by hand: there is no third
    place to put it that does not need JavaScript to flip a class.
 
-   An override file must repeat the same four arms to be complete. One that defines only
-   `:root` restyles light and leaves dark as it is here, which is a legitimate thing to
-   ship and not an error. */
+   An override file must repeat the same four arms to be complete, and the reason is
+   specificity rather than tidiness. One that defines only `:root` (0,1,0) is outranked by
+   both `[data-theme]` arms and by the guarded media query (0,2,0), so on a deployment that
+   pins `ui.theme` to `dark` or `light` such a file changes **not one colour**: the arm the
+   deployment forces keeps winning. It loads, the link element is in the page, the policy
+   allows it, and the palette does not move, which is the most confusing way for a setting to do
+   nothing. What such a file DOES still change is anything it styles by selector rather than
+   by token, since those rules meet no competitor here at all. Measured on the live
+   deployment with `ui.theme: dark` and the estate's own `common.css`: its `:root` tokens
+   were ignored wholesale and its `input`, `.card` and `.brand` rules applied.
+
+   So: a token file redefines the four arms, or it redefines nothing on a themed
+   deployment. A file that defines only `:root` is still a legitimate thing to ship, for a
+   deployment that leaves `ui.theme` on `system`. */
 :root{
   color-scheme:light dark;
 
