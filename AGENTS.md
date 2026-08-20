@@ -887,8 +887,10 @@ section under-read itself by a fifth, and two of the seven are lockout-class.
   practical cost is that an inline `style=` attribute or an `on…=` handler no longer applies
   on these pages, so arrangement goes in `AUTH_CSS` where it belonged anyway
   (`the_sign_in_page_carries_its_policy_and_the_nonce_it_names` pins the pairing, and
-  `the_policy_lets_a_login_land_on_another_host_of_the_estate` pins the landing, which the
-  suite could not see while every fixture deployment was one host). **nginx must leave both locations ungated** (`auth_request off`, exactly as for
+  `a_whole_login_lands_where_the_page_that_ran_it_permits` walks a whole login both ways in
+  and requires the redirect the gate issues to be permitted by the page that submitted the
+  form: every half of that was already tested separately and the login was broken anyway,
+  which is what a suite of fixtures on one host could never see). **nginx must leave both locations ungated** (`auth_request off`, exactly as for
   `/auth/session` and `/auth/logout`): a sign-in page behind the gate answers a signed-out
   visitor with itself, forever.
 

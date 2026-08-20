@@ -5228,47 +5228,135 @@ mod tests {
         );
     }
 
-    /// The last hop of a login, which is the one a policy can cancel after everything else
-    /// has already worked.
+    /// A whole login, both ways in, checked against the policy of the page that ran it.
     ///
-    /// Both of these pages hand the id_token over with a real top-level form `POST` to
-    /// `/auth/session`, and the answer to that `POST` is a `302` onto wherever the visitor was
-    /// going, which in a normal deployment is another host of the estate. **Chromium checks
-    /// that redirect against `form-action`**, not just the URL the form names, so a policy of
-    /// `'self'` blocks the navigation on a page whose session has already been minted: the
-    /// person is signed in, the cookie is set, and they are looking at a spinner that will
-    /// never finish. Nothing in the response says so and nothing reaches the journal, since
-    /// server-side the login succeeded.
+    /// **Every piece of this was already tested and the login was still broken**, which is
+    /// the argument for this test rather than an argument against the ones it joins.
+    /// `/auth/login` and `/auth/callback` had their policy asserted; `/auth/session` had its
+    /// `302`, its `Location` and its cookie asserted; and nothing anywhere compared the two.
+    /// `form-action` is a claim the page makes about where its form may **end up**, the
+    /// `Location` is where the gate then sends it, and Chromium is what refuses the pair when
+    /// they disagree: the `POST` is same-origin and passes, the session is minted, the cookie
+    /// is set, the journal records `session granted`, and the browser silently drops the
+    /// navigation. The person is signed in and is looking at a spinner that will never finish.
     ///
-    /// It shipped because the suite only ever served a deployment whose estate was one host,
-    /// where `'self'` is the right answer and the bug is invisible. So this fixture names a
-    /// cookie domain, which is what a multi-host deployment has, and both pages that redirect
-    /// are checked: the callback is the one the social flow lands on and it is served from the
-    /// same [`gate_csp`], but "the same function" is what was true of the broken version too.
+    /// So this walks the login end to end and asserts the **relationship** rather than a
+    /// string: it reads the `form-action` off the page, follows the same `POST` a browser
+    /// would, and requires the redirect the gate issues to be permitted by the page that
+    /// issued the form. A literal assertion would have to be rewritten by whoever broke it;
+    /// this one only passes when a login actually works.
+    ///
+    /// **Both ways in, because they are two documents.** The email flow POSTs from
+    /// `/auth/login`; a social sign-in comes back through `/auth/callback`, which POSTs the
+    /// token it has just exchanged. The last hop is the same for both and the page carrying
+    /// the policy is not, which is exactly the kind of difference "it is the same function"
+    /// hides: that was true of the broken version too. What is out of reach here is the middle
+    /// of the social leg, the code-for-token exchange, because that is Amazon's endpoint and
+    /// this suite is offline; the page that performs it and the `POST` that follows it are
+    /// both here.
+    ///
+    /// The one thing no test in this language can do is **enforce** a CSP, which only a
+    /// browser does. What it can do is stop the two halves drifting apart again, and that
+    /// drift is the whole of what went wrong. It went unseen because every fixture deployment
+    /// in this suite was a single host, where `'self'` is the right answer and the bug does
+    /// not exist; this one names a cookie domain, which is what a real deployment has.
     #[test]
-    fn the_policy_lets_a_login_land_on_another_host_of_the_estate() {
+    fn a_whole_login_lands_where_the_page_that_ran_it_permits() {
         let base = serve(token_state(gate_settings(&format!(
             r#"{{ "cookie_domain": ".badbat75.com",
                   "oauth_domain": "pool.auth.eu-central-1.amazoncognito.com",
                   "social_callback_url": "{CALLBACK_URL}",
                   "social_buttons": [{{ "idp": "Google", "audience": "social-client" }}] }}"#
         ))));
-        for path in ["/auth/login", "/auth/callback"] {
-            let r = agent().get(format!("{base}{path}")).call().unwrap();
-            assert_eq!(r.status(), 200, "{path}");
-            let csp = r
-                .headers()
-                .get("Content-Security-Policy")
-                .unwrap()
-                .to_str()
-                .unwrap();
-            // The apex and everything under it, because a CSP wildcard does not match the
-            // domain it is a wildcard of, exactly as a host pattern does not.
-            assert!(
-                csp.contains("form-action 'self' https://badbat75.com https://*.badbat75.com;"),
-                "{path} must let the login land in the estate: {csp}"
-            );
+
+        /// What a browser does with a `form-action` source list, near enough to assert on:
+        /// the redirect's origin must be the page's own (`'self'`), an origin named
+        /// literally, or a subdomain of a `https://*.d` source. A wildcard does not match
+        /// the domain it is a wildcard of, which is why the apex has to be listed beside it
+        /// and why this is worth modelling rather than string-matching.
+        fn permits(directive: &str, url: &str, own: &str) -> bool {
+            let origin: String = url.split('/').take(3).collect::<Vec<_>>().join("/");
+            directive.split(' ').any(|src| match src {
+                "'self'" => origin == own,
+                _ => match src.strip_prefix("https://*.") {
+                    Some(d) => origin
+                        .strip_prefix("https://")
+                        .is_some_and(|h| h.ends_with(&format!(".{d}"))),
+                    None => src == origin,
+                },
+            })
         }
+
+        // A subdomain and the apex: the two arms of the directive, and both are ordinary
+        // landing places here. The apex is not decoration, since a CSP wildcard no more
+        // matches it than a host pattern does.
+        for target in ["https://ai.badbat75.com/llm/", "https://badbat75.com/"] {
+            for page in ["/auth/login", "/auth/callback"] {
+                let r = agent().get(format!("{base}{page}")).call().unwrap();
+                assert_eq!(r.status(), 200, "{page}");
+                let csp = r
+                    .headers()
+                    .get("Content-Security-Policy")
+                    .unwrap()
+                    .to_str()
+                    .unwrap()
+                    .to_string();
+                let form_action = csp
+                    .split("; ")
+                    .find_map(|d| d.strip_prefix("form-action "))
+                    .expect("every page carries a form-action");
+
+                // The form POST that page makes, which is same-origin and always was: this
+                // is the hop that has never been in doubt.
+                let r = agent()
+                    .post(format!("{base}/auth/session"))
+                    .header("Sec-Fetch-Site", "same-origin")
+                    .send_form([("id_token", IT_TOKEN_OK), ("rd", target)])
+                    .unwrap();
+                assert_eq!(r.status(), 302, "{page} -> {target}");
+                let sc = r.headers().get("Set-Cookie").unwrap().to_str().unwrap();
+                assert!(sc.starts_with("bb_session=bb1."), "{sc}");
+                let location = r.headers().get("Location").unwrap().to_str().unwrap();
+                assert_eq!(location, target, "{page}");
+
+                // And the assertion the outage was: the login has succeeded, and this is
+                // whether the browser will be allowed to finish it.
+                assert!(
+                    permits(form_action, location, &base),
+                    "a login from {page} is minted and then cancelled: \
+                     form-action {form_action} does not permit {location}"
+                );
+            }
+        }
+
+        // The other direction, which says what this directive is not. `safe_rd` refuses a
+        // target outside `gate.authorized_hosts` and falls back to the sign-in page, so the
+        // authorization boundary is still the settings file's and not the policy's; and the
+        // page it falls back to is itself inside what the policy permits, or a refused `rd`
+        // would strand the visitor exactly as the bug did.
+        let r = agent()
+            .post(format!("{base}/auth/session"))
+            .header("Sec-Fetch-Site", "same-origin")
+            .send_form([("id_token", IT_TOKEN_OK), ("rd", "https://evil.example/x")])
+            .unwrap();
+        assert_eq!(r.status(), 302);
+        let fallback = r.headers().get("Location").unwrap().to_str().unwrap();
+        assert_eq!(fallback, LOGIN);
+        let csp = agent()
+            .get(format!("{base}/auth/login"))
+            .call()
+            .unwrap()
+            .headers()
+            .get("Content-Security-Policy")
+            .unwrap()
+            .to_str()
+            .unwrap()
+            .to_string();
+        let form_action = csp
+            .split("; ")
+            .find_map(|d| d.strip_prefix("form-action "))
+            .unwrap();
+        assert!(permits(form_action, fallback, &base), "{form_action}");
     }
 
     /// A deployment that sets the two `ui` URLs: the page asks for them and the policy lets
