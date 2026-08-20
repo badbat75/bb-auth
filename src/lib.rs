@@ -3749,6 +3749,38 @@ fn csp_asset_source(url: Option<&str>) -> Option<String> {
     }
 }
 
+/// The `form-action` source list for a page whose forms are answered with a redirect into the
+/// estate: `'self'` plus the cookie's domain and every host under it.
+///
+/// The source is the **cookie domain** and deliberately not [`GateSettings::authorized_hosts`],
+/// which is the list that actually decides where a login may land. Two reasons, and the second
+/// is why the obvious choice is the wrong one. [`compile_settings`] already refuses a file
+/// whose authorized hosts are not all covered by the cookie domain, so this is by construction
+/// a superset of every host a login can legitimately reach, and it is the same boundary the
+/// file already reasons about. And [`compile_host_pattern`] admits globs that a CSP
+/// host-source cannot express at all (`*bat75.com`, `a.*.com`), so building the directive out
+/// of those would mean silently dropping the entries that do not translate, which is this bug
+/// again for whoever wrote one. [`compile_cookie_domain`], by contrast, has already vouched
+/// for a bare domain with no scheme, no port, no path and no glob, so the value drops into a
+/// source expression with nothing left to escape or check.
+///
+/// An empty domain keeps `'self'`, and that is the right answer rather than a fallback: with
+/// no `Domain` the session cookie is host-only, so a cross-host landing would arrive with no
+/// session at all and there is nothing here worth permitting.
+///
+/// **This is not the authorization boundary and is not being asked to be one.** `safe_rd` in
+/// the gate still decides where a login may go, against `authorized_hosts`, exactly as before;
+/// all this directive has to do is stop cancelling a redirect the gate has already approved.
+pub fn estate_form_action(cookie_domain: Option<&str>) -> String {
+    match cookie_domain
+        .map(cookie_domain_host)
+        .filter(|d| !d.is_empty())
+    {
+        Some(d) => format!("'self' https://{d} https://*.{d}"),
+        None => "'self'".to_string(),
+    }
+}
+
 /// Assemble the `Content-Security-Policy` for a page either program serves.
 ///
 /// The shape is `default-src 'none'` plus exactly what the page needs, which is short because
@@ -3758,7 +3790,7 @@ fn csp_asset_source(url: Option<&str>) -> Option<String> {
 /// So the policy writes itself out of the settings, and an operator who sets neither gets a
 /// page that may load nothing from anywhere.
 ///
-/// The two arguments the caller supplies are the two things this file cannot know:
+/// The three arguments the caller supplies are the three things this file cannot know:
 ///
 /// * `script_src` is what the page's own scripting is allowed to be. A nonce where the script
 ///   is assembled per response (the sign-in page substitutes configuration into it), a
@@ -3766,6 +3798,16 @@ fn csp_asset_source(url: Option<&str>) -> Option<String> {
 /// * `style_src` is the same question for the inline `<style>` block that carries
 ///   [`THEME_CSS`], [`BASE_CSS`] and the caller's own layout. The operator's stylesheet is
 ///   appended to it here, because *that* source is this function's business.
+/// * `form_action` is where the page's forms may **end up**, which is not the same question as
+///   where they post. Chromium applies this directive to every hop of a form submission, the
+///   redirect the response carries included, so a page that posts to its own origin and is
+///   answered with a `302` onto another host of the estate needs that host named here or the
+///   browser cancels the navigation. That is not hypothetical: it is what a hardcoded `'self'`
+///   did to every Chromium login in a multi-host deployment, and it did it in the worst shape
+///   available, since the session was already minted and the person was left watching a
+///   spinner on a page that had succeeded. [`estate_form_action`] derives the answer for a
+///   page that redirects, `'self'` is right for a form that lands on its own origin, and
+///   `'none'` for a page that carries no form at all.
 ///
 /// `connect` is for the hosts a page's script legitimately talks to: the gate's sign-in page
 /// speaks to Cognito, and nothing else here speaks to anything. The two asset URLs are passed
@@ -3795,6 +3837,7 @@ fn csp_asset_source(url: Option<&str>) -> Option<String> {
 pub fn page_csp(
     script_src: &str,
     style_src: &str,
+    form_action: &str,
     stylesheet_url: Option<&str>,
     logo_url: Option<&str>,
     connect: &[&str],
@@ -3824,7 +3867,7 @@ pub fn page_csp(
     };
     format!(
         "default-src 'none'; script-src {script_src}; style-src {style}; img-src {img}; \
-         font-src {font}; connect-src {connect_src}; form-action 'self'; \
+         font-src {font}; connect-src {connect_src}; form-action {form_action}; \
          frame-ancestors 'none'; base-uri 'none'"
     )
 }
@@ -7058,7 +7101,7 @@ mod tests {
     #[test]
     fn the_policy_admits_exactly_the_asset_hosts_the_settings_name() {
         let csp = |style: Option<&str>, logo: Option<&str>| {
-            page_csp("'nonce-N'", "'nonce-N'", style, logo, &[])
+            page_csp("'nonce-N'", "'nonce-N'", "'self'", style, logo, &[])
         };
 
         // Neither set: nothing external may load, and an image may still be a data: URI,
@@ -7124,6 +7167,50 @@ mod tests {
         assert!(
             port.contains("style-src 'nonce-N' https://assets.internal:8443;"),
             "{port}"
+        );
+    }
+
+    /// Where a form may end up, which is a different question from where it posts, and the
+    /// one a hardcoded `'self'` got wrong for every Chromium login in this estate.
+    ///
+    /// The two spellings of a cookie domain must give one answer: RFC 6265 ignores the
+    /// leading dot, so a file that writes it and a file that does not describe the same set of
+    /// hosts, and a directive that disagreed with the cookie would let a login land somewhere
+    /// the session does not reach (or, as it did, stop one landing where it does).
+    #[test]
+    fn the_form_action_is_the_estate_the_cookie_already_covers() {
+        // The dot is the operator's spelling and not a source expression: what goes into the
+        // policy is the domain and a wildcard for what is under it.
+        let dotted = estate_form_action(Some(".badbat75.com"));
+        assert_eq!(
+            dotted, "'self' https://badbat75.com https://*.badbat75.com",
+            "a leading dot must not reach the policy"
+        );
+        assert_eq!(estate_form_action(Some("badbat75.com")), dotted);
+
+        // The apex is listed beside the wildcard because a CSP `*.x.com` does not match
+        // `x.com`, exactly as `compile_host_pattern` does not: the gate's own host is often
+        // the apex, and a login that lands there would be the same failure again.
+        assert!(dotted.contains("https://badbat75.com "), "{dotted}");
+
+        // No domain at all is a host-only cookie, so there is no second host a session could
+        // survive to and nothing here worth permitting.
+        assert_eq!(estate_form_action(None), "'self'");
+        assert_eq!(estate_form_action(Some("")), "'self'");
+
+        // And it reaches the emitted policy rather than only the helper, which is the half a
+        // unit test of the helper alone would leave unproven.
+        let live = page_csp(
+            "'none'",
+            "'none'",
+            &estate_form_action(Some(".badbat75.com")),
+            None,
+            None,
+            &[],
+        );
+        assert!(
+            live.contains("form-action 'self' https://badbat75.com https://*.badbat75.com;"),
+            "{live}"
         );
     }
 

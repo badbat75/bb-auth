@@ -2310,10 +2310,16 @@ fn respond_page(req: Request, status: u16, page: Markup, look: &Look) {
 ///
 /// `img-src` is `'none'`: this interface shows no image at all, not even the deployment's
 /// logo, so the honest policy says so.
+///
+/// `form-action` stays `'self'`, which is the one place this GUI is stricter than the gate and
+/// is meant to be. Every form here posts to this program and is answered with a `302` back to
+/// a page of this program, so nothing of the estate's wider boundary applies: a redirect off
+/// this host would be a bug, and a policy that permitted one would be the wrong place to find
+/// out.
 fn admin_csp(look: &Look) -> String {
     let script = format!("'unsafe-hashes' {}", csp_hash(SETTINGS_ONCHANGE));
     let style = csp_hash(&format!("{THEME_CSS}{BASE_CSS}{CSS}"));
-    page_csp(&script, &style, look.stylesheet, None, &[])
+    page_csp(&script, &style, "'self'", look.stylesheet, None, &[])
 }
 
 /// `302` to `location`, setting one preference cookie to `value`. `location` is built from a
@@ -8085,10 +8091,13 @@ mod tests {
             csp.contains("'unsafe-hashes'"),
             "an attribute handler needs it: {csp}"
         );
-        // Nothing else may run, load or be framed.
+        // Nothing else may run, load or be framed, and no form may leave this host: the gate
+        // widened its own `form-action` to the estate because its pages are answered with a
+        // redirect off-host, and this one must not follow it there. The semicolon is what
+        // says nothing has been added beside `'self'`.
         assert!(csp.starts_with("default-src 'none';"), "{csp}");
         assert!(csp.contains("frame-ancestors 'none'"), "{csp}");
-        assert!(csp.contains("form-action 'self'"), "{csp}");
+        assert!(csp.contains("form-action 'self';"), "{csp}");
     }
 
     #[test]

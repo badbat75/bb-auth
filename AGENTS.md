@@ -868,12 +868,27 @@ section under-read itself by a fifth, and two of the seven are lockout-class.
   source. **Every page carries a policy, and the policy is derived rather than written**:
   `PAGE_SECURITY_HEADERS` on every HTML response, and a `page_csp` of `default-src 'none'`
   plus exactly what that page uses, which is a per-response nonce (`csp_nonce`) on the two
-  inline blocks, the origins the script talks to, and the two `ui` URLs an operator may have
-  set. This is the page in the estate most worth spending one on: its whole job is to hold a
+  inline blocks, the origins the script talks to, the two `ui` URLs an operator may have
+  set, and **`form-action`, which is the estate and not `'self'`**. That last one is derived
+  too, from `gate.cookie_domain` through `estate_form_action`, and the reason it is worth a
+  clause of its own is that the constant it replaced broke every Chromium login here for a
+  day: these pages hand the id_token over with a real top-level form `POST`, the answer is a
+  `302` onto another host, and Chromium checks the **redirect** against this directive and
+  not just the URL the form names. The cookie domain is the right source rather than
+  `gate.authorized_hosts` because `compile_settings` already refuses a file whose hosts it
+  does not cover, so it is a superset by construction, and because a host pattern admits
+  globs (`*bat75.com`) that no CSP source expression can express, which building the
+  directive out of them would silently drop. It is not an authorization boundary and is not
+  asked to be one: `safe_rd` still decides where a login may land. An empty domain keeps
+  `'self'`, since a host-only cookie has no second host to survive to. The GUI stays `'self'`
+  and must, because it only ever redirects to itself.
+  This is the page in the estate most worth spending one on: its whole job is to hold a
   credential for a moment, and it is the one a GUI field can point at a third host. The
   practical cost is that an inline `style=` attribute or an `on…=` handler no longer applies
   on these pages, so arrangement goes in `AUTH_CSS` where it belonged anyway
-  (`the_sign_in_page_carries_its_policy_and_the_nonce_it_names` pins the pairing). **nginx must leave both locations ungated** (`auth_request off`, exactly as for
+  (`the_sign_in_page_carries_its_policy_and_the_nonce_it_names` pins the pairing, and
+  `the_policy_lets_a_login_land_on_another_host_of_the_estate` pins the landing, which the
+  suite could not see while every fixture deployment was one host). **nginx must leave both locations ungated** (`auth_request off`, exactly as for
   `/auth/session` and `/auth/logout`): a sign-in page behind the gate answers a signed-out
   visitor with itself, forever.
 

@@ -22,7 +22,7 @@ Versions are the crate's (`Cargo.toml`); packages add a Debian revision
 
 ## Unreleased
 
-**Due out as 1.99.1, a release candidate for 2.0.0**, and the version number says so: the
+**Due out as 1.99.2, a release candidate for 2.0.0**, and the version number says so: the
 configuration surface moved far enough in one window that calling it 1.2.0 would have
 undersold what an upgrade has to do. The findings of an architecture and process review,
 addressed; the gate's whole Cognito wiring and the estate it serves moved out of the
@@ -30,7 +30,7 @@ environment and into the settings file; and a confirmation step in front of the 
 that can stop people getting in.
 
 **A version gets a section of its own here only once it is tagged and released, and a
-release candidate is neither.** 1.99.1 is a version number, not a release: it is built,
+release candidate is neither.** 1.99.2 is a version number, not a release: it is built,
 deployed and run, and it is **not tagged**, because a tag is what says "this is a thing you
 can install and go back to" and a candidate is not that. So this section stays under this
 heading through however many 1.99.x there are, and becomes `## 2.0.0` on the day 2.0.0 is
@@ -52,6 +52,32 @@ when there is no tag to check out.
 **Nothing here changes the cookie format or the access-file format, so no upgrade in this
 release logs anybody out.** The settings file goes from version 1 to version 3, which needs an
 edit before the binaries land: see "Upgrading" below.
+
+### Fixed in 1.99.2: `form-action` blocked every Chromium login
+
+**If you are running a 1.99.1 build, upgrade.** Between 1.99.1 and this build, the
+`Content-Security-Policy` the gate's pages carry named `form-action 'self'` as a constant,
+and that blocks the last hop of every login in a deployment whose sign-in page and landing
+host are different hosts, on any Chromium browser. Firefox and Safari are unaffected, which
+is what made it look like something else.
+
+The shape it takes is the worst one available. Both gate pages hand the id_token over with a
+real top-level form `POST` to `/auth/session`, which is same-origin and passes; the response
+is a `302` onto wherever the visitor was going; and Chromium applies `form-action` to the
+**redirect target** of a form submission, not only to the URL the form names. So the session
+is minted, the cookie is set, the journal records `session granted`, and the browser silently
+cancels the navigation: the person is signed in and is looking at a spinner that will never
+finish, with nothing on screen and nothing in the log to say why.
+
+`form-action` is now derived from `gate.cookie_domain`, like everything else in that policy:
+`'self' https://<domain> https://*.<domain>`. Nothing to configure, and no new setting. The
+cookie domain is the source rather than `gate.authorized_hosts` because the settings file
+already refuses a file whose authorized hosts that domain does not cover, so it is a superset
+of every host a login can legitimately reach, and because a host pattern may be a glob that no
+CSP source expression can express. Where no cookie domain is set the directive stays `'self'`,
+which is correct: a host-only cookie has no second host to survive to. The admin GUI keeps
+`'self'` and always did, since it only ever redirects to itself. This is not a change to where
+a login may land: `safe_rd` and `gate.authorized_hosts` decide that, exactly as before.
 
 ### The gate serves its own sign-in page
 

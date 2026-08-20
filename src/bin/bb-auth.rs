@@ -131,11 +131,12 @@ use tiny_http::{Header, Request, Response, ResponseBox, Server, StatusCode};
 // access file has no opinion about — HTTP, the cookie, id_token validation, the nginx
 // contract — stays here, in one file, read top to bottom.
 use bb_auth_core::{
-    claim_name_ok, decide, decide_api_key, default_settings_path, header_safe_email, html_escape,
-    login_url_for, now, page_csp, read_access, read_settings, request_site, request_url,
-    sha256_hex, social_idp_label, stylesheet_link, version_line, Access, AccessKind, ApiKeyRecord,
-    Decision, IdentityAttr, KeyDecision, ProfileClaim, RequestSite, Settings, SocialButton,
-    Subject, UrlPattern, API_KEY_PREFIX, BASE_CSS, PAGE_SECURITY_HEADERS, THEME_CSS,
+    claim_name_ok, decide, decide_api_key, default_settings_path, estate_form_action,
+    header_safe_email, html_escape, login_url_for, now, page_csp, read_access, read_settings,
+    request_site, request_url, sha256_hex, social_idp_label, stylesheet_link, version_line, Access,
+    AccessKind, ApiKeyRecord, Decision, IdentityAttr, KeyDecision, ProfileClaim, RequestSite,
+    Settings, SocialButton, Subject, UrlPattern, API_KEY_PREFIX, BASE_CSS, PAGE_SECURITY_HEADERS,
+    THEME_CSS,
 };
 
 type HmacSha256 = Hmac<Sha256>;
@@ -2158,9 +2159,10 @@ fn global_login(settings: &Settings) -> &str {
 fn handle_callback(req: Request, state: &State) {
     let nonce = csp_nonce();
     // This page's script POSTs to the token endpoint of the OAuth domain and then hands the
-    // id_token to `/auth/session`, which `form-action 'self'` already covers. Rendered under
-    // the read lock and answered outside it, so the 404 arm and the 200 arm hold it for the
-    // same short moment.
+    // id_token to `/auth/session`, and is then answered with a redirect into the estate,
+    // which is what [`gate_csp`]'s `form-action` has to cover. Rendered under the read lock
+    // and answered outside it, so the 404 arm and the 200 arm hold it for the same short
+    // moment.
     let rendered = {
         let settings = state.settings.read().unwrap();
         social_ready(&settings).map(|(domain, callback)| {
@@ -2196,11 +2198,19 @@ fn callback_page(token_url: &str, callback_url: &str, settings: &Settings, nonce
 /// `<style>` [`look_subs`] builds and the `<script>` the template carries, which between them
 /// are everything either page executes: there is no second script, no external one, and
 /// nothing loaded from anywhere the settings did not name.
+///
+/// `form-action` is the estate's, from [`estate_form_action`], and it is the one source here
+/// that is not about what the page loads. Both of these pages hand the id_token over with a
+/// real top-level form `POST` to `/auth/session`, and the answer to that `POST` is a `302`
+/// onto wherever the visitor was going, which in this system is another host. Chromium checks
+/// that redirect against this directive, so a policy naming only `'self'` blocks the last hop
+/// of a login that has already succeeded.
 fn gate_csp(settings: &Settings, nonce: &str, connect: &[&str]) -> String {
     let src = format!("'nonce-{nonce}'");
     page_csp(
         &src,
         &src,
+        &estate_form_action(settings.cookie_domain.as_deref()),
         settings.stylesheet_url.as_deref(),
         settings.logo_url.as_deref(),
         connect,
@@ -2246,10 +2256,13 @@ fn respond_html(req: Request, state: &State, status: u16, title: &str, msg: &str
     };
     // This page has no script of its own and nothing to say to Cognito: it is a sentence and
     // a link back. `'none'` rather than the nonce, because a policy that permits what the
-    // page does not do is a policy with nothing left to enforce.
+    // page does not do is a policy with nothing left to enforce. The same reasoning is what
+    // makes `form-action` `'none'` here and the estate's on the two pages that redirect: this
+    // one carries a link, and a link is not a form submission.
     let csp = page_csp(
         "'none'",
         &format!("'nonce-{nonce}'"),
+        "'none'",
         settings.stylesheet_url.as_deref(),
         settings.logo_url.as_deref(),
         &[],
@@ -5188,7 +5201,10 @@ mod tests {
             .to_string();
         assert!(csp.starts_with("default-src 'none';"), "{csp}");
         assert!(csp.contains("frame-ancestors 'none'"), "{csp}");
-        assert!(csp.contains("form-action 'self'"), "{csp}");
+        // These fixture settings name no cookie domain, so the estate is a single host and
+        // `'self'` is the whole answer. The semicolon is part of the assertion: it is what
+        // says nothing has been quietly added beside it.
+        assert!(csp.contains("form-action 'self';"), "{csp}");
         assert!(
             body.contains(&format!("<script nonce=\"{nonce}\">")),
             "the script must carry the policy's nonce"
@@ -5210,6 +5226,49 @@ mod tests {
                 .status(),
             200
         );
+    }
+
+    /// The last hop of a login, which is the one a policy can cancel after everything else
+    /// has already worked.
+    ///
+    /// Both of these pages hand the id_token over with a real top-level form `POST` to
+    /// `/auth/session`, and the answer to that `POST` is a `302` onto wherever the visitor was
+    /// going, which in a normal deployment is another host of the estate. **Chromium checks
+    /// that redirect against `form-action`**, not just the URL the form names, so a policy of
+    /// `'self'` blocks the navigation on a page whose session has already been minted: the
+    /// person is signed in, the cookie is set, and they are looking at a spinner that will
+    /// never finish. Nothing in the response says so and nothing reaches the journal, since
+    /// server-side the login succeeded.
+    ///
+    /// It shipped because the suite only ever served a deployment whose estate was one host,
+    /// where `'self'` is the right answer and the bug is invisible. So this fixture names a
+    /// cookie domain, which is what a multi-host deployment has, and both pages that redirect
+    /// are checked: the callback is the one the social flow lands on and it is served from the
+    /// same [`gate_csp`], but "the same function" is what was true of the broken version too.
+    #[test]
+    fn the_policy_lets_a_login_land_on_another_host_of_the_estate() {
+        let base = serve(token_state(gate_settings(&format!(
+            r#"{{ "cookie_domain": ".badbat75.com",
+                  "oauth_domain": "pool.auth.eu-central-1.amazoncognito.com",
+                  "social_callback_url": "{CALLBACK_URL}",
+                  "social_buttons": [{{ "idp": "Google", "audience": "social-client" }}] }}"#
+        ))));
+        for path in ["/auth/login", "/auth/callback"] {
+            let r = agent().get(format!("{base}{path}")).call().unwrap();
+            assert_eq!(r.status(), 200, "{path}");
+            let csp = r
+                .headers()
+                .get("Content-Security-Policy")
+                .unwrap()
+                .to_str()
+                .unwrap();
+            // The apex and everything under it, because a CSP wildcard does not match the
+            // domain it is a wildcard of, exactly as a host pattern does not.
+            assert!(
+                csp.contains("form-action 'self' https://badbat75.com https://*.badbat75.com;"),
+                "{path} must let the login land in the estate: {csp}"
+            );
+        }
     }
 
     /// A deployment that sets the two `ui` URLs: the page asks for them and the policy lets
