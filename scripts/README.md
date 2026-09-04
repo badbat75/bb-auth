@@ -192,7 +192,8 @@ ssh user@host 'sudo bash -s' < ./scripts/verify.sh
 
 Read-only, standalone, exits non-zero if any check fails. Packages configured, no unit
 shadowed, gate active, `GET /auth/healthz == ok`, `GET /auth/validate` without a cookie
-`== 401`, HMAC key present, the access file parsing under the gate's own parser, a clean
+`== 401`, `GET /auth/denied == 403` (the refusal page answers its own status, which is what
+`error_page 403 = @bb_denied` copies), HMAC key present, the access file parsing under the gate's own parser, a clean
 `listening on` in the journal since the unit came up, and with the GUI installed its own
 liveness plus the ownership its write path needs.
 

@@ -22,7 +22,13 @@ Versions are the crate's (`Cargo.toml`); packages add a Debian revision
 
 ## Unreleased
 
-**Due out as 1.99.1, a release candidate for 2.0.0**, and the version number says so: the
+**Due out as 1.99.3, and 1.99.2 is deliberately skipped**: a build carrying that number was
+deployed to a host on 2026-08-20 from a commit (`g3b40e77`) that is in no checkout this
+repository can see, so the number is spent whatever its contents were. Reusing it would put
+two different sets of bytes behind one version string, which is the failure the commit in the
+version string exists to catch rather than to cause.
+
+**A release candidate for 2.0.0**, and the version number says so: the
 configuration surface moved far enough in one window that calling it 1.2.0 would have
 undersold what an upgrade has to do. The findings of an architecture and process review,
 addressed; the gate's whole Cognito wiring and the estate it serves moved out of the
@@ -30,7 +36,7 @@ environment and into the settings file; and a confirmation step in front of the 
 that can stop people getting in.
 
 **A version gets a section of its own here only once it is tagged and released, and a
-release candidate is neither.** 1.99.1 is a version number, not a release: it is built,
+release candidate is neither.** 1.99.3 is a version number, not a release: it is built,
 deployed and run, and it is **not tagged**, because a tag is what says "this is a thing you
 can install and go back to" and a candidate is not that. So this section stays under this
 heading through however many 1.99.x there are, and becomes `## 2.0.0` on the day 2.0.0 is
@@ -69,6 +75,47 @@ edit before the binaries land: see "Upgrading" below.
   `/auth/session` and `/auth/logout`: a sign-in page behind `auth_request` answers a signed-out
   visitor with itself, forever.
 
+### A refused request that is signed in gets a `403`, and a page
+
+* **`/auth/validate` now answers `403` when it identified the caller and no scope admits
+  them**, and keeps `401` for a caller it could not identify. That ends a redirect loop that
+  had no error anywhere in it: nginx turns a `401` into the login page, and somebody who is
+  already signed in signs straight back in, returns to the URL that refused them, and is
+  refused again. The line is drawn where each credential is *verified*, so a live `bbk_` key,
+  a valid id_token and an unexpired session cookie all reach the new status; an expired
+  cookie, a forged one and no credential at all keep the old one. The `403` deliberately
+  carries no `X-Auth-Login-URL`: there is nothing to redirect to.
+* **nginx needs one more line per gated location**, and without it a `403` is whatever your
+  server block does with an unhandled one:
+
+  ```nginx
+  error_page 401 = @bb_signin;
+  error_page 403 = @bb_denied;          # new
+  location @bb_denied {
+      proxy_set_header X-Original-URL $bb_url;
+      proxy_pass http://127.0.0.1:4181/auth/denied;
+  }
+  ```
+
+* **All four of the gate's pages are now files** under `src/assets/`: `login.html`,
+  `callback.html`, and the two that used to be built in a `format!` in the middle of the
+  gate, `denied.html` and `error.html` (the page a failed `/auth/session` lands on). Same
+  `__BB_*__` substitution, same shared `<style>`, so a page is edited, diffed and reviewed as
+  HTML.
+* **The gate serves the page**, at `/auth/denied`, in the palette the `ui` section gives every
+  other page. It answers `403` itself, so `error_page 403 = @bb_denied` keeps the status
+  honest, and it says that this account cannot open that page **without** saying whether the
+  page exists: a URL outside every application is refused exactly like one whose scope
+  excludes you. Its one link is a sign-out, since signing in as the same person lands right
+  back on it. Leave the location ungated, like the other two pages.
+* **Two ways to use your own page instead**: `gate.denied_url` in the settings file for the
+  whole deployment, and `denied_url` on an application in the access file for one area.
+  Because an area is an absolute prefix, that second one is **per host**: one gate fronting
+  several hosts gives each host its own refusal page, written where every other property of
+  an area is. `/auth/denied` then answers `302` to it, which is why the nginx snippet above
+  forwards `X-Original-URL`: without it the area cannot be resolved and the global page
+  answers, which still says no.
+
 ### Security
 
 * `POST /auth/session` now refuses a request the browser reports as `cross-site`, or one
@@ -86,6 +133,15 @@ edit before the binaries land: see "Upgrading" below.
   `font-src` follows the stylesheet and only the stylesheet, so a token file may bring its
   own `@font-face` from the host it came from (or a `data:` face), and no other host may
   serve a typeface to these pages.
+* **The admin GUI's own stylesheet was being refused by its own policy on every build made
+  on Windows**, which is every build this project ships: an HTML parser collapses CRLF before
+  the CSP check runs, so a browser hashes the LF form of an inline block, while `csp_hash`
+  hashed the bytes `include_str!` embedded, and this repository's working tree is CRLF
+  (`core.autocrlf=true`, and the cross-compile builds from that same tree). The result was an
+  admin interface rendered as unstyled markup, with nothing in any log and nothing in a test:
+  the test that checks the pairing compared the function against itself. `csp_hash` now
+  normalises newlines, and the test pins a literal hash rather than a round trip. The gate's
+  own pages were never affected, because they use a per-response nonce.
 * The admin GUI refuses to start on a non-loopback address unless
   `BB_AUTH_WEB_ALLOW_NONLOOPBACK=1` says it was meant. Its only credential is a header
   nginx injects, so a bind to `0.0.0.0` was an unauthenticated remote writer of the access
@@ -108,6 +164,13 @@ edit before the binaries land: see "Upgrading" below.
 
 ### The settings file, now at `"version": 3`
 
+* **`gate.denied_url`**, the nineteenth setting: where a `403` lands, empty meaning the gate's
+  own `/auth/denied`. It is a new optional field rather than a format change, so a version-3
+  file that does not mention it is read exactly as before. It passes the three-part rule more
+  cleanly than anything else in the file, because it is read *after* somebody has been
+  refused: the worst a wrong value achieves is a broken link shown to a person who was never
+  getting in, which is why it is not a sixth change that asks before it answers. An
+  application's own `denied_url` in the access file overrides it for that area.
 * **The user pool, the cookie's domain and the authorized hosts moved in too**, and three more
   environment variables are no longer read: `BB_AUTH_COGNITO_ISSUER`, `BB_AUTH_COOKIE_DOMAIN`
   and `BB_AUTH_AUTHORIZED_HOSTS`, replaced by `gate.issuer`, `gate.cookie_domain` and

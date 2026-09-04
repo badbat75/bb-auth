@@ -134,8 +134,9 @@ same goes for README's operator-facing version.
 
 | Method | Path | Caller | Behavior |
 |--------|------|--------|----------|
-| `GET` | `/auth/validate` | nginx only (`auth_request`) | `204` naming the identity in one header per `identity_attrs` entry (default `X-Auth-Email`) if an accepted credential authorizes the request URL, otherwise `401` + `X-Auth-Login-URL: <this area's login page>`. A `204` also carries one header per `profile_claims` entry the credential knows (percent-encoded; omitted otherwise). Accepts (in order) an `Authorization: Bearer bbk_…` static API key, an `Authorization: Bearer <id_token>`, or the session cookie, and then no credential at all, which only an `anonymous` scope grants. A request with no credential names nobody; one that carried a valid credential is still named, so the header is bimodal on such a scope and an application there must treat it as "if you know who this is, say so". A **vetoed** identity is never named. See §12. |
+| `GET` | `/auth/validate` | nginx only (`auth_request`) | `204` naming the identity in one header per `identity_attrs` entry (default `X-Auth-Email`) if an accepted credential authorizes the request URL; `401` + `X-Auth-Login-URL: <this area's login page>` when nothing identified the caller; `403`, and no login page, when something did and no scope admits them. A `204` also carries one header per `profile_claims` entry the credential knows (percent-encoded; omitted otherwise). Accepts (in order) an `Authorization: Bearer bbk_…` static API key, an `Authorization: Bearer <id_token>`, or the session cookie, and then no credential at all, which only an `anonymous` scope grants. A request with no credential names nobody; one that carried a valid credential is still named, so the header is bimodal on such a scope and an application there must treat it as "if you know who this is, say so". A **vetoed** identity is never named. See §12. |
 | `GET`, `HEAD` | `/auth/login[?rd=…]` | browser | The sign-in page: runs the Cognito `USER_AUTH` flow in the browser and POSTs the resulting id_token to `/auth/session`. Self-contained (palette, layout, script and both languages in the document; only the operator's optional stylesheet and logo are external). `rd` is validated here with the same `rd_url_allowed` `safe_rd` uses and dropped if it fails; with none, the browser's `Referer` answers in its place, through that same check and absolute-only, since this page resolves nothing against nginx. Social buttons appear only when `gate.oauth_domain`, `gate.social_callback_url` and at least one `gate.social_buttons` entry add up to a social sign-in that could work. |
+| `GET`, `HEAD` | `/auth/denied` | browser (through nginx `error_page 403`) | `403` with the refusal page, in the same palette every other page wears. Says that this account cannot open that page without saying whether the page exists, and links to a sign-out rather than a sign-in. `302` to the operator's own page instead when the area's `denied_url`, or `gate.denied_url`, names one; the area is resolved from `BB_AUTH_ORIGINAL_URL_HEADER` when nginx forwards it here, and without it the global page answers. |
 | `GET`, `HEAD` | `/auth/callback` | browser | Finishes a social sign-in: exchanges the OAuth code and the PKCE verifier for tokens, offers a profile form when the IdP sent no names, and delivers the id_token exactly as the sign-in page does. `404` when no social client is configured. |
 | `POST` | `/auth/session` | browser | Body `application/x-www-form-urlencoded`: `id_token=…&rd=…`. Fully validates the id_token; on success sets the session cookie and `302`s to `rd` (open-redirect guarded). |
 | `GET` | `/auth/logout[?rd=…]` | browser | Sets an expired (Max-Age=0) cookie and `302` → `rd` (same `safe_rd` guard), or, with no `rd`, the browser's `Referer` (same guard), and failing both the login page. Cross-site requests (`Sec-Fetch-Site: cross-site`) are ignored (no cookie clear) to block CSRF-forced logout. Reads nothing about the host it was called on, and the expiring cookie carries the same `Domain` as the minted one, so under a shared `gate.cookie_domain` one mounted location logs the browser out of every vhost: see README "One logout endpoint for every vhost". |
@@ -293,6 +294,7 @@ so an edit made by either is one the other would accept.
 | `gate.social_providers` | `[]` → any | `providerName`s (case-insensitive, e.g. `Google`, `SignInWithApple`) the relaxation above applies to. No effect unless it is on. |
 | `gate.client_id` | `""` → no login can complete | The Cognito **app client the email flow uses**: what `/auth/login` runs `USER_AUTH` against, and the first accepted audience. Empty is tolerated, because a package creates this file and cannot know the value, and reported loudly at startup. |
 | `gate.login_url` | `""` → the gate's own `/auth/login` | Where a `401` sends people, and where a rejected redirect target lands. Absolute https when set; an application's own `login_url` in the access file overrides it for that area. |
+| `gate.denied_url` | `""` → the gate's own `/auth/denied` | Where a `403` lands. Absolute https when set, and `/auth/denied` then answers `302` to it; an application's own `denied_url` in the access file overrides it for that area, which is what makes a refusal page per host. The one URL here that can close nothing: it is read after somebody has already been refused. |
 | `gate.oauth_domain` | `""` → no social sign-in | Cognito's hosted UI, as a bare host with no scheme and no path. The authorize and token URLs are derived from it. |
 | `gate.social_callback_url` | `""` → no social sign-in | The `redirect_uri`, which Cognito compares **byte for byte** with the one registered on every app client in `social_buttons`. |
 | `gate.social_buttons` | `[]` → none | Which social buttons `/auth/login` offers, in the order given, and **the app client each runs through**: `{ "idp": "Google", "audience": "<app client id>" }`. The app client is per button because Cognito federates per app client. Empty offers none, which is the same page a deployment with no `oauth_domain` serves. The admin GUI renders it as a table, a row per way in (the email row first, then `SOCIAL_IDPS`, then any name already in the file), with the tick the only writable column besides the app clients. Not to be confused with `social_providers` above: that one decides whose unverified email is accepted, this one what a visitor is shown. |
@@ -774,7 +776,10 @@ the key has not expired. What the key may then *reach* is `decide`'s, through
 
 An application's `login_url` overrides `gate.login_url` for its whole area
 (`login_url_for`); it names the login page on `/auth/validate`'s `401`, the fallback for a
-rejected `rd`, and the link on `/auth/session`'s error pages. There is no ambiguity to
+rejected `rd`, and the link on `/auth/session`'s error pages. Its `denied_url` is the same
+field one page along (`denied_url_for`): where a `403` in that area lands. Since an area is an
+absolute prefix it names a host, so those two are also how one gate fronting several hosts
+gives each host its own pages. There is no ambiguity to
 resolve: areas do not overlap, so at most one application answers, and it answers
 whether or not any of its scopes covers the URL. A `401` inside an application is exactly
 when its own login page is wanted.
@@ -794,9 +799,19 @@ location /app1 {
     auth_request     /internal/auth-gate;
     auth_request_set $bb_login $upstream_http_x_auth_login_url;
     error_page 401 = @bb_signin;
+    error_page 403 = @bb_denied;
 }
 location @bb_signin { return 302 $bb_login_safe?rd=$scheme://$host$request_uri; }
+location @bb_denied {
+    proxy_set_header X-Original-URL $bb_url;
+    proxy_pass http://127.0.0.1:4181/auth/denied;
+}
 ```
+
+The `403` arm is the other half of the same rule, and it needs no header of the gate's: the
+page is a fixed path on the gate, the choice of *which* page lives in the two files
+(`denied_url_for`), and `X-Original-URL` is only what lets the area's own page be found. `=`
+is what keeps the status honest, since `/auth/denied` answers `403` itself.
 
 `auth_request_set` reads the subrequest's response headers even when it answered `401`,
 which is what makes this work at all. The `map` is not decoration: an unset `$bb_login` (a
@@ -929,7 +944,17 @@ membership and the key's own restriction follow in that order.
 A failed bearer falls through to the cookie check, so a stray `Authorization` header never
 blocks an otherwise-valid cookie, and only then is the anonymous case considered, so a
 credential that *does* authorize still names its holder downstream. Any authorized
-credential → `204`; otherwise `401`.
+credential → `204`.
+
+The refusal is two statuses, and which one it is turns on whether the gate **identified** the
+caller rather than on whether it authorized them: a `bbk_` key that resolved to a live row, an
+id_token that validated, or a session cookie whose signature held all mean the client is who
+they say they are, and a refusal after that is `403`. Everything else is `401` + the login
+page. The reason is nginx's answer to each: a `401` becomes a redirect to the login page, and
+a browser that already holds a valid cookie signs straight back in, returns to the URL that
+refused it and is refused again, for ever, with no error anywhere. Signing in cannot fix a
+`403`, so nginx answers that one with a page (`error_page 403 = @bb_denied` → `/auth/denied`)
+and no redirect at all.
 
 ### Identity propagation (`identity_attrs`)
 

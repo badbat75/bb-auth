@@ -16,7 +16,7 @@ somebody out or lets somebody in.
 | [Commands](#commands) | what to run, and **which check matches which change** |
 | [After a dependency change](#after-a-dependency-change) | the two `cargo tree` greps, and what they mean |
 | [Conventions](#conventions) | English, why-not-what, no new em-dashes, one home per rule |
-| [Invariants](#invariants--do-not-break-these) | **36 rules, in nine groups, indexed at the top of the section** |
+| [Invariants](#invariants--do-not-break-these) | **37 rules, in nine groups, indexed at the top of the section** |
 | [Config & deploy notes](#config--deploy-notes) | the configuration reference (the deploy *rules* are invariants) |
 
 ## What this is
@@ -28,7 +28,11 @@ accepts per-request bearer credentials — a Cognito `id_token` or a static `bbk
 **It serves that login page itself**, at `/auth/login` (and `/auth/callback` for a social
 sign-in), which is not a widening of the job but a removal of three duplicated values: the
 page needs the app-client id, the issuer's endpoint and the hosts a post-login `rd` may land
-on, and the gate already holds all three as the values it validates against.
+on, and the gate already holds all three as the values it validates against. It serves the
+**refusal** page too, at `/auth/denied`, for the same kind of reason one page along: a `403`
+has to land somewhere, that somewhere needs the palette and the brand the gate is already
+configured with, and the alternative was nginx answering a refusal with the login page, which
+is the redirect loop the `403` exists to end.
 
 The access list is a JSON **access file** (`BB_AUTH_ACCESS_FILE`, default
 `access.json`, and it says *access* rather than *users* because the roster is one section of
@@ -61,9 +65,11 @@ One crate, four targets, and the split is load-bearing:
   more than one program must agree on, byte for byte.
 - **[src/bin/bb-auth.rs](src/bin/bb-auth.rs)** — **the gate**, and everything the access file has no
   opinion about: HTTP, the session cookie, id_token validation, the nginx contract, and the
-  three pages it serves: the sign-in page and the social callback are templates in
-  [src/assets/](src/assets/) whose `__BB_*__` placeholders `render_page` fills, and the error
-  page is built inline in `respond_html`, being one sentence and a link. Still **one file**
+  four pages it serves, and all four are templates in [src/assets/](src/assets/) whose
+  `__BB_*__` placeholders `render_page` fills: the sign-in page, the social callback, the
+  refusal page a `403` lands on and the error page a failed `/auth/session` lands on. A page
+  is HTML, and HTML is edited, diffed and reviewed as HTML; the two small ones were built in a
+  `format!` until somebody had to change one. Still **one file**
   (about 5,000 lines), still read top to bottom. The GUI is about 8,400 and is navigated by
   its section order rather than by that slogan.
 - **[src/bin/bb-auth-adm.rs](src/bin/bb-auth-adm.rs)** — the access-file admin CLI: CRUD over
@@ -192,6 +198,9 @@ cargo run --bin bb-auth-adm -- --help
 cargo run --bin bb-auth-adm -- -f .\deploy\access.json show
 cargo run --bin bb-auth-adm -- -f .\deploy\access.json app add mpa --base 'https://app.x.com/mpa'
 cargo run --bin bb-auth-adm -- -f .\deploy\access.json scope add mpa admin --url 'https://app.x.com/mpa/admin/*' --access restricted --user bob@x.com
+# The two pages this area sends people to, and since an area names a host, this is also how
+# one gate fronting several hosts gives each host its own sign-in and refusal page.
+cargo run --bin bb-auth-adm -- -f .\deploy\access.json app set mpa --denied-url 'https://app.x.com/no-entry'
 cargo run --bin bb-auth-adm -- -f .\deploy\access.json user add bob@x.com
 cargo run --bin bb-auth-adm -- -f .\deploy\access.json key add bob@x.com --id laptop --duration 365d
 cargo run --bin bb-auth-adm -- -f .\deploy\access.json can bob@x.com https://app.x.com/mpa/admin/panel
@@ -247,7 +256,7 @@ passed, on code untouched since it passed, tells you nothing you did not already
 | `src/assets/admin.css` alone | `cargo test --bin bb-auth-web` and `node e2e/shots.js <scene>` |
 | `src/assets/theme.css` or `src/assets/base.css` | `cargo test` (the palette's four arms are pinned by `the_theme_defines_every_token_in_all_four_arms`, the sharing by `only_the_palette_names_a_colour` and `the_components_are_shared_and_the_layouts_only_arrange_them`) and `node e2e/shots.js config` **and a look at `/auth/login`**: both files are emitted by both programs, so a change to either repaints the admin interface and the sign-in page together, and half of that is invisible to the admin's own suite |
 | `src/assets/auth.css` alone | `cargo test --bin bb-auth` and a look at the page in a browser |
-| `src/assets/*.html` | `cargo test --bin bb-auth` (the page tests read the rendered document) and a look at the page in a browser: no test can tell you a login form is unusable |
+| `src/assets/*.html` | `cargo test --bin bb-auth` (the page tests read the rendered document) and a look at the page in a browser: no test can tell you a login form is unusable, or that a refusal reads as an accusation. All four pages are here: `login.html`, `callback.html`, `denied.html`, `error.html` |
 | `maud` markup, or a `K` translation key | the above, plus `cargo test` (several tests assert on rendered HTML) and `node e2e/run.js` |
 | A signature, a handler, the gate, or the library | all of it, plus `cargo clippy --all-targets` |
 | A dependency version | all of it, plus the cross-compile and the dependency check below |
@@ -322,7 +331,7 @@ is fatal on failure, so reaching the `listening on …` line proves the fetch, t
 
 ## Invariants — do not break these
 
-**The rules, in one place.** Thirty-six of them, grouped. The lead sentence of each is
+**The rules, in one place.** Thirty-seven of them, grouped. The lead sentence of each is
 its whole claim; the prose under it is the reason, which is the part worth reading before
 changing anything. Seven of these used to sit in "Config & deploy notes" below, so this
 section under-read itself by a fifth, and two of the seven are lockout-class.
@@ -371,6 +380,7 @@ section under-read itself by a fifth, and two of the seven are lockout-class.
 - id_token validation
 - There is no canonical service base URL.
 - The gate never redirects a gated request; nginx does.
+- A refusal a login cannot fix is a `403`, and nginx answers it with a page rather than a hop.
 - The pages the gate serves are complete on their own, and the operator's stylesheet is an addition to one.
 - Social sign-in is four settings that stand or fall together, and none of them is an env var.
 - `safe_rd` guards the post-login redirect
@@ -433,7 +443,7 @@ section under-read itself by a fifth, and two of the seven are lockout-class.
   operator: flags, warnings, and the wording of a verdict. HTTP, the cookie, the JWT,
   the env, the nginx contract and the pages themselves are the **gate's**, and stay in
   `src/bin/bb-auth.rs` and `src/assets/` — which is still one file, read top to bottom, plus
-  three templates it fills. Do not move gate code into the library to "share" it
+  the four templates it fills. Do not move gate code into the library to "share" it
   with the CLI; the CLI has no business with any of it. The two authorization functions in
   `bb-auth.rs` (`authorize`, `bearer_apikey`) are thin wrappers that add the log line
   and the wall clock to the library's decision — keep them thin, and keep the rule in the
@@ -487,8 +497,9 @@ section under-read itself by a fifth, and two of the seven are lockout-class.
 
 - **The settings file is what must change without a restart, and the rule for what goes in it
   is three-part.** A setting belongs there iff it is (1) read **per request**, (2) unable to
-  lock the operator out **irreversibly**, and (3) not a secret. Eighteen pass, in three
-  sections: `gate.issuer`, `gate.client_id`, `gate.login_url`, `gate.cookie_domain`,
+  lock the operator out **irreversibly**, and (3) not a secret. Nineteen pass, in three
+  sections: `gate.issuer`, `gate.client_id`, `gate.login_url`, `gate.denied_url`,
+  `gate.cookie_domain`,
   `gate.authorized_hosts`, `gate.profile_claims`, `gate.identity_attrs`,
   `gate.allow_unverified_social`, `gate.social_providers`, `gate.oauth_domain`,
   `gate.social_callback_url`, `gate.social_buttons`, `gate.session_ttl_secs`; `web.admins`;
@@ -496,6 +507,15 @@ section under-read itself by a fifth, and two of the seven are lockout-class.
   the **look of every page either program serves** and the one section both of them read. The
   `ui` four pass the middle part precisely because the built-in stylesheet is complete: the
   worst a wrong value there achieves is an unstyled page, never a closed door.
+
+  **The nineteenth is `gate.denied_url`, and the argument is made out loud because this
+  section demands it of the next one too.** It is read per request, on `/auth/denied`; it is
+  no secret, since it is a `Location:` a browser follows; and it passes the middle part more
+  cleanly than anything else here, because it is read **after** somebody has already been
+  refused. It cannot close a door: the worst a wrong value achieves is that a person who was
+  never getting in sees a broken link instead of a page. That is also why it is not a
+  sixth guarded change, and why an application may override it in the access file
+  (`denied_url_for`), which is what makes a refusal page per host.
 
   **Part 2 is not "cannot break a login", and saying so is what makes the list honest.**
   Several of these can. The test is whether the person who made the edit can still undo it,
@@ -847,8 +867,35 @@ section under-read itself by a fifth, and two of the seven are lockout-class.
   no env, which is what lets `--check-access` run with no config, and moving the check to startup
   would turn a typo into a boot loop that `--check-access` never saw.
 
+- **A refusal a login cannot fix is a `403`, and nginx answers it with a page rather than a
+  hop.** `/auth/validate` has two refusals and the line between them is whether the gate
+  **identified** the caller, never whether it authorized them: a `bbk_` key that resolved to a
+  live row, an id_token that validated, or a session cookie whose signature held are all
+  clients this gate knows, and a refusal after that is `403` (`respond_forbidden`, and the
+  `identified` flag set where each credential is *verified*). Everything else is the `401`
+  above. The reason is what nginx does with each. A `401` is a redirect to the login page, so
+  answering one to somebody already signed in is a loop with no error in it anywhere: the
+  login page hands back the cookie they already had, the gated URL refuses it again, and the
+  deployment is working exactly as configured throughout. A `403` carries **no**
+  `LOGIN_URL_HEADER`, and that omission is the rule rather than an oversight: there is nothing
+  to redirect to, because signing in again cannot change the answer. An `anonymous` scope is
+  still asked *before* either refusal, for the reason it outranks the `denied` veto: it grants
+  with no credential at all, so a client refused there could simply have sent less. The gate
+  serves the page itself at `/auth/denied` (`403`, so `error_page 403 = @bb_denied` keeps the
+  status honest), and it must say no **without saying whether the URL exists**: a URL outside
+  every application is refused exactly like one whose scope excludes this person, and telling
+  a visitor which they hit is an enumeration oracle for anybody with any account at all. The
+  operator's own page replaces it through `denied_url_for`, the application's `denied_url`
+  before `gate.denied_url`, which is `login_url_for` one page along and is what makes a
+  refusal page **per host**, since an area is an absolute prefix. That override is the one
+  `302` this design does not push into nginx, and the reason is nginx: proxying to a host a
+  file names would need a resolver and a second upstream, so the recipe stays a fixed
+  `proxy_pass` to `/auth/denied` and the choice of page stays where every other hot value is.
+  It cannot loop, because nothing gates the page it names.
+
 - **The pages the gate serves are complete on their own, and the operator's stylesheet is an
-  addition to one.** `/auth/login`, `/auth/callback` and the error page carry their palette
+  addition to one.** `/auth/login`, `/auth/callback`, the refusal page (`/auth/denied`) and
+  the error page carry their palette
   (`THEME_CSS`), the components built from it (`BASE_CSS`, the same bytes `bb-auth-web`
   emits), their own arrangement of them (`AUTH_CSS`), their script and their two languages
   **inline**:
@@ -873,9 +920,13 @@ section under-read itself by a fifth, and two of the seven are lockout-class.
   credential for a moment, and it is the one a GUI field can point at a third host. The
   practical cost is that an inline `style=` attribute or an `on…=` handler no longer applies
   on these pages, so arrangement goes in `AUTH_CSS` where it belonged anyway
-  (`the_sign_in_page_carries_its_policy_and_the_nonce_it_names` pins the pairing). **nginx must leave both locations ungated** (`auth_request off`, exactly as for
+  (`the_sign_in_page_carries_its_policy_and_the_nonce_it_names` pins the pairing). **nginx must leave all three page locations ungated** (`auth_request off`, exactly as for
   `/auth/session` and `/auth/logout`): a sign-in page behind the gate answers a signed-out
-  visitor with itself, forever.
+  visitor with itself, forever, and a refusal page behind it is a refusal nobody can ever be
+  shown. The refusal page and the error page go through one `respond_card`, which is
+  `look_subs` plus that page's own values: the two differ by a template and three
+  substitutions, and neither carries a script, so both get `script-src 'none'` rather than the
+  nonce the other two need.
 
 - **Social sign-in is four settings that stand or fall together, and none of them is an env
   var.** `gate.oauth_domain` (the hosted UI, a bare host), `gate.social_callback_url` (the

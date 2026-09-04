@@ -31,7 +31,7 @@ For the service's internal structure and config, see
         └─ proxy to bb-auth GET /auth/validate
                  (no Cookie, or invalid cookie)
                  └─ 401
-        error_page 401 = @bb_signin
+        error_page 401 = @bb_signin   (403 → @bb_denied: see Phase 4)
  nginx ──302 https://login.example.com/?rd=https://app.example.com/──▶ browser
 ```
 
@@ -213,12 +213,15 @@ would be `/internal/auth-gate`. For programmatic clients it also forwards the
    d. no credential at all, which only an `anonymous` scope grants
    decide(subject, url): resolve url → one application (areas do not overlap) → the
       first scope, in file order, whose urls cover it. anonymous → granted, ahead of
-      the veto. Else denied? → 401. Else authenticated → any Cognito identity;
+      the veto. Else denied? → refused. Else authenticated → any Cognito identity;
       restricted → the credential class, then the roster, then membership, then the
       key's own `scopes` restriction. The profile claims take no part in this.
    └─ 204 naming the identity in one header per configured attribute (default
-      X-Auth-Email) if any of a/b/c/d authorizes, else 401
+      X-Auth-Email) if any of a/b/c/d authorizes
       (+ one header per configured profile claim, percent-encoded, when known)
+   └─ 403 if a/b/c produced an identity and nothing admitted it: this client IS
+      signed in, so the login page has nothing to offer them
+   └─ 401 + X-Auth-Login-URL otherwise: no credential, or none this gate accepts
  nginx: auth_request_set $bb_email $upstream_http_x_auth_email   [+ one per claim]
  nginx ──proxy to upstream app (X-Auth-Email: … [+ the claims])──▶ browser (the app's response)
 ```
@@ -230,6 +233,13 @@ A few things are worth emphasizing:
   bb-auth revokes access immediately, even for a still-unexpired, correctly-signed cookie
   or API key. On an `authenticated` scope the roster is never consulted, so there `denied`
   is the only lever: removing the row changes nothing.
+- **The refusal is two statuses, and the difference is a loop.** `401` means the gate does
+  not know who this is, and nginx turns it into a redirect to the login page. Answer that to
+  somebody who is already signed in and they sign in again, come back with the same cookie,
+  and are refused again, for ever, with no error anywhere. So a credential the gate accepted
+  and no scope admits is `403`, which nginx answers with `/auth/denied` and no redirect:
+  `error_page 403 = @bb_denied`. The page is the gate's own, in the same palette as the
+  sign-in page, unless the area's `denied_url` or `gate.denied_url` names another.
 - **Bearer credentials fall through to the cookie**, so a stray `Authorization`
   header never blocks a valid cookie. Static `bbk_` API keys (see
   [`ARCHITECTURE.md`](./ARCHITECTURE.md) §12) let non-browser clients (e.g. MCP)

@@ -1,0 +1,36 @@
+<!DOCTYPE html>
+<!-- The gate serves this page at /auth/denied, which is where nginx sends a 403 that
+     `error_page 403 = @bb_denied` catches. What it is for, and why an operator's own page
+     replaces it with a 302 instead of an nginx edit: see DENIED_HTML in src/bin/bb-auth.rs. -->
+<html lang="en"__BB_THEME_ATTR__>
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <meta name="robots" content="noindex, nofollow">
+  <title>Access denied</title>
+__BB_HEAD__
+</head>
+<body>
+  <main class="card">
+    <div class="brand">
+__BB_LOGO__
+      <h1>Access denied</h1>
+    </div>
+
+    <!-- It must not say whether the page exists. A URL outside every application is refused
+         exactly like one whose scope excludes this person, so naming which of the two
+         happened would hand an enumeration oracle to anybody with any account at all. -->
+    <p class="status">
+      This account cannot open that page, or there is nothing there.
+      If you have another account, sign out and sign in with that one.
+    </p>
+
+    <!-- A sign-out, and deliberately not a sign-in: whoever is reading this is already
+         signed in, so the login page would hand back the same session and land them right
+         back here. That round trip is the loop the 403 exists to end. -->
+    <p class="center hint"><a href="/auth/logout">Sign out and use another account</a></p>
+
+    <footer>__BB_BRAND__</footer>
+  </main>
+</body>
+</html>

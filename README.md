@@ -29,6 +29,8 @@ and `gate.login_url` can still point at one of your own.
 
 ```text
 browser ── hits the protected service ──▶ nginx auth_request → GET /auth/validate
+   │                                          ├─ 403 (a valid session, no scope admits it)
+   │                                          │    └─ nginx error_page 403 → /auth/denied, no redirect
    │                                          └─ 401 (no/!valid cookie)
    ▼
 nginx error_page 401 → 302  <login-page>/?rd=<original>
@@ -47,16 +49,25 @@ nginx error_page 401 → 302  <login-page>/?rd=<original>
 
 | Method | Path             | Who        | Purpose                                            |
 |--------|------------------|------------|----------------------------------------------------|
-| GET    | `/auth/validate` | nginx only | `auth_request`: 204 naming the identity in one header per configured attribute (default `X-Auth-Email`, plus one per configured profile claim when known) if the session cookie, an `Authorization: Bearer <id_token>`, or a static `Authorization: Bearer bbk_…` API key is admitted by the scope that owns the URL, else 401 + `X-Auth-Login-URL`. An `anonymous` scope answers 204 with no credential at all, and then names nobody; a request that *did* carry a credential is still named on it, except a `denied` one, which is never named. |
+| GET    | `/auth/validate` | nginx only | `auth_request`: 204 naming the identity in one header per configured attribute (default `X-Auth-Email`, plus one per configured profile claim when known) if the session cookie, an `Authorization: Bearer <id_token>`, or a static `Authorization: Bearer bbk_…` API key is admitted by the scope that owns the URL. **401 + `X-Auth-Login-URL`** when nothing identified the caller, **403** when something did and no scope admits them. An `anonymous` scope answers 204 with no credential at all, and then names nobody; a request that *did* carry a credential is still named on it, except a `denied` one, which is never named. |
 | GET, HEAD | `/auth/login`    | browser    | the sign-in page: runs the Cognito flow and POSTs the `id_token` to `/auth/session`. Self-contained (no external stylesheet, script or font), IT/EN, with the social buttons `gate.social_buttons` enables (and none at all when it enables none, or when this deployment has no usable social app client). Lands on `?rd=`, else on the `Referer` the browser sent |
 | GET, HEAD | `/auth/callback` | browser    | finishes a social sign-in (OAuth code + PKCE). `404` unless this deployment has a social sign-in at all: `gate.oauth_domain` and `gate.social_callback_url` in the settings file |
+| GET, HEAD | `/auth/denied`   | browser    | the refusal page a `403` lands on, in the same palette as the sign-in page. `302` to your own page instead when the area's `denied_url`, or `gate.denied_url`, names one |
 | POST   | `/auth/session`  | browser    | validate posted `id_token`, set cookie, 302 → `rd` |
 | GET    | `/auth/logout`   | browser    | clear cookie, 302 → `rd` (guarded), else `Referer` (same guard), else the login page |
 | GET    | `/auth/healthz`  | local      | liveness                                           |
 
-Only the first is gated. **nginx must leave `/auth/login` and `/auth/callback` ungated**, the
-way it already does for `/auth/session` and `/auth/logout`: a sign-in page behind an
-`auth_request` answers a signed-out visitor with itself, forever.
+Only the first is gated. **nginx must leave `/auth/login`, `/auth/callback` and
+`/auth/denied` ungated**, the way it already does for `/auth/session` and `/auth/logout`: a
+sign-in page behind an `auth_request` answers a signed-out visitor with itself, forever, and
+a refusal page behind one is a refusal nobody can be shown.
+
+**The two refusals are not the same answer.** A `401` means the gate does not know who this
+is, and nginx turns it into the login page. A `403` means it does, and no scope here admits
+them: signing in again cannot change that, so nginx answers it with the refusal page and no
+redirect at all. A gate that answered `401` to both sent a signed-in visitor to the login
+page, which handed back the cookie they already had, which came back to the URL that refused
+it: a loop with no error anywhere in it, on a deployment working exactly as configured.
 
 ## Programmatic access (Bearer)
 
@@ -281,6 +292,7 @@ An application owns a **literal** URL area and a list of named scopes.
 - **`name`** — `[A-Za-z0-9_-]+`, unique in the file, and the left half of `application/scope`.
 - **`base`** — one or more literal URL prefixes, **no wildcards**. Every pattern of every scope must lie inside one of them, and **no two applications may overlap**, anywhere in the file. Together those make applications a partition of the URL space: at most one can answer for a URL, so their order carries no meaning.
 - **`login_url`** — an absolute `https://` login page for this whole area, overriding `gate.login_url` (see [Per-application login page](#per-application-login-page)). Validated at load: printable ASCII, https, no userinfo `@`, no backslash, because it ends up in a header and a redirect.
+- **`denied_url`** — an absolute `https://` page for a **refusal** inside this area, overriding `gate.denied_url` (see [The refusal page](#the-refusal-page)). Same validation as `login_url`, for the same reason. An area is an absolute prefix, so it names a host: this is how one gate fronting several hosts gives each host its own refusal page.
 - **`scopes`** — see below. Order is meaning.
 
 The area is compared at a **path boundary**, which is why `https://x.com/app` covers
@@ -425,6 +437,46 @@ hardcoded `@bb_signin` would.
 
 The gate can name the login page here because a `401` happens **on** a gated URL, so the
 application resolves, and it answers even when none of its scopes covers the URL. Logout gets no such luck.
+
+### The refusal page
+
+A `401` is an invitation to sign in, so answering one to somebody who already *is* signed in
+is a loop: nginx sends them to the login page, the login page hands back the cookie they
+already had, and the URL that refused it refuses it again. The gate therefore answers **403**
+whenever a credential it accepts is not admitted here, and nginx answers a 403 with a page
+rather than a hop:
+
+```nginx
+location /app1 {
+    ...
+    error_page 401 = @bb_signin;
+    error_page 403 = @bb_denied;
+}
+location @bb_denied {
+    auth_request off;                                    # only if the gate is at server level
+    proxy_set_header X-Original-URL $bb_url;             # which area refused: per-area page
+    proxy_pass http://127.0.0.1:4181/auth/denied;
+}
+```
+
+The `=` is load-bearing and so is the page's own status: `/auth/denied` answers `403` itself,
+so `error_page 403 = @bb_denied` keeps the refusal honest instead of turning it into a `200`.
+Nothing here redirects, so the browser stays on the URL it asked for.
+
+The page comes from the gate, in the palette the `ui` section gives every other page, and it
+says that this account cannot open that page **without** saying whether the page exists: a
+gate refuses a URL outside every application exactly as it refuses one whose scope excludes
+you, and telling a visitor which of the two they hit hands an enumeration oracle to anyone
+with any account at all. Its one link is a sign-out, because signing in as the same person
+lands right back on it.
+
+To replace it with a page of your own, name one: the application's `denied_url` for that area,
+or `gate.denied_url` for the whole deployment. `/auth/denied` then answers `302` to it, which
+is the one redirect this design does not push into nginx, and for an nginx reason: proxying to
+a host a file names would need a resolver and a second upstream, so the recipe above stays
+fixed and the choice of page lives where every other hot value does. The `X-Original-URL` line
+is what makes the per-application page reachable; without it every host gets the global one,
+which still says no.
 
 ### Logging out
 
@@ -889,8 +941,8 @@ shared storage.
 **[`deploy/settings.example.json`](deploy/settings.example.json)**: everything that is read
 per request, cannot lock anybody out irreversibly, and holds no secret: the profile claims,
 the identity attributes, the social relaxation and its providers, **the whole Cognito wiring
-(the user pool, the app clients, where people sign in and which social buttons the page
-offers) and the estate (the session cookie's domain and the hosts a login may land on)**, the
+(the user pool, the app clients, where people sign in, where a refusal lands and which social
+buttons the page offers) and the estate (the session cookie's domain and the hosts a login may land on)**, the
 session lifetime, who may use `bb-auth-web`, and the `ui` section — how every page either
 program serves looks. All of it is there because all three programs have an opinion about it
 and an env var is readable only by the process that was started with it: the admin GUI could
@@ -932,7 +984,8 @@ other form uses. It will not let an administrator remove themselves: that one is
 ### The look (`ui`)
 
 One stylesheet restyles **both** programs, because both read this section: the sign-in page,
-the social callback and the error page the gate serves, and every page of `bb-auth-web`.
+the social callback, the error page and the refusal page the gate serves, and every page of
+`bb-auth-web`.
 
 | Setting | What it does |
 |---|---|
@@ -1038,12 +1091,28 @@ The binary is service-agnostic. To front a service at `app.example.com`:
            # headers too, so the gate can name it per application.
            auth_request_set $bb_login $upstream_http_x_auth_login_url;
 
+           # The two refusals, and they are NOT the same answer. 401 = the gate does
+           # not know who this is: send them to sign in. 403 = it does, and no scope
+           # here admits them: signing in again cannot change that, so answer with a
+           # page and no redirect. Send a 403 to @bb_signin and a signed-in visitor
+           # loops between the login page and this URL for ever.
            error_page 401 = @bb_signin;
+           error_page 403 = @bb_denied;
            proxy_pass http://127.0.0.1:8080;   # the upstream app
        }
 
        location @bb_signin {
            return 302 $bb_login_safe?rd=$scheme://$host$request_uri;
+       }
+
+       # The refusal page. `=` takes the status from this location, and /auth/denied
+       # answers 403 itself, so the browser is told the truth on the URL it asked
+       # for. X-Original-URL is what lets an application (and therefore a host) have
+       # a refusal page of its own; without it the global one answers, which still
+       # says no.
+       location @bb_denied {
+           proxy_set_header X-Original-URL $bb_url;
+           proxy_pass http://127.0.0.1:4181/auth/denied;
        }
 
        location = /auth/session {
@@ -1079,6 +1148,9 @@ The binary is service-agnostic. To front a service at `app.example.com`:
        # to the Referer instead, which is the browser's business, not nginx's.
        location = /auth/login    { proxy_pass http://127.0.0.1:4181/auth/login; }
        location = /auth/callback { proxy_pass http://127.0.0.1:4181/auth/callback; }
+       # The refusal page, reachable directly as well as through @bb_denied above:
+       # ungated for the same reason the sign-in page is.
+       location = /auth/denied   { proxy_pass http://127.0.0.1:4181/auth/denied; }
    }
    ```
 
@@ -1161,6 +1233,9 @@ server {
 
         auth_request_set $bb_login $upstream_http_x_auth_login_url;
         error_page 401 = @bb_signin;
+        # An administrator who signs in and is not on the list gets a page saying so,
+        # not a bounce back to the sign-in page they just came from.
+        error_page 403 = @bb_denied;
 
         # NO URI part. The request path passes through unchanged, so /admin/users
         # arrives as /admin/users — which is why BB_AUTH_WEB_BASE_PATH=/admin.
@@ -1171,6 +1246,10 @@ server {
 
     location @bb_signin {
         return 302 $bb_login_safe?rd=$scheme://$host$request_uri;
+    }
+    location @bb_denied {
+        proxy_set_header X-Original-URL $bb_url;
+        proxy_pass http://127.0.0.1:4181/auth/denied;
     }
 }
 ```

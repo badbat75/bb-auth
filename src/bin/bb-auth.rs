@@ -16,16 +16,24 @@
 //!
 //! | Method | Path | Caller | Behaviour |
 //! |--------|------|--------|-----------|
-//! | `GET`  | `/auth/validate` | nginx `auth_request`, loopback | 204 + [`IDENTITY_HEADER`] (+ one header per configured [`ProfileClaim`] the credential carries) if a credential authorizes the request, else 401 |
+//! | `GET`  | `/auth/validate` | nginx `auth_request`, loopback | 204 + [`IDENTITY_HEADER`] (+ one header per configured [`ProfileClaim`] the credential carries) if a credential authorizes the request; 401 + [`LOGIN_URL_HEADER`] when nothing identified the client; 403 when something did and no scope admits them |
 //! | `GET`, `HEAD` | `/auth/login` | browser | the sign-in page ([`LOGIN_HTML`]), which runs the Cognito flow and POSTs the id_token back to `/auth/session`, landing on `?rd=` or, failing that, on the [`REFERER_HEADER`] ([`rd_candidate`]) |
 //! | `GET`, `HEAD` | `/auth/callback` | browser | the social sign-in callback ([`CALLBACK_HTML`]); `404` unless [`social_ready`] says this deployment has a social sign-in |
+//! | `GET`, `HEAD` | `/auth/denied`   | browser, via nginx `error_page 403` | 403 + the refusal page ([`handle_denied`]), or a `302` to the page `denied_url` names |
 //! | `POST` | `/auth/session`  | browser | validate the posted `id_token`, set the cookie, 302 → `rd` |
 //! | `GET`  | `/auth/logout`   | browser | clear the cookie, 302 → `?rd=`, else the [`REFERER_HEADER`] ([`rd_candidate`]), else the login page |
 //! | `GET`  | `/auth/healthz`  | local   | 200 `ok` |
 //!
-//! The first is the only one nginx gates. The other five must be reachable without a
-//! credential, and the two pages most of all: a sign-in page behind an `auth_request` answers
-//! a signed-out visitor with itself, forever.
+//! The first is the only one nginx gates. The other six must be reachable without a
+//! credential, and the pages most of all: a sign-in page behind an `auth_request` answers a
+//! signed-out visitor with itself, forever, and a refusal page behind one is a refusal nobody
+//! can be shown.
+//!
+//! **The two refusals are different answers to different questions**, and keeping them apart
+//! is what stops a signed-in visitor from bouncing between the gate and the login page for
+//! ever: a `401` means the gate does not know who this is, which nginx answers with the login
+//! page; a `403` means it does, and no scope here admits them, which nginx answers with
+//! `/auth/denied` and no redirect at all.
 //!
 //! # Authorization model
 //!
@@ -131,11 +139,12 @@ use tiny_http::{Header, Request, Response, ResponseBox, Server, StatusCode};
 // access file has no opinion about — HTTP, the cookie, id_token validation, the nginx
 // contract — stays here, in one file, read top to bottom.
 use bb_auth_core::{
-    claim_name_ok, decide, decide_api_key, default_settings_path, header_safe_email, html_escape,
-    login_url_for, now, page_csp, read_access, read_settings, request_site, request_url,
-    sha256_hex, social_idp_label, stylesheet_link, version_line, Access, AccessKind, ApiKeyRecord,
-    Decision, IdentityAttr, KeyDecision, ProfileClaim, RequestSite, Settings, SocialButton,
-    Subject, UrlPattern, API_KEY_PREFIX, BASE_CSS, PAGE_SECURITY_HEADERS, THEME_CSS,
+    claim_name_ok, decide, decide_api_key, default_settings_path, denied_url_for,
+    header_safe_email, html_escape, login_url_for, now, page_csp, read_access, read_settings,
+    request_site, request_url, sha256_hex, social_idp_label, stylesheet_link, version_line, Access,
+    AccessKind, ApiKeyRecord, Decision, IdentityAttr, KeyDecision, ProfileClaim, RequestSite,
+    Settings, SocialButton, Subject, UrlPattern, API_KEY_PREFIX, BASE_CSS, PAGE_SECURITY_HEADERS,
+    THEME_CSS,
 };
 
 type HmacSha256 = Hmac<Sha256>;
@@ -1706,6 +1715,23 @@ fn respond_unauthorized(req: Request, login_url: &str) {
     let _ = req.respond(resp);
 }
 
+/// Respond `403` to a rejected `auth_request` whose credential the gate *did* accept: the
+/// client is who they say they are, and nothing here admits them.
+///
+/// It carries no [`LOGIN_URL_HEADER`], and that omission is the whole of it. A `401` is
+/// nginx's cue to send a browser to the login page, and a browser that already holds a
+/// valid cookie signs straight back in there and returns to the URL that refused it, with
+/// the same cookie, for a `401` again: the redirect loop this status exists to end. Signing
+/// in again cannot change this answer, so there is nothing to redirect to, and nginx turns
+/// it into a page that says no (`error_page 403 = @bb_denied`) rather than into a hop.
+///
+/// It names nobody, for the reason [`respond_authorized`] names somebody: the identity
+/// headers are the grant's contract with the application behind the gate, and a refusal
+/// reaches an error page nginx serves, not that application.
+fn respond_forbidden(req: Request) {
+    let _ = req.respond(Response::empty(StatusCode(403)));
+}
+
 /// Respond `302 Location: …`, optionally setting or clearing the session cookie.
 /// `location` must already have passed [`safe_rd`].
 ///
@@ -1728,11 +1754,14 @@ fn respond_redirect(req: Request, location: &str, set_cookie: Option<&str>) {
 // The gate's own pages
 // ---------------------------------------------------------------------------
 //
-// Three HTML surfaces, and every one of them is complete on its own: the sign-in page, the
-// social callback that finishes an OAuth leg, and the error page a failed `/auth/session`
-// lands on. Nothing here fetches a stylesheet, a font or a script from another host, because
-// the situation these pages exist for is the one where somebody cannot get in, and a sign-in
-// page that needs a CDN to be up has picked exactly the wrong moment to have a dependency.
+// Four HTML surfaces, and every one of them is complete on its own: the sign-in page, the
+// social callback that finishes an OAuth leg, the refusal page a `403` lands on and the error
+// page a failed `/auth/session` lands on. All four are files in `src/assets/`, filled by
+// `render_page`: a page is HTML, and HTML is edited, diffed and reviewed as HTML, which the
+// two smaller ones were not while they were a `format!` in this file. Nothing here fetches a
+// stylesheet, a font or a script from another host, because the situation these pages exist
+// for is the one where somebody cannot get in, and a sign-in page that needs a CDN to be up
+// has picked exactly the wrong moment to have a dependency.
 //
 // The look is `bb_auth_core::THEME_CSS` (the palette) plus `bb_auth_core::BASE_CSS` (the
 // components) plus [`AUTH_CSS`] (this arrangement of them), in that order, and an operator's
@@ -2134,6 +2163,12 @@ fn login_page(settings: &Settings, rd: &str, nonce: &str) -> String {
 /// one place a sign-in page is certainly reachable from.
 const OWN_LOGIN_PATH: &str = "/auth/login";
 
+/// The logout endpoint, as a path. The router matches on it and the refusal page links to
+/// it, and a test pins that the template really carries this string: a link that quietly
+/// stopped matching the route would be a `404` at the one moment somebody is trying to get
+/// out of a page that will not let them in.
+const OWN_LOGOUT_PATH: &str = "/auth/logout";
+
 /// Where people sign in, for an application that names no page of its own: the settings
 /// file's value, or this gate's own page.
 ///
@@ -2145,6 +2180,80 @@ fn global_login(settings: &Settings) -> &str {
         "" => OWN_LOGIN_PATH,
         url => url,
     }
+}
+
+/// The refusal page, served at `GET /auth/denied`. Every word of it is in the template,
+/// because nothing about it varies: the page says the same thing to everybody, and what an
+/// operator changes is the `ui` section around it or the page itself
+/// ([`bb_auth_core::Settings::denied_url`]). See [`handle_denied`] for what it must not say.
+const DENIED_HTML: &str = include_str!("../assets/denied.html");
+
+/// The error page a failed `POST /auth/session` lands on. A file rather than markup built in
+/// a `format!`, for the reason the other three are: a page is HTML, and HTML is edited,
+/// diffed and reviewed as HTML.
+const ERROR_HTML: &str = include_str!("../assets/error.html");
+
+/// The refusal page this gate serves itself, as a path, and for the reason
+/// [`OWN_LOGIN_PATH`] is one: the gate knows neither its own scheme nor its own host.
+///
+/// It is where nginx sends a `403` from [`handle_validate`], and unlike the sign-in page it
+/// is never named in a response header: nginx reaches it with a fixed `proxy_pass` and the
+/// operator's own page is chosen *here*, out of the settings file, so that pointing a
+/// deployment at another page is a save and not an nginx edit. See [`handle_denied`].
+const OWN_DENIED_PATH: &str = "/auth/denied";
+
+/// Serve `GET /auth/denied`, the page a refused request lands on: `403` with the same card,
+/// palette and operator stylesheet as every other page the gate serves.
+///
+/// **Why the gate serves it.** A refusal is the other half of the loop the `403` exists to
+/// end. nginx has to answer a refused request with *something*, and the something it had
+/// available was the login page, which is what made a signed-in visitor bounce for ever. A
+/// page needs a palette, a brand and a logo to not look like a broken deployment, and the
+/// gate already holds all three as the `ui` section it styles the sign-in page with: served
+/// from here, the two pages cannot drift; served from a static host, every one of the three
+/// is a second copy of a value that is already configured.
+///
+/// **What it says**, and does not say: that this account cannot open that page, without
+/// saying whether the page exists. The gate knows (a URL no application covers is refused
+/// exactly like one whose scope excludes this person), and telling a visitor which of the two
+/// they hit is an enumeration oracle for anyone with any valid account at all. The link is a
+/// sign-out rather than a sign-in, because signing in as the same person lands right back
+/// here and switching accounts is the only move the page can honestly offer.
+///
+/// **An operator's own page replaces it**, and then this endpoint is a `302` to that page:
+/// the application's `denied_url` for the area that refused, else `gate.denied_url`, which is
+/// [`bb_auth_core::denied_url_for`] resolving exactly as [`login_url_for`] does one page
+/// along. Per application means **per host**, since an area is an absolute prefix: two
+/// hosts fronted by one gate carry two refusal pages, written where every other property of
+/// an area is written. It costs one line of nginx, `proxy_set_header X-Original-URL $bb_url`
+/// on the location that reaches this page, and a deployment that omits it gets the global
+/// page rather than an error, because a refusal styled for the wrong area still says no.
+///
+/// The `302` is the one redirect this design does not push into nginx, and the reason is
+/// nginx: proxying to a host a file names would need a resolver, a second upstream and an
+/// edit to the recipe on every change, so the recipe stays one fixed `proxy_pass` at this
+/// path and the choice of page lives where the rest of the deployment is written. It cannot
+/// loop: nothing gates the page it names, and no credential is consulted to serve it.
+fn handle_denied(req: Request, state: &State) {
+    // Which area refused them, if nginx said so. It is the same header, read through the same
+    // helper, as everywhere else the gate needs the URL it is guarding.
+    let url = original_url(&req, &state.cfg);
+    // Cloned rather than held: `respond_card` takes the settings lock again for the look, and
+    // the redirect arm has nothing left to read once it has the URL. Access first, then
+    // settings, which is the order `handle_validate` takes them in.
+    let elsewhere = {
+        let access = state.access.read().unwrap();
+        let settings = state.settings.read().unwrap();
+        let to = denied_url_for(&access, &settings.denied_url, url.as_deref());
+        (!to.is_empty()).then_some(to)
+    };
+    if let Some(url) = elsewhere {
+        // `compile_page_url` vouched for it at load, so it is printable ASCII and cannot
+        // split the header it lands in.
+        respond_redirect(req, &url, None);
+        return;
+    }
+    respond_card(req, state, 403, DENIED_HTML, Vec::new());
 }
 
 /// Serve `GET /auth/callback`, the page that finishes a social sign-in.
@@ -2229,47 +2338,58 @@ fn respond_page(req: Request, status: u16, body: String, csp: &str) {
 /// the same palette and the same operator stylesheet as the sign-in page it offers to go
 /// back to.
 ///
-/// Every interpolated value is escaped by [`html_escape`]. Today the inputs are constants and
-/// a validated env value, but there is no structural guarantee a future caller will not pass
-/// request data, so nothing is emitted raw.
+/// The heading and the sentence are the caller's, because a bad token, a body with no token
+/// in it and an email with nowhere to go each say something different; the link is always the
+/// way back to the page they just failed on. Both values are escaped on the way in.
 fn respond_html(req: Request, state: &State, status: u16, title: &str, msg: &str, login_url: &str) {
+    respond_card(
+        req,
+        state,
+        status,
+        ERROR_HTML,
+        vec![
+            ("__BB_TITLE__", html_escape(title)),
+            ("__BB_MESSAGE__", html_escape(msg)),
+            // `login_url` came from `login_url_for`, so `compile_login_url` vouched for it or
+            // it is `OWN_LOGIN_PATH`. Escaped anyway: that is a property of emitting into an
+            // attribute, not of today's caller.
+            ("__BB_LOGIN_URL__", html_escape(login_url)),
+        ],
+    );
+}
+
+/// Render and answer with one of the gate's two card pages, [`DENIED_HTML`] or
+/// [`ERROR_HTML`]: the same `__BB_*__` substitution the sign-in page goes through, so all
+/// four pages are files in [src/assets/](../src/assets/) and one `ui` section styles them
+/// together.
+///
+/// `extra` is whatever this page has beyond the look, and every value in it is escaped by its
+/// caller. Neither page runs any script, so `script-src` is `'none'` rather than the nonce: a
+/// policy that permits what the page does not do is a policy with nothing left to enforce.
+fn respond_card(
+    req: Request,
+    state: &State,
+    status: u16,
+    template: &str,
+    extra: Vec<(&'static str, String)>,
+) {
     let nonce = csp_nonce();
-    let settings = state.settings.read().unwrap();
-    let head = look_subs(&settings, &nonce)
-        .into_iter()
-        .find(|(k, _)| *k == "__BB_HEAD__")
-        .map(|(_, v)| v)
-        .unwrap_or_default();
-    let theme = match settings.theme.attr() {
-        Some(a) => format!(" data-theme=\"{a}\""),
-        None => String::new(),
+    // Rendered under the read lock and answered outside it, exactly as the other two pages
+    // are: the look and the policy describing it must come from one reading of the settings.
+    let (page, csp) = {
+        let settings = state.settings.read().unwrap();
+        let mut subs = look_subs(&settings, &nonce);
+        subs.extend(extra);
+        let csp = page_csp(
+            "'none'",
+            &format!("'nonce-{nonce}'"),
+            settings.stylesheet_url.as_deref(),
+            settings.logo_url.as_deref(),
+            &[],
+        );
+        (render_page(template, &subs), csp)
     };
-    // This page has no script of its own and nothing to say to Cognito: it is a sentence and
-    // a link back. `'none'` rather than the nonce, because a policy that permits what the
-    // page does not do is a policy with nothing left to enforce.
-    let csp = page_csp(
-        "'none'",
-        &format!("'nonce-{nonce}'"),
-        settings.stylesheet_url.as_deref(),
-        settings.logo_url.as_deref(),
-        &[],
-    );
-    drop(settings);
-    let title = html_escape(title);
-    let msg = html_escape(msg);
-    let login_url = html_escape(login_url);
-    let body = format!(
-        "<!doctype html>\n<html lang=\"en\"{theme}>\n<head>\n\
-         <meta charset=\"utf-8\">\n\
-         <meta name=\"viewport\" content=\"width=device-width,initial-scale=1\">\n\
-         <title>{title}</title>\n{head}\n</head>\n\
-         <body><main class=\"card\">\n\
-         <div class=\"brand\"><h1>{title}</h1></div>\n\
-         <p class=\"status\">{msg}</p>\n\
-         <p class=\"center hint\"><a href=\"{login_url}\">&larr; Back to sign-in</a></p>\n\
-         </main></body>\n</html>\n"
-    );
-    respond_page(req, status, body, &csp);
+    respond_page(req, status, page, &csp);
 }
 
 // ---------------------------------------------------------------------------
@@ -2448,9 +2568,19 @@ fn authorize_login(access: &Access, ident: UserIdentity, url: Option<&str>) -> O
 }
 
 /// `GET /auth/validate` — the nginx `auth_request` endpoint. 204 plus the authorized
-/// user in [`IDENTITY_HEADER`] if any credential authorizes this request, else 401 plus
-/// this area's login page in [`LOGIN_URL_HEADER`]. Never issues a cookie, and never
-/// redirects: nginx turns the 401 into a redirect, which is why the header exists.
+/// user in [`IDENTITY_HEADER`] if any credential authorizes this request; **401** plus this
+/// area's login page in [`LOGIN_URL_HEADER`] when nothing identified the client; **403**
+/// when something did and no scope admits them. Never issues a cookie, and never redirects:
+/// nginx turns the 401 into a redirect, which is why the header exists.
+///
+/// **The two refusals are not interchangeable, and telling them apart is the whole of the
+/// distinction.** A 401 means "I do not know who you are", and nginx answers it by sending
+/// the browser to the login page. A client that already holds a valid cookie and is refused
+/// with a 401 signs straight back in there, comes back to the URL that refused it with the
+/// same cookie, and is refused again: a redirect loop with no error anywhere in it, on a
+/// deployment that is working exactly as configured. So a credential this gate accepted and
+/// no scope admits is a 403 ([`respond_forbidden`]), which nginx turns into a page that says
+/// no. It is also the honest status: signing in again cannot change the answer.
 ///
 /// Credentials are tried in the order documented on the crate: `bbk_` API key, raw
 /// id_token, then the session cookie. A key must resolve to a user in the roster and put
@@ -2465,6 +2595,13 @@ fn handle_validate(req: Request, state: &State) {
     // captured now as an owned value so the request can be consumed when we respond.
     let url = original_url(&req, cfg);
 
+    // Did anything the client sent identify them to this gate? It is deliberately not the
+    // same question as "was the request authorized", and the difference is which refusal is
+    // honest below: a credential this gate accepted and no scope admits is a 403, everything
+    // else is a 401. It is set where each credential is *verified* rather than where it is
+    // authorized, which is what keeps the two questions apart.
+    let mut identified = false;
+
     // Bearer path: programmatic clients (e.g. MCP) present `Authorization: Bearer
     // <cred>`. A `bbk_` credential is a static API key resolved against the access
     // table; anything else is a raw Cognito id_token validated exactly like
@@ -2475,13 +2612,19 @@ fn handle_validate(req: Request, state: &State) {
             // A key acts as its user and carries no token, so no claims come with it.
             let access = state.access.read().unwrap();
             bearer_apikey(&access, token).and_then(|rec| {
+                // A key that resolves to a live, unexpired row is a credential this gate
+                // knows, whatever the scope then says about it.
+                identified = true;
                 let who = format!("key '{}' of {}", rec.key_id, rec.uuid);
                 authorize(&access, &Subject::Key(rec), url.as_deref(), &who)
                     .then(|| Granted::Identity(key_identity(&access, rec)))
             })
         } else {
             match validate_id_token(token, state) {
-                Ok(ident) => authorize_login(&state.access.read().unwrap(), ident, url.as_deref()),
+                Ok(ident) => {
+                    identified = true;
+                    authorize_login(&state.access.read().unwrap(), ident, url.as_deref())
+                }
                 Err(e) => {
                     eprintln!("[bb-auth] bearer rejected: {e}");
                     None
@@ -2497,16 +2640,24 @@ fn handle_validate(req: Request, state: &State) {
     let granted = header_value(&req, "Cookie")
         .and_then(|c| cookie_value(c, &cfg.cookie_name).map(str::to_string))
         .and_then(|v| verify_session(&v, &cfg.hmac_keys))
-        .and_then(|ident| authorize_login(&state.access.read().unwrap(), ident, url.as_deref()));
+        .and_then(|ident| {
+            // The signature held and the cookie has not expired, so this is a session this
+            // gate minted and still stands behind: whoever holds it is signed in, and a
+            // refusal from here on is about the URL and not about them.
+            identified = true;
+            authorize_login(&state.access.read().unwrap(), ident, url.as_deref())
+        });
     if let Some(granted) = granted {
         respond_authorized(req, &granted, state);
         return;
     }
 
     // No credential authorized this request. An `anonymous` scope grants anyway, to
-    // anybody, which is what it is for. Asked through [`decide`] rather than [`authorize`]
-    // so the refusal is not logged twice: a request with no credential at all is the
-    // ordinary case on a gated URL, not an event.
+    // anybody, which is what it is for, and it is asked before either refusal for the same
+    // reason it outranks the `denied` veto: it grants with no credential at all, so a client
+    // refused here could simply have sent less. Asked through [`decide`] rather than
+    // [`authorize`] so the refusal is not logged twice: a request with no credential at all
+    // is the ordinary case on a gated URL, not an event.
     let (anonymous, login) = {
         let access = state.access.read().unwrap();
         (
@@ -2523,6 +2674,8 @@ fn handle_validate(req: Request, state: &State) {
     };
     if anonymous {
         respond_authorized(req, &Granted::Anonymous, state);
+    } else if identified {
+        respond_forbidden(req)
     } else {
         respond_unauthorized(req, &login)
     }
@@ -2889,6 +3042,13 @@ fn check_settings(path: &str) -> ! {
                 "[bb-auth] {path}: sign-in page: {}",
                 match s.login_url.as_str() {
                     "" => "(none: the gate's own /auth/login, on the calling host)",
+                    url => url,
+                }
+            );
+            println!(
+                "[bb-auth] {path}: refusal page: {}",
+                match s.denied_url.as_str() {
+                    "" => "(none: the gate's own /auth/denied, on the calling host)",
                     url => url,
                 }
             );
@@ -3355,16 +3515,20 @@ fn main() {
              (allow_unverified_social in {settings_path})"
         );
     }
-    // The sign-in page it now serves itself, and what it offers on it. Worth a line of its
-    // own because both halves are easy to get wrong from outside: nginx has to leave
-    // /auth/login and /auth/callback ungated, and a social button that is drawn is a button
-    // whose app client and callback URL Cognito has to agree with.
+    // The pages it serves itself, and what it offers on them. Worth a line of its own
+    // because both halves are easy to get wrong from outside: nginx has to leave all three
+    // ungated, and a social button that is drawn is a button whose app client and callback
+    // URL Cognito has to agree with.
     eprintln!(
-        "[bb-auth] pages: /auth/login and /auth/callback (leave both UNGATED in nginx) | \
-         cognito={} | client={} | login={} | social={}",
+        "[bb-auth] pages: /auth/login, /auth/callback and /auth/denied (leave all three \
+         UNGATED in nginx) | cognito={} | client={} | login={} | denied={} | social={}",
         cognito_endpoint(&settings),
         settings.client_id,
         global_login(&settings),
+        match settings.denied_url.as_str() {
+            "" => OWN_DENIED_PATH,
+            url => url,
+        },
         social_state(&settings)
     );
     // The one setting whose absence stops every new login. Loud, because the symptom is a
@@ -3485,11 +3649,12 @@ fn route(req: Request, state: &State) {
     match (method.as_str(), path.as_str()) {
         ("GET", "/auth/validate") => handle_validate(req, state),
         ("POST", "/auth/session") => handle_session(req, state),
-        ("GET", "/auth/logout") => handle_logout(req, state),
-        // The two pages, and the two locations nginx must leave UNGATED: a sign-in page
-        // behind an `auth_request` answers a signed-out visitor with itself, forever.
+        ("GET", OWN_LOGOUT_PATH) => handle_logout(req, state),
+        // The three pages, and the three locations nginx must leave UNGATED: a sign-in page
+        // behind an `auth_request` answers a signed-out visitor with itself, forever, and a
+        // refusal page behind one is a refusal nobody can ever be shown.
         //
-        // `HEAD` as well as `GET`, and these are the only two routes that take it. Not for
+        // `HEAD` as well as `GET`, and these are the only routes that take it. Not for
         // tidiness: these URLs REPLACED files nginx served off disk, and nginx answers `HEAD`
         // on a file. Every probe, uptime check and `curl -I` an operator already points at
         // the sign-in page has to keep working across that move, or the cutover breaks
@@ -3497,6 +3662,7 @@ fn route(req: Request, state: &State) {
         // needs to know nothing about it.
         ("GET" | "HEAD", "/auth/login") => handle_login(req, state),
         ("GET" | "HEAD", "/auth/callback") => handle_callback(req, state),
+        ("GET" | "HEAD", OWN_DENIED_PATH) => handle_denied(req, state),
         ("GET", "/auth/healthz") => {
             let _ = req.respond(Response::from_string("ok"));
         }
@@ -4649,7 +4815,8 @@ mod tests {
                        {{ "name": "app1", "base": ["https://app.x.com/app1"], "scopes": [
                           {{ "name": "open", "urls": ["https://app.x.com/app1/*"],
                              "access": "authenticated" }} ] }},
-                       {{ "name": "other", "base": ["https://app.x.com/other"], "scopes": [
+                       {{ "name": "other", "base": ["https://app.x.com/other"],
+                          "denied_url": "https://denied.x.com/other", "scopes": [
                           {{ "name": "team", "urls": ["https://app.x.com/other/*"],
                              "access": "restricted", "users": ["{BOB}"] }} ] }},
                        {{ "name": "pub", "base": ["https://app.x.com/pub"], "scopes": [
@@ -5092,6 +5259,155 @@ mod tests {
         // is the fail-closed posture the whole nginx contract rests on.
         let r = a.get(format!("{base}/auth/validate")).call().unwrap();
         assert_eq!(r.status(), 401);
+
+        // The page a 403 lands on, which nginx reaches with a fixed `proxy_pass`. It answers
+        // 403 itself, so `error_page 403 = @bb_denied` keeps the status honest.
+        let mut r = a.get(format!("{base}/auth/denied")).call().unwrap();
+        assert_eq!(r.status(), 403);
+        let page = r.body_mut().read_to_string().unwrap();
+        assert!(page.contains("Access denied"), "{page}");
+        // It offers the only move it honestly can, and never the login page: signing in as
+        // the same person lands right back here, which is the loop this whole change is
+        // about. The link is written in the template, so this is also what pins it to the
+        // route the router actually serves.
+        assert!(
+            DENIED_HTML.contains(OWN_LOGOUT_PATH),
+            "the template links to the route"
+        );
+        assert!(page.contains(OWN_LOGOUT_PATH), "{page}");
+        assert!(!page.contains(LOGIN), "{page}");
+        // Rendered, not served raw: a placeholder left standing is a page missing its
+        // stylesheet, which is exactly what nobody looks at on an error page.
+        assert!(!page.contains("__BB_"), "{page}");
+    }
+
+    /// The two refusals, told apart. A `401` sends a browser to the login page, so answering
+    /// one to somebody who is already signed in is a loop with no error in it anywhere:
+    /// login, cookie, back, refused, login. Every credential this gate accepts has to reach a
+    /// `403` instead, and every one it does not has to keep reaching the `401`.
+    #[test]
+    fn a_credential_the_gate_accepts_is_refused_with_403_and_no_login_page() {
+        let base = serve(token_state(gate_settings("{}")));
+        let a = agent();
+        // `other` is restricted to bob, `app1` is `authenticated`, `pub` is `anonymous`.
+        let validate = |url: &str, header: (&str, &str)| {
+            a.get(format!("{base}/auth/validate"))
+                .header("X-Original-URL", url)
+                .header(header.0, header.1)
+                .call()
+                .unwrap()
+        };
+        let cookie = |email: &str| {
+            format!(
+                "bb_session={}",
+                make_session(&ident(email), 3600, &keys_one())
+            )
+        };
+
+        // A session this gate minted, on an area that lists somebody else. The person is
+        // signed in: there is nothing a login page could do for them.
+        let r = validate(
+            "https://app.x.com/other/x",
+            ("Cookie", &cookie("stranger@x.com")),
+        );
+        assert_eq!(r.status(), 403);
+        assert!(r.headers().get(LOGIN_URL_HEADER).is_none());
+
+        // The `denied` veto is the same answer: a vetoed identity is refused everywhere, and
+        // signing in again is exactly what it may not fix.
+        let r = validate(
+            "https://app.x.com/other/x",
+            ("Cookie", &cookie("spammer@x.com")),
+        );
+        assert_eq!(r.status(), 403);
+
+        // A `bbk_` key the file knows, on a scope that admits no key at all. A key cannot
+        // sign in either, so a 401 would be the same nonsense one credential along.
+        let r = validate(
+            "https://app.x.com/app1/x",
+            ("Authorization", "Bearer bbk_secret"),
+        );
+        assert_eq!(r.status(), 403);
+
+        // And what a 401 is still for. An expired cookie, a forged one and no cookie at all
+        // are the same request as far as this gate is concerned: it does not know who this
+        // is, and the login page is the answer.
+        let r = validate(
+            "https://app.x.com/other/x",
+            (
+                "Cookie",
+                &format!(
+                    "bb_session={}",
+                    make_session(&ident("bob@x.com"), 0, &keys_one())
+                ),
+            ),
+        );
+        assert_eq!(r.status(), 401);
+        assert_eq!(r.headers().get(LOGIN_URL_HEADER).unwrap(), LOGIN);
+        let r = validate(
+            "https://app.x.com/other/x",
+            ("Cookie", "bb_session=bb1.k1.nonsense"),
+        );
+        assert_eq!(r.status(), 401);
+        // An unknown key is not a credential this gate accepts, so it is a 401 as well: there
+        // is no identity behind it to refuse.
+        let r = validate(
+            "https://app.x.com/other/x",
+            ("Authorization", "Bearer bbk_nope"),
+        );
+        assert_eq!(r.status(), 401);
+
+        // An `anonymous` scope grants before either refusal, to anybody, which is what it is
+        // for: a client refused there could simply have sent less.
+        let r = validate(
+            "https://app.x.com/pub/health",
+            ("Cookie", &cookie("stranger@x.com")),
+        );
+        assert_eq!(r.status(), 204);
+    }
+
+    /// The refusal page, and the two ways an operator replaces it. Per application means per
+    /// **host**, since an area is an absolute prefix, which is the only axis this file has for
+    /// "this host answers differently".
+    #[test]
+    fn the_refusal_page_gives_way_to_the_area_and_then_to_the_settings() {
+        let a = agent();
+        // No page configured anywhere: the gate's own, on the calling host.
+        let base = serve(token_state(gate_settings("{}")));
+        let r = a.get(format!("{base}/auth/denied")).call().unwrap();
+        assert_eq!(r.status(), 403);
+
+        // The area that refused, if nginx said which one. This is a per-host page: the
+        // application owns an absolute prefix, so its host is in its area.
+        let r = a
+            .get(format!("{base}/auth/denied"))
+            .header("X-Original-URL", "https://app.x.com/other/x")
+            .call()
+            .unwrap();
+        assert_eq!(r.status(), 302);
+        assert_eq!(
+            r.headers().get("Location").unwrap(),
+            "https://denied.x.com/other"
+        );
+
+        // An area that names none falls back to the settings file, and a deployment whose
+        // nginx forwards no URL at all falls back to it too: a refusal styled for the wrong
+        // area still says no, where a failure to render says nothing.
+        let base = serve(token_state(gate_settings(
+            r#"{ "denied_url": "https://denied.x.com/all" }"#,
+        )));
+        for url in ["https://app.x.com/app1/x", ""] {
+            let mut req = a.get(format!("{base}/auth/denied"));
+            if !url.is_empty() {
+                req = req.header("X-Original-URL", url);
+            }
+            let r = req.call().unwrap();
+            assert_eq!(r.status(), 302);
+            assert_eq!(
+                r.headers().get("Location").unwrap(),
+                "https://denied.x.com/all"
+            );
+        }
     }
 
     #[test]
@@ -5144,13 +5460,19 @@ mod tests {
         assert_eq!(r.headers().get("Cache-Control").unwrap(), "no-store");
 
         // A token that does not validate gets no cookie and an error page, not a redirect.
-        let r = agent()
+        let mut r = agent()
             .post(format!("{base}/auth/session"))
             .header("Sec-Fetch-Site", "same-origin")
             .send_form([("id_token", IT_TOKEN_BAD_EMAIL)])
             .unwrap();
         assert_eq!(r.status(), 401);
         assert!(r.headers().get("Set-Cookie").is_none());
+        // And it is a rendered page: the way back to the sign-in page it came from, with
+        // every placeholder filled. A template that lost a substitution shows the raw
+        // `__BB_` on the one page nobody is reading carefully.
+        let page = r.body_mut().read_to_string().unwrap();
+        assert!(page.contains(LOGIN), "{page}");
+        assert!(!page.contains("__BB_"), "{page}");
 
         // And a body that carries no token at all is a 400, which is the shape a broken
         // sign-in page produces.

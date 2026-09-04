@@ -202,7 +202,18 @@ pub fn compile_pattern(raw: &str) -> Result<UrlPattern, String> {
 /// config and no network. Moving the check to startup would turn an operator's typo into a
 /// fatal boot under `Restart=on-failure` that `--check-access` never saw coming.
 pub fn compile_login_url(raw: &str) -> Result<String, String> {
-    let e = |m: &str| Err(format!("login_url '{raw}': {m}"));
+    compile_page_url("login_url", raw)
+}
+
+/// The same guard, for any operator-configured URL of a page the gate sends somebody to:
+/// today the login page and `gate.denied_url`, the page a refusal lands on.
+///
+/// [`compile_login_url`] is this function under the name it had when a login page was the
+/// only such value. `field` is what the message names, because "denied_url '…': must be an
+/// absolute https:// URL" is a sentence an operator can act on, and the same sentence about
+/// `login_url` for a value they wrote under another key is one they cannot.
+pub fn compile_page_url(field: &str, raw: &str) -> Result<String, String> {
+    let e = |m: &str| Err(format!("{field} '{raw}': {m}"));
     let u = raw.trim();
     if u.is_empty() {
         return e("empty");
@@ -439,6 +450,13 @@ pub struct AppRecord {
     /// Reaches nginx through `X-Auth-Login-URL`; also names the fallback for a rejected
     /// `rd` and the link on `/auth/session`'s error pages. See [`login_url_for`].
     pub login_url: Option<String>,
+    /// Refusal page for this area, overriding `gate.denied_url`. `None` = use the global,
+    /// which is itself empty for the gate's own `/auth/denied`. See [`denied_url_for`].
+    ///
+    /// It is on the application and not on the scope because an area is what a visitor can
+    /// name: they were refused *somewhere*, and which of the scopes said no is a fact about
+    /// the file that no page may hand a stranger.
+    pub denied_url: Option<String>,
     /// **First match wins**, in file order: the first scope whose `urls` cover the request
     /// answers for it, even if it grants nothing. That is what makes a carve-out
     /// expressible, a narrower and stricter scope listed before a broad one, which a union
@@ -487,6 +505,28 @@ pub fn login_url_for(access: &Access, global: &str, url: Option<&str>) -> String
     access
         .app_for(url)
         .and_then(|a| a.login_url.as_deref())
+        .unwrap_or(global)
+        .to_string()
+}
+
+/// The refusal page for `url`: the application whose area covers it, or `global`
+/// (`gate.denied_url`). [`login_url_for`] one page along, and resolved the same way, for the
+/// same reason: areas do not overlap, so at most one application answers.
+///
+/// This is what makes a per-**host** refusal page expressible, since an area is an absolute
+/// prefix and therefore names a host: two applications on two hosts carry two pages. It needs
+/// the URL to say so, and the gate only has one on `/auth/denied` if nginx forwards
+/// `BB_AUTH_ORIGINAL_URL_HEADER` there, exactly as it must on `/auth/session`. Without it
+/// this returns the global, which is a page rather than an error: a refusal that is styled
+/// for the wrong area still says no, and failing the whole page over a missing header would
+/// answer a refused visitor with nothing at all.
+///
+/// Every value returned passed [`compile_page_url`] (the application's at load, the global
+/// at settings-compile), so callers may put it in a header or a redirect without checking.
+pub fn denied_url_for(access: &Access, global: &str, url: Option<&str>) -> String {
+    access
+        .app_for(url)
+        .and_then(|a| a.denied_url.as_deref())
         .unwrap_or(global)
         .to_string()
 }
@@ -948,6 +988,11 @@ pub struct AppSpec {
     /// Malformed is fatal, like a URL pattern. See [`compile_login_url`].
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub login_url: Option<String>,
+    /// Absolute `https://` refusal page for this area. Absent means `gate.denied_url`, and
+    /// an empty one of those means the gate's own `/auth/denied`. Malformed is fatal, like a
+    /// URL pattern. See [`compile_page_url`].
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub denied_url: Option<String>,
     /// **Order is meaning**: first match wins. See [`AppRecord::scopes`].
     #[serde(default)]
     pub scopes: Vec<ScopeSpec>,
@@ -1541,6 +1586,13 @@ pub fn compile_access(file: &AccessFile) -> Result<Access, String> {
             }
             None => None,
         };
+        let denied_url = match &a.denied_url {
+            Some(u) => Some(
+                compile_page_url("denied_url", u)
+                    .map_err(|e| format!("application '{name}': {e}"))?,
+            ),
+            None => None,
+        };
 
         let mut scopes: Vec<ScopeRecord> = Vec::with_capacity(a.scopes.len());
         for s in &a.scopes {
@@ -1769,6 +1821,7 @@ pub fn compile_access(file: &AccessFile) -> Result<Access, String> {
             name,
             base,
             login_url,
+            denied_url,
             scopes,
         });
     }
@@ -3406,6 +3459,19 @@ pub struct GateSettings {
     /// land, and it is not in this file.
     #[serde(default)]
     pub login_url: String,
+    /// **Where a refusal lands**: the page `/auth/denied` stands in for. Absolute https,
+    /// validated by [`compile_page_url`].
+    ///
+    /// Empty means the gate's own `/auth/denied`, which is the page it builds itself out of
+    /// the `ui` section, so this is how an operator points somewhere *else* rather than how
+    /// they get a page at all. It is the only value here that no login depends on: it is read
+    /// when somebody has already been refused, so the worst a wrong one can do is send that
+    /// person to a page that is not there, and no cookie, no scope and no grant is touched.
+    /// A gate whose `/auth/denied` answers `302` to it is the one redirect in this design
+    /// nginx does not perform itself, and it exists because nginx cannot proxy to a host the
+    /// settings file names without a resolver and a rewrite of the recipe.
+    #[serde(default)]
+    pub denied_url: String,
     /// The Cognito **hosted-UI domain**, as a bare host with no scheme and no path, e.g.
     /// `pool.auth.eu-central-1.amazoncognito.com`. Empty means this deployment offers no
     /// social sign-in at all.
@@ -3517,6 +3583,7 @@ impl Default for GateSettings {
             // and a button exists because somebody wrote one.
             client_id: String::new(),
             login_url: String::new(),
+            denied_url: String::new(),
             oauth_domain: String::new(),
             social_callback_url: String::new(),
             social_buttons: Vec::new(),
@@ -3725,11 +3792,22 @@ pub const PAGE_SECURITY_HEADERS: [(&str, &str); 4] = [
 /// and no way for the policy and the page to disagree, because both are derived from the same
 /// `&str`. It is a hash and not a copy, so a stale value cannot survive an edit to the
 /// content: the browser recomputes it and refuses to apply a block that changed.
+///
+/// **Newlines are normalised to LF first, and that is not a nicety.** An HTML parser
+/// normalises the document's newlines before anything else sees it, so what a browser hashes
+/// is the block with every CRLF already collapsed. This repository is developed on Windows
+/// with `core.autocrlf=true`, so the working tree's stylesheets have CRLF, `include_str!`
+/// embeds them verbatim, and the release is cross-compiled from that same tree: without this
+/// line the served page and the policy that describes it disagree on every build made here,
+/// the browser refuses the whole stylesheet, and the admin interface renders as unstyled
+/// markup with nothing in the journal and nothing in any test. It costs one pass over a
+/// compile-time constant and is a no-op wherever the checkout is LF.
 pub fn csp_hash(content: &str) -> String {
     use base64::engine::general_purpose::STANDARD;
+    let normalized = content.replace("\r\n", "\n");
     format!(
         "'sha256-{}'",
-        STANDARD.encode(Sha256::digest(content.as_bytes()))
+        STANDARD.encode(Sha256::digest(normalized.as_bytes()))
     )
 }
 
@@ -4072,6 +4150,9 @@ pub struct Settings {
     /// See [`GateSettings::login_url`]. Empty = the gate's own `/auth/login`, and the gate
     /// is where that default is applied, because only it knows the path it serves.
     pub login_url: String,
+    /// See [`GateSettings::denied_url`]. Empty = the gate's own `/auth/denied`, and the gate
+    /// applies that default too, for the same reason.
+    pub denied_url: String,
     /// See [`GateSettings::oauth_domain`]. `None` = no social sign-in.
     pub oauth_domain: Option<String>,
     /// See [`GateSettings::social_callback_url`]. `None` = no social sign-in.
@@ -4584,6 +4665,10 @@ pub fn compile_settings(file: &SettingsFile) -> Result<Settings, String> {
         "" => String::new(),
         raw => compile_login_url(raw).map_err(|e| format!("login_url: {e}"))?,
     };
+    let denied_url = match file.gate.denied_url.trim() {
+        "" => String::new(),
+        raw => compile_page_url("denied_url", raw)?,
+    };
     let issuer = compile_issuer(&file.gate.issuer)?;
     let cookie_domain = compile_cookie_domain(&file.gate.cookie_domain)?;
     let mut authorized_hosts: Vec<UrlPattern> =
@@ -4693,6 +4778,7 @@ pub fn compile_settings(file: &SettingsFile) -> Result<Settings, String> {
         client_id,
         audiences,
         login_url,
+        denied_url,
         oauth_domain: (!oauth_domain.is_empty()).then_some(oauth_domain),
         social_callback_url,
         social_buttons,
@@ -5125,6 +5211,7 @@ mod tests {
             { "name": "mpa",
               "base": ["https://app.x.com/mpa"],
               "login_url": "https://signup.x.com/",
+              "denied_url": "https://app.x.com/mpa-denied",
               "scopes": [
                 { "name": "healthz", "urls": ["https://app.x.com/mpa/healthz"],
                   "access": "anonymous" },
@@ -5929,6 +6016,39 @@ mod tests {
     }
 
     #[test]
+    fn the_refusal_page_falls_back_the_same_way_the_login_page_does() {
+        let a = access_of("denied-url", &fixture());
+        let g = "https://denied.example/";
+        // An area's own page, which is what makes a refusal per-host: the area names a host.
+        assert_eq!(
+            denied_url_for(&a, g, Some("https://app.x.com/mpa/admin/x")),
+            "https://app.x.com/mpa-denied"
+        );
+        // An application that declares none, and a request nginx sent no URL for, both fall
+        // through to the global; empty there is the gate's own page, which only the gate can
+        // name, so this returns it empty rather than guessing a path.
+        assert_eq!(denied_url_for(&a, g, Some("https://ai.x.com/mcp/tool")), g);
+        assert_eq!(denied_url_for(&a, g, None), g);
+        assert_eq!(denied_url_for(&a, "", None), "");
+    }
+
+    #[test]
+    fn a_malformed_denied_url_is_fatal() {
+        // Same guard as the login page, and fatal for the same reason: it lands in a
+        // `Location:` header, so a value that is not printable ASCII is a splitting gadget
+        // and one that is not https is a downgrade.
+        let e = access_err(
+            "bad-denied",
+            &fixture().replace(
+                "https://app.x.com/mpa-denied",
+                "http://app.x.com/mpa-denied",
+            ),
+        );
+        assert!(e.contains("absolute https"), "{e}");
+        assert!(e.contains("denied_url"), "{e}");
+    }
+
+    #[test]
     fn a_malformed_login_url_is_fatal() {
         let e = access_err(
             "bad-login",
@@ -6490,6 +6610,29 @@ mod tests {
     }
 
     #[test]
+    fn the_refusal_page_is_optional_and_held_to_the_login_page_guard() {
+        // Absent is the gate's own /auth/denied, and the gate is where that default lives,
+        // because only it knows the path it serves.
+        assert!(settings(r#"{ "version": 3 }"#)
+            .unwrap()
+            .denied_url
+            .is_empty());
+        let s =
+            settings(r#"{ "version": 3, "gate": { "denied_url": "https://x.com/no" } }"#).unwrap();
+        assert_eq!(s.denied_url, "https://x.com/no");
+        // The same guard as the sign-in page: it ends up in a `Location:`, so anything that
+        // could split a header or downgrade the scheme is refused on the way in, and the
+        // message names the field the operator typed rather than the one it shares code with.
+        let e = refusal(settings(
+            r#"{ "version": 3, "gate": { "denied_url": "http://x.com/no" } }"#,
+        ));
+        assert!(
+            e.contains("denied_url") && e.contains("absolute https"),
+            "{e}"
+        );
+    }
+
+    #[test]
     fn the_version_is_checked_the_way_the_access_file_checks_its_own() {
         // No version at all deserializes to 0, which is not this format either.
         for json in [r#"{}"#, r#"{ "version": 4 }"#] {
@@ -6848,6 +6991,28 @@ mod tests {
 
         // An unknown key inside the section is refused, exactly as it is in the other two.
         assert!(settings(r#"{ "version": 3, "ui": { "stylesheet": "x" } }"#).is_err());
+    }
+
+    /// The hash a policy names has to be the hash a *browser* computes, and the difference
+    /// between the two is invisible from inside this crate.
+    ///
+    /// An HTML parser normalises the document's newlines before the CSP check ever runs, so a
+    /// browser hashes the block with every CRLF already collapsed. This repository is
+    /// developed on a CRLF checkout (`core.autocrlf=true`), `include_str!` embeds the
+    /// stylesheets exactly as they sit on disk, and the release is cross-compiled from that
+    /// same tree: hashing the raw bytes ships a binary whose every page carries a policy that
+    /// refuses its own stylesheet, with nothing in any log and nothing in a test that only
+    /// compares this function against itself. Hence the literal below rather than a
+    /// round trip.
+    #[test]
+    fn a_hash_names_the_newlines_a_browser_sees_and_not_the_ones_on_disk() {
+        let crlf = "a{color:red}\r\nb{color:blue}\r\n";
+        let lf = "a{color:red}\nb{color:blue}\n";
+        assert_eq!(csp_hash(crlf), csp_hash(lf));
+        assert_eq!(
+            csp_hash(lf),
+            "'sha256-S20dnUqfVjBZxb8Zswwd1Uxqocz3m5nEgSQSEQdyC7w='"
+        );
     }
 
     #[test]

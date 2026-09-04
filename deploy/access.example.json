@@ -78,7 +78,8 @@
       "name": "app1",
       "base": ["https://app.example.com/app1"],
       "login_url": "https://signup.example.com/",
-      "notes": "the login page here overrides gate.login_url for this whole area",
+      "denied_url": "https://app.example.com/no-entry",
+      "notes": "both pages here override the gate.* ones for this whole area, and since an area names a host, that is how one gate gives each host its own",
       "scopes": [
         {
           "name": "healthz",

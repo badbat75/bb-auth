@@ -144,6 +144,23 @@
     "Whatever it names, nginx must leave /auth/login and /auth/callback UNGATED."
   ],
 
+  "_comment_denied_url": [
+    "gate.denied_url: where a 403 lands, for somebody who IS signed in and is not admitted",
+    "here. EMPTY MEANS the gate's own /auth/denied, a page it builds out of the ui section",
+    "below, so a deployment gets one without configuring anything. Absolute https when set,",
+    "and the gate's /auth/denied then answers 302 to it.",
+    "It is the one URL in this file that can close nothing: it is read after somebody has",
+    "already been refused, so a wrong value costs that person a page and nobody a door. That",
+    "is why it is not one of the five that ask before they answer.",
+    "An application may override it for its own area (denied_url there), which is how ONE",
+    "gate fronting several hosts gives each host its own refusal page: an area is an",
+    "absolute prefix, so it names a host.",
+    "nginx reaches the page with error_page 403 = @bb_denied and a proxy_pass to",
+    "/auth/denied, which must be UNGATED like the other two pages: a refusal page behind the",
+    "gate is a refusal nobody can be shown. Forward X-Original-URL there too, or the",
+    "per-application page cannot be resolved and every host gets this global one."
+  ],
+
   "_comment_social_wiring": [
     "gate.oauth_domain / gate.social_callback_url — the Cognito hosted UI this deployment",
     "sends people to, as a bare host, and the redirect_uri it comes back to. Empty means no",
@@ -191,7 +208,7 @@
 
   "_comment_ui": [
     "ui — how every page BOTH programs serve looks: the gate's sign-in page, its social",
-    "callback and its error page, and the whole bb-auth-web GUI. It is the one section they",
+    "callback, its error page and its refusal page, and the whole bb-auth-web GUI. It is the one section they",
     "share, and it passes the three-part rule above the way the rest do: read when a page is",
     "rendered, harmless when wrong (an unstyled page, never a locked door), no secret.",
     "",
@@ -216,6 +233,7 @@
     "issuer": "",
     "client_id": "",
     "login_url": "",
+    "denied_url": "",
     "cookie_domain": "",
     "authorized_hosts": ["example.com", "*.example.com"],
     "profile_claims": [],
