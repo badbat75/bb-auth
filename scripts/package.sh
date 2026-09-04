@@ -68,11 +68,28 @@ case "$(uname -s)" in
     command -v wsl.exe >/dev/null 2>&1 || {
       echo "[pkg] FATAL: run this under Linux or WSL (wsl.exe not found)." >&2; exit 1; }
     WIN_CRATE_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && { pwd -W 2>/dev/null || pwd; })"
+    # WHICH COMMIT THESE BYTES ARE is worked out on THIS side of the handover, where git
+    # is, and carried across: the other side is a /mnt/c mount in a distribution that may
+    # have no git at all, and asking there answered "unknown" for a build started exactly
+    # as documented (`bash scripts/package.sh` from Git Bash), while the same build through
+    # deploy.ps1 was named, because that script already passes the value in. It also
+    # disarmed the refusal below to package an uncommitted tree, since a tree that cannot
+    # be read is never dirty. Same derivation as section 2, and the same reason for the
+    # commit rather than `git describe`. Empty stays empty, so a machine with no git here
+    # either still gets the fallback there.
+    if [ -z "${BB_AUTH_BUILD:-}" ]; then
+      BB_AUTH_BUILD="$(git -C "$WIN_CRATE_DIR" rev-parse --short=7 HEAD 2>/dev/null)" || BB_AUTH_BUILD=""
+      if [ -n "$BB_AUTH_BUILD" ]; then
+        git -C "$WIN_CRATE_DIR" diff-index --quiet HEAD -- 2>/dev/null ||
+          BB_AUTH_BUILD="$BB_AUTH_BUILD-dirty"
+        BB_AUTH_BUILD="g$BB_AUTH_BUILD"
+      fi
+    fi
     QARGS=""
     for a in "$@"; do QARGS="$QARGS $(printf '%q' "$a")"; done
-    echo "[pkg] Windows shell detected, re-running inside WSL ..."
+    echo "[pkg] Windows shell detected, re-running inside WSL (build $BB_AUTH_BUILD) ..."
     exec wsl.exe -e bash -lc \
-      "cd \"\$(wslpath -a '$WIN_CRATE_DIR')\" && exec bash scripts/package.sh$QARGS"
+      "cd \"\$(wslpath -a '$WIN_CRATE_DIR')\" && BB_AUTH_BUILD='${BB_AUTH_BUILD:-}' exec bash scripts/package.sh$QARGS"
     ;;
 esac
 
