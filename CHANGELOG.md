@@ -88,6 +88,49 @@ which is correct: a host-only cookie has no second host to survive to. The admin
 `'self'` and always did, since it only ever redirects to itself. This is not a change to where
 a login may land: `safe_rd` and `gate.authorized_hosts` decide that, exactly as before.
 
+### Carried by 1.99.3: the `403` and the page it lands on
+
+1.99.3 is the number the rest of this section was first built under, and it is written down
+because a candidate's handle is its commit while the number is the only thing a host reports
+about itself. It carries everything from "A refused request that is signed in gets a `403`,
+and a page" onwards, and three things too small to have a section of their own:
+
+* **Shell scripts are checked out with LF** (`.gitattributes`). A `deploy.sh` that reaches a
+  Debian host with CRLF line endings dies on `bash: $'\r': command not found` at its first
+  line, so the rule is not tidiness: it is the difference between a release leaving this
+  machine and not.
+* **`scripts/package.sh` works the commit out before handing over to WSL**, for the reason
+  `deploy.ps1` already did one script along: the build runs where the checkout is a `/mnt/c`
+  mount and `git` may not exist, so asking there answered `unknown`.
+* A clippy 1.98 fix (`?` in place of a match that only ever returned `None`), and the
+  refusal page's nginx recipe corrected to `rewrite ^ /auth/denied break`, since a named
+  location takes no URI on `proxy_pass` and the shorter form fails `nginx -t`.
+
+### Fixed in 1.99.4: the refusal page signed out into a 404
+
+The `Sign out` link on `/auth/denied` was `href="/auth/logout"`, root-relative, and that is
+wrong everywhere the page is actually read. nginx answers a `403` with it through
+`error_page 403 = @bb_denied`, which **proxies rather than redirects**, so the browser is
+still on the gated vhost: the click resolved against a host that mounts a service and not the
+gate, and landed in that vhost's catch-all. A `404` for whoever the service knows, and the
+refusal page again for whoever it does not, which is the loop the `403` exists to end,
+arriving one click later.
+
+The link is now absolute on the origin of that area's login page, and carries that page as
+its `?rd=`. The origin is the login page's because it is the host a deployment has already
+said the gate answers on, and it is resolved per area, so one gate fronting several hosts
+signs each host's people out where they signed in. The `?rd=` is there because a sign-out
+offered on this page means "use another account" and has somewhere specific to land; without
+one the browser's `Referer` answers instead, naming the page that has just refused them,
+which costs a `401` and one more hop.
+
+Nothing to configure, and one thing to know: this is the rule "One logout endpoint for every
+vhost" in README already stated, applied to the gate's own page, which was the last thing in
+the repository breaking it. **A gated vhost therefore needs no `/auth/logout` location of its
+own.** Where `gate.login_url` is empty the link stays relative, which is correct: the gate's
+own sign-in page is only reachable when the gate is mounted on the vhost being read from, and
+then the endpoint beside it is too.
+
 ### The gate serves its own sign-in page
 
 * `/auth/login` and `/auth/callback` are the gate's now, complete on their own: no font, no
@@ -137,12 +180,8 @@ a login may land: `safe_rd` and `gate.authorized_hosts` decide that, exactly as 
   honest, and it says that this account cannot open that page **without** saying whether the
   page exists: a URL outside every application is refused exactly like one whose scope
   excludes you. Its one link is a sign-out, since signing in as the same person lands right
-  back on it, and that link is **absolute**, on the origin of the area's login page and
-  carrying that page as its `?rd=`: `error_page` proxies rather than redirects, so the
-  browser is still on the gated vhost when it reads the page, and a root-relative
-  `/auth/logout` would resolve against a host that mounts a service rather than the gate.
-  A gated vhost therefore needs no logout location of its own. Leave the page's location
-  ungated, like the other two pages.
+  back on it, and it is absolute on the origin of that area's login page (see "Fixed in
+  1.99.4" above). Leave the page's location ungated, like the other two pages.
 * **Two ways to use your own page instead**: `gate.denied_url` in the settings file for the
   whole deployment, and `denied_url` on an application in the access file for one area.
   Because an area is an absolute prefix, that second one is **per host**: one gate fronting
