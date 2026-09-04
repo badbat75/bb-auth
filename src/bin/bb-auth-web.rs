@@ -3981,13 +3981,9 @@ fn scope_credentials(s: &ScopeSpec) -> Option<Vec<&'static str>> {
 fn app_credentials(a: &AppSpec) -> Option<Vec<&'static str>> {
     let (mut login, mut api_key) = (false, false);
     for s in &a.scopes {
-        match scope_credentials(s) {
-            None => return None,
-            Some(list) => {
-                login |= list.contains(&"login");
-                api_key |= list.contains(&"api_key");
-            }
-        }
+        let list = scope_credentials(s)?;
+        login |= list.contains(&"login");
+        api_key |= list.contains(&"api_key");
     }
     // Built in a fixed order rather than sorted, so the column reads the same way the scope
     // below it does and the two can be compared at a glance.
