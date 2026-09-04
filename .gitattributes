@@ -1,0 +1,7 @@
+# Shell scripts reach a Linux shell whatever machine the checkout is on: WSL builds the
+# packages, and deploy.sh and verify.sh are piped into `sudo bash` on the target. bash reads
+# a trailing CR as part of the token, so with the CRLF a Windows checkout gives them
+# (`core.autocrlf=true`) `set -euo pipefail` aborts package.sh on its third line with
+# "set: pipefail: invalid option name" and the release never starts. This is the one file
+# that can promise otherwise, because it outranks the setting.
+*.sh text eol=lf
