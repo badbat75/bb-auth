@@ -582,7 +582,7 @@ section under-read itself by a fifth, and two of the seven are lockout-class.
 
   It is a *file* for one mechanical reason, and not for tidiness: **a process cannot re-read
   its own environment** (systemd loads `EnvironmentFile=` once, at `ExecStart`), so an env var
-  can never be hot. Do not add a nineteenth setting because it would be convenient there;
+  can never be hot. Do not add a twentieth setting because it would be convenient there;
   check it against the three parts first, and say the argument out loud the way the ones above
   are, including the part it fails.
   It is held in `RwLock<Settings>`, reloaded by the same SIGHUP as the access file and
