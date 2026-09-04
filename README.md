@@ -455,13 +455,16 @@ location /app1 {
 location @bb_denied {
     auth_request off;                                    # only if the gate is at server level
     proxy_set_header X-Original-URL $bb_url;             # which area refused: per-area page
-    proxy_pass http://127.0.0.1:4181/auth/denied;
+    rewrite ^ /auth/denied break;                        # nginx takes no URI on proxy_pass here
+    proxy_pass http://127.0.0.1:4181;
 }
 ```
 
 The `=` is load-bearing and so is the page's own status: `/auth/denied` answers `403` itself,
 so `error_page 403 = @bb_denied` keeps the refusal honest instead of turning it into a `200`.
-Nothing here redirects, so the browser stays on the URL it asked for.
+Nothing here redirects, so the browser stays on the URL it asked for. The `rewrite … break`
+is not decoration either: nginx refuses a URI part on `proxy_pass` inside a named location,
+so the shorter `proxy_pass http://127.0.0.1:4181/auth/denied;` fails `nginx -t` (1.26.3).
 
 The page comes from the gate, in the palette the `ui` section gives every other page, and it
 says that this account cannot open that page **without** saying whether the page exists: a
@@ -1112,7 +1115,8 @@ The binary is service-agnostic. To front a service at `app.example.com`:
        # says no.
        location @bb_denied {
            proxy_set_header X-Original-URL $bb_url;
-           proxy_pass http://127.0.0.1:4181/auth/denied;
+           rewrite ^ /auth/denied break;    # a named location takes no URI on proxy_pass
+           proxy_pass http://127.0.0.1:4181;
        }
 
        location = /auth/session {
@@ -1249,7 +1253,8 @@ server {
     }
     location @bb_denied {
         proxy_set_header X-Original-URL $bb_url;
-        proxy_pass http://127.0.0.1:4181/auth/denied;
+        rewrite ^ /auth/denied break;    # a named location takes no URI on proxy_pass
+        proxy_pass http://127.0.0.1:4181;
     }
 }
 ```

@@ -804,7 +804,8 @@ location /app1 {
 location @bb_signin { return 302 $bb_login_safe?rd=$scheme://$host$request_uri; }
 location @bb_denied {
     proxy_set_header X-Original-URL $bb_url;
-    proxy_pass http://127.0.0.1:4181/auth/denied;
+    rewrite ^ /auth/denied break;    # a named location takes no URI on proxy_pass
+    proxy_pass http://127.0.0.1:4181;
 }
 ```
 

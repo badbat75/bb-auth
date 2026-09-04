@@ -120,7 +120,8 @@ a login may land: `safe_rd` and `gate.authorized_hosts` decide that, exactly as 
   error_page 403 = @bb_denied;          # new
   location @bb_denied {
       proxy_set_header X-Original-URL $bb_url;
-      proxy_pass http://127.0.0.1:4181/auth/denied;
+      rewrite ^ /auth/denied break;    # a named location takes no URI on proxy_pass
+      proxy_pass http://127.0.0.1:4181;
   }
   ```
 
