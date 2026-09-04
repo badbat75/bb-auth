@@ -473,6 +473,13 @@ you, and telling a visitor which of the two they hit hands an enumeration oracle
 with any account at all. Its one link is a sign-out, because signing in as the same person
 lands right back on it.
 
+That link is **absolute**, on the origin of this area's login page and with that page as its
+`?rd=`, and the reason is the recipe above: `error_page` proxies rather than redirects, so the
+browser is still on the gated vhost when it reads this page and a root-relative
+`/auth/logout` would resolve against a host that mounts a service rather than the gate. It is
+the same rule as [One logout endpoint for every vhost](#one-logout-endpoint-for-every-vhost),
+applied to the gate's own page, so a gated vhost needs no logout location of its own.
+
 To replace it with a page of your own, name one: the application's `denied_url` for that area,
 or `gate.denied_url` for the whole deployment. `/auth/denied` then answers `302` to it, which
 is the one redirect this design does not push into nginx, and for an nginx reason: proxying to

@@ -22,12 +22,14 @@ Versions are the crate's (`Cargo.toml`); packages add a Debian revision
 
 ## Unreleased
 
-**Due out as 1.99.3, and 1.99.2 is spent**: a build carrying that number was deployed to a
-host on 2026-08-20 from `g3b40e77`, which carried the `form-action` fix below and nothing of
-the `403` work, so the tree that carries both is a different set of bytes and gets a
-different number. Reusing it would put two different sets of bytes behind one version
-string, which is the failure the commit in the version string exists to catch rather than to
-cause.
+**Due out as 1.99.4, and the two numbers before it are behind us.** 1.99.2 was spent by a
+deploy: a build carrying it went to a host on 2026-08-20 from `g3b40e77`, which had the
+`form-action` fix below and nothing of the `403` work. 1.99.3 is left behind one step along,
+and without the same claim being made about it, because the claim is not the point: the
+refusal page's sign-out link changed after that number was written, so the bytes under it are
+not the bytes under this one, whether or not any host ever ran them. Reusing either would put
+two different sets of bytes behind one version string, which is the failure the commit in the
+version string exists to catch rather than to cause.
 
 **A release candidate for 2.0.0**, and the version number says so: the
 configuration surface moved far enough in one window that calling it 1.2.0 would have
@@ -37,7 +39,7 @@ environment and into the settings file; and a confirmation step in front of the 
 that can stop people getting in.
 
 **A version gets a section of its own here only once it is tagged and released, and a
-release candidate is neither.** 1.99.3 is a version number, not a release: it is built,
+release candidate is neither.** 1.99.4 is a version number, not a release: it is built,
 deployed and run, and it is **not tagged**, because a tag is what says "this is a thing you
 can install and go back to" and a candidate is not that. So this section stays under this
 heading through however many 1.99.x there are, and becomes `## 2.0.0` on the day 2.0.0 is
@@ -135,7 +137,12 @@ a login may land: `safe_rd` and `gate.authorized_hosts` decide that, exactly as 
   honest, and it says that this account cannot open that page **without** saying whether the
   page exists: a URL outside every application is refused exactly like one whose scope
   excludes you. Its one link is a sign-out, since signing in as the same person lands right
-  back on it. Leave the location ungated, like the other two pages.
+  back on it, and that link is **absolute**, on the origin of the area's login page and
+  carrying that page as its `?rd=`: `error_page` proxies rather than redirects, so the
+  browser is still on the gated vhost when it reads the page, and a root-relative
+  `/auth/logout` would resolve against a host that mounts a service rather than the gate.
+  A gated vhost therefore needs no logout location of its own. Leave the page's location
+  ungated, like the other two pages.
 * **Two ways to use your own page instead**: `gate.denied_url` in the settings file for the
   whole deployment, and `denied_url` on an application in the access file for one area.
   Because an area is an absolute prefix, that second one is **per host**: one gate fronting

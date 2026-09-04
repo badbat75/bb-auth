@@ -27,8 +27,10 @@ __BB_LOGO__
 
     <!-- A sign-out, and deliberately not a sign-in: whoever is reading this is already
          signed in, so the login page would hand back the same session and land them right
-         back here. That round trip is the loop the 403 exists to end. -->
-    <p class="center hint"><a href="/auth/logout">Sign out and use another account</a></p>
+         back here. That round trip is the loop the 403 exists to end. The href is absolute
+         and carries its own ?rd=, because this document is read under the gated vhost's own
+         address and not the gate's: see logout_link in src/bin/bb-auth.rs. -->
+    <p class="center hint"><a href="__BB_LOGOUT_URL__">Sign out and use another account</a></p>
 
     <footer>__BB_BRAND__</footer>
   </main>

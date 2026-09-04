@@ -2182,6 +2182,40 @@ fn global_login(settings: &Settings) -> &str {
     }
 }
 
+/// The `Sign out` link the refusal page carries: this gate's logout endpoint, absolute on
+/// the origin of the page people sign in on, and naming that same page as its `?rd=`.
+///
+/// **It has to be absolute**, and the reason is where this page is read. nginx answers a
+/// `403` with it through `error_page 403 = @bb_denied`, which is a proxy rather than a
+/// redirect, so the browser stays on the gated URL and a root-relative `/auth/logout`
+/// resolves against *that* vhost. That vhost mounts a service, not the gate: the click lands
+/// in its catch-all, which is a `404` for whoever the service knows and this very page again
+/// for whoever it does not. [`handle_logout`] reads nothing about the host it is called on,
+/// so one mounted location serves the whole estate as long as every link names it absolutely,
+/// and this page was the last thing in the repository breaking that rule.
+///
+/// The origin is the **login page's** because that is the host a deployment has already said
+/// the gate answers on, and it is resolved per area ([`login_url_for`]) for the reason the
+/// refusal page itself is: one gate fronts several hosts and each may sign its people in
+/// somewhere of its own. The `?rd=` is that same page, because a sign-out offered *here*
+/// means "use another account" and has somewhere specific to land; without one the browser's
+/// [`REFERER_HEADER`] answers instead, naming the page that has just refused them, which
+/// costs a `401` and one more hop. A login page outside `gate.authorized_hosts` is not a
+/// broken link either: [`safe_rd`] then falls back to the global `gate.login_url`, which is
+/// a sign-in page either way.
+///
+/// A login URL with no origin is the gate's own page ([`OWN_LOGIN_PATH`]), which is only
+/// reachable at all when the gate is mounted on the vhost being read from, and then
+/// `/auth/logout` is mounted there too: relative is right for the same reason it was wrong
+/// above.
+fn logout_link(login_url: &str) -> String {
+    let rd = pct_encode(login_url);
+    match origin_of(login_url) {
+        Some(origin) => format!("{origin}{OWN_LOGOUT_PATH}?rd={rd}"),
+        None => format!("{OWN_LOGOUT_PATH}?rd={rd}"),
+    }
+}
+
 /// The refusal page, served at `GET /auth/denied`. Every word of it is in the template,
 /// because nothing about it varies: the page says the same thing to everybody, and what an
 /// operator changes is the `ui` section around it or the page itself
@@ -2218,7 +2252,8 @@ const OWN_DENIED_PATH: &str = "/auth/denied";
 /// exactly like one whose scope excludes this person), and telling a visitor which of the two
 /// they hit is an enumeration oracle for anyone with any valid account at all. The link is a
 /// sign-out rather than a sign-in, because signing in as the same person lands right back
-/// here and switching accounts is the only move the page can honestly offer.
+/// here and switching accounts is the only move the page can honestly offer, and it is
+/// absolute because this page is read under somebody else's vhost: see [`logout_link`].
 ///
 /// **An operator's own page replaces it**, and then this endpoint is a `302` to that page:
 /// the application's `denied_url` for the area that refused, else `gate.denied_url`, which is
@@ -2241,11 +2276,15 @@ fn handle_denied(req: Request, state: &State) {
     // Cloned rather than held: `respond_card` takes the settings lock again for the look, and
     // the redirect arm has nothing left to read once it has the URL. Access first, then
     // settings, which is the order `handle_validate` takes them in.
-    let elsewhere = {
+    let (elsewhere, login) = {
         let access = state.access.read().unwrap();
         let settings = state.settings.read().unwrap();
         let to = denied_url_for(&access, &settings.denied_url, url.as_deref());
-        (!to.is_empty()).then_some(to)
+        // The area's own sign-in page, which is where the page's one link sends whoever
+        // wants to try another account. Read here rather than in the redirect arm's absence,
+        // because both values come from one reading of the two tables.
+        let login = login_url_for(&access, global_login(&settings), url.as_deref());
+        ((!to.is_empty()).then_some(to), login)
     };
     if let Some(url) = elsewhere {
         // `compile_page_url` vouched for it at load, so it is printable ASCII and cannot
@@ -2253,7 +2292,17 @@ fn handle_denied(req: Request, state: &State) {
         respond_redirect(req, &url, None);
         return;
     }
-    respond_card(req, state, 403, DENIED_HTML, Vec::new());
+    // Escaped on the way into the attribute, as every other value this page substitutes is:
+    // that is a property of emitting into HTML and not of what today's caller happens to
+    // hand over.
+    let sign_out = html_escape(&logout_link(&login));
+    respond_card(
+        req,
+        state,
+        403,
+        DENIED_HTML,
+        vec![("__BB_LOGOUT_URL__", sign_out)],
+    );
 }
 
 /// Serve `GET /auth/callback`, the page that finishes a social sign-in.
@@ -4761,6 +4810,31 @@ mod tests {
         assert_eq!(f("/\r\nSet-Cookie: x=1"), LOGIN); // response splitting
     }
 
+    /// The refusal page's sign-out, which is the one link in this repository that is read
+    /// under a vhost the gate is not mounted on. Relative, it resolved against that vhost and
+    /// hit its catch-all; absolute on the login page's origin, it reaches the one endpoint
+    /// that serves every vhost, and the `?rd=` is what saves the extra `401` the browser's
+    /// `Referer` would otherwise buy.
+    #[test]
+    fn the_refusal_page_signs_out_on_the_login_page_origin() {
+        assert_eq!(
+            logout_link("https://login.badbat75.com/"),
+            "https://login.badbat75.com/auth/logout?rd=https%3A%2F%2Flogin.badbat75.com%2F"
+        );
+        // An area may sign its people in on a page of its own, path and query included, and
+        // the origin is all this takes from it.
+        assert_eq!(
+            logout_link("https://in.badbat75.com/x?a=1"),
+            "https://in.badbat75.com/auth/logout?rd=https%3A%2F%2Fin.badbat75.com%2Fx%3Fa%3D1"
+        );
+        // The gate's own page, which is only reachable when the gate is mounted on the vhost
+        // being read from, and then the endpoint beside it is too.
+        assert_eq!(
+            logout_link(OWN_LOGIN_PATH),
+            "/auth/logout?rd=%2Fauth%2Flogin"
+        );
+    }
+
     #[test]
     fn rd_url_allowed_matches_host_only() {
         let h = bb_hosts();
@@ -5278,16 +5352,20 @@ mod tests {
         assert_eq!(r.status(), 403);
         let page = r.body_mut().read_to_string().unwrap();
         assert!(page.contains("Access denied"), "{page}");
-        // It offers the only move it honestly can, and never the login page: signing in as
-        // the same person lands right back here, which is the loop this whole change is
-        // about. The link is written in the template, so this is also what pins it to the
-        // route the router actually serves.
+        // It offers the only move it honestly can, and never a link *to* the login page:
+        // signing in as the same person lands right back here, which is the loop this whole
+        // page is about. The sign-out is absolute on the login page's origin, because the
+        // browser is reading this document under the gated vhost's address and a relative
+        // path would resolve against a host that does not mount the gate.
         assert!(
-            DENIED_HTML.contains(OWN_LOGOUT_PATH),
-            "the template links to the route"
+            page.contains(&format!(
+                r#"href="{}auth/logout?rd={}""#,
+                LOGIN,
+                pct_encode(LOGIN)
+            )),
+            "{page}"
         );
-        assert!(page.contains(OWN_LOGOUT_PATH), "{page}");
-        assert!(!page.contains(LOGIN), "{page}");
+        assert!(!page.contains(&format!(r#"href="{LOGIN}""#)), "{page}");
         // Rendered, not served raw: a placeholder left standing is a page missing its
         // stylesheet, which is exactly what nobody looks at on an error page.
         assert!(!page.contains("__BB_"), "{page}");
