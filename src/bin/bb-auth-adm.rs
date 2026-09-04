@@ -45,15 +45,16 @@ use bb_auth_core::{
     add_api_key, add_application, add_denied, add_scope, add_user, add_user_email, add_user_group,
     app_mut, app_pos, compile_app_client_id, compile_asset_url, compile_brand_name,
     compile_cookie_domain, compile_host_pattern, compile_issuer, compile_login_url,
-    compile_oauth_domain, decide, decide_api_key, default_settings_path, edit_url_list, edit_urls,
-    format_date, guarded_changes, key_expiry, key_mut, mint_uuid, move_scope, norm_email, now,
-    open_access_file, open_settings_file, parse_exclusion, remove_api_key, remove_application,
-    remove_denied, remove_scope, remove_user, remove_user_email, remove_user_group,
-    rename_application, rename_scope, request_url, rotate_api_key, scope_pos, shadowing_scope,
-    user_group_mut, user_group_refs, user_label, user_pos, version_line, well_formed_uuid, Access,
-    AccessFile, AccessWrite, ApiKeySpec, AppSpec, Decision, GateSettings, GuardedSetting,
-    KeyDecision, ScopeSpec, SealedKey, SettingsFile, SettingsWrite, SocialButtonSpec, Subject,
-    UiTheme, UserSpec, WiredButton, Written, ACCESS_FILE_VERSION, SETTINGS_VERSION,
+    compile_oauth_domain, compile_page_url, decide, decide_api_key, default_settings_path,
+    edit_url_list, edit_urls, format_date, guarded_changes, key_expiry, key_mut, mint_uuid,
+    move_scope, norm_email, now, open_access_file, open_settings_file, parse_exclusion,
+    remove_api_key, remove_application, remove_denied, remove_scope, remove_user,
+    remove_user_email, remove_user_group, rename_application, rename_scope, request_url,
+    rotate_api_key, scope_pos, shadowing_scope, user_group_mut, user_group_refs, user_label,
+    user_pos, version_line, well_formed_uuid, Access, AccessFile, AccessWrite, ApiKeySpec, AppSpec,
+    Decision, GateSettings, GuardedSetting, KeyDecision, ScopeSpec, SealedKey, SettingsFile,
+    SettingsWrite, SocialButtonSpec, Subject, UiTheme, UserSpec, WiredButton, Written,
+    ACCESS_FILE_VERSION, SETTINGS_VERSION,
 };
 
 const USAGE: &str = "\
@@ -78,9 +79,9 @@ file
 
 applications                    the places. Areas do not overlap, so their order is nothing
   app list
-  app add NAME --base URL... [--login-url URL] [--note TEXT]
+  app add NAME --base URL... [--login-url URL] [--denied-url URL] [--note TEXT]
   app set NAME [--base U]... [--add-base U]... [--rm-base U]... [--login-url URL]
-               [--no-login-url] [--note TEXT]
+               [--no-login-url] [--denied-url URL] [--no-denied-url] [--note TEXT]
   app rename NAME NEW
   app rm NAME
 
@@ -134,7 +135,7 @@ settings                        the OTHER file: what takes effect with no restar
   settings show                 what the gate and the GUI read from it
   settings set [--claims LIST] [--identity LIST] [--session-ttl SECS]
                [--unverified-social true|false] [--providers LIST] [--no-providers]
-               [--issuer URL] [--login-url URL] [--client-id ID]
+               [--issuer URL] [--login-url URL] [--denied-url URL] [--client-id ID]
                [--cookie-domain DOMAIN] [--authorized-hosts LIST] [--no-authorized-hosts]
                [--oauth-domain HOST] [--social-callback-url URL]
                [--social-buttons IDP=APPCLIENT,...] [--no-social-buttons]
@@ -160,6 +161,11 @@ settings                        the OTHER file: what takes effect with no restar
   --cookie-domain, and removing an --authorized-hosts entry), so changing one asks first
   and --yes is how you mean it. None of them invalidates a cookie, which is why asking is
   enough: your own session survives the edit, so you can always undo it.
+  --denied-url is the other page a browser is sent to, the one a 403 lands on, and it is
+  not one of the five: it is shown to somebody who has already been refused, so a wrong
+  value costs them a page and nobody a door. Empty is the gate's own /auth/denied. An
+  application may override it with `app set NAME --denied-url`, which is how one gate
+  fronting several hosts gives each host its own refusal page.
   The last four are the `ui` section, and they are the look of every page BOTH programs
   emit: the gate's login page and bb-auth-web itself. --stylesheet loads after the built-in
   stylesheet and is meant to redefine its custom properties, so a deployment restyles both
@@ -169,7 +175,8 @@ settings                        the OTHER file: what takes effect with no restar
 --url takes a <scheme>://<host>/<path> glob; repeat it, or comma-separate. `*` never
 crosses '/' unless it is the pattern's last character; blanket coverage is '*://*/*'.
 A --base is LITERAL (no wildcards): it is the area an application owns, and every scope
-pattern must lie inside it. Access is enumerated, never assumed: a URL no application
+pattern must lie inside it. It is also what makes --login-url and --denied-url per-host:
+an area names a host, so two applications on two hosts carry two pages. Access is enumerated, never assumed: a URL no application
 covers is reachable by nobody.
 
 An edit takes effect when the gate re-reads the file: systemctl reload bb-auth.
@@ -746,6 +753,13 @@ fn cmd_settings_show(ctx: Ctx) -> Result<ExitCode, String> {
         }
     );
     println!(
+        "  denied_url              {}",
+        match s.denied_url.as_str() {
+            "" => "(none: the gate's own /auth/denied)",
+            url => url,
+        }
+    );
+    println!(
         "  client_id               {}",
         match s.client_id.as_str() {
             "" => "(none: no login can complete)",
@@ -837,6 +851,7 @@ fn cmd_settings_set(mut ctx: Ctx) -> Result<ExitCode, String> {
     let social = take_tristate(&mut ctx.flags, "unverified-social")?;
     let providers = ctx.flags.take_many("providers")?;
     let login_url = ctx.flags.take_one("login-url")?;
+    let denied_url = ctx.flags.take_one("denied-url")?;
     let client_id = ctx.flags.take_one("client-id")?;
     let issuer = ctx.flags.take_one("issuer")?;
     let cookie_domain = ctx.flags.take_one("cookie-domain")?;
@@ -874,6 +889,7 @@ fn cmd_settings_set(mut ctx: Ctx) -> Result<ExitCode, String> {
         && providers.is_empty()
         && !no_providers
         && login_url.is_none()
+        && denied_url.is_none()
         && client_id.is_none()
         && issuer.is_none()
         && cookie_domain.is_none()
@@ -926,6 +942,15 @@ fn cmd_settings_set(mut ctx: Ctx) -> Result<ExitCode, String> {
             compile_login_url(&u).map_err(|e| format!("--login-url: {e}"))?;
         }
         doc.gate.login_url = u.trim().to_string();
+    }
+    // Not one of the five that ask before they answer: a refusal page cannot shut a door,
+    // it is only what somebody already shut out is shown.
+    if let Some(u) = denied_url {
+        if !u.trim().is_empty() {
+            compile_page_url("denied_url", &u)
+                .map_err(|e| e.replace("denied_url", "--denied-url"))?;
+        }
+        doc.gate.denied_url = u.trim().to_string();
     }
     if let Some(id) = client_id {
         doc.gate.client_id = compile_app_client_id("--client-id", &id)?;
@@ -1233,6 +1258,9 @@ fn print_app(a: &AppSpec, doc: &AccessFile) {
     println!("{}  base: {}", a.name.trim(), a.base.join(", "));
     if let Some(l) = &a.login_url {
         println!("     login_url: {l}");
+    }
+    if let Some(l) = &a.denied_url {
+        println!("     denied_url: {l}");
     }
     if let Some(n) = &a.notes {
         if !n.is_empty() {
@@ -1737,6 +1765,7 @@ fn cmd_app_list(ctx: Ctx) -> Result<ExitCode, String> {
 fn cmd_app_add(mut ctx: Ctx, name: &str) -> Result<ExitCode, String> {
     let base = ctx.flags.take_many("base")?;
     let login_url = ctx.flags.take_one("login-url")?;
+    let denied_url = ctx.flags.take_one("denied-url")?;
     let note = ctx.flags.take_one("note")?;
     ctx.flags.finish()?;
     let (mut doc, _) = load(&ctx)?;
@@ -1750,6 +1779,7 @@ fn cmd_app_add(mut ctx: Ctx, name: &str) -> Result<ExitCode, String> {
             name: name.trim().to_string(),
             base,
             login_url,
+            denied_url,
             notes: note,
             ..Default::default()
         },
@@ -1770,6 +1800,8 @@ fn cmd_app_set(mut ctx: Ctx, name: &str) -> Result<ExitCode, String> {
     let rm = ctx.flags.take_many("rm-base")?;
     let login_url = ctx.flags.take_one("login-url")?;
     let no_login = ctx.flags.take_flag("no-login-url")?;
+    let denied_url = ctx.flags.take_one("denied-url")?;
+    let no_denied = ctx.flags.take_flag("no-denied-url")?;
     let note = ctx.flags.take_one("note")?;
     ctx.flags.finish()?;
     let (mut doc, _) = load(&ctx)?;
@@ -1782,6 +1814,14 @@ fn cmd_app_set(mut ctx: Ctx, name: &str) -> Result<ExitCode, String> {
     }
     if let Some(l) = login_url {
         a.login_url = Some(l);
+        changed = true;
+    }
+    if no_denied {
+        a.denied_url = None;
+        changed = true;
+    }
+    if let Some(l) = denied_url {
+        a.denied_url = Some(l);
         changed = true;
     }
     if let Some(n) = note {

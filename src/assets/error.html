@@ -1,0 +1,28 @@
+<!DOCTYPE html>
+<!-- The gate serves this page when POST /auth/session refuses a login: a bad token, a body
+     with no token in it, or a verified email with nowhere it could go. The heading and the
+     sentence are the caller's, because each of those says something different; the way back
+     is always the sign-in page it just came from. See ERROR_HTML in src/bin/bb-auth.rs. -->
+<html lang="en"__BB_THEME_ATTR__>
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <meta name="robots" content="noindex, nofollow">
+  <title>__BB_TITLE__</title>
+__BB_HEAD__
+</head>
+<body>
+  <main class="card">
+    <div class="brand">
+__BB_LOGO__
+      <h1>__BB_TITLE__</h1>
+    </div>
+
+    <p class="status">__BB_MESSAGE__</p>
+
+    <p class="center hint"><a href="__BB_LOGIN_URL__">&larr; Back to sign-in</a></p>
+
+    <footer>__BB_BRAND__</footer>
+  </main>
+</body>
+</html>

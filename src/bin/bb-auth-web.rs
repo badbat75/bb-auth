@@ -195,17 +195,17 @@ use bb_auth_core::{
     add_api_key, add_application, add_denied, add_scope, add_user, add_user_email, add_user_group,
     app_mut, app_pos, compile_app_client_id, compile_asset_url, compile_brand_name,
     compile_cookie_domain, compile_host_pattern, compile_issuer, compile_login_url,
-    compile_oauth_domain, cookie_domain_covers, csp_hash, decide, default_settings_path, edit_urls,
-    format_date, group_ref, guarded_changes, key_expiry, key_mut, move_scope, norm_email, now,
-    open_access_file, open_settings_file, page_csp, parse_exclusion, remove_api_key,
-    remove_application, remove_denied, remove_scope, remove_user, remove_user_email,
-    remove_user_group, rename_application, rename_scope, request_site, request_url, rotate_api_key,
-    scope_mut, scope_pos, sha256_hex, shadowing_scope, social_idp_label, stylesheet_link,
-    user_group_mut, user_group_refs, user_label, user_pos, user_refs, version_line, Access,
-    AccessFile, AccessWrite, ApiKeySpec, AppSpec, Decision, GateSettings, GuardedSetting,
-    RequestSite, ScopeSpec, SealedKey, SettingsFile, SettingsWrite, SocialButtonSpec, Subject,
-    UiTheme, UserSpec, WiredButton, Written, BASE_CSS, IDENTITY_HEADER, PAGE_SECURITY_HEADERS,
-    SOCIAL_IDPS, THEME_CSS,
+    compile_oauth_domain, compile_page_url, cookie_domain_covers, csp_hash, decide,
+    default_settings_path, edit_urls, format_date, group_ref, guarded_changes, key_expiry, key_mut,
+    move_scope, norm_email, now, open_access_file, open_settings_file, page_csp, parse_exclusion,
+    remove_api_key, remove_application, remove_denied, remove_scope, remove_user,
+    remove_user_email, remove_user_group, rename_application, rename_scope, request_site,
+    request_url, rotate_api_key, scope_mut, scope_pos, sha256_hex, shadowing_scope,
+    social_idp_label, stylesheet_link, user_group_mut, user_group_refs, user_label, user_pos,
+    user_refs, version_line, Access, AccessFile, AccessWrite, ApiKeySpec, AppSpec, Decision,
+    GateSettings, GuardedSetting, RequestSite, ScopeSpec, SealedKey, SettingsFile, SettingsWrite,
+    SocialButtonSpec, Subject, UiTheme, UserSpec, WiredButton, Written, BASE_CSS, IDENTITY_HEADER,
+    PAGE_SECURITY_HEADERS, SOCIAL_IDPS, THEME_CSS,
 };
 use maud::{html, Markup, PreEscaped, DOCTYPE};
 use std::io::Read;
@@ -521,6 +521,8 @@ enum K {
     BaseHelp,
     LoginUrl,
     LoginUrlHelp,
+    DeniedUrl,
+    DeniedUrlHelp,
     AccessWord,
     AccessAnonymous,
     AccessAuthenticated,
@@ -625,6 +627,8 @@ enum K {
     SocialWaysHelp,
     GlobalLoginUrl,
     GlobalLoginUrlHelp,
+    GlobalDeniedUrl,
+    GlobalDeniedUrlHelp,
     OauthDomain,
     OauthDomainHelp,
     SocialCallback,
@@ -750,6 +754,12 @@ fn t(lang: Lang, key: K) -> &'static str {
             lang,
             "Where a 401 sends people, and where a rejected redirect lands. Empty means the gate's own /auth/login on the host the request arrived at, which is what a deployment that has not moved its sign-in page wants. An application can override it for its own area.",
             "Dove un 401 manda le persone, e dove finisce un redirect rifiutato. Vuoto significa la /auth/login del gate stesso sull'host da cui arriva la richiesta, che e' quello che vuole un deployment che non ha spostato la propria pagina di accesso. Una applicazione puo' sovrascriverla per la propria area.",
+        ),
+        K::GlobalDeniedUrl => m(lang, "Refusal page", "Pagina di rifiuto"),
+        K::GlobalDeniedUrlHelp => m(
+            lang,
+            "Where a 403 sends people: somebody who is signed in and is not admitted here. Empty means the gate's own /auth/denied, which it builds out of the look below. It cannot shut a door, only decide what the person already shut out is shown. An application can override it for its own area, which is how one gate gives each host its own page.",
+            "Dove un 403 manda le persone: qualcuno che ha fatto l'accesso e qui non e' ammesso. Vuoto significa la /auth/denied del gate stesso, costruita con l'aspetto qui sotto. Non puo' chiudere nessuna porta: decide solo cosa vede chi e' gia' stato respinto. Una applicazione puo' sovrascriverla per la propria area, ed e' cosi' che un solo gate da' a ogni host la sua pagina.",
         ),
         K::OauthDomain => m(lang, "Hosted UI domain", "Dominio della hosted UI"),
         K::OauthDomainHelp => m(
@@ -1012,6 +1022,7 @@ fn t(lang: Lang, key: K) -> &'static str {
         K::AccessWord => m(lang, "access", "accesso"),
         K::Credentials => m(lang, "credentials", "credenziali"),
         K::LoginUrl => m(lang, "login_url", "login_url"),
+        K::DeniedUrl => m(lang, "denied_url", "denied_url"),
         K::CredLogin => m(lang, "login", "login"),
         K::CredApiKey => m(lang, "api_key", "api_key"),
         K::AccessAnonymous => m(lang, "anonymous", "anonimo"),
@@ -1255,6 +1266,15 @@ fn t(lang: Lang, key: K) -> &'static str {
              https. Empty uses the global one.",
             "La pagina di accesso per tutta quest\u{2019}area, che sostituisce \
              BB_AUTH_LOGIN_URL. Https assoluto. Vuoto usa quella globale.",
+        ),
+        K::DeniedUrlHelp => m(
+            lang,
+            "The page a refusal lands on for this whole area, overriding the global one. \
+             Absolute https. Empty uses the global, which is itself empty for the gate\u{2019}s \
+             own /auth/denied.",
+            "La pagina su cui atterra un rifiuto per tutta quest\u{2019}area, che sostituisce \
+             quella globale. Https assoluto. Vuoto usa quella globale, che a sua volta vuota \
+             significa la /auth/denied del gate stesso.",
         ),
         K::AccessHelp => m(
             lang,
@@ -4390,7 +4410,7 @@ fn notes_field(value: &str) -> Markup {
     }
 }
 
-/// The `applications` form: `name`, `base`, `login_url`, `notes`. There is no field here
+/// The `applications` form: `name`, `base`, `login_url`, `denied_url`, `notes`. There is no field here
 /// that names a user, and there never may be one: an application describes a **place**, and
 /// grants to named users live in a scope's `users`/`groups` alone.
 #[derive(Default)]
@@ -4398,6 +4418,9 @@ struct AppForm {
     name: String,
     base: String,
     login_url: String,
+    /// Where a refusal inside this area lands. Beside `login_url` because the pair is the
+    /// same question twice: which page this area sends somebody to when they cannot pass.
+    denied_url: String,
     notes: String,
 }
 
@@ -4407,6 +4430,7 @@ impl AppForm {
             name: a.name.trim().to_string(),
             base: a.base.join("\n"),
             login_url: a.login_url.clone().unwrap_or_default(),
+            denied_url: a.denied_url.clone().unwrap_or_default(),
             notes: a.notes.clone().unwrap_or_default(),
         }
     }
@@ -4415,6 +4439,7 @@ impl AppForm {
             name: f.get("name").to_string(),
             base: f.get("base").to_string(),
             login_url: f.get("login_url").to_string(),
+            denied_url: f.get("denied_url").to_string(),
             notes: f.get("notes").to_string(),
         }
     }
@@ -4433,6 +4458,8 @@ fn page_app_form(v: &View, existing: Option<&str>, f: &AppForm, err: Option<&Ref
                 (urls_field(v.t(K::Base), "base", &f.base, html! { (v.t(K::BaseHelp)) }, about("base")))
                 (text_field(v.t(K::LoginUrl), "login_url", &f.login_url, "https://login.x.com/",
                             Some(v.t(K::LoginUrlHelp)), about("login_url")))
+                (text_field(v.t(K::DeniedUrl), "denied_url", &f.denied_url, "https://x.com/denied",
+                            Some(v.t(K::DeniedUrlHelp)), about("denied_url")))
                 (notes_field(&f.notes))
             }, if editing { v.t(K::Save) } else { v.t(K::Create) }, false))
         }
@@ -4622,6 +4649,9 @@ struct ConfigForm {
     client_id: String,
     /// `gate.login_url`. Empty = the gate's own `/auth/login`.
     login_url: String,
+    /// `gate.denied_url`. Empty = the gate's own `/auth/denied`. The one URL on this page
+    /// that can close nothing: it is only what somebody already refused is shown.
+    denied_url: String,
     /// `gate.issuer`, the Cognito user pool. This form refuses to write an empty one, for the
     /// reason it refuses an empty `client_id`: both mean no login can complete.
     issuer: String,
@@ -4654,6 +4684,7 @@ impl ConfigForm {
             providers: doc.gate.social_providers.join("\n"),
             client_id: doc.gate.client_id.clone(),
             login_url: doc.gate.login_url.clone(),
+            denied_url: doc.gate.denied_url.clone(),
             issuer: doc.gate.issuer.clone(),
             cookie_domain: doc.gate.cookie_domain.clone(),
             hosts: doc.gate.authorized_hosts.join("\n"),
@@ -4696,6 +4727,7 @@ impl ConfigForm {
             providers: f.get("providers").to_string(),
             client_id: f.get("client_id").to_string(),
             login_url: f.get("login_url").to_string(),
+            denied_url: f.get("denied_url").to_string(),
             issuer: f.get("issuer").to_string(),
             cookie_domain: f.get("cookie_domain").to_string(),
             hosts: f.get("hosts").to_string(),
@@ -4763,6 +4795,10 @@ impl ConfigForm {
         }
         if !self.login_url.trim().is_empty() {
             compile_login_url(&self.login_url).map_err(|e| Refusal::on("login_url", &e))?;
+        }
+        if !self.denied_url.trim().is_empty() {
+            compile_page_url("denied_url", &self.denied_url)
+                .map_err(|e| Refusal::on("denied_url", &e))?;
         }
         // The pool, held to the same standard as the app client above and refused empty for
         // the same reason: this form should not be able to write a deployment where no login
@@ -4833,6 +4869,7 @@ impl ConfigForm {
         doc.gate.social_providers = Self::lines(&self.providers);
         doc.gate.client_id = client_id;
         doc.gate.login_url = self.login_url.trim().to_string();
+        doc.gate.denied_url = self.denied_url.trim().to_string();
         doc.gate.issuer = issuer;
         doc.gate.cookie_domain = cookie_domain;
         doc.gate.authorized_hosts = hosts;
@@ -5017,6 +5054,12 @@ fn page_config(
                 (text_field(v.t(K::GlobalLoginUrl), "login_url", &f.login_url,
                             "https://auth.example.com/auth/login",
                             Some(v.t(K::GlobalLoginUrlHelp)), about("login_url")))
+                // The other page a browser is sent to, and the reason it sits beside the
+                // sign-in page rather than under the look below: the two are one decision,
+                // where this estate answers somebody it will not let through.
+                (text_field(v.t(K::GlobalDeniedUrl), "denied_url", &f.denied_url,
+                            "https://auth.example.com/auth/denied",
+                            Some(v.t(K::GlobalDeniedUrlHelp)), about("denied_url")))
                 // These two are neighbours because they are checked against each other: a
                 // host the cookie cannot reach is refused, and an operator told so has to be
                 // able to see both without scrolling.
@@ -5628,6 +5671,10 @@ fn mutate(v: &View, form: &Form) -> Outcome {
                     "" => None,
                     l => Some(l.to_string()),
                 };
+                let denied_url = match f.denied_url.trim() {
+                    "" => None,
+                    l => Some(l.to_string()),
+                };
                 let notes = match f.notes.trim() {
                     "" => None,
                     n => Some(n.to_string()),
@@ -5638,6 +5685,7 @@ fn mutate(v: &View, form: &Form) -> Outcome {
                         name: name.clone(),
                         base,
                         login_url,
+                        denied_url,
                         notes,
                         ..Default::default()
                     },
@@ -5665,6 +5713,10 @@ fn mutate(v: &View, form: &Form) -> Outcome {
                 let a = app_mut(&mut doc, &name)?;
                 a.base = form.lines("base");
                 a.login_url = match f.login_url.trim() {
+                    "" => None,
+                    l => Some(l.to_string()),
+                };
+                a.denied_url = match f.denied_url.trim() {
                     "" => None,
                     l => Some(l.to_string()),
                 };

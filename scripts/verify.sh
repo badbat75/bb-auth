@@ -100,6 +100,11 @@ chk "GET /auth/healthz == ok" "ok" \
     "$(curl -fsS --max-time 3 "http://$LISTEN/auth/healthz" 2>/dev/null || true)"
 chk "GET /auth/validate (no cookie) == 401" "401" \
     "$(curl -s -o /dev/null -w '%{http_code}' --max-time 3 "http://$LISTEN/auth/validate" || true)"
+# The page a 403 lands on, and it answers 403 itself: that is the status
+# `error_page 403 = @bb_denied` copies, so a 200 here would turn every refusal into a page
+# that reads as though the request had succeeded.
+chk "GET /auth/denied == 403" "403" \
+    "$(curl -s -o /dev/null -w '%{http_code}' --max-time 3 "http://$LISTEN/auth/denied" || true)"
 
 HKV="$(envval BB_AUTH_HMAC_KEY)"
 if [ -n "$HKV" ] && [ "${#HKV}" -ge 32 ]; then
