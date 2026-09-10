@@ -196,15 +196,16 @@ use bb_auth_core::{
     app_mut, app_pos, compile_app_client_id, compile_asset_url, compile_brand_name,
     compile_cookie_domain, compile_host_pattern, compile_issuer, compile_login_url,
     compile_oauth_domain, compile_page_url, cookie_domain_covers, csp_hash, decide,
-    default_settings_path, edit_urls, format_date, group_ref, guarded_changes, key_expiry, key_mut,
-    move_scope, norm_email, now, open_access_file, open_settings_file, page_csp, parse_exclusion,
-    remove_api_key, remove_application, remove_denied, remove_scope, remove_user,
-    remove_user_email, remove_user_group, rename_application, rename_scope, request_site,
-    request_url, rotate_api_key, scope_mut, scope_pos, sha256_hex, shadowing_scope,
-    social_idp_label, stylesheet_link, user_group_mut, user_group_refs, user_label, user_pos,
-    user_refs, version_line, Access, AccessFile, AccessWrite, ApiKeySpec, AppSpec, Decision,
-    GateSettings, GuardedSetting, RequestSite, ScopeSpec, SealedKey, SettingsFile, SettingsWrite,
-    SocialButtonSpec, Subject, UiTheme, UserSpec, WiredButton, Written, BASE_CSS, IDENTITY_HEADER,
+    default_settings_path, edit_urls, format_date, format_datetime, group_ref, guarded_changes,
+    key_expiry, key_mut, move_scope, norm_email, now, open_access_file, open_settings_file,
+    page_csp, parse_exclusion, read_audit, remove_api_key, remove_application, remove_denied,
+    remove_scope, remove_user, remove_user_email, remove_user_group, rename_application,
+    rename_scope, request_site, request_url, rotate_api_key, scope_mut, scope_pos, sha256_hex,
+    shadowing_scope, social_idp_label, stylesheet_link, user_group_mut, user_group_refs,
+    user_label, user_pos, user_refs, version_line, Access, AccessFile, AccessWrite, ApiKeySpec,
+    AppSpec, AuditCredential, AuditEvent, AuditKind, Decision, GateSettings, GuardedSetting,
+    RequestSite, ScopeSpec, SealedKey, SettingsFile, SettingsWrite, SocialButtonSpec, Subject,
+    UiTheme, UserSpec, WiredButton, Written, BASE_CSS, DEFAULT_AUDIT_FILE, IDENTITY_HEADER,
     PAGE_SECURITY_HEADERS, SOCIAL_IDPS, THEME_CSS,
 };
 use maud::{html, Markup, PreEscaped, DOCTYPE};
@@ -471,6 +472,45 @@ enum K {
     WhyNotEnrolled,
     WhyNotMember,
     WhyKeyOutOfScope,
+    // --- the refusals only the audit ever shows, since no access check can reach them ---
+    WhyTokenInvalid,
+    WhyCrossSite,
+    WhyKeyUnknown,
+    WhyKeyExpired,
+    WhyKeyOwnerDenied,
+    WhyUnEnrolledGrant,
+    WhyUnknownReason,
+    // --- the audit ---
+    Audit,
+    AuditIntro,
+    AuditOff,
+    AuditOffHelp,
+    AuditRefresh,
+    AuditWindow,
+    AuditAll,
+    AuditOutcome,
+    AuditAny,
+    AuditAllowed,
+    AuditRefused,
+    AuditCredential,
+    AuditDamaged,
+    AuditTruncated,
+    AuditDeduped,
+    ColWhen,
+    ColEvent,
+    ColWho,
+    ColWhere,
+    ColWhy,
+    KindLoginGranted,
+    KindLoginRefused,
+    KindLoginEnded,
+    KindAccessGranted,
+    KindAccessRefused,
+    CredSocial,
+    CredLocal,
+    CredKey,
+    CredSession,
+    CredAnonymous,
     AppSees,
     NoIdentityTitle,
     NoIdentityBody,
@@ -1175,6 +1215,91 @@ fn t(lang: Lang, key: K) -> &'static str {
             "is not among the scopes this key restricted itself to.",
             "non è tra gli scope a cui questa chiave si è ristretta.",
         ),
+        // The refusals that happen before any scope is consulted, or on a path the access
+        // check cannot walk. They read as the continuation of a sentence the row starts, the
+        // same way the eleven above do.
+        K::WhyTokenInvalid => m(
+            lang,
+            "the token did not validate: wrong pool, wrong app client, expired, or an unverified email.",
+            "il token non è stato validato: pool errato, app client errato, scaduto, o email non verificata.",
+        ),
+        K::WhyCrossSite => m(
+            lang,
+            "the sign-in did not come from a page of this estate.",
+            "l'accesso non proveniva da una pagina di questo dominio.",
+        ),
+        K::WhyKeyUnknown => m(
+            lang,
+            "no key in the file has this value. The key itself is never recorded, so there is nothing to name.",
+            "nessuna chiave nel file ha questo valore. La chiave non viene mai registrata, quindi non c'è nulla da nominare.",
+        ),
+        K::WhyKeyExpired => m(lang, "the key has expired.", "la chiave è scaduta."),
+        K::WhyKeyOwnerDenied => m(
+            lang,
+            "the key is valid, and its owner is on the denied list.",
+            "la chiave è valida, e il suo proprietario è nella lista dei negati.",
+        ),
+        K::WhyUnEnrolledGrant => m(
+            lang,
+            "let in by an authenticated scope, while being in no users entry.",
+            "ammesso da uno scope authenticated, pur non essendo in nessuna voce users.",
+        ),
+        K::WhyUnknownReason => m(
+            lang,
+            "recorded by a newer version of bb-auth than this one.",
+            "registrato da una versione di bb-auth più recente di questa.",
+        ),
+        // --- the audit ---
+        K::Audit => m(lang, "Audit", "Audit"),
+        K::AuditIntro => m(
+            lang,
+            "What the gate has answered: sign-ins, sign-outs and refusals, newest first. Ordinary allowed requests are not here and never were: they are nginx's access log, and one row per asset would bury everything on this page.",
+            "Cosa ha risposto il gate: accessi, uscite e rifiuti, dal più recente. Le richieste ordinarie ammesse non ci sono e non ci sono mai state: sono nel log di nginx, e una riga per ogni asset seppellirebbe tutto il resto di questa pagina.",
+        ),
+        K::AuditOff => m(lang, "The audit is off", "L'audit è disattivato"),
+        K::AuditOffHelp => m(
+            lang,
+            "BB_AUTH_AUDIT_FILE is empty in this service's env file, or names a file the gate does not write. With no file there is nothing to show: the events are in the journal instead, on the host.",
+            "BB_AUTH_AUDIT_FILE è vuoto nel file di environment di questo servizio, oppure indica un file che il gate non scrive. Senza file non c'è nulla da mostrare: gli eventi sono nel journal, sull'host.",
+        ),
+        K::AuditRefresh => m(lang, "Refresh", "Aggiorna"),
+        K::AuditWindow => m(lang, "Period", "Periodo"),
+        K::AuditAll => m(lang, "Everything", "Tutto"),
+        K::AuditOutcome => m(lang, "Outcome", "Esito"),
+        K::AuditAny => m(lang, "Any", "Qualsiasi"),
+        K::AuditAllowed => m(lang, "Allowed", "Ammesso"),
+        K::AuditRefused => m(lang, "Refused", "Rifiutato"),
+        K::AuditCredential => m(lang, "Credential", "Credenziale"),
+        K::AuditDamaged => m(
+            lang,
+            "lines could not be read and were skipped.",
+            "righe non sono leggibili e sono state saltate.",
+        ),
+        K::AuditTruncated => m(
+            lang,
+            "There are older events in this period than this page can hold. Narrow the period to see them.",
+            "In questo periodo ci sono eventi più vecchi di quanti questa pagina possa contenerne. Restringi il periodo per vederli.",
+        ),
+        K::AuditDeduped => m(
+            lang,
+            "A refusal repeated within five minutes is recorded once: a browser refused one asset is a browser refused forty. Sign-ins and sign-outs are never collapsed.",
+            "Un rifiuto ripetuto entro cinque minuti è registrato una volta sola: un browser a cui viene rifiutato un asset è un browser a cui ne vengono rifiutati quaranta. Accessi e uscite non vengono mai accorpati.",
+        ),
+        K::ColWhen => m(lang, "When (UTC)", "Quando (UTC)"),
+        K::ColEvent => m(lang, "Event", "Evento"),
+        K::ColWho => m(lang, "Who", "Chi"),
+        K::ColWhere => m(lang, "Where", "Dove"),
+        K::ColWhy => m(lang, "Why", "Perché"),
+        K::KindLoginGranted => m(lang, "Signed in", "Accesso"),
+        K::KindLoginRefused => m(lang, "Sign-in refused", "Accesso rifiutato"),
+        K::KindLoginEnded => m(lang, "Signed out", "Uscita"),
+        K::KindAccessGranted => m(lang, "Let in", "Ammesso"),
+        K::KindAccessRefused => m(lang, "Refused", "Rifiutato"),
+        K::CredSocial => m(lang, "Social", "Social"),
+        K::CredLocal => m(lang, "Cognito account", "Account Cognito"),
+        K::CredKey => m(lang, "API key", "Chiave API"),
+        K::CredSession => m(lang, "Session", "Sessione"),
+        K::CredAnonymous => m(lang, "None", "Nessuna"),
         K::AppSees => m(lang, "the application sees", "l'applicazione vede"),
         K::NoIdentityTitle => m(lang, "No identity header", "Nessun header di identità"),
         K::NoIdentityBody => m(
@@ -1753,6 +1878,14 @@ struct Config {
     /// destination for someone who just ended their session and is the right default for a
     /// deployment that has not said otherwise.
     logout_url: Option<String>,
+    /// `BB_AUTH_AUDIT_FILE`, the authentication audit the gate appends to and this GUI reads.
+    /// Default [`DEFAULT_AUDIT_FILE`], and **empty means there is no Audit tab at all**.
+    ///
+    /// The gate's variable name, on purpose, exactly as `BB_AUTH_ACCESS_FILE` is: each service
+    /// has its own env file, one name means one thing, and unset on both sides means the same
+    /// default on both sides. This end never writes it, and the unit that runs this end has no
+    /// business being able to: an audit an administrator can edit is not one.
+    audit_path: String,
 }
 
 /// Read an env var, falling back to `default` when unset.
@@ -1840,6 +1973,9 @@ impl Config {
             base_path,
             default_lang,
             logout_url,
+            audit_path: env_or("BB_AUTH_AUDIT_FILE", DEFAULT_AUDIT_FILE)
+                .trim()
+                .to_string(),
         }
     }
 }
@@ -1895,6 +2031,10 @@ enum Route {
     /// One roster row, addressed by its uuid: the identity is what the file references,
     /// and an email can be added or dropped without the page moving.
     User(String),
+    /// The audit: what the gate has actually answered, which is the one page here that reads
+    /// neither file and edits nothing. It sits between the people and the settings because it
+    /// is about the people, one step later: `users` says who *may* get in, this says who did.
+    Audit,
     /// The settings file, which is not a section of the access file at all: the five values
     /// the gate reads per request, and the list of people this GUI opens for.
     Config,
@@ -1952,6 +2092,7 @@ impl Route {
             Route::Denied => "/denied".to_string(),
             Route::Users => "/users".to_string(),
             Route::User(u) => format!("/users/{}", seg(u)),
+            Route::Audit => "/audit".to_string(),
             Route::Config => "/config".to_string(),
 
             Route::AppAdd => format!("/apps/{ACTION_ADD}"),
@@ -2055,6 +2196,9 @@ impl Route {
                 Route::Apps => "applications",
                 Route::Users => "users",
                 Route::Config => "settings",
+                // The one title that names no section of either file, because this tab is
+                // about neither: it is the file the gate writes.
+                Route::Audit => "audit",
                 _ => "bb-auth-web",
             },
         }
@@ -2093,6 +2237,8 @@ fn route(path: &str, base: &str) -> Option<Route> {
     match segs.as_slice() {
         [] | [""] => Some(Route::Dashboard),
         ["config"] => Some(Route::Config),
+
+        ["audit"] => Some(Route::Audit),
 
         ["users"] => Some(Route::Users),
         ["users", ACTION_ADD] => Some(Route::UserAdd),
@@ -2587,6 +2733,28 @@ fn page_href(v: &View, l: &Listing, page: usize) -> String {
 /// so filtering one list does not reset another's page — except this list's own page, which
 /// is dropped on purpose, because a new filter belongs at the top of its results.
 fn list_controls(v: &View, l: &Listing, matched: usize, total: usize) -> Markup {
+    list_controls_with(v, l, matched, total, &[], html! {})
+}
+
+/// [`list_controls`] with fields of its own in front of the filter box.
+///
+/// `extra` is rendered inside the same form, so one submit applies the whole row and there is
+/// one Apply button rather than one per control. `owned` names the parameters `extra` renders
+/// itself: they are then left out of the hidden inputs, or every one of them would be
+/// submitted twice and the page would read whichever value came last.
+///
+/// This exists for the audit, which is the only list here filtered by anything but text, and
+/// it stays a parameter of the shared control rather than a second control beside it: two
+/// forms over one list are two Apply buttons, and an operator who set a period and typed a
+/// name would have to guess which one applies both.
+fn list_controls_with(
+    v: &View,
+    l: &Listing,
+    matched: usize,
+    total: usize,
+    owned: &[&str],
+    extra: Markup,
+) -> Markup {
     let (_, _, page, pages) = l.window(matched);
     let q_name = l.q_name();
     let p_name = l.p_name();
@@ -2594,10 +2762,11 @@ fn list_controls(v: &View, l: &Listing, matched: usize, total: usize) -> Markup 
         div class="listctl" {
             form method="get" action=(v.href(&v.at)) {
                 @for (k, val) in preserved_query(v.query) {
-                    @if k != q_name && k != p_name {
+                    @if k != q_name && k != p_name && !owned.contains(&k.as_str()) {
                         input type="hidden" name=(k) value=(val);
                     }
                 }
+                (extra)
                 input type="search" name=(q_name) value=(l.q) placeholder=(v.t(K::Filter))
                       aria-label=(v.t(K::Filter));
                 button type="submit" class="pill" { (v.t(K::Apply)) }
@@ -2727,6 +2896,7 @@ fn shell(v: &View, title: &str, content: Markup) -> Markup {
         (Route::Dashboard, v.t(K::Dashboard)),
         (Route::Apps, v.t(K::Apps)),
         (Route::Users, v.t(K::Users)),
+        (Route::Audit, v.t(K::Audit)),
         (Route::Config, v.t(K::Config)),
     ];
     let current = v.at.tab();
@@ -4077,6 +4247,317 @@ fn denied_list(v: &View, doc: &AccessFile) -> Markup {
                     }
                 }
         }))
+    }
+}
+
+// ---------------------------------------------------------------------------
+// The audit page
+// ---------------------------------------------------------------------------
+//
+// The one tab that reads neither file and writes nothing. Everything else here is a view of
+// what an operator wrote; this is a view of what the gate *did* with it, which is the only
+// way to find out that a rule written months ago is refusing somebody today.
+
+/// The periods the page offers, as `(query value, seconds back from now)`. "Everything" is the
+/// absence of a period and so is not one of them.
+const AUDIT_PERIODS: [(&str, u64); 4] = [
+    ("1h", 3_600),
+    ("24h", 86_400),
+    ("7d", 7 * 86_400),
+    ("30d", 30 * 86_400),
+];
+
+/// The period a page with no `aw=` shows.
+///
+/// A day and not everything, because the read stops at the far edge of the period: the default
+/// view parses the last day of a file that may hold a year, which is what keeps this page cheap
+/// on the hardware it runs on. It is also the answer to the question somebody opening this tab
+/// usually has, which is what happened just now.
+const AUDIT_DEFAULT_PERIOD: &str = "24h";
+
+/// How many events one read may return before it says there are more.
+///
+/// Far more than a page shows, because the filters run *after* the read: a text filter over a
+/// month has to see the month. Twenty pages of fifty rows either way.
+const AUDIT_READ_CAP: usize = 5_000;
+
+/// The credentials the filter offers, in the order they appear, as `(tag, label)`. The tags are
+/// [`AuditCredential::tag`]'s, so a row and a filter can never disagree about what a key is.
+fn audit_credentials(v: &View) -> [(&'static str, &'static str); 5] {
+    [
+        ("social", v.t(K::CredSocial)),
+        ("local", v.t(K::CredLocal)),
+        ("key", v.t(K::CredKey)),
+        ("session", v.t(K::CredSession)),
+        ("anonymous", v.t(K::CredAnonymous)),
+    ]
+}
+
+/// One event's credential, in words: the kind, and what names this one instance of it.
+fn audit_cred_markup(v: &View, cred: &AuditCredential) -> Markup {
+    html! {
+        @match cred {
+            AuditCredential::Social { provider } => {
+                (v.t(K::CredSocial)) " " span class="muted mono" { (provider) }
+            }
+            AuditCredential::Key { id } if !id.is_empty() => {
+                (v.t(K::CredKey)) " " span class="muted mono" { (id) }
+            }
+            other => (v.t(match other {
+                AuditCredential::Local => K::CredLocal,
+                AuditCredential::Session => K::CredSession,
+                AuditCredential::Key { .. } => K::CredKey,
+                _ => K::CredAnonymous,
+            })),
+        }
+    }
+}
+
+/// The sentence a refusal code stands for, in the reader's language.
+///
+/// The nine that a [`Decision`] can produce are the **same phrases the access check prints**,
+/// deliberately: a page that explained `not_member` one way here and another way there would
+/// be two explanations of one rule. A code this binary has never heard of is shown as itself
+/// with a note, because an audit written by a newer gate is still worth reading.
+fn audit_reason(v: &View, code: &str) -> Markup {
+    let key = match code {
+        "vetoed" => Some(K::WhyVetoed),
+        "excluded" => Some(K::WhyExcluded),
+        "no_application" => Some(K::WhyNoApplication),
+        "no_scope" => Some(K::WhyNoScope),
+        "unauthenticated" => Some(K::WhyUnauthenticated),
+        "credential_refused" => Some(K::WhyCredentialRefused),
+        "not_enrolled" => Some(K::WhyNotEnrolled),
+        "not_member" => Some(K::WhyNotMember),
+        "key_out_of_scope" => Some(K::WhyKeyOutOfScope),
+        "token_invalid" => Some(K::WhyTokenInvalid),
+        "cross_site" => Some(K::WhyCrossSite),
+        "key_unknown" => Some(K::WhyKeyUnknown),
+        "key_expired" => Some(K::WhyKeyExpired),
+        "key_owner_denied" => Some(K::WhyKeyOwnerDenied),
+        "un_enrolled" => Some(K::WhyUnEnrolledGrant),
+        _ => None,
+    };
+    html! {
+        @match key {
+            Some(k) => (v.t(k)),
+            None => {
+                code { (code) } " " span class="muted" { (v.t(K::WhyUnknownReason)) }
+            }
+        }
+    }
+}
+
+/// `/audit` — what the gate has answered, newest first, filtered and paged entirely in the
+/// query string like every other list here.
+///
+/// It reads the file **on every request**, which is what makes Refresh a plain link to this
+/// same URL rather than a control that has to do anything: there is no cache to bust, and a
+/// page that reloaded itself would be a page that needs a script.
+fn page_audit(v: &View, doc: &AccessFile) -> Markup {
+    if v.cfg.audit_path.is_empty() {
+        return html! {
+            h1 { (v.t(K::Audit)) }
+            p class="lede" { (v.t(K::AuditIntro)) }
+            div class="panel warn" {
+                p { strong { (v.t(K::AuditOff)) } }
+                p class="muted" { (v.t(K::AuditOffHelp)) }
+            }
+        };
+    }
+    let period = query_param(v.query, "aw").unwrap_or_else(|| AUDIT_DEFAULT_PERIOD.to_string());
+    let since = AUDIT_PERIODS
+        .iter()
+        .find(|(name, _)| *name == period)
+        .map(|(_, secs)| now().saturating_sub(*secs));
+    let read = read_audit(
+        std::path::Path::new(&v.cfg.audit_path),
+        since,
+        AUDIT_READ_CAP,
+    );
+    // A file that will not open is worth saying plainly and in the operator's own terms: the
+    // one that actually happens is a mode the gate wrote and this service cannot read, and
+    // "permission denied" plus the path is the whole diagnosis.
+    let read = match read {
+        Ok(p) => p,
+        Err(e) => {
+            return html! {
+                h1 { (v.t(K::Audit)) }
+                div class="panel bad" {
+                    p { (v.t(K::FileErrorTitle)) }
+                    p class="mono" { (v.cfg.audit_path) ": " (e) }
+                    p class="muted" { (v.t(K::FileErrorHint)) }
+                }
+            }
+        }
+    };
+
+    let cred = query_param(v.query, "ac").unwrap_or_default();
+    let outcome = query_param(v.query, "ao").unwrap_or_default();
+    let l = Listing::read("a", v.query);
+    let rows: Vec<&AuditEvent> = read
+        .events
+        .iter()
+        .filter(|e| cred.is_empty() || e.cred.tag() == cred)
+        .filter(|e| match outcome.as_str() {
+            "ok" => e.kind.granted(),
+            "no" => !e.kind.granted(),
+            _ => true,
+        })
+        // The row's own fields, plus what the roster currently calls the uuid on it: a key
+        // event names a row and not an address, and searching for the address you can see has
+        // to find it.
+        .filter(|e| {
+            let who = e
+                .uuid
+                .as_deref()
+                .map(|u| label_of(doc, u))
+                .unwrap_or_default();
+            l.keeps(&format!("{} {who}", e.haystack()))
+        })
+        .collect();
+    let (start, end, _, _) = l.window(rows.len());
+    let selects = html! {
+        select name="aw" aria-label=(v.t(K::AuditWindow)) {
+            @for (name, _) in AUDIT_PERIODS {
+                option value=(name) selected[name == period] { (name) }
+            }
+            option value="all" selected[!AUDIT_PERIODS.iter().any(|(n, _)| *n == period)] {
+                (v.t(K::AuditAll))
+            }
+        }
+        select name="ac" aria-label=(v.t(K::AuditCredential)) {
+            option value="" selected[cred.is_empty()] { (v.t(K::AuditCredential)) ": " (v.t(K::AuditAny)) }
+            @for (tag, label) in audit_credentials(v) {
+                option value=(tag) selected[tag == cred] { (label) }
+            }
+        }
+        select name="ao" aria-label=(v.t(K::AuditOutcome)) {
+            option value="" selected[outcome.is_empty()] { (v.t(K::AuditOutcome)) ": " (v.t(K::AuditAny)) }
+            option value="ok" selected[outcome == "ok"] { (v.t(K::AuditAllowed)) }
+            option value="no" selected[outcome == "no"] { (v.t(K::AuditRefused)) }
+        }
+    };
+    html! {
+        h1 { (v.t(K::Audit)) }
+        p class="lede" { (v.t(K::AuditIntro)) }
+        p class="primary" {
+            // Refresh is this same URL: every filter is in it, so re-reading the file with the
+            // view intact is a link and nothing more.
+            a class="pill" href=(listing_href(v, &l, &audit_kept(&l, &period, &cred, &outcome))) {
+                "↻ " (v.t(K::AuditRefresh))
+            }
+        }
+        (list_controls_with(v, &l, rows.len(), read.events.len(), &["aw", "ac", "ao"], selects))
+        @if read.more {
+            p class="muted" { (v.t(K::AuditTruncated)) }
+        }
+        @if read.damaged > 0 {
+            p class="muted" { (read.damaged) " " (v.t(K::AuditDamaged)) }
+        }
+        (list_rows(v, read.events.len(), rows.len(), html! {
+            div class="panel" {
+                table {
+                    thead { tr {
+                        th { (v.t(K::ColWhen)) }
+                        th { (v.t(K::ColEvent)) }
+                        th { (v.t(K::ColWho)) }
+                        th { (v.t(K::AuditCredential)) }
+                        th { (v.t(K::ColWhere)) }
+                        th class="why" { (v.t(K::ColWhy)) }
+                    } }
+                    tbody {
+                        @for e in &rows[start..end] {
+                            // The outcome is the tag in the event column and nowhere else: a
+                            // whole row in the error colour is a page of red on the deployment
+                            // that has most to read here, which is the one being probed.
+                            tr {
+                                td class="mono when" data-label=(v.t(K::ColWhen)) {
+                                    (format_datetime(e.ts))
+                                }
+                                td data-label=(v.t(K::ColEvent)) { (audit_kind(v, e.kind)) }
+                                td data-label=(v.t(K::ColWho)) { (audit_who(v, doc, e)) }
+                                td data-label=(v.t(K::AuditCredential)) {
+                                    (audit_cred_markup(v, &e.cred))
+                                }
+                                td class="where" data-label=(v.t(K::ColWhere)) {
+                                    (audit_where(e))
+                                }
+                                td class="why" data-label=(v.t(K::ColWhy)) {
+                                    @match &e.reason {
+                                        Some(r) => (audit_reason(v, r)),
+                                        None => span class="muted" { "—" },
+                                    }
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+        }))
+        p class="muted" { (v.t(K::AuditDeduped)) }
+    }
+}
+
+/// This page's own parameters, for a link that must keep the whole view: [`listing_href`]
+/// replaces only the listing's two, and these three are not its business.
+fn audit_kept(l: &Listing, period: &str, cred: &str, outcome: &str) -> Vec<(String, String)> {
+    let mut set = Vec::new();
+    if !l.q.is_empty() {
+        set.push((l.q_name(), l.q.clone()));
+    }
+    for (name, val) in [("aw", period), ("ac", cred), ("ao", outcome)] {
+        if !val.is_empty() {
+            set.push((name.to_string(), val.to_string()));
+        }
+    }
+    set
+}
+
+/// What kind of thing this row is, in one phrase.
+fn audit_kind(v: &View, kind: AuditKind) -> Markup {
+    let (key, class) = match kind {
+        AuditKind::LoginGranted => (K::KindLoginGranted, "tag ok"),
+        AuditKind::LoginRefused => (K::KindLoginRefused, "tag bad"),
+        AuditKind::LoginEnded => (K::KindLoginEnded, "tag"),
+        AuditKind::AccessGranted => (K::KindAccessGranted, "tag ok"),
+        AuditKind::AccessRefused => (K::KindAccessRefused, "tag bad"),
+    };
+    html! { span class=(class) { (v.t(key)) } }
+}
+
+/// Who this row is about: a link to their page when the roster still has them, the identifier
+/// as recorded when it does not.
+///
+/// The two are not interchangeable and the difference is the point: an audit is history, and
+/// resolving a uuid through the file as it is **now** is how a reader finds out that the person
+/// refused last week is the person whose row was edited yesterday. A row that has been deleted
+/// since keeps its uuid and simply stops being a link.
+fn audit_who(v: &View, doc: &AccessFile, e: &AuditEvent) -> Markup {
+    html! {
+        @match (&e.uuid, &e.subject) {
+            (Some(uuid), _) if user_pos(doc, uuid).is_some() => {
+                a href=(v.href(&Route::User(uuid.clone()))) { (label_of(doc, uuid)) }
+            }
+            (_, Some(s)) => code { (s) }
+            (Some(uuid), None) => code class="muted" { (uuid) }
+            (None, None) => span class="muted" { "—" },
+        }
+    }
+}
+
+/// Where this row happened: the scope that answered, and the URL that was being reached for.
+fn audit_where(e: &AuditEvent) -> Markup {
+    html! {
+        @if let (Some(app), Some(scope)) = (&e.app, &e.scope) {
+            code { (app) @if !scope.is_empty() { "/" (scope) } }
+        }
+        @if let Some(url) = &e.url {
+            div class="muted mono" { (url) }
+        }
+        @if e.app.is_none() && e.url.is_none() {
+            span class="muted" { "—" }
+        }
     }
 }
 
@@ -6378,6 +6859,10 @@ fn handle(mut req: Request, cfg: &Config) {
         }
         Route::Denied => (200, page_denied(&v, &doc), title),
         Route::Users => (200, page_users(&v, &doc, &access), title),
+        // It reads the access file for one thing only: what the roster calls a uuid an event
+        // recorded. Every other page here is *about* that file; this one borrows a name from
+        // it.
+        Route::Audit => (200, page_audit(&v, &doc), title),
         // Nothing left on a `UserSpec` for a standalone edit to change, so `UserEdit`
         // simply shows the same page `User` does: the uuid is fixed, and emails and keys
         // manage themselves on their own routes.
@@ -6939,6 +7424,9 @@ mod tests {
             // Configured, so the control renders and the tests below see the shape a real
             // deployment has. The unset case is its own test.
             logout_url: Some("/auth/logout".to_string()),
+            // Beside the access file, so a test that wants an audit writes one there and a
+            // test that does not gets an empty page rather than another test's rows.
+            audit_path: format!("{path}.audit"),
         }
     }
 
@@ -8264,11 +8752,12 @@ mod tests {
                 Route::GroupRm(_) => 25,
                 Route::DenyAdd => 26,
                 Route::DenyRm(_) => 27,
+                Route::Audit => 28,
             }
         }
         let seen: std::collections::HashSet<usize> = every_route().iter().map(variant).collect();
         // All of them but `ScopeMove`, which has no page to render: it is POST only.
-        let missing: Vec<usize> = (0..=27).filter(|i| !seen.contains(i)).collect();
+        let missing: Vec<usize> = (0..=28).filter(|i| !seen.contains(i)).collect();
         assert_eq!(missing, vec![13], "every_route must name every page");
     }
 
@@ -8286,6 +8775,7 @@ mod tests {
             Route::Denied,
             Route::Users,
             Route::User(bob.clone()),
+            Route::Audit,
             Route::Config,
             Route::AppAdd,
             Route::AppEdit("mpa".to_string()),
@@ -8375,11 +8865,117 @@ mod tests {
             Route::Denied => page_denied(&v, &doc),
             Route::Users => page_users(&v, &doc, &access),
             Route::User(e) => page_user(&v, &doc, &access, e).1,
+            Route::Audit => page_audit(&v, &doc),
             other => panic!("{other:?} is not a read-only page"),
         };
         let html = shell(&v, "t", content).into_string();
         let _ = std::fs::remove_file(&path);
         html
+    }
+
+    /// The audit file [`cfg_for`] points at, which is beside the access file [`scratch`]
+    /// writes and is therefore named by the same test name.
+    fn audit_path_for(name: &str) -> String {
+        format!(
+            "{}.audit",
+            std::env::temp_dir()
+                .join(format!("bb-auth-web-{name}.json"))
+                .to_string_lossy()
+        )
+    }
+
+    /// An audit on disk, written through the gate's own writer: the page under test then reads
+    /// exactly the bytes a real gate would have left, rather than a fixture hand-rolled to
+    /// match what the reader expects.
+    fn audit_fixture(name: &str, events: &[AuditEvent]) -> String {
+        let p = audit_path_for(name);
+        let _ = std::fs::remove_file(&p);
+        let w = bb_auth_core::AuditWriter::new(&p);
+        for e in events {
+            w.record(e).unwrap();
+        }
+        p
+    }
+
+    #[test]
+    fn the_audit_shows_newest_first_and_filters_on_every_axis() {
+        let now = now();
+        let key = AuditEvent::new(
+            now - 60,
+            AuditKind::AccessRefused,
+            AuditCredential::Key {
+                id: "laptop".into(),
+            },
+        )
+        .of(BOB)
+        .at(Some(("mpa", "admin")))
+        .on(Some("https://mpa.x.com/admin"))
+        .because("key_out_of_scope");
+        let login = AuditEvent::new(
+            now - 30,
+            AuditKind::LoginGranted,
+            AuditCredential::Social {
+                provider: "Google".into(),
+            },
+        )
+        .by("newcomer@x.com", None);
+        // Older than every period the page offers, so it is only ever visible under
+        // "everything": the period is a real cut and not decoration.
+        let ancient = AuditEvent::new(
+            now - 40 * 86_400,
+            AuditKind::LoginEnded,
+            AuditCredential::Session,
+        )
+        .by("ancient@x.com", None);
+        let p = audit_fixture("audit", &[ancient, key, login]);
+
+        let html = render_of("audit", SAMPLE, Route::Audit, "");
+        let (first, second) = (
+            html.find("newcomer@x.com").expect("the login is shown"),
+            html.find("laptop").expect("the key refusal is shown"),
+        );
+        assert!(first < second, "newest first: {html}");
+        // A key names a row, and the row is what the page shows and links to, because that is
+        // the name a reader can look up.
+        assert!(
+            html.contains("bob@x.com"),
+            "the key's owner is named: {html}"
+        );
+        assert!(html.contains(&format!("href=\"/users/{BOB}\"")), "{html}");
+        // The default period is a day, so nothing older is in the page at all.
+        assert!(!html.contains("ancient@x.com"), "{html}");
+        assert!(
+            render_of("audit", SAMPLE, Route::Audit, "aw=all").contains("ancient@x.com"),
+            "everything means everything"
+        );
+
+        // Each filter cuts on its own axis.
+        let only_keys = render_of("audit", SAMPLE, Route::Audit, "ac=key");
+        assert!(only_keys.contains("laptop"));
+        assert!(!only_keys.contains("newcomer@x.com"), "{only_keys}");
+        let only_allowed = render_of("audit", SAMPLE, Route::Audit, "ao=ok");
+        assert!(only_allowed.contains("newcomer@x.com"));
+        assert!(!only_allowed.contains("laptop"), "{only_allowed}");
+        // And the text filter reaches the fields a row is made of, the reason included.
+        let by_text = render_of("audit", SAMPLE, Route::Audit, "aq=key_out_of_scope");
+        assert!(by_text.contains("laptop"));
+        assert!(!by_text.contains("newcomer@x.com"), "{by_text}");
+        let _ = std::fs::remove_file(&p);
+    }
+
+    #[test]
+    fn an_audit_that_is_off_says_so_rather_than_looking_empty() {
+        // The difference matters: an empty page reads as "nobody has done anything", which on
+        // an unconfigured deployment is a lie an administrator would act on.
+        let path = scratch("audit-off", SAMPLE);
+        let mut cfg = cfg_for(&path, "");
+        cfg.audit_path = String::new();
+        let (doc, _) = open_access_file(&cfg.access_path).unwrap();
+        let v = view(&cfg, Route::Audit, "REV");
+        let html = page_audit(&v, &doc).into_string();
+        assert!(html.contains("The audit is off"), "{html}");
+        assert!(html.contains("BB_AUTH_AUDIT_FILE"), "{html}");
+        let _ = std::fs::remove_file(&path);
     }
 
     #[test]

@@ -16,7 +16,7 @@ somebody out or lets somebody in.
 | [Commands](#commands) | what to run, and **which check matches which change** |
 | [After a dependency change](#after-a-dependency-change) | the two `cargo tree` greps, and what they mean |
 | [Conventions](#conventions) | English, why-not-what, no new em-dashes, one home per rule |
-| [Invariants](#invariants--do-not-break-these) | **37 rules, in nine groups, indexed at the top of the section** |
+| [Invariants](#invariants--do-not-break-these) | **40 rules, in ten groups, indexed at the top of the section** |
 | [Config & deploy notes](#config--deploy-notes) | the configuration reference (the deploy *rules* are invariants) |
 
 ## What this is
@@ -54,7 +54,10 @@ One crate, four targets, and the split is load-bearing:
   and written* (`open_access_file`, `AccessWrite`, the document mutations). And
   **the settings file** beside it (`SettingsFile`, `compile_settings`, `SettingsWrite`, plus
   `compile_profile_claims` / `compile_identity_attrs`, which are here because all three
-  programs validate them). And **the presentation contract**: the palette
+  programs validate them). And **the audit file** (`AuditEvent`, `AuditWriter`, `read_audit`),
+  which is the same rule pointing the other way: the gate writes those lines and the GUI reads
+  them, so a second answer to what one line means would be a reader showing something the
+  writer never said. And **the presentation contract**: the palette
   (`THEME_CSS`, [src/assets/theme.css](src/assets/theme.css)), the components built out of it
   (`BASE_CSS`, [src/assets/base.css](src/assets/base.css)), and `UiTheme` / `stylesheet_link`
   / `html_escape` / `compile_asset_url` beside them. Same membership rule: two programs emit
@@ -79,12 +82,15 @@ One crate, four targets, and the split is load-bearing:
   (server-rendered, `maud`): the same CRUD as the CLI, made **only** through the library's
   editing core, plus a **Settings** tab over the settings file, in that file's own three
   sections: what the gate answers with, who administers this, and how the pages look (the
-  last one being the gate's pages too, which is why one save restyles both programs). Four
+  last one being the gate's pages too, which is why one save restyles both programs), and an
+  **Audit** tab over the file the gate writes. Five
   tabs, and none of them
   is `denied` or `user_groups`: those two are **sections of the users
   page**, groups above the roster, because a group only means anything in terms of the roster
-  and both are about people. Settings is last because it is the only tab that is not about
-  the access file at all. **Every tab is a noun**, a place that owns a section of a file, and
+  and both are about people. Audit comes after them because it is about the same people one
+  step later: `users` says who may get in, the audit says who did. Settings is last because it
+  is the only tab that is not about who reaches what at all.
+  **Every tab is a noun**, a place that owns a section of a file, and
   that is what says where the **access check** goes: it is a verb, it owns nothing, and it was
   the odd item out for as long as it was a fifth tab. It is now a section of the application
   page and of the person page (`app_check`, `user_check`), which is where the question is
@@ -98,7 +104,11 @@ One crate, four targets, and the split is load-bearing:
   not even a redirect, because there is no single page a bookmark to it could honestly land on. Every unordered list carries a filter and a pager, both living
   entirely in the query string (`Listing`, `list_controls`) since a page here must work with
   scripting off; each list namespaces its two parameters (`uq`/`up`, `gq`/`gp`, …) so several
-  on one page do not steal each other's state. **Scopes are deliberately excluded from that**:
+  on one page do not steal each other's state. The audit's three list boxes ride in the same
+  form through `list_controls_with`, rather than in a second one beside it: two forms over one
+  list are two Apply buttons, and an operator who set a period and typed a name would have to
+  guess which one applies both. Its Refresh is that same URL as a link, which is all it can be
+  when the page reads the file on every request and every filter is already in the address. **Scopes are deliberately excluded from that**:
   their order is their meaning and the ↑/↓ buttons move them within the *file*, so a filtered
   view would show positions that are not the file's and a move that appears to do nothing.
   **No page may need JavaScript**, and the *only* thing standing on the far side of that
@@ -161,8 +171,9 @@ This repo is developed on Windows but the artifact is a Linux/aarch64 binary.
 # file and the writers (src/lib.rs), the gate including its token verifier and its router
 # over a real socket (src/bin/bb-auth.rs), the CLI's argument grammar (src/bin/bb-auth-adm.rs)
 # and the GUI including nine that drive real HTTP (src/bin/bb-auth-web.rs). A handful are
-# cfg(unix) (the SIGHUP reload's fail-soft, the writer's mode preservation) and therefore run
-# on Linux, never on the development host (run them under WSL before a release).
+# cfg(unix) (the SIGHUP reload's fail-soft, the writer's mode preservation, the audit file's
+# own mode) and therefore run on Linux, never on the development host (run them under WSL
+# before a release).
 cargo test
 cargo test session_roundtrip          # a single test by name
 
@@ -258,6 +269,7 @@ passed, on code untouched since it passed, tells you nothing you did not already
 | `src/assets/auth.css` alone | `cargo test --bin bb-auth` and a look at the page in a browser |
 | `src/assets/*.html` | `cargo test --bin bb-auth` (the page tests read the rendered document) and a look at the page in a browser: no test can tell you a login form is unusable, or that a refusal reads as an accusation. All four pages are here: `login.html`, `callback.html`, `denied.html`, `error.html` |
 | `maud` markup, or a `K` translation key | the above, plus `cargo test` (several tests assert on rendered HTML) and `node e2e/run.js` |
+| Anything about the audit (what is recorded, the schema, the page) | `cargo test` **and a look at the tab with a real file**: the suite can say a row round-trips, it cannot say a refusal reads as an explanation. `bb-auth --check-env` does not cover this one, since the audit is optional by design |
 | A signature, a handler, the gate, or the library | all of it, plus `cargo clippy --all-targets` |
 | A dependency version | all of it, plus the cross-compile and the dependency check below |
 
@@ -331,7 +343,7 @@ is fatal on failure, so reaching the `listening on …` line proves the fetch, t
 
 ## Invariants — do not break these
 
-**The rules, in one place.** Thirty-seven of them, grouped. The lead sentence of each is
+**The rules, in one place.** Forty of them, grouped. The lead sentence of each is
 its whole claim; the prose under it is the reason, which is the part worth reading before
 changing anything. Seven of these used to sit in "Config & deploy notes" below, so this
 section under-read itself by a fifth, and two of the seven are lockout-class.
@@ -350,6 +362,12 @@ section under-read itself by a fifth, and two of the seven are lockout-class.
 - The access file is the real access gate
 - The settings file is what must change without a restart, and the rule for what goes in it is three-part.
 - What changes who reaches what is fatal; what drops one credential is skipped.
+
+[**The audit**](#the-audit)
+
+- An event has exactly one home.
+- The audit is bounded by construction, and can never cost a login.
+- It records authentication, not traffic.
 
 [**Resolving a URL**](#resolving-a-url)
 
@@ -619,6 +637,53 @@ section under-read itself by a fifth, and two of the seven are lockout-class.
   `bb-auth --check-access <file>` runs this same parser and exits 0/1, and `scripts/deploy.sh` calls
   it on the file about to go live and aborts before restarting, so a rejected file can never become
   a `Restart=on-failure` boot loop.
+
+### The audit
+
+The third file more than one program has an opinion about, and the only one that goes the
+other way: the gate writes it, `bb-auth-web` reads it back on its Audit tab. It is off unless
+`BB_AUTH_AUDIT_FILE` names something, and its default is `/var/log/bb-auth/audit.jsonl`, which
+the unit creates through `LogsDirectory` precisely so that the gate's own prefix can stay
+`ReadOnlyPaths`.
+
+- **An event has exactly one home.** When the audit is on, the request-path lines that used to
+  go to the journal go to the file **instead**; when it is off, the journal keeps saying what
+  it always said. The same refusal in two artifacts is one an operator has to reconcile by
+  eye, and reconciling by eye is what a schema is for: the journal is prose with a volume
+  knob, this is a record with a schema and a retention, and each event belongs to one of them.
+  `LogLevel::Debug` overrides both and prints regardless, because that level exists for the
+  ten minutes when the repetition *is* the information. The exclusivity is not a promise the
+  file gets to break: `Audit::on` reports false the moment a write has failed, and every
+  caller records first and asks afterwards, so a broken audit hands its events straight back
+  to the journal and a recovered one takes them back. What is **not** on this axis is startup,
+  configuration, reloads and failures, which are the journal's alone: they are about the
+  process and not about a person.
+- **The audit is bounded by construction, and can never cost a login.** The file rotates onto
+  `.1` at `AUDIT_MAX_BYTES` and there are exactly two, so the pair cannot grow past twice it
+  however hard somebody hammers a gated URL. That is deliberately the *only* bound: a flood of
+  refusals is exactly the case an audit exists for, so it is kept and the disk is what gets
+  protected, rather than the flood being filtered and the evidence lost. Write failures are
+  fail-soft to the last line: `AuditWriter::record` returns the error, `Audit::record` says so
+  **once** and carries on, and the decision is the access file's whatever the file system
+  says. A full disk must not be able to refuse anybody, and must not be able to admit anybody
+  either.
+- **It records authentication, not traffic.** Sign-ins, sign-outs, refusals, and the one grant
+  worth a line (an identity Cognito vouches for walking into an `authenticated` scope while
+  being in no roster row). **Not** the ordinary allowed request: the gate answers an
+  `auth_request` for every asset of every page, and a row for each is a file nobody reads and
+  a write on the path that must never be slow. That log already exists and is nginx's, which
+  has the URL, the status and the client address this gate never sees. The second deliberate
+  omission is the refusal carrying **no** credential, which is what every signed-out browser
+  gets on its way to the login page: it is the ordinary case, it names nobody, and it is the
+  only one an anonymous client could produce without limit. The two kinds that do fire per
+  request are deduplicated by `first_audited` on its own five-minute window, keyed by who,
+  where and why but never by which URL, since a browser refused one asset is a browser refused
+  forty; that window is **separate from the journal's** (`first_in_window`), because an audit
+  whose contents depend on the journal's verbosity is not an audit. A `reason` is a **code**
+  and never a sentence (`decision_reason` is the only place one is spelled, and it is the
+  `Decision` variant's own name), so the wording belongs to whoever is reading: the GUI shows
+  a refusal in the reader's language, in the same words its access check already uses for the
+  same verdict. Profile claims are in neither home, for the reason they are in no log line.
 
 ### Resolving a URL
 
@@ -1006,9 +1071,15 @@ section under-read itself by a fifth, and two of the seven are lockout-class.
   (where a **package** must put them; `/etc/systemd/system` is the admin's, and a copy there
   *overrides* the packaged one forever, which is why both postinsts and `verify.sh` report one
   rather than remove it).
-  **The gate** writes nothing, so its whole prefix is `ReadOnlyPaths` and no `StateDirectory` is
-  needed despite the `var/lib` name — `bb-auth-adm` writes that file from *outside* the unit's
-  namespace, as root, and the hardening does not apply to it. It runs hardened and non-privileged
+  **The gate** writes nothing *under its own prefix*, so that whole prefix is `ReadOnlyPaths` and
+  no `StateDirectory` is needed despite the `var/lib` name — `bb-auth-adm` writes that file from
+  *outside* the unit's namespace, as root, and the hardening does not apply to it. The one thing
+  it does write is the audit, and it is `LogsDirectory=bb-auth` (`/var/log/bb-auth`, mode 0750,
+  owned by the service user) rather than a second hole in `/opt/bb-auth` for exactly that reason:
+  a gate that could write `var/lib` could rewrite the access list it enforces, which is a far
+  larger hole than an audit is worth. The GUI reads that directory through the `bb-auth` group it
+  already belongs to, and never writes it: an audit an administrator can edit is not an audit.
+  It runs hardened and non-privileged
   on loopback behind a TLS-terminating reverse proxy, speaks plain HTTP, and holds no Cognito
   secret. **`bb-auth-web` is a second unit of the same shape** — the gate's hardening mirrored,
   its own `bb-auth-web` user, its own operator-owned env, an administrator list it reads from

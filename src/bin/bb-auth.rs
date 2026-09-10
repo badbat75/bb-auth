@@ -139,12 +139,13 @@ use tiny_http::{Header, Request, Response, ResponseBox, Server, StatusCode};
 // access file has no opinion about — HTTP, the cookie, id_token validation, the nginx
 // contract — stays here, in one file, read top to bottom.
 use bb_auth_core::{
-    claim_name_ok, decide, decide_api_key, default_settings_path, denied_url_for,
+    claim_name_ok, decide, decide_api_key, decision_reason, default_settings_path, denied_url_for,
     estate_form_action, header_safe_email, html_escape, login_url_for, now, page_csp, read_access,
     read_settings, request_site, request_url, sha256_hex, social_idp_label, stylesheet_link,
-    version_line, Access, AccessKind, ApiKeyRecord, Decision, IdentityAttr, KeyDecision,
-    ProfileClaim, RequestSite, Settings, SocialButton, Subject, UrlPattern, API_KEY_PREFIX,
-    BASE_CSS, PAGE_SECURITY_HEADERS, THEME_CSS,
+    version_line, Access, AccessKind, ApiKeyRecord, AuditCredential, AuditEvent, AuditKind,
+    AuditWriter, Decision, IdentityAttr, KeyDecision, ProfileClaim, RequestSite, Settings,
+    SocialButton, Subject, UrlPattern, API_KEY_PREFIX, BASE_CSS, DEFAULT_AUDIT_FILE,
+    PAGE_SECURITY_HEADERS, THEME_CSS,
 };
 
 type HmacSha256 = Hmac<Sha256>;
@@ -425,6 +426,18 @@ struct Config {
     /// string, so `/app/%2e%2e/admin` would match an `/app/*` scope while nginx serves
     /// `/admin`. A gated location that forgets the `set` sends no header and is denied.
     original_url_header: String,
+    /// `BB_AUTH_AUDIT_FILE`, the authentication audit. Default
+    /// [`DEFAULT_AUDIT_FILE`]; **empty turns it off**, which is the one way to say no.
+    ///
+    /// It is an env var and not a settings-file entry, and it is worth being explicit about
+    /// which part of that three-part rule it fails: a path is where the process opens a file,
+    /// so a hot one would mean closing a file and opening another mid-flight, and the whole
+    /// point of a setting being hot is that nothing has to be re-opened. It is the access
+    /// file's own argument, one file along. What follows from that is the one thing to get
+    /// right on a deploy: `bb-auth-web` reads this same path out of *its* env, so the two must
+    /// name one file. Neither has to say it: unset on both sides means [`DEFAULT_AUDIT_FILE`]
+    /// on both sides.
+    audit_file: String,
     /// `BB_AUTH_WORKERS`, the number of blocking request threads. At least 1.
     workers: usize,
 }
@@ -491,6 +504,12 @@ const LOG_DEDUPE_MAX: usize = 1024;
 /// Keys already logged, and when. See [`first_in_window`].
 static RECENT_LOGS: OnceLock<Mutex<HashMap<String, Instant>>> = OnceLock::new();
 
+/// Keys already **audited**, and when. A second table and not a shared one, because the two
+/// filters answer to different things: the journal's is turned off by [`LogLevel::Debug`],
+/// and an audit whose contents depend on the journal's verbosity is not an audit. Sharing one
+/// table would also let whichever artifact saw an event first silence the other.
+static RECENT_AUDIT: OnceLock<Mutex<HashMap<String, Instant>>> = OnceLock::new();
+
 /// Is this the first time `key` has been seen in [`LOG_DEDUPE_WINDOW`]?
 ///
 /// The per-request identity lines are worth keeping and not worth repeating: an un-enrolled
@@ -502,10 +521,23 @@ fn first_in_window(key: &str) -> bool {
     if logs(LogLevel::Debug) {
         return true;
     }
-    let Ok(mut seen) = RECENT_LOGS
-        .get_or_init(|| Mutex::new(HashMap::new()))
-        .lock()
-    else {
+    first_seen(&RECENT_LOGS, key)
+}
+
+/// The same window, for the audit file, and never turned off.
+///
+/// It applies to the two kinds that fire **per request** ([`AuditKind::AccessRefused`] and the
+/// un-enrolled [`AuditKind::AccessGranted`]), where a browser refused one asset is a browser
+/// refused forty and the forty say nothing the first did not. The login events are never
+/// deduplicated: they are things a person did, they happen a handful of times a session, and
+/// how many times is part of the answer.
+fn first_audited(key: &str) -> bool {
+    first_seen(&RECENT_AUDIT, key)
+}
+
+/// Has `key` been seen in `table` within [`LOG_DEDUPE_WINDOW`]? Records it if not.
+fn first_seen(table: &OnceLock<Mutex<HashMap<String, Instant>>>, key: &str) -> bool {
+    let Ok(mut seen) = table.get_or_init(|| Mutex::new(HashMap::new())).lock() else {
         return true;
     };
     let now = Instant::now();
@@ -519,6 +551,75 @@ fn first_in_window(key: &str) -> bool {
     }
     seen.insert(key.to_string(), now);
     true
+}
+
+/// The gate's end of the audit file, and the rule that keeps an event out of two places.
+///
+/// **An event has one home.** When the audit is on, the request-path lines that used to go to
+/// the journal go to the file instead, because the same refusal in two artifacts is one an
+/// operator reconciles by eye, and the file is the one with a schema, a filter and a page.
+/// When it is off, nothing changes: the journal keeps saying what it has always said, which
+/// is what a deployment that never turns this on still needs. [`LogLevel::Debug`] overrides
+/// both and prints regardless, because that level exists for the ten minutes when the
+/// repetition *is* the information and a second window is the last thing you want to open.
+///
+/// The failure is deliberately quiet after the first time. A full disk, a directory the unit
+/// forgot to declare or a mode nobody fixed must cost the audit and never the login, and
+/// saying so on every event would turn one broken audit into the journal it displaced.
+struct Audit {
+    writer: Option<AuditWriter>,
+    /// Set once the first write has failed, so the warning is one line and not one per event.
+    broken: std::sync::atomic::AtomicBool,
+}
+
+impl Audit {
+    /// Off: no file, and every request-path line stays in the journal.
+    fn off() -> Audit {
+        Audit {
+            writer: None,
+            broken: std::sync::atomic::AtomicBool::new(false),
+        }
+    }
+
+    fn to(path: &str) -> Audit {
+        Audit {
+            writer: Some(AuditWriter::new(path)),
+            broken: std::sync::atomic::AtomicBool::new(false),
+        }
+    }
+
+    /// Is the audit taking this event, and therefore is the journal not?
+    ///
+    /// False once a write has failed, which is what makes "one home" survive the file going
+    /// away: the journal picks the events back up until the next one succeeds. Callers record
+    /// first and ask afterwards, so the fallback covers the very event that failed.
+    fn on(&self) -> bool {
+        self.writer.is_some() && !self.broken.load(std::sync::atomic::Ordering::Relaxed)
+    }
+
+    /// Record one event, or lose it. Never fails, never blocks a decision, and never says the
+    /// same thing twice in a row.
+    fn record(&self, ev: AuditEvent) {
+        use std::sync::atomic::Ordering;
+        let Some(w) = &self.writer else {
+            return;
+        };
+        match w.record(&ev) {
+            Ok(()) => {
+                if self.broken.swap(false, Ordering::Relaxed) {
+                    eprintln!("[bb-auth] audit writable again: {}", w.path().display());
+                }
+            }
+            Err(e) => {
+                if !self.broken.swap(true, Ordering::Relaxed) {
+                    eprintln!(
+                        "[bb-auth] audit write FAILED, events go to the journal instead: {}: {e}",
+                        w.path().display()
+                    );
+                }
+            }
+        }
+    }
 }
 
 /// Is this listen address on the loopback interface, which is what every deployment note in
@@ -603,6 +704,9 @@ impl Config {
             hmac_keys: HmacKeys { by_id, active_id },
             cookie_name: env_or("BB_AUTH_COOKIE_NAME", "bb_session"),
             original_url_header: env_or("BB_AUTH_ORIGINAL_URL_HEADER", "X-Original-URL"),
+            audit_file: env_or("BB_AUTH_AUDIT_FILE", DEFAULT_AUDIT_FILE)
+                .trim()
+                .to_string(),
             workers: env_or("BB_AUTH_WORKERS", "4").parse().unwrap_or(4).max(1),
         }
     }
@@ -649,6 +753,10 @@ struct State {
     /// Serializes JWKS refreshers, so a `kid` miss under load triggers one fetch, not
     /// one per worker. See [`refresh_jwks_if_due`].
     jwks_refresh: Mutex<()>,
+    /// Where an authentication event goes, and whether the journal still gets it. Not behind
+    /// a lock and not reloaded on SIGHUP: it is a *path*, and a path is the one thing that
+    /// cannot be hot ([`Config::audit_file`]).
+    audit: Audit,
 }
 
 // ---------------------------------------------------------------------------
@@ -999,6 +1107,13 @@ fn decoding_key(state: &State, kid: &str) -> Option<DecodingKey> {
 struct UserIdentity {
     email: String,
     claims: BTreeMap<String, String>,
+    /// Which credential carried it, for the audit and for nothing else. It is a field of the
+    /// identity because it is the one thing about a credential that cannot be recovered from
+    /// it later: a token says whether it was federated and through whom, and the cookie that
+    /// token mints says nothing at all ([`AuditCredential::Session`]). It is not signed into
+    /// the cookie and must not be, since that is a [`COOKIE_VERSION`] bump and a bump logs
+    /// everybody out; the login event is where the exact answer is recorded, once.
+    cred: AuditCredential,
 }
 
 /// The id_token claims bb-auth consumes. `exp`, `aud` and `iss` are enforced by
@@ -1198,7 +1313,21 @@ fn validate_id_token(token: &str, state: &State) -> Result<UserIdentity, String>
             claims.insert(pc.claim.clone(), v);
         }
     }
-    Ok(UserIdentity { email, claims })
+    // Which credential this is, and this is the only place that can still tell: a token with
+    // an `identities` entry came through a federation and names it, one without is an account
+    // of the pool's own. Anything downstream of the cookie has lost the difference.
+    let cred = if c.identities.is_empty() {
+        AuditCredential::Local
+    } else {
+        AuditCredential::Social {
+            provider: social_provider_names(&c.identities),
+        }
+    };
+    Ok(UserIdentity {
+        email,
+        claims,
+        cred,
+    })
 }
 
 // ---------------------------------------------------------------------------
@@ -1319,6 +1448,8 @@ fn verify_session(val: &str, keys: &HmacKeys) -> Option<UserIdentity> {
             Some(UserIdentity {
                 email,
                 claims: decode_claims_segment(cb)?,
+                // What a cookie can say about how its holder signed in, which is nothing.
+                cred: AuditCredential::Session,
             })
         }
         _ => None,
@@ -2488,26 +2619,135 @@ fn original_url(req: &Request, cfg: &Config) -> Option<String> {
 /// identities Cognito vouches for, and Cognito vouches for no static key of ours: an
 /// unknown key is not an un-enrolled user, it is nobody, and there would be no identity to
 /// hand back.
-fn bearer_apikey<'a>(access: &'a Access, token: &str) -> Option<&'a ApiKeyRecord> {
+fn bearer_apikey<'a>(
+    access: &'a Access,
+    token: &str,
+    url: Option<&str>,
+    audit: &Audit,
+) -> Option<&'a ApiKeyRecord> {
+    let refused = |caller: Caller, why: &str, line: std::fmt::Arguments| {
+        caller.refused(audit, why, None, url, line);
+        None
+    };
     match decide_api_key(access, &sha256_hex(token), now()) {
         KeyDecision::Granted(rec) => Some(rec),
-        KeyDecision::Unknown => {
-            eprintln!("[bb-auth] api key rejected: unknown");
-            None
-        }
-        KeyDecision::OwnerDenied(rec) => {
-            eprintln!(
-                "[bb-auth] api key denied: owner is denied [{} {}]",
+        // Nothing to name: the id belongs to a row there is none of, and the bearer the
+        // client sent is the one thing that must never be written down.
+        KeyDecision::Unknown => refused(
+            Caller::unknown_key(),
+            "key_unknown",
+            format_args!("api key rejected: unknown"),
+        ),
+        KeyDecision::OwnerDenied(rec) => refused(
+            Caller::key(rec),
+            "key_owner_denied",
+            format_args!(
+                "api key denied: owner is denied [{} {}]",
                 rec.uuid, rec.key_id
-            );
-            None
+            ),
+        ),
+        KeyDecision::Expired(rec) => refused(
+            Caller::key(rec),
+            "key_expired",
+            format_args!("api key rejected: expired [{} {}]", rec.uuid, rec.key_id),
+        ),
+    }
+}
+
+/// Who is asking, in the two shapes the gate has to name them in: a phrase for the journal
+/// and fields for the audit.
+///
+/// One value, built where the credential is *verified*, which is the same place
+/// [`handle_validate`]'s `identified` flag is set and for the same reason: two descriptions of
+/// the caller assembled at two different points are two that can name different people.
+struct Caller {
+    /// The phrase the journal uses: an identifier for a login, a key id and its owner for a
+    /// `bbk_`. Only ever logged, never matched on.
+    who: String,
+    cred: AuditCredential,
+    /// The identifier presented, where there is one. A key presents none: it acts as its
+    /// user, and the user is named by [`Caller::uuid`].
+    subject: Option<String>,
+    uuid: Option<String>,
+}
+
+impl Caller {
+    /// A Cognito-backed identity, from either of the two credentials that carry one.
+    fn identity(email: &str, cred: AuditCredential, access: &Access) -> Caller {
+        Caller {
+            who: email.to_string(),
+            cred,
+            subject: Some(email.to_string()),
+            uuid: access.uuid_of(email).map(str::to_string),
         }
-        KeyDecision::Expired(rec) => {
-            eprintln!(
-                "[bb-auth] api key rejected: expired [{} {}]",
-                rec.uuid, rec.key_id
+    }
+
+    /// A static key. The audit names the owning row rather than the key id alone, because an
+    /// id is only unique inside one row and the row is what a reader can look up afterwards.
+    fn key(rec: &ApiKeyRecord) -> Caller {
+        Caller {
+            who: format!("key '{}' of {}", rec.key_id, rec.uuid),
+            cred: AuditCredential::Key {
+                id: rec.key_id.clone(),
+            },
+            subject: None,
+            uuid: Some(rec.uuid.clone()),
+        }
+    }
+
+    /// A `bbk_` bearer that resolved to nothing. It is still a key credential, and the empty
+    /// id is the honest answer to which one: the only thing that would name it is the bearer
+    /// itself, which is never written down.
+    fn unknown_key() -> Caller {
+        Caller {
+            who: "an unknown key".to_string(),
+            cred: AuditCredential::Key { id: String::new() },
+            subject: None,
+            uuid: None,
+        }
+    }
+
+    /// This caller's event of that kind, with who they are already filled in.
+    fn event(&self, kind: AuditKind) -> AuditEvent {
+        let ev = AuditEvent::new(now(), kind, self.cred.clone());
+        match (&self.subject, &self.uuid) {
+            (Some(s), u) => ev.by(s, u.as_deref()),
+            (None, Some(u)) => ev.of(u),
+            (None, None) => ev,
+        }
+    }
+
+    /// Record a refusal, and say it in the journal if the journal is where it lives.
+    ///
+    /// The two homes are here in one place because the rule that there is only ever one of
+    /// them is the kind that decays the moment it is written twice. See [`Audit`].
+    fn refused(
+        &self,
+        audit: &Audit,
+        why: &str,
+        place: Option<(&str, &str)>,
+        url: Option<&str>,
+        line: std::fmt::Arguments,
+    ) {
+        let (app, scope) = place.unwrap_or(("", ""));
+        // Per request, and it says the same thing every time: a browser refused one asset is
+        // a browser refused forty. The first of a burst is recorded, keyed by who, where and
+        // why but NOT by which URL, since the forty differ only in that. Deliberately not
+        // [`first_in_window`]: an audit whose contents depend on the journal's verbosity is
+        // not an audit.
+        if first_audited(&format!("{}|{app}/{scope}|{why}", self.who)) {
+            audit.record(
+                self.event(AuditKind::AccessRefused)
+                    .at(place)
+                    .on(url)
+                    .because(why),
             );
-            None
+        }
+        // Quiet at `LogLevel::Error`, where a refusal on a gated URL is the ordinary case
+        // rather than an event: that is the level for a gate in front of something the public
+        // browses. Quiet too when the audit took it, unless Debug asked for everything twice.
+        if logs(LogLevel::Debug) || (!audit.on() && logs(LogLevel::Info)) {
+            eprintln!("[bb-auth] {line}");
         }
     }
 }
@@ -2518,60 +2758,98 @@ fn bearer_apikey<'a>(access: &'a Access, token: &str) -> Option<&'a ApiKeyRecord
 /// same question of the same code. What stays here is what only a request has: the wall
 /// clock, and the log line naming the reason. Keep it that thin, or the two stop agreeing.
 ///
-/// `who` names the credential in the log: an identifier for a login, a key id and its
-/// owner for a `bbk_`. It is only ever logged, never matched on.
-fn authorize(access: &Access, subject: &Subject, url: Option<&str>, who: &str) -> bool {
+/// `caller` names the credential in both places it has to be named: the phrase for the
+/// journal, the fields for the audit. It is only ever reported, never matched on.
+fn authorize(
+    access: &Access,
+    subject: &Subject,
+    url: Option<&str>,
+    caller: &Caller,
+    audit: &Audit,
+) -> bool {
+    let who = &caller.who;
     let at = || url.unwrap_or("<none>");
-    // Every refusal reads the same and returns the same, so it is written once. It is quiet
-    // at `LogLevel::Error`, where a `401` on a gated URL is the ordinary case rather than an
-    // event: that is the level for a gate in front of something the public browses.
-    let deny = |why: std::fmt::Arguments| -> bool {
-        if logs(LogLevel::Info) {
-            eprintln!("[bb-auth] denied: {why}");
-        }
+    let decision = decide(access, subject, url);
+    // The place the refusal happened, where the refusal has one. `Vetoed` is about the person
+    // and `NoApplication` is about a URL no area covers, so neither has one to name.
+    let place = match &decision {
+        Decision::Anonymous { app, scope }
+        | Decision::Granted { app, scope }
+        | Decision::Excluded { app, scope }
+        | Decision::Unauthenticated { app, scope }
+        | Decision::CredentialRefused { app, scope }
+        | Decision::NotEnrolled { app, scope }
+        | Decision::NotMember { app, scope }
+        | Decision::KeyOutOfScope { app, scope } => Some((app.as_str(), scope.as_str())),
+        Decision::NoScope { app } => Some((app.as_str(), "")),
+        Decision::Vetoed | Decision::NoApplication => None,
+    };
+    // Every refusal reads the same and goes to the same one place, so it is written once.
+    let deny = |line: std::fmt::Arguments| -> bool {
+        caller.refused(audit, decision_reason(&decision), place, url, line);
         false
     };
-    match decide(access, subject, url) {
-        // An anonymous scope is the steady state of a health endpoint, so it is not
-        // logged: a line per poll would bury everything that matters.
+    match &decision {
+        // An anonymous scope is the steady state of a health endpoint, so it is not an
+        // event: a line per poll would bury everything that matters, in either home.
         Decision::Anonymous { .. } => true,
         Decision::Granted { app, scope } => {
-            // The one grant worth a line: somebody Cognito vouches for, who is in no
+            // The one grant worth recording: somebody Cognito vouches for, who is in no
             // roster row, just walked in. That is what an `authenticated` scope is for,
             // and an operator should be able to see it happening.
             if let Subject::Identifier(id) = subject {
-                // Once per identity per window: it says the same thing on the hundredth
-                // request as on the first, and this fires on every request that carries a
-                // credential into an `authenticated` area.
-                if access.uuid_of(id).is_none() && logs(LogLevel::Info) && first_in_window(id) {
-                    eprintln!(
-                        "[bb-auth] granted via {app}/{scope} to an un-enrolled identity: {id}"
-                    );
+                if access.uuid_of(id).is_none() {
+                    // Once per identity per window, in both homes and for the same reason:
+                    // it says the same thing on the hundredth request as on the first, and
+                    // this fires on every request that carries a credential into an
+                    // `authenticated` area. The two windows are counted separately, so
+                    // turning the journal up cannot change what the audit holds.
+                    if first_audited(&format!("granted|{id}|{app}/{scope}")) {
+                        audit.record(
+                            caller
+                                .event(AuditKind::AccessGranted)
+                                .at(place)
+                                .on(url)
+                                .because("un_enrolled"),
+                        );
+                    }
+                    if (logs(LogLevel::Debug) || (!audit.on() && logs(LogLevel::Info)))
+                        && first_in_window(id)
+                    {
+                        eprintln!(
+                            "[bb-auth] granted via {app}/{scope} to an un-enrolled identity: {id}"
+                        );
+                    }
                 }
             }
             true
         }
-        Decision::Vetoed => deny(format_args!("{who} is on the denied list")),
-        Decision::Excluded { app, scope } => deny(format_args!("{app}/{scope} excludes {who}")),
-        Decision::NoApplication => deny(format_args!("no application covers {} [{who}]", at())),
+        Decision::Vetoed => deny(format_args!("denied: {who} is on the denied list")),
+        Decision::Excluded { app, scope } => {
+            deny(format_args!("denied: {app}/{scope} excludes {who}"))
+        }
+        Decision::NoApplication => deny(format_args!(
+            "denied: no application covers {} [{who}]",
+            at()
+        )),
         Decision::NoScope { app } => deny(format_args!(
-            "application '{app}' has no scope for {} [{who}]",
+            "denied: application '{app}' has no scope for {} [{who}]",
             at()
         )),
         Decision::Unauthenticated { app, scope } => {
-            deny(format_args!("{app}/{scope} needs an identity"))
+            deny(format_args!("denied: {app}/{scope} needs an identity"))
         }
         Decision::CredentialRefused { app, scope } => deny(format_args!(
-            "{app}/{scope} does not admit this credential [{who}]"
+            "denied: {app}/{scope} does not admit this credential [{who}]"
         )),
-        Decision::NotEnrolled { app, scope } => {
-            deny(format_args!("{who} is in no users entry [{app}/{scope}]"))
-        }
+        Decision::NotEnrolled { app, scope } => deny(format_args!(
+            "denied: {who} is in no users entry [{app}/{scope}]"
+        )),
         Decision::NotMember { app, scope } => {
-            deny(format_args!("{app}/{scope} does not list {who}"))
+            deny(format_args!("denied: {app}/{scope} does not list {who}"))
         }
         Decision::KeyOutOfScope { app, scope } => deny(format_args!(
-            "this key may not exercise {app}/{scope} [{who}]"
+            "denied: this key may not exercise {app}/{scope} [{who}]"
         )),
     }
 }
@@ -2601,9 +2879,19 @@ fn key_identity(access: &Access, rec: &ApiKeyRecord) -> Authorized {
 /// An identity in no roster row is not an error: an `authenticated` scope exists precisely
 /// to admit one. It simply has no `uuid` to hand downstream, and the identifier it signed
 /// in with is the only email there is.
-fn authorize_login(access: &Access, ident: UserIdentity, url: Option<&str>) -> Option<Granted> {
-    let UserIdentity { email, claims } = ident;
-    if !authorize(access, &Subject::Identifier(&email), url, &email) {
+fn authorize_login(
+    access: &Access,
+    ident: UserIdentity,
+    url: Option<&str>,
+    audit: &Audit,
+) -> Option<Granted> {
+    let UserIdentity {
+        email,
+        claims,
+        cred,
+    } = ident;
+    let caller = Caller::identity(&email, cred, access);
+    if !authorize(access, &Subject::Identifier(&email), url, &caller, audit) {
         return None;
     }
     // A vetoed identity is never named downstream, and reaching this line means one just
@@ -2672,21 +2960,35 @@ fn handle_validate(req: Request, state: &State) {
         let granted = if token.starts_with(API_KEY_PREFIX) {
             // A key acts as its user and carries no token, so no claims come with it.
             let access = state.access.read().unwrap();
-            bearer_apikey(&access, token).and_then(|rec| {
+            bearer_apikey(&access, token, url.as_deref(), &state.audit).and_then(|rec| {
                 // A key that resolves to a live, unexpired row is a credential this gate
                 // knows, whatever the scope then says about it.
                 identified = true;
-                let who = format!("key '{}' of {}", rec.key_id, rec.uuid);
-                authorize(&access, &Subject::Key(rec), url.as_deref(), &who)
-                    .then(|| Granted::Identity(key_identity(&access, rec)))
+                let caller = Caller::key(rec);
+                authorize(
+                    &access,
+                    &Subject::Key(rec),
+                    url.as_deref(),
+                    &caller,
+                    &state.audit,
+                )
+                .then(|| Granted::Identity(key_identity(&access, rec)))
             })
         } else {
             match validate_id_token(token, state) {
                 Ok(ident) => {
                     identified = true;
-                    authorize_login(&state.access.read().unwrap(), ident, url.as_deref())
+                    authorize_login(
+                        &state.access.read().unwrap(),
+                        ident,
+                        url.as_deref(),
+                        &state.audit,
+                    )
                 }
                 Err(e) => {
+                    // A bearer that did not validate names nobody: there is no identity to
+                    // record it against, and the token is not one to write down. It stays a
+                    // journal line, which is the honest home for "somebody sent something".
                     eprintln!("[bb-auth] bearer rejected: {e}");
                     None
                 }
@@ -2706,7 +3008,12 @@ fn handle_validate(req: Request, state: &State) {
             // gate minted and still stands behind: whoever holds it is signed in, and a
             // refusal from here on is about the URL and not about them.
             identified = true;
-            authorize_login(&state.access.read().unwrap(), ident, url.as_deref())
+            authorize_login(
+                &state.access.read().unwrap(),
+                ident,
+                url.as_deref(),
+                &state.audit,
+            )
         });
     if let Some(granted) = granted {
         respond_authorized(req, &granted, state);
@@ -2792,7 +3099,15 @@ fn handle_session(mut req: Request, state: &State) {
         header_value(&req, "Host"),
     );
     if !matches!(site, RequestSite::SameOrigin | RequestSite::SameSite) {
-        eprintln!("[bb-auth] session refused: {site:?} POST to /auth/session");
+        // Refused before the body is read, so there is no credential to name: whatever this
+        // form carried, the gate never looked at it.
+        state.audit.record(
+            AuditEvent::new(now(), AuditKind::LoginRefused, AuditCredential::Anonymous)
+                .because("cross_site"),
+        );
+        if logs(LogLevel::Debug) || !state.audit.on() {
+            eprintln!("[bb-auth] session refused: {site:?} POST to /auth/session");
+        }
         respond_html(
             req,
             state,
@@ -2827,7 +3142,16 @@ fn handle_session(mut req: Request, state: &State) {
     let ident = match validate_id_token(id_token, state) {
         Ok(i) => i,
         Err(e) => {
-            eprintln!("[bb-auth] session rejected: {e}");
+            // A token that did not validate names nobody, and the reason is the gate's own
+            // sentence rather than a code: `validate_id_token` has a dozen ways to say no and
+            // they are all "this token is not one of ours".
+            state.audit.record(
+                AuditEvent::new(now(), AuditKind::LoginRefused, AuditCredential::Anonymous)
+                    .because("token_invalid"),
+            );
+            if logs(LogLevel::Debug) || !state.audit.on() {
+                eprintln!("[bb-auth] session rejected: {e}");
+            }
             respond_html(
                 req,
                 state,
@@ -2842,23 +3166,28 @@ fn handle_session(mut req: Request, state: &State) {
 
     // Booleans, not a held guard: `respond_html` consumes `req`, and the lock has no
     // business being alive while we write a response.
-    let (vetoed, enrolled, any_open) = {
+    let (vetoed, enrolled, any_open, uuid) = {
         let access = state.access.read().unwrap();
         (
             access.vetoes_identifier(&ident.email),
             access.uuid_of(&ident.email).is_some(),
             access.any_authenticated_scope(),
+            access.uuid_of(&ident.email).map(str::to_string),
         )
     };
     if vetoed || !(enrolled || any_open) {
-        let why = if vetoed {
-            "denied"
-        } else {
-            "not in users table"
-        };
-        // Profile claims are never logged: they are PII the log line does not need, and
-        // the email already identifies it.
-        eprintln!("[bb-auth] session denied: {} {why}", ident.email);
+        let why = if vetoed { "vetoed" } else { "not_enrolled" };
+        // The access file's own words for the same two refusals, so a reader that can explain
+        // one can explain the other. Profile claims are in neither home: they are PII that
+        // adds nothing, and the identifier already says who this was.
+        state.audit.record(
+            AuditEvent::new(now(), AuditKind::LoginRefused, ident.cred.clone())
+                .by(&ident.email, uuid.as_deref())
+                .because(why),
+        );
+        if logs(LogLevel::Debug) || !state.audit.on() {
+            eprintln!("[bb-auth] session denied: {} {why}", ident.email);
+        }
         respond_html(
             req,
             state,
@@ -2895,7 +3224,16 @@ fn handle_session(mut req: Request, state: &State) {
         );
         (rd, cookie)
     };
-    eprintln!("[bb-auth] session granted: {} -> {rd}", ident.email);
+    // The one event that says how somebody proved who they are, because it is the only moment
+    // the gate knows: from here on they hold a cookie, and a cookie does not say.
+    state.audit.record(
+        AuditEvent::new(now(), AuditKind::LoginGranted, ident.cred.clone())
+            .by(&ident.email, uuid.as_deref())
+            .on(Some(&rd)),
+    );
+    if logs(LogLevel::Debug) || !state.audit.on() {
+        eprintln!("[bb-auth] session granted: {} -> {rd}", ident.email);
+    }
     respond_redirect(req, &rd, Some(&cookie));
 }
 
@@ -3004,6 +3342,29 @@ fn handle_logout(req: Request, state: &State) {
         &hosts,
         &login,
     );
+    // Whose session just ended, which is a question about the same timeline as whose session
+    // began and is otherwise unanswerable: nothing else here reads the cookie, because
+    // clearing one needs no idea what is in it. Only when one is actually being cleared: a
+    // cross-site logout clears nothing, so nothing ended. It costs one HMAC verification on an
+    // endpoint somebody reaches by clicking a link.
+    if cookie.is_some() {
+        if let Some(ident) = header_value(&req, "Cookie")
+            .and_then(|c| cookie_value(c, &cfg.cookie_name).map(str::to_string))
+            .and_then(|v| verify_session(&v, &cfg.hmac_keys))
+        {
+            let uuid = state
+                .access
+                .read()
+                .unwrap()
+                .uuid_of(&ident.email)
+                .map(str::to_string);
+            state.audit.record(
+                AuditEvent::new(now(), AuditKind::LoginEnded, ident.cred)
+                    .by(&ident.email, uuid.as_deref())
+                    .on(Some(&target)),
+            );
+        }
+    }
     respond_redirect(req, &target, cookie.as_deref());
 }
 
@@ -3485,8 +3846,15 @@ fn main() {
         })
         .collect();
 
+    let audit = if cfg.audit_file.is_empty() {
+        Audit::off()
+    } else {
+        Audit::to(&cfg.audit_file)
+    };
+
     let state = Arc::new(State {
         cfg,
+        audit,
         access: RwLock::new(access),
         settings: RwLock::new(settings),
         #[cfg(unix)]
@@ -3557,6 +3925,18 @@ fn main() {
              near the ~4 KB a browser will store (profile_claims in {settings_path})",
             settings.profile_claims.len()
         );
+    }
+    // Where the authentication events go, and therefore whether the journal still carries
+    // them. Worth a line because the two are exclusive: an operator who reads "audit=…" here
+    // and then greps the journal for a refusal will find nothing, and this is the sentence
+    // that says why.
+    match state.audit.on() {
+        true => eprintln!(
+            "[bb-auth] audit: {} (logins, refusals and logouts go there instead of here; \
+             BB_AUTH_AUDIT_FILE= to turn it off)",
+            state.cfg.audit_file
+        ),
+        false => eprintln!("[bb-auth] audit: off, events stay in this journal"),
     }
     if !open_scopes.is_empty() {
         // Cognito self-signup is open, so `authenticated` really is "anyone who can
@@ -3763,6 +4143,7 @@ mod tests {
         UserIdentity {
             email: email.to_string(),
             claims: BTreeMap::new(),
+            cred: AuditCredential::Local,
         }
     }
     /// An identity carrying an arbitrary claim set.
@@ -3773,11 +4154,35 @@ mod tests {
                 .iter()
                 .map(|(k, v)| (k.to_string(), v.to_string()))
                 .collect(),
+            cred: AuditCredential::Local,
         }
     }
     /// An identity carrying the two claims a display name is usually built from.
     fn ident_full(email: &str, given: &str, family: &str) -> UserIdentity {
         ident_claims(email, &[("given_name", given), ("family_name", family)])
+    }
+
+    /// What a verified cookie hands back: the identity that went in, minus how it was proved.
+    ///
+    /// Its own helper rather than a weaker assertion, because that difference **is** the rule:
+    /// the cookie carries an identity and its claims and says nothing about the credential
+    /// behind them ([`AuditCredential::Session`]). A round trip that compared loosely would let
+    /// a future edit stamp the provider into the cookie with nothing noticing, and that edit is
+    /// a [`COOKIE_VERSION`] bump that logs every session out.
+    fn from_cookie(mut i: UserIdentity) -> UserIdentity {
+        i.cred = AuditCredential::Session;
+        i
+    }
+
+    // The two authorization entry points with the audit off, which is what a test of the
+    // *decision* wants: these deliberately shadow the glob import above (a local item beats a
+    // `use super::*`), so a test reads as the question it is asking and nothing in this suite
+    // races for one file on disk. A test of the record itself calls `super::` and says so.
+    fn authorize_login(access: &Access, ident: UserIdentity, url: Option<&str>) -> Option<Granted> {
+        super::authorize_login(access, ident, url, &Audit::off())
+    }
+    fn bearer_apikey<'a>(access: &'a Access, token: &str) -> Option<&'a ApiKeyRecord> {
+        super::bearer_apikey(access, token, None, &Audit::off())
     }
     /// A compiled claim list, written comma-separated for brevity. The compiler itself, and
     /// everything it refuses, is the library's and is tested there; what these tests need is
@@ -3864,7 +4269,11 @@ mod tests {
         // The email lowercases; the claim values do not — their case is the user's.
         assert_eq!(
             verify_session(&c, &k),
-            Some(ident_full("foo@bar.com", "Niccolò", "de' Medici"))
+            Some(from_cookie(ident_full(
+                "foo@bar.com",
+                "Niccolò",
+                "de' Medici"
+            )))
         );
     }
 
@@ -3880,7 +4289,7 @@ mod tests {
             Some(""),
             "empty segment, never {{}}: {c}"
         );
-        assert_eq!(verify_session(&c, &k), Some(ident("a@b.com")));
+        assert_eq!(verify_session(&c, &k), Some(from_cookie(ident("a@b.com"))));
     }
 
     #[test]
@@ -3890,7 +4299,7 @@ mod tests {
         let k = keys_one();
         let id = ident_claims("a@b.com", &[("nickname", r#"a"b\c/d"#)]);
         let c = make_session(&id, 3600, &k);
-        assert_eq!(verify_session(&c, &k), Some(id));
+        assert_eq!(verify_session(&c, &k), Some(from_cookie(id)));
     }
 
     #[test]
@@ -3980,7 +4389,10 @@ mod tests {
         let c = format!("{msg}.{sig}");
         assert_eq!(
             verify_session(&c, &k),
-            Some(ident_claims("x@y.com", &[("given_name", "Ada")]))
+            Some(from_cookie(ident_claims(
+                "x@y.com",
+                &[("given_name", "Ada")]
+            )))
         );
     }
 
@@ -4300,6 +4712,9 @@ mod tests {
             hmac_keys: keys_one(),
             cookie_name: "bb_session".to_string(),
             original_url_header: "X-Original-URL".to_string(),
+            // Off, which is what every test that is not about the audit wants: a suite that
+            // wrote to a real path would have every test racing for one file.
+            audit_file: String::new(),
             workers: 1,
         }
     }
@@ -4993,6 +5408,84 @@ mod tests {
     }
 
     #[test]
+    fn a_refusal_reaches_the_audit_with_who_where_and_why() {
+        let a = gate_access("audit-refusal");
+        let p = std::env::temp_dir().join("bb-auth-audit-refusal.jsonl");
+        let _ = std::fs::remove_file(&p);
+        let audit = Audit::to(p.to_str().unwrap());
+
+        // A member of nothing, on a restricted scope. The identity is unique to this test
+        // because the dedupe window is process-wide and the suite runs in parallel.
+        let refused = super::authorize_login(
+            &a,
+            ident("audit-refusal@x.com"),
+            Some("https://app.x.com/other/x"),
+            &audit,
+        );
+        assert!(
+            refused.is_none(),
+            "the decision is unchanged by recording it"
+        );
+
+        let page = bb_auth_core::read_audit(&p, None, 10).unwrap();
+        assert_eq!(page.events.len(), 1);
+        let ev = &page.events[0];
+        assert_eq!(ev.kind, AuditKind::AccessRefused);
+        assert_eq!(ev.subject.as_deref(), Some("audit-refusal@x.com"));
+        assert_eq!(ev.uuid, None, "nobody's row: this identity is in none");
+        assert_eq!(ev.app.as_deref(), Some("other"));
+        assert_eq!(ev.reason.as_deref(), Some("not_enrolled"));
+        assert_eq!(ev.url.as_deref(), Some("https://app.x.com/other/x"));
+        assert_eq!(ev.cred, AuditCredential::Local);
+
+        // The same refusal again inside the window is the same sentence, so it is not a
+        // second row: a browser refused one asset is a browser refused forty.
+        super::authorize_login(
+            &a,
+            ident("audit-refusal@x.com"),
+            Some("https://app.x.com/other/y"),
+            &audit,
+        );
+        assert_eq!(
+            bb_auth_core::read_audit(&p, None, 10).unwrap().events.len(),
+            1
+        );
+        let _ = std::fs::remove_file(&p);
+    }
+
+    #[test]
+    fn an_audit_that_cannot_be_written_costs_the_record_and_never_the_login() {
+        // The rule the whole sink is built around: a full disk, a missing directory or a mode
+        // nobody fixed must not be able to refuse anybody, and must not be able to admit
+        // anybody either. The decision is the access file's, whatever the file system says.
+        let a = gate_access("audit-broken");
+        let nowhere = std::env::temp_dir().join("bb-auth-no-such-dir-at-all/audit.jsonl");
+        let audit = Audit::to(nowhere.to_str().unwrap());
+        assert!(audit.on(), "on until a write has actually failed");
+
+        let granted = super::authorize_login(
+            &a,
+            ident("bob@x.com"),
+            Some("https://app.x.com/other/x"),
+            &audit,
+        );
+        assert!(granted.is_some(), "the grant stands");
+        let refused = super::authorize_login(
+            &a,
+            ident("audit-broken@x.com"),
+            Some("https://app.x.com/other/x"),
+            &audit,
+        );
+        assert!(refused.is_none(), "and so does the refusal");
+        // And the events fall back to the journal, which is what `on()` reporting false means
+        // to every caller that asks after recording.
+        assert!(
+            !audit.on(),
+            "a failed write hands the events back to the journal"
+        );
+    }
+
+    #[test]
     fn bearer_apikey_resolves_to_its_owner() {
         // The gate hashes the bearer; the file holds only the hash. A key acts as its
         // user, so the identity handed back is the owner's row: the one identity on this
@@ -5028,7 +5521,13 @@ mod tests {
         );
         let url = Some("https://x.com/a/thing");
         let rec = bearer_apikey(&a, "bbk_secret").unwrap();
-        assert!(!authorize(&a, &Subject::Key(rec), url, "key"));
+        assert!(!authorize(
+            &a,
+            &Subject::Key(rec),
+            url,
+            &Caller::key(rec),
+            &Audit::off()
+        ));
         // The same person, through a browser login, is admitted.
         assert!(authorize_login(&a, ident("bob@x.com"), url).is_some());
     }
@@ -5123,6 +5622,7 @@ mod tests {
         let issuer = settings.issuer.clone();
         State {
             cfg: cookie_cfg(),
+            audit: Audit::off(),
             access: RwLock::new(gate_access("token")),
             settings: RwLock::new(settings),
             #[cfg(unix)]

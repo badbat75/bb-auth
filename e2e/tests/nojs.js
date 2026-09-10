@@ -16,7 +16,7 @@ async function run(ctx, t) {
   const { context, page } = await newPage(ctx);
   try {
     // Zero scripts, sampled across page shapes: dashboard, list, form.
-    for (const p of ['/', '/users', '/apps', '/apps/app1', '/users/b3f1c8a2-4e77-4f1a-9c0d-1e2f3a4b5c6d/keys/+add']) {
+    for (const p of ['/', '/users', '/apps', '/apps/app1', '/audit', '/users/b3f1c8a2-4e77-4f1a-9c0d-1e2f3a4b5c6d/keys/+add']) {
       await page.goto(ctx.base + p);
       t.eq(`no <script> on ${p}`, await page.locator('script').count(), 0);
       // And exactly one kind of handler, on exactly the two controls entitled to it.

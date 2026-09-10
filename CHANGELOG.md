@@ -62,6 +62,44 @@ when there is no tag to check out.
 release logs anybody out.** The settings file goes from version 1 to version 3, which needs an
 edit before the binaries land: see "Upgrading" below.
 
+### New: the audit, and an Audit tab to read it
+
+The gate now records what it has answered, and `bb-auth-web` grew a fifth tab that reads it
+back: newest first, filtered by person, by credential (social, Cognito account, API key,
+session) and by period, paged like every other list here and needing no JavaScript for any of
+it. Refresh is a link to the same address, because the page reads the file on every request.
+
+**It is on by default at `/var/log/bb-auth/audit.jsonl`, and there is one thing to know before
+upgrading: the events move.** With an audit file, a sign-in, a sign-out and a refusal go to
+that file *instead* of into the journal, because the same event in two places is one somebody
+has to reconcile by eye. `journalctl -u bb-auth` keeps everything else it ever had (startup,
+configuration, reloads, failures), `journalctl` at `BB_AUTH_LOG_LEVEL=debug` prints the
+request lines regardless, and `BB_AUTH_AUDIT_FILE=` (empty) turns the file off and puts the
+journal back exactly as it was. If the file cannot be written the events fall back into the
+journal on their own, with one line saying so.
+
+What it records is **authentication, not traffic**: sign-ins, sign-outs, refusals, and the one
+grant worth a line, which is somebody Cognito vouches for walking into an `authenticated`
+scope while being in no `users` entry. Not the ordinary allowed request: the gate answers an
+`auth_request` for every asset of every page, so that is nginx's log and always was, and it
+has the URL, the status and the client address this gate never sees. Refusals that carry no
+credential at all are not recorded either, being what every signed-out browser gets on its way
+to the login page. A refusal repeated inside five minutes is recorded once.
+
+The file is JSON, one object per line, with a schema version on every one, and it rotates
+itself at 4 MB onto `.1`, so the pair cannot exceed 8 MB whatever happens. Nothing about it
+can cost a login: a write that fails is one journal line and the request proceeds.
+
+Two deployment notes. The gate's unit gains `LogsDirectory=bb-auth`, so **the unit file has to
+land and `systemctl daemon-reload` has to run** before the gate can write anything (the
+package does both); until then the audit fails soft and the events stay in the journal. And
+`bb-auth-web` reads that directory through the `bb-auth` group it already belongs to for the
+access file, so a GUI host needs no new privilege. One credential is recorded less precisely
+than it might be: a session cookie says who you are and not how you proved it, so a refusal
+carrying one reads "Session" rather than "Google". Stamping the provider into the cookie is a
+cookie-format bump, and a cookie-format bump logs everybody out. The sign-in event carries the
+exact answer, which is where the question is really being asked.
+
 ### Fixed in 1.99.2: `form-action` blocked every Chromium login
 
 **If you are running a 1.99.1 build, upgrade.** Between 1.99.1 and this build, the

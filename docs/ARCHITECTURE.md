@@ -267,6 +267,7 @@ nothing in an env file can ever take effect without a restart.
 | `BB_AUTH_LISTEN` | no | `127.0.0.1:4181` | Bind address. Loopback only — nginx fronts it. |
 | `BB_AUTH_COOKIE_NAME` | no | `bb_session` | The cookie's **name** only. Its domain and its lifetime are settings (§8a). Renaming it orphans every cookie already issued, which is why it is here and the domain is not. |
 | `BB_AUTH_SETTINGS_FILE` | no | `settings.json` beside the access file | Path to the settings file (§8a). Re-read on `SIGHUP` like the access file, fail-soft on both. A missing file is a fatal startup. |
+| `BB_AUTH_AUDIT_FILE` | no | `/var/log/bb-auth/audit.jsonl` | The authentication audit (§8b): one JSON object per line, appended by the gate and read back by `bb-auth-web`'s Audit tab. **Empty turns it off**, and the events go to the journal instead. Not a setting for the same reason the access file's path is not: a path is where a process opens a file. |
 | `BB_AUTH_WORKERS` | no | `4` | Thread pool size (min 1). |
 
 The admin GUI is a separate service with a separate env file
@@ -369,6 +370,36 @@ before matching the host with the same glob a scope's `urls` use. Lookalikes suc
 as `evilexample.com` and `example.com.evil.com` do not match `*.example.com`, because
 the pattern's literal dot must be present — and the apex `example.com` doesn't either,
 so list it explicitly.
+
+### 8b. The audit file
+
+The third file more than one program reads, and the only one written by the gate:
+`BB_AUTH_AUDIT_FILE`, one JSON object per line, appended under a mutex and rotated onto `.1`
+at 4 MB. `AuditEvent`, `AuditWriter` and `read_audit` are in the library for the same reason
+the access file's parser is: the gate writes those lines and `bb-auth-web` reads them, so a
+second answer to what one line means would be a reader showing something the writer never
+said. The unit provides the directory (`LogsDirectory=bb-auth`, `bb-auth:bb-auth 0750`), which
+is why this is the one thing the gate writes and its own `/opt/bb-auth` prefix stays
+`ReadOnlyPaths`.
+
+Five kinds, and they are all about **authentication** rather than traffic: `login_granted`
+(with the credential that proved it, which is the only moment the gate knows whether a
+federation was involved), `login_refused`, `login_ended`, `access_refused`, and the
+`access_granted` that matters, which is an identity in no roster row being let in by an
+`authenticated` scope. Not the ordinary allowed request, which is nginx's access log and
+would be one row per asset here; not a refusal that carried no credential, which is every
+signed-out browser on its way to the login page. The two kinds that fire per request are
+deduplicated over five minutes by `first_audited`, on a table of its own so that the journal's
+verbosity cannot change what the audit holds.
+
+The `reason` is a **code** and never a sentence — `decision_reason` is the only place one is
+spelled, and it is the `Decision` variant's own name — so the wording belongs to whoever
+reads: the GUI renders a refusal in the reader's language, reusing the very phrases its access
+check already uses for the same verdict.
+
+The gate's journal and this file are exclusive: with an audit configured the request-path
+lines go here *instead*, and `Audit::on` reports false the moment a write fails, so a broken
+audit hands its events straight back to the journal.
 
 ---
 

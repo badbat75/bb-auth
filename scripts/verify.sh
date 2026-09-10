@@ -149,6 +149,26 @@ else
   bad "journal: no 'listening on' line since bb-auth last started"
 fi
 
+# The audit, which is the one file the gate WRITES, and therefore the one whose permissions
+# fail in a direction nothing else here would notice: the gate carries on either way, so a
+# directory the unit no longer declares or a mode the GUI cannot read is silent apart from a
+# single journal line at the moment it broke. Reported and never fixed, like everything else
+# in this script.
+AUDIT_FILE="$(envval BB_AUTH_AUDIT_FILE "$ENV_FILE")"
+AUDIT_FILE="${AUDIT_FILE:-/var/log/bb-auth/audit.jsonl}"
+if [ -z "$(envval BB_AUTH_AUDIT_FILE "$ENV_FILE")" ] && grep -q '^BB_AUTH_AUDIT_FILE=' "$ENV_FILE" 2>/dev/null; then
+  note "audit: off by configuration (BB_AUTH_AUDIT_FILE is empty); events stay in the journal"
+elif [ -e "$AUDIT_FILE" ]; then
+  note "audit: $AUDIT_FILE $(stat -c '%U:%G %a %s bytes' "$AUDIT_FILE")"
+  if journalctl -u bb-auth --since "$SINCE" --no-pager 2>/dev/null | grep -q 'audit write FAILED'; then
+    bad "the gate could not write $AUDIT_FILE since it started; the events are in the journal"
+  fi
+else
+  # Not a failure: a gate that has refused nobody and signed nobody in since the file was
+  # last rotated away has nothing to have written.
+  note "audit: $AUDIT_FILE does not exist yet (nothing has been recorded since it was created)"
+fi
+
 # --- the GUI, only if it is installed ---------------------------------------
 if [ -x "$DEST/bin/bb-auth-web" ]; then
   echo "[verify] --- the admin GUI ---"

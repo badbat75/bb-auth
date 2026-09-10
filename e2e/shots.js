@@ -119,6 +119,27 @@ const SCENES = [
   ['can-denied', go('/apps/app1?email=spammer%40example.com&url=https%3A%2F%2Fapp.example.com%2Fapp1')],
   ['can-on-a-person', go('/users/you%40example.com?url=https%3A%2F%2Fapp.example.com%2Fapp1%2Fadmin%2Fpanel')],
 
+  // The audit, which is the one page whose content this GUI cannot produce: the gate writes
+  // that file. So the scene lays one down first, of four rows that differ in the ways the
+  // table has to keep legible — a sign-in naming its provider, a refusal naming a scope and a
+  // reason, a key acting as the row it belongs to, and a sign-out, which is neither.
+  ['audit', async (page, ctx) => {
+    const ago = (s) => Math.floor(Date.now() / 1000) - s;
+    const rows = [
+      { v: 1, ts: ago(4000), kind: 'access_refused', cred: { type: 'key', id: 'laptop' },
+        uuid: 'b3f1c8a2-4e77-4f1a-9c0d-1e2f3a4b5c6d', app: 'app1', scope: 'admin',
+        url: 'https://app.example.com/app1/admin/panel', reason: 'key_out_of_scope' },
+      { v: 1, ts: ago(2400), kind: 'login_refused', cred: { type: 'anonymous' },
+        reason: 'token_invalid' },
+      { v: 1, ts: ago(1200), kind: 'login_ended', cred: { type: 'session' },
+        subject: 'you@example.com', url: 'https://app.example.com/app1' },
+      { v: 1, ts: ago(300), kind: 'login_granted', cred: { type: 'social', provider: 'Google' },
+        subject: 'newcomer@example.com', url: 'https://app.example.com/app1' },
+    ];
+    fs.writeFileSync(ctx.auditFile, rows.map((r) => JSON.stringify(r)).join('\n') + '\n');
+    await page.goto(ctx.base + '/audit');
+  }],
+
   // ---- the forms ---------------------------------------------------------
   ['user-add', go('/users/%2Badd')],
   ['user-edit', go('/users/you%40example.com/edit')],
@@ -324,9 +345,11 @@ async function main() {
       if (view.theme) await page.goto(`${ctx.base}/?theme=${view.theme}`);
       for (const [name, steps] of scenes) {
         // Every scene starts from the fixture, both files: the settings scenes write to
-        // the second one exactly as the others write to the first.
+        // the second one exactly as the others write to the first. The audit starts absent,
+        // and the one scene that wants rows lays them down itself.
         fs.copyFileSync(FIXTURE, ctx.accessFile);
         fs.writeFileSync(ctx.settingsFile, SETTINGS_FIXTURE);
+        fs.rmSync(ctx.auditFile, { force: true });
         // One scene that cannot reach its state (a selector the markup no longer has,
         // typically) must not cost the other hundred their screenshot: this is evidence
         // for a human, not an assertion, so it degrades instead of aborting. The exit

@@ -1274,6 +1274,23 @@ pub fn format_date(epoch: u64) -> String {
     format!("{y:04}-{m:02}-{d:02}")
 }
 
+/// Format Unix seconds as `YYYY-MM-DD HH:MM:SS`, in **UTC**, for the audit page.
+///
+/// UTC and not the host's local time, which is not a limitation being made a virtue: there is
+/// no zone database here and adding one to read a log would be the largest dependency in the
+/// tree. It is also the honest rendering of what is stored, and the page says `UTC` in the
+/// column heading rather than leaving a reader to assume their own.
+pub fn format_datetime(epoch: u64) -> String {
+    let (y, m, d) = civil_from_days((epoch / 86_400) as i64);
+    let s = epoch % 86_400;
+    format!(
+        "{y:04}-{m:02}-{d:02} {:02}:{:02}:{:02}",
+        s / 3600,
+        (s % 3600) / 60,
+        s % 60
+    )
+}
+
 /// A parsed validity window.
 #[derive(Debug, PartialEq, Eq)]
 pub enum Dur {
@@ -3611,6 +3628,405 @@ pub struct WebSettings {
     /// because the *gate* has no business failing to start over a list it never reads.
     #[serde(default)]
     pub admins: Vec<String>,
+}
+
+// ---------------------------------------------------------------------------
+// The audit file
+// ---------------------------------------------------------------------------
+//
+// The third file more than one program has an opinion about, and it is here on the same
+// membership rule as the other two: the gate appends to it, `bb-auth-web` reads it back, and
+// a second answer to "what is one line of this" would be a reader showing something the
+// writer did not mean. What is new is the direction. The access file and the settings file
+// are written by the editors and read by the gate; this one goes the other way, and it is the
+// only thing in this system that does.
+//
+// It is NOT the journal, and the two are kept apart on purpose. The journal is prose, for an
+// operator, with a volume knob; this is a record with a schema, for a program, with a
+// retention. An event has exactly one of those homes at a time (see `AuditEvent`), because an
+// event written to both is one an operator has to reconcile by eye, and reconciling by eye is
+// what a schema is for.
+
+/// The audit record's schema version, carried on every line as `v`.
+///
+/// The schema is **additive**: a new field is optional and an older reader ignores it, so
+/// this is bumped only when an existing field changes *meaning*, never when one is added.
+/// That is the opposite conclusion from the session cookie's `COOKIE_VERSION`, and for the
+/// opposite reason: a cookie format change logs everybody out, while nobody is holding a line
+/// of this file, so there is nothing to pay for tolerance here.
+pub const AUDIT_SCHEMA: u32 = 1;
+
+/// Where the audit lives when nothing says otherwise, on both sides.
+///
+/// A constant rather than two env vars that have to agree, for the reason this whole library
+/// exists: the gate writes the file and the GUI reads it, and a path written twice drifts with
+/// nothing to catch it. It is under `/var/log` and not beside the access file because the
+/// gate's own prefix is `ReadOnlyPaths` and must stay that way: a gate that could write
+/// `var/lib` could rewrite the access list it enforces, which is a much larger hole than an
+/// audit is worth. `LogsDirectory=bb-auth` in the unit is what creates it.
+pub const DEFAULT_AUDIT_FILE: &str = "/var/log/bb-auth/audit.jsonl";
+
+/// How large the live audit file may grow before it is rotated onto `.1`, so the pair is
+/// bounded by twice this and the disk cannot be filled by whoever is being refused.
+///
+/// A cap and not a retention period, because the thing that must be bounded is *bytes*: a
+/// flood of refusals is exactly the case an audit is for and exactly the case that would
+/// otherwise fill a Raspberry Pi's card. At the size of one event that is on the order of
+/// forty thousand lines per file, which at this deployment's rate is years and under a flood
+/// is hours. The flood is visible in what is kept either way.
+pub const AUDIT_MAX_BYTES: u64 = 4 * 1024 * 1024;
+
+/// What kind of thing happened. The outcome is a property of the kind rather than a field of
+/// its own: there is no granted-and-refused event, and a second field would let one be
+/// written.
+#[derive(Serialize, Deserialize, Clone, Copy, PartialEq, Eq, Debug)]
+#[serde(rename_all = "snake_case")]
+pub enum AuditKind {
+    /// A session cookie was minted: somebody signed in.
+    LoginGranted,
+    /// `/auth/session` refused to mint one, with `reason` saying which of its doors closed.
+    LoginRefused,
+    /// A session was cleared at `/auth/logout`. It authorizes nothing and refuses nothing,
+    /// and it is here because "when did this person's session end" is a question about the
+    /// same timeline as when it began.
+    LoginEnded,
+    /// A gated request was allowed and was worth saying so: today that is an identity Cognito
+    /// vouches for walking into an `authenticated` scope while being in no roster row. An
+    /// ordinary grant to an enrolled person is **not** an event (see [`AuditEvent`]).
+    AccessGranted,
+    /// A gated request was refused, having presented a credential.
+    AccessRefused,
+}
+
+impl AuditKind {
+    /// Did this end in a yes? What the audit page's outcome filter is, and what keeps the
+    /// answer from being spelled out twice.
+    pub fn granted(self) -> bool {
+        matches!(self, AuditKind::LoginGranted | AuditKind::AccessGranted)
+    }
+}
+
+/// Which credential the client presented, which is the one thing about an access that the
+/// access file cannot be asked afterwards.
+///
+/// [`AuditCredential::Session`] is the honest cost of the cookie's wire format: a
+/// `bb1` cookie carries an identity and the profile claims and nothing about how that
+/// identity was proved, so on every request after the login the gate knows *who* and not
+/// *how*. Stamping the provider into the cookie would say how, and would log every existing
+/// session out to start saying it. The login events carry the exact answer, and they are the
+/// ones the question is really about.
+#[derive(Serialize, Deserialize, Clone, PartialEq, Eq, Debug)]
+#[serde(tag = "type", rename_all = "snake_case")]
+pub enum AuditCredential {
+    /// A federated id_token, naming the upstream identity providers it came through.
+    Social { provider: String },
+    /// A native Cognito id_token: an account of the pool's own, with no federation behind it.
+    Local,
+    /// A `bbk_` static key, by its id. The owning row is in `uuid`, since a key acts as its
+    /// user and the id alone is only unique within one.
+    Key { id: String },
+    /// A session cookie this gate signed. Which of the two kinds above minted it is not
+    /// recoverable from it.
+    Session,
+    /// No credential at all, which reaches the audit only where the refusal happened before
+    /// one could be read.
+    Anonymous,
+}
+
+impl AuditCredential {
+    /// The word the audit page's credential filter matches on: the tag, without its payload,
+    /// so filtering by `key` finds every key rather than one key's id.
+    pub fn tag(&self) -> &'static str {
+        match self {
+            AuditCredential::Social { .. } => "social",
+            AuditCredential::Local => "local",
+            AuditCredential::Key { .. } => "key",
+            AuditCredential::Session => "session",
+            AuditCredential::Anonymous => "anonymous",
+        }
+    }
+}
+
+/// One line of the audit file: one authentication event.
+///
+/// **What is deliberately not here is every allowed request.** The gate answers an
+/// `auth_request` on every asset of every page, and this estate's own traffic is on the order
+/// of fifteen hundred of those a day, so an audit of all of them is a file nobody reads and a
+/// write on the path that must never be slow. The events kept are the ones that change
+/// something: a session begins, a session is refused, a session ends, somebody who is in no
+/// roster row is let in anyway, and a credential is turned away. What a per-request access log
+/// would say is already said by nginx's, which has the URL, the status and the client address
+/// this gate never sees.
+///
+/// The other deliberate omission is the refusal that carries **no** credential, which is what
+/// every signed-out browser gets on its way to the login page. It is the ordinary case, it
+/// says nothing about anybody, and it is the only one an anonymous client could produce
+/// without limit.
+#[derive(Serialize, Deserialize, Clone, PartialEq, Eq, Debug)]
+pub struct AuditEvent {
+    /// [`AUDIT_SCHEMA`] as written. Defaulted on read so a line from a future writer that
+    /// dropped it is still shown rather than counted as damage.
+    #[serde(default)]
+    pub v: u32,
+    /// Unix seconds. The file is append-ordered, so this is also its sort order, which is
+    /// what lets a reader stop at the far edge of a time window instead of parsing the rest.
+    pub ts: u64,
+    pub kind: AuditKind,
+    pub cred: AuditCredential,
+    /// The identifier the credential resolved to, when there is one: an email, normally.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub subject: Option<String>,
+    /// The roster row, when the identity is in one. Both are kept because they answer
+    /// different questions later: the uuid still names the row after an address is dropped,
+    /// and the identifier is what was actually presented.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub uuid: Option<String>,
+    /// The application and the scope that answered, `app/scope`, when one did.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub app: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub scope: Option<String>,
+    /// The URL that was being reached for, as the gate resolved it.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub url: Option<String>,
+    /// **A code, never a sentence**: `not_member`, `token_invalid`, `key_expired`. The
+    /// wording belongs to whoever is reading, the same way a header name belongs to
+    /// [`derive_profile_header`] and not to the operator who named a claim. It is what lets
+    /// the admin GUI show a refusal in the reader's own language, in the same words its
+    /// access check already uses for the same verdict.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub reason: Option<String>,
+}
+
+impl AuditEvent {
+    /// A bare event of this kind. The rest is added by the four methods below, so a call site
+    /// in the gate stays one expression and cannot forget a field it never had to name.
+    pub fn new(ts: u64, kind: AuditKind, cred: AuditCredential) -> AuditEvent {
+        AuditEvent {
+            v: AUDIT_SCHEMA,
+            ts,
+            kind,
+            cred,
+            subject: None,
+            uuid: None,
+            app: None,
+            scope: None,
+            url: None,
+            reason: None,
+        }
+    }
+
+    /// Who: the identifier presented, and the roster row it resolved to if it did.
+    pub fn by(mut self, subject: &str, uuid: Option<&str>) -> AuditEvent {
+        self.subject = Some(subject.to_string());
+        self.uuid = uuid.map(str::to_string);
+        self
+    }
+
+    /// Whose row, where there is a row but no identifier to show for it: a key names its
+    /// owner by uuid and nothing else.
+    pub fn of(mut self, uuid: &str) -> AuditEvent {
+        self.uuid = Some(uuid.to_string());
+        self
+    }
+
+    /// Which scope answered, when one did. An `Option` and not two `&str` because half the
+    /// refusals have no place to name (a veto is about the person, and a URL outside every
+    /// area has no application), and a caller that has to say so with an `if` says it in the
+    /// middle of a builder chain.
+    pub fn at(mut self, place: Option<(&str, &str)>) -> AuditEvent {
+        if let Some((app, scope)) = place {
+            self.app = Some(app.to_string());
+            self.scope = Some(scope.to_string());
+        }
+        self
+    }
+
+    /// Which URL was being reached for.
+    pub fn on(mut self, url: Option<&str>) -> AuditEvent {
+        self.url = url.map(str::to_string);
+        self
+    }
+
+    /// Why it ended the way it did, as a code.
+    pub fn because(mut self, reason: &str) -> AuditEvent {
+        self.reason = Some(reason.to_string());
+        self
+    }
+
+    /// Everything on this event a text filter should match, joined. One place, so the page's
+    /// filter box and any future one agree on what "matches" means.
+    pub fn haystack(&self) -> String {
+        let mut s = String::new();
+        for part in [
+            self.subject.as_deref(),
+            self.uuid.as_deref(),
+            self.app.as_deref(),
+            self.scope.as_deref(),
+            self.url.as_deref(),
+            self.reason.as_deref(),
+        ]
+        .into_iter()
+        .flatten()
+        {
+            s.push_str(part);
+            s.push(' ');
+        }
+        if let AuditCredential::Key { id } = &self.cred {
+            s.push_str(id);
+        }
+        s
+    }
+}
+
+/// The refusal code for a [`Decision`], and the only place one is spelled.
+///
+/// It is the variant's own name in snake_case, which is not laziness: the audit's vocabulary
+/// and the decision's are then the same vocabulary, so a reader that has to explain
+/// `not_member` can reuse the words it already uses to explain [`Decision::NotMember`], and a
+/// new decision variant that nobody maps here fails to compile.
+pub fn decision_reason(d: &Decision) -> &'static str {
+    match d {
+        Decision::Anonymous { .. } => "anonymous",
+        Decision::Granted { .. } => "granted",
+        Decision::Vetoed => "vetoed",
+        Decision::Excluded { .. } => "excluded",
+        Decision::NoApplication => "no_application",
+        Decision::NoScope { .. } => "no_scope",
+        Decision::Unauthenticated { .. } => "unauthenticated",
+        Decision::CredentialRefused { .. } => "credential_refused",
+        Decision::NotEnrolled { .. } => "not_enrolled",
+        Decision::NotMember { .. } => "not_member",
+        Decision::KeyOutOfScope { .. } => "key_out_of_scope",
+    }
+}
+
+/// The rotated file's path: the live one with `.1` on the end.
+fn audit_previous(path: &std::path::Path) -> std::path::PathBuf {
+    let mut name = path.as_os_str().to_os_string();
+    name.push(".1");
+    std::path::PathBuf::from(name)
+}
+
+/// The gate's end of the audit file: the one thing in this system that appends.
+///
+/// It is a type and not a free function because rotation is a check-then-rename and the gate
+/// is threaded: two workers that both found the file over [`AUDIT_MAX_BYTES`] would rename it
+/// twice and throw away the half between. The mutex is held across the whole append, which
+/// costs nothing at the rate these events happen and is what makes the file's line ordering
+/// its time ordering, which the reader then relies on.
+pub struct AuditWriter {
+    path: std::path::PathBuf,
+    lock: std::sync::Mutex<()>,
+}
+
+impl AuditWriter {
+    pub fn new(path: impl Into<std::path::PathBuf>) -> AuditWriter {
+        AuditWriter {
+            path: path.into(),
+            lock: std::sync::Mutex::new(()),
+        }
+    }
+
+    /// Where this writer appends, for the startup banner.
+    pub fn path(&self) -> &std::path::Path {
+        &self.path
+    }
+
+    /// Append one event.
+    ///
+    /// The error is returned rather than reported, because the wording belongs to whoever has
+    /// an operator, and above all because the **caller must not stop**: a full disk, a
+    /// directory the unit forgot to declare or a mode nobody fixed must cost the audit and
+    /// never the login. The gate says so once and carries on.
+    pub fn record(&self, ev: &AuditEvent) -> std::io::Result<()> {
+        use std::io::Write;
+        let mut line = serde_json::to_string(ev).map_err(std::io::Error::other)?;
+        line.push('\n');
+        // Poisoning would mean a previous writer panicked mid-append, which costs at most a
+        // torn line; refusing to write from then on would cost the rest of the audit.
+        let _guard = self.lock.lock().unwrap_or_else(|e| e.into_inner());
+        if std::fs::metadata(&self.path).is_ok_and(|m| m.len() >= AUDIT_MAX_BYTES) {
+            // Rename and not truncate: a reader that opened the file a moment ago goes on
+            // reading the bytes it opened, and the events are still there to be read next
+            // time under the other name.
+            std::fs::rename(&self.path, audit_previous(&self.path))?;
+        }
+        let mut f = std::fs::OpenOptions::new()
+            .create(true)
+            .append(true)
+            .open(&self.path)?;
+        // The mode is set after the fact rather than through `OpenOptions::mode`, which the
+        // unit's `UMask=0077` would mask down to 0600 and leave the GUI unable to read a word
+        // of it. Best effort: an operator who chose another mode keeps it, since the write
+        // succeeding matters more than the bits agreeing with a default.
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            let _ = std::fs::set_permissions(&self.path, std::fs::Permissions::from_mode(0o640));
+        }
+        f.write_all(line.as_bytes())
+    }
+}
+
+/// What one read of the audit file returned: the newest events first.
+pub struct AuditPage {
+    /// Newest first, which is the order the file is read in and the order it is shown in.
+    pub events: Vec<AuditEvent>,
+    /// There were older events still inside the window when `cap` was reached. The page says
+    /// so rather than pretending the history ends there.
+    pub more: bool,
+    /// Lines that did not parse, which is a torn tail after a power cut or a foreign file.
+    /// Counted and reported rather than swallowed: an audit that quietly drops what it cannot
+    /// read is worse than one that says how much it could not read.
+    pub damaged: usize,
+}
+
+/// Read the audit newest-first, stopping at `since` or after `cap` events.
+///
+/// Both files are read, live then rotated, which is what makes a window that reaches back
+/// across a rotation whole. A missing file is an empty page and not an error: that is what a
+/// deployment which has never refused anybody looks like, and it must not read as a fault.
+pub fn read_audit(
+    path: &std::path::Path,
+    since: Option<u64>,
+    cap: usize,
+) -> std::io::Result<AuditPage> {
+    let mut page = AuditPage {
+        events: Vec::new(),
+        more: false,
+        damaged: 0,
+    };
+    for p in [path.to_path_buf(), audit_previous(path)] {
+        let data = match std::fs::read(&p) {
+            Ok(d) => d,
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => continue,
+            Err(e) => return Err(e),
+        };
+        // Backwards, because the file is time-ordered and the page wants its end. The whole
+        // file is in memory either way (it is bounded by AUDIT_MAX_BYTES), but only the lines
+        // actually shown are parsed, which is what keeps a "last hour" view off the cost of a
+        // month of history.
+        for line in data.split(|b| *b == b'\n').rev() {
+            if line.is_empty() {
+                continue;
+            }
+            match serde_json::from_slice::<AuditEvent>(line) {
+                Ok(ev) => {
+                    if since.is_some_and(|s| ev.ts < s) {
+                        return Ok(page);
+                    }
+                    if page.events.len() >= cap {
+                        page.more = true;
+                        return Ok(page);
+                    }
+                    page.events.push(ev);
+                }
+                Err(_) => page.damaged += 1,
+            }
+        }
+    }
+    Ok(page)
 }
 
 // ---------------------------------------------------------------------------
@@ -7574,5 +7990,176 @@ mod tests {
             default_settings_path(r"C:\tmp\access.json"),
             r"C:\tmp\settings.json"
         );
+    }
+
+    // --- the audit file -----------------------------------------------------
+
+    /// A fresh audit path of its own, so these tests run in parallel like the rest.
+    fn audit_tmp(name: &str) -> std::path::PathBuf {
+        let p = std::env::temp_dir().join(format!("bb-auth-audit-{name}.jsonl"));
+        let _ = std::fs::remove_file(&p);
+        let _ = std::fs::remove_file(audit_previous(&p));
+        p
+    }
+
+    fn login(ts: u64, who: &str) -> AuditEvent {
+        AuditEvent::new(ts, AuditKind::LoginGranted, AuditCredential::Local).by(who, None)
+    }
+
+    #[test]
+    fn the_audit_reads_back_newest_first() {
+        let p = audit_tmp("order");
+        let w = AuditWriter::new(&p);
+        for (i, who) in ["a@x.com", "b@x.com", "c@x.com"].iter().enumerate() {
+            w.record(&login(100 + i as u64, who)).unwrap();
+        }
+        let page = read_audit(&p, None, 100).unwrap();
+        let seen: Vec<&str> = page
+            .events
+            .iter()
+            .map(|e| e.subject.as_deref().unwrap())
+            .collect();
+        assert_eq!(seen, ["c@x.com", "b@x.com", "a@x.com"]);
+        assert!(!page.more);
+        assert_eq!(page.damaged, 0);
+        assert_eq!(page.events[0].v, AUDIT_SCHEMA);
+        let _ = std::fs::remove_file(&p);
+    }
+
+    #[test]
+    fn the_audit_stops_at_the_window_and_at_the_cap() {
+        let p = audit_tmp("window");
+        let w = AuditWriter::new(&p);
+        for ts in 100..110 {
+            w.record(&login(ts, "a@x.com")).unwrap();
+        }
+        // The window is a floor on `ts`, and the file being time-ordered is what lets the
+        // read stop there rather than parse the rest.
+        assert_eq!(read_audit(&p, Some(105), 100).unwrap().events.len(), 5);
+        // The cap says so instead of trimming in silence.
+        let page = read_audit(&p, None, 3).unwrap();
+        assert_eq!(page.events.len(), 3);
+        assert!(page.more);
+        let _ = std::fs::remove_file(&p);
+    }
+
+    #[test]
+    fn a_torn_line_is_counted_and_the_rest_is_read() {
+        let p = audit_tmp("torn");
+        let w = AuditWriter::new(&p);
+        w.record(&login(100, "a@x.com")).unwrap();
+        // What a power cut mid-append leaves behind.
+        {
+            use std::io::Write;
+            let mut f = std::fs::OpenOptions::new().append(true).open(&p).unwrap();
+            f.write_all(b"{\"ts\":101,\"kin\n").unwrap();
+        }
+        w.record(&login(102, "b@x.com")).unwrap();
+        let page = read_audit(&p, None, 100).unwrap();
+        assert_eq!(page.events.len(), 2, "the whole lines are still readable");
+        assert_eq!(page.damaged, 1, "and the broken one is reported");
+        let _ = std::fs::remove_file(&p);
+    }
+
+    #[test]
+    fn a_rotation_keeps_the_window_whole() {
+        let p = audit_tmp("rotate");
+        let w = AuditWriter::new(&p);
+        w.record(&login(100, "old@x.com")).unwrap();
+        // Rotate by hand rather than by writing four megabytes: what is under test is that a
+        // read spans both files, not that `metadata` can measure one.
+        std::fs::rename(&p, audit_previous(&p)).unwrap();
+        w.record(&login(101, "new@x.com")).unwrap();
+        let page = read_audit(&p, None, 100).unwrap();
+        let seen: Vec<&str> = page
+            .events
+            .iter()
+            .map(|e| e.subject.as_deref().unwrap())
+            .collect();
+        assert_eq!(seen, ["new@x.com", "old@x.com"]);
+        let _ = std::fs::remove_file(&p);
+        let _ = std::fs::remove_file(audit_previous(&p));
+    }
+
+    #[test]
+    fn a_missing_audit_is_an_empty_page_and_not_a_fault() {
+        // What a gate that has never refused anybody looks like. It must not read as an
+        // error, or the page would report a fault on a healthy deployment.
+        let p = audit_tmp("absent");
+        let page = read_audit(&p, None, 100).unwrap();
+        assert!(page.events.is_empty());
+        assert_eq!(page.damaged, 0);
+    }
+
+    #[test]
+    fn an_event_serializes_to_one_line_of_only_what_it_has() {
+        let ev = AuditEvent::new(
+            1_700_000_000,
+            AuditKind::AccessRefused,
+            AuditCredential::Key {
+                id: "laptop".into(),
+            },
+        )
+        .of("11111111-2222-3333-4444-555555555555")
+        .at(Some(("ai", "root")))
+        .on(Some("https://ai.x.com/mcp"))
+        .because(decision_reason(&Decision::KeyOutOfScope {
+            app: "ai".into(),
+            scope: "root".into(),
+        }));
+        let line = serde_json::to_string(&ev).unwrap();
+        assert!(!line.contains('\n'), "one event is one line");
+        // An absent field is absent, not null: the file is read by a program and written on
+        // a card, and half these fields are absent on any given event.
+        assert!(!line.contains("subject"));
+        assert!(line.contains(r#""reason":"key_out_of_scope""#));
+        assert!(line.contains(r#""cred":{"type":"key","id":"laptop"}"#));
+        assert_eq!(serde_json::from_str::<AuditEvent>(&line).unwrap(), ev);
+        // The filter matches on the key's id, the scope and the reason alike.
+        let hay = ev.haystack();
+        for part in ["laptop", "ai", "root", "key_out_of_scope", "ai.x.com"] {
+            assert!(hay.contains(part), "{part} is filterable");
+        }
+    }
+
+    /// The audit is created group-readable, and that is a deployment contract rather than a
+    /// detail: the gate writes this file under `UMask=0077`, and `bb-auth-web` reads it
+    /// through the `bb-auth` group it already belongs to. At 0600 the Audit tab is a
+    /// permission error on a deployment where everything else is correct, and the only sign
+    /// of it is a page nobody looks at until they need it.
+    #[cfg(unix)]
+    #[test]
+    fn the_audit_is_readable_by_the_group_that_has_to_read_it() {
+        use std::os::unix::fs::PermissionsExt;
+        let p = audit_tmp("mode");
+        AuditWriter::new(&p).record(&login(100, "a@x.com")).unwrap();
+        let mode = std::fs::metadata(&p).unwrap().permissions().mode() & 0o777;
+        assert_eq!(
+            mode, 0o640,
+            "owner writes, the gate's group reads, nobody else"
+        );
+        let _ = std::fs::remove_file(&p);
+    }
+
+    #[test]
+    fn the_credential_tag_is_the_kind_and_not_the_instance() {
+        // The filter offers five words; a key's id must not be one of them, or filtering by
+        // credential would mean filtering by which key.
+        assert_eq!(
+            AuditCredential::Key {
+                id: "laptop".into()
+            }
+            .tag(),
+            AuditCredential::Key { id: "phone".into() }.tag()
+        );
+        assert_eq!(
+            AuditCredential::Social {
+                provider: "Google".into()
+            }
+            .tag(),
+            "social"
+        );
+        assert!(AuditKind::LoginGranted.granted());
+        assert!(!AuditKind::AccessRefused.granted());
     }
 }

@@ -21,7 +21,7 @@ const path = require('path');
 
 const { E2E_DIR, FIXTURE, SETTINGS_FIXTURE, boot } = require('./lib/server');
 
-const AREAS = ['auth', 'crud', 'settings', 'validation', 'conflict', 'i18n', 'nojs'];
+const AREAS = ['auth', 'crud', 'settings', 'validation', 'conflict', 'i18n', 'audit', 'nojs'];
 
 async function main() {
   const shotsDir = process.env.E2E_SHOTS === '1' ? path.join(E2E_DIR, 'artifacts') : null;
@@ -33,9 +33,12 @@ async function main() {
     const { Checker } = require('./lib/harness');
     for (const area of AREAS) {
       // Every area starts from the pristine fixture, both files: the settings area writes
-      // to the second one exactly as the others write to the first.
+      // to the second one exactly as the others write to the first. The audit starts absent,
+      // which is a state and not an omission: it is what a gate that has recorded nothing
+      // looks like, and the area that cares about it lays down its own.
       fs.copyFileSync(FIXTURE, ctx.accessFile);
       fs.writeFileSync(ctx.settingsFile, SETTINGS_FIXTURE);
+      fs.rmSync(ctx.auditFile, { force: true });
       const t = new Checker(area, shotsDir);
       try {
         await require(`./tests/${area}`).run(ctx, t);

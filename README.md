@@ -618,13 +618,15 @@ its `root:bb-auth 0640` ownership. Then reload — see below.
 ### Editing it in a browser — `bb-auth-web`
 
 The same file in a browser: a server-rendered admin GUI that needs no JavaScript. Three tabs
-about the access file, and a fourth for the settings file.
+about the access file, a fourth over what the gate has recorded, and a fifth for the settings
+file.
 **Users** holds the three sections about people, in the order they nest: the user groups and
 who references each one, then the roster, then the `denied` veto. **Applications** lists each
 one with its area, its scope count and which credential classes get in anywhere inside it,
 and each application's page shows its scopes **numbered in file order** (the number is the
 meaning — first match wins) with their members, their credentials and their `excluded`.
-Every key's expiry is on its owner's page. **Settings** is the odd one out and reads like it:
+Every key's expiry is on its owner's page. **Audit** is the one tab that edits nothing: see
+[The audit](#the-audit) below. **Settings** is the odd one out and reads like it:
 it edits the other file (see [Config](#config)), which is why it is last.
 
 The **access check** (`can EMAIL URL` in the browser, answered by the gate's own decision
@@ -668,6 +670,7 @@ with no identity header answers `401` and says so, rather than serving anyone.
 | `BB_AUTH_WEB_BASE_PATH` | no | *(empty)* | the URL prefix nginx mounts it at, e.g. `/admin` |
 | `BB_AUTH_WEB_DEFAULT_LANG` | no | `en` | `en` or `it`; a `?lang=` choice is remembered in a cookie |
 | `BB_AUTH_WEB_LOGOUT_URL` | no | *(none)* | where the header's "Sign out" points. **Unset means no control at all**, which is the only safe default: this binary knows neither its own scheme nor its own host, and the one thing it is handed is a client-supplied `Host:`. A bad value is refused at startup |
+| `BB_AUTH_AUDIT_FILE` | no | `/var/log/bb-auth/audit.jsonl` | the audit the **Audit** tab reads, written by the gate (the gate's own variable name, so unset on both sides means one file). Read-only here; empty means the tab says the audit is off rather than looking empty |
 | `BB_AUTH_WEB_ALLOW_NONLOOPBACK` | no | *(unset)* | `1` to allow a non-loopback `BB_AUTH_WEB_LISTEN`. Without it that bind is a fatal startup: the service's only credential is a header nginx sets, so anything that can reach the port could edit the access file |
 
 Who may use it is **not** an env var: it is `web.admins` in the settings file, read fresh on
@@ -811,6 +814,54 @@ The access file is re-checked on every `/validate`, so de-authorizing someone is
 just an edit (remove the user or a single API key, or add them to `denied`) +
 `systemctl reload bb-auth` (SIGHUP). A restart works too.
 
+## The audit
+
+The gate records what it has answered, as JSON, one object per line, at
+`BB_AUTH_AUDIT_FILE` (default `/var/log/bb-auth/audit.jsonl`; **empty turns it off**).
+`bb-auth-web`'s **Audit** tab reads that file back: newest first, with a filter box, a
+credential filter, an outcome filter and a period, all of them in the query string, so the
+page needs no JavaScript, survives a language change and can be bookmarked. Refresh is a link
+to the same address, because the file is read on every request.
+
+**One event has one home.** With the audit on, a sign-in, a sign-out and a refusal go to the
+file *instead* of into the journal: the same event in two places is one you have to reconcile
+by eye. The journal keeps everything about the process (startup, configuration, reloads,
+failures), `BB_AUTH_LOG_LEVEL=debug` prints the request lines regardless, and if the file ever
+cannot be written the events fall back into the journal on their own, with one line saying so.
+
+What it holds:
+
+| Event | When |
+|-------|------|
+| `login_granted` | a session cookie was minted, with the credential that proved it: `social` naming the provider, or `local` for an account of the pool's own |
+| `login_refused` | `/auth/session` said no: an invalid token, a `denied` identity, an identity in no `users` entry with no `authenticated` scope anywhere, or a sign-in that did not come from this estate |
+| `login_ended` | `/auth/logout` cleared a session, and whose |
+| `access_refused` | a request that carried a credential was refused, with the scope that answered and the reason as a code |
+| `access_granted` | the one grant worth a line: an identity Cognito vouches for, in no `users` entry, let in by an `authenticated` scope |
+
+What it deliberately does **not** hold is the ordinary allowed request. The gate answers an
+`auth_request` for every asset of every page, so one row each is a file nobody reads and a
+write on the path that must never be slow; that log already exists and is nginx's, which has
+the URL, the status and the client address this gate never sees. Refusals carrying no
+credential at all are out for the same kind of reason: that is what every signed-out browser
+gets on its way to the login page. And a refusal repeated inside five minutes is recorded
+once, keyed by who, where and why: a browser refused one asset is a browser refused forty.
+
+One credential is recorded less precisely than the rest, and it is worth knowing why. A
+session cookie carries an identity and says nothing about how that identity was proved, so a
+refusal carrying one reads `Session` rather than `Google`. Stamping the provider into the
+cookie would be a cookie-format bump, and a bump logs everybody out; the sign-in event carries
+the exact answer, and that is where the question is really being asked.
+
+The file rotates itself onto `.1` at 4 MB, so the pair can never exceed 8 MB however hard
+somebody hammers a gated URL — which is the only bound there is, on purpose: a flood of
+refusals is exactly what an audit is for, so what gets protected is the disk and not the
+reader. The gate creates it through `LogsDirectory=bb-auth` in its unit (`bb-auth:bb-auth`,
+`0750`/`0640`), which is also why it is under `/var/log` and not beside the access file: the
+gate's own prefix stays read-only to it, because a gate that could write `var/lib` could
+rewrite the access list it enforces. `bb-auth-web` reads it through the `bb-auth` group it
+already belongs to, and never writes it.
+
 ## Build (cross-compile)
 
 ```bash
@@ -941,7 +992,9 @@ cost?
 
 **[`deploy/bb-auth.env.example`](deploy/bb-auth.env.example)**: everything a change to
 costs a restart or a re-login, which after 1.99.1 is a short list: the listener and the worker
-count, the HMAC key, the session cookie's **name**, where the access file is, and
+count, the HMAC key, the session cookie's **name**, where the access file is, where the
+**audit file** is (`BB_AUTH_AUDIT_FILE`, empty to turn it off: a path says where a process
+opens a file, which is the one thing no amount of hotness can change), and
 `BB_AUTH_ORIGINAL_URL_HEADER`, which *is* the lockout when it is wrong. The cookie's name is
 there and its domain is not, which looks arbitrary and is not: renaming it orphans every
 cookie already issued, and unlike the domain nobody has a reason to. The only secret

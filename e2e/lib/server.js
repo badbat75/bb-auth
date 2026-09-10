@@ -57,7 +57,9 @@ function tempAccessFile() {
   const settings = path.join(dir, 'settings.json');
   fs.copyFileSync(FIXTURE, file);
   fs.writeFileSync(settings, SETTINGS_FIXTURE);
-  return { dir, file, settings };
+  // The audit is named but not created: a deployment where the gate has recorded nothing yet
+  // is the state every scene but one starts in, and the empty page is what it must look like.
+  return { dir, file, settings, audit: path.join(dir, 'audit.jsonl') };
 }
 
 /** Ask the OS for a free loopback port. */
@@ -73,13 +75,16 @@ function freePort() {
 }
 
 /** Start bb-auth-web and resolve once it says it is listening. */
-function startServer(bin, accessFile, port) {
+function startServer(bin, accessFile, auditFile, port) {
   return new Promise((resolve, reject) => {
     const child = spawn(bin, [], {
       cwd: REPO,
       env: {
         ...process.env,
         BB_AUTH_ACCESS_FILE: accessFile,
+        // Named explicitly rather than left to default, which on a developer's machine would
+        // be a path under /var/log that this suite must never read or create.
+        BB_AUTH_AUDIT_FILE: auditFile,
         BB_AUTH_WEB_LISTEN: `127.0.0.1:${port}`,
         BB_AUTH_WEB_BASE_PATH: '/admin',
         BB_AUTH_WEB_DEFAULT_LANG: 'en',
@@ -143,7 +148,7 @@ const SETTINGS_FIXTURE =
 async function boot() {
   const { chromium } = ensureDeps();
   const bin = buildBin();
-  const { dir, file: accessFile, settings: settingsFile } = tempAccessFile();
+  const { dir, file: accessFile, settings: settingsFile, audit: auditFile } = tempAccessFile();
   const port = await freePort();
 
   let server, browser;
@@ -153,7 +158,7 @@ async function boot() {
     fs.rmSync(dir, { recursive: true, force: true });
   };
   try {
-    server = await startServer(bin, accessFile, port);
+    server = await startServer(bin, accessFile, auditFile, port);
     browser = await chromium.launch({ channel: CHANNEL, headless: true });
   } catch (e) {
     await stop();
@@ -165,6 +170,7 @@ async function boot() {
     base: `http://127.0.0.1:${port}/admin`,
     accessFile,
     settingsFile,
+    auditFile,
   };
   console.log(`== server on ${ctx.origin} (file: ${accessFile}) | browser: ${CHANNEL} ==\n`);
   return { ctx, stop };

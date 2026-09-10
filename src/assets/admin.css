@@ -84,6 +84,17 @@ tbody tr:hover{background:var(--bg)}
    row's three actions onto two ragged lines inside a narrow right-aligned cell. The panel
    already scrolls (overflow-x:auto) if a row's actions ever outgrow the column. */
 td.pills{display:flex;flex-wrap:nowrap;justify-content:flex-end}
+/* A timestamp is one thing and must read as one: left to itself the audit's first column
+   breaks a date at its own hyphens and turns a one-line row into three, while the column that
+   should have taken the slack is the sentence explaining the refusal. Auto layout then hands
+   the width to whatever is left. */
+td.when{white-space:nowrap}
+/* A URL is one unbreakable token, and a table's auto layout hands it whatever width it asks
+   for: left alone, the audit's `where` column takes the row and the sentence explaining the
+   refusal beside it is squeezed to one word per line. Breaking a URL anywhere is what a URL
+   is for, and the reason column keeps a floor under it so it can never collapse again. */
+th.where,td.where{overflow-wrap:anywhere;width:26%}
+th.why,td.why{width:26%}
 
 ul.plain{list-style:none;margin:0;padding:0}
 ul.plain li{padding:2px 0}
@@ -136,9 +147,14 @@ p.primary{margin:16px 0 20px}
    --------------------------------------------------------------------------- */
 
 .listctl{display:flex;flex-wrap:wrap;gap:10px;align-items:center;margin:0 0 10px}
-.listctl form{display:flex;gap:6px;align-items:center;margin:0}
+.listctl form{display:flex;flex-wrap:wrap;gap:6px;align-items:center;margin:0}
 .listctl input[type=search]{width:auto;font-size:var(--fs-sm);padding:5px 11px;
   min-width:min(16rem,60vw)}
+/* The audit's three list boxes, which is the one form here with fields in front of the filter
+   box. They wrap rather than shrink, and the reason is what shrinking did: a `select` whose
+   whole label is inside it collapses to its arrow on a phone, and three unlabelled arrows in a
+   row are three controls nobody can tell apart. */
+.listctl select{width:auto;flex:0 0 auto;font-size:var(--fs-sm);padding:5px 11px}
 .listctl .pager{display:inline-flex;gap:6px;align-items:center}
 
 /* ---------------------------------------------------------------------------
@@ -211,6 +227,10 @@ details.settings > summary::-webkit-details-marker{display:none}
     padding-bottom:2px}
   table{min-width:0}
   table,thead,tbody,tr,td{display:block}
+  /* The audit's two column shares are about a table competing for width, and there is no
+     table here: a stacked card is one column, and a percentage of it is not a share of
+     anything. */
+  th.why,td.why,th.where,td.where{width:auto}
   thead{position:absolute;width:1px;height:1px;padding:0;margin:-1px;overflow:hidden;
     clip:rect(0,0,0,0);white-space:nowrap;border:0}
   tbody tr{border-bottom:1px solid var(--card-border);padding:8px 0;margin:0 0 2px}

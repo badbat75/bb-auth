@@ -41,8 +41,17 @@ SystemCallArchitectures=native
 CapabilityBoundingSet=
 AmbientCapabilities=
 # The whole tree is read-only to the service: bin/ (binary), etc/ (config + HMAC
-# key), var/lib/ (access.json). bb-auth never writes — no StateDirectory needed.
+# key), var/lib/ (access.json). The gate writes NOTHING under its own prefix, and that has to
+# stay true: a gate that could write var/lib could rewrite the access list it enforces.
 ReadOnlyPaths=/opt/bb-auth
+# The one thing it does write, and the reason it is here rather than in the prefix above:
+# /var/log/bb-auth/audit.jsonl, the authentication audit bb-auth-web reads back. systemd
+# creates the directory as bb-auth:bb-auth 0750, so the GUI reads it through the bb-auth group
+# it is already a member of, and nothing else on the host can. Removing this line does not
+# break the gate: the write fails, the failure is one journal line, and the events fall back
+# into the journal (BB_AUTH_AUDIT_FILE= is how to mean it deliberately).
+LogsDirectory=bb-auth
+LogsDirectoryMode=0750
 UMask=0077
 # Bounds, because tiny_http spawns a thread per connection once the fixed worker pool is
 # busy and there is no rate limit in front of it: on loopback behind nginx that is bounded
