@@ -16,9 +16,21 @@ const {
 
 async function run(ctx, t) {
   const { context, page } = await newPage(ctx);
+  // `$$eval` is Playwright's, not JavaScript's eval: it runs this fixed function inside the
+  // page over the matched elements, and nothing of it comes from the page under test.
+  const openCount = () => page.$$eval('details.group', (ds) => ds.filter((d) => d.open).length);
   try {
+    // --- the page opens folded, to its five headings -------------------------------
+    // Everything below edits fields, and a field inside a folded group is one a person cannot
+    // type into, so the first thing is the command that opens them all, which is remembered.
+    await page.goto(ctx.base + '/config?lang=en');
+    t.eq('a browser that never chose sees the headings only', await openCount(), 0);
+    await Promise.all([page.waitForNavigation(), page.click('text=Expand all')]);
+    t.eq('expand all opens every group', await openCount(), 5);
+
     // --- what the page shows is what the file says -------------------------------
     await page.goto(ctx.base + '/config?lang=en');
+    t.eq('and the choice outlives the page it was made on', await openCount(), 5);
     t.eq('the tab is in the bar', await page.locator('header nav a.pill.on').innerText(), 'Settings');
     t.eq('identity_attrs comes from the file',
       await page.locator('textarea[name=identity]').inputValue(), 'email');
@@ -219,10 +231,7 @@ async function run(ctx, t) {
     // and the two commands at the top are remembered across a save, which ends in a
     // redirect that carries no query. Only a browser can check any of that.
     await page.goto(ctx.base + '/config?lang=en');
-    // `$$eval` is Playwright's, not JavaScript's eval: it runs this fixed function inside the
-    // page over the matched elements, and nothing of it comes from the page under test.
-    const openCount = () => page.$$eval('details.group', (ds) => ds.filter((d) => d.open).length);
-    t.eq('every group starts open', await openCount(), 5);
+    t.eq('every group is open, as chosen above', await openCount(), 5);
     await Promise.all([page.waitForNavigation(), page.click('text=Collapse all')]);
     t.eq('collapse all folds every group', await openCount(), 0);
     t.check('and leaves no parameter in the address', !page.url().includes('groups='), page.url());

@@ -83,8 +83,8 @@ One crate, four targets, and the split is load-bearing:
   editing core, plus a **Settings** tab over the settings file, in that file's own four
   sections: what the gate answers with, what the audit records and for how long, who
   administers this, and how the pages look (the last one being the gate's pages too, which is
-  why one save restyles both programs), each a group that folds to its heading with no script,
-  and an **Audit** tab over the file the gate writes. Five
+  why one save restyles both programs), each a group that folds to its heading with no script
+  and that the page opens folded, and an **Audit** tab over the file the gate writes. Five
   tabs, and none of them
   is `denied` or `user_groups`: those two are **sections of the users
   page**, groups above the roster, because a group only means anything in terms of the roster

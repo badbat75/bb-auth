@@ -167,7 +167,8 @@ const SCENES = [
   // and refusing a save. It is last in the bar and last here.
   ['config', go('/config')],
   ['config-refused', async (page, ctx) => {
-    await page.goto(ctx.base + '/config');
+    // Opened first: the page starts folded, and a refusal is photographed next to its field.
+    await page.goto(ctx.base + '/config?groups=open');
     await page.fill('textarea[name=admins]', 'somebody@else.example.com');
     await submit(page);
   }],

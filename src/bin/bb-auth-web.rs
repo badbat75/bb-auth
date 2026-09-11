@@ -190,10 +190,10 @@
 //! zones come out of the host's own database ([`ZONEINFO_DIR`]), and none is compiled in.
 //!
 //! **How the Settings page opens** is the fourth, and the same shape again: its groups are
-//! `details` that each fold on their own with no script, and the page's two commands (expand
-//! all, collapse all) are links carrying `?groups=`, which becomes [`GROUPS_COOKIE`] so that a
-//! page folded to its headings stays folded after the next save. A refused field's group is
-//! open whatever the preference says.
+//! `details` that each fold on their own with no script, the page opens folded to its five
+//! headings, and its two commands (expand all, collapse all) are links carrying `?groups=`,
+//! which becomes [`GROUPS_COOKIE`] so that a page somebody opened stays open after the next
+//! save. A refused field's group is open whatever the preference says.
 //!
 //! **The look is shared with the gate**, which is why neither the palette nor the controls
 //! are in this file at all. Two reasons, and the second was learned by looking at the two
@@ -447,14 +447,16 @@ fn parse_theme(s: &str) -> Option<UiTheme> {
 /// How the Settings page opens: every group expanded, or every group folded to its heading.
 ///
 /// A preference and not a parameter of the page, because the commands that set it are meant to
-/// stick: an operator who folds everything to see the page's shape wants it folded after the
+/// stick: an operator who opens everything to work through the page wants it open after the
 /// next save too, and a save ends in a redirect that carries no query. Each group still opens
 /// and closes on its own in the browser, with no script, since each one is a `details`.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 enum GroupsPref {
-    /// What the page always was, and so what nobody who has not chosen gets surprised by.
-    #[default]
     Open,
+    /// Where every browser starts: the page reads as its five headings, which is its table of
+    /// contents, and the one group somebody came to change is a click away. A page of every
+    /// field at once is a page that has to be scrolled to find the one that matters.
+    #[default]
     Closed,
 }
 
@@ -10144,20 +10146,22 @@ mod tests {
                 .count()
         };
 
-        // Open by default: what the page always was.
+        // Folded by default: the page reads as its five headings.
         let mut v = view(&cfg, Route::Config, &rev);
+        v.groups = GroupsPref::default();
         let html = page_config(&v, &ConfigForm::of(&doc), None, None).into_string();
         assert_eq!(html.matches(r#"<details class="panel group""#).count(), 5);
-        assert_eq!(count_open(&html), 5, "{html}");
+        assert_eq!(count_open(&html), 0, "{html}");
         assert!(
-            html.contains("?groups=closed"),
-            "the command is on the page"
+            html.contains("?groups=open") && html.contains("?groups=closed"),
+            "both commands are on the page"
         );
 
-        // Folded by preference, all five.
-        v.groups = GroupsPref::Closed;
+        // Open by preference, all five.
+        v.groups = GroupsPref::Open;
         let html = page_config(&v, &ConfigForm::of(&doc), None, None).into_string();
-        assert_eq!(count_open(&html), 0, "{html}");
+        assert_eq!(count_open(&html), 5, "{html}");
+        v.groups = GroupsPref::Closed;
 
         // A refusal on a field opens that field's group, and only that one.
         let err = Refusal::on("audit_retention", "no");
@@ -10186,23 +10190,25 @@ mod tests {
                 handle(req, &served);
             }
         });
-        let r = client()
-            .get(format!("http://127.0.0.1:{port}/config?groups=closed"))
-            .header(IDENTITY_HEADER, "admin@x.com")
-            .call()
-            .expect("a response");
+        let get = |target: &str, cookie: Option<&str>| {
+            let mut r = client()
+                .get(format!("http://127.0.0.1:{port}{target}"))
+                .header(IDENTITY_HEADER, "admin@x.com");
+            if let Some(c) = cookie {
+                r = r.header("Cookie", c);
+            }
+            r.call().expect("a response")
+        };
+        let r = get("/config?groups=open", None);
         assert_eq!(r.status(), 302);
         assert_eq!(r.headers().get("Location").unwrap(), "/config");
         let set = r.headers().get("Set-Cookie").unwrap().to_str().unwrap();
-        assert!(set.starts_with("groups=closed;"), "{set}");
-        let mut r = client()
-            .get(format!("http://127.0.0.1:{port}/config"))
-            .header(IDENTITY_HEADER, "admin@x.com")
-            .header("Cookie", "groups=closed")
-            .call()
-            .expect("a response");
-        let body = r.body_mut().read_to_string().unwrap();
-        assert_eq!(count_open(&body), 0, "{body}");
+        assert!(set.starts_with("groups=open;"), "{set}");
+        let body = |mut r: ureq::http::Response<ureq::Body>| r.body_mut().read_to_string().unwrap();
+        // A browser that never chose sees the headings; one that chose sees what it chose.
+        assert_eq!(count_open(&body(get("/config", None))), 0);
+        assert_eq!(count_open(&body(get("/config", Some("groups=open")))), 5);
+        assert_eq!(count_open(&body(get("/config", Some("groups=closed")))), 0);
         cleanup(&path);
     }
 

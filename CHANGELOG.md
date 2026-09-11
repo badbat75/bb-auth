@@ -22,7 +22,9 @@ Versions are the crate's (`Cargo.toml`); packages add a Debian revision
 
 ## Unreleased
 
-**Due out as 1.99.5, and the numbers before it are behind us.** 1.99.4 was spent by a deploy
+**Due out as 1.99.6, and the numbers before it are behind us.** 1.99.5 was spent by a deploy
+on 2026-09-11 from `g15ae13e`, which carried everything in the section named after it except
+the Settings page opening folded. 1.99.4 was spent by a deploy
 on 2026-09-10 from `gfd77f1f`, which carried the audit and nothing of what the section below
 calls new after it. 1.99.2 was spent by a
 deploy: a build carrying it went to a host on 2026-08-20 from `g3b40e77`, which had the
@@ -41,7 +43,7 @@ environment and into the settings file; and a confirmation step in front of the 
 that can stop people getting in.
 
 **A version gets a section of its own here only once it is tagged and released, and a
-release candidate is neither.** 1.99.5 is a version number, not a release: it is built,
+release candidate is neither.** 1.99.6 is a version number, not a release: it is built,
 deployed and run, and it is **not tagged**, because a tag is what says "this is a thing you
 can install and go back to" and a candidate is not that. So this section stays under this
 heading through however many 1.99.x there are, and becomes `## 2.0.0` on the day 2.0.0 is
@@ -149,8 +151,9 @@ the Audit tab no more memory than one set to four mebibytes.
 
 The Settings tab's groups **fold**: each heading opens and closes its group (a `details`, so no
 script), and "Expand all" / "Collapse all" at the top are remembered per browser like the
-language and the theme, so a page folded to its headings stays folded after a save. A group
-holding a refused field opens whatever the preference says.
+language and the theme, so a page somebody opened stays open after a save. **Since 1.99.6 the
+page opens folded**, reading as its five headings; 1.99.5 opened it expanded. A group holding a
+refused field opens whatever the preference says.
 
 The Audit tab reads its times in UTC (as before, and still the default), in the **host's**
 zone, or in one you name (`Europe/Rome`, `+05:30`), chosen beside the filters and remembered
