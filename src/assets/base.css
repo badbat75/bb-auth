@@ -95,7 +95,7 @@ p.lede{color:var(--muted);margin:0 0 18px}
    --------------------------------------------------------------------------- */
 
 input[type=text],input[type=email],input[type=tel],input[type=password],input[type=search],
-select,textarea{font-family:inherit;font-size:1rem;width:100%;padding:10px 12px;
+input[type=number],select,textarea{font-family:inherit;font-size:1rem;width:100%;padding:10px 12px;
   color:var(--text);background:var(--input-bg);border:1px solid var(--input-border);
   border-radius:var(--r-ctl);outline:none;transition:border-color .15s,box-shadow .15s}
 /* 1rem above and not `inherit`: below 16px, mobile Safari zooms the page when a field takes

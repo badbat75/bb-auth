@@ -22,7 +22,9 @@ Versions are the crate's (`Cargo.toml`); packages add a Debian revision
 
 ## Unreleased
 
-**Due out as 1.99.4, and the two numbers before it are behind us.** 1.99.2 was spent by a
+**Due out as 1.99.5, and the numbers before it are behind us.** 1.99.4 was spent by a deploy
+on 2026-09-10 from `gfd77f1f`, which carried the audit and nothing of what the section below
+calls new after it. 1.99.2 was spent by a
 deploy: a build carrying it went to a host on 2026-08-20 from `g3b40e77`, which had the
 `form-action` fix below and nothing of the `403` work. 1.99.3 is left behind one step along,
 and without the same claim being made about it, because the claim is not the point: the
@@ -39,7 +41,7 @@ environment and into the settings file; and a confirmation step in front of the 
 that can stop people getting in.
 
 **A version gets a section of its own here only once it is tagged and released, and a
-release candidate is neither.** 1.99.4 is a version number, not a release: it is built,
+release candidate is neither.** 1.99.5 is a version number, not a release: it is built,
 deployed and run, and it is **not tagged**, because a tag is what says "this is a thing you
 can install and go back to" and a candidate is not that. So this section stays under this
 heading through however many 1.99.x there are, and becomes `## 2.0.0` on the day 2.0.0 is
@@ -82,7 +84,7 @@ What it records is **authentication, not traffic**: sign-ins, sign-outs, refusal
 grant worth a line, which is somebody Cognito vouches for walking into an `authenticated`
 scope while being in no `users` entry. Not the ordinary allowed request: the gate answers an
 `auth_request` for every asset of every page, so that is nginx's log and always was, and it
-has the URL, the status and the client address this gate never sees. Refusals that carry no
+has the URL, the status and the byte count of every request. Refusals that carry no
 credential at all are not recorded either, being what every signed-out browser gets on its way
 to the login page. A refusal repeated inside five minutes is recorded once.
 
@@ -99,6 +101,68 @@ than it might be: a session cookie says who you are and not how you proved it, s
 carrying one reads "Session" rather than "Google". Stamping the provider into the cookie is a
 cookie-format bump, and a cookie-format bump logs everybody out. The sign-in event carries the
 exact answer, which is where the question is really being asked.
+
+### Carried by 1.99.5: where a request came from, how long it is kept, and in which time zone
+
+Every audit row can now say where its request came from: the client's **address**, nginx's
+own **id for the request** (which finds that request's line in nginx's access log, where
+everything the audit leaves out is), the client's **user agent** (cut at 256 bytes), and, on a
+sign-in, the Cognito **account** behind the token (`sub`), which is what tells this month's
+owner of an address from last month's once an account has been deleted and registered again.
+The Audit tab shows them in a Client column and under the name, and its filter box finds a
+row by any of them, so an address pasted from a firewall's log or an id from nginx's lands on
+the row. The credential moved under the event to make room, and reads as one fact with it:
+"Signed in, Social Google".
+
+**The address and the request id are off until you say which headers to believe**, and that
+is the one thing to know before switching them on. The gate listens on loopback, so an
+address is only as true as the nginx in front of it, and a header nginx does not overwrite is
+whatever the client sent. Two new settings name the headers, `audit.client_ip_header` and
+`audit.request_id_header` (`bb-auth-adm settings set --client-ip-header X-Real-IP
+--request-id-header X-Request-ID`, or a new group on the Settings tab), and the README's
+nginx recipe sets `X-Real-IP $remote_addr` and `X-Request-ID $request_id` on the three
+locations that reach the gate, plus a `log_format` carrying `$request_id`. A list such as
+`X-Forwarded-For` is read from its last entry, the one nginx added; neither setting may name
+`Authorization`, `Cookie` or `Proxy-Authorization`. The user agent needs no setting, being
+the client's word about itself and recorded as nothing more.
+
+They live in a **new `audit` section** of the settings file, with the two below, and that
+has one convenient consequence: an older gate keeps an unknown top-level key rather than
+refusing the file, so the section can be written before the binaries that read it land.
+
+A refusal repeated inside five minutes is still recorded once, but the window is now per
+address as well: the same key refused from a second machine is a second row, and usually the
+interesting one.
+
+**How long the audit is kept is now a setting**, two in fact, each an amount and a unit of
+time (`weeks`, `months`, `years`) or of space (`MiB`, `GiB`). `audit.rotation` is when the
+live file moves onto `.1` (at a size, or when its oldest event reaches an age), still keeping
+only the last one; `audit.retention` is the most kept across the two files (no event older
+than an age, or the pair never over a size). The defaults, `4 MiB` and none, are exactly what
+the audit did before. **At least one of the two has to be a size**, or a flood of refusals could
+fill the disk, and a file with both in time is refused with a sentence saying so. A retention in
+time is applied hourly, at startup and on every reload, so a quiet deployment still forgets an
+address on the day it said it would, and the Audit tab shows nothing past it even in the hour
+between. For personal data such as addresses this is the setting that answers "for how long".
+The audit's files are also read backwards in blocks now, so a rotation set to a gibibyte costs
+the Audit tab no more memory than one set to four mebibytes.
+
+The Settings tab's groups **fold**: each heading opens and closes its group (a `details`, so no
+script), and "Expand all" / "Collapse all" at the top are remembered per browser like the
+language and the theme, so a page folded to its headings stays folded after a save. A group
+holding a refused field opens whatever the preference says.
+
+The Audit tab reads its times in UTC (as before, and still the default), in the **host's**
+zone, or in one you name (`Europe/Rome`, `+05:30`), chosen beside the filters and remembered
+per browser like the language and the theme. "Local" is the host's zone and not the
+browser's: no request header carries a browser's zone, and no page here may need a script to
+ask. The zones come from the host's own database through one new dependency, `tz-rs`, which
+has none of its own and bundles no zone data; a host without `tzdata` offers UTC and says so
+above the table.
+
+Nothing here changes the cookie, the access file or the settings file's version: the new
+section is additive, and so are the four audit fields, whose schema stays `v: 1` (an older
+reader ignores them, a newer one reads an older line without them).
 
 ### Fixed in 1.99.2: `form-action` blocked every Chromium login
 

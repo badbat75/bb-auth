@@ -95,6 +95,20 @@ td.when{white-space:nowrap}
    is for, and the reason column keeps a floor under it so it can never collapse again. */
 th.where,td.where{overflow-wrap:anywhere;width:26%}
 th.why,td.why{width:26%}
+/* Where a row's request came from. The address is never broken, and it is what sizes the
+   column: half an address is no address, and it is the one thing in the cell a reader
+   compares down the page. The user agent is two lines at most, with the whole of it in the
+   title: the client's description of itself, worth a glance and never worth a third of the
+   row. */
+td.client .ip{white-space:nowrap}
+td.client .ua{overflow-wrap:anywhere;display:-webkit-box;-webkit-box-orient:vertical;
+  -webkit-line-clamp:2;line-clamp:2;overflow:hidden}
+/* One line, cut with an ellipsis at whatever width the cell already has, for the two long
+   identifiers under a row (the account, the request id). `width:0` is what keeps the line
+   from sizing the column; `min-width:100%` is what makes it fill the column anyway. The cut
+   is paint and not text, so a double click still copies the whole of it. */
+td .clip{display:block;white-space:nowrap;overflow:hidden;text-overflow:ellipsis;width:0;
+  min-width:100%}
 
 ul.plain{list-style:none;margin:0;padding:0}
 ul.plain li{padding:2px 0}
@@ -127,7 +141,26 @@ form.can label.fld{display:flex;flex-direction:column;gap:4px;flex:1 1 240px;mar
    measure on a narrow viewport because base.css's width:100% is left standing. */
 input.f-id,input.f-duration{max-width:14ch}
 input.f-email,input.f-name,input.f-login_url,input.f-aud{max-width:40ch}
+input.f-client_ip_header,input.f-request_id_header{max-width:24ch}
 form.edit label{display:block;margin:0 0 14px}
+/* An amount and its unit on one line: a short number box and the list box beside it, which is
+   one setting and must not read as two. */
+form.edit .limit{display:flex;gap:8px;align-items:center;flex-wrap:wrap}
+form.edit .limit input{max-width:10ch}
+form.edit .limit select{width:auto;flex:0 0 auto}
+
+/* A group of settings that folds to its heading. The panel IS the `details` and its heading
+   the `summary`, so it opens and closes with no script, which is the only way anything here
+   opens or closes. The marker is drawn here rather than left to each browser, whose own is a
+   different triangle in each and sits on a different baseline from an h2. */
+details.group > summary{list-style:none;cursor:pointer;display:flex;align-items:baseline;
+  gap:8px}
+details.group > summary::-webkit-details-marker{display:none}
+details.group > summary::before{content:"\25B8";color:var(--muted);display:inline-block;
+  font-size:1.3em;line-height:1;transition:transform .12s}
+details.group[open] > summary::before{transform:rotate(90deg)}
+details.group > summary h2{margin-bottom:0}
+details.group[open] > summary{margin-bottom:12px}
 form.edit .hint{display:block;margin:4px 0 0}
 form.edit .radio{display:flex;gap:8px;align-items:baseline;margin:0 0 6px}
 form.edit .radio input{margin:0;width:auto}
@@ -156,6 +189,13 @@ p.primary{margin:16px 0 20px}
    row are three controls nobody can tell apart. */
 .listctl select{width:auto;flex:0 0 auto;font-size:var(--fs-sm);padding:5px 11px}
 .listctl .pager{display:inline-flex;gap:6px;align-items:center}
+/* The audit's clock: a list box and, for a zone of the operator's own, a text box beside it.
+   The box is shown only while `Custom` is the choice, and the stylesheet decides that because
+   it is the only thing on these pages allowed to decide anything: a browser without :has()
+   drops the rule and shows the box all the time, which costs a field and nothing else. */
+.listctl .tzpick{display:inline-flex;flex-wrap:wrap;gap:6px;align-items:center}
+.listctl .tzpick:not(:has(option[value=custom]:checked)) .tzc{display:none}
+.listctl input.tzc{width:auto;font-size:var(--fs-sm);padding:5px 11px;max-width:14rem}
 
 /* ---------------------------------------------------------------------------
    The Settings menu

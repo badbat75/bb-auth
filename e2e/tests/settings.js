@@ -196,6 +196,45 @@ async function run(ctx, t) {
     t.eq('an unrelated roster edit does not 409 it', (await submit(page)).status(), 200);
     t.eq('and the save landed', settings(ctx).gate.session_ttl_secs, 3600);
 
+    // --- the audit's rotation and retention: an amount and a unit each -------------
+    await page.goto(ctx.base + '/config?lang=en');
+    await page.fill('input[name=audit_rotation]', '1');
+    await page.selectOption('select[name=audit_rotation_unit]', 'GiB');
+    await page.fill('input[name=audit_retention]', '6');
+    await page.selectOption('select[name=audit_retention_unit]', 'months');
+    t.eq('rotation and retention save', (await submit(page)).status(), 200);
+    t.eq('in the file\'s one spelling', [settings(ctx).audit.rotation, settings(ctx).audit.retention],
+      ['1 GiB', '6 months']);
+    // Nothing in space: refused, with the retention's box the one marked, and nothing written.
+    await page.goto(ctx.base + '/config?lang=en');
+    await page.selectOption('select[name=audit_rotation_unit]', 'months');
+    await page.selectOption('select[name=audit_retention_unit]', 'years');
+    await page.fill('input[name=audit_retention]', '1');
+    t.eq('a policy with no size is refused', (await submit(page)).status(), 400);
+    t.eq('on the retention box', await page.locator('input[name=audit_retention].invalid').count(), 1);
+    t.eq('and the file keeps what it had', settings(ctx).audit.rotation, '1 GiB');
+
+    // --- groups that fold -----------------------------------------------------------
+    // Each is a `details`, so folding and unfolding is the browser's and needs no script,
+    // and the two commands at the top are remembered across a save, which ends in a
+    // redirect that carries no query. Only a browser can check any of that.
+    await page.goto(ctx.base + '/config?lang=en');
+    // `$$eval` is Playwright's, not JavaScript's eval: it runs this fixed function inside the
+    // page over the matched elements, and nothing of it comes from the page under test.
+    const openCount = () => page.$$eval('details.group', (ds) => ds.filter((d) => d.open).length);
+    t.eq('every group starts open', await openCount(), 5);
+    await Promise.all([page.waitForNavigation(), page.click('text=Collapse all')]);
+    t.eq('collapse all folds every group', await openCount(), 0);
+    t.check('and leaves no parameter in the address', !page.url().includes('groups='), page.url());
+    await page.click('#g-access > summary');
+    t.eq('a heading opens its own group', await openCount(), 1);
+    await page.fill('input[name=ttl]', '7200');
+    t.eq('a save from a folded page still saves', (await submit(page)).status(), 200);
+    t.eq('what the folded groups hold went with it', settings(ctx).gate.session_ttl_secs, 7200);
+    t.eq('and the page comes back folded', await openCount(), 0);
+    await Promise.all([page.waitForNavigation(), page.click('text=Expand all')]);
+    t.eq('expand all opens them again', await openCount(), 5);
+
     // --- Italian ------------------------------------------------------------------
     await page.goto(ctx.base + '/config?lang=it');
     const it = await mainText(page);

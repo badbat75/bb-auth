@@ -142,10 +142,10 @@ use bb_auth_core::{
     claim_name_ok, decide, decide_api_key, decision_reason, default_settings_path, denied_url_for,
     estate_form_action, header_safe_email, html_escape, login_url_for, now, page_csp, read_access,
     read_settings, request_site, request_url, sha256_hex, social_idp_label, stylesheet_link,
-    version_line, Access, AccessKind, ApiKeyRecord, AuditCredential, AuditEvent, AuditKind,
-    AuditWriter, Decision, IdentityAttr, KeyDecision, ProfileClaim, RequestSite, Settings,
-    SocialButton, Subject, UrlPattern, API_KEY_PREFIX, BASE_CSS, DEFAULT_AUDIT_FILE,
-    PAGE_SECURITY_HEADERS, THEME_CSS,
+    version_line, Access, AccessKind, ApiKeyRecord, AuditClient, AuditCredential, AuditEvent,
+    AuditKind, AuditPolicy, AuditWriter, Decision, IdentityAttr, KeyDecision, ProfileClaim,
+    RequestSite, Settings, SocialButton, Subject, UrlPattern, API_KEY_PREFIX, BASE_CSS,
+    DEFAULT_AUDIT_FILE, PAGE_SECURITY_HEADERS, THEME_CSS,
 };
 
 type HmacSha256 = Hmac<Sha256>;
@@ -570,14 +570,21 @@ struct Audit {
     writer: Option<AuditWriter>,
     /// Set once the first write has failed, so the warning is one line and not one per event.
     broken: std::sync::atomic::AtomicBool,
+    /// The same, for the hourly maintenance, which can fail on its own (a temp file it cannot
+    /// create) while appends go on working.
+    maintenance_broken: std::sync::atomic::AtomicBool,
 }
 
 impl Audit {
     /// Off: no file, and every request-path line stays in the journal.
-    fn off() -> Audit {
+    ///
+    /// `const` so a test can hold one in a `static` and hand out a [`RequestAudit`] that
+    /// outlives the statement it was made in.
+    const fn off() -> Audit {
         Audit {
             writer: None,
             broken: std::sync::atomic::AtomicBool::new(false),
+            maintenance_broken: std::sync::atomic::AtomicBool::new(false),
         }
     }
 
@@ -585,6 +592,46 @@ impl Audit {
         Audit {
             writer: Some(AuditWriter::new(path)),
             broken: std::sync::atomic::AtomicBool::new(false),
+            maintenance_broken: std::sync::atomic::AtomicBool::new(false),
+        }
+    }
+
+    /// This audit as one request sees it: every event recorded through the result carries
+    /// where that request came from, and is written under the rotation the settings named when
+    /// the request arrived.
+    fn for_request(&self, client: AuditClient, policy: AuditPolicy) -> RequestAudit<'_> {
+        RequestAudit {
+            audit: self,
+            client,
+            policy,
+        }
+    }
+
+    /// Bring the audit's files within `policy`: rotation on age, and the retention. See
+    /// [`AuditWriter::maintain`] for what that means and why it is not done on every write.
+    ///
+    /// Failure is reported once and not once an hour, like a failed write: a directory
+    /// somebody made read-only is one line in the journal, and so is the day it is fixed.
+    fn maintain(&self, policy: &AuditPolicy) {
+        use std::sync::atomic::Ordering;
+        let Some(w) = &self.writer else {
+            return;
+        };
+        match w.maintain(policy, now()) {
+            Ok(()) => {
+                if self.maintenance_broken.swap(false, Ordering::Relaxed) {
+                    eprintln!("[bb-auth] audit maintenance working again");
+                }
+            }
+            Err(e) => {
+                if !self.maintenance_broken.swap(true, Ordering::Relaxed) {
+                    eprintln!(
+                        "[bb-auth] audit maintenance FAILED, rotation on age and the retention \
+                         are not being applied: {}: {e}",
+                        w.path().display()
+                    );
+                }
+            }
         }
     }
 
@@ -597,14 +644,14 @@ impl Audit {
         self.writer.is_some() && !self.broken.load(std::sync::atomic::Ordering::Relaxed)
     }
 
-    /// Record one event, or lose it. Never fails, never blocks a decision, and never says the
-    /// same thing twice in a row.
-    fn record(&self, ev: AuditEvent) {
+    /// Record one event under `policy`'s rotation, or lose it. Never fails, never blocks a
+    /// decision, and never says the same thing twice in a row.
+    fn record(&self, ev: AuditEvent, policy: &AuditPolicy) {
         use std::sync::atomic::Ordering;
         let Some(w) = &self.writer else {
             return;
         };
-        match w.record(&ev) {
+        match w.record(&ev, policy) {
             Ok(()) => {
                 if self.broken.swap(false, Ordering::Relaxed) {
                     eprintln!("[bb-auth] audit writable again: {}", w.path().display());
@@ -620,6 +667,134 @@ impl Audit {
             }
         }
     }
+}
+
+/// The audit as one request sees it: the sink, plus where the request came from.
+///
+/// It exists so that the client is a property of the **request** rather than a parameter of
+/// every function that records something: every event recorded through it is stamped with the
+/// request's [`AuditClient`] on the way to the file, including the ones built at a call site
+/// nobody thought about. A row with no address on it would most likely be the row an operator
+/// needed one on, and a type that stamps it is the only kind of rule that cannot be forgotten.
+struct RequestAudit<'a> {
+    audit: &'a Audit,
+    client: AuditClient,
+    /// The rotation and retention as the settings said when the request arrived, so a reload
+    /// landing mid-request cannot rotate one event under one policy and the next under another.
+    policy: AuditPolicy,
+}
+
+impl RequestAudit<'_> {
+    /// Record one event, stamped with where the request came from. See [`Audit::record`].
+    fn record(&self, ev: AuditEvent) {
+        self.audit.record(ev.from(&self.client), &self.policy);
+    }
+
+    /// See [`Audit::on`].
+    fn on(&self) -> bool {
+        self.audit.on()
+    }
+
+    /// The address, as the part of a deduplication key that says where from: empty when the
+    /// request carried none, which collapses every such request into one key exactly as they
+    /// were collapsed before an address was recorded at all.
+    fn ip(&self) -> &str {
+        self.client.ip.as_deref().unwrap_or("")
+    }
+}
+
+/// The longest `User-Agent` the audit keeps, in bytes.
+///
+/// A real one is 100 to 150 bytes and a long one (a mobile browser inside an app) about 250,
+/// so this cuts almost nothing honest and keeps a line from being made arbitrarily long by
+/// whoever is being refused: the audit is bounded by construction, and one field that took
+/// whatever it was given would be the exception to that.
+const AUDIT_UA_MAX: usize = 256;
+
+/// The longest request id the audit keeps. nginx's `$request_id` is 32 hex digits and a UUID
+/// is 36, so this is double the longest honest one.
+const AUDIT_RID_MAX: usize = 64;
+
+/// The longest Cognito `sub` the audit keeps. A real one is a 36-character UUID.
+const AUDIT_SUB_MAX: usize = 128;
+
+/// Where this request came from, for the audit: each [`AuditClient`] field read from the header
+/// the settings name for it, and dropped when it is not what it claims to be.
+///
+/// The user agent needs no setting: it is the client's own header, recorded as the client's
+/// word, and there is nothing for nginx to overwrite. The other two are only as true as nginx
+/// makes them, which is why each is read from a header an operator had to name
+/// ([`bb_auth_core::AuditSettings::client_ip_header`]).
+fn audit_client(req: &Request, settings: &Settings) -> AuditClient {
+    let named = |h: &Option<String>| h.as_deref().and_then(|h| header_value(req, h));
+    AuditClient {
+        ip: named(&settings.client_ip_header).and_then(client_ip),
+        ua: header_value(req, "User-Agent").and_then(user_agent),
+        rid: named(&settings.request_id_header).and_then(request_id),
+    }
+}
+
+/// The audit as this request sees it: where it came from and the policy it is written under,
+/// out of one read of the live settings.
+fn request_audit<'a>(state: &'a State, req: &Request) -> RequestAudit<'a> {
+    let settings = state.settings.read().unwrap();
+    state
+        .audit
+        .for_request(audit_client(req, &settings), settings.audit_policy)
+}
+
+/// A client address out of a proxy's header: the **last** entry of a comma-separated list,
+/// parsed as an address and written back in canonical form, or nothing.
+///
+/// The last entry because it is the one the nearest proxy wrote: `$proxy_add_x_forwarded_for`
+/// appends the address nginx saw to whatever the client sent, so everything before it is the
+/// client's word. Parsed, rather than copied, so a header that is not an address costs the row
+/// its address and nothing else, and so whatever is recorded is short and means one thing.
+/// Canonical so an IPv4 client of a dual-stack socket (`::ffff:203.0.113.7`) reads as the IPv4
+/// address it is, and a filter for that address finds it.
+fn client_ip(raw: &str) -> Option<String> {
+    let last = raw.rsplit(',').next()?.trim();
+    let ip: std::net::IpAddr = last.parse().ok()?;
+    Some(ip.to_canonical().to_string())
+}
+
+/// A `User-Agent` as the audit keeps it: control characters removed, cut at [`AUDIT_UA_MAX`]
+/// bytes on a character boundary, and nothing at all when nothing is left.
+fn user_agent(raw: &str) -> Option<String> {
+    let mut ua: String = raw.trim().chars().filter(|c| !c.is_control()).collect();
+    if ua.len() > AUDIT_UA_MAX {
+        let mut cut = AUDIT_UA_MAX;
+        while !ua.is_char_boundary(cut) {
+            cut -= 1;
+        }
+        ua.truncate(cut);
+    }
+    (!ua.is_empty()).then_some(ua)
+}
+
+/// A request id as the audit keeps it: letters, digits and `-`, at most [`AUDIT_RID_MAX`] of
+/// them, or nothing.
+///
+/// Narrow on purpose, and the reason is the one [`bb_auth_core::compile_audit_header`] refuses
+/// the credential headers for, one layer further in. An id is written down as it arrives, and
+/// every credential this gate knows has a character this refuses: a `bbk_` key its underscore,
+/// an id_token and a session cookie their dots. So even a header that turned out to carry one
+/// could not put it into the file.
+fn request_id(raw: &str) -> Option<String> {
+    let id = raw.trim();
+    (!id.is_empty()
+        && id.len() <= AUDIT_RID_MAX
+        && id.bytes().all(|b| b.is_ascii_alphanumeric() || b == b'-'))
+    .then(|| id.to_string())
+}
+
+/// A token's `sub` as the audit keeps it: printable ASCII with no space, at most
+/// [`AUDIT_SUB_MAX`] bytes, or nothing. Cognito's is a UUID; anything else is not one of its
+/// accounts, and a value that cannot be what it says is left out rather than written down.
+fn account_sub(v: Option<&serde_json::Value>) -> Option<String> {
+    let sub = v?.as_str()?.trim();
+    (!sub.is_empty() && sub.len() <= AUDIT_SUB_MAX && sub.bytes().all(|b| b.is_ascii_graphic()))
+        .then(|| sub.to_string())
 }
 
 /// Is this listen address on the loopback interface, which is what every deployment note in
@@ -943,12 +1118,62 @@ fn spawn_access_reload_handler(state: &Arc<State>) {
         for _ in signals.forever() {
             reload_access(&sig_state);
             reload_settings(&sig_state);
+            // A new rotation or retention applies now rather than within the hour: the path
+            // unit turns every save into this signal, so an operator who shortens the
+            // retention from the GUI sees the audit shrink on the next page they load.
+            let policy = sig_state.settings.read().unwrap().audit_policy;
+            sig_state.audit.maintain(&policy);
         }
     });
 }
 
 #[cfg(not(unix))]
 fn spawn_access_reload_handler(_state: &Arc<State>) {}
+
+/// A policy in one line for an operator: when the live file rotates, what the retention keeps,
+/// and the most the pair can take on disk.
+fn audit_policy_line(p: &AuditPolicy) -> String {
+    let mib = p.max_bytes() as f64 / f64::from(1 << 20);
+    format!(
+        "rotation {} (one previous file kept), retention {}, at most {} on disk",
+        p.rotation.spelled(),
+        match p.retention {
+            Some(r) => r.spelled(),
+            None => "(none: what the rotation keeps)".to_string(),
+        },
+        if mib >= 1024.0 {
+            format!("{:.1} GiB", mib / 1024.0)
+        } else {
+            format!("{mib:.1} MiB")
+        }
+    )
+}
+
+/// How often the audit is brought within its rotation and retention when nothing asks.
+///
+/// An hour, because that is the precision a retention in weeks is honest to, and because a
+/// deployment that records one event a day would otherwise keep an expired address until the
+/// next person was refused. It costs one read of each file's first line when there is nothing
+/// to do, which is every hour but the one when there is.
+const AUDIT_MAINTENANCE_EVERY: Duration = Duration::from_secs(3600);
+
+/// Spawn the thread that runs [`Audit::maintain`] every [`AUDIT_MAINTENANCE_EVERY`], under the
+/// policy the settings say at that moment.
+///
+/// A thread and not a timer unit, because the rule it applies is in the settings file this
+/// process already holds, and a second program reading it would be a second answer to what
+/// "six months" means. Nothing is spawned when the audit is off: there is nothing to maintain.
+fn spawn_audit_maintenance(state: &Arc<State>) {
+    if !state.audit.on() {
+        return;
+    }
+    let st = Arc::clone(state);
+    std::thread::spawn(move || loop {
+        std::thread::sleep(AUDIT_MAINTENANCE_EVERY);
+        let policy = st.settings.read().unwrap().audit_policy;
+        st.audit.maintain(&policy);
+    });
+}
 
 // ---------------------------------------------------------------------------
 // JWKS
@@ -1114,6 +1339,10 @@ struct UserIdentity {
     /// the cookie and must not be, since that is a [`COOKIE_VERSION`] bump and a bump logs
     /// everybody out; the login event is where the exact answer is recorded, once.
     cred: AuditCredential,
+    /// The token's `sub`, the Cognito account, for the audit and for nothing else, exactly
+    /// like `cred` and for the same reason: `None` when the identity came out of a cookie,
+    /// which does not carry it and must not start to.
+    sub: Option<String>,
 }
 
 /// The id_token claims bb-auth consumes. `exp`, `aud` and `iss` are enforced by
@@ -1327,6 +1556,10 @@ fn validate_id_token(token: &str, state: &State) -> Result<UserIdentity, String>
         email,
         claims,
         cred,
+        // In `extra` and not a typed field of its own: it is read for the audit alone, so a
+        // token whose `sub` is not a string must cost the row its account and never the login,
+        // which is what `Claims::extra` already does for a profile claim.
+        sub: account_sub(c.extra.get("sub")),
     })
 }
 
@@ -1448,8 +1681,10 @@ fn verify_session(val: &str, keys: &HmacKeys) -> Option<UserIdentity> {
             Some(UserIdentity {
                 email,
                 claims: decode_claims_segment(cb)?,
-                // What a cookie can say about how its holder signed in, which is nothing.
+                // What a cookie can say about how its holder signed in, which is nothing, and
+                // about which Cognito account that was, which is nothing either.
                 cred: AuditCredential::Session,
+                sub: None,
             })
         }
         _ => None,
@@ -2623,7 +2858,7 @@ fn bearer_apikey<'a>(
     access: &'a Access,
     token: &str,
     url: Option<&str>,
-    audit: &Audit,
+    audit: &RequestAudit,
 ) -> Option<&'a ApiKeyRecord> {
     let refused = |caller: Caller, why: &str, line: std::fmt::Arguments| {
         caller.refused(audit, why, None, url, line);
@@ -2669,16 +2904,25 @@ struct Caller {
     /// user, and the user is named by [`Caller::uuid`].
     subject: Option<String>,
     uuid: Option<String>,
+    /// The Cognito account, where a token was validated on this request. See
+    /// [`UserIdentity::sub`].
+    sub: Option<String>,
 }
 
 impl Caller {
     /// A Cognito-backed identity, from either of the two credentials that carry one.
-    fn identity(email: &str, cred: AuditCredential, access: &Access) -> Caller {
+    fn identity(
+        email: &str,
+        cred: AuditCredential,
+        sub: Option<String>,
+        access: &Access,
+    ) -> Caller {
         Caller {
             who: email.to_string(),
             cred,
             subject: Some(email.to_string()),
             uuid: access.uuid_of(email).map(str::to_string),
+            sub,
         }
     }
 
@@ -2692,6 +2936,7 @@ impl Caller {
             },
             subject: None,
             uuid: Some(rec.uuid.clone()),
+            sub: None,
         }
     }
 
@@ -2704,12 +2949,14 @@ impl Caller {
             cred: AuditCredential::Key { id: String::new() },
             subject: None,
             uuid: None,
+            sub: None,
         }
     }
 
-    /// This caller's event of that kind, with who they are already filled in.
+    /// This caller's event of that kind, with who they are already filled in. Where the
+    /// request came from is not this type's business: [`RequestAudit::record`] stamps that.
     fn event(&self, kind: AuditKind) -> AuditEvent {
-        let ev = AuditEvent::new(now(), kind, self.cred.clone());
+        let ev = AuditEvent::new(now(), kind, self.cred.clone()).account(self.sub.as_deref());
         match (&self.subject, &self.uuid) {
             (Some(s), u) => ev.by(s, u.as_deref()),
             (None, Some(u)) => ev.of(u),
@@ -2723,7 +2970,7 @@ impl Caller {
     /// them is the kind that decays the moment it is written twice. See [`Audit`].
     fn refused(
         &self,
-        audit: &Audit,
+        audit: &RequestAudit,
         why: &str,
         place: Option<(&str, &str)>,
         url: Option<&str>,
@@ -2731,11 +2978,13 @@ impl Caller {
     ) {
         let (app, scope) = place.unwrap_or(("", ""));
         // Per request, and it says the same thing every time: a browser refused one asset is
-        // a browser refused forty. The first of a burst is recorded, keyed by who, where and
-        // why but NOT by which URL, since the forty differ only in that. Deliberately not
-        // [`first_in_window`]: an audit whose contents depend on the journal's verbosity is
-        // not an audit.
-        if first_audited(&format!("{}|{app}/{scope}|{why}", self.who)) {
+        // a browser refused forty. The first of a burst is recorded, keyed by who, where, why
+        // and from which address, but NOT by which URL, since the forty differ only in that.
+        // The address is in the key because the same refusal from a second address is a
+        // second fact, and the interesting one: one key refused on two machines is a key that
+        // has been copied. Deliberately not [`first_in_window`]: an audit whose contents
+        // depend on the journal's verbosity is not an audit.
+        if first_audited(&format!("{}|{app}/{scope}|{why}|{}", self.who, audit.ip())) {
             audit.record(
                 self.event(AuditKind::AccessRefused)
                     .at(place)
@@ -2765,7 +3014,7 @@ fn authorize(
     subject: &Subject,
     url: Option<&str>,
     caller: &Caller,
-    audit: &Audit,
+    audit: &RequestAudit,
 ) -> bool {
     let who = &caller.who;
     let at = || url.unwrap_or("<none>");
@@ -2799,12 +3048,13 @@ fn authorize(
             // and an operator should be able to see it happening.
             if let Subject::Identifier(id) = subject {
                 if access.uuid_of(id).is_none() {
-                    // Once per identity per window, in both homes and for the same reason:
-                    // it says the same thing on the hundredth request as on the first, and
-                    // this fires on every request that carries a credential into an
-                    // `authenticated` area. The two windows are counted separately, so
-                    // turning the journal up cannot change what the audit holds.
-                    if first_audited(&format!("granted|{id}|{app}/{scope}")) {
+                    // Once per identity per address per window, in both homes and for the
+                    // same reason: it says the same thing on the hundredth request as on the
+                    // first, and this fires on every request that carries a credential into
+                    // an `authenticated` area. The address is in the key for the reason it is
+                    // in a refusal's. The two windows are counted separately, so turning the
+                    // journal up cannot change what the audit holds.
+                    if first_audited(&format!("granted|{id}|{app}/{scope}|{}", audit.ip())) {
                         audit.record(
                             caller
                                 .event(AuditKind::AccessGranted)
@@ -2883,14 +3133,15 @@ fn authorize_login(
     access: &Access,
     ident: UserIdentity,
     url: Option<&str>,
-    audit: &Audit,
+    audit: &RequestAudit,
 ) -> Option<Granted> {
     let UserIdentity {
         email,
         claims,
         cred,
+        sub,
     } = ident;
-    let caller = Caller::identity(&email, cred, access);
+    let caller = Caller::identity(&email, cred, sub, access);
     if !authorize(access, &Subject::Identifier(&email), url, &caller, audit) {
         return None;
     }
@@ -2943,6 +3194,10 @@ fn handle_validate(req: Request, state: &State) {
     // Original request URL (for application resolution and per-scope URL matching),
     // captured now as an owned value so the request can be consumed when we respond.
     let url = original_url(&req, cfg);
+    // Where the request came from, read once and carried by everything recorded below. Read
+    // on every request although most record nothing, because it is three header lookups and
+    // the alternative is reading them at each of the places that do.
+    let audit = request_audit(state, &req);
 
     // Did anything the client sent identify them to this gate? It is deliberately not the
     // same question as "was the request authorized", and the difference is which refusal is
@@ -2960,30 +3215,19 @@ fn handle_validate(req: Request, state: &State) {
         let granted = if token.starts_with(API_KEY_PREFIX) {
             // A key acts as its user and carries no token, so no claims come with it.
             let access = state.access.read().unwrap();
-            bearer_apikey(&access, token, url.as_deref(), &state.audit).and_then(|rec| {
+            bearer_apikey(&access, token, url.as_deref(), &audit).and_then(|rec| {
                 // A key that resolves to a live, unexpired row is a credential this gate
                 // knows, whatever the scope then says about it.
                 identified = true;
                 let caller = Caller::key(rec);
-                authorize(
-                    &access,
-                    &Subject::Key(rec),
-                    url.as_deref(),
-                    &caller,
-                    &state.audit,
-                )
-                .then(|| Granted::Identity(key_identity(&access, rec)))
+                authorize(&access, &Subject::Key(rec), url.as_deref(), &caller, &audit)
+                    .then(|| Granted::Identity(key_identity(&access, rec)))
             })
         } else {
             match validate_id_token(token, state) {
                 Ok(ident) => {
                     identified = true;
-                    authorize_login(
-                        &state.access.read().unwrap(),
-                        ident,
-                        url.as_deref(),
-                        &state.audit,
-                    )
+                    authorize_login(&state.access.read().unwrap(), ident, url.as_deref(), &audit)
                 }
                 Err(e) => {
                     // A bearer that did not validate names nobody: there is no identity to
@@ -3008,12 +3252,7 @@ fn handle_validate(req: Request, state: &State) {
             // gate minted and still stands behind: whoever holds it is signed in, and a
             // refusal from here on is about the URL and not about them.
             identified = true;
-            authorize_login(
-                &state.access.read().unwrap(),
-                ident,
-                url.as_deref(),
-                &state.audit,
-            )
+            authorize_login(&state.access.read().unwrap(), ident, url.as_deref(), &audit)
         });
     if let Some(granted) = granted {
         respond_authorized(req, &granted, state);
@@ -3079,6 +3318,10 @@ fn handle_session(mut req: Request, state: &State) {
         global_login(&state.settings.read().unwrap()),
         caller_url.as_deref(),
     );
+    // Where this login came from. Every event below is about a person at a keyboard, which is
+    // where an address and a user agent say the most: "a sign-in from a country nobody here
+    // lives in" is the question an audit of logins exists to answer.
+    let audit = request_audit(state, &req);
 
     // Where did this POST come from? A session cookie is minted here, and minting one for
     // somebody else's form is login CSRF: an attacker registers with Cognito (self-signup is
@@ -3101,11 +3344,11 @@ fn handle_session(mut req: Request, state: &State) {
     if !matches!(site, RequestSite::SameOrigin | RequestSite::SameSite) {
         // Refused before the body is read, so there is no credential to name: whatever this
         // form carried, the gate never looked at it.
-        state.audit.record(
+        audit.record(
             AuditEvent::new(now(), AuditKind::LoginRefused, AuditCredential::Anonymous)
                 .because("cross_site"),
         );
-        if logs(LogLevel::Debug) || !state.audit.on() {
+        if logs(LogLevel::Debug) || !audit.on() {
             eprintln!("[bb-auth] session refused: {site:?} POST to /auth/session");
         }
         respond_html(
@@ -3145,11 +3388,11 @@ fn handle_session(mut req: Request, state: &State) {
             // A token that did not validate names nobody, and the reason is the gate's own
             // sentence rather than a code: `validate_id_token` has a dozen ways to say no and
             // they are all "this token is not one of ours".
-            state.audit.record(
+            audit.record(
                 AuditEvent::new(now(), AuditKind::LoginRefused, AuditCredential::Anonymous)
                     .because("token_invalid"),
             );
-            if logs(LogLevel::Debug) || !state.audit.on() {
+            if logs(LogLevel::Debug) || !audit.on() {
                 eprintln!("[bb-auth] session rejected: {e}");
             }
             respond_html(
@@ -3180,12 +3423,13 @@ fn handle_session(mut req: Request, state: &State) {
         // The access file's own words for the same two refusals, so a reader that can explain
         // one can explain the other. Profile claims are in neither home: they are PII that
         // adds nothing, and the identifier already says who this was.
-        state.audit.record(
+        audit.record(
             AuditEvent::new(now(), AuditKind::LoginRefused, ident.cred.clone())
                 .by(&ident.email, uuid.as_deref())
+                .account(ident.sub.as_deref())
                 .because(why),
         );
-        if logs(LogLevel::Debug) || !state.audit.on() {
+        if logs(LogLevel::Debug) || !audit.on() {
             eprintln!("[bb-auth] session denied: {} {why}", ident.email);
         }
         respond_html(
@@ -3226,12 +3470,13 @@ fn handle_session(mut req: Request, state: &State) {
     };
     // The one event that says how somebody proved who they are, because it is the only moment
     // the gate knows: from here on they hold a cookie, and a cookie does not say.
-    state.audit.record(
+    audit.record(
         AuditEvent::new(now(), AuditKind::LoginGranted, ident.cred.clone())
             .by(&ident.email, uuid.as_deref())
+            .account(ident.sub.as_deref())
             .on(Some(&rd)),
     );
-    if logs(LogLevel::Debug) || !state.audit.on() {
+    if logs(LogLevel::Debug) || !audit.on() {
         eprintln!("[bb-auth] session granted: {} -> {rd}", ident.email);
     }
     respond_redirect(req, &rd, Some(&cookie));
@@ -3358,7 +3603,10 @@ fn handle_logout(req: Request, state: &State) {
                 .unwrap()
                 .uuid_of(&ident.email)
                 .map(str::to_string);
-            state.audit.record(
+            // Read here rather than at the top, because this is the only branch that records
+            // anything and a logout is otherwise three header reads nobody needed.
+            let audit = request_audit(state, &req);
+            audit.record(
                 AuditEvent::new(now(), AuditKind::LoginEnded, ident.cred)
                     .by(&ident.email, uuid.as_deref())
                     .on(Some(&target)),
@@ -3509,6 +3757,24 @@ fn check_settings(path: &str) -> ! {
                     "[bb-auth] {path}: accepting unverified emails for social logins [{scope}]"
                 );
             }
+            // The two headers the audit believes, by name, because believing one is a promise
+            // about nginx that a check of this file cannot keep: the operator reading this is
+            // the one who has to know that nginx overwrites both on every gated location.
+            println!(
+                "[bb-auth] {path}: audit: client address from {}, request id from {}",
+                s.client_ip_header
+                    .as_deref()
+                    .unwrap_or("(nowhere: not recorded)"),
+                s.request_id_header
+                    .as_deref()
+                    .unwrap_or("(nowhere: not recorded)"),
+            );
+            // The disk figure is the one worth reading: it is what a flood can cost, whatever
+            // the two settings are written in.
+            println!(
+                "[bb-auth] {path}: audit: {}",
+                audit_policy_line(&s.audit_policy)
+            );
             // Named, not counted: this list is the GUI's whole door, and an operator reading
             // a check should see whether their own address is on it.
             println!(
@@ -3874,6 +4140,13 @@ fn main() {
     // POSIX-only; no-op on non-unix hosts.
     spawn_access_reload_handler(&state);
 
+    // The audit's rotation on age and its retention: once now, so a restart applies a policy
+    // straight away, and then hourly, so a quiet deployment still forgets what it said it would.
+    state
+        .audit
+        .maintain(&state.settings.read().unwrap().audit_policy);
+    spawn_audit_maintenance(&state);
+
     let server = Arc::new(Server::http(&listen).unwrap_or_else(|e| {
         eprintln!("[bb-auth] FATAL: cannot bind {listen}: {e}");
         std::process::exit(1);
@@ -3933,8 +4206,12 @@ fn main() {
     match state.audit.on() {
         true => eprintln!(
             "[bb-auth] audit: {} (logins, refusals and logouts go there instead of here; \
-             BB_AUTH_AUDIT_FILE= to turn it off)",
-            state.cfg.audit_file
+             BB_AUTH_AUDIT_FILE= to turn it off) | {} | client address from {} | request id \
+             from {}",
+            state.cfg.audit_file,
+            audit_policy_line(&settings.audit_policy),
+            settings.client_ip_header.as_deref().unwrap_or("(nowhere)"),
+            settings.request_id_header.as_deref().unwrap_or("(nowhere)"),
         ),
         false => eprintln!("[bb-auth] audit: off, events stay in this journal"),
     }
@@ -4144,6 +4421,7 @@ mod tests {
             email: email.to_string(),
             claims: BTreeMap::new(),
             cred: AuditCredential::Local,
+            sub: None,
         }
     }
     /// An identity carrying an arbitrary claim set.
@@ -4155,6 +4433,7 @@ mod tests {
                 .map(|(k, v)| (k.to_string(), v.to_string()))
                 .collect(),
             cred: AuditCredential::Local,
+            sub: None,
         }
     }
     /// An identity carrying the two claims a display name is usually built from.
@@ -4162,16 +4441,27 @@ mod tests {
         ident_claims(email, &[("given_name", given), ("family_name", family)])
     }
 
-    /// What a verified cookie hands back: the identity that went in, minus how it was proved.
+    /// What a verified cookie hands back: the identity that went in, minus how it was proved
+    /// and minus which Cognito account proved it.
     ///
     /// Its own helper rather than a weaker assertion, because that difference **is** the rule:
     /// the cookie carries an identity and its claims and says nothing about the credential
     /// behind them ([`AuditCredential::Session`]). A round trip that compared loosely would let
-    /// a future edit stamp the provider into the cookie with nothing noticing, and that edit is
-    /// a [`COOKIE_VERSION`] bump that logs every session out.
+    /// a future edit stamp the provider or the `sub` into the cookie with nothing noticing, and
+    /// that edit is a [`COOKIE_VERSION`] bump that logs every session out.
     fn from_cookie(mut i: UserIdentity) -> UserIdentity {
         i.cred = AuditCredential::Session;
+        i.sub = None;
         i
+    }
+
+    /// An audit that records nothing, in a `static` so the [`RequestAudit`] borrowed from it
+    /// outlives the statement it is made in.
+    static QUIET: Audit = Audit::off();
+
+    /// A request that says nothing about where it came from, on the audit that records nothing.
+    fn quiet() -> RequestAudit<'static> {
+        QUIET.for_request(AuditClient::default(), AuditPolicy::default())
     }
 
     // The two authorization entry points with the audit off, which is what a test of the
@@ -4179,10 +4469,10 @@ mod tests {
     // `use super::*`), so a test reads as the question it is asking and nothing in this suite
     // races for one file on disk. A test of the record itself calls `super::` and says so.
     fn authorize_login(access: &Access, ident: UserIdentity, url: Option<&str>) -> Option<Granted> {
-        super::authorize_login(access, ident, url, &Audit::off())
+        super::authorize_login(access, ident, url, &quiet())
     }
     fn bearer_apikey<'a>(access: &'a Access, token: &str) -> Option<&'a ApiKeyRecord> {
-        super::bearer_apikey(access, token, None, &Audit::off())
+        super::bearer_apikey(access, token, None, &quiet())
     }
     /// A compiled claim list, written comma-separated for brevity. The compiler itself, and
     /// everything it refuses, is the library's and is tested there; what these tests need is
@@ -5407,12 +5697,22 @@ mod tests {
         .is_none());
     }
 
+    /// A client as nginx describes one: an address, a browser, and nginx's own id.
+    fn client_at(ip: &str) -> AuditClient {
+        AuditClient {
+            ip: Some(ip.to_string()),
+            ua: Some("Mozilla/5.0 (X11; Linux aarch64)".to_string()),
+            rid: Some("5f1c0a9e7b2d4c3a8e6f1b0d9c7a5e3f".to_string()),
+        }
+    }
+
     #[test]
     fn a_refusal_reaches_the_audit_with_who_where_and_why() {
         let a = gate_access("audit-refusal");
         let p = std::env::temp_dir().join("bb-auth-audit-refusal.jsonl");
         let _ = std::fs::remove_file(&p);
         let audit = Audit::to(p.to_str().unwrap());
+        let home = audit.for_request(client_at("203.0.113.7"), AuditPolicy::default());
 
         // A member of nothing, on a restricted scope. The identity is unique to this test
         // because the dedupe window is process-wide and the suite runs in parallel.
@@ -5420,7 +5720,7 @@ mod tests {
             &a,
             ident("audit-refusal@x.com"),
             Some("https://app.x.com/other/x"),
-            &audit,
+            &home,
         );
         assert!(
             refused.is_none(),
@@ -5437,6 +5737,10 @@ mod tests {
         assert_eq!(ev.reason.as_deref(), Some("not_enrolled"));
         assert_eq!(ev.url.as_deref(), Some("https://app.x.com/other/x"));
         assert_eq!(ev.cred, AuditCredential::Local);
+        // Where it came from, stamped by the request and not by any call site.
+        assert_eq!(ev.ip.as_deref(), Some("203.0.113.7"));
+        assert_eq!(ev.rid.as_deref(), Some("5f1c0a9e7b2d4c3a8e6f1b0d9c7a5e3f"));
+        assert!(ev.ua.as_deref().is_some_and(|u| u.contains("aarch64")));
 
         // The same refusal again inside the window is the same sentence, so it is not a
         // second row: a browser refused one asset is a browser refused forty.
@@ -5444,12 +5748,24 @@ mod tests {
             &a,
             ident("audit-refusal@x.com"),
             Some("https://app.x.com/other/y"),
-            &audit,
+            &home,
         );
         assert_eq!(
             bb_auth_core::read_audit(&p, None, 10).unwrap().events.len(),
             1
         );
+
+        // The same refusal from another address is not the same sentence: one identity
+        // refused on two machines is two facts, and the second is the one worth reading.
+        super::authorize_login(
+            &a,
+            ident("audit-refusal@x.com"),
+            Some("https://app.x.com/other/z"),
+            &audit.for_request(client_at("198.51.100.23"), AuditPolicy::default()),
+        );
+        let page = bb_auth_core::read_audit(&p, None, 10).unwrap();
+        assert_eq!(page.events.len(), 2);
+        assert_eq!(page.events[0].ip.as_deref(), Some("198.51.100.23"));
         let _ = std::fs::remove_file(&p);
     }
 
@@ -5462,19 +5778,20 @@ mod tests {
         let nowhere = std::env::temp_dir().join("bb-auth-no-such-dir-at-all/audit.jsonl");
         let audit = Audit::to(nowhere.to_str().unwrap());
         assert!(audit.on(), "on until a write has actually failed");
+        let request = audit.for_request(AuditClient::default(), AuditPolicy::default());
 
         let granted = super::authorize_login(
             &a,
             ident("bob@x.com"),
             Some("https://app.x.com/other/x"),
-            &audit,
+            &request,
         );
         assert!(granted.is_some(), "the grant stands");
         let refused = super::authorize_login(
             &a,
             ident("audit-broken@x.com"),
             Some("https://app.x.com/other/x"),
-            &audit,
+            &request,
         );
         assert!(refused.is_none(), "and so does the refusal");
         // And the events fall back to the journal, which is what `on()` reporting false means
@@ -5483,6 +5800,150 @@ mod tests {
             !audit.on(),
             "a failed write hands the events back to the journal"
         );
+    }
+
+    #[test]
+    fn a_client_address_is_the_last_entry_and_an_address_or_nothing() {
+        assert_eq!(client_ip("203.0.113.7").as_deref(), Some("203.0.113.7"));
+        // `$proxy_add_x_forwarded_for`: the client's claims first, nginx's own entry last.
+        assert_eq!(
+            client_ip("10.9.8.7, 1.1.1.1 , 203.0.113.7").as_deref(),
+            Some("203.0.113.7")
+        );
+        // An IPv4 client of a dual-stack socket reads as the IPv4 address it is.
+        assert_eq!(
+            client_ip("::ffff:203.0.113.7").as_deref(),
+            Some("203.0.113.7")
+        );
+        assert_eq!(client_ip("2001:DB8::1").as_deref(), Some("2001:db8::1"));
+        // Anything that is not an address costs the row its address, and nothing else.
+        for junk in [
+            "",
+            "unknown",
+            "203.0.113.7:4431",
+            "a@x.com",
+            "203.0.113.7, ",
+        ] {
+            assert_eq!(client_ip(junk), None, "{junk:?}");
+        }
+    }
+
+    #[test]
+    fn a_user_agent_is_kept_short_and_printable() {
+        assert_eq!(user_agent("  curl/8.9.1 ").as_deref(), Some("curl/8.9.1"));
+        assert_eq!(user_agent("a\u{7}b\u{1b}c").as_deref(), Some("abc"));
+        assert_eq!(user_agent("   "), None);
+        // Cut on a character boundary, however the length falls.
+        let long = "é".repeat(AUDIT_UA_MAX);
+        let kept = user_agent(&long).unwrap();
+        assert!(kept.len() <= AUDIT_UA_MAX && kept.chars().all(|c| c == 'é'));
+    }
+
+    /// A request id is written down as it arrives, so its charset is the last line of defence
+    /// between a misnamed header and a credential in a file an administrator reads: every
+    /// credential this gate knows has a character it refuses.
+    #[test]
+    fn a_request_id_can_never_be_a_credential() {
+        assert_eq!(
+            request_id("5f1c0a9e7b2d4c3a8e6f1b0d9c7a5e3f").as_deref(),
+            Some("5f1c0a9e7b2d4c3a8e6f1b0d9c7a5e3f")
+        );
+        assert!(request_id("9d8e7f60-1a2b-4c3d-8e9f-0a1b2c3d4e5f").is_some());
+        let cookie = make_session(&ident("bob@x.com"), 3600, &keys_one());
+        for credential in ["bbk_secret", IT_TOKEN_OK, cookie.as_str(), "Bearer abc"] {
+            assert_eq!(request_id(credential), None, "{credential}");
+        }
+        assert_eq!(request_id(&"a".repeat(AUDIT_RID_MAX + 1)), None);
+        assert_eq!(request_id(""), None);
+    }
+
+    #[test]
+    fn an_account_is_a_short_printable_string_or_nothing() {
+        let sub = serde_json::json!("9d8e7f60-1a2b-4c3d-8e9f-0a1b2c3d4e5f");
+        assert_eq!(
+            account_sub(Some(&sub)).as_deref(),
+            Some("9d8e7f60-1a2b-4c3d-8e9f-0a1b2c3d4e5f")
+        );
+        for bad in [
+            serde_json::json!(42),
+            serde_json::json!("has a space"),
+            serde_json::json!("x".repeat(AUDIT_SUB_MAX + 1)),
+            serde_json::json!(""),
+        ] {
+            assert_eq!(account_sub(Some(&bad)), None, "{bad}");
+        }
+        assert_eq!(account_sub(None), None);
+    }
+
+    /// The whole path, over a socket: the address and the request id reach the file from the
+    /// headers the settings name and from nowhere else, and the user agent always does.
+    ///
+    /// The second half is the one that matters. A client that sends its own `X-Real-IP` to a
+    /// gate whose settings name no header must not get it written down, because on that
+    /// deployment nobody has promised that nginx overwrites it.
+    #[test]
+    fn where_a_request_came_from_is_read_only_from_the_headers_named() {
+        let validate = |base: &str, email: &str, ip: &str| {
+            let cookie = make_session(&ident(email), 3600, &keys_one());
+            agent()
+                .get(format!("{base}/auth/validate"))
+                .header("X-Original-URL", "https://app.x.com/other/x")
+                .header("Cookie", format!("bb_session={cookie}"))
+                .header("X-Real-IP", ip)
+                .header("X-Request-ID", "5f1c0a9e7b2d4c3a8e6f1b0d9c7a5e3f")
+                .header("User-Agent", "Mozilla/5.0 (X11; Linux aarch64)")
+                .call()
+                .unwrap()
+        };
+        let read = |p: &std::path::Path| bb_auth_core::read_audit(p, None, 10).unwrap().events;
+
+        // Named: both headers are believed, and the refusal (a stranger on bob's scope)
+        // carries them.
+        let named = std::env::temp_dir().join("bb-auth-audit-client-named.jsonl");
+        let _ = std::fs::remove_file(&named);
+        // The two headers are the `audit` section's, which the compiled settings carry beside
+        // the gate's own; set them there rather than teach the fixture a second section.
+        let mut named_settings = gate_settings("{}");
+        named_settings.client_ip_header = Some("X-Real-IP".to_string());
+        named_settings.request_id_header = Some("X-Request-ID".to_string());
+        let mut st = token_state(named_settings);
+        st.audit = Audit::to(named.to_str().unwrap());
+        let base = serve(st);
+        assert_eq!(
+            validate(&base, "client-named@x.com", "203.0.113.41").status(),
+            403
+        );
+        let events = read(&named);
+        assert_eq!(events.len(), 1);
+        assert_eq!(events[0].ip.as_deref(), Some("203.0.113.41"));
+        assert_eq!(
+            events[0].rid.as_deref(),
+            Some("5f1c0a9e7b2d4c3a8e6f1b0d9c7a5e3f")
+        );
+        assert_eq!(
+            events[0].ua.as_deref(),
+            Some("Mozilla/5.0 (X11; Linux aarch64)")
+        );
+
+        // Not named: the same headers arrive and neither is written down. The user agent
+        // still is, since it never pretended to be anything but the client's word.
+        let unnamed = std::env::temp_dir().join("bb-auth-audit-client-unnamed.jsonl");
+        let _ = std::fs::remove_file(&unnamed);
+        let mut st = token_state(gate_settings("{}"));
+        st.audit = Audit::to(unnamed.to_str().unwrap());
+        let base = serve(st);
+        assert_eq!(
+            validate(&base, "client-unnamed@x.com", "203.0.113.42").status(),
+            403
+        );
+        let events = read(&unnamed);
+        assert_eq!(events.len(), 1);
+        assert_eq!(events[0].ip, None);
+        assert_eq!(events[0].rid, None);
+        assert!(events[0].ua.is_some());
+
+        let _ = std::fs::remove_file(&named);
+        let _ = std::fs::remove_file(&unnamed);
     }
 
     #[test]
@@ -5526,7 +5987,7 @@ mod tests {
             &Subject::Key(rec),
             url,
             &Caller::key(rec),
-            &Audit::off()
+            &quiet()
         ));
         // The same person, through a browser login, is admitted.
         assert!(authorize_login(&a, ident("bob@x.com"), url).is_some());

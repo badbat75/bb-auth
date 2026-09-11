@@ -191,6 +191,37 @@
     "regardless of what the header says."
   ],
 
+  "_comment_audit_headers": [
+    "audit.client_ip_header / audit.request_id_header — the request headers the audit reads",
+    "the client's address and nginx's id for the request out of: X-Real-IP and X-Request-ID",
+    "in the README's recipe. EMPTY, THE DEFAULT, RECORDS NEITHER, and that is on purpose.",
+    "The gate listens on loopback and never sees a client, so an address is only as true as",
+    "the nginx in front of it, and nginx passes a client's own headers through untouched",
+    "unless a proxy_set_header overwrites them. Name one only once nginx overwrites it on",
+    "every location that reaches the gate (the auth_request target, /auth/session,",
+    "/auth/logout): a header it does not overwrite is whatever the client chose to say.",
+    "A list such as X-Forwarded-For is read from its LAST entry, the one nginx appended.",
+    "Neither may name Authorization, Cookie or Proxy-Authorization: a request id is written",
+    "down as it arrives, and a credential is not something to write down.",
+    "With $request_id in nginx's log_format as well, an audit row's rid finds its line in",
+    "nginx's access log, which has everything the audit leaves out."
+  ],
+
+  "_comment_audit_limits": [
+    "audit.rotation / audit.retention — an amount and a unit each: weeks, months, years, MiB",
+    "or GiB ('4 MiB', '1 GiB', '26 weeks', '6 months', '1 year').",
+    "rotation: when the live audit file moves onto audit.jsonl.1, replacing the one before, so",
+    "only the last is kept. A size, or an age of the file's oldest event. Empty = 4 MiB.",
+    "retention: the most kept across both files. An age: no event older than it stays on",
+    "disk, whichever file it is in (pruned hourly, at startup and on every reload), which is",
+    "the one to use when the question is personal data such as addresses. A size: the two",
+    "files together never exceed it. Empty = nothing beyond what the rotation keeps.",
+    "AT LEAST ONE OF THE TWO MUST BE A SIZE: a time bounds how old the audit gets and not how",
+    "big, and a flood of refusals would fill the disk. A file with both in time is refused.",
+    "An older gate ignores this whole section rather than refusing the file: it is a key at",
+    "this top level, and unknown keys up here are kept, not refused."
+  ],
+
   "_comment_admins": [
     "web.admins — who may use bb-auth-web, matched against the X-Auth-Email nginx injects",
     "(trimmed and lowercased, so a login's capitalisation cannot matter). REQUIRED and never",
@@ -244,6 +275,12 @@
     "social_callback_url": "",
     "social_buttons": [],
     "session_ttl_secs": 2592000
+  },
+  "audit": {
+    "client_ip_header": "",
+    "request_id_header": "",
+    "rotation": "4 MiB",
+    "retention": ""
   },
   "web": {
     "admins": ["you@example.com"]

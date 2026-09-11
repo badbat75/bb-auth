@@ -1274,12 +1274,12 @@ pub fn format_date(epoch: u64) -> String {
     format!("{y:04}-{m:02}-{d:02}")
 }
 
-/// Format Unix seconds as `YYYY-MM-DD HH:MM:SS`, in **UTC**, for the audit page.
+/// Format Unix seconds as `YYYY-MM-DD HH:MM:SS`, as if they were **UTC**, for the audit page.
 ///
-/// UTC and not the host's local time, which is not a limitation being made a virtue: there is
-/// no zone database here and adding one to read a log would be the largest dependency in the
-/// tree. It is also the honest rendering of what is stored, and the page says `UTC` in the
-/// column heading rather than leaving a reader to assume their own.
+/// It knows nothing about time zones and should not: the audit page shifts the seconds by the
+/// offset of whichever zone its reader chose before it calls this, reading that offset out of
+/// the host's own zone database. So there is still one formatter, and the zone is a question
+/// for the one program that has a reader to ask.
 pub fn format_datetime(epoch: u64) -> String {
     let (y, m, d) = civil_from_days((epoch / 86_400) as i64);
     let s = epoch % 86_400;
@@ -3418,7 +3418,7 @@ pub const MAX_HONOURED_SESSION_TTL: u64 = 400 * 86_400;
 /// untouched and takes the arithmetic out of reach.
 pub const MAX_SESSION_TTL: u64 = 100 * 365 * 86_400;
 
-/// The gate's half of the settings file: the five it answers with.
+/// The gate's half of the settings file: what it answers a request with.
 #[derive(Deserialize, Serialize, Clone, Debug, PartialEq, Eq)]
 #[serde(deny_unknown_fields)]
 pub struct GateSettings {
@@ -3615,6 +3615,65 @@ impl Default for GateSettings {
     }
 }
 
+/// The audit's section of the settings file: which headers it believes about where a request
+/// came from, when its live file rotates, and how much of it is kept.
+///
+/// A section of its own rather than four more fields of `gate`, although the gate is what
+/// reads it, because it answers a different question from the rest of `gate`: not how a
+/// request is answered but what is written down about it afterwards. It is also the section an
+/// older binary can be handed without refusing the file, since an unknown key at the top level
+/// is preserved rather than refused.
+///
+/// All four pass the three-part rule, and say so rather than assume it. Each is read when an
+/// event is recorded or the files are maintained, which is per request or hourly and never
+/// once at startup; none can close a door, since the audit is written after the decision and
+/// can fail without costing a login; and none is a secret.
+#[derive(Deserialize, Serialize, Clone, Debug, Default, PartialEq, Eq)]
+#[serde(deny_unknown_fields)]
+pub struct AuditSettings {
+    /// The request header the **client's address** is read from: `X-Real-IP` in the README's
+    /// recipe, which Debian's `proxy_params` already sets. Empty, the default, records no
+    /// address at all.
+    ///
+    /// **Off unless named, because naming it is a promise about nginx that this file cannot
+    /// check.** The gate listens on loopback and never sees a client itself, and nginx hands a
+    /// client's own headers through untouched unless a `proxy_set_header` overwrites them. On
+    /// a location that forgets to, the address in the audit is whatever the client chose to
+    /// say, which is worse than none: an audit that can be told a lie is an audit that tells
+    /// one. So it is switched on by whoever wires nginx, in the same edit.
+    ///
+    /// A list is accepted and its **last** entry is taken, which makes `X-Forwarded-For` usable
+    /// as well: `$proxy_add_x_forwarded_for` appends the address nginx saw to whatever the
+    /// client sent, so the last entry is nginx's and everything before it is the client's
+    /// word. A value that is not an address is not recorded.
+    #[serde(default)]
+    pub client_ip_header: String,
+    /// The request header nginx's **id for the request** is read from: `X-Request-ID`, set
+    /// from `$request_id`, in the README's recipe. Empty, the default, records none.
+    ///
+    /// It is the audit's way to everything it deliberately does not hold. nginx's access log
+    /// has the request line, the status, the byte count and the referrer for every request,
+    /// and with `$request_id` in its `log_format` one search for this value finds the line an
+    /// audit row is about. Off unless named for the reason the address is: a header nginx does
+    /// not overwrite is the client's, and an id the client chose points at somebody else's line.
+    #[serde(default)]
+    pub request_id_header: String,
+    /// When the live file moves onto `.1`, replacing the one before: an amount and a unit, of
+    /// space (`4 MiB`, `1 GiB`) or of time (`1 month`, the age of the file's oldest event).
+    /// Empty means [`AUDIT_MAX_BYTES`]. See [`AuditPolicy`].
+    #[serde(default)]
+    pub rotation: String,
+    /// How much of the audit is kept at most, across both files: of time (`6 months`: no event
+    /// older than that stays on disk, whichever file it is in) or of space (`64 MiB`: the two
+    /// files together never exceed it). Empty keeps what the rotation keeps and nothing less.
+    ///
+    /// A retention in time is the one to reach for when the question is personal data: an
+    /// address is kept for as long as it says and not for as long as the bytes happen to last,
+    /// which on a quiet deployment is years.
+    #[serde(default)]
+    pub retention: String,
+}
+
 /// The GUI's half of the settings file: who may open its door.
 #[derive(Deserialize, Serialize, Clone, Debug, Default, PartialEq, Eq)]
 #[serde(deny_unknown_fields)]
@@ -3666,15 +3725,273 @@ pub const AUDIT_SCHEMA: u32 = 1;
 /// audit is worth. `LogsDirectory=bb-auth` in the unit is what creates it.
 pub const DEFAULT_AUDIT_FILE: &str = "/var/log/bb-auth/audit.jsonl";
 
-/// How large the live audit file may grow before it is rotated onto `.1`, so the pair is
-/// bounded by twice this and the disk cannot be filled by whoever is being refused.
+/// The rotation an audit gets when `audit.rotation` says nothing: the live file moves onto
+/// `.1` at this size, so the pair is bounded by twice it and the disk cannot be filled by
+/// whoever is being refused.
 ///
-/// A cap and not a retention period, because the thing that must be bounded is *bytes*: a
-/// flood of refusals is exactly the case an audit is for and exactly the case that would
-/// otherwise fill a Raspberry Pi's card. At the size of one event that is on the order of
-/// forty thousand lines per file, which at this deployment's rate is years and under a flood
-/// is hours. The flood is visible in what is kept either way.
+/// A size and not a period, because the thing that must be bounded is *bytes*: a flood of
+/// refusals is exactly the case an audit is for and exactly the case that would otherwise fill
+/// a Raspberry Pi's card. An event is about 200 bytes without the client fields and about 450
+/// with them (a browser's user agent is most of the difference), so this is ten to twenty
+/// thousand events per file: years at this deployment's rate, hours under a flood. The flood
+/// is visible in what is kept either way. See [`AuditPolicy`] for what an operator can say
+/// instead, and the one thing they cannot.
 pub const AUDIT_MAX_BYTES: u64 = 4 * 1024 * 1024;
+
+/// A unit an audit limit is written in: the three of time and the two of space an operator
+/// thinks about a log in.
+///
+/// Nothing finer than a week or a mebibyte, on purpose: a limit that small would rotate or
+/// prune on nearly every event, and an audit that is mostly rewrites is one nobody can trust
+/// to still hold last week.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum AuditUnit {
+    Weeks,
+    Months,
+    Years,
+    MiB,
+    GiB,
+}
+
+impl AuditUnit {
+    /// Every unit, in the order a list box offers them: time first, then space.
+    pub const ALL: [AuditUnit; 5] = [
+        AuditUnit::Weeks,
+        AuditUnit::Months,
+        AuditUnit::Years,
+        AuditUnit::MiB,
+        AuditUnit::GiB,
+    ];
+
+    /// The file's own word for it, plural, which is also what a form posts.
+    pub fn code(self) -> &'static str {
+        match self {
+            AuditUnit::Weeks => "weeks",
+            AuditUnit::Months => "months",
+            AuditUnit::Years => "years",
+            AuditUnit::MiB => "MiB",
+            AuditUnit::GiB => "GiB",
+        }
+    }
+
+    /// The file's word for exactly one of it.
+    fn singular(self) -> &'static str {
+        match self {
+            AuditUnit::Weeks => "week",
+            AuditUnit::Months => "month",
+            AuditUnit::Years => "year",
+            AuditUnit::MiB => "MiB",
+            AuditUnit::GiB => "GiB",
+        }
+    }
+
+    /// Whether this is a unit of time rather than of space.
+    pub fn is_time(self) -> bool {
+        matches!(
+            self,
+            AuditUnit::Weeks | AuditUnit::Months | AuditUnit::Years
+        )
+    }
+
+    /// A unit as written, singular or plural, in any case.
+    ///
+    /// `MB` and `GB` are refused rather than read as their binary cousins: they are a
+    /// different number, and a setting that silently meant 5% less than it said is the kind of
+    /// thing nobody notices until it matters.
+    pub fn parse(s: &str) -> Option<AuditUnit> {
+        match s.trim().to_ascii_lowercase().as_str() {
+            "week" | "weeks" => Some(AuditUnit::Weeks),
+            "month" | "months" => Some(AuditUnit::Months),
+            "year" | "years" => Some(AuditUnit::Years),
+            "mib" => Some(AuditUnit::MiB),
+            "gib" => Some(AuditUnit::GiB),
+            _ => None,
+        }
+    }
+
+    /// One of this unit, in seconds or in bytes.
+    ///
+    /// A month and a year are the Gregorian averages (30.436875 and 365.2425 days) and not
+    /// calendar arithmetic: a retention of "6 months" is a length of time, and a limit that
+    /// meant 181 days in one half of the year and 184 in the other would be a limit nobody
+    /// could state.
+    fn scale(self) -> u64 {
+        match self {
+            AuditUnit::Weeks => 7 * 86_400,
+            AuditUnit::Months => 2_629_746,
+            AuditUnit::Years => 31_556_952,
+            AuditUnit::MiB => 1 << 20,
+            AuditUnit::GiB => 1 << 30,
+        }
+    }
+
+    /// The largest amount of it that is a setting and not a typo: a century, or a tebibyte.
+    fn max_amount(self) -> u64 {
+        match self {
+            AuditUnit::Weeks => 5_200,
+            AuditUnit::Months => 1_200,
+            AuditUnit::Years => 100,
+            AuditUnit::MiB => 1 << 20,
+            AuditUnit::GiB => 1 << 10,
+        }
+    }
+}
+
+/// A limit on the audit, as an amount of time or of space: `4 MiB`, `6 months`.
+///
+/// It keeps the unit it was written in rather than being reduced to seconds or bytes, because
+/// it is shown back to whoever wrote it, and "26 weeks" coming back as "0.4986 years" would be
+/// a page arguing with its own operator.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct AuditLimit {
+    pub amount: u64,
+    pub unit: AuditUnit,
+}
+
+impl AuditLimit {
+    pub const fn new(amount: u64, unit: AuditUnit) -> AuditLimit {
+        AuditLimit { amount, unit }
+    }
+
+    /// Parse `<amount> <unit>`, the space optional: `4 MiB`, `4MiB`, `1 year`, `26 weeks`.
+    /// The amount is a whole number, at least one, and at most [`AuditUnit`]'s ceiling.
+    pub fn parse(raw: &str) -> Result<AuditLimit, String> {
+        let s = raw.trim();
+        let split = s.find(|c: char| !c.is_ascii_digit()).unwrap_or(s.len());
+        let (digits, unit) = s.split_at(split);
+        let refuse = || {
+            Err(format!(
+                "'{s}' is not an amount and a unit: write it as, say, '4 MiB', '1 GiB', \
+                 '26 weeks', '6 months' or '1 year'"
+            ))
+        };
+        let Some(unit) = AuditUnit::parse(unit) else {
+            return refuse();
+        };
+        let Ok(amount) = digits.parse::<u64>() else {
+            return refuse();
+        };
+        if amount == 0 {
+            return Err(format!("'{s}': an amount of nothing is not a limit"));
+        }
+        if amount > unit.max_amount() {
+            return Err(format!(
+                "'{s}': at most {} {}, which is already more than any disk or any audit needs",
+                unit.max_amount(),
+                unit.code()
+            ));
+        }
+        Ok(AuditLimit { amount, unit })
+    }
+
+    /// How the file writes it: `4 MiB`, `1 year`, `6 months`. What [`AuditLimit::parse`]
+    /// reads back as the same limit.
+    pub fn spelled(&self) -> String {
+        let word = if self.amount == 1 {
+            self.unit.singular()
+        } else {
+            self.unit.code()
+        };
+        format!("{} {word}", self.amount)
+    }
+
+    /// The limit in seconds, when it is one of time.
+    pub fn seconds(&self) -> Option<u64> {
+        self.unit
+            .is_time()
+            .then(|| self.amount.saturating_mul(self.unit.scale()))
+    }
+
+    /// The limit in bytes, when it is one of space.
+    pub fn bytes(&self) -> Option<u64> {
+        (!self.unit.is_time()).then(|| self.amount.saturating_mul(self.unit.scale()))
+    }
+}
+
+/// When the live audit file rotates and how much of the audit is kept: `audit.rotation` and
+/// `audit.retention`, compiled, and the arithmetic between them in one place.
+///
+/// **There are only ever two files**, the live one and the one it last rotated onto (`.1`):
+/// a rotation replaces the previous `.1`, so what a rotation keeps is one file's worth. A
+/// retention then says how much of that pair may stay at most. In time: no event older than it
+/// is kept, whatever file it is in. In space: the pair together never exceeds it, which is
+/// done by rotating the live file at half of it at the latest, so it needs no rewriting at all.
+///
+/// **At least one of the two is a size**, and [`AuditPolicy::new`] refuses the combination
+/// that is not. A time bounds how old the audit gets and says nothing about how big: a flood
+/// of refusals inside one rotation period would grow the live file without limit, and a flood
+/// is the one case an audit exists for. With a size anywhere, [`AuditPolicy::max_bytes`] is
+/// the most the audit can ever take on disk, which is what keeps it bounded by construction.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct AuditPolicy {
+    pub rotation: AuditLimit,
+    pub retention: Option<AuditLimit>,
+}
+
+impl Default for AuditPolicy {
+    /// Four mebibytes and no retention: what the audit did before either was a setting.
+    fn default() -> Self {
+        AuditPolicy {
+            rotation: AuditLimit::new(AUDIT_MAX_BYTES >> 20, AuditUnit::MiB),
+            retention: None,
+        }
+    }
+}
+
+impl AuditPolicy {
+    /// A policy, or the sentence saying why it bounds no bytes.
+    pub fn new(rotation: AuditLimit, retention: Option<AuditLimit>) -> Result<AuditPolicy, String> {
+        let sized = rotation.bytes().is_some() || retention.is_some_and(|r| r.bytes().is_some());
+        if !sized {
+            return Err(format!(
+                "rotation '{}' with {} bounds how old the audit gets and not how big: a flood \
+                 of refusals would grow the live file without limit. Rotate on a size (MiB, GiB) \
+                 or give the retention one",
+                rotation.spelled(),
+                match retention {
+                    Some(r) => format!("retention '{}'", r.spelled()),
+                    None => "no retention".to_string(),
+                }
+            ));
+        }
+        Ok(AuditPolicy {
+            rotation,
+            retention,
+        })
+    }
+
+    /// The size the live file rotates at: the rotation's own, or half a retention in space,
+    /// whichever is smaller, so that the live file and the one before it together never exceed
+    /// that retention. Always an answer: a policy [`AuditPolicy::new`] refused would fall back
+    /// to [`AUDIT_MAX_BYTES`] here rather than to no bound.
+    pub fn rotate_at_bytes(&self) -> u64 {
+        let half = self.retention.and_then(|r| r.bytes()).map(|b| b / 2);
+        match (self.rotation.bytes(), half) {
+            (Some(r), Some(h)) => r.min(h),
+            (Some(r), None) => r,
+            (None, Some(h)) => h,
+            (None, None) => AUDIT_MAX_BYTES,
+        }
+    }
+
+    /// The age, in seconds, the live file's oldest event may reach before the file rotates.
+    pub fn rotate_at_age(&self) -> Option<u64> {
+        self.rotation.seconds()
+    }
+
+    /// The oldest timestamp an event may carry at `now` and still be kept, for a retention in
+    /// time.
+    pub fn keep_since(&self, now: u64) -> Option<u64> {
+        self.retention
+            .and_then(|r| r.seconds())
+            .map(|s| now.saturating_sub(s))
+    }
+
+    /// The most the audit can take on disk: two files at [`AuditPolicy::rotate_at_bytes`].
+    pub fn max_bytes(&self) -> u64 {
+        self.rotate_at_bytes().saturating_mul(2)
+    }
+}
 
 /// What kind of thing happened. The outcome is a property of the kind rather than a field of
 /// its own: there is no granted-and-refused event, and a second field would let one be
@@ -3747,6 +4064,30 @@ impl AuditCredential {
     }
 }
 
+/// Where a request came from, as far as the gate can be told: the three things about a request
+/// that are not about the credential it carried.
+///
+/// A type of its own because the gate reads it once per request and every event recorded on
+/// that request's behalf carries it ([`AuditEvent::from`]). A caller that had to name each field
+/// at each call site would be a caller that forgets one, and the row it forgets it on is the
+/// row somebody needed it on.
+///
+/// **How far each is to be believed differs, and the difference is why they are three fields
+/// and not one.** The gate listens on loopback and never sees a client's address itself, so
+/// `ip` is only as true as the proxy that wrote it: it is recorded only when
+/// [`AuditSettings::client_ip_header`] names a header, which nginx must then overwrite on every
+/// location that reaches the gate. `rid` is nginx's own id for the request, recorded the same
+/// way under [`AuditSettings::request_id_header`], and it is there to find this request's line
+/// in nginx's access log, which holds everything this record deliberately does not. `ua` is the
+/// client's word about itself and nothing more: a hint for whoever reads the row ("that is my
+/// phone"), never evidence.
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub struct AuditClient {
+    pub ip: Option<String>,
+    pub ua: Option<String>,
+    pub rid: Option<String>,
+}
+
 /// One line of the audit file: one authentication event.
 ///
 /// **What is deliberately not here is every allowed request.** The gate answers an
@@ -3755,8 +4096,8 @@ impl AuditCredential {
 /// write on the path that must never be slow. The events kept are the ones that change
 /// something: a session begins, a session is refused, a session ends, somebody who is in no
 /// roster row is let in anyway, and a credential is turned away. What a per-request access log
-/// would say is already said by nginx's, which has the URL, the status and the client address
-/// this gate never sees.
+/// would say is already said by nginx's, which has the URL, the status and the byte count for
+/// every request; `rid` is how a row here finds its line there.
 ///
 /// The other deliberate omission is the refusal that carries **no** credential, which is what
 /// every signed-out browser gets on its way to the login page. It is the ordinary case, it
@@ -3796,11 +4137,30 @@ pub struct AuditEvent {
     /// access check already uses for the same verdict.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub reason: Option<String>,
+    /// The Cognito account behind the credential: the id_token's `sub`, which unlike the email
+    /// is never handed to anybody else. It is what tells the account that signed in last month
+    /// from a new one registered on the same address after the first was deleted.
+    ///
+    /// Present only where a token was validated on this request. A session cookie carries no
+    /// `sub`, and making it carry one would change the cookie's wire format, which logs
+    /// everybody out; the login event is where the answer is recorded, once.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub sub: Option<String>,
+    /// The client's address, as the proxy in front of the gate reported it; see
+    /// [`AuditClient`] for how far that is to be believed.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub ip: Option<String>,
+    /// The client's `User-Agent`, cut short by the gate so a line stays a line.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub ua: Option<String>,
+    /// The proxy's id for the request, for finding its line in the proxy's own log.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub rid: Option<String>,
 }
 
 impl AuditEvent {
-    /// A bare event of this kind. The rest is added by the four methods below, so a call site
-    /// in the gate stays one expression and cannot forget a field it never had to name.
+    /// A bare event of this kind. The rest is added by the methods below, so a call site in
+    /// the gate stays one expression and cannot forget a field it never had to name.
     pub fn new(ts: u64, kind: AuditKind, cred: AuditCredential) -> AuditEvent {
         AuditEvent {
             v: AUDIT_SCHEMA,
@@ -3813,6 +4173,10 @@ impl AuditEvent {
             scope: None,
             url: None,
             reason: None,
+            sub: None,
+            ip: None,
+            ua: None,
+            rid: None,
         }
     }
 
@@ -3854,8 +4218,26 @@ impl AuditEvent {
         self
     }
 
+    /// Which Cognito account the token belonged to, when a token was validated at all.
+    pub fn account(mut self, sub: Option<&str>) -> AuditEvent {
+        self.sub = sub.map(str::to_string);
+        self
+    }
+
+    /// Where the request came from. One value for all three, so no call site has to know
+    /// which of them this request happened to carry.
+    pub fn from(mut self, client: &AuditClient) -> AuditEvent {
+        self.ip.clone_from(&client.ip);
+        self.ua.clone_from(&client.ua);
+        self.rid.clone_from(&client.rid);
+        self
+    }
+
     /// Everything on this event a text filter should match, joined. One place, so the page's
     /// filter box and any future one agree on what "matches" means.
+    ///
+    /// The address and the request id are in it because pasting one is how a reader arrives
+    /// here from somewhere else: from a firewall's log, or from the line in nginx's.
     pub fn haystack(&self) -> String {
         let mut s = String::new();
         for part in [
@@ -3865,6 +4247,10 @@ impl AuditEvent {
             self.scope.as_deref(),
             self.url.as_deref(),
             self.reason.as_deref(),
+            self.sub.as_deref(),
+            self.ip.as_deref(),
+            self.ua.as_deref(),
+            self.rid.as_deref(),
         ]
         .into_iter()
         .flatten()
@@ -3908,13 +4294,144 @@ fn audit_previous(path: &std::path::Path) -> std::path::PathBuf {
     std::path::PathBuf::from(name)
 }
 
-/// The gate's end of the audit file: the one thing in this system that appends.
+/// The mode the audit's files are left in: the gate writes, the `bb-auth` group (which is how
+/// `bb-auth-web` reads it) reads, nobody else.
+///
+/// Set after the fact rather than through `OpenOptions::mode`, which the unit's `UMask=0077`
+/// would mask down to 0600 and leave the GUI unable to read a word of it. Best effort: an
+/// operator who chose another mode keeps it, since the write succeeding matters more than the
+/// bits agreeing with a default.
+fn audit_mode(path: &std::path::Path) {
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        let _ = std::fs::set_permissions(path, std::fs::Permissions::from_mode(0o640));
+    }
+    #[cfg(not(unix))]
+    let _ = path;
+}
+
+/// Only the timestamp of a line, which is all rotation and retention need to know about it.
+#[derive(Deserialize)]
+struct Stamp {
+    ts: u64,
+}
+
+/// The timestamp a line carries, or `None` for a line that is not one of ours (a torn tail
+/// after a power cut).
+fn line_ts(line: &[u8]) -> Option<u64> {
+    serde_json::from_slice::<Stamp>(line).ok().map(|s| s.ts)
+}
+
+/// The timestamp of the first readable line of a file: its oldest event, since the file is
+/// append-ordered. `None` for a file that is missing, empty, or has no readable line near its
+/// start.
+fn oldest_ts(path: &std::path::Path) -> Option<u64> {
+    use std::io::BufRead;
+    let f = std::fs::File::open(path).ok()?;
+    std::io::BufReader::new(f)
+        .split(b'\n')
+        .take(16)
+        .find_map(|l| l.ok().and_then(|l| line_ts(&l)))
+}
+
+/// The timestamp of the last readable line of a file: its newest event.
+fn newest_ts(path: &std::path::Path) -> Option<u64> {
+    let mut lines = RevLines::open(path).ok()?;
+    for _ in 0..16 {
+        let line = lines.next_line().ok()??;
+        if let Some(ts) = line_ts(&line) {
+            return Some(ts);
+        }
+    }
+    None
+}
+
+/// Replace `path` with its own bytes from `from` onwards, through a temp file beside it and a
+/// rename, so a reader that opened the file a moment ago keeps reading the bytes it opened.
+///
+/// Streamed rather than read into memory, because a file here can be as large as an operator
+/// said a rotation may be, and that can be a gibibyte on a machine with less to spare.
+fn keep_from(path: &std::path::Path, from: u64) -> std::io::Result<()> {
+    use std::io::{Seek, SeekFrom};
+    let mut src = std::fs::File::open(path)?;
+    src.seek(SeekFrom::Start(from))?;
+    let mut tmp_name = path.as_os_str().to_os_string();
+    tmp_name.push(".tmp");
+    let tmp = std::path::PathBuf::from(tmp_name);
+    let mut dst = std::fs::File::create(&tmp)?;
+    std::io::copy(&mut src, &mut dst)?;
+    dst.sync_all()?;
+    drop(dst);
+    audit_mode(&tmp);
+    std::fs::rename(&tmp, path)
+}
+
+/// Drop every event of `path` older than `since`: the whole file when even its newest is, the
+/// lines before the first one that is not otherwise, and nothing when its oldest is not.
+///
+/// The file is time-ordered, so this is "find the first line to keep and keep everything
+/// after it", and a torn line before that point goes with the expired ones.
+fn drop_before(path: &std::path::Path, since: u64) -> std::io::Result<()> {
+    use std::io::BufRead;
+    match oldest_ts(path) {
+        None => return Ok(()),
+        Some(t) if t >= since => return Ok(()),
+        Some(_) => {}
+    }
+    if newest_ts(path).is_some_and(|t| t < since) {
+        return std::fs::remove_file(path);
+    }
+    let mut reader = std::io::BufReader::new(std::fs::File::open(path)?);
+    let mut offset = 0u64;
+    let mut line = Vec::new();
+    loop {
+        line.clear();
+        let n = reader.read_until(b'\n', &mut line)?;
+        if n == 0 {
+            return std::fs::remove_file(path);
+        }
+        if line_ts(line.strip_suffix(b"\n").unwrap_or(&line)).is_some_and(|t| t >= since) {
+            return keep_from(path, offset);
+        }
+        offset += n as u64;
+    }
+}
+
+/// Keep at most the last `max` bytes of `path`, starting at a line boundary, which is what a
+/// retention in space does to a file written under a looser one.
+fn keep_tail(path: &std::path::Path, max: u64) -> std::io::Result<()> {
+    use std::io::{BufRead, Seek, SeekFrom};
+    let len = match std::fs::metadata(path) {
+        Ok(m) => m.len(),
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(()),
+        Err(e) => return Err(e),
+    };
+    if len <= max {
+        return Ok(());
+    }
+    // The first whole line at or after the cut: skip the partial one the cut lands in.
+    let mut reader = std::io::BufReader::new(std::fs::File::open(path)?);
+    reader.seek(SeekFrom::Start(len - max))?;
+    let mut partial = Vec::new();
+    let skipped = reader.read_until(b'\n', &mut partial)? as u64;
+    keep_from(path, len - max + skipped)
+}
+
+/// The gate's end of the audit file: the one thing in this system that appends, rotates and
+/// prunes it.
 ///
 /// It is a type and not a free function because rotation is a check-then-rename and the gate
-/// is threaded: two workers that both found the file over [`AUDIT_MAX_BYTES`] would rename it
-/// twice and throw away the half between. The mutex is held across the whole append, which
-/// costs nothing at the rate these events happen and is what makes the file's line ordering
-/// its time ordering, which the reader then relies on.
+/// is threaded: two workers that both found the file due would rename it twice and throw away
+/// the half between. The mutex is held across the whole append, which costs nothing at the rate
+/// these events happen and is what makes the file's line ordering its time ordering, which the
+/// reader and the pruning both rely on.
+///
+/// What it does is two things at two rates, and the split is on purpose. [`AuditWriter::record`]
+/// appends and rotates on **size**, because that is the bound that has to hold between one
+/// event and the next under a flood. [`AuditWriter::maintain`] rotates on **age** and applies
+/// the retention, which only have to hold to within an hour, and must hold even on a deployment
+/// that writes nothing for a month: the gate calls it hourly, at startup and on every reload.
 pub struct AuditWriter {
     path: std::path::PathBuf,
     lock: std::sync::Mutex<()>,
@@ -3933,39 +4450,139 @@ impl AuditWriter {
         &self.path
     }
 
-    /// Append one event.
+    /// Poisoning would mean a previous writer panicked mid-append, which costs at most a torn
+    /// line; refusing to write from then on would cost the rest of the audit.
+    fn guard(&self) -> std::sync::MutexGuard<'_, ()> {
+        self.lock.lock().unwrap_or_else(|e| e.into_inner())
+    }
+
+    /// Move the live file onto `.1`, replacing whatever was there: only the last one is kept.
+    ///
+    /// Rename and not truncate: a reader that opened the file a moment ago goes on reading the
+    /// bytes it opened, and the events are still there to be read next time under the other
+    /// name.
+    fn rotate(&self) -> std::io::Result<()> {
+        match std::fs::rename(&self.path, audit_previous(&self.path)) {
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(()),
+            other => other,
+        }
+    }
+
+    /// Append one event, rotating first if this line would take the live file past the size
+    /// `policy` allows.
+    ///
+    /// Before and not after, so the live file never holds more than that size: which is what
+    /// makes [`AuditPolicy::max_bytes`] exact rather than exact give or take a line.
     ///
     /// The error is returned rather than reported, because the wording belongs to whoever has
     /// an operator, and above all because the **caller must not stop**: a full disk, a
     /// directory the unit forgot to declare or a mode nobody fixed must cost the audit and
     /// never the login. The gate says so once and carries on.
-    pub fn record(&self, ev: &AuditEvent) -> std::io::Result<()> {
+    pub fn record(&self, ev: &AuditEvent, policy: &AuditPolicy) -> std::io::Result<()> {
         use std::io::Write;
         let mut line = serde_json::to_string(ev).map_err(std::io::Error::other)?;
         line.push('\n');
-        // Poisoning would mean a previous writer panicked mid-append, which costs at most a
-        // torn line; refusing to write from then on would cost the rest of the audit.
-        let _guard = self.lock.lock().unwrap_or_else(|e| e.into_inner());
-        if std::fs::metadata(&self.path).is_ok_and(|m| m.len() >= AUDIT_MAX_BYTES) {
-            // Rename and not truncate: a reader that opened the file a moment ago goes on
-            // reading the bytes it opened, and the events are still there to be read next
-            // time under the other name.
-            std::fs::rename(&self.path, audit_previous(&self.path))?;
+        let _guard = self.guard();
+        let size = std::fs::metadata(&self.path).map(|m| m.len()).unwrap_or(0);
+        if size > 0 && size + line.len() as u64 > policy.rotate_at_bytes() {
+            self.rotate()?;
         }
         let mut f = std::fs::OpenOptions::new()
             .create(true)
             .append(true)
             .open(&self.path)?;
-        // The mode is set after the fact rather than through `OpenOptions::mode`, which the
-        // unit's `UMask=0077` would mask down to 0600 and leave the GUI unable to read a word
-        // of it. Best effort: an operator who chose another mode keeps it, since the write
-        // succeeding matters more than the bits agreeing with a default.
-        #[cfg(unix)]
-        {
-            use std::os::unix::fs::PermissionsExt;
-            let _ = std::fs::set_permissions(&self.path, std::fs::Permissions::from_mode(0o640));
-        }
+        audit_mode(&self.path);
         f.write_all(line.as_bytes())
+    }
+
+    /// Bring both files within `policy` as it stands at `now`: rotate the live file if it is
+    /// too big or its oldest event too old, cut `.1` down to the size a rotation may hold, and
+    /// drop every event a retention in time has expired.
+    ///
+    /// The size half is what makes a stricter policy take effect at once rather than one
+    /// rotation later: a `.1` written under a looser one would otherwise stand, too big, until
+    /// the live file next rotated onto it.
+    pub fn maintain(&self, policy: &AuditPolicy, now: u64) -> std::io::Result<()> {
+        let _guard = self.guard();
+        let prev = audit_previous(&self.path);
+        let live_size = std::fs::metadata(&self.path).map(|m| m.len()).unwrap_or(0);
+        let too_big = live_size > policy.rotate_at_bytes();
+        let too_old = policy
+            .rotate_at_age()
+            .zip(oldest_ts(&self.path))
+            .is_some_and(|(age, oldest)| oldest < now.saturating_sub(age));
+        if live_size > 0 && (too_big || too_old) {
+            self.rotate()?;
+        }
+        keep_tail(&prev, policy.rotate_at_bytes())?;
+        keep_tail(&self.path, policy.rotate_at_bytes())?;
+        if let Some(since) = policy.keep_since(now) {
+            drop_before(&prev, since)?;
+            drop_before(&self.path, since)?;
+        }
+        Ok(())
+    }
+}
+
+/// How much of a file [`RevLines`] reads at a time.
+const REV_BLOCK: u64 = 64 * 1024;
+
+/// The lines of a file, last first, read from its end in blocks: one block of memory plus the
+/// longest line, whatever size the file has grown to.
+///
+/// The audit is read newest first, and a view of "the last day" wants the end of a file that
+/// may hold a year. Reading the whole of it to walk it backwards was fine at four mebibytes and
+/// is not at the gibibyte a rotation may now be set to, on the machine that serves the page.
+struct RevLines {
+    file: std::fs::File,
+    /// How much of the file, from its start, has not been read yet.
+    pos: u64,
+    /// Read but not yet handed out, in file order: at most one partial line plus one block.
+    buf: Vec<u8>,
+    block: u64,
+}
+
+impl RevLines {
+    fn open(path: &std::path::Path) -> std::io::Result<RevLines> {
+        RevLines::with_block(path, REV_BLOCK)
+    }
+
+    fn with_block(path: &std::path::Path, block: u64) -> std::io::Result<RevLines> {
+        let file = std::fs::File::open(path)?;
+        // The length now, not as the file grows: a line appended while this reads belongs to
+        // the next read, and reading up to a moving end would hand out half of it.
+        let pos = file.metadata()?.len();
+        Ok(RevLines {
+            file,
+            pos,
+            buf: Vec::new(),
+            block,
+        })
+    }
+
+    /// The next line back, without its newline, skipping blank ones; `None` at the start.
+    fn next_line(&mut self) -> std::io::Result<Option<Vec<u8>>> {
+        use std::io::{Read, Seek, SeekFrom};
+        loop {
+            if let Some(i) = self.buf.iter().rposition(|&b| b == b'\n') {
+                let line = self.buf.split_off(i + 1);
+                self.buf.truncate(i);
+                if line.is_empty() {
+                    continue;
+                }
+                return Ok(Some(line));
+            }
+            if self.pos == 0 {
+                return Ok((!self.buf.is_empty()).then(|| std::mem::take(&mut self.buf)));
+            }
+            let n = self.block.min(self.pos);
+            self.pos -= n;
+            let mut chunk = vec![0u8; n as usize];
+            self.file.seek(SeekFrom::Start(self.pos))?;
+            self.file.read_exact(&mut chunk)?;
+            chunk.extend_from_slice(&self.buf);
+            self.buf = chunk;
+        }
     }
 }
 
@@ -3998,20 +4615,16 @@ pub fn read_audit(
         damaged: 0,
     };
     for p in [path.to_path_buf(), audit_previous(path)] {
-        let data = match std::fs::read(&p) {
-            Ok(d) => d,
+        let mut lines = match RevLines::open(&p) {
+            Ok(l) => l,
             Err(e) if e.kind() == std::io::ErrorKind::NotFound => continue,
             Err(e) => return Err(e),
         };
-        // Backwards, because the file is time-ordered and the page wants its end. The whole
-        // file is in memory either way (it is bounded by AUDIT_MAX_BYTES), but only the lines
-        // actually shown are parsed, which is what keeps a "last hour" view off the cost of a
-        // month of history.
-        for line in data.split(|b| *b == b'\n').rev() {
-            if line.is_empty() {
-                continue;
-            }
-            match serde_json::from_slice::<AuditEvent>(line) {
+        // Backwards, because the file is time-ordered and the page wants its end, and from the
+        // end in blocks, so that only what is shown is read at all: a "last hour" view costs a
+        // few blocks of a file that may hold a year.
+        while let Some(line) = lines.next_line()? {
+            match serde_json::from_slice::<AuditEvent>(&line) {
                 Ok(ev) => {
                     if since.is_some_and(|s| ev.ts < s) {
                         return Ok(page);
@@ -4557,9 +5170,11 @@ pub struct UiSettings {
 
 /// A settings file as it is written: three sections, a version, and whatever else was in it.
 ///
-/// The sections answer three different questions, which is why they are three and not one:
-/// `gate` is how the gate answers a request, `web` is who may use the GUI, and `ui` is how a
-/// page looks to whoever reaches one. The last is the only one *both* programs read.
+/// The sections answer four different questions, which is why they are four and not one:
+/// `gate` is how the gate answers a request, `audit` is what it writes down about one and for
+/// how long, `web` is who may use the GUI, and `ui` is how a page looks to whoever reaches one.
+/// `ui` is the one *both* programs render from, and `audit` the one both read (the gate to
+/// write the audit, the GUI to show no more of it than the retention keeps).
 ///
 /// Unknown keys are rejected inside each section, for the reason [`AppSpec`] rejects them,
 /// a typo in a setting that narrows behaviour must not be dropped in silence, and preserved
@@ -4571,6 +5186,8 @@ pub struct SettingsFile {
     pub version: u32,
     #[serde(default)]
     pub gate: GateSettings,
+    #[serde(default)]
+    pub audit: AuditSettings,
     #[serde(default)]
     pub web: WebSettings,
     #[serde(default)]
@@ -4629,6 +5246,13 @@ pub struct Settings {
     pub cookie_domain: Option<String>,
     /// See [`GateSettings::authorized_hosts`], compiled. Empty refuses every redirect target.
     pub authorized_hosts: Vec<UrlPattern>,
+    /// See [`AuditSettings::client_ip_header`]. `None` = no address is recorded.
+    pub client_ip_header: Option<String>,
+    /// See [`AuditSettings::request_id_header`]. `None` = no request id is recorded.
+    pub request_id_header: Option<String>,
+    /// [`AuditSettings::rotation`] and [`AuditSettings::retention`], compiled into the one
+    /// thing both programs need of them.
+    pub audit_policy: AuditPolicy,
     /// See [`WebSettings::admins`], normalised with [`norm_email`] and deduplicated. May be
     /// empty here; `bb-auth-web` is where that is fatal.
     pub admins: Vec<String>,
@@ -4849,6 +5473,64 @@ pub fn compile_cookie_domain(raw: &str) -> Result<String, String> {
         );
     }
     Ok(d)
+}
+
+/// The request headers an audit value may never be read from, because each carries a
+/// credential. Compared case-insensitively, as header names are.
+const CREDENTIAL_HEADERS: [&str; 3] = ["Authorization", "Proxy-Authorization", "Cookie"];
+
+/// Validate the name of a request header the audit reads a value out of, for the setting
+/// `what` names: empty, which is the setting switched off, or a header name that is not a
+/// credential.
+///
+/// The charset is letters, digits and `-`, which is narrower than RFC 9110's token and is
+/// every header name anybody actually writes. The underscore is the one that matters: nginx
+/// drops a request header with one in its name unless `underscores_in_headers` says otherwise,
+/// so a name that allowed it would allow a setting that reads nothing, in silence.
+///
+/// The credential headers are refused by name, and the reason is the request id rather than
+/// the address. An address is parsed and whatever is not one is dropped, so naming
+/// `Authorization` there would only record nothing; but a request id is written down as it
+/// arrives, and naming a header that carries a credential would put that credential into a file
+/// an administrator reads, which is the one thing this system never does with a bearer.
+pub fn compile_audit_header(what: &str, raw: &str) -> Result<String, String> {
+    let name = raw.trim();
+    if name.is_empty() {
+        return Ok(String::new());
+    }
+    if name.len() > 64 || !name.bytes().all(|b| b.is_ascii_alphanumeric() || b == b'-') {
+        return Err(format!(
+            "{what}: '{name}' is not a header name, which is letters, digits and '-' (nginx \
+             drops a request header with an underscore in its name)"
+        ));
+    }
+    if CREDENTIAL_HEADERS
+        .iter()
+        .any(|c| c.eq_ignore_ascii_case(name))
+    {
+        return Err(format!(
+            "{what}: '{name}' carries a credential, and the audit never writes one down"
+        ));
+    }
+    Ok(name.to_string())
+}
+
+/// Compile `audit.rotation` and `audit.retention` into a policy, or say why not.
+///
+/// Empty is a default and not a refusal for both: a rotation nobody wrote is
+/// [`AUDIT_MAX_BYTES`], and a retention nobody wrote is no limit beyond the rotation's own,
+/// which is what the audit did before either was a setting. Each message names the setting it
+/// is about, because the one sentence [`AuditPolicy::new`] can add is about the pair.
+pub fn compile_audit_policy(rotation: &str, retention: &str) -> Result<AuditPolicy, String> {
+    let rotation = match rotation.trim() {
+        "" => AuditPolicy::default().rotation,
+        raw => AuditLimit::parse(raw).map_err(|e| format!("audit.rotation: {e}"))?,
+    };
+    let retention = match retention.trim() {
+        "" => None,
+        raw => Some(AuditLimit::parse(raw).map_err(|e| format!("audit.retention: {e}"))?),
+    };
+    AuditPolicy::new(rotation, retention).map_err(|e| format!("audit: {e}"))
 }
 
 /// What a `Domain=` attribute actually reaches: the value without the optional leading dot,
@@ -5196,6 +5878,22 @@ pub fn compile_settings(file: &SettingsFile) -> Result<Settings, String> {
         }
     }
 
+    // What the audit reads where a request came from out of. One header for both is refused
+    // with a sentence rather than accepted: it could only ever be a slip, since no header
+    // carries an address and an id at once, and one of the two settings would then record
+    // nothing while looking configured.
+    let client_ip_header =
+        compile_audit_header("audit.client_ip_header", &file.audit.client_ip_header)?;
+    let request_id_header =
+        compile_audit_header("audit.request_id_header", &file.audit.request_id_header)?;
+    if !client_ip_header.is_empty() && client_ip_header.eq_ignore_ascii_case(&request_id_header) {
+        return Err(format!(
+            "audit.client_ip_header and audit.request_id_header both name '{client_ip_header}'; \
+             one header cannot carry an address and a request id at once"
+        ));
+    }
+    let audit_policy = compile_audit_policy(&file.audit.rotation, &file.audit.retention)?;
+
     let mut admins: Vec<String> = Vec::new();
     for raw in &file.web.admins {
         let e = norm_email(raw);
@@ -5245,6 +5943,9 @@ pub fn compile_settings(file: &SettingsFile) -> Result<Settings, String> {
         issuer,
         cookie_domain: (!cookie_domain.is_empty()).then_some(cookie_domain),
         authorized_hosts,
+        client_ip_header: (!client_ip_header.is_empty()).then_some(client_ip_header),
+        request_id_header: (!request_id_header.is_empty()).then_some(request_id_header),
+        audit_policy,
         admins,
         stylesheet_url,
         logo_url,
@@ -7066,6 +7767,137 @@ mod tests {
         assert_eq!(s.social_providers, None);
         assert_eq!(s.session_ttl, 2_592_000);
         assert!(s.admins.is_empty());
+        // The audit records nothing about where a request came from until somebody who has
+        // wired nginx says which headers to believe, and it rotates and keeps exactly what it
+        // did before either was a setting.
+        assert_eq!(s.client_ip_header, None);
+        assert_eq!(s.request_id_header, None);
+        assert_eq!(s.audit_policy, AuditPolicy::default());
+        assert_eq!(s.audit_policy.max_bytes(), 2 * AUDIT_MAX_BYTES);
+    }
+
+    /// Both audit headers are off until named, and neither may name a credential.
+    ///
+    /// The credential refusal is the one that matters, and it is pinned for the request id's
+    /// sake: an id is written down as it arrives, so a setting that could name `Cookie` could
+    /// put every session cookie on the estate into a file an administrator reads.
+    #[test]
+    fn the_audit_headers_are_off_until_named_and_never_a_credential() {
+        let s = settings(
+            r#"{ "version": 3, "audit": { "client_ip_header": " X-Real-IP ",
+                                           "request_id_header": "X-Request-ID" } }"#,
+        )
+        .unwrap();
+        assert_eq!(s.client_ip_header.as_deref(), Some("X-Real-IP"));
+        assert_eq!(s.request_id_header.as_deref(), Some("X-Request-ID"));
+
+        for (field, name, says) in [
+            ("client_ip_header", "Authorization", "credential"),
+            ("request_id_header", "cookie", "credential"),
+            ("request_id_header", "Proxy-Authorization", "credential"),
+            // nginx drops a request header with an underscore in its name by default, so this
+            // would be a setting that reads nothing, in silence.
+            ("client_ip_header", "X_Real_IP", "underscore"),
+            ("request_id_header", "X-Request ID", "header name"),
+        ] {
+            let e = refusal(settings(&format!(
+                r#"{{ "version": 3, "audit": {{ "{field}": "{name}" }} }}"#
+            )));
+            assert!(e.contains(field) && e.contains(says), "{field}={name}: {e}");
+        }
+
+        // One header for both is a slip, and one of the two would record nothing.
+        let e = refusal(settings(
+            r#"{ "version": 3, "audit": { "client_ip_header": "X-Real-IP",
+                                           "request_id_header": "x-real-ip" } }"#,
+        ));
+        assert!(e.contains("at once"), "{e}");
+    }
+
+    #[test]
+    fn an_audit_limit_is_an_amount_and_a_unit_of_time_or_space() {
+        for (typed, amount, unit, spelled) in [
+            ("4 MiB", 4, AuditUnit::MiB, "4 MiB"),
+            ("4MiB", 4, AuditUnit::MiB, "4 MiB"),
+            (" 1 gib ", 1, AuditUnit::GiB, "1 GiB"),
+            ("1 year", 1, AuditUnit::Years, "1 year"),
+            ("2 Years", 2, AuditUnit::Years, "2 years"),
+            ("6 months", 6, AuditUnit::Months, "6 months"),
+            ("1 month", 1, AuditUnit::Months, "1 month"),
+            ("26 weeks", 26, AuditUnit::Weeks, "26 weeks"),
+        ] {
+            let l = AuditLimit::parse(typed).unwrap();
+            assert_eq!((l.amount, l.unit), (amount, unit), "{typed}");
+            assert_eq!(l.spelled(), spelled);
+            // What the file is written with reads back as the same limit.
+            assert_eq!(AuditLimit::parse(&l.spelled()).unwrap(), l);
+        }
+        assert_eq!(AuditLimit::parse("2 MiB").unwrap().bytes(), Some(2 << 20));
+        assert_eq!(
+            AuditLimit::parse("1 week").unwrap().seconds(),
+            Some(604_800)
+        );
+        assert_eq!(AuditLimit::parse("1 GiB").unwrap().seconds(), None);
+        // A decimal megabyte is a different number, and a day is finer than a log is kept in.
+        for junk in [
+            "",
+            "4",
+            "MiB",
+            "0 MiB",
+            "-1 years",
+            "1.5 GiB",
+            "4 MB",
+            "4 KiB",
+            "1 day",
+            "101 years",
+            "2000 GiB",
+        ] {
+            assert!(AuditLimit::parse(junk).is_err(), "{junk:?}");
+        }
+    }
+
+    /// The arithmetic between rotation and retention, and the one combination refused: nothing
+    /// in space anywhere, which leaves a flood free to fill the disk.
+    #[test]
+    fn a_policy_is_bounded_in_bytes_whatever_else_it_says() {
+        let l = |s: &str| AuditLimit::parse(s).unwrap();
+        // A size rotation alone: the default shape.
+        let p = AuditPolicy::new(l("4 MiB"), None).unwrap();
+        assert_eq!(p.rotate_at_bytes(), 4 << 20);
+        assert_eq!(p.max_bytes(), 8 << 20);
+        assert_eq!(p.keep_since(1_000_000), None);
+        // A retention in space pulls the rotation down to half of it, so the pair fits.
+        let p = AuditPolicy::new(l("4 MiB"), Some(l("2 MiB"))).unwrap();
+        assert_eq!(p.rotate_at_bytes(), 1 << 20);
+        assert_eq!(p.max_bytes(), 2 << 20);
+        // A rotation in time needs its bound from the retention.
+        let p = AuditPolicy::new(l("1 month"), Some(l("64 MiB"))).unwrap();
+        assert_eq!(p.rotate_at_age(), Some(2_629_746));
+        assert_eq!(p.max_bytes(), 64 << 20);
+        // A retention in time says how old, and the rotation still says how big.
+        let p = AuditPolicy::new(l("4 MiB"), Some(l("1 week"))).unwrap();
+        assert_eq!(p.keep_since(1_000_000), Some(1_000_000 - 604_800));
+        assert_eq!(p.max_bytes(), 8 << 20);
+        // Nothing in space: refused, with the way out in the sentence.
+        for retention in [None, Some(l("1 year"))] {
+            let e = AuditPolicy::new(l("1 month"), retention).unwrap_err();
+            assert!(e.contains("without limit") && e.contains("MiB"), "{e}");
+        }
+        // And through the settings file, where each refusal names its setting.
+        let e = refusal(settings(
+            r#"{ "version": 3, "audit": { "rotation": "1 month" } }"#,
+        ));
+        assert!(e.contains("audit"), "{e}");
+        let e = refusal(settings(
+            r#"{ "version": 3, "audit": { "retention": "1 fortnight" } }"#,
+        ));
+        assert!(e.contains("audit.retention"), "{e}");
+        let s = settings(
+            r#"{ "version": 3, "audit": { "rotation": "1 GiB", "retention": "6 months" } }"#,
+        )
+        .unwrap();
+        assert_eq!(s.audit_policy.rotation, l("1 GiB"));
+        assert_eq!(s.audit_policy.retention, Some(l("6 months")));
     }
 
     #[test]
@@ -8006,12 +8838,17 @@ mod tests {
         AuditEvent::new(ts, AuditKind::LoginGranted, AuditCredential::Local).by(who, None)
     }
 
+    /// Append under the policy a settings file that says nothing gets.
+    fn put(w: &AuditWriter, ev: AuditEvent) {
+        w.record(&ev, &AuditPolicy::default()).unwrap();
+    }
+
     #[test]
     fn the_audit_reads_back_newest_first() {
         let p = audit_tmp("order");
         let w = AuditWriter::new(&p);
         for (i, who) in ["a@x.com", "b@x.com", "c@x.com"].iter().enumerate() {
-            w.record(&login(100 + i as u64, who)).unwrap();
+            put(&w, login(100 + i as u64, who));
         }
         let page = read_audit(&p, None, 100).unwrap();
         let seen: Vec<&str> = page
@@ -8031,7 +8868,7 @@ mod tests {
         let p = audit_tmp("window");
         let w = AuditWriter::new(&p);
         for ts in 100..110 {
-            w.record(&login(ts, "a@x.com")).unwrap();
+            put(&w, login(ts, "a@x.com"));
         }
         // The window is a floor on `ts`, and the file being time-ordered is what lets the
         // read stop there rather than parse the rest.
@@ -8047,14 +8884,14 @@ mod tests {
     fn a_torn_line_is_counted_and_the_rest_is_read() {
         let p = audit_tmp("torn");
         let w = AuditWriter::new(&p);
-        w.record(&login(100, "a@x.com")).unwrap();
+        put(&w, login(100, "a@x.com"));
         // What a power cut mid-append leaves behind.
         {
             use std::io::Write;
             let mut f = std::fs::OpenOptions::new().append(true).open(&p).unwrap();
             f.write_all(b"{\"ts\":101,\"kin\n").unwrap();
         }
-        w.record(&login(102, "b@x.com")).unwrap();
+        put(&w, login(102, "b@x.com"));
         let page = read_audit(&p, None, 100).unwrap();
         assert_eq!(page.events.len(), 2, "the whole lines are still readable");
         assert_eq!(page.damaged, 1, "and the broken one is reported");
@@ -8065,11 +8902,11 @@ mod tests {
     fn a_rotation_keeps_the_window_whole() {
         let p = audit_tmp("rotate");
         let w = AuditWriter::new(&p);
-        w.record(&login(100, "old@x.com")).unwrap();
+        put(&w, login(100, "old@x.com"));
         // Rotate by hand rather than by writing four megabytes: what is under test is that a
         // read spans both files, not that `metadata` can measure one.
         std::fs::rename(&p, audit_previous(&p)).unwrap();
-        w.record(&login(101, "new@x.com")).unwrap();
+        put(&w, login(101, "new@x.com"));
         let page = read_audit(&p, None, 100).unwrap();
         let seen: Vec<&str> = page
             .events
@@ -8079,6 +8916,178 @@ mod tests {
         assert_eq!(seen, ["new@x.com", "old@x.com"]);
         let _ = std::fs::remove_file(&p);
         let _ = std::fs::remove_file(audit_previous(&p));
+    }
+
+    /// Lines of an audit file, as the writer would have left them, oldest first.
+    fn lines_of(stamps: &[u64]) -> String {
+        stamps
+            .iter()
+            .map(|ts| {
+                format!(
+                    "{}\n",
+                    serde_json::to_string(&login(*ts, "a@x.com")).unwrap()
+                )
+            })
+            .collect()
+    }
+
+    fn stamps(p: &std::path::Path) -> Vec<u64> {
+        std::fs::read_to_string(p)
+            .unwrap_or_default()
+            .lines()
+            .filter_map(|l| line_ts(l.as_bytes()))
+            .collect()
+    }
+
+    fn cleanup_audit(p: &std::path::Path) {
+        let _ = std::fs::remove_file(p);
+        let _ = std::fs::remove_file(audit_previous(p));
+    }
+
+    /// The live file rotates before the line that would take it past its size, not after, so
+    /// the pair never holds more than the policy says: the bound is exact, not exact give or
+    /// take a line.
+    #[test]
+    fn the_live_file_rotates_before_it_would_pass_its_size() {
+        let p = audit_tmp("rotate-size");
+        // A retention of 2 MiB rotates the live file at 1 MiB.
+        let policy = AuditPolicy::new(
+            AuditLimit::new(4, AuditUnit::MiB),
+            Some(AuditLimit::new(2, AuditUnit::MiB)),
+        )
+        .unwrap();
+        let limit = policy.rotate_at_bytes();
+        let one = lines_of(&[100]);
+        let mut fill = String::new();
+        let mut ts = 100;
+        while fill.len() + one.len() <= limit as usize {
+            fill.push_str(&lines_of(&[ts]));
+            ts += 1;
+        }
+        std::fs::write(&p, &fill).unwrap();
+        let w = AuditWriter::new(&p);
+        w.record(&login(ts, "next@x.com"), &policy).unwrap();
+        assert_eq!(
+            stamps(&p),
+            [ts],
+            "the live file starts again with the new event"
+        );
+        assert_eq!(
+            std::fs::read_to_string(audit_previous(&p)).unwrap(),
+            fill,
+            "and the one before it is what the live file was, whole"
+        );
+        assert!(std::fs::metadata(audit_previous(&p)).unwrap().len() <= limit);
+        cleanup_audit(&p);
+    }
+
+    /// Maintenance is what makes a time mean something on a deployment that writes nothing
+    /// for a month: a live file whose oldest event is past the rotation age moves on, and
+    /// every event past a retention in time goes, whichever file it is in.
+    #[test]
+    fn maintenance_rotates_on_age_and_drops_what_the_retention_expired() {
+        let now = 10_000_000;
+        let week = 604_800;
+
+        // Rotation on age: the oldest event is two weeks old, the rotation is one week.
+        let p = audit_tmp("maintain-age");
+        std::fs::write(&p, lines_of(&[now - 2 * week, now - 10])).unwrap();
+        let rotate_weekly = AuditPolicy::new(
+            AuditLimit::new(1, AuditUnit::Weeks),
+            Some(AuditLimit::new(64, AuditUnit::MiB)),
+        )
+        .unwrap();
+        AuditWriter::new(&p).maintain(&rotate_weekly, now).unwrap();
+        assert!(!p.exists(), "rotated away");
+        assert_eq!(stamps(&audit_previous(&p)), [now - 2 * week, now - 10]);
+        cleanup_audit(&p);
+
+        // Retention in time: `.1` entirely expired, the live file half.
+        let p = audit_tmp("maintain-retention");
+        std::fs::write(audit_previous(&p), lines_of(&[1_000, 1_001])).unwrap();
+        let mut live = lines_of(&[5_000, now - 2 * week]);
+        live.push_str("{\"ts\":42,\"kin\n"); // a torn line among the expired ones
+        live.push_str(&lines_of(&[now - 3_600, now - 60]));
+        std::fs::write(&p, live).unwrap();
+        let keep_a_week = AuditPolicy::new(
+            AuditLimit::new(4, AuditUnit::MiB),
+            Some(AuditLimit::new(1, AuditUnit::Weeks)),
+        )
+        .unwrap();
+        AuditWriter::new(&p).maintain(&keep_a_week, now).unwrap();
+        assert!(
+            !audit_previous(&p).exists(),
+            "a file with nothing left in it goes"
+        );
+        assert_eq!(stamps(&p), [now - 3_600, now - 60]);
+        assert_eq!(
+            read_audit(&p, None, 100).unwrap().damaged,
+            0,
+            "and the torn line went with the expired events around it"
+        );
+        // Run again, nothing changes: a retention already met costs no rewrite.
+        let before = std::fs::read(&p).unwrap();
+        AuditWriter::new(&p).maintain(&keep_a_week, now).unwrap();
+        assert_eq!(std::fs::read(&p).unwrap(), before);
+        cleanup_audit(&p);
+    }
+
+    /// A stricter policy takes effect at the next maintenance, which the gate runs on every
+    /// reload: a `.1` written under a looser one is cut down to its newest events, at a line
+    /// boundary, rather than standing too big until the next rotation.
+    #[test]
+    fn a_stricter_size_cuts_a_file_written_under_a_looser_one() {
+        let p = audit_tmp("maintain-size");
+        let old: Vec<u64> = (0..40_000).collect();
+        std::fs::write(audit_previous(&p), lines_of(&old)).unwrap();
+        std::fs::write(&p, lines_of(&[50_000])).unwrap();
+        let tight = AuditPolicy::new(
+            AuditLimit::new(4, AuditUnit::MiB),
+            Some(AuditLimit::new(2, AuditUnit::MiB)),
+        )
+        .unwrap();
+        AuditWriter::new(&p).maintain(&tight, 60_000).unwrap();
+        let prev = audit_previous(&p);
+        assert!(std::fs::metadata(&prev).unwrap().len() <= tight.rotate_at_bytes());
+        let kept = stamps(&prev);
+        assert_eq!(
+            kept.last(),
+            Some(&39_999),
+            "the newest events are the ones kept"
+        );
+        assert!(kept.len() < old.len());
+        assert_eq!(
+            read_audit(&p, None, 100_000).unwrap().damaged,
+            0,
+            "cut at a line"
+        );
+        cleanup_audit(&p);
+    }
+
+    /// Backwards through a file in blocks far smaller than its lines: every line comes out
+    /// whole, last first, blank ones skipped, with or without a final newline.
+    #[test]
+    fn a_file_is_read_backwards_in_blocks_and_every_line_comes_out_whole() {
+        let p = audit_tmp("revlines");
+        for body in [
+            "alpha\nbravo-is-a-much-longer-line\n\ncharlie\n",
+            "alpha\nbravo-is-a-much-longer-line\n\ncharlie",
+            "",
+            "\n\n",
+            "only",
+        ] {
+            std::fs::write(&p, body).unwrap();
+            let expect: Vec<&str> = body.lines().filter(|l| !l.is_empty()).rev().collect();
+            for block in [1, 3, 7, 64 * 1024] {
+                let mut r = RevLines::with_block(&p, block).unwrap();
+                let mut got = Vec::new();
+                while let Some(l) = r.next_line().unwrap() {
+                    got.push(String::from_utf8(l).unwrap());
+                }
+                assert_eq!(got, expect, "{body:?} in blocks of {block}");
+            }
+        }
+        let _ = std::fs::remove_file(&p);
     }
 
     #[test]
@@ -8122,6 +9131,50 @@ mod tests {
         }
     }
 
+    #[test]
+    fn where_a_request_came_from_rides_on_the_event_and_is_filterable() {
+        let client = AuditClient {
+            ip: Some("203.0.113.7".into()),
+            ua: Some("Mozilla/5.0 (X11; Linux aarch64)".into()),
+            rid: Some("5f1c0a9e7b2d4c3a8e6f1b0d9c7a5e3f".into()),
+        };
+        let ev = login(1_700_000_000, "a@x.com")
+            .account(Some("9d8e7f60-1a2b-4c3d-8e9f-0a1b2c3d4e5f"))
+            .from(&client);
+        assert_eq!(ev.ip, client.ip);
+        assert_eq!(ev.ua, client.ua);
+        assert_eq!(ev.rid, client.rid);
+        let line = serde_json::to_string(&ev).unwrap();
+        assert!(line.contains(r#""ip":"203.0.113.7""#), "{line}");
+        assert!(line.contains(r#""sub":"9d8e7f60-"#), "{line}");
+        assert_eq!(serde_json::from_str::<AuditEvent>(&line).unwrap(), ev);
+
+        // Pasting an address from a firewall's log, or an id from nginx's, is how a reader
+        // arrives at this page, so both have to find the row.
+        let hay = ev.haystack();
+        for part in ["203.0.113.7", "5f1c0a9e", "9d8e7f60", "aarch64"] {
+            assert!(hay.contains(part), "{part} is filterable");
+        }
+
+        // A client that said nothing leaves nothing behind, not three nulls.
+        let bare = login(1_700_000_000, "a@x.com").from(&AuditClient::default());
+        let line = serde_json::to_string(&bare).unwrap();
+        for absent in ["\"ip\"", "\"ua\"", "\"rid\"", "\"sub\""] {
+            assert!(!line.contains(absent), "{absent} in {line}");
+        }
+    }
+
+    /// The schema is additive, and a line an older gate wrote is still read. That is the whole
+    /// reason `AUDIT_SCHEMA` did not move when four fields arrived: nobody holds a line of this
+    /// file, so tolerating one without them costs nothing.
+    #[test]
+    fn a_line_from_before_the_client_fields_still_reads() {
+        let old = r#"{"v":1,"ts":1700000000,"kind":"login_granted","cred":{"type":"local"},"subject":"a@x.com"}"#;
+        let ev: AuditEvent = serde_json::from_str(old).unwrap();
+        assert_eq!(ev.subject.as_deref(), Some("a@x.com"));
+        assert_eq!((ev.ip, ev.ua, ev.rid, ev.sub), (None, None, None, None));
+    }
+
     /// The audit is created group-readable, and that is a deployment contract rather than a
     /// detail: the gate writes this file under `UMask=0077`, and `bb-auth-web` reads it
     /// through the `bb-auth` group it already belongs to. At 0600 the Audit tab is a
@@ -8132,7 +9185,7 @@ mod tests {
     fn the_audit_is_readable_by_the_group_that_has_to_read_it() {
         use std::os::unix::fs::PermissionsExt;
         let p = audit_tmp("mode");
-        AuditWriter::new(&p).record(&login(100, "a@x.com")).unwrap();
+        put(&AuditWriter::new(&p), login(100, "a@x.com"));
         let mode = std::fs::metadata(&p).unwrap().permissions().mode() & 0o777;
         assert_eq!(
             mode, 0o640,

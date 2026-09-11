@@ -122,19 +122,28 @@ const SCENES = [
   // The audit, which is the one page whose content this GUI cannot produce: the gate writes
   // that file. So the scene lays one down first, of four rows that differ in the ways the
   // table has to keep legible — a sign-in naming its provider, a refusal naming a scope and a
-  // reason, a key acting as the row it belongs to, and a sign-out, which is neither.
+  // reason, a key acting as the row it belongs to, and a sign-out, which is neither. Three of
+  // them carry where they came from, the way a gate with both audit headers configured writes
+  // them, and one does not, which is what a row from before that looks like.
   ['audit', async (page, ctx) => {
     const ago = (s) => Math.floor(Date.now() / 1000) - s;
+    const from = (ip, ua, rid) => ({ ip, ua, rid });
+    const safari = 'Mozilla/5.0 (Macintosh; Intel Mac OS X 14_6) AppleWebKit/605.1.15 ' +
+      '(KHTML, like Gecko) Version/17.6 Safari/605.1.15';
     const rows = [
       { v: 1, ts: ago(4000), kind: 'access_refused', cred: { type: 'key', id: 'laptop' },
         uuid: 'b3f1c8a2-4e77-4f1a-9c0d-1e2f3a4b5c6d', app: 'app1', scope: 'admin',
-        url: 'https://app.example.com/app1/admin/panel', reason: 'key_out_of_scope' },
+        url: 'https://app.example.com/app1/admin/panel', reason: 'key_out_of_scope',
+        ...from('198.51.100.23', 'claude-code/2.1.0', '0b6e3c2a9f8d4e1b7c5a3f2e1d0c9b8a') },
       { v: 1, ts: ago(2400), kind: 'login_refused', cred: { type: 'anonymous' },
         reason: 'token_invalid' },
       { v: 1, ts: ago(1200), kind: 'login_ended', cred: { type: 'session' },
-        subject: 'you@example.com', url: 'https://app.example.com/app1' },
+        subject: 'you@example.com', url: 'https://app.example.com/app1',
+        ...from('2001:db8:4f::1c', safari, '7d2a0e9c1b3f4a5e8d6c2b1a0f9e8d7c') },
       { v: 1, ts: ago(300), kind: 'login_granted', cred: { type: 'social', provider: 'Google' },
-        subject: 'newcomer@example.com', url: 'https://app.example.com/app1' },
+        subject: 'newcomer@example.com', url: 'https://app.example.com/app1',
+        sub: '9d8e7f60-1a2b-4c3d-8e9f-0a1b2c3d4e5f',
+        ...from('203.0.113.7', safari, '5f1c0a9e7b2d4c3a8e6f1b0d9c7a5e3f') },
     ];
     fs.writeFileSync(ctx.auditFile, rows.map((r) => JSON.stringify(r)).join('\n') + '\n');
     await page.goto(ctx.base + '/audit');

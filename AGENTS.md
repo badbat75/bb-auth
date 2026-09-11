@@ -16,7 +16,7 @@ somebody out or lets somebody in.
 | [Commands](#commands) | what to run, and **which check matches which change** |
 | [After a dependency change](#after-a-dependency-change) | the two `cargo tree` greps, and what they mean |
 | [Conventions](#conventions) | English, why-not-what, no new em-dashes, one home per rule |
-| [Invariants](#invariants--do-not-break-these) | **40 rules, in ten groups, indexed at the top of the section** |
+| [Invariants](#invariants--do-not-break-these) | **41 rules, in ten groups, indexed at the top of the section** |
 | [Config & deploy notes](#config--deploy-notes) | the configuration reference (the deploy *rules* are invariants) |
 
 ## What this is
@@ -80,10 +80,11 @@ One crate, four targets, and the split is load-bearing:
   and `can EMAIL URL` (would this credential get in?). It links the library, none of the gate.
 - **[src/bin/bb-auth-web.rs](src/bin/bb-auth-web.rs)** — the access-file admin GUI
   (server-rendered, `maud`): the same CRUD as the CLI, made **only** through the library's
-  editing core, plus a **Settings** tab over the settings file, in that file's own three
-  sections: what the gate answers with, who administers this, and how the pages look (the
-  last one being the gate's pages too, which is why one save restyles both programs), and an
-  **Audit** tab over the file the gate writes. Five
+  editing core, plus a **Settings** tab over the settings file, in that file's own four
+  sections: what the gate answers with, what the audit records and for how long, who
+  administers this, and how the pages look (the last one being the gate's pages too, which is
+  why one save restyles both programs), each a group that folds to its heading with no script,
+  and an **Audit** tab over the file the gate writes. Five
   tabs, and none of them
   is `denied` or `user_groups`: those two are **sections of the users
   page**, groups above the roster, because a group only means anything in terms of the roster
@@ -343,7 +344,7 @@ is fatal on failure, so reaching the `listening on …` line proves the fetch, t
 
 ## Invariants — do not break these
 
-**The rules, in one place.** Forty of them, grouped. The lead sentence of each is
+**The rules, in one place.** Forty-one of them, grouped. The lead sentence of each is
 its whole claim; the prose under it is the reason, which is the part worth reading before
 changing anything. Seven of these used to sit in "Config & deploy notes" below, so this
 section under-read itself by a fifth, and two of the seven are lockout-class.
@@ -368,6 +369,7 @@ section under-read itself by a fifth, and two of the seven are lockout-class.
 - An event has exactly one home.
 - The audit is bounded by construction, and can never cost a login.
 - It records authentication, not traffic.
+- It believes a header only when an operator has named it.
 
 [**Resolving a URL**](#resolving-a-url)
 
@@ -515,12 +517,14 @@ section under-read itself by a fifth, and two of the seven are lockout-class.
 
 - **The settings file is what must change without a restart, and the rule for what goes in it
   is three-part.** A setting belongs there iff it is (1) read **per request**, (2) unable to
-  lock the operator out **irreversibly**, and (3) not a secret. Nineteen pass, in three
+  lock the operator out **irreversibly**, and (3) not a secret. Twenty-three pass, in four
   sections: `gate.issuer`, `gate.client_id`, `gate.login_url`, `gate.denied_url`,
   `gate.cookie_domain`,
   `gate.authorized_hosts`, `gate.profile_claims`, `gate.identity_attrs`,
   `gate.allow_unverified_social`, `gate.social_providers`, `gate.oauth_domain`,
-  `gate.social_callback_url`, `gate.social_buttons`, `gate.session_ttl_secs`; `web.admins`;
+  `gate.social_callback_url`, `gate.social_buttons`, `gate.session_ttl_secs`; the whole
+  `audit` section (`client_ip_header`, `request_id_header`, `rotation`, `retention`);
+  `web.admins`;
   and the whole `ui` section (`stylesheet_url`, `logo_url`, `brand_name`, `theme`), which is
   the **look of every page either program serves** and the one section both of them read. The
   `ui` four pass the middle part precisely because the built-in stylesheet is complete: the
@@ -534,6 +538,23 @@ section under-read itself by a fifth, and two of the seven are lockout-class.
   never getting in sees a broken link instead of a page. That is also why it is not a
   sixth guarded change, and why an application may override it in the access file
   (`denied_url_for`), which is what makes a refusal page per host.
+
+  **The last four are the `audit` section, and they pass all three parts cleanly.** They are
+  read whenever an event is recorded or the audit is maintained, which is per request or hourly
+  and never once at startup; none can close a door, because the audit is written after the
+  decision and can fail without costing a login; and none is a secret. They are a section of
+  their own rather than more of `gate` because they answer a different question (not how a
+  request is answered but what is written down about it, and for how long), and the choice has
+  a useful side effect: an older binary keeps an unknown top-level key rather than refusing the
+  file, so this section can be written before the binaries that read it have landed.
+  The two headers are not **checkable**, and that is the thing to know about them: naming one
+  is a promise that nginx overwrites that header on every location that reaches the gate, and
+  no parser can see nginx. So both are empty in a fresh file, a package never names them, and
+  the one refusal the file makes on them is the one that matters most: neither may name a
+  credential header (`compile_audit_header`), because a request id is written down as it
+  arrives. `rotation` and `retention` are refused in exactly one combination, the one that bounds
+  no bytes, which the audit invariant below is about. None of the four is a guarded change: the
+  worst a wrong one does is write a wrong address down, or keep less than somebody wanted.
 
   **Part 2 is not "cannot break a login", and saying so is what makes the list honest.**
   Several of these can. The test is whether the person who made the edit can still undo it,
@@ -600,7 +621,7 @@ section under-read itself by a fifth, and two of the seven are lockout-class.
 
   It is a *file* for one mechanical reason, and not for tidiness: **a process cannot re-read
   its own environment** (systemd loads `EnvironmentFile=` once, at `ExecStart`), so an env var
-  can never be hot. Do not add a twentieth setting because it would be convenient there;
+  can never be hot. Do not add a twenty-fourth setting because it would be convenient there;
   check it against the three parts first, and say the argument out loud the way the ones above
   are, including the part it fails.
   It is held in `RwLock<Settings>`, reloaded by the same SIGHUP as the access file and
@@ -658,32 +679,67 @@ the unit creates through `LogsDirectory` precisely so that the gate's own prefix
   to the journal and a recovered one takes them back. What is **not** on this axis is startup,
   configuration, reloads and failures, which are the journal's alone: they are about the
   process and not about a person.
-- **The audit is bounded by construction, and can never cost a login.** The file rotates onto
-  `.1` at `AUDIT_MAX_BYTES` and there are exactly two, so the pair cannot grow past twice it
-  however hard somebody hammers a gated URL. That is deliberately the *only* bound: a flood of
-  refusals is exactly the case an audit exists for, so it is kept and the disk is what gets
-  protected, rather than the flood being filtered and the evidence lost. Write failures are
+- **The audit is bounded by construction, and can never cost a login.** There are exactly two
+  files, the live one and the one it last rotated onto (`.1`), and a rotation replaces the old
+  `.1`. When the live file rotates and how much the pair keeps are `audit.rotation` and
+  `audit.retention`, each an amount of time or of space (`AuditPolicy`), and **at least one of
+  the two must be a size**: a time bounds how old the audit gets and not how big, so rotation and
+  retention both in time is refused (`AuditPolicy::new`), which is what keeps
+  `AuditPolicy::max_bytes` an answer however hard somebody hammers a gated URL. A retention in
+  space works by rotating at half of it at the latest, so it never needs a rewrite; a retention
+  in time drops every expired event from both files, and so does a rotation on age, in
+  `AuditWriter::maintain`, which the gate runs hourly, at startup and on every reload. The
+  hourly half is not optional: a deployment that records one event a month must still forget,
+  on time, the address it said it would, which a rule applied only on write would not do. The
+  default is `AUDIT_MAX_BYTES` and no retention, which is what the audit did before either was
+  a setting. The size is deliberately the *only* bound on a flood: it is exactly the case an
+  audit exists for, so it is kept and the disk is what gets protected, rather than the flood
+  being filtered and the evidence lost. Write failures are
   fail-soft to the last line: `AuditWriter::record` returns the error, `Audit::record` says so
   **once** and carries on, and the decision is the access file's whatever the file system
   says. A full disk must not be able to refuse anybody, and must not be able to admit anybody
-  either.
+  either. The reader is bounded too: `read_audit` walks a file backwards in blocks
+  (`RevLines`), so a rotation an operator set to a gibibyte costs the Audit tab one block of
+  memory and not the file.
 - **It records authentication, not traffic.** Sign-ins, sign-outs, refusals, and the one grant
   worth a line (an identity Cognito vouches for walking into an `authenticated` scope while
   being in no roster row). **Not** the ordinary allowed request: the gate answers an
   `auth_request` for every asset of every page, and a row for each is a file nobody reads and
   a write on the path that must never be slow. That log already exists and is nginx's, which
-  has the URL, the status and the client address this gate never sees. The second deliberate
+  has the URL, the status and the byte count of every request, and a row's `rid` is how it
+  finds its line there. The second deliberate
   omission is the refusal carrying **no** credential, which is what every signed-out browser
   gets on its way to the login page: it is the ordinary case, it names nobody, and it is the
   only one an anonymous client could produce without limit. The two kinds that do fire per
   request are deduplicated by `first_audited` on its own five-minute window, keyed by who,
-  where and why but never by which URL, since a browser refused one asset is a browser refused
-  forty; that window is **separate from the journal's** (`first_in_window`), because an audit
+  where, why and from which address, but never by which URL, since a browser refused one asset
+  is a browser refused forty, while one identity refused from a second address is a second fact
+  and usually the interesting one; that window is **separate from the journal's**
+  (`first_in_window`), because an audit
   whose contents depend on the journal's verbosity is not an audit. A `reason` is a **code**
   and never a sentence (`decision_reason` is the only place one is spelled, and it is the
   `Decision` variant's own name), so the wording belongs to whoever is reading: the GUI shows
   a refusal in the reader's language, in the same words its access check already uses for the
   same verdict. Profile claims are in neither home, for the reason they are in no log line.
+- **It believes a header only when an operator has named it.** The gate listens on loopback
+  and never sees a client, so a row's address (`ip`) and nginx's id for the request (`rid`)
+  are only as true as the proxy that wrote them, and nginx hands a client's own headers through
+  untouched unless a `proxy_set_header` overwrites them. An address the client chose is worse
+  than none, because an audit that can be told a lie is an audit that tells one. So both are
+  read only from the header `audit.client_ip_header` / `audit.request_id_header` names, both are
+  empty until somebody who has wired nginx names them, and the recipe overwrites both on every
+  location that reaches the gate (the `auth_request` target, `/auth/session`, `/auth/logout`).
+  Of a list the **last** entry is taken, which is the one the nearest proxy appended, and never
+  the first, which is the client's. Every value is narrowed on the way in rather than trusted
+  to be what it says: the address is parsed and dropped if it is not one (`client_ip`), the id
+  is letters, digits and `-` (`request_id`, a charset every credential this gate knows fails,
+  so a misnamed header still cannot write one down), and the user agent, which needs no setting
+  because it is the client's word and recorded as such, is cut at `AUDIT_UA_MAX`. It is stamped
+  by `RequestAudit` rather than at each call site, so no event can be written without it. The
+  account (`sub`) comes from a validated token and from nothing else, never from a cookie,
+  which would be a `COOKIE_VERSION` bump. And an address is personal data kept for as long as
+  the file's bytes last rather than for a number of days, which is worth saying on any page
+  that tells people what this estate records about them.
 
 ### Resolving a URL
 

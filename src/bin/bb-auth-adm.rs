@@ -43,18 +43,18 @@ use std::process::ExitCode;
 
 use bb_auth_core::{
     add_api_key, add_application, add_denied, add_scope, add_user, add_user_email, add_user_group,
-    app_mut, app_pos, compile_app_client_id, compile_asset_url, compile_brand_name,
-    compile_cookie_domain, compile_host_pattern, compile_issuer, compile_login_url,
-    compile_oauth_domain, compile_page_url, decide, decide_api_key, default_settings_path,
-    edit_url_list, edit_urls, format_date, guarded_changes, key_expiry, key_mut, mint_uuid,
-    move_scope, norm_email, now, open_access_file, open_settings_file, parse_exclusion,
-    remove_api_key, remove_application, remove_denied, remove_scope, remove_user,
-    remove_user_email, remove_user_group, rename_application, rename_scope, request_url,
-    rotate_api_key, scope_pos, shadowing_scope, user_group_mut, user_group_refs, user_label,
-    user_pos, version_line, well_formed_uuid, Access, AccessFile, AccessWrite, ApiKeySpec, AppSpec,
-    Decision, GateSettings, GuardedSetting, KeyDecision, ScopeSpec, SealedKey, SettingsFile,
-    SettingsWrite, SocialButtonSpec, Subject, UiTheme, UserSpec, WiredButton, Written,
-    ACCESS_FILE_VERSION, SETTINGS_VERSION,
+    app_mut, app_pos, compile_app_client_id, compile_asset_url, compile_audit_header,
+    compile_audit_policy, compile_brand_name, compile_cookie_domain, compile_host_pattern,
+    compile_issuer, compile_login_url, compile_oauth_domain, compile_page_url, decide,
+    decide_api_key, default_settings_path, edit_url_list, edit_urls, format_date, guarded_changes,
+    key_expiry, key_mut, mint_uuid, move_scope, norm_email, now, open_access_file,
+    open_settings_file, parse_exclusion, remove_api_key, remove_application, remove_denied,
+    remove_scope, remove_user, remove_user_email, remove_user_group, rename_application,
+    rename_scope, request_url, rotate_api_key, scope_pos, shadowing_scope, user_group_mut,
+    user_group_refs, user_label, user_pos, version_line, well_formed_uuid, Access, AccessFile,
+    AccessWrite, ApiKeySpec, AppSpec, AuditLimit, Decision, GateSettings, GuardedSetting,
+    KeyDecision, ScopeSpec, SealedKey, SettingsFile, SettingsWrite, SocialButtonSpec, Subject,
+    UiTheme, UserSpec, WiredButton, Written, ACCESS_FILE_VERSION, SETTINGS_VERSION,
 };
 
 const USAGE: &str = "\
@@ -139,6 +139,8 @@ settings                        the OTHER file: what takes effect with no restar
                [--cookie-domain DOMAIN] [--authorized-hosts LIST] [--no-authorized-hosts]
                [--oauth-domain HOST] [--social-callback-url URL]
                [--social-buttons IDP=APPCLIENT,...] [--no-social-buttons]
+               [--client-ip-header HEADER] [--request-id-header HEADER]
+               [--audit-rotation SIZE|AGE] [--audit-retention SIZE|AGE]
                [--brand NAME] [--stylesheet URL] [--logo URL] [--theme system|light|dark]
                [--yes]
   settings admin add EMAIL...   who may use bb-auth-web. NEVER empty, never 'everyone'
@@ -166,6 +168,17 @@ settings                        the OTHER file: what takes effect with no restar
   value costs them a page and nobody a door. Empty is the gate's own /auth/denied. An
   application may override it with `app set NAME --denied-url`, which is how one gate
   fronting several hosts gives each host its own refusal page.
+  --client-ip-header and --request-id-header are what the audit reads the client's address
+  and nginx's request id out of (X-Real-IP and X-Request-ID in the README's recipe). Both
+  are off until named, because naming one is a promise that nginx OVERWRITES that header on
+  every location that reaches the gate: one it does not overwrite is the client's own, and
+  the audit would write down whatever the client chose to say. Empty turns either off.
+  --audit-rotation is when the live audit file moves onto .1, replacing the one before (only
+  the last is kept): a size ('4 MiB', '1 GiB') or an age of its oldest event ('1 month').
+  --audit-retention is the most kept across both files: an age ('6 months', no event older
+  stays on disk) or a size ('64 MiB', the two files together never exceed it). Units are
+  weeks, months, years, MiB and GiB. At least one of the two must be a size, or a flood of
+  refusals could fill the disk. Empty rotation is 4 MiB; empty retention is none.
   The last four are the `ui` section, and they are the look of every page BOTH programs
   emit: the gate's login page and bb-auth-web itself. --stylesheet loads after the built-in
   stylesheet and is meant to redefine its custom properties, so a deployment restyles both
@@ -803,6 +816,37 @@ fn cmd_settings_show(ctx: Ctx) -> Result<ExitCode, String> {
         s.session_ttl / 86_400
     );
     println!();
+    println!("audit");
+    println!(
+        "  client_ip_header        {}",
+        s.client_ip_header
+            .as_deref()
+            .unwrap_or("(none: the audit records no address)")
+    );
+    println!(
+        "  request_id_header       {}",
+        s.request_id_header
+            .as_deref()
+            .unwrap_or("(none: the audit records no request id)")
+    );
+    let p = &s.audit_policy;
+    println!(
+        "  rotation                {}  (the live file moves onto .1; only the last is kept)",
+        p.rotation.spelled()
+    );
+    println!(
+        "  retention               {}",
+        match p.retention {
+            Some(r) => r.spelled(),
+            None => "(none: what the rotation keeps)".to_string(),
+        }
+    );
+    // Derived, like the audiences: the one number the two settings add up to.
+    println!(
+        "  (on disk, at most)      {} MiB",
+        p.max_bytes() as f64 / f64::from(1 << 20)
+    );
+    println!();
     println!("web");
     println!(
         "  admins                  {}",
@@ -863,6 +907,10 @@ fn cmd_settings_set(mut ctx: Ctx) -> Result<ExitCode, String> {
     let buttons = ctx.flags.take_many("social-buttons")?;
     let no_buttons = ctx.flags.take_flag("no-social-buttons")?;
     let no_providers = ctx.flags.take_flag("no-providers")?;
+    let ip_header = ctx.flags.take_one("client-ip-header")?;
+    let rid_header = ctx.flags.take_one("request-id-header")?;
+    let rotation = ctx.flags.take_one("audit-rotation")?;
+    let retention = ctx.flags.take_one("audit-retention")?;
     let stylesheet = ctx.flags.take_one("stylesheet")?;
     let logo = ctx.flags.take_one("logo")?;
     let brand = ctx.flags.take_one("brand")?;
@@ -899,6 +947,10 @@ fn cmd_settings_set(mut ctx: Ctx) -> Result<ExitCode, String> {
         && callback.is_none()
         && buttons.is_empty()
         && !no_buttons
+        && ip_header.is_none()
+        && rid_header.is_none()
+        && rotation.is_none()
+        && retention.is_none()
         && stylesheet.is_none()
         && logo.is_none()
         && brand.is_none()
@@ -1000,6 +1052,35 @@ fn cmd_settings_set(mut ctx: Ctx) -> Result<ExitCode, String> {
             })
             .collect::<Result<Vec<_>, String>>()?;
     }
+    // The two headers the audit believes. Not among the five that ask first: they authorize
+    // nothing and are read after the decision, so the worst a wrong one does is write a wrong
+    // address into the audit, which is what the help text above warns about instead.
+    if let Some(h) = ip_header {
+        doc.audit.client_ip_header = compile_audit_header("--client-ip-header", &h)?;
+    }
+    if let Some(h) = rid_header {
+        doc.audit.request_id_header = compile_audit_header("--request-id-header", &h)?;
+    }
+    // Written back in the one spelling the file uses ('4 MiB', '6 months'), whatever was typed,
+    // and checked as a pair here so the refusal names the flags rather than the fields.
+    if let Some(r) = rotation {
+        doc.audit.rotation = match r.trim() {
+            "" => String::new(),
+            raw => AuditLimit::parse(raw)
+                .map_err(|e| format!("--audit-rotation: {e}"))?
+                .spelled(),
+        };
+    }
+    if let Some(r) = retention {
+        doc.audit.retention = match r.trim() {
+            "" => String::new(),
+            raw => AuditLimit::parse(raw)
+                .map_err(|e| format!("--audit-retention: {e}"))?
+                .spelled(),
+        };
+    }
+    compile_audit_policy(&doc.audit.rotation, &doc.audit.retention)
+        .map_err(|e| e.replace("audit:", "--audit-rotation / --audit-retention:"))?;
     // The `ui` four. Each is validated here rather than left to the write, so the error names
     // the flag the operator typed instead of the field name in the file; the write validates
     // them again anyway, which is the guarantee, and this is only the better sentence.

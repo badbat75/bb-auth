@@ -1,6 +1,6 @@
 [package]
 name = "bb-auth"
-version = "1.99.4"
+version = "1.99.5"
 edition = "2021"
 description = "Minimal, service-agnostic Cognito id_token → session-cookie auth gate (nginx auth_request)"
 license = "MIT"
@@ -74,6 +74,15 @@ signal-hook = { version = "0.4", features = ["iterator"] }
 # not of a per-value check somebody has to remember. Default features only: the web-
 # framework integrations (actix/axum/rocket/…) stay off, so this pulls in no server stack.
 maud = "0.27"
+# Time zones for bb-auth-web's audit page, which can show its times in UTC, in the host's own
+# zone or in one an operator names. It reads the HOST's zone database (/etc/localtime and
+# /usr/share/zoneinfo, which tzdata keeps current) and bundles none, which is what the audit
+# page's UTC-only rendering used to cite as the reason not to have one: a copy of the tz
+# database compiled in would have been the largest dependency in the tree, and a stale one the
+# day a government moves a clock. Pure Rust, `forbid(unsafe_code)`, no dependencies of its own.
+# `alloc` and not the default `std`: this program opens the files itself, so the crate's own
+# file lookup (which would also take a POSIX TZ string, with its inverted sign) never runs.
+tz-rs = { version = "0.7", default-features = false, features = ["alloc"] }
 
 # `chown` when bb-auth-adm rewrites the access file: the live one is root:bb-auth 0640, and
 # a rewrite that left it root:root would lock the service out of its own access list. Plain

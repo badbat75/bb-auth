@@ -821,7 +821,10 @@ The gate records what it has answered, as JSON, one object per line, at
 `bb-auth-web`'s **Audit** tab reads that file back: newest first, with a filter box, a
 credential filter, an outcome filter and a period, all of them in the query string, so the
 page needs no JavaScript, survives a language change and can be bookmarked. Refresh is a link
-to the same address, because the file is read on every request.
+to the same address, because the file is read on every request. The times are shown in UTC,
+in the host's own zone, or in one you name (`Europe/Rome`, `+02:00`), chosen in the same row
+of controls and remembered per browser; the zones come from the host's database, so a host
+without `tzdata` offers UTC and says so.
 
 **One event has one home.** With the audit on, a sign-in, a sign-out and a refusal go to the
 file *instead* of into the journal: the same event in two places is one you have to reconcile
@@ -842,10 +845,43 @@ What it holds:
 What it deliberately does **not** hold is the ordinary allowed request. The gate answers an
 `auth_request` for every asset of every page, so one row each is a file nobody reads and a
 write on the path that must never be slow; that log already exists and is nginx's, which has
-the URL, the status and the client address this gate never sees. Refusals carrying no
+the URL, the status and the byte count of every request. Refusals carrying no
 credential at all are out for the same kind of reason: that is what every signed-out browser
 gets on its way to the login page. And a refusal repeated inside five minutes is recorded
-once, keyed by who, where and why: a browser refused one asset is a browser refused forty.
+once, keyed by who, where, why and from which address: a browser refused one asset is a
+browser refused forty, while the same key refused from a second machine is worth a row.
+
+### Where a request came from
+
+Every row can also say where its request came from, and the four fields differ in how far
+they are to be believed:
+
+| Field | What | From |
+|-------|------|------|
+| `ip` | the client's address | the header `audit.client_ip_header` names, **only** when it names one |
+| `rid` | nginx's own id for the request | the header `audit.request_id_header` names, **only** when it names one |
+| `ua` | the client's `User-Agent`, cut at 256 bytes | always: it is the client's word about itself, recorded as such |
+| `sub` | the Cognito account behind a token | a token validated on that request (a session cookie does not carry one) |
+
+The gate listens on loopback and never sees a client itself, so an address is only as true as
+the proxy that wrote it, and nginx passes a client's own headers through untouched unless a
+`proxy_set_header` overwrites them. That is why the two header settings are **empty until you
+name them**, and why you name them only once nginx overwrites both on every location that
+reaches the gate (the recipe below does). A list such as `X-Forwarded-For` is read from its
+**last** entry, the one nginx appended; neither setting may name `Authorization`, `Cookie` or
+`Proxy-Authorization`.
+
+```bash
+sudo bb-auth-adm settings set --client-ip-header X-Real-IP --request-id-header X-Request-ID
+```
+
+The request id is the audit's way to everything it leaves out: put `$request_id` in nginx's
+`log_format` as well and one search for a row's `rid` finds that request's line in nginx's
+access log. `$remote_addr` is the real client only when nginx is the first hop; behind a CDN
+or a tunnel, restore it with `set_real_ip_from` first. And an address is personal data: with
+no retention in time the file keeps it for as long as its bytes last, which on a quiet
+deployment is years, so set one (below) and say so on any page that tells people what the
+estate records about them.
 
 One credential is recorded less precisely than the rest, and it is worth knowing why. A
 session cookie carries an identity and says nothing about how that identity was proved, so a
@@ -853,10 +889,34 @@ refusal carrying one reads `Session` rather than `Google`. Stamping the provider
 cookie would be a cookie-format bump, and a bump logs everybody out; the sign-in event carries
 the exact answer, and that is where the question is really being asked.
 
-The file rotates itself onto `.1` at 4 MB, so the pair can never exceed 8 MB however hard
-somebody hammers a gated URL — which is the only bound there is, on purpose: a flood of
-refusals is exactly what an audit is for, so what gets protected is the disk and not the
-reader. The gate creates it through `LogsDirectory=bb-auth` in its unit (`bb-auth:bb-auth`,
+### Rotation and retention
+
+There are only ever two files, the live one and the one it last rotated onto (`.1`): a
+rotation replaces the old `.1`. Two settings say when and how much, each an amount and a unit
+of time (`weeks`, `months`, `years`) or of space (`MiB`, `GiB`):
+
+| Setting | Default | What it does |
+|---------|---------|--------------|
+| `audit.rotation` | `4 MiB` | When the live file moves onto `.1`: at a size, or when its oldest event reaches an age |
+| `audit.retention` | none | The most kept across both files: no event older than an age, or the pair never over a size |
+
+```bash
+sudo bb-auth-adm settings set --audit-rotation "4 MiB" --audit-retention "6 months"
+```
+
+**At least one of the two has to be a size.** A time bounds how old the audit gets and not
+how big, and a flood of refusals inside one rotation period is exactly what an audit exists
+to record, so a file with both in time is refused with a sentence saying so. With a size
+somewhere the audit has a ceiling (`bb-auth --check-settings` prints it), and the defaults
+come to 8 MiB, which is what the audit did before either was a setting. A retention in space
+is kept by rotating at half of it at the latest; a retention in time, and a rotation on age,
+are applied by the gate hourly, at startup and on every reload, so a deployment that records
+one event a month still forgets on time. The Audit tab shows nothing past the retention even
+in the hour between.
+
+What gets protected under a flood is the disk and not the reader, on purpose: a flood of
+refusals is exactly what an audit is for. The gate creates the directory through
+`LogsDirectory=bb-auth` in its unit (`bb-auth:bb-auth`,
 `0750`/`0640`), which is also why it is under `/var/log` and not beside the access file: the
 gate's own prefix stays read-only to it, because a gate that could write `var/lib` could
 rewrite the access list it enforces. `bb-auth-web` reads it through the `bb-auth` group it
@@ -1099,6 +1159,13 @@ The binary is service-agnostic. To front a service at `app.example.com`:
        default $bb_login;
    }
 
+   # Optional, for the audit: nginx's own id for each request in its access log, so an
+   # audit row's `rid` finds its line here. `combined` plus one field; point every
+   # access_log at it (access_log /var/log/nginx/app.access.log combined_rid;).
+   log_format combined_rid '$remote_addr - $remote_user [$time_local] "$request" '
+                           '$status $body_bytes_sent "$http_referer" '
+                           '"$http_user_agent" rid=$request_id';
+
    server {
        listen 443 ssl;
        server_name app.example.com;
@@ -1115,6 +1182,12 @@ The binary is service-agnostic. To front a service at `app.example.com`:
            proxy_set_header        X-Original-URL $bb_url;
            # Programmatic clients authenticate with a bearer on every request.
            proxy_set_header        Authorization $http_authorization;
+           # For the audit, and read only once audit.client_ip_header and
+           # audit.request_id_header name them. SET, not passed through: a header nginx
+           # does not overwrite is the client's own. $remote_addr and $request_id are the
+           # parent request's inside the subrequest, so they match its access-log line.
+           proxy_set_header        X-Real-IP    $remote_addr;
+           proxy_set_header        X-Request-ID $request_id;
        }
 
        location / {
@@ -1184,6 +1257,10 @@ The binary is service-agnostic. To front a service at `app.example.com`:
            # on, so a relative `rd` resolves against the caller. This is a plain
            # proxy_pass, not a subrequest, so $uri is the real one.
            proxy_set_header X-Original-URL https://app.example.com$uri;
+           # The same two as the gate location, because a sign-in is the event an
+           # address says the most about.
+           proxy_set_header X-Real-IP    $remote_addr;
+           proxy_set_header X-Request-ID $request_id;
            proxy_pass http://127.0.0.1:4181/auth/session;
        }
        location = /auth/logout  {
@@ -1196,6 +1273,8 @@ The binary is service-agnostic. To front a service at `app.example.com`:
            proxy_set_header X-Original-URL https://app.example.com$uri;
            # A `Sign out` with no `?rd=` falls back to the browser's Referer, and
            # then to the login page. Nothing to configure here for either.
+           proxy_set_header X-Real-IP    $remote_addr;
+           proxy_set_header X-Request-ID $request_id;
            proxy_pass http://127.0.0.1:4181/auth/logout;
        }
 
@@ -1265,6 +1344,8 @@ server {
         proxy_set_header        Content-Length "";
         proxy_set_header        X-Original-URL $bb_url;
         proxy_set_header        Authorization $http_authorization;
+        proxy_set_header        X-Real-IP    $remote_addr;   # for the audit: see "Where a
+        proxy_set_header        X-Request-ID $request_id;    # request came from"
     }
 
     location /admin/ {

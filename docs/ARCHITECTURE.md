@@ -300,6 +300,10 @@ so an edit made by either is one the other would accept.
 | `gate.social_callback_url` | `""` → no social sign-in | The `redirect_uri`, which Cognito compares **byte for byte** with the one registered on every app client in `social_buttons`. |
 | `gate.social_buttons` | `[]` → none | Which social buttons `/auth/login` offers, in the order given, and **the app client each runs through**: `{ "idp": "Google", "audience": "<app client id>" }`. The app client is per button because Cognito federates per app client. Empty offers none, which is the same page a deployment with no `oauth_domain` serves. The admin GUI renders it as a table, a row per way in (the email row first, then `SOCIAL_IDPS`, then any name already in the file), with the tick the only writable column besides the app clients. Not to be confused with `social_providers` above: that one decides whose unverified email is accepted, this one what a visitor is shown. |
 | `gate.session_ttl_secs` | `2592000` (30 d) | Applies to cookies minted from then on and to none already in a browser, so changing it logs nobody out. Below 60s is refused (a login loop); above 400 days is warned about (the cap browsers apply to `Max-Age`). |
+| `audit.client_ip_header` | `""` → no address recorded | The request header the audit reads the client's address from (`X-Real-IP` in the README's recipe). Name it only once nginx **overwrites** it on every location that reaches the gate; a header nginx does not overwrite is the client's own. The last entry of a list is taken, which makes `X-Forwarded-For` usable. A credential header is refused (§8b). |
+| `audit.request_id_header` | `""` → no request id recorded | The request header carrying nginx's `$request_id` (`X-Request-ID` in the recipe), which finds an audit row's line in nginx's access log. Same rule, same refusal. |
+| `audit.rotation` | `"4 MiB"` | When the live audit file moves onto `.1`, replacing it: a size (`MiB`, `GiB`) or an age of its oldest event (`weeks`, `months`, `years`). §8b. |
+| `audit.retention` | `""` → none | The most the audit keeps across both files: an age (no older event stays) or a size (the pair never exceeds it). At least one of rotation and retention must be a size, or the file is refused. §8b. |
 | `web.admins` | `[]` | Who may use `bb-auth-web`, matched against the `X-Auth-Email` nginx injects. **Never empty**: the binary refuses to serve without one and both editors refuse to write an empty list. The gate ignores this section. |
 | `ui.stylesheet_url` | `""` → none | A stylesheet loaded **after** each program's built-in one, so it wins by source order. Absolute `https://`, or a path starting with `/` on this host. Read by both services, which is what makes one file restyle the gate's pages and the whole GUI together. Expected to redefine the custom properties in `THEME_CSS` and nothing else. |
 | `ui.logo_url` | `""` → none | Shown on the sign-in page above the name. Same two shapes. |
@@ -325,7 +329,7 @@ already trusted — is retired by version 3 rather than quietly untrue, and what
 that this file is trusted as much as the gate: whoever can write it can already write the
 access file beside it and the admin list inside it.
 
-Three of the eighteen do not pass the three-part rule cleanly, which is stated rather than
+Three of the twenty-three do not pass the three-part rule cleanly, which is stated rather than
 glossed. `gate.issuer` is not read per request but once, to fetch a JWKS, so a reload
 re-fetches and swaps keys and settings **together or neither**. `gate.cookie_domain` cannot
 log anybody out but does something worse: every cookie already issued keeps the old `Domain`,
@@ -375,7 +379,7 @@ so list it explicitly.
 
 The third file more than one program reads, and the only one written by the gate:
 `BB_AUTH_AUDIT_FILE`, one JSON object per line, appended under a mutex and rotated onto `.1`
-at 4 MB. `AuditEvent`, `AuditWriter` and `read_audit` are in the library for the same reason
+under `audit.rotation` (4 MiB by default). `AuditEvent`, `AuditWriter` and `read_audit` are in the library for the same reason
 the access file's parser is: the gate writes those lines and `bb-auth-web` reads them, so a
 second answer to what one line means would be a reader showing something the writer never
 said. The unit provides the directory (`LogsDirectory=bb-auth`, `bb-auth:bb-auth 0750`), which
@@ -390,7 +394,39 @@ federation was involved), `login_refused`, `login_ended`, `access_refused`, and 
 would be one row per asset here; not a refusal that carried no credential, which is every
 signed-out browser on its way to the login page. The two kinds that fire per request are
 deduplicated over five minutes by `first_audited`, on a table of its own so that the journal's
-verbosity cannot change what the audit holds.
+verbosity cannot change what the audit holds, keyed by who, where, why and from which address.
+
+Each row can say where its request came from, in four optional fields that differ in how far
+they are to be believed (`AuditClient`, stamped by the gate's `RequestAudit` so no call site
+can forget it). `ip` and `rid` are read from the headers `audit.client_ip_header` and
+`audit.request_id_header` name, and only when they name one, because the gate never sees a
+client itself and a header nginx does not overwrite is the client's word; the address is
+parsed (and taken from the last entry of a list), the id is held to letters, digits and `-`,
+a charset every credential of ours fails. `ua` is the client's `User-Agent`, cut at 256 bytes
+and recorded as the client's word. `sub` is the Cognito account of a token validated on that
+request; a session cookie carries none. The schema stays `v: 1`, because it is additive: an
+older reader ignores the four fields and a newer one reads an older line with none of them.
+
+**Rotation and retention** (`AuditPolicy`, compiled from `audit.rotation` and
+`audit.retention`). There are only ever two files, the live one and `.1`, and a rotation
+replaces the old `.1`. `AuditWriter::record` rotates on **size**, before the append that would
+cross it, so the live file never holds more than the policy allows; the size is the rotation's
+own or half a retention in space, whichever is smaller, which is how a retention in space holds
+without ever rewriting a file. `AuditWriter::maintain` does the rest: a rotation on **age**, a
+`.1` written under a looser policy cut down to its newest lines, and a retention in **time**
+dropping every expired event from both files (a temp file and a rename, streamed, so a reader
+that opened the file keeps its bytes). The gate runs it at startup, on every reload and hourly
+from a thread of its own, which is what makes a retention in time hold on a deployment that
+writes nothing for a month. At least one of the two settings is a size (`AuditPolicy::new`),
+so `AuditPolicy::max_bytes` is always the ceiling a flood can reach. `read_audit` walks both
+files backwards in blocks (`RevLines`), so a gibibyte of history costs the Audit tab a block
+of memory, and the tab applies a retention in time as a floor on every period it offers.
+
+`bb-auth-web` shows the times in UTC, in the host's zone (`/etc/localtime`) or in one the
+reader names (an IANA name read from `/usr/share/zoneinfo`, or a fixed offset), through
+`tz-rs`, which reads the host's database and bundles none. The choice is a per-browser cookie,
+like the language and the theme; `Local` is the host's zone rather than the browser's,
+because no request header carries a browser's zone and no page there may need a script.
 
 The `reason` is a **code** and never a sentence — `decision_reason` is the only place one is
 spelled, and it is the `Decision` variant's own name — so the wording belongs to whoever
@@ -417,6 +453,7 @@ needs only the GNU toolchain — no system OpenSSL or cert store:
 | `base64` | URL-safe encoding in the cookie. |
 | `form_urlencoded` | Parsing the `/auth/session` POST body. |
 | `serde` / `serde_json` | Claims + JWKS deserialization. |
+| `tz-rs` (`alloc` only) | `bb-auth-web` only: reading the audit's times in a zone, from the host's own `/usr/share/zoneinfo`. No dependencies, no `unsafe`, no bundled database. |
 
 **Release profile** (`Cargo.toml`): `opt-level="z"`, LTO, single codegen unit,
 `panic="abort"`, stripped — optimized for binary size.

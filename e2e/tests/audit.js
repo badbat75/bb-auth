@@ -55,6 +55,11 @@ async function run(ctx, t) {
       kind: 'login_granted',
       cred: { type: 'social', provider: 'Google' },
       subject: 'newcomer@example.com',
+      // Where it came from, as a gate with both audit headers configured records it.
+      sub: '9d8e7f60-1a2b-4c3d-8e9f-0a1b2c3d4e5f',
+      ip: '203.0.113.7',
+      ua: 'Mozilla/5.0 (Macintosh; Intel Mac OS X 14_6) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/17.6 Safari/605.1.15',
+      rid: '5f1c0a9e7b2d4c3a8e6f1b0d9c7a5e3f',
     },
   ];
   // Thirty more of one shape, to put the pager over its 25-row page. Older than the four
@@ -104,6 +109,21 @@ async function run(ctx, t) {
       !text.includes('ancient@example.com'),
       text
     );
+    // Where a sign-in came from: the address, nginx's id for the request, and the account.
+    t.check('the client address is shown', text.includes('203.0.113.7'), text);
+    t.check(
+      "with the id that finds the request in nginx's log",
+      text.includes('rid 5f1c0a9e7b2d4c3a8e6f1b0d9c7a5e3f'),
+      text
+    );
+    t.check('and the Cognito account under the name', text.includes('sub 9d8e7f60'), text);
+    // The user agent is two lines at most, whatever its length: the client's description of
+    // itself, and never a third of the row.
+    const ua = page.locator('main td.client .ua').first();
+    const uaLines = await ua.evaluate(
+      (el) => Math.round(el.getBoundingClientRect().height / parseFloat(getComputedStyle(el).lineHeight))
+    );
+    t.check('a long user agent is clamped to two lines', uaLines <= 2, String(uaLines));
     await t.shot(page, 'audit');
 
     // --- the filters, all three list boxes and the text field in one form ---
@@ -144,6 +164,33 @@ async function run(ctx, t) {
     after = await mainText(page);
     t.check('the text filter matches on the identity', after.includes('crowd7@example.com'), after);
     t.check('and excludes the rest', !after.includes('crowd8@example.com'), after);
+
+    // --- the clock ----------------------------------------------------------
+    // The box for a zone of one's own shows only while Custom is the choice, and it is the
+    // stylesheet that decides that, since nothing on these pages may run a script to do it.
+    // This is the check no unit test can make: it is about what a browser paints.
+    await page.goto(ctx.base + '/audit');
+    const zoneBox = page.locator('.listctl input[name=tzc]');
+    t.eq('the custom zone box is hidden while UTC is chosen', await zoneBox.isVisible(), false);
+    await page.selectOption('.listctl select[name=tz]', 'custom');
+    t.eq('and appears the moment Custom is', await zoneBox.isVisible(), true);
+    await zoneBox.fill('+05:30');
+    await apply();
+    let clock = await mainText(page);
+    t.check('the chosen zone heads the time column', clock.includes('(+05:30)'), clock);
+    t.check('and is not in the address, since it is a preference', !page.url().includes('tz'), page.url());
+    await page.goto(ctx.base + '/audit');
+    clock = await mainText(page);
+    t.check('it is remembered on a link that says nothing about it', clock.includes('(+05:30)'), clock);
+    // A zone the host does not have is said to be missing, and the page reads in UTC.
+    await zoneBox.fill('No/Such_Zone');
+    await apply();
+    clock = await mainText(page);
+    t.check('a zone nobody has is named as missing', clock.includes('is not a time zone this server knows'), clock);
+    t.check('and the times fall back to UTC', clock.includes('(UTC)'), clock);
+    // Back to UTC, so everything below reads the page it expects.
+    await page.selectOption('.listctl select[name=tz]', 'utc');
+    await apply();
 
     // --- the pager, and Refresh keeping the whole view ---------------------
     await page.goto(ctx.base + '/audit?aw=all');

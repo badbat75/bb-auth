@@ -180,6 +180,21 @@
 //! page; the two-arm dark rule that makes an explicit choice win over the OS is in
 //! [`THEME_CSS`], with the rest of the palette.
 //!
+//! **The time zone** is a third preference of the same kind, and the one that is not in the
+//! menu: it changes one page, the audit, so it sits in that page's own filter row, and its
+//! `Custom` choice needs a text box, which a menu of list boxes that apply on change has no
+//! place for. It is remembered the same way ([`TZ_COOKIE`]) and redirected out of the URL the
+//! same way. `Local` is the zone of the **host** this program runs on and not the browser's,
+//! because no header carries a browser's zone and a page that may not need a script cannot
+//! ask for it; the list box names the host's zone so nobody has to guess which one it is. The
+//! zones come out of the host's own database ([`ZONEINFO_DIR`]), and none is compiled in.
+//!
+//! **How the Settings page opens** is the fourth, and the same shape again: its groups are
+//! `details` that each fold on their own with no script, and the page's two commands (expand
+//! all, collapse all) are links carrying `?groups=`, which becomes [`GROUPS_COOKIE`] so that a
+//! page folded to its headings stays folded after the next save. A refused field's group is
+//! open whatever the preference says.
+//!
 //! **The look is shared with the gate**, which is why neither the palette nor the controls
 //! are in this file at all. Two reasons, and the second was learned by looking at the two
 //! surfaces side by side: `ui.stylesheet_url` restyles this GUI and the gate's sign-in page
@@ -193,20 +208,21 @@
 
 use bb_auth_core::{
     add_api_key, add_application, add_denied, add_scope, add_user, add_user_email, add_user_group,
-    app_mut, app_pos, compile_app_client_id, compile_asset_url, compile_brand_name,
-    compile_cookie_domain, compile_host_pattern, compile_issuer, compile_login_url,
-    compile_oauth_domain, compile_page_url, cookie_domain_covers, csp_hash, decide,
-    default_settings_path, edit_urls, format_date, format_datetime, group_ref, guarded_changes,
-    key_expiry, key_mut, move_scope, norm_email, now, open_access_file, open_settings_file,
-    page_csp, parse_exclusion, read_audit, remove_api_key, remove_application, remove_denied,
-    remove_scope, remove_user, remove_user_email, remove_user_group, rename_application,
-    rename_scope, request_site, request_url, rotate_api_key, scope_mut, scope_pos, sha256_hex,
-    shadowing_scope, social_idp_label, stylesheet_link, user_group_mut, user_group_refs,
-    user_label, user_pos, user_refs, version_line, Access, AccessFile, AccessWrite, ApiKeySpec,
-    AppSpec, AuditCredential, AuditEvent, AuditKind, Decision, GateSettings, GuardedSetting,
-    RequestSite, ScopeSpec, SealedKey, SettingsFile, SettingsWrite, SocialButtonSpec, Subject,
-    UiTheme, UserSpec, WiredButton, Written, BASE_CSS, DEFAULT_AUDIT_FILE, IDENTITY_HEADER,
-    PAGE_SECURITY_HEADERS, SOCIAL_IDPS, THEME_CSS,
+    app_mut, app_pos, compile_app_client_id, compile_asset_url, compile_audit_header,
+    compile_brand_name, compile_cookie_domain, compile_host_pattern, compile_issuer,
+    compile_login_url, compile_oauth_domain, compile_page_url, cookie_domain_covers, csp_hash,
+    decide, default_settings_path, edit_urls, format_date, format_datetime, group_ref,
+    guarded_changes, key_expiry, key_mut, move_scope, norm_email, now, open_access_file,
+    open_settings_file, page_csp, parse_exclusion, read_audit, remove_api_key, remove_application,
+    remove_denied, remove_scope, remove_user, remove_user_email, remove_user_group,
+    rename_application, rename_scope, request_site, request_url, rotate_api_key, scope_mut,
+    scope_pos, sha256_hex, shadowing_scope, social_idp_label, stylesheet_link, user_group_mut,
+    user_group_refs, user_label, user_pos, user_refs, version_line, Access, AccessFile,
+    AccessWrite, ApiKeySpec, AppSpec, AuditCredential, AuditEvent, AuditKind, AuditLimit,
+    AuditPolicy, AuditUnit, Decision, GateSettings, GuardedSetting, RequestSite, ScopeSpec,
+    SealedKey, SettingsFile, SettingsWrite, SocialButtonSpec, Subject, UiTheme, UserSpec,
+    WiredButton, Written, BASE_CSS, DEFAULT_AUDIT_FILE, IDENTITY_HEADER, PAGE_SECURITY_HEADERS,
+    SOCIAL_IDPS, THEME_CSS,
 };
 use maud::{html, Markup, PreEscaped, DOCTYPE};
 use std::io::Read;
@@ -224,8 +240,31 @@ const LANG_COOKIE: &str = "lang";
 /// a page in the wrong palette. Not `Secure`, for the same reason too.
 const THEME_COOKIE: &str = "theme";
 
+/// Cookie remembering which clock the audit is read in. A display preference exactly like the
+/// two above and for the same reasons: it carries no identity and no capability, and the worst
+/// a rewritten one achieves is a page read in another time zone.
+const TZ_COOKIE: &str = "tz";
+
+/// The audit form's text box for a zone of the operator's own, read only when the list box
+/// beside it says `custom`. It is never a cookie itself: [`TZ_COOKIE`] stores the zone it named.
+const TZ_CUSTOM_PARAM: &str = "tzc";
+
+/// Cookie remembering whether the Settings page opens with its groups expanded or collapsed.
+/// A display preference like the others, with their reasoning: the worst a rewritten one
+/// achieves is a page folded the other way.
+const GROUPS_COOKIE: &str = "groups";
+
+/// Where the host keeps its zone database, which the tzdata package keeps current. Read on
+/// demand and never bundled: see the `tz-rs` entry in `Cargo.toml`.
+const ZONEINFO_DIR: &str = "/usr/share/zoneinfo";
+
+/// The host's own zone, which is what `timedatectl set-timezone` points somewhere in
+/// [`ZONEINFO_DIR`].
+const LOCALTIME_FILE: &str = "/etc/localtime";
+
 /// A year. The preference is a preference, not a session. Shared by every preference cookie:
-/// today [`LANG_COOKIE`] and [`THEME_COOKIE`], both set through [`respond_preference_redirect`].
+/// [`LANG_COOKIE`], [`THEME_COOKIE`] and [`TZ_COOKIE`], all set through
+/// [`respond_preference_redirect`].
 const PREFERENCE_COOKIE_MAX_AGE: i64 = 31_536_000;
 
 /// **The only JavaScript this GUI emits**, on the two Settings list boxes and nowhere else.
@@ -405,6 +444,156 @@ fn parse_theme(s: &str) -> Option<UiTheme> {
     }
 }
 
+/// How the Settings page opens: every group expanded, or every group folded to its heading.
+///
+/// A preference and not a parameter of the page, because the commands that set it are meant to
+/// stick: an operator who folds everything to see the page's shape wants it folded after the
+/// next save too, and a save ends in a redirect that carries no query. Each group still opens
+/// and closes on its own in the browser, with no script, since each one is a `details`.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+enum GroupsPref {
+    /// What the page always was, and so what nobody who has not chosen gets surprised by.
+    #[default]
+    Open,
+    Closed,
+}
+
+impl GroupsPref {
+    /// The cookie value and the query value: one spelling.
+    fn code(self) -> &'static str {
+        match self {
+            GroupsPref::Open => "open",
+            GroupsPref::Closed => "closed",
+        }
+    }
+
+    fn parse(s: &str) -> Option<GroupsPref> {
+        match s.trim() {
+            "open" => Some(GroupsPref::Open),
+            "closed" => Some(GroupsPref::Closed),
+            _ => None,
+        }
+    }
+}
+
+/// Which clock the audit is read in: the third preference, and the only one that is not in the
+/// Settings menu, because it changes one page and its `Custom` choice needs a text box.
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+enum TzPref {
+    /// What the file stores, and where every session starts until it chooses otherwise: the
+    /// same floor `Auto` and `System` are for the other two, so a deployment that never
+    /// chooses reads the page it always read.
+    #[default]
+    Utc,
+    /// The zone of the **host** this program runs on, and not the browser's: no request header
+    /// carries a browser's zone, and a page that may not need a script has no way to ask for it.
+    Local,
+    /// A zone the operator named: an IANA name out of the host's database, or a fixed offset,
+    /// held in the spelling [`custom_zone`] gives it.
+    Custom(String),
+}
+
+impl TzPref {
+    /// The cookie value, which is also what [`parse_tz_pref`] reads back. A custom zone is its
+    /// own spelling, which [`custom_zone`] has already held to a charset a cookie may carry.
+    fn code(&self) -> &str {
+        match self {
+            TzPref::Utc => "utc",
+            TzPref::Local => "local",
+            TzPref::Custom(z) => z,
+        }
+    }
+
+    /// Which option of the audit's list box this is.
+    fn choice(&self) -> &'static str {
+        match self {
+            TzPref::Utc => "utc",
+            TzPref::Local => "local",
+            TzPref::Custom(_) => "custom",
+        }
+    }
+}
+
+/// Parse a zone preference out of the cookie or out of the audit's text box. `None` for
+/// anything that is neither of the two words nor a zone [`custom_zone`] accepts, which leaves
+/// whatever preference was already in force standing.
+fn parse_tz_pref(s: &str) -> Option<TzPref> {
+    let v = s.trim();
+    if v.eq_ignore_ascii_case("utc") {
+        Some(TzPref::Utc)
+    } else if v.eq_ignore_ascii_case("local") {
+        Some(TzPref::Local)
+    } else {
+        custom_zone(v).map(TzPref::Custom)
+    }
+}
+
+/// A zone of the operator's own, in the spelling the cookie stores: a fixed offset as
+/// `+HH:MM`, or an IANA name as typed. `None` for anything else.
+///
+/// A name is letters, digits, `_`, `+`, `-` and `/`, starting with a letter, which is every
+/// name in the database and nothing that can leave it: there is no `.`, so there is no `..`,
+/// so there is no path that climbs out of [`ZONEINFO_DIR`]. The same charset is what makes the
+/// value safe in a `Set-Cookie`, which is where it goes next. Whether the host has a zone of
+/// that name is a question for the page that reads it, which says so when it does not.
+fn custom_zone(v: &str) -> Option<String> {
+    let v = v.trim();
+    if let Some(secs) = parse_offset(v) {
+        return Some(format_offset(secs));
+    }
+    let named = !v.is_empty()
+        && v.len() <= 64
+        && v.starts_with(|c: char| c.is_ascii_alphabetic())
+        && !v.ends_with('/')
+        && !v.contains("//")
+        && v.bytes()
+            .all(|b| b.is_ascii_alphanumeric() || matches!(b, b'_' | b'+' | b'-' | b'/'));
+    named.then(|| v.to_string())
+}
+
+/// A fixed offset from UTC in seconds: `+2`, `+02`, `+0200` or `+02:00`, optionally after `UTC`
+/// or `GMT`, with the sign meaning what it means on a clock: ahead of UTC.
+///
+/// The sign is why this exists rather than the string going to a POSIX `TZ` parser, which is
+/// what the zone library would have done with it: POSIX spells two hours **ahead** of UTC as
+/// `UTC-2`, the opposite of what anybody typing it into a box means, and a page that silently
+/// read four hours out would be worse than one that refused. Up to fourteen hours either way,
+/// which is every offset in use.
+fn parse_offset(v: &str) -> Option<i32> {
+    let up = v.trim().to_ascii_uppercase();
+    let rest = up
+        .strip_prefix("UTC")
+        .or_else(|| up.strip_prefix("GMT"))
+        .unwrap_or(&up);
+    let (sign, digits) = match rest.as_bytes().first()? {
+        b'+' => (1, &rest[1..]),
+        b'-' => (-1, &rest[1..]),
+        _ => return None,
+    };
+    let (h, m) = match digits.split_once(':') {
+        Some(pair) => pair,
+        None if digits.len() > 2 => digits.split_at(digits.len() - 2),
+        None => (digits, "0"),
+    };
+    let two_digits = |s: &str| (1..=2).contains(&s.len()) && s.bytes().all(|b| b.is_ascii_digit());
+    if !two_digits(h) || !two_digits(m) {
+        return None;
+    }
+    let (h, m): (i32, i32) = (h.parse().ok()?, m.parse().ok()?);
+    if m > 59 || h * 60 + m > 14 * 60 {
+        return None;
+    }
+    Some(sign * (h * 3600 + m * 60))
+}
+
+/// An offset in seconds as `+HH:MM`, which is how the heading names a fixed zone and how the
+/// cookie stores one.
+fn format_offset(secs: i32) -> String {
+    let a = secs.unsigned_abs();
+    let sign = if secs < 0 { '-' } else { '+' };
+    format!("{sign}{:02}:{:02}", a / 3600, (a % 3600) / 60)
+}
+
 /// Every translatable string in the GUI, as a variant.
 ///
 /// An enum rather than a string key so that [`t`]'s match is **exhaustive**: adding a key
@@ -499,8 +688,15 @@ enum K {
     ColWhen,
     ColEvent,
     ColWho,
+    ColClient,
     ColWhere,
     ColWhy,
+    AuditZone,
+    TzLocal,
+    TzCustom,
+    TzCustomHint,
+    TzUnknown,
+    TzLocalMissing,
     KindLoginGranted,
     KindLoginRefused,
     KindLoginEnded,
@@ -654,6 +850,25 @@ enum K {
     ConfigHandover,
     ConfigSignIn,
     ConfigAdminLook,
+    ConfigAudit,
+    ClientIpHeader,
+    ClientIpHeaderHelp,
+    RequestIdHeader,
+    RequestIdHeaderHelp,
+    AuditRotation,
+    AuditRotationHelp,
+    AuditRetention,
+    AuditRetentionHelp,
+    AuditOnDisk,
+    LimitNone,
+    UnitWeek,
+    UnitWeeks,
+    UnitMonth,
+    UnitMonths,
+    UnitYear,
+    UnitYears,
+    GroupsExpand,
+    GroupsCollapse,
     ConfigHot,
     ProfileClaims,
     ProfileClaimsHelp,
@@ -745,6 +960,45 @@ fn t(lang: Lang, key: K) -> &'static str {
         ),
         K::ConfigSignIn => m(lang, "The sign-in page", "La pagina di accesso"),
         K::ConfigAdminLook => m(lang, "Administration and look", "Amministrazione e aspetto"),
+        K::ConfigAudit => m(lang, "What the audit records", "Cosa registra l'audit"),
+        K::ClientIpHeader => m(
+            lang,
+            "Client address header",
+            "Header dell'indirizzo del client",
+        ),
+        K::ClientIpHeaderHelp => m(
+            lang,
+            "The request header the audit reads the client's address from, such as X-Real-IP. Empty records no address. Name it only once nginx overwrites this header on every location that reaches the gate: one it does not overwrite is the client's own, and the audit would write down whatever the client chose to say. A list such as X-Forwarded-For is read from its last entry, which is the one nginx added.",
+            "L'header da cui l'audit legge l'indirizzo del client, per esempio X-Real-IP. Vuoto non registra alcun indirizzo. Indicalo solo quando nginx sovrascrive questo header su ogni location che arriva al gate: uno che non sovrascrive è quello del client, e l'audit scriverebbe qualunque cosa il client abbia scelto di dire. Di una lista come X-Forwarded-For si legge l'ultima voce, cioè quella aggiunta da nginx.",
+        ),
+        K::AuditRotation => m(lang, "Rotation", "Rotazione"),
+        K::AuditRotationHelp => m(
+            lang,
+            "When the live file moves onto the previous one, which it replaces: only the last is kept. A size (MiB, GiB), or an age of the file's oldest event (weeks, months, years).",
+            "Quando il file attivo passa al posto del precedente, che sostituisce: si conserva solo l'ultimo. Una dimensione (MiB, GiB), oppure l'età dell'evento più vecchio del file (settimane, mesi, anni).",
+        ),
+        K::AuditRetention => m(lang, "Retention", "Conservazione"),
+        K::AuditRetentionHelp => m(
+            lang,
+            "The most the audit keeps, across both files. An age: no event older than it stays on disk, which is the one to use for personal data such as addresses. A size: the two files together never exceed it. At least one of rotation and retention must be a size, or a flood of refusals could fill the disk.",
+            "Il massimo che l'audit conserva, sommando i due file. Un'età: nessun evento più vecchio resta su disco, ed è quella da usare per dati personali come gli indirizzi. Una dimensione: i due file insieme non la superano mai. Almeno una tra rotazione e conservazione deve essere una dimensione, altrimenti un'ondata di rifiuti potrebbe riempire il disco.",
+        ),
+        K::AuditOnDisk => m(lang, "At most on disk", "Al massimo su disco"),
+        K::LimitNone => m(lang, "none", "nessuna"),
+        K::UnitWeek => m(lang, "week", "settimana"),
+        K::UnitWeeks => m(lang, "weeks", "settimane"),
+        K::UnitMonth => m(lang, "month", "mese"),
+        K::UnitMonths => m(lang, "months", "mesi"),
+        K::UnitYear => m(lang, "year", "anno"),
+        K::UnitYears => m(lang, "years", "anni"),
+        K::GroupsExpand => m(lang, "Expand all", "Espandi tutto"),
+        K::GroupsCollapse => m(lang, "Collapse all", "Comprimi tutto"),
+        K::RequestIdHeader => m(lang, "Request id header", "Header dell'id della richiesta"),
+        K::RequestIdHeaderHelp => m(
+            lang,
+            "The request header carrying nginx's own id for the request, such as X-Request-ID set from $request_id. Empty records none. With $request_id in nginx's log format as well, the id on an audit row finds that request's line in nginx's access log, which has everything the audit leaves out. The same rule holds: nginx must overwrite it.",
+            "L'header con l'id che nginx assegna alla richiesta, per esempio X-Request-ID impostato da $request_id. Vuoto non registra nulla. Con $request_id anche nel log_format di nginx, l'id su una riga dell'audit ritrova la riga di quella richiesta nel log di accesso di nginx, che contiene tutto quello che l'audit tralascia. Vale la stessa regola: nginx deve sovrascriverlo.",
+        ),
         K::ConfigHot => m(
             lang,
             "Saved here, live on the next request.",
@@ -1285,9 +1539,26 @@ fn t(lang: Lang, key: K) -> &'static str {
             "A refusal repeated within five minutes is recorded once: a browser refused one asset is a browser refused forty. Sign-ins and sign-outs are never collapsed.",
             "Un rifiuto ripetuto entro cinque minuti è registrato una volta sola: un browser a cui viene rifiutato un asset è un browser a cui ne vengono rifiutati quaranta. Accessi e uscite non vengono mai accorpati.",
         ),
-        K::ColWhen => m(lang, "When (UTC)", "Quando (UTC)"),
+        // The zone the times are in follows it in brackets, because it is the reader's choice
+        // now and a heading that said "UTC" on its own would be wrong half the time.
+        K::ColWhen => m(lang, "When", "Quando"),
         K::ColEvent => m(lang, "Event", "Evento"),
         K::ColWho => m(lang, "Who", "Chi"),
+        K::ColClient => m(lang, "Client", "Client"),
+        K::AuditZone => m(lang, "Time zone", "Fuso orario"),
+        K::TzLocal => m(lang, "Local", "Locale"),
+        K::TzCustom => m(lang, "Custom", "Personalizzato"),
+        K::TzCustomHint => m(lang, "Europe/Rome or +02:00", "Europe/Rome o +02:00"),
+        K::TzUnknown => m(
+            lang,
+            "is not a time zone this server knows, so the times below are in UTC.",
+            "non è un fuso orario che questo server conosca: gli orari qui sotto sono in UTC.",
+        ),
+        K::TzLocalMissing => m(
+            lang,
+            "This server does not say which time zone it is in, so the times below are in UTC.",
+            "Questo server non dice in quale fuso orario si trova: gli orari qui sotto sono in UTC.",
+        ),
         K::ColWhere => m(lang, "Where", "Dove"),
         K::ColWhy => m(lang, "Why", "Perché"),
         K::KindLoginGranted => m(lang, "Signed in", "Accesso"),
@@ -2490,10 +2761,11 @@ fn admin_csp(look: &Look) -> String {
 
 /// `302` to `location`, setting one preference cookie to `value`. `location` is built from a
 /// [`Route`] and re-encoded query parameters, so it is printable ASCII by construction and
-/// [`h`] cannot panic on it; `value` is always one of a closed enum's own [`Lang::code`] or
-/// [`UiTheme::code`], never request-supplied.
+/// [`h`] cannot panic on it; `value` is one of a closed enum's own [`Lang::code`] or
+/// [`UiTheme::code`], or a [`TzPref::code`], whose one request-supplied spelling has passed
+/// [`custom_zone`]'s charset, which holds no byte a cookie value may not carry.
 ///
-/// The one redirect both preferences use: see [`respond_lang_redirect`] and
+/// The one redirect every preference uses: see [`respond_lang_redirect`] and
 /// [`respond_theme_redirect`].
 fn respond_preference_redirect(req: Request, location: &str, cookie_name: &str, value: &str) {
     let cookie =
@@ -2524,6 +2796,10 @@ fn respond_theme_redirect(req: Request, location: &str, theme: UiTheme) {
 /// which is the entire point. `location` is a [`Route::path`] under the base plus a
 /// [`Msg::key`], both printable ASCII by construction, so [`h`] cannot panic on it — and
 /// nothing request-supplied is in it.
+///
+/// Its one other use is a `GET` that carried nothing but a time zone nobody could read, which
+/// comes back to its page with the zone dropped. That `location` is a [`preference_href`], so
+/// the same argument holds: every client byte in it has been re-encoded.
 fn respond_redirect(req: Request, location: &str) {
     let resp = Response::empty(StatusCode(303))
         .with_header(h("Location", location))
@@ -2589,9 +2865,15 @@ fn negotiate_theme(query: Option<&str>, cookie: Option<&str>) -> UiTheme {
 /// is a constant, a [`Route::path`] or a re-encoded query parameter — nothing the client sent
 /// survives verbatim, which is what makes the string safe in a `Location:` header.
 fn preference_href(cfg: &Config, at: &Route, query: &str, param: &str) -> String {
+    preference_href_without(cfg, at, query, &[param])
+}
+
+/// [`preference_href`] for a preference that arrives as more than one parameter, which today
+/// is the audit's clock: a list box and the text box a `custom` choice reads.
+fn preference_href_without(cfg: &Config, at: &Route, query: &str, params: &[&str]) -> String {
     let mut ser = form_urlencoded::Serializer::new(String::new());
     for (k, v) in form_urlencoded::parse(query.as_bytes()) {
-        if k != param {
+        if !params.contains(&k.as_ref()) {
             ser.append_pair(&k, &v);
         }
     }
@@ -2837,6 +3119,16 @@ struct View<'a> {
     /// [`shell`] then falls through to the deployment's own [`Look::theme`] before leaving the
     /// decision to the OS.
     theme: UiTheme,
+    /// Which clock **this browser** reads the audit in; see [`TzPref`]. Only the audit page
+    /// looks at it, and it is carried here with the other two preferences because it comes
+    /// from the same place (a cookie) for the same reason (a preference outlives a page).
+    tz: TzPref,
+    /// Whether the Settings page opens folded; see [`GroupsPref`].
+    groups: GroupsPref,
+    /// The audit's rotation and retention, from the same settings read as everything else on
+    /// the page: the Audit tab shows no event the retention says is gone, whether or not the
+    /// gate's hourly maintenance has reached it yet.
+    audit: AuditPolicy,
     /// How this deployment asks the page to look. See [`Look`].
     look: Look<'a>,
     /// The signed-in administrator, when there is one. `None` suppresses the navigation:
@@ -3359,6 +3651,65 @@ fn urls_field(label: &str, name: &str, value: &str, hint: Markup, invalid: bool)
                       class=[invalid.then_some("invalid")]
                       aria-invalid=[invalid.then_some("true")]
                       aria-describedby=[invalid.then_some(ERR_ID)] { (value) }
+            span class="hint" { (hint) }
+        }
+    }
+}
+
+/// A unit's name in the reader's language, singular for one of it and plural otherwise. The
+/// two of space are the same word in every language, and are left as the file spells them.
+fn unit_label(v: &View, unit: AuditUnit, amount: u64) -> &'static str {
+    let one = amount == 1;
+    match unit {
+        AuditUnit::Weeks => v.t(if one { K::UnitWeek } else { K::UnitWeeks }),
+        AuditUnit::Months => v.t(if one { K::UnitMonth } else { K::UnitMonths }),
+        AuditUnit::Years => v.t(if one { K::UnitYear } else { K::UnitYears }),
+        AuditUnit::MiB => "MiB",
+        AuditUnit::GiB => "GiB",
+    }
+}
+
+/// An audit limit in the reader's words: `4 MiB`, `6 mesi`, `1 year`.
+fn limit_text(v: &View, l: &AuditLimit) -> String {
+    format!("{} {}", l.amount, unit_label(v, l.unit, l.amount))
+}
+
+/// An amount-and-unit field: a number and a list box of [`AuditUnit`]s, posted as `name` and
+/// `name_unit`, which the form puts back together into the one string the file stores.
+///
+/// Two controls and not one text box because the unit is a choice among five, and a box that
+/// took "4 MB" would be a box that accepted a number the file then refuses. `none` is offered
+/// only where empty means something (a retention), and never where it would be an error.
+#[allow(clippy::too_many_arguments)]
+fn limit_field(
+    v: &View,
+    label: &str,
+    name: &str,
+    amount: &str,
+    unit: &str,
+    none: bool,
+    hint: &str,
+    invalid: bool,
+) -> Markup {
+    html! {
+        label {
+            span class="lbl" { (label) }
+            span class="limit" {
+                input type="number" min="1" step="1" name=(name) value=(amount)
+                      class=(format!("f-{name}{}", if invalid { " invalid" } else { "" }))
+                      aria-invalid=[invalid.then_some("true")]
+                      aria-describedby=[invalid.then_some(ERR_ID)];
+                select name=(format!("{name}_unit")) aria-label=(label) {
+                    @if none {
+                        option value="" selected[unit.is_empty()] { (v.t(K::LimitNone)) }
+                    }
+                    @for u in AuditUnit::ALL {
+                        option value=(u.code()) selected[u.code() == unit] {
+                            (unit_label(v, u, 2))
+                        }
+                    }
+                }
+            }
             span class="hint" { (hint) }
         }
     }
@@ -4348,6 +4699,126 @@ fn audit_reason(v: &View, code: &str) -> Markup {
     }
 }
 
+/// A zone the audit can be read in: what the page calls it, and the rules that turn a Unix time
+/// into that zone's wall clock.
+struct Zone {
+    /// What the column heading and the list box say: `UTC`, a name out of the host's
+    /// database, or an offset.
+    label: String,
+    rules: tz::TimeZone,
+    /// Whether each row says which of the zone's clocks it was read on (`CET`, `CEST`). A zone
+    /// that changes its clock needs it, or the hour either side of a change reads the same
+    /// twice; a fixed offset does not, and the heading already says which one it is.
+    per_row: bool,
+}
+
+/// UTC as a [`Zone`]: what the file stores, and what the page falls back to when the zone it
+/// was asked for cannot be had.
+fn utc_zone() -> Zone {
+    Zone {
+        label: "UTC".to_string(),
+        rules: tz::TimeZone::utc(),
+        per_row: false,
+    }
+}
+
+/// Why the zone a preference names could not be had, which the page says above the table
+/// rather than quietly showing UTC under a heading somebody would take at its word.
+#[derive(Debug, PartialEq, Eq)]
+enum ZoneMissing {
+    /// The host's own zone is not readable, which is what a workstation without one looks like.
+    Local,
+    /// No zone of this name in the host's database.
+    Custom(String),
+}
+
+/// The zone a preference names, read out of the host's database on every request.
+///
+/// On every request, like everything else this program shows: a zone file is two or three
+/// kilobytes, a host whose clock is moved by `timedatectl` is read correctly on the next page
+/// rather than after a restart, and there is no cache to be the stale half of anything.
+fn resolve_zone(pref: &TzPref) -> Result<Zone, ZoneMissing> {
+    let read = |path: &str| {
+        std::fs::read(path)
+            .ok()
+            .and_then(|bytes| tz::TimeZone::from_tz_data(&bytes).ok())
+    };
+    match pref {
+        TzPref::Utc => Ok(utc_zone()),
+        TzPref::Local => Ok(Zone {
+            label: local_zone_name().unwrap_or_else(|| "localtime".to_string()),
+            rules: read(LOCALTIME_FILE).ok_or(ZoneMissing::Local)?,
+            per_row: true,
+        }),
+        TzPref::Custom(zone) => match parse_offset(zone) {
+            Some(secs) => Ok(Zone {
+                label: format_offset(secs),
+                rules: tz::TimeZone::fixed(secs).map_err(|_| ZoneMissing::Custom(zone.clone()))?,
+                per_row: false,
+            }),
+            // `custom_zone` held the name to a charset with no `.` in it before it could
+            // become a preference, which is what makes this join unable to leave the directory.
+            None => Ok(Zone {
+                label: zone.clone(),
+                rules: read(&format!("{ZONEINFO_DIR}/{zone}"))
+                    .ok_or_else(|| ZoneMissing::Custom(zone.clone()))?,
+                per_row: true,
+            }),
+        },
+    }
+}
+
+/// The host's own zone by name, for the list box and the heading: where [`LOCALTIME_FILE`]
+/// points, which is how systemd records it. `None` for a copy rather than a link, and the
+/// name is held to [`custom_zone`]'s rule because a link can point anywhere.
+fn local_zone_name() -> Option<String> {
+    let target = std::fs::read_link(LOCALTIME_FILE).ok()?;
+    let (_, name) = target.to_str()?.rsplit_once("zoneinfo/")?;
+    custom_zone(name).filter(|n| parse_offset(n).is_none())
+}
+
+/// One Unix time on this zone's wall clock, and the name of the clock when the zone has more
+/// than one. `format_datetime` stays the one formatter: this only moves the seconds first.
+fn zoned(ts: u64, zone: &Zone) -> (String, Option<String>) {
+    match zone.rules.find_local_time_type(ts as i64) {
+        Ok(t) => (
+            format_datetime(ts.saturating_add_signed(i64::from(t.ut_offset()))),
+            zone.per_row
+                .then(|| t.time_zone_designation().to_string())
+                .filter(|d| !d.is_empty()),
+        ),
+        // A time outside what the rules describe, which a zone file with a rule for the
+        // future never has. The one honest rendering left is the one that is stored.
+        Err(_) => (format_datetime(ts), Some("UTC".to_string())),
+    }
+}
+
+/// Where this row's request came from: the address, the user agent, and nginx's id for it.
+///
+/// The address first and never broken, because it is what a reader compares down the column
+/// and half an address is no address. The user agent under it, in a hint's small type and at
+/// most two lines, because it is the client's description of itself and must not read as
+/// evidence. The id last, on one line cut short by the stylesheet: it exists to be copied into
+/// a search of nginx's log, and a cut on screen is not a cut in the text, so a double click
+/// still copies all of it (and the title shows it). Its label is the file's own `rid`,
+/// untranslated like every other word the file is made of.
+fn audit_origin(e: &AuditEvent) -> Markup {
+    html! {
+        @if let Some(ip) = &e.ip {
+            div class="mono ip" { (ip) }
+        }
+        @if let Some(ua) = &e.ua {
+            div class="hint ua" title=(ua) { (ua) }
+        }
+        @if let Some(rid) = &e.rid {
+            div class="hint mono clip" title=(rid) { "rid " (rid) }
+        }
+        @if e.ip.is_none() && e.ua.is_none() && e.rid.is_none() {
+            span class="muted" { "—" }
+        }
+    }
+}
+
 /// `/audit` — what the gate has answered, newest first, filtered and paged entirely in the
 /// query string like every other list here.
 ///
@@ -4370,6 +4841,13 @@ fn page_audit(v: &View, doc: &AccessFile) -> Markup {
         .iter()
         .find(|(name, _)| *name == period)
         .map(|(_, secs)| now().saturating_sub(*secs));
+    // A retention in time is a floor on every period, "everything" included: the gate prunes
+    // hourly, and in the hour between, a page that showed what the settings say is gone would
+    // be showing somebody's address the operator decided nobody keeps.
+    let since = match (since, v.audit.keep_since(now())) {
+        (Some(a), Some(b)) => Some(a.max(b)),
+        (a, b) => a.or(b),
+    };
     let read = read_audit(
         std::path::Path::new(&v.cfg.audit_path),
         since,
@@ -4417,6 +4895,18 @@ fn page_audit(v: &View, doc: &AccessFile) -> Markup {
         })
         .collect();
     let (start, end, _, _) = l.window(rows.len());
+    // The clock the page is read in, and why it is not the one asked for when that could not
+    // be had: a heading saying `Europe/Rome` over UTC times would be a page lying about the one
+    // thing a reader of an audit compares across rows.
+    let (zone, missing) = match resolve_zone(&v.tz) {
+        Ok(z) => (z, None),
+        Err(m) => (utc_zone(), Some(m)),
+    };
+    let local = local_zone_name();
+    let custom = match &v.tz {
+        TzPref::Custom(z) => z.as_str(),
+        _ => "",
+    };
     let selects = html! {
         select name="aw" aria-label=(v.t(K::AuditWindow)) {
             @for (name, _) in AUDIT_PERIODS {
@@ -4437,6 +4927,23 @@ fn page_audit(v: &View, doc: &AccessFile) -> Markup {
             option value="ok" selected[outcome == "ok"] { (v.t(K::AuditAllowed)) }
             option value="no" selected[outcome == "no"] { (v.t(K::AuditRefused)) }
         }
+        // The clock, and for a zone of the operator's own the box to type it in. In the same
+        // form as the filters, so one Apply sets it with them, and remembered as a cookie
+        // rather than carried in the URL, because it is a preference and not a filter: the
+        // same zone is wanted tomorrow, on a link that says nothing about it. The box is shown
+        // only while `custom` is chosen, which the stylesheet decides, since no script may.
+        span class="tzpick" {
+            select name=(TZ_COOKIE) aria-label=(v.t(K::AuditZone)) {
+                option value="utc" selected[v.tz.choice() == "utc"] { "UTC" }
+                option value="local" selected[v.tz.choice() == "local"] {
+                    (v.t(K::TzLocal))
+                    @if let Some(name) = &local { " (" (name) ")" }
+                }
+                option value="custom" selected[v.tz.choice() == "custom"] { (v.t(K::TzCustom)) }
+            }
+            input type="text" class="tzc" name=(TZ_CUSTOM_PARAM) value=(custom)
+                  placeholder=(v.t(K::TzCustomHint)) aria-label=(v.t(K::TzCustom));
+        }
     };
     html! {
         h1 { (v.t(K::Audit)) }
@@ -4448,7 +4955,21 @@ fn page_audit(v: &View, doc: &AccessFile) -> Markup {
                 "↻ " (v.t(K::AuditRefresh))
             }
         }
-        (list_controls_with(v, &l, rows.len(), read.events.len(), &["aw", "ac", "ao"], selects))
+        (list_controls_with(
+            v,
+            &l,
+            rows.len(),
+            read.events.len(),
+            &["aw", "ac", "ao", TZ_COOKIE, TZ_CUSTOM_PARAM],
+            selects,
+        ))
+        @match &missing {
+            Some(ZoneMissing::Local) => div class="msg warn" { (v.t(K::TzLocalMissing)) },
+            Some(ZoneMissing::Custom(name)) => div class="msg warn" {
+                code { (name) } " " (v.t(K::TzUnknown))
+            },
+            None => {}
+        }
         @if read.more {
             p class="muted" { (v.t(K::AuditTruncated)) }
         }
@@ -4458,11 +4979,14 @@ fn page_audit(v: &View, doc: &AccessFile) -> Markup {
         (list_rows(v, read.events.len(), rows.len(), html! {
             div class="panel" {
                 table {
+                    // Six columns, and the credential is under the event rather than in a
+                    // seventh: a table this wide is already what squeezes the sentence in the
+                    // last column, and "signed in, through Google" is one fact read together.
                     thead { tr {
-                        th { (v.t(K::ColWhen)) }
+                        th { (v.t(K::ColWhen)) " (" (zone.label) ")" }
                         th { (v.t(K::ColEvent)) }
                         th { (v.t(K::ColWho)) }
-                        th { (v.t(K::AuditCredential)) }
+                        th class="client" { (v.t(K::ColClient)) }
                         th { (v.t(K::ColWhere)) }
                         th class="why" { (v.t(K::ColWhy)) }
                     } }
@@ -4471,14 +4995,24 @@ fn page_audit(v: &View, doc: &AccessFile) -> Markup {
                             // The outcome is the tag in the event column and nowhere else: a
                             // whole row in the error colour is a page of red on the deployment
                             // that has most to read here, which is the one being probed.
+                            @let (wall, clock) = zoned(e.ts, &zone);
                             tr {
                                 td class="mono when" data-label=(v.t(K::ColWhen)) {
-                                    (format_datetime(e.ts))
+                                    (wall)
+                                    @if let Some(c) = clock { " " span class="muted" { (c) } }
                                 }
-                                td data-label=(v.t(K::ColEvent)) { (audit_kind(v, e.kind)) }
+                                td data-label=(v.t(K::ColEvent)) {
+                                    (audit_kind(v, e.kind))
+                                    // Nothing under a refusal that came before any credential
+                                    // was read: the reason column already says why, and "None"
+                                    // under the tag would read as a second answer to it.
+                                    @if !matches!(e.cred, AuditCredential::Anonymous) {
+                                        div class="hint" { (audit_cred_markup(v, &e.cred)) }
+                                    }
+                                }
                                 td data-label=(v.t(K::ColWho)) { (audit_who(v, doc, e)) }
-                                td data-label=(v.t(K::AuditCredential)) {
-                                    (audit_cred_markup(v, &e.cred))
+                                td class="client" data-label=(v.t(K::ColClient)) {
+                                    (audit_origin(e))
                                 }
                                 td class="where" data-label=(v.t(K::ColWhere)) {
                                     (audit_where(e))
@@ -4496,6 +5030,31 @@ fn page_audit(v: &View, doc: &AccessFile) -> Markup {
             }
         }))
         p class="muted" { (v.t(K::AuditDeduped)) }
+        // How far back this page can reach at all, which is a question a reader of an audit
+        // always has and the page is the only one who can answer without a shell.
+        p class="muted" {
+            (v.t(K::AuditRotation)) ": " (limit_text(v, &v.audit.rotation))
+            " · " (v.t(K::AuditRetention)) ": "
+            (match v.audit.retention {
+                Some(r) => limit_text(v, &r),
+                None => v.t(K::LimitNone).to_string(),
+            })
+            " · " (v.t(K::AuditOnDisk)) ": " (size_text(v.audit.max_bytes()))
+        }
+    }
+}
+
+/// A number of bytes the way the settings write them: whole GiB or MiB where it is one, a
+/// tenth of a MiB where half a retention is not.
+fn size_text(bytes: u64) -> String {
+    const MIB: u64 = 1 << 20;
+    const GIB: u64 = 1 << 30;
+    if bytes >= GIB && bytes.is_multiple_of(GIB) {
+        format!("{} GiB", bytes / GIB)
+    } else if bytes.is_multiple_of(MIB) {
+        format!("{} MiB", bytes / MIB)
+    } else {
+        format!("{:.1} MiB", bytes as f64 / MIB as f64)
     }
 }
 
@@ -4542,6 +5101,13 @@ fn audit_who(v: &View, doc: &AccessFile, e: &AuditEvent) -> Markup {
             (_, Some(s)) => code { (s) }
             (Some(uuid), None) => code class="muted" { (uuid) }
             (None, None) => span class="muted" { "—" },
+        }
+        // The Cognito account under the name, where a token was validated: the line that tells
+        // this month's owner of an address from last month's, once somebody has deleted an
+        // account and registered the address again. Labelled with the claim's own name, and on
+        // one line, since the first group of a UUID is what an eye compares.
+        @if let Some(sub) = &e.sub {
+            div class="hint mono clip" title=(sub) { "sub " (sub) }
         }
     }
 }
@@ -5143,6 +5709,16 @@ struct ConfigForm {
     /// The enabled social providers as `(identity_provider, app client)`. Pairs rather than
     /// names because Cognito federates per app client: see [`social_choices`].
     buttons: Vec<(String, String)>,
+    /// `audit.client_ip_header`. Empty = the audit records no address.
+    ip_header: String,
+    /// `audit.request_id_header`. Empty = the audit records no request id.
+    rid_header: String,
+    /// `audit.rotation`, as the two controls it is edited in: an amount, and a unit's code.
+    rotation_n: String,
+    rotation_unit: String,
+    /// `audit.retention` likewise. An empty unit is no retention, whatever the amount says.
+    retention_n: String,
+    retention_unit: String,
     admins: String,
     stylesheet: String,
     logo: String,
@@ -5153,6 +5729,11 @@ struct ConfigForm {
 impl ConfigForm {
     /// The form as the file says it, which is what a `GET` renders.
     fn of(doc: &SettingsFile) -> ConfigForm {
+        // Both parse, because a file that did not would not have been opened for editing: a
+        // file the gate refuses is an error page, not this form.
+        let rotation =
+            AuditLimit::parse(&doc.audit.rotation).unwrap_or(AuditPolicy::default().rotation);
+        let retention = AuditLimit::parse(&doc.audit.retention).ok();
         ConfigForm {
             claims: doc.gate.profile_claims.join("\n"),
             identity: doc.gate.identity_attrs.join("\n"),
@@ -5179,6 +5760,16 @@ impl ConfigForm {
                     SocialButtonSpec::Name(n) => (n.clone(), String::new()),
                 })
                 .collect(),
+            ip_header: doc.audit.client_ip_header.clone(),
+            rid_header: doc.audit.request_id_header.clone(),
+            // The file's spelling split into the two controls. A rotation nobody wrote is the
+            // default one, shown as what it is rather than as an empty box that means it.
+            rotation_n: rotation.amount.to_string(),
+            rotation_unit: rotation.unit.code().to_string(),
+            retention_n: retention.map(|r| r.amount.to_string()).unwrap_or_default(),
+            retention_unit: retention
+                .map(|r| r.unit.code().to_string())
+                .unwrap_or_default(),
             admins: doc.web.admins.join("\n"),
             stylesheet: doc.ui.stylesheet_url.clone(),
             logo: doc.ui.logo_url.clone(),
@@ -5221,6 +5812,12 @@ impl ConfigForm {
                 .filter(|idp| f.checked(&idp_field(idp)))
                 .map(|idp| (idp.to_string(), f.get(&aud_field(idp)).trim().to_string()))
                 .collect(),
+            ip_header: f.get("client_ip_header").to_string(),
+            rid_header: f.get("request_id_header").to_string(),
+            rotation_n: f.get("audit_rotation").to_string(),
+            rotation_unit: f.get("audit_rotation_unit").to_string(),
+            retention_n: f.get("audit_retention").to_string(),
+            retention_unit: f.get("audit_retention_unit").to_string(),
             admins: f.get("admins").to_string(),
             stylesheet: f.get("stylesheet").to_string(),
             logo: f.get("logo").to_string(),
@@ -5330,6 +5927,37 @@ impl ConfigForm {
         {
             return Err(Refusal::on("domain", t(lang, K::SocialWiringNeeded)));
         }
+        // The two headers the audit believes, each refused on its own field. The library
+        // makes the same refusals on the way to disk, and one more (both naming one header),
+        // which it then attributes to the second of the two here, where it can be fixed.
+        let ip_header = compile_audit_header("client_ip_header", &self.ip_header)
+            .map_err(|e| Refusal::on("client_ip_header", &e))?;
+        let rid_header = compile_audit_header("request_id_header", &self.rid_header)
+            .map_err(|e| Refusal::on("request_id_header", &e))?;
+        if !ip_header.is_empty() && ip_header.eq_ignore_ascii_case(&rid_header) {
+            return Err(Refusal::on(
+                "request_id_header",
+                format!("'{rid_header}' is already the client address header; one header cannot carry both"),
+            ));
+        }
+        // The rotation and the retention, each put back together from its two controls and
+        // refused on the amount's box, which is the one an operator types into. The pair is
+        // checked last and blamed on the retention, since that is the half which can supply
+        // the size a rotation in time is missing.
+        let rotation = AuditLimit::parse(&format!(
+            "{} {}",
+            self.rotation_n.trim(),
+            self.rotation_unit.trim()
+        ))
+        .map_err(|e| Refusal::on("audit_rotation", format!("audit.rotation: {e}")))?;
+        let retention = match self.retention_unit.trim() {
+            "" => None,
+            unit => Some(
+                AuditLimit::parse(&format!("{} {unit}", self.retention_n.trim()))
+                    .map_err(|e| Refusal::on("audit_retention", format!("audit.retention: {e}")))?,
+            ),
+        };
+        AuditPolicy::new(rotation, retention).map_err(|e| Refusal::on("audit_retention", e))?;
         compile_asset_url("stylesheet_url", &self.stylesheet)
             .map_err(|e| Refusal::on("stylesheet", &e))?;
         compile_asset_url("logo_url", &self.logo).map_err(|e| Refusal::on("logo", &e))?;
@@ -5362,6 +5990,10 @@ impl ConfigForm {
                 })
             })
             .collect();
+        doc.audit.client_ip_header = ip_header;
+        doc.audit.request_id_header = rid_header;
+        doc.audit.rotation = rotation.spelled();
+        doc.audit.retention = retention.map(|r| r.spelled()).unwrap_or_default();
         doc.web.admins = admins;
         doc.ui.stylesheet_url = self.stylesheet.trim().to_string();
         doc.ui.logo_url = self.logo.trim().to_string();
@@ -5437,6 +6069,35 @@ fn guarded_risk(which: GuardedSetting) -> K {
     }
 }
 
+/// One group of the Settings page: a panel that folds to its heading.
+///
+/// A `details`, because that is how HTML has always opened and closed something with no
+/// script behind it, and this GUI may have none. Its inputs are part of the form whether it is
+/// open or not, so a folded group is saved exactly as a visible one is.
+fn settings_group(id: &str, open: bool, heading: Markup, body: Markup) -> Markup {
+    html! {
+        details class="panel group" id=(format!("g-{id}")) open[open] {
+            summary { h2 class="tight" { (heading) } }
+            (body)
+        }
+    }
+}
+
+/// Which group of the Settings page a refused field is in, by its `name=`: the group that has
+/// to be open whatever the reader asked for, since a refusal pointing at a folded field is a
+/// refusal nobody can act on.
+fn settings_group_of(field: &str) -> &'static str {
+    match field {
+        "social" | "providers" | "ttl" => "access",
+        "identity" | "claims" => "handover",
+        "client_ip_header" | "request_id_header" | "audit_rotation" | "audit_retention" => "audit",
+        "admins" | "brand" | "stylesheet" | "logo" | "theme" => "look",
+        // Everything else on the page is the sign-in box's, including the table of ways in,
+        // whose fields are named after the providers in the file (`aud-Google`).
+        _ => "signin",
+    }
+}
+
 fn page_config(
     v: &View,
     f: &ConfigForm,
@@ -5445,9 +6106,30 @@ fn page_config(
 ) -> Markup {
     let about = |name| err.is_some_and(|e| e.is(name));
     let days = f.ttl.trim().parse::<u64>().unwrap_or(0) / 86_400;
+    // Which groups are open: the reader's preference, then whatever the page has to show them.
+    // A refusal opens its field's group, and one that names no field opens them all, since
+    // the page cannot say where the problem is; a held save opens the sign-in group, which is
+    // where every guarded setting lives.
+    let refused = err.map(|e| e.field.as_deref().map(settings_group_of));
+    let open = |id: &str| {
+        v.groups == GroupsPref::Open
+            || matches!(refused, Some(None))
+            || refused.flatten() == Some(id)
+            || (confirm.is_some() && id == "signin")
+    };
+    let groups_href =
+        |pref: GroupsPref| format!("{}?{GROUPS_COOKIE}={}", v.href(&Route::Config), pref.code());
     html! {
         h1 { (v.t(K::Config)) }
         p class="lede" { (v.t(K::ConfigIntro)) }
+        // The two commands. Links and not buttons, because they change nothing but how this
+        // page opens: each is a `GET` the handler turns into a cookie and redirects back from,
+        // exactly as a language or a theme is chosen.
+        p class="primary" {
+            a class="pill" href=(groups_href(GroupsPref::Open)) { "⊞ " (v.t(K::GroupsExpand)) }
+            " "
+            a class="pill" href=(groups_href(GroupsPref::Closed)) { "⊟ " (v.t(K::GroupsCollapse)) }
+        }
         // A save that takes one of the five guarded settings away is SHOWN before it is
         // written, and the form below is re-rendered with the values that are waiting, so
         // the answer to "no, not that" is to edit the field rather than to start again.
@@ -5481,19 +6163,17 @@ fn page_config(
                 p class="muted" { (v.t(K::ConfirmSafety)) }
             }
         }
-        // FOUR BOXES, ONE FORM. The grouping is by what a setting decides, not by which
+        // FIVE GROUPS, ONE FORM. The grouping is by what a setting decides, not by which
         // section of the file it lands in: an operator asking "who gets in, and for how
         // long" should not have to read past what the application receives to find out, and
         // the two questions are answered by fields that happen to be neighbours in the file.
-        // The file keeps its own three sections unchanged, so each box still names the key
-        // it writes; where a box spans two, it names both.
+        // Each group still names the section it writes; where a group spans two, it names both.
         //
-        // One form and one save, because the `rev` guard is over the whole file: four forms
-        // would be four fingerprints and three chances to lose an edit somebody else made
-        // between them.
+        // One form and one save, because the `rev` guard is over the whole file: five forms
+        // would be five fingerprints and four chances to lose an edit somebody else made
+        // between them. Folding a group does not take it out of the form.
         (form_shell(v, err, html! {
-            div class="panel" {
-                h2 class="tight" { (section_heading(v.t(K::ConfigAccess), "gate")) }
+            (settings_group("access", open("access"), section_heading(v.t(K::ConfigAccess), "gate"), html! {
                 // The scope form's own furniture, because a checkbox here is the same thing
                 // it is there and inventing a second one would show.
                 div {
@@ -5512,16 +6192,32 @@ fn page_config(
                 (text_field(v.t(K::SessionTtl), "ttl", &f.ttl, "2592000",
                             Some(&format!("{days} {}. {}", v.t(K::Days), v.t(K::SessionTtlHelp))),
                             about("ttl")))
-            }
-            div class="panel" {
-                h2 class="tight" { (section_heading(v.t(K::ConfigHandover), "gate")) }
+            }))
+            (settings_group("handover", open("handover"), section_heading(v.t(K::ConfigHandover), "gate"), html! {
                 (urls_field(v.t(K::IdentityAttrs), "identity", &f.identity,
                             html! { (v.t(K::IdentityAttrsHelp)) }, about("identity")))
                 (urls_field(v.t(K::ProfileClaims), "claims", &f.claims,
                             html! { (v.t(K::ProfileClaimsHelp)) }, about("claims")))
-            }
-            div class="panel" {
-                h2 class="tight" { (section_heading(v.t(K::ConfigSignIn), "gate")) }
+            }))
+            // The headers that come IN, beside the ones that go out above: both are the
+            // nginx contract, and an operator wiring one is looking at the other. Named by
+            // the file's own keys, since both are typed into an nginx config next. Then how
+            // long what they record is kept, which is the other half of the same decision.
+            (settings_group("audit", open("audit"), section_heading(v.t(K::ConfigAudit), "audit"), html! {
+                (text_field(v.t(K::ClientIpHeader), "client_ip_header", &f.ip_header,
+                            "X-Real-IP", Some(v.t(K::ClientIpHeaderHelp)),
+                            about("client_ip_header")))
+                (text_field(v.t(K::RequestIdHeader), "request_id_header", &f.rid_header,
+                            "X-Request-ID", Some(v.t(K::RequestIdHeaderHelp)),
+                            about("request_id_header")))
+                (limit_field(v, v.t(K::AuditRotation), "audit_rotation", &f.rotation_n,
+                             &f.rotation_unit, false, v.t(K::AuditRotationHelp),
+                             about("audit_rotation")))
+                (limit_field(v, v.t(K::AuditRetention), "audit_retention", &f.retention_n,
+                             &f.retention_unit, true, v.t(K::AuditRetentionHelp),
+                             about("audit_retention")))
+            }))
+            (settings_group("signin", open("signin"), section_heading(v.t(K::ConfigSignIn), "gate"), html! {
                 // Where people sign in at all, first: it is the page the two below only
                 // add a way into.
                 // The pool first: everything else in this box is a way into it.
@@ -5560,9 +6256,8 @@ fn page_config(
                 // Cognito will not match (`Microsoft` for `MicrosoftPersonal`, say) with
                 // nothing to catch it but a button that never appears.
                 (social_choices(v, f, err))
-            }
-            div class="panel" {
-                h2 class="tight" { (section_heading(v.t(K::ConfigAdminLook), "web + ui")) }
+            }))
+            (settings_group("look", open("look"), section_heading(v.t(K::ConfigAdminLook), "web + ui"), html! {
                 (urls_field(v.t(K::Admins), "admins", &f.admins,
                             html! { (v.t(K::AdminsHelp)) " (" (v.t(K::AdminsKeepYourself)) ")" },
                             about("admins")))
@@ -5594,7 +6289,7 @@ fn page_config(
                     }
                     span class="hint" { (v.t(K::DefaultThemeHelp)) }
                 }
-            }
+            }))
             @if let Some(c) = confirm {
                 input type="hidden" name="confirm" value=(c.token);
             }
@@ -6589,6 +7284,11 @@ fn anon_view<'a>(
         lang,
         lang_pref,
         theme,
+        // An error page shows no time, so it has no clock to be read in, no settings to fold
+        // and no audit to cut.
+        tz: TzPref::Utc,
+        groups: GroupsPref::Open,
+        audit: AuditPolicy::default(),
         look,
         admin: None,
         // Every caller is an error page, and an error page belongs to no tab.
@@ -6623,6 +7323,18 @@ fn handle(mut req: Request, cfg: &Config) {
         query_param(&query, THEME_COOKIE).as_deref(),
         header_value(&req, "Cookie").and_then(|c| cookie_value(c, THEME_COOKIE)),
     );
+    // The cookie alone, unlike the two above: a `?tz=` never reaches a render, because the
+    // redirect below turns it into this cookie first. A cookie this binary could not have set
+    // is no preference at all, and UTC is what no preference means.
+    let tz = header_value(&req, "Cookie")
+        .and_then(|c| cookie_value(c, TZ_COOKIE))
+        .and_then(parse_tz_pref)
+        .unwrap_or_default();
+    // The same, for how the Settings page opens.
+    let groups = header_value(&req, "Cookie")
+        .and_then(|c| cookie_value(c, GROUPS_COOKIE))
+        .and_then(GroupsPref::parse)
+        .unwrap_or_default();
     // Identity comes from nginx and from nowhere else. A missing header is a broken
     // deployment, not an anonymous visitor — say so, and fail closed.
     let raw_email = match header_value(&req, IDENTITY_HEADER) {
@@ -6710,6 +7422,9 @@ fn handle(mut req: Request, cfg: &Config) {
                 lang,
                 lang_pref,
                 theme,
+                tz,
+                groups,
+                audit: settings.audit_policy,
                 look,
                 admin: Some(&email),
                 at: Route::Dashboard,
@@ -6749,6 +7464,9 @@ fn handle(mut req: Request, cfg: &Config) {
             lang,
             lang_pref,
             theme,
+            tz: tz.clone(),
+            groups,
+            audit: settings.audit_policy,
             look,
             admin: Some(&email),
             at: at.clone(),
@@ -6803,6 +7521,36 @@ fn handle(mut req: Request, cfg: &Config) {
         respond_theme_redirect(req, &preference_href(cfg, &at, &query, THEME_COOKIE), theme);
         return;
     }
+    // The audit's clock, remembered the same way. It arrives as two fields rather than one,
+    // because `custom` is a choice in a list box and the zone it means is typed in the box
+    // beside it: the text box is read only when the list box says so. A zone nothing can read
+    // sets nothing, and the browser comes back to the page in whatever clock it was already
+    // in, with both parameters gone so no link on it carries them any further.
+    if let Some(choice) = query_param(&query, TZ_COOKIE) {
+        let chosen = match choice.trim() {
+            "custom" => query_param(&query, TZ_CUSTOM_PARAM).and_then(|z| parse_tz_pref(&z)),
+            other => parse_tz_pref(other),
+        };
+        let location = preference_href_without(cfg, &at, &query, &[TZ_COOKIE, TZ_CUSTOM_PARAM]);
+        match chosen {
+            Some(pref) => respond_preference_redirect(req, &location, TZ_COOKIE, pref.code()),
+            // A `303`, the redirect this binary answers a form with: there is nothing to
+            // remember, and a `GET` is exactly what the browser should follow it with.
+            None => respond_redirect(req, &location),
+        }
+        return;
+    }
+    // How the Settings page opens, remembered the same way again: the two commands at its top
+    // are links carrying this one parameter.
+    if let Some(pref) = query_param(&query, GROUPS_COOKIE).and_then(|g| GroupsPref::parse(&g)) {
+        respond_preference_redirect(
+            req,
+            &preference_href(cfg, &at, &query, GROUPS_COOKIE),
+            GROUPS_COOKIE,
+            pref.code(),
+        );
+        return;
+    }
 
     // Fresh off disk, every request, and hashed: `rev` is what every form on this page will
     // carry, and what the `POST` that comes back has to still match. Which file it fingerprints
@@ -6815,6 +7563,9 @@ fn handle(mut req: Request, cfg: &Config) {
         lang,
         lang_pref,
         theme,
+        tz,
+        groups,
+        audit: settings.audit_policy,
         look,
         admin: Some(&email),
         at: at.clone(),
@@ -7588,6 +8339,12 @@ mod tests {
             // The set the page says it drew a row for; a test that ticks one adds its own
             // `idp-<name>` and `aud-<name>` beside it, exactly as a browser would.
             ("idps", ""),
+            // The audit's rotation as the page renders it for a file that names none, and no
+            // retention: what a browser sends back from a form nobody touched.
+            ("audit_rotation", "4"),
+            ("audit_rotation_unit", "MiB"),
+            ("audit_retention", ""),
+            ("audit_retention_unit", ""),
             ("admins", "admin@x.com"),
         ];
         for (k, v) in over {
@@ -8835,6 +9592,9 @@ mod tests {
             lang: Lang::En,
             lang_pref: LangPref::Auto,
             theme: UiTheme::System,
+            tz: TzPref::Utc,
+            groups: GroupsPref::Open,
+            audit: AuditPolicy::default(),
             look: Look::default(),
             admin: Some("admin@x.com"),
             at,
@@ -8892,7 +9652,7 @@ mod tests {
         let _ = std::fs::remove_file(&p);
         let w = bb_auth_core::AuditWriter::new(&p);
         for e in events {
-            w.record(e).unwrap();
+            w.record(e, &AuditPolicy::default()).unwrap();
         }
         p
     }
@@ -8976,6 +9736,517 @@ mod tests {
         assert!(html.contains("The audit is off"), "{html}");
         assert!(html.contains("BB_AUTH_AUDIT_FILE"), "{html}");
         let _ = std::fs::remove_file(&path);
+    }
+
+    /// A row carries where its request came from, and the filter box finds it by any of it.
+    #[test]
+    fn the_audit_says_where_a_request_came_from() {
+        let login = AuditEvent::new(now() - 60, AuditKind::LoginGranted, AuditCredential::Local)
+            .by("far-away@x.com", None)
+            .account(Some("9d8e7f60-1a2b-4c3d-8e9f-0a1b2c3d4e5f"))
+            .from(&bb_auth_core::AuditClient {
+                ip: Some("203.0.113.7".into()),
+                ua: Some("Mozilla/5.0 (Macintosh)".into()),
+                rid: Some("5f1c0a9e7b2d4c3a8e6f1b0d9c7a5e3f".into()),
+            });
+        let p = audit_fixture("audit-client", &[login]);
+
+        let html = render_of("audit-client", SAMPLE, Route::Audit, "");
+        for part in [
+            "203.0.113.7",
+            "Mozilla/5.0 (Macintosh)",
+            "rid 5f1c0a9e7b2d4c3a8e6f1b0d9c7a5e3f",
+            "sub 9d8e7f60-1a2b-4c3d-8e9f-0a1b2c3d4e5f",
+            // No preference is UTC, and the heading says so.
+            "When (UTC)",
+        ] {
+            assert!(html.contains(part), "{part}: {html}");
+        }
+        // An address pasted from a firewall's log finds the row; another one does not.
+        let hit = render_of("audit-client", SAMPLE, Route::Audit, "aq=203.0.113");
+        assert!(hit.contains("far-away@x.com"), "{hit}");
+        let miss = render_of("audit-client", SAMPLE, Route::Audit, "aq=198.51.100");
+        assert!(!miss.contains("far-away@x.com"), "{miss}");
+        let _ = std::fs::remove_file(&p);
+    }
+
+    /// Central Europe, built by hand so no test needs the host's zone database: an hour ahead
+    /// of UTC in winter and two in summer, changing on the last Sunday of March and October.
+    fn cet() -> Zone {
+        use tz::timezone::{AlternateTime, LocalTimeType, MonthWeekDay, RuleDay, TransitionRule};
+        let std = LocalTimeType::new(3600, false, Some(b"CET")).unwrap();
+        let dst = LocalTimeType::new(7200, true, Some(b"CEST")).unwrap();
+        let rule = AlternateTime::new(
+            std,
+            dst,
+            RuleDay::MonthWeekDay(MonthWeekDay::new(3, 5, 0).unwrap()),
+            7200,
+            RuleDay::MonthWeekDay(MonthWeekDay::new(10, 5, 0).unwrap()),
+            10800,
+        )
+        .unwrap();
+        Zone {
+            label: "Europe/Rome".to_string(),
+            rules: tz::TimeZone::new(
+                vec![],
+                vec![std],
+                vec![],
+                Some(TransitionRule::Alternate(rule)),
+            )
+            .unwrap(),
+            per_row: true,
+        }
+    }
+
+    /// Noon UTC on a given day of 2026.
+    fn noon(day: &str) -> u64 {
+        bb_auth_core::parse_date_epoch(day).unwrap() + 12 * 3600
+    }
+
+    #[test]
+    fn a_time_is_read_on_the_clock_its_zone_had_that_day() {
+        let (winter, summer) = (noon("2026-01-15"), noon("2026-07-15"));
+        // A zone with two clocks names the one each row was read on, or the hour either side
+        // of a change would read the same twice.
+        assert_eq!(
+            zoned(winter, &cet()),
+            ("2026-01-15 13:00:00".to_string(), Some("CET".to_string()))
+        );
+        assert_eq!(
+            zoned(summer, &cet()),
+            ("2026-07-15 14:00:00".to_string(), Some("CEST".to_string()))
+        );
+        // A fixed offset and UTC need no such note: the heading already says which they are.
+        let india = resolve_zone(&TzPref::Custom("+05:30".into())).unwrap();
+        assert_eq!(india.label, "+05:30");
+        assert_eq!(
+            zoned(winter, &india),
+            ("2026-01-15 17:30:00".to_string(), None)
+        );
+        assert_eq!(
+            zoned(winter, &utc_zone()),
+            ("2026-01-15 12:00:00".to_string(), None)
+        );
+        // A name nobody has is said to be missing rather than read as something else, which is
+        // also what a workstation with no zone database gives for every name.
+        assert_eq!(
+            resolve_zone(&TzPref::Custom("No/Such_Zone".into())).err(),
+            Some(ZoneMissing::Custom("No/Such_Zone".into()))
+        );
+    }
+
+    /// The one path the hand-built zone above cannot cover: a real file out of the host's
+    /// database, parsed by the library the page uses. Unix only, since that is where the
+    /// database is, and skipped on a host with no tzdata rather than failed, since a missing
+    /// zone is a state the page already handles and says so.
+    #[cfg(unix)]
+    #[test]
+    fn a_named_zone_is_read_out_of_the_hosts_database() {
+        if !std::path::Path::new(&format!("{ZONEINFO_DIR}/Europe/Rome")).exists() {
+            return;
+        }
+        let rome = resolve_zone(&TzPref::Custom("Europe/Rome".into())).unwrap();
+        assert_eq!(rome.label, "Europe/Rome");
+        assert_eq!(
+            zoned(noon("2026-01-15"), &rome),
+            ("2026-01-15 13:00:00".to_string(), Some("CET".to_string()))
+        );
+        assert_eq!(
+            zoned(noon("2026-07-15"), &rome),
+            ("2026-07-15 14:00:00".to_string(), Some("CEST".to_string()))
+        );
+    }
+
+    #[test]
+    fn a_zone_preference_is_a_word_a_name_or_an_offset_and_nothing_else() {
+        assert_eq!(parse_tz_pref("utc"), Some(TzPref::Utc));
+        assert_eq!(parse_tz_pref(" Local "), Some(TzPref::Local));
+        for name in [
+            "Europe/Rome",
+            "America/Argentina/Buenos_Aires",
+            "Etc/GMT+2",
+            "GMT",
+        ] {
+            assert_eq!(
+                parse_tz_pref(name),
+                Some(TzPref::Custom(name.to_string())),
+                "{name}"
+            );
+        }
+        // An offset is stored in one spelling however it was typed, and its sign means ahead
+        // of UTC: the opposite of what a POSIX TZ string would have made of `UTC-2`.
+        for (typed, stored) in [
+            ("+2", "+02:00"),
+            ("+0200", "+02:00"),
+            ("UTC+02:00", "+02:00"),
+            ("gmt-3", "-03:00"),
+            ("+5:30", "+05:30"),
+            ("-0930", "-09:30"),
+            ("+14", "+14:00"),
+        ] {
+            assert_eq!(
+                parse_tz_pref(typed),
+                Some(TzPref::Custom(stored.to_string())),
+                "{typed}"
+            );
+        }
+        assert_eq!(parse_offset("UTC-2"), Some(-7200));
+        // Nothing that could climb out of the zone directory, or break a cookie, becomes one.
+        for junk in [
+            "",
+            "../../etc/passwd",
+            "Europe/../../etc",
+            "/etc/localtime",
+            "Europe//Rome",
+            "Europe/Rome/",
+            "Rome;x=1",
+            "a b",
+            "+15",
+            "+02:60",
+            "+",
+        ] {
+            assert_eq!(parse_tz_pref(junk), None, "{junk:?}");
+        }
+        // What is stored reads back as itself.
+        for p in [
+            TzPref::Utc,
+            TzPref::Local,
+            TzPref::Custom("Europe/Rome".into()),
+            TzPref::Custom("+05:30".into()),
+        ] {
+            assert_eq!(parse_tz_pref(p.code()), Some(p.clone()));
+        }
+    }
+
+    /// The page in the clock a reader chose, and the page that says so when that clock
+    /// cannot be had, rather than one printing UTC under a heading somebody takes at its word.
+    #[test]
+    fn the_audit_reads_in_the_chosen_zone_or_says_why_not() {
+        let at = noon("2026-01-15");
+        let ev = AuditEvent::new(at, AuditKind::LoginGranted, AuditCredential::Local)
+            .by("clock@x.com", None);
+        let p = audit_fixture("audit-zone", &[ev]);
+        let path = scratch("audit-zone", SAMPLE);
+        let cfg = cfg_for(&path, "");
+        let (doc, _) = open_access_file(&cfg.access_path).unwrap();
+        let mut v = view(&cfg, Route::Audit, "REV");
+        // January is further back than the default day.
+        v.query = "aw=all";
+
+        v.tz = TzPref::Custom("+05:30".into());
+        let html = page_audit(&v, &doc).into_string();
+        assert!(html.contains("When (+05:30)"), "{html}");
+        assert!(html.contains("2026-01-15 17:30:00"), "{html}");
+        assert!(
+            html.contains(r#"<option value="custom" selected>"#),
+            "{html}"
+        );
+        assert!(html.contains(r#"name="tzc" value="+05:30""#), "{html}");
+
+        v.tz = TzPref::Custom("No/Such_Zone".into());
+        let html = page_audit(&v, &doc).into_string();
+        assert!(
+            html.contains("is not a time zone this server knows"),
+            "{html}"
+        );
+        assert!(html.contains("When (UTC)"), "{html}");
+        assert!(html.contains("2026-01-15 12:00:00"), "{html}");
+        // What was asked for stays in the box, to be corrected rather than retyped.
+        assert!(
+            html.contains(r#"name="tzc" value="No/Such_Zone""#),
+            "{html}"
+        );
+
+        cleanup(&path);
+        let _ = std::fs::remove_file(&p);
+    }
+
+    /// A zone is a preference: it becomes a cookie and leaves the address, like the language
+    /// and the theme, and a zone nothing can read sets nothing at all.
+    #[test]
+    fn a_zone_is_remembered_and_leaves_the_address() {
+        let path = scratch("tz-redirect", SAMPLE);
+        let served = cfg_for(&path, "");
+        let server = Server::http("127.0.0.1:0").expect("bind an ephemeral port");
+        let port = server.server_addr().to_ip().expect("an ip address").port();
+        std::thread::spawn(move || {
+            for req in server.incoming_requests() {
+                handle(req, &served);
+            }
+        });
+        let get = |query: &str, cookie: &str| {
+            let mut r = client()
+                .get(format!("http://127.0.0.1:{port}/audit?{query}"))
+                .header(IDENTITY_HEADER, "admin@x.com");
+            if !cookie.is_empty() {
+                r = r.header("Cookie", cookie);
+            }
+            r.call().expect("a response")
+        };
+        let header = |r: &ureq::http::Response<ureq::Body>, name: &str| {
+            r.headers()
+                .get(name)
+                .map(|h| h.to_str().unwrap().to_string())
+        };
+
+        // Typed as an offset, stored in one spelling, and the filters survive the trip.
+        let r = get("aw=7d&tz=custom&tzc=%2B2", "");
+        assert_eq!(r.status(), 302);
+        assert_eq!(header(&r, "Location").as_deref(), Some("/audit?aw=7d"));
+        let set = header(&r, "Set-Cookie").unwrap();
+        assert!(set.starts_with("tz=+02:00;"), "{set}");
+
+        // A word is the whole answer, whatever the box beside it still holds.
+        let r = get("tz=local&tzc=Europe%2FRome", "");
+        assert!(header(&r, "Set-Cookie").unwrap().starts_with("tz=local;"));
+
+        // A zone nothing can read sets nothing, and both parameters leave the address anyway.
+        let r = get("aw=24h&tz=custom&tzc=..%2F..%2Fetc%2Fpasswd", "");
+        assert_eq!(r.status(), 303);
+        assert_eq!(header(&r, "Set-Cookie"), None);
+        assert_eq!(header(&r, "Location").as_deref(), Some("/audit?aw=24h"));
+
+        // And the page reads whatever the cookie says. This audit is empty, so there is no
+        // table to head; the list box and the box beside it are what show the choice.
+        let mut r = get("", "tz=+05:30");
+        assert_eq!(r.status(), 200);
+        let body = r.body_mut().read_to_string().unwrap();
+        assert!(
+            body.contains(r#"<option value="custom" selected>"#),
+            "{body}"
+        );
+        assert!(body.contains(r#"name="tzc" value="+05:30""#), "{body}");
+        cleanup(&path);
+    }
+
+    #[test]
+    fn the_settings_page_writes_the_audit_headers_and_refuses_a_credential() {
+        let path = scratch("cfg-audit-headers", SAMPLE);
+        let sp = settings_path(&path);
+        let cfg = cfg_for(&path, "");
+
+        let got = post_settings(
+            &cfg,
+            &sp,
+            &[
+                ("client_ip_header", "X-Real-IP"),
+                ("request_id_header", "X-Request-ID"),
+            ],
+        );
+        assert!(matches!(got, Got::Redirect(_)), "{got:?}");
+        let (doc, s) = open_settings_file(&sp).unwrap();
+        assert_eq!(s.client_ip_header.as_deref(), Some("X-Real-IP"));
+        assert_eq!(s.request_id_header.as_deref(), Some("X-Request-ID"));
+        let rev = rev_of(&sp);
+        let v = view(&cfg, Route::Config, &rev);
+        let html = page_config(&v, &ConfigForm::of(&doc), None, None).into_string();
+        assert!(
+            html.contains(r#"name="client_ip_header" value="X-Real-IP""#),
+            "{html}"
+        );
+
+        // A header that carries a credential is refused on its own field, and nothing lands:
+        // an id is written down as it arrives, and a cookie is not something to write down.
+        let before = read(&sp);
+        let got = post_settings(&cfg, &sp, &[("request_id_header", "Cookie")]);
+        let (status, html) = got.page();
+        assert_eq!(status, 400);
+        assert!(html.contains("carries a credential"), "{html}");
+        assert_eq!(read(&sp), before);
+        cleanup(&path);
+    }
+
+    /// Rotation and retention are an amount and a unit each, written back in the file's one
+    /// spelling, and the pair that bounds no bytes is refused on the retention's box.
+    #[test]
+    fn the_settings_page_writes_the_rotation_and_the_retention() {
+        let path = scratch("cfg-audit-limits", SAMPLE);
+        let sp = settings_path(&path);
+        let cfg = cfg_for(&path, "");
+
+        let got = post_settings(
+            &cfg,
+            &sp,
+            &[
+                ("audit_rotation", "1"),
+                ("audit_rotation_unit", "GiB"),
+                ("audit_retention", "6"),
+                ("audit_retention_unit", "months"),
+            ],
+        );
+        assert!(matches!(got, Got::Redirect(_)), "{got:?}");
+        let (doc, s) = open_settings_file(&sp).unwrap();
+        assert_eq!(doc.audit.rotation, "1 GiB");
+        assert_eq!(doc.audit.retention, "6 months");
+        assert_eq!(
+            s.audit_policy.retention.and_then(|r| r.seconds()),
+            Some(6 * 2_629_746)
+        );
+        // And the page renders the controls back as it saved them.
+        let rev = rev_of(&sp);
+        let v = view(&cfg, Route::Config, &rev);
+        let html = page_config(&v, &ConfigForm::of(&doc), None, None).into_string();
+        assert!(
+            html.contains(r#"name="audit_retention" value="6""#),
+            "{html}"
+        );
+        assert!(
+            html.contains(r#"<option value="months" selected>"#),
+            "{html}"
+        );
+
+        // A rotation in time with no size anywhere: refused, nothing written, the retention's
+        // box the one marked.
+        let before = read(&sp);
+        let got = post_settings(
+            &cfg,
+            &sp,
+            &[
+                ("audit_rotation", "1"),
+                ("audit_rotation_unit", "months"),
+                ("audit_retention", "1"),
+                ("audit_retention_unit", "years"),
+            ],
+        );
+        let (status, html) = got.page();
+        assert_eq!(status, 400);
+        assert!(html.contains("without limit"), "{html}");
+        assert!(
+            html.contains(r#"class="f-audit_retention invalid""#),
+            "{html}"
+        );
+        assert_eq!(read(&sp), before);
+
+        // No retention is the list box's `none`, whatever the number beside it says.
+        let got = post_settings(
+            &cfg,
+            &sp,
+            &[("audit_retention", "3"), ("audit_retention_unit", "")],
+        );
+        assert!(matches!(got, Got::Redirect(_)), "{got:?}");
+        assert_eq!(open_settings_file(&sp).unwrap().0.audit.retention, "");
+        cleanup(&path);
+    }
+
+    /// Every group folds, the two commands say how the page opens and are remembered, and a
+    /// refused field is never left inside a folded group.
+    #[test]
+    fn the_settings_groups_fold_and_a_refusal_is_never_folded_away() {
+        let path = scratch("cfg-groups", SAMPLE);
+        let sp = settings_path(&path);
+        let cfg = cfg_for(&path, "");
+        let (doc, _) = open_settings_file(&sp).unwrap();
+        let rev = rev_of(&sp);
+        // How many groups render open: the ones whose opening tag carries the attribute.
+        let count_open = |html: &str| {
+            html.match_indices(r#"<details class="panel group" id="g-"#)
+                .filter(|(i, _)| html[*i..].split('>').next().unwrap().contains(" open"))
+                .count()
+        };
+
+        // Open by default: what the page always was.
+        let mut v = view(&cfg, Route::Config, &rev);
+        let html = page_config(&v, &ConfigForm::of(&doc), None, None).into_string();
+        assert_eq!(html.matches(r#"<details class="panel group""#).count(), 5);
+        assert_eq!(count_open(&html), 5, "{html}");
+        assert!(
+            html.contains("?groups=closed"),
+            "the command is on the page"
+        );
+
+        // Folded by preference, all five.
+        v.groups = GroupsPref::Closed;
+        let html = page_config(&v, &ConfigForm::of(&doc), None, None).into_string();
+        assert_eq!(count_open(&html), 0, "{html}");
+
+        // A refusal on a field opens that field's group, and only that one.
+        let err = Refusal::on("audit_retention", "no");
+        let html = page_config(&v, &ConfigForm::of(&doc), Some(&err), None).into_string();
+        assert_eq!(count_open(&html), 1, "{html}");
+        assert!(
+            html.contains(r#"<details class="panel group" id="g-audit" open>"#),
+            "{html}"
+        );
+        // One that names no field opens everything: the page cannot say where to look.
+        let html = page_config(
+            &v,
+            &ConfigForm::of(&doc),
+            Some(&Refusal::from("x".to_string())),
+            None,
+        )
+        .into_string();
+        assert_eq!(count_open(&html), 5, "{html}");
+
+        // The commands are remembered the way a theme is: a cookie, and the parameter gone.
+        let served = cfg_for(&path, "");
+        let server = Server::http("127.0.0.1:0").expect("bind an ephemeral port");
+        let port = server.server_addr().to_ip().expect("an ip address").port();
+        std::thread::spawn(move || {
+            for req in server.incoming_requests() {
+                handle(req, &served);
+            }
+        });
+        let r = client()
+            .get(format!("http://127.0.0.1:{port}/config?groups=closed"))
+            .header(IDENTITY_HEADER, "admin@x.com")
+            .call()
+            .expect("a response");
+        assert_eq!(r.status(), 302);
+        assert_eq!(r.headers().get("Location").unwrap(), "/config");
+        let set = r.headers().get("Set-Cookie").unwrap().to_str().unwrap();
+        assert!(set.starts_with("groups=closed;"), "{set}");
+        let mut r = client()
+            .get(format!("http://127.0.0.1:{port}/config"))
+            .header(IDENTITY_HEADER, "admin@x.com")
+            .header("Cookie", "groups=closed")
+            .call()
+            .expect("a response");
+        let body = r.body_mut().read_to_string().unwrap();
+        assert_eq!(count_open(&body), 0, "{body}");
+        cleanup(&path);
+    }
+
+    /// A retention in time is a floor on every period the Audit tab offers, `everything`
+    /// included, and the page says how the audit rotates and what it keeps.
+    #[test]
+    fn the_audit_shows_nothing_the_retention_has_expired() {
+        let now = now();
+        let old = AuditEvent::new(
+            now - 30 * 86_400,
+            AuditKind::LoginGranted,
+            AuditCredential::Local,
+        )
+        .by("last-month@x.com", None);
+        let new = AuditEvent::new(now - 60, AuditKind::LoginGranted, AuditCredential::Local)
+            .by("just-now@x.com", None);
+        let p = audit_fixture("audit-retention", &[old, new]);
+        let path = scratch("audit-retention", SAMPLE);
+        let cfg = cfg_for(&path, "");
+        let (doc, _) = open_access_file(&cfg.access_path).unwrap();
+        let mut v = view(&cfg, Route::Audit, "REV");
+        v.query = "aw=all";
+
+        let html = page_audit(&v, &doc).into_string();
+        assert!(
+            html.contains("last-month@x.com"),
+            "no retention, everything: {html}"
+        );
+
+        v.audit = AuditPolicy::new(
+            AuditLimit::new(4, AuditUnit::MiB),
+            Some(AuditLimit::new(1, AuditUnit::Weeks)),
+        )
+        .unwrap();
+        let html = page_audit(&v, &doc).into_string();
+        assert!(
+            !html.contains("last-month@x.com"),
+            "a week is a week: {html}"
+        );
+        assert!(html.contains("just-now@x.com"), "{html}");
+        assert!(html.contains("Retention: 1 week"), "{html}");
+        assert!(html.contains("At most on disk: 8 MiB"), "{html}");
+        cleanup(&path);
+        let _ = std::fs::remove_file(&p);
     }
 
     #[test]
