@@ -2,8 +2,7 @@
 
 Everything that governs work in this repository: what it is, what to run, the conventions to
 write in, and the rules that must not break. It is tool-agnostic on purpose, so any coding
-agent can start here; `CLAUDE.md` is a one-line import of this file and holds nothing of its
-own.
+agent can start here, and there is deliberately no tool-specific file beside it.
 
 **Read [the invariants](#invariants--do-not-break-these) before changing behaviour.** This is
 an authentication gate, and almost every rule in it exists because breaking that rule locks
