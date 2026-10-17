@@ -22,7 +22,9 @@ Versions are the crate's (`Cargo.toml`); packages add a Debian revision
 
 ## Unreleased
 
-**Due out as 1.99.6, and the numbers before it are behind us.** 1.99.5 was spent by a deploy
+**Due out as 1.99.7, and the numbers before it are behind us.** 1.99.6 was spent by a deploy
+on 2026-09-11 from `gb855ed2`, which carried everything below except what the section named
+after 1.99.7 adds. 1.99.5 was spent by a deploy
 on 2026-09-11 from `g15ae13e`, which carried everything in the section named after it except
 the Settings page opening folded. 1.99.4 was spent by a deploy
 on 2026-09-10 from `gfd77f1f`, which carried the audit and nothing of what the section below
@@ -43,7 +45,7 @@ environment and into the settings file; and a confirmation step in front of the 
 that can stop people getting in.
 
 **A version gets a section of its own here only once it is tagged and released, and a
-release candidate is neither.** 1.99.6 is a version number, not a release: it is built,
+release candidate is neither.** 1.99.7 is a version number, not a release: it is built,
 deployed and run, and it is **not tagged**, because a tag is what says "this is a thing you
 can install and go back to" and a candidate is not that. So this section stays under this
 heading through however many 1.99.x there are, and becomes `## 2.0.0` on the day 2.0.0 is
@@ -65,6 +67,20 @@ when there is no tag to check out.
 **Nothing here changes the cookie format or the access-file format, so no upgrade in this
 release logs anybody out.** The settings file goes from version 1 to version 3, which needs an
 edit before the binaries land: see "Upgrading" below.
+
+### Carried by 1.99.7: Cognito's `acr` and `amr`, and a reload that could hang a worker
+
+**Nothing to do before November 2026.** AWS adds an `acr` string and an `amr` array to every
+Cognito token from 2026-11-04, ramping to every user pool by 2027-02-28. The gate already
+tolerated both, because it reads the claims it needs by name and keeps the rest as raw
+values; a test now signs a token carrying them and requires the login to go through, so a
+stricter claims struct cannot land without failing it. Configured as a profile claim, `acr`
+is captured like any string, and `amr` costs that claim and never the login. The gate does
+not read the discovery document, so the new members there do not reach it.
+
+**A token's validation took the settings lock twice on one thread.** A SIGHUP reload queued
+between the two reads could leave that worker waiting forever, since std's `RwLock` puts a
+new reader behind a waiting writer. It now reads once.
 
 ### New: the audit, and an Audit tab to read it
 

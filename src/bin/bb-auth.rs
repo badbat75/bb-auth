@@ -1511,10 +1511,9 @@ fn validate_id_token(token: &str, state: &State) -> Result<UserIdentity, String>
     if !header_safe_email(&email) {
         return Err(format!("token email is not printable ASCII: {email:?}"));
     }
-    // One read of the live settings for the whole of this token: the relaxation and the claim
-    // list are one operator decision, and a reload landing between the two halves would apply
-    // half of it.
-    let settings = state.settings.read().unwrap();
+    // Still the guard taken above, and it must not be taken a second time: std's `RwLock`
+    // queues a new reader behind a waiting writer, so a SIGHUP reload landing between two
+    // reads on this thread would wait for the first while the second waits for it.
     if !email_verified_true(&c.email_verified) {
         // Strict by default. The only exception is a social login whose email
         // Cognito couldn't verify itself — and only when explicitly enabled.
@@ -6056,7 +6055,13 @@ mod tests {
     // group of them (`alg`, a missing `kid`, `token_use`, `exp`, `aud`, the email's shape)
     // was reachable only through a live Cognito.
 
-    const IT_JWKS: &str = r#"{"keys":[{"kty":"RSA","alg":"RS256","use":"sig","kid":"bb-auth-it","e":"AQAB","n":"rugOpI1NhVG8CKJbf8LFMFjw-Goe26G5YJLb7-VTWg3VLG_-Qy2kQEW-aPIX_RgDZ9VcoU06LT6ZAAa142TGZYarzE8RsGqTgDVS6uiJEeeCy_mztxMcKXUoE45enGhbESY1-j9VZPvNMb-7Oearl-EqKeprpJYV2-SxYY9QRtJFJR4rKxberyssan4PkN2hlS128Z5Kd4TepQLU5RlIm6tPTZaP81fKF_rB6YNvHDyAofEVcK0s3YH6a5CI1FDPWbK9VssTmDnlzPVoSdd56Haq4kH2NbxrybK3OOStROluoS_Q0Ejzsg_JTcqjofuNKRiLd8itgYti2FMstsKkbQ"}]}"#;
+    // Two keys, as a real pool's JWKS has: the second was minted later, for
+    // `IT_TOKEN_COGNITO_2026`, and is just as thrown away as the first.
+    const IT_JWKS: &str = r#"{"keys":[{"kty":"RSA","alg":"RS256","use":"sig","kid":"bb-auth-it","e":"AQAB","n":"rugOpI1NhVG8CKJbf8LFMFjw-Goe26G5YJLb7-VTWg3VLG_-Qy2kQEW-aPIX_RgDZ9VcoU06LT6ZAAa142TGZYarzE8RsGqTgDVS6uiJEeeCy_mztxMcKXUoE45enGhbESY1-j9VZPvNMb-7Oearl-EqKeprpJYV2-SxYY9QRtJFJR4rKxberyssan4PkN2hlS128Z5Kd4TepQLU5RlIm6tPTZaP81fKF_rB6YNvHDyAofEVcK0s3YH6a5CI1FDPWbK9VssTmDnlzPVoSdd56Haq4kH2NbxrybK3OOStROluoS_Q0Ejzsg_JTcqjofuNKRiLd8itgYti2FMstsKkbQ"},{"kty":"RSA","alg":"RS256","use":"sig","kid":"bb-auth-it-2026","e":"AQAB","n":"iuMCQrIgQh9ZpX39V3RbM2xcHq6l5n5MCAPnIToeAJfUZn-z5908qgi7VVAI_jSGGL2aa2OWBhmGshL67j1wvu2_xtY9ykJy2QXF5s_8OistMIDx7wOttMKDVA0VFPnfABXW_dwgLipx5aXj7Ow_CJYqwIQlJLsy2sW4fokbG09Vxa1gteA9Oyr6QgeGrMxuH5kDzTJF5EPg4z12RZYc8_sh4zoOFa_RVf9q4MdmQdEQPtlPxUCGatgwWTG03080RW9qwXznstrPhfn7t3C5y_e5ER6zoeBewiSz4pkBkUWxKOWUnuEoW6BBp6vTaOVFxUMqa4Yk88oywNe69yev0Q"}]}"#;
+    /// The token Cognito issues from November 2026: `IT_TOKEN_OK`'s claims plus a `sub`, a
+    /// string `acr` and an array `amr` (`"acr":"urn:cognito:loa:4","amr":["pwd","otp","mfa"]`),
+    /// the additive change AWS announced for every user pool.
+    const IT_TOKEN_COGNITO_2026: &str = "eyJhbGciOiJSUzI1NiIsInR5cCI6IkpXVCIsImtpZCI6ImJiLWF1dGgtaXQtMjAyNiJ9.eyJzdWIiOiJhMWIyYzNkNC01Njc4LTkwYWItY2RlZi0wMDAwMDAwMDAwMDEiLCJpc3MiOiJodHRwczovL2NvZ25pdG8taWRwLmV1LWNlbnRyYWwtMS5hbWF6b25hd3MuY29tL2V1LWNlbnRyYWwtMV9URVNUUE9PTCIsImF1ZCI6InRlc3RjbGllbnQiLCJ0b2tlbl91c2UiOiJpZCIsImV4cCI6NDEwMjQ0NDgwMCwiaWF0IjoxMDAwMDAwMDAwLCJlbWFpbCI6ImFkYUBleGFtcGxlLmNvbSIsImVtYWlsX3ZlcmlmaWVkIjp0cnVlLCJnaXZlbl9uYW1lIjoiQWRhIiwiZmFtaWx5X25hbWUiOiJMb3ZlbGFjZSIsImFjciI6InVybjpjb2duaXRvOmxvYTo0IiwiYW1yIjpbInB3ZCIsIm90cCIsIm1mYSJdfQ.Ukd5cODjm6wYkOsK68WwRs5HfpuSQ0Aeo32NVmVR6OBnvBd4fbU6R1fxmO9xM-WeYLFX-361nbj_jf0SEnNkR8TcA5jwvIvI67Wr1fXtTJTOPOr3Xiu4945IyznaRmjvYc56F_eAaEGa_blDz4a-1r08xwoYizMifg1pAuJB_1MMvXAfoXWWNV2JUH-Fa0aoQuK__Qe3lUouaKLO65lhws2pmXSQpjMZHV6yMU-LOhDNNOULEEIjMb3h2HadJT0o9TXrwvhtlcmCuCQybTvWVegR_-S57KpzV3-x_d3Ttenw2FAkQWu-uTKUiCOc7jjl3-e8gFEUXUUv7nNNF5v8xA";
     const IT_TOKEN_OK: &str = "eyJhbGciOiJSUzI1NiIsInR5cCI6IkpXVCIsImtpZCI6ImJiLWF1dGgtaXQifQ.eyJpc3MiOiJodHRwczovL2NvZ25pdG8taWRwLmV1LWNlbnRyYWwtMS5hbWF6b25hd3MuY29tL2V1LWNlbnRyYWwtMV9URVNUUE9PTCIsImF1ZCI6InRlc3RjbGllbnQiLCJ0b2tlbl91c2UiOiJpZCIsImV4cCI6NDEwMjQ0NDgwMCwiaWF0IjoxMDAwMDAwMDAwLCJlbWFpbCI6ImFkYUBleGFtcGxlLmNvbSIsImVtYWlsX3ZlcmlmaWVkIjp0cnVlLCJnaXZlbl9uYW1lIjoiQWRhIiwiZmFtaWx5X25hbWUiOiJMb3ZlbGFjZSJ9.AsSpalg5hcJwwVL5Nh03f98i0xsz-Th4NJM5aFk9Wv7yRbBUq1zuYq6ZNZdOtpgKa19j3zTR3NsRETnHhWVZhGLRvSCluY_zyEGzgwO_D1cBwtDjc5XGqehOux-torQKaXryxWlhd2um3RyJt5KuBIUaCTuZsnRb4ghQBdYVBg7nmRwfXnFTCB-HWYwh_VaklGKpe0kaHfvv1ttp3oWdt37CCFT3CRXPQi2UNMxW53SeIk6UPrhEX2d9gNjRBMidno2ALMXxA6L4ku5G1bPEfj9HbkqArSNCJHCPtQMhH1WUB2iqZrMA6q78imDaFjI31uc5uzdIpt4FUda35NeQxA";
     const IT_TOKEN_ACCESS: &str = "eyJhbGciOiJSUzI1NiIsInR5cCI6IkpXVCIsImtpZCI6ImJiLWF1dGgtaXQifQ.eyJpc3MiOiJodHRwczovL2NvZ25pdG8taWRwLmV1LWNlbnRyYWwtMS5hbWF6b25hd3MuY29tL2V1LWNlbnRyYWwtMV9URVNUUE9PTCIsImF1ZCI6InRlc3RjbGllbnQiLCJ0b2tlbl91c2UiOiJhY2Nlc3MiLCJleHAiOjQxMDI0NDQ4MDAsImlhdCI6MTAwMDAwMDAwMCwiZW1haWwiOiJhZGFAZXhhbXBsZS5jb20iLCJlbWFpbF92ZXJpZmllZCI6dHJ1ZSwiZ2l2ZW5fbmFtZSI6IkFkYSIsImZhbWlseV9uYW1lIjoiTG92ZWxhY2UifQ.BcXSfueCjbuy0ICSd9mXlm3vwI1ywkym7x2KdABO5aYYeP2l9_2A7WCmNOFDpPeDcDUD-8rT3hpBsKeckfl0-CgxwyIQ8UClRhC3GbGjKFEuA_65ieaxz1CfruCEItlpFpE-zb3YUc89Yk6-dVbGI45k-0UhWK6I91Hn-R5hliZoauYgq2CCIxDfRRE2-bOKJvsBVgc3xrYDQts8Wq8M8lsmQn-OfycFWAtG3shOw8ujrr4nLGvycy2A9hffOsXJyV-sPtC_Oj_jtufHv_nW1KnVVxzcQj6QQFO3_s0BMyTyfTZSRD7I7_7OqNZ-N0GfCjMeza6uxWcQQ7Y4KDh0NA";
     const IT_TOKEN_UNVERIFIED: &str = "eyJhbGciOiJSUzI1NiIsInR5cCI6IkpXVCIsImtpZCI6ImJiLWF1dGgtaXQifQ.eyJpc3MiOiJodHRwczovL2NvZ25pdG8taWRwLmV1LWNlbnRyYWwtMS5hbWF6b25hd3MuY29tL2V1LWNlbnRyYWwtMV9URVNUUE9PTCIsImF1ZCI6InRlc3RjbGllbnQiLCJ0b2tlbl91c2UiOiJpZCIsImV4cCI6NDEwMjQ0NDgwMCwiaWF0IjoxMDAwMDAwMDAwLCJlbWFpbCI6ImFkYUBleGFtcGxlLmNvbSIsImVtYWlsX3ZlcmlmaWVkIjpmYWxzZSwiZ2l2ZW5fbmFtZSI6IkFkYSIsImZhbWlseV9uYW1lIjoiTG92ZWxhY2UifQ.owL1LWxaPNuK4do4S1T23b9Zywk7Fhfq178Nx9f0MO4R3qZKhtG10Z_E1bOqBK6hjy1T5hmbtUdg8FIwHg10OVWjbnW_m8Fzk7v-MWLnOgd5kLVwnsyWX8NgIAmo1dSb0-P3xV6C2HpCtFnZPhR98fGxXJUIf5HLr31Hi86VNJNG8-nMU3F2Iqy1vdeMBwcrSkMhlmZZO4n1rE0cR9DvUY9ixfEfr81sR9vTc4mpnXIwT-aViOP-s9Ovrq4gJCNz5os4IYJQkEwNVH8xO9tuXcx5zL-S2Rwfoqg6kv4Azk7gD4x4PCWbff2NsjTtS1fGxCwICQDhEmr46T2sitee8Q";
@@ -6072,11 +6077,19 @@ mod tests {
     /// fetch, and this is what keeps these tests offline.
     fn token_state(settings: Settings) -> State {
         let set: JwkSet = serde_json::from_str(IT_JWKS).expect("fixture JWKS parses");
-        let mut keys = HashMap::new();
-        keys.insert(
-            "bb-auth-it".to_string(),
-            DecodingKey::from_jwk(&set.keys[0]).expect("fixture JWK becomes a key"),
-        );
+        let keys: HashMap<String, DecodingKey> = set
+            .keys
+            .iter()
+            .map(|jwk| {
+                (
+                    jwk.common
+                        .key_id
+                        .clone()
+                        .expect("every fixture JWK has a kid"),
+                    DecodingKey::from_jwk(jwk).expect("fixture JWK becomes a key"),
+                )
+            })
+            .collect();
         // The issuer these keys belong to is the settings', so the cache is seeded with
         // whatever the fixture settings name: a cache that disagreed with them would trigger
         // a refetch against a pool no test has a server for.
@@ -6151,6 +6164,32 @@ mod tests {
         // `family_name` is in the token and is not configured, so it is not captured: the
         // cookie carries what the operator asked for and nothing else.
         assert_eq!(id.claims.len(), 1);
+    }
+
+    #[test]
+    fn a_token_with_acr_and_an_array_amr_still_signs_in() {
+        // AWS adds `acr` and `amr` to every Cognito token from November 2026, `amr` always an
+        // array. Unknown claims land in `Claims::extra` as raw values, so the login must
+        // survive them, and a struct that grew `deny_unknown_fields` or a `String` `amr`
+        // would fail here before it failed every new login in production.
+        let st = token_state(gate_settings(
+            r#"{ "profile_claims": ["given_name", "acr", "amr"] }"#,
+        ));
+        let id =
+            validate_id_token(IT_TOKEN_COGNITO_2026, &st).expect("the new claims are additive");
+        assert_eq!(id.email, "ada@example.com");
+        assert_eq!(
+            id.sub.as_deref(),
+            Some("a1b2c3d4-5678-90ab-cdef-000000000001")
+        );
+        // A string claim is captured like any other; an array one costs that claim and
+        // nothing else, which is what `clean_claim` promises for a non-string value.
+        assert_eq!(
+            id.claims.get("acr").map(String::as_str),
+            Some("urn:cognito:loa:4")
+        );
+        assert!(!id.claims.contains_key("amr"));
+        assert_eq!(id.claims.get("given_name").map(String::as_str), Some("Ada"));
     }
 
     #[test]
