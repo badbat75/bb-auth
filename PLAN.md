@@ -16,7 +16,7 @@ as the column says. A requirement still open must be covered by a step.
 |---|---|---|
 | R1 | Self-service API keys: a user mints, rotates and removes their own `bbk_` tokens, without an administrator | Step 4 |
 | R2 | Self-service profile: a user sees what bb-auth knows about them and edits their own Cognito profile attributes | Step 5 |
-| R3 | The self-service surface is a fourth binary of its own, dedicated to users and separate from the admin GUI, so further user-facing features have a home | Design approved (`docs/ARCHITECTURE.md` §13); step 3 |
+| R3 | The self-service surface is a fourth binary of its own, dedicated to users and separate from the admin GUI, so further user-facing features have a home | Design approved (`docs/ARCHITECTURE.md` §13); steps 3a, 3b, 3c |
 | R4 | Self-service deletion: a user deletes their own account and its related data, at once, after a confirmation: the roster row, keys, references in scopes and groups, and the Cognito user. The audit is not edited: their lines expire with `audit.retention`, and the page says so | Steps 6, 7. For a social-only user the Cognito half is left to an administrator and the page says so: accepted by the user on 2026-11-23 |
 
 ### How we work
@@ -75,23 +75,48 @@ decisions listed in §13.10: the binary is `bb-auth-me`, behind an `authenticate
 as the shared `bb-auth-web` account, re-authenticating with a server-side email code before any
 Cognito action.
 
-### 3. Package and ownership
+### 3a. Package and ownership, built locally
 
 Covers: R3.
 
 The `bb-auth-me` `.deb` (variant in `Cargo.toml`, env example, unit, postinst/prerm/postrm),
 the shared-account ownership block in both editor postinsts, the conditional hand-back in both
 postrms, `bb-auth-reload.path` moved to the gate's variant with `Breaks`/`Replaces`, and
-`scripts/verify.sh`, `scripts/deploy.ps1 -Packages` and `scripts/deploy.sh` knowing the fourth
-package.
+`scripts/build.sh`, `scripts/package.sh`, `scripts/verify.sh`, `scripts/deploy.ps1 -Packages` and
+`scripts/deploy.sh` knowing the fourth package (design: `docs/ARCHITECTURE.md` §13.2, §13.3).
 
-- Done when: on a test host, with the user's go-ahead for each deploy, the GUI and `bb-auth-me`
-  both save in both orders, `sudo bb-auth-adm` saves after both, every save reloads the gate,
-  purging either editor leaves the other saving, a rename onto `settings.json` as `bb-auth-me`
-  fails, an upgrade from the current packages raises no dpkg file conflict, and a gate-only host
-  still changes no ownership. The postinst's closing message tells the operator to cover the
-  page with an `authenticated` scope, and says in one line that on a deployment with no such
-  scope yet this makes `/auth/session` mint cookies for strangers (§13.4).
+- Done when: `bash scripts/package.sh` builds four `.deb`s; `dpkg-deb -c` and `dpkg-deb -I` show
+  each file in the package §13.2 assigns it (the path unit in the gate's, with `Breaks`/`Replaces`
+  on `bb-auth-web`), `shellcheck` is clean on every changed maintainer script, and the postinst's
+  closing message tells the operator to cover the page with an `authenticated` scope and says in
+  one line that on a deployment with no such scope yet this makes `/auth/session` mint cookies
+  for strangers (§13.4).
+
+### 3b. The nginx recipe for bb-auth-me
+
+Covers: R3. Asked by the user on 2026-11-23.
+
+The README documents the nginx location that serves `bb-auth-me`, in the same form as the GUI's:
+`auth_request` to the gate, `$bb_url` set in the location, every possible identity header set or
+cleared (`IDENTITY_ATTRS`) and the configured profile headers passed, `BB_AUTH_ME_BASE_PATH`
+matching the location, the `401` to the sign-in page and the `403` to `@bb_denied`, and the
+`authenticated` scope in the access file that must cover it.
+
+- Done when: the snippet passes `nginx -t` on rpi-01 (read-only check, run on a copy) and the
+  README says which scope covers it.
+
+### 3c. Install on rpi-01
+
+Covers: R3. Test host named by the user on 2026-11-23: `rpi-01`.
+
+With the user's go-ahead for each change: the four packages installed, the nginx location from
+3b added and reloaded, and the `authenticated` scope added to the live access file.
+
+- Done when: on rpi-01 the GUI and `bb-auth-me` both save in both orders, `sudo bb-auth-adm`
+  saves after both, every save reloads the gate, purging either editor leaves the other saving,
+  a rename onto `settings.json` as `bb-auth-me` fails, an upgrade from the current packages
+  raises no dpkg file conflict, a gate-only host still changes no ownership, and the page loads
+  through nginx in a browser for a signed-in person.
 
 ### 4. Self-service API keys
 
