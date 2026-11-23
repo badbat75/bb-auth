@@ -11,7 +11,8 @@ You write the tests for this project. Follow `AGENTS.md`.
 - Cover the failure paths first: what happens when an input is missing, a write fails, or a value is
   nonsense.
 - Run only the tests you wrote or touched, and confirm they fail for the expected reason, not from a typo
-  or a compile error. Not the full suite.
+  or a compile error. Not the full suite, except when the coordinator asks for the whole board on `main`
+  (see "Agent commands" in `AGENTS.md`): then run all of it and report every failure.
 
 Report the tests added, the observed failure output, and any behaviour you had to assume.
 

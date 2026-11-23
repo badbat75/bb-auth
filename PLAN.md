@@ -32,7 +32,7 @@ as the column says. A requirement still open must be covered by a step.
 | W7 | Each agent has its own skill, saying how it works in this project and the pitfalls met so far, which it can update itself or the coordinator can | Met: `.agents/skills/`, format in `AGENTS.md` |
 | W8 | Everything in English; only the conversation with the user may be in their language | Applies to every step |
 | W9 | Displayed text in the `K` translation table or the page templates, ready for more languages | Applies to every step |
-| W10 | Agents run only the tests of the part they work on, plus linter and format check; the user runs the full suite once, on main after the merge, before installing | Applies to every step |
+| W10 | Agents run only the tests of the part they work on, plus linter and format check; the tester runs the full suite once, on main after the merge, before installing | Applies to every step |
 
 ## Definition of Done
 
@@ -41,7 +41,7 @@ as not checked, and the step stays open.
 
 1. **Test first.** Each behaviour has a test that was seen failing for the right reason, then passing.
 2. **All green.** The checks under "Agent commands" in `AGENTS.md` pass: the tests of the part that
-   changed, the linter and the format check. The full suite is the user's, after the merge.
+   changed, the linter and the format check. The full suite is the tester's, after the merge.
 3. **Tried for real.** Behaviour is checked in the real thing, not only in tests: the check the Commands
    table in `AGENTS.md` matches to the change, including a look at the page in a browser where it says
    so. A deploy only with the user's go-ahead.

@@ -1274,7 +1274,8 @@ cargo clippy --all-targets
 cargo fmt --check
 ```
 
-The user runs the whole board once, on `main` after the merge and before a release: `cargo test`,
+The `tester` runs the whole board once, on `main` after the merge and before a release, when the
+coordinator asks for it: `cargo test`,
 `node e2e/run.js`, `cargo doc --no-deps`, and the cfg(unix) tests under WSL.
 
 ## Layout

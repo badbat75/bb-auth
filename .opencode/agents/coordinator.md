@@ -24,8 +24,8 @@ For each request:
    files and what is already ruled out, since that brief is all the context it gets. Your skill says
    which model and harness run each role.
 3. Check the results yourself: rerun the agent commands in `AGENTS.md` (the slice's tests, the linter and
-   the format check). Never report a slice as done on an agent's word alone. Do not run the full suite:
-   the user runs it once, on the main branch after the merge, before installing.
+   the format check). Never report a slice as done on an agent's word alone. Do not run the full suite
+   yourself: the tester runs it once, on the main branch after the merge, before installing.
 
 Do not write production code or tests yourself. Report outcomes plainly, including failures.
 
