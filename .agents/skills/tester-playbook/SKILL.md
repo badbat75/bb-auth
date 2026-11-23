@@ -16,6 +16,10 @@ Rules are in `AGENTS.md`. Format of this file: `AGENTS.md`, under "Skills".
 - In `bb-auth-web`, test a request end to end over a real socket: copy
   `serving_enforces_the_identity_header_and_the_admin_allowlist` (`scratch` with a unique name,
   `cfg_for`, `client()`, `IDENTITY_HEADER`, `cleanup`). The fixture's administrator is `admin@x.com`.
+- Whole board: save each command's output to a file and give each one a `timeout`. On a Linux host
+  the cfg(unix) tests run inside plain `cargo test`, with no WSL. `node e2e/run.js` builds and starts its
+  own server and uses the system `microsoft-edge`; its `TOTAL` line is the verdict. For `cargo doc`,
+  count the `^warning` lines.
 - To show that an assertion after a red one already passes, move it ahead for one run, then
   restore the order: nothing after the first panic runs.
 
