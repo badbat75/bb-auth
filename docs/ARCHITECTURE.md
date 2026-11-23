@@ -1457,13 +1457,14 @@ opinion about it):
 
 - **`cognito_endpoint`**, today private to the gate: derived from `gate.issuer`, and two
   programs must now agree on where the pool's API is. Becomes a `Settings` method.
-- **`Access::key_scopes_for(uuid)` and `Access::scopes_reached(uuid)`**, beside
+- **`Access::key_scopes_for(uuid)` and `Access::scopes_reached(identifier)`**, beside
   `scopes_for`. They restate `decide`'s rule as a set, which is exactly what must never
   drift from `decide` ("keep the rule in the library, or `bb-auth-adm can` starts answering
   a different question"). `key_scopes_for` is the `restricted` scopes whose members include
   the uuid, whose `credentials` admit a key, and whose `excluded` does not name the uuid:
   `decide` refuses a key on every other kind of scope (an `authenticated` scope is
-  `CredentialRefused` for a key). `scopes_reached` is defined in 13.4. Tests drive `decide`
+  `CredentialRefused` for a key). `scopes_reached` is defined in 13.4, and takes an identifier because a stranger has no uuid
+  yet reaches `authenticated` scopes and is excluded by email (built: step 2a). Tests drive `decide`
   on a URL inside each returned scope and require a grant.
 - **`remove_user` rewrites a uuid in a scope's `excluded` to the primary email, as it
   already does for `denied`, instead of dropping it.** Today it drops it on the argument

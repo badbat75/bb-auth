@@ -7,6 +7,8 @@ Rules are in `AGENTS.md`. Format of this file: `AGENTS.md`, under "Skills".
 
 ## How to
 
+- A library function that restates `decide` as a set must call the helpers `decide` calls
+  (`vetoes_identifier`, `excludes_identifier`, `uuid_of`), never a copy of their logic.
 - Run `cargo fmt` before `cargo fmt --check`: rustfmt splits long method chains.
 - The tester's uncommitted test is already in the tree, so read `git diff` hunk by hunk to see your own change.
 

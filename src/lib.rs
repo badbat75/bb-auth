@@ -638,6 +638,39 @@ impl Access {
             .collect()
     }
 
+    /// Every scope a signed-in `identifier` reaches: the list the self-service page
+    /// (bb-auth-me) shows a person.
+    ///
+    /// This is [`decide`]'s rule for a browser login restated as a set rather than as one
+    /// answer, so it asks the very helpers [`decide`] asks ([`Access::vetoes_identifier`],
+    /// [`ScopeRecord::excludes_identifier`], [`Access::uuid_of`]): a grant rule written
+    /// twice is what drifts, and a page promising a scope the gate refuses is worse than a
+    /// page saying nothing. An [`AccessKind::Anonymous`] scope is never listed, since it
+    /// grants with no credential and so says nothing about this person.
+    ///
+    /// It takes an identifier, not a uuid, because a stranger has no uuid and yet reaches
+    /// every [`AccessKind::Authenticated`] scope, and is kept out of one only by the email
+    /// they sign in with. Membership, not a promise about every URL: scopes are first match
+    /// wins inside an application, so a listed scope answers only what shadows do not.
+    pub fn scopes_reached(&self, identifier: &str) -> Vec<(&AppRecord, &ScopeRecord)> {
+        if self.vetoes_identifier(identifier) {
+            return Vec::new();
+        }
+        let uuid = self.uuid_of(identifier);
+        self.apps
+            .iter()
+            .flat_map(|a| a.scopes.iter().map(move |s| (a, s)))
+            .filter(|(_, s)| match s.access {
+                AccessKind::Anonymous => false,
+                AccessKind::Authenticated => true,
+                AccessKind::Restricted => {
+                    s.credentials.login && uuid.is_some_and(|u| s.members.contains(u))
+                }
+            })
+            .filter(|(_, s)| !s.excludes_identifier(self, identifier))
+            .collect()
+    }
+
     /// The uuid this identifier resolves to, matched as the file stores it.
     pub fn uuid_of(&self, identifier: &str) -> Option<&str> {
         self.by_identifier
@@ -7589,6 +7622,160 @@ mod tests {
                      "access": "restricted" } ] } ] }"#,
         );
         assert!(!b.any_authenticated_scope());
+    }
+
+    // --- what an identity reaches -------------------------------------------
+
+    /// The pairs as `app/scope` strings, in the order the function returns them, so each
+    /// assertion below reads as the list the user page will show and pins file order too.
+    fn reached(a: &Access, identifier: &str) -> Vec<String> {
+        a.scopes_reached(identifier)
+            .iter()
+            .map(|(app, s)| format!("{}/{}", app.name, s.name))
+            .collect()
+    }
+
+    /// One URL per non-anonymous scope of the fixture, chosen so that **that** scope answers
+    /// it: scopes are first match wins, so `mpa/onboarding` answers `/mpa/welcome` and never
+    /// `/mpa/admin/panel`, and `mcp/api` answers `/mcp/other` and never `/mcp/logs/today`.
+    /// The agreement test checks this table against `resolve` before trusting it.
+    const PROBES: &[(&str, &str)] = &[
+        ("mpa/admin", "https://app.x.com/mpa/admin/panel"),
+        ("mpa/onboarding", "https://app.x.com/mpa/welcome"),
+        ("mcp/logs", "https://ai.x.com/mcp/logs/today"),
+        ("mcp/api", "https://ai.x.com/mcp/other"),
+    ];
+
+    /// The set is the page's promise about a signed-in person, so every kind has to be right
+    /// in it: bob reaches mpa/admin only through `@admins`, mcp/logs directly, and
+    /// mpa/onboarding because that grant admits any signed-in identity. mpa/healthz is
+    /// anonymous, so it says nothing about him, and mcp/api's credentials admit a key and
+    /// refuse a login, so a browser never reaches it.
+    #[test]
+    fn scopes_reached_lists_a_roster_user_in_file_order() {
+        let a = access_of("reached-bob", &fixture());
+        assert_eq!(
+            reached(&a, "bob@x.com"),
+            vec!["mpa/admin", "mpa/onboarding", "mcp/logs"]
+        );
+    }
+
+    /// The identifier is an email and the answer comes from the roster row, so an old
+    /// address, or the same address in another case, must not show a shorter list than the
+    /// one the person signs in with.
+    #[test]
+    fn scopes_reached_answers_the_same_for_every_email_of_a_user() {
+        let a = access_of("reached-emails", &fixture());
+        assert_eq!(reached(&a, "BOB@old.com"), reached(&a, "bob@x.com"));
+        assert_eq!(
+            reached(&a, " BOB@OLD.COM "),
+            vec!["mpa/admin", "mpa/onboarding", "mcp/logs"]
+        );
+    }
+
+    /// A stranger has no uuid, so no restricted scope can name them, and `authenticated`
+    /// exists precisely to admit a signed-in identity the file has never heard of. This is
+    /// why the function takes an email and not a uuid.
+    #[test]
+    fn scopes_reached_gives_a_stranger_only_the_authenticated_scope() {
+        let a = access_of("reached-stranger", &fixture());
+        assert_eq!(
+            reached(&a, "stranger@elsewhere.com"),
+            vec!["mpa/onboarding"]
+        );
+    }
+
+    /// carol is in the roster and named by no scope: a `restricted` scope reads membership,
+    /// not enrolment, so being a user buys a person no access on its own.
+    #[test]
+    fn scopes_reached_gives_an_enrolled_non_member_only_the_authenticated_scope() {
+        let a = access_of("reached-carol", &fixture());
+        assert_eq!(reached(&a, "carol@x.com"), vec!["mpa/onboarding"]);
+    }
+
+    /// `denied` outranks every grant, so a vetoed identity is shown no list at all: the page
+    /// that would show it is a 403. This one asserts absence, so it is green against the
+    /// stub and must be rerun once the code exists.
+    #[test]
+    fn scopes_reached_is_empty_for_an_identity_the_file_denies() {
+        let a = access_of("reached-denied", &fixture());
+        assert!(a.vetoes_identifier("spammer@x.com"));
+        assert!(reached(&a, "spammer@x.com").is_empty());
+    }
+
+    /// The scope's own veto is local, unlike `denied`: bob is kept out of mpa/admin without
+    /// unpicking `@admins`, so the rest of his list stands.
+    #[test]
+    fn scopes_reached_drops_a_scope_that_excludes_the_identity_by_uuid() {
+        let a = access_of(
+            "reached-excl-uuid",
+            &with_exclusion("https://app.x.com/mpa/admin/*", &format!("\"{BOB}\"")),
+        );
+        assert_eq!(reached(&a, "bob@x.com"), vec!["mpa/onboarding", "mcp/logs"]);
+    }
+
+    /// An `authenticated` scope lists nobody, so an email is the only way to keep a stranger
+    /// out of one, and in this fixture it is the only scope they reached at all. This one
+    /// asserts absence, so it is green against the stub and must be rerun once the code
+    /// exists.
+    #[test]
+    fn scopes_reached_is_empty_for_a_stranger_excluded_from_the_only_scope() {
+        let a = access_of(
+            "reached-excl-stranger",
+            &with_exclusion("https://app.x.com/mpa/*", "\"stranger@elsewhere.com\""),
+        );
+        assert!(reached(&a, "stranger@elsewhere.com").is_empty());
+    }
+
+    /// The page's list and the gate's answer are the same rule written twice, and two copies
+    /// of a grant rule drift. So for every identifier, every non-anonymous scope of the
+    /// fixture must be listed exactly when `decide` grants on a URL that scope itself
+    /// answers: the whole set, both directions, on one fixture.
+    #[test]
+    fn scopes_reached_agrees_with_decide_on_every_scope() {
+        let a = access_of("reached-agree", &fixture());
+
+        // The probe table is the whole file: a scope added to the fixture has to be probed.
+        let probed: Vec<String> = PROBES.iter().map(|(name, _)| name.to_string()).collect();
+        let non_anonymous: Vec<String> = a
+            .apps
+            .iter()
+            .flat_map(|app| {
+                app.scopes
+                    .iter()
+                    .filter(|s| s.access != AccessKind::Anonymous)
+                    .map(|s| format!("{}/{}", app.name, s.name))
+            })
+            .collect();
+        assert_eq!(
+            probed, non_anonymous,
+            "the probe table must cover every non-anonymous scope"
+        );
+
+        for id in [
+            "bob@x.com",
+            "BOB@old.com",
+            "carol@x.com",
+            "stranger@elsewhere.com",
+            "spammer@x.com",
+        ] {
+            let listed = reached(&a, id);
+            for (name, url) in PROBES {
+                let (app, scope) = a.resolve(Some(url)).expect("every probe url resolves");
+                assert_eq!(
+                    (app.name.as_str(), scope.name.as_str()),
+                    name.split_once('/').unwrap(),
+                    "{url} must be answered by {name}, not by a scope that shadows it"
+                );
+                let granted = decide(&a, &Subject::Identifier(id), Some(url)).granted();
+                let shows = listed.iter().any(|s| s == name);
+                assert_eq!(
+                    granted, shows,
+                    "{id} at {url}: decide granted {granted}, scopes_reached listed {shows} \
+                     (list: {listed:?})"
+                );
+            }
+        }
     }
 
     // --- the settings file ---------------------------------------------------
