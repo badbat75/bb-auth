@@ -15,7 +15,8 @@ Rules are in `AGENTS.md` and `PLAN.md`. Format of this file: `AGENTS.md`, under 
   require (ambiguity, real effects, a requirement change).
 - The version is the last released one plus one (W11). Bump it once, right after a release, never per
   commit: the patch in `Cargo.toml`, then `cargo check` to carry it into `Cargo.lock`, then the "Due
-  out as" line of `CHANGELOG.md`. Check the CHANGELOG lead for the last deployed number first.
+  out as" line of `CHANGELOG.md`. Find the last deployed number on the host (`bb-auth --version`, `/var/log/dpkg.log`), not only in
+  the CHANGELOG lead, which can lag behind a deploy.
 - Ask the user for real runs one at a time, with the exact command and the expected result.
 
 ### Who runs each role
@@ -69,3 +70,5 @@ files outside the repo.
   with that setting removed and under `timeout`.
 - A local coder that starts its own server can end with exit 144 once its work is done. Check the tree
   and the tests before rerunning it, and tell it in the brief not to start servers or call `pkill`.
+- Reach the test host as `rpi-01.bombicci.local`: its key is known under that name, and the bare
+  `rpi-01` fails host key verification.
