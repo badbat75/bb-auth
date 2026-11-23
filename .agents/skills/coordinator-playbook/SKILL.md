@@ -72,3 +72,6 @@ files outside the repo.
   and the tests before rerunning it, and tell it in the brief not to start servers or call `pkill`.
 - Reach the test host as `rpi-01.bombicci.local`: its key is known under that name, and the bare
   `rpi-01` fails host key verification.
+- aorus also runs the user's llama.cpp-framework work (its builds and its own opencode agents), and
+  the local model serves both. Run one local agent at a time, no parallel cargo or e2e beside it,
+  and never touch that project's processes.
