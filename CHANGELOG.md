@@ -22,11 +22,11 @@ Versions are the crate's (`Cargo.toml`); packages add a Debian revision
 
 ## Unreleased
 
-**Due out as 1.99.8, and the numbers before it are behind us.** 1.99.7 was written down and
-never deployed: the version is now bumped with each change to shipped code (plan W11), so a
-number can name bytes that were built and never ran, and the next deploy spends 1.99.8. 1.99.6
-was spent by a deploy on 2026-09-11 from `gb855ed2`, which carried everything below except what
-the section named after 1.99.7 adds. 1.99.5 was spent by a deploy
+**Due out as 1.99.9, and the numbers before it are behind us.** 1.99.7 and 1.99.8 were written
+down and never deployed: the version is now bumped with each change to shipped code (plan W11),
+so a number can name bytes that were built and never ran, and the next deploy spends 1.99.9.
+1.99.6 was spent by a deploy on 2026-09-11 from `gb855ed2`, which carried everything below
+except what the sections named after 1.99.7 and 1.99.8 add. 1.99.5 was spent by a deploy
 on 2026-09-11 from `g15ae13e`, which carried everything in the section named after it except
 the Settings page opening folded. 1.99.4 was spent by a deploy
 on 2026-09-10 from `gfd77f1f`, which carried the audit and nothing of what the section below
@@ -47,7 +47,7 @@ environment and into the settings file; and a confirmation step in front of the 
 that can stop people getting in.
 
 **A version gets a section of its own here only once it is tagged and released, and a
-release candidate is neither.** 1.99.8 is a version number, not a release: it names bytes to be
+release candidate is neither.** 1.99.9 is a version number, not a release: it names bytes to be
 built, and it is **not tagged**, because a tag is what says "this is a thing you can install
 and go back to" and a candidate is not that. So this section stays under this
 heading through however many 1.99.x there are, and becomes `## 2.0.0` on the day 2.0.0 is
@@ -105,9 +105,12 @@ signed-in person uses for **their own** account, so that minting a key and readi
 profile stop needing an administrator. It is `bb-auth-web`'s trust model with the privilege
 taken out: loopback, plain HTTP behind nginx, identity from the `X-Auth-Email` nginx injects
 and nowhere else, no token validated, no cookie minted, no secret held, `web.admins` not read.
-Today it answers, and shows little: the caller's addresses and their roster uuid, a `403` for a
-denied identity, a `401` when nginx sent no identity, a `500` naming the setting when the
-deployment injects none. No package and no unit yet, so an upgrade installs nothing new.
+It shows the caller's addresses and roster uuid, then four read-only sections: where they reach
+(the applications and scope names, grouped by application, never a URL), the groups naming them,
+their API keys (id, expiry date or "never", and the restriction the key carries, never the hash
+or the bearer) and the profile claims the deployment forwards, decoded. A `403` answers a denied
+identity, a `401` when nginx sent no identity, and a `500` naming the setting when the deployment
+injects none. No package and no unit yet, so an upgrade installs nothing new.
 
 ### New: the audit, and an Audit tab to read it
 

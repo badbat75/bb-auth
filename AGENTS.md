@@ -142,8 +142,15 @@ One crate, five targets, and the split is load-bearing:
   acting on their own account. What exists is the identity half (plan step 2b-1): both files
   read fresh on every request, the header split into the list of addresses
   the gate really sends (every email of one row, space-joined), the `denied` veto checked ahead
-  of everything, and a page naming the caller and their uuid. The keys, the profile and the
-  Cognito leg are the next steps. It links the library, none of the gate, and its design is
+  of everything, and a page naming the caller and their uuid. Step 2b-2 added four
+  **read-only** sections under it: *Where you reach* (the applications and scope names
+  `Access::scopes_reached` returns, grouped by application, never a URL), *Groups* (the
+  `user_groups` naming the caller's uuid), *API keys* (each key's id, its expiry date or
+  "never", and its restriction, never the hash or the bearer) and *Profile* (each configured
+  `gate.profile_claims` claim and the value nginx forwarded, percent-decoded). A stranger and
+  an administrator with no roster row see the same page. The keys' writes, the profile edit
+  and the Cognito leg are the next steps. It links the library, none of the gate, and its
+  design is
   [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md) §13. It is **not packaged yet**: no `.deb`, no
   unit, and `scripts/build.sh` and `scripts/package.sh` know only the other three binaries, so
   a deploy installs nothing new (plan step 3).
@@ -190,7 +197,7 @@ This repo is developed on Windows but the artifact is a Linux/aarch64 binary.
 # file and the writers (src/lib.rs), the gate including its token verifier and its router
 # over a real socket (src/bin/bb-auth.rs), the CLI's argument grammar (src/bin/bb-auth-adm.rs),
 # the GUI including nine that drive real HTTP (src/bin/bb-auth-web.rs) and the self-service
-# page's six, also over a real socket (src/bin/bb-auth-me.rs). A handful are
+# page's fifteen, also over a real socket (src/bin/bb-auth-me.rs). A handful are
 # cfg(unix) (the SIGHUP reload's fail-soft, the writer's mode preservation, the audit file's
 # own mode) and therefore run on Linux, never on the development host (run them under WSL
 # before a release).

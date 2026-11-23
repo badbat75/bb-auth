@@ -14,9 +14,9 @@ as the column says. A requirement still open must be covered by a step.
 
 | ID | Requirement | State |
 |---|---|---|
-| R1 | Self-service API keys: a user mints, rotates and removes their own `bbk_` tokens, without an administrator | Steps 2b-2, 4 |
-| R2 | Self-service profile: a user sees what bb-auth knows about them and edits their own Cognito profile attributes | Steps 2b-2, 5 |
-| R3 | The self-service surface is a fourth binary of its own, dedicated to users and separate from the admin GUI, so further user-facing features have a home | Design approved (`docs/ARCHITECTURE.md` §13); steps 2b-2, 3 |
+| R1 | Self-service API keys: a user mints, rotates and removes their own `bbk_` tokens, without an administrator | Step 4 |
+| R2 | Self-service profile: a user sees what bb-auth knows about them and edits their own Cognito profile attributes | Step 5 |
+| R3 | The self-service surface is a fourth binary of its own, dedicated to users and separate from the admin GUI, so further user-facing features have a home | Design approved (`docs/ARCHITECTURE.md` §13); steps 2b-3, 3 |
 | R4 | Self-service deletion: a user deletes their own account and its related data, at once, after a confirmation: the roster row, keys, references in scopes and groups, and the Cognito user. The audit is not edited: their lines expire with `audit.retention`, and the page says so | Steps 6, 7. For a social-only user the Cognito half is left to an administrator and the page says so: accepted by the user on 2026-11-23 |
 
 ### How we work
@@ -75,21 +75,26 @@ decisions listed in §13.10: the binary is `bb-auth-me`, behind an `authenticate
 as the shared `bb-auth-web` account, re-authenticating with a server-side email code before any
 Cognito action.
 
-### 2b-2. The user binary: what the page shows
+### 2b-3. The user binary: the same look as the admin console
 
-Covers: R3, part of R1 and R2. Builds on the identity handling already in `bb-auth-me`.
+Covers: R3. Asked by the user on 2026-11-23.
 
-`src/bin/bb-auth-me.rs` serves one page showing what bb-auth knows about the caller (uuid,
-emails, groups, the applications and scope names they reach (`Access::scopes_reached`, already in the library), key ids,
-expiry and scopes, denied or not, the profile headers nginx forwards), and no URL pattern or base
-anywhere, in the shared presentation (`THEME_CSS`, `BASE_CSS`, `ui`, `page_csp`,
-`PAGE_SECURITY_HEADERS`), with no script. No packaging, no write. `X-Auth-Email` is split on ASCII
-whitespace and each part `norm_email`ed, the rule `bb-auth-web`'s `handle` already applies.
+The administrator decides the look, from the settings file: `ui.brand_name` and `ui.logo_url` shown
+on the page, `ui.stylesheet_url`, and `ui.theme` as the default theme (stamped as `data-theme` on
+`html`, as `bb-auth-web` does). The layout is the binary's own and fixed: a centred card with a
+gutter, as the gate's pages, instead of today's full-width card. The person may choose only two
+things, each from a selector that works with scripting off and is remembered in a cookie, as in the
+console: the theme (light, dark, system), which overrides `ui.theme` for them alone, and the
+language (English, Italian). Language order: the person's choice, then `Accept-Language`, then
+English. Every string is in the `K` table in both languages. Reuse what `bb-auth-web` already does
+for these (`negotiate_lang`, `negotiate_theme`, the preference redirect); what both programs must
+agree on moves to the library, the rest is copied with a note. A claim with no forwarded value
+shows the "none" word rather than an empty value.
 
-- Done when: the four callers (roster user, administrator not in the roster, stranger, denied)
-  see what §13.4 says; no page
-  contains a URL pattern or base from the fixture; a test pins zero `<script>` and zero handlers;
-  the page is checked in a browser.
+- Done when: tests show `ui.theme` reaches `data-theme`, a theme cookie overrides it, the
+  language follows cookie then `Accept-Language` then English, both selectors work as plain links or
+  forms with no script, brand and logo render when set and are absent when not; the page is checked
+  in a browser in light and dark, in both languages.
 
 ### 3. Package and ownership
 
