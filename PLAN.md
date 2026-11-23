@@ -14,7 +14,10 @@ as the column says. A requirement still open must be covered by a step.
 
 | ID | Requirement | State |
 |---|---|---|
-| R1 | Self-service API keys: a user mints, rotates and removes their own `bbk_` tokens, without an administrator | Step 1 |
+| R1 | Self-service API keys: a user mints, rotates and removes their own `bbk_` tokens, without an administrator | Steps 1, 2, 3 |
+| R2 | Self-service profile: a user sees what bb-auth knows about them and edits their own Cognito profile attributes | Steps 1, 2, 4 |
+| R3 | The self-service surface is a fourth binary of its own, dedicated to users and separate from the admin GUI, so further user-facing features have a home | Steps 1, 2 |
+| R4 | Self-service deletion: a user deletes their own account and its related data, at once, after a confirmation: the roster row, keys, references in scopes and groups, and the Cognito user. The audit is not edited: their lines expire with `audit.retention`, and the page says so | Steps 1, 5 |
 
 ### How we work
 
@@ -61,70 +64,110 @@ on 2026-11-23; the work before it is in `git log`.
 
 ## Next steps
 
-### 1. Self-service API keys: let a user mint their own `bbk_` token
+Decided by the user on 2026-11-23: the self-service surface is **a fourth binary**, not a route
+inside `bb-auth-web`, because a non-admin surface must not share a binary with the admin CRUD and
+more user-facing features are expected. Its features are the API keys (R1), an **editable** Cognito
+profile (R2) and deleting one's own account (R4).
+
+### 1. Design the user binary (architect)
+
+Covers: R1, R2, R3, R4 (design only, no code).
+
+The architect writes the design into `docs/ARCHITECTURE.md` and the decisions into this plan, in the
+register the settings-file invariant uses: what the surface can reach, and what it cannot. It must
+settle:
+
+- **Name, unit and package**: binary name, systemd unit, service user, env file, `.deb` (optional,
+  like the other admin tools), what it may write (the access file only, through `AccessWrite`) and
+  what it may not (settings file, audit). Ownership: today installing `bb-auth-web` moves the access
+  file to `bb-auth-web:bb-auth 0640`; a second unprivileged writer needs an answer that keeps both
+  writers and the gate working, with or without `bb-auth-web` installed.
+- **Who reaches it**: nginx `auth_request` with an `authenticated` (or `restricted`) scope, identity
+  from `X-Auth-Email` only, and the four cases: roster user, admin, `authenticated` stranger, denied.
+- **What it shares**: what moves into the library (and why, under "the library is the shared files,
+  and nothing else"), and what stays in the binary. Presentation: `THEME_CSS`/`BASE_CSS`, the `ui`
+  settings, the no-JavaScript rule, `PAGE_SECURITY_HEADERS`/`page_csp`, `request_site`.
+- **API keys**: the narrow-only rule, reveal-once (`SealedKey` + `Written`), `rev`, audit events,
+  and the abuse bound (key count cap, `duration` floor/ceiling, roster rows only).
+- **Cognito profile**: how a server-rendered, no-JavaScript page changes Cognito attributes. Today
+  bb-auth holds no Cognito credential and receives only an `id_token`. Options to weigh (check each
+  against the AWS documentation, not memory): the user's own access token with
+  `UpdateUserAttributes` (how does the binary get it?), or an admin call with IAM credentials (a
+  secret, and the pure-Rust dependency invariant). Which attributes are editable, and why. The
+  **email** attribute is the roster's identity key: changing it in Cognito can lock the person out
+  or let them claim another row, so say whether it is editable at all. Profile claims are
+  self-asserted and authorize nothing, which must stay true.
+- **Account deletion**: how the Cognito user is deleted (same credential question as the profile),
+  in which order the two deletions happen and what a half-done deletion leaves (a roster row with no
+  Cognito user is harmless; a Cognito user with no roster row is an `authenticated` stranger). What
+  happens to a `denied` entry naming the person: a veto must never be lifted by the person it vetoes,
+  and a denied identity reaches nothing here anyway. The audit is not edited (user decision).
+- **Steps**: confirm or rewrite steps 2 to 5 below, each small enough for one slice.
+
+- Done when: the design is in `docs/ARCHITECTURE.md`, the user has approved it, and steps 2 to 5
+  reflect it.
+
+### 2. The user binary: skeleton, identity and a read-only profile page
+
+Covers: R3, part of R1 and R2. Shape set by step 1.
+
+The binary builds, packages and serves one page showing what bb-auth knows about the caller (uuid,
+emails, groups, reachable applications and scopes, denied or not), with the four identity cases
+tested (roster user, admin, stranger, denied).
+
+- Done when: the four cases are tested, the page is checked in a browser, and the package installs
+  beside the others without changing who owns the access file in a way that breaks a writer.
+
+### 3. Self-service API keys
 
 Covers: R1.
 
-#### The feature
+Hard requirements (invariants this feature touches):
 
-An authenticated person reaches a page of their own, lists the API keys that belong to them,
-and mints, rotates and removes them. Today the only doors to `api_keys` are `bb-auth-adm`
-over SSH and the `bb-auth-web` Users tab, and both are administrator surfaces: minting a key
-for a laptop, a CLI profile or a CI job means asking someone in `web.admins`.
-
-#### The design decision to make first
-
-`bb-auth-web` is admin-only end to end (`web.admins` is required, never empty, and gates
-every route). A self-service page is for people who are *not* admins, so one of:
-
-1. **A self-service route inside `bb-auth-web`** (e.g. `/me/keys`) exempt from the
-   `web.admins` check, gated by an `authenticated` scope in nginx instead. Cheapest wiring,
-   but it puts a non-admin surface in the same binary as the admin CRUD, so the exemption
-   must be exact: the route may read and write only the caller's own user row.
-2. **A separate target** (a fifth binary, or a mode of the GUI) whose whole job is the
-   personal key page. More isolation, more packaging.
-
-Pick one and write the argument down in this step before coding, in the register the settings-file
-invariant uses: what the surface can reach, and what it cannot.
-
-#### Hard requirements (invariants this feature touches)
-
-- **Keys only narrow.** The self-service form may offer a key `id`, a `duration`, and a
-  *subset* of the owner's existing scope restrictions; it must never be able to mint a key
-  that reaches more than its owner. `decide_api_key` already enforces the owner check, and
-  the mint path must not let a caller name arbitrary `application/scope` pairs.
-- **One identity.** The page acts on the email nginx injects (`X-Auth-Email`) and on no
-  form field. A caller with no roster row (an `authenticated`-scope stranger) has no keys
-  and gets an explanatory page, not an empty form that mints an ownerless key.
+- **Keys only narrow.** The form may offer a key `id`, a `duration`, and a *subset* of the scopes the
+  owner already reaches; it must never mint a key that reaches more than its owner, nor let the
+  caller name arbitrary `application/scope` pairs.
+- **One identity.** The page acts on `X-Auth-Email` and on no form field. A caller with no roster
+  row gets an explanatory page, never a form that mints an ownerless key.
 - **`denied` is checked before anything.** A vetoed identity mints nothing.
-- **Reveal-once stays.** The raw bearer prints on the page exactly once, after the write
-  lands (`SealedKey` + `Written` receipt), and is never stored, never re-rendered, never in
-  the audit line.
-- **Write path unchanged.** All mutations go through `AccessWrite` (validate on the exact
-  bytes, atomic rename, preserve mode/owner) and bump `rev`, so the 409 stale-form check
-  works against a concurrent `bb-auth-adm` the same way it does today.
-- **No JavaScript.** The page follows the GUI's rules: GET never mutates, POST carries the
-  same-origin check and `rev`, lists carry filter/pager in the query string.
-- **Audit.** Mint, rotate and remove are credential events on a named identity; decide
-  whether they join the audit schema (they read as authentication-adjacent, not traffic)
-  and pin the event names.
-- **Abuse bound.** Self-minting is a long-lived credential an authenticated stranger can
-  request in a loop once any `authenticated` scope exists. State the bound (per-user key
-  count cap, minimum `duration` floor, or "roster rows only") in the design note, and make
-  the choice visible to `--check-access` output or the startup banner if it changes what is
-  reachable.
+- **Reveal-once stays.** The raw bearer shows exactly once, after the write lands, and is never
+  stored, re-rendered or audited.
+- **Write path unchanged.** All mutations go through `AccessWrite` and the `rev` 409 check, against a
+  concurrent `bb-auth-adm` or `bb-auth-web`.
+- **No JavaScript.** GET never mutates; POST carries the same-origin check and `rev`.
+- **Audit and abuse bound** as decided in step 1.
 
-#### Checks that must pass
+Tests: the route's authorization (admin, roster user, stranger, denied), narrow-only, reveal-once,
+the `rev` conflict, and the e2e flow.
 
-`cargo test`, `cargo clippy --all-targets`, `cargo fmt`, `cargo doc --no-deps` clean; new
-tests for the route's authorization (admin, roster user, `authenticated` stranger, denied
-user), the narrow-only rule, reveal-once, and the `rev` conflict; `node e2e/run.js`
-extended with the self-service flow.
+- Done when: a roster user mints, rotates and removes a key of their own in a browser, while a
+  stranger and a denied user cannot.
 
-- Done when: the checks above pass, and a roster user mints, rotates and removes a key of their own in a
-  browser, while a stranger and a denied user cannot.
+### 4. Editable Cognito profile
+
+Covers: R2.
+
+Mechanism, editable attributes and the email question as decided in step 1. Tests never touch the
+real user pool; the first real edit against it needs the user's go-ahead.
+
+- Done when: a user changes an editable attribute of their own in a browser against the real pool
+  (with the user's go-ahead), cannot change another person's or a non-editable one, and the change
+  shows in their next token's profile claims.
+
+### 5. Delete my account
+
+Covers: R4.
+
+A confirmation step (a second `POST`, no JavaScript), then the roster row goes through the same
+sweep `remove_user` does (keys, scope and group references, `excluded`), through `AccessWrite` and
+`rev`, and the Cognito user is deleted as step 1 decided. `denied` entries are never removed by
+this. The audit is not edited; the page says how long the person's lines are kept. Tests never touch
+the real pool; the first real deletion needs the user's go-ahead.
+
+- Done when: a roster user deletes their own account in a browser (test account, real pool, with the
+  user's go-ahead), the access file no longer names them anywhere it named them, they can no longer
+  sign in, and a denied user cannot use this to lift their veto.
 
 ## Waiting for the user
 
-- Step 1: the design decision (a route inside `bb-auth-web`, or a separate target), before any code.
-
+- Step 1: approval of the architect's design, before any code.
