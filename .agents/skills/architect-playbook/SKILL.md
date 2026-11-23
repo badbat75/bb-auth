@@ -14,6 +14,10 @@ Rules are in `AGENTS.md`. Format of this file: `AGENTS.md`, under "Skills".
 - Check every AWS fact against the Cognito API reference
   (docs.aws.amazon.com/cognito-user-identity-pools/latest/APIReference/) and mark what is unverified.
 
+- To hide a secret from a unit, `InaccessiblePaths=` its whole directory, even the one holding the
+  unit's own env file: `EnvironmentFile=` is read by the manager before any bind mount
+  (systemd.exec(5)).
+
 ## Pitfalls
 
 - `X-Auth-Email` can hold several emails joined by a space: never treat the whole header as one email.

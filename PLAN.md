@@ -16,7 +16,7 @@ as the column says. A requirement still open must be covered by a step.
 |---|---|---|
 | R1 | Self-service API keys: a user mints, rotates and removes their own `bbk_` tokens, without an administrator | Step 4 |
 | R2 | Self-service profile: a user sees what bb-auth knows about them and edits their own Cognito profile attributes | Step 5 |
-| R3 | The self-service surface is a fourth binary of its own, dedicated to users and separate from the admin GUI, so further user-facing features have a home | Design approved (`docs/ARCHITECTURE.md` §13); steps 3a, 3b, 3c |
+| R3 | The self-service surface is a section of the admin GUI (`bb-auth-web`, at `<base>/me/`), open to any signed-in identity, never reading `web.admins` and acting only on the caller's own account, so further user-facing features have a home. Changed by the user on 2026-11-23 from "a fourth binary of its own" | Design revised (`docs/ARCHITECTURE.md` §13); page built as `bb-auth-me`, unpackaged; steps 3a, 3b, 3c, 3d |
 | R4 | Self-service deletion: a user deletes their own account and its related data, at once, after a confirmation: the roster row, keys, references in scopes and groups, and the Cognito user. The audit is not edited: their lines expire with `audit.retention`, and the page says so | Steps 6, 7. For a social-only user the Cognito half is left to an administrator and the page says so: accepted by the user on 2026-11-23 |
 
 ### How we work
@@ -61,62 +61,92 @@ as not checked, and the step stays open.
 
 The gate, the CLI (`bb-auth-adm`) and the admin GUI (`bb-auth-web`) are built and deployed; `README.md`,
 `AGENTS.md` and `CHANGELOG.md` say what they do. The agent structure (roles, skills, this plan) was added
-on 2026-11-23; the work before it is in `git log`.
+on 2026-11-23; the work before it is in `git log`. The self-service page exists as an unpackaged
+`bb-auth-me` target, to be folded into `bb-auth-web` (step 3c).
 
 ## Next steps
 
-Decided by the user on 2026-11-23: the self-service surface is **a fourth binary**, not a route
-inside `bb-auth-web`, because a non-admin surface must not share a binary with the admin CRUD and
-more user-facing features are expected. Its features are the API keys (R1), an **editable** Cognito
-profile (R2) and deleting one's own account (R4).
+Decided by the user on 2026-11-23 (afternoon), reversing the morning's fourth binary: the
+self-service surface is **a section of `bb-auth-web`**, at `<base>/me/`, open to any identity
+nginx vouches for, never reading `web.admins`, and acting only on the caller's own account:
+the API keys (R1), an **editable** Cognito profile (R2) and deleting one's own account (R4). The
+page already built as `bb-auth-me` (steps 2b-1 to 2b-3) moves there and that target goes. The
+reversal's cost, stated in `docs/ARCHITECTURE.md` §13.12, is that strangers now talk to the
+process that writes both files, so two gaps found the same day are closed **first**, before the
+GUI is opened to anyone who is not an administrator: `bb-auth-web` can read the HMAC key, and it
+believes `X-Auth-Email` from any local process. The design is `docs/ARCHITECTURE.md` §13.
 
-The design is in `docs/ARCHITECTURE.md` §13, approved by the user on 2026-11-23 with the
-decisions listed in §13.10: the binary is `bb-auth-me`, behind an `authenticated` scope, running
-as the shared `bb-auth-web` account, re-authenticating with a server-side email code before any
-Cognito action.
+### 3a. bb-auth-web cannot read the HMAC key
 
-### 3a. Package and ownership, built locally
+Covers: R3 (a precondition to opening the GUI to strangers). Design: §13.4.
 
-Covers: R3.
+`deploy/bb-auth-web.service` gains `InaccessiblePaths=/opt/bb-auth/etc`, the directory and not
+the file, with a comment saying why (the env file is read by the service manager before the
+sandbox; a per-file mount detaches on a rename).
 
-The `bb-auth-me` `.deb` (variant in `Cargo.toml`, env example, unit, postinst/prerm/postrm),
-the shared-account ownership block in both editor postinsts, the conditional hand-back in both
-postrms, `bb-auth-reload.path` moved to the gate's variant with `Breaks`/`Replaces`, and
-`scripts/build.sh`, `scripts/package.sh`, `scripts/verify.sh`, `scripts/deploy.ps1 -Packages` and
-`scripts/deploy.sh` knowing the fourth package (design: `docs/ARCHITECTURE.md` §13.2, §13.3).
+- Done when: on rpi-01, with the user's go-ahead for the install, `bb-auth-web` starts and
+  listens (its env was loaded), `sudo cat /proc/$(systemctl show -p MainPID --value
+  bb-auth-web)/root/opt/bb-auth/etc/bb-auth.env` fails, a GUI save still lands and reloads the
+  gate, and the Audit tab still reads `/var/log/bb-auth`. Until rpi-01 is reached, the step
+  stays open with only the unit change and `systemd-analyze verify` on it done.
 
-- Done when: `bash scripts/package.sh` builds four `.deb`s; `dpkg-deb -c` and `dpkg-deb -I` show
-  each file in the package §13.2 assigns it (the path unit in the gate's, with `Breaks`/`Replaces`
-  on `bb-auth-web`), `shellcheck` is clean on every changed maintainer script, and the postinst's
-  closing message tells the operator to cover the page with an `authenticated` scope and says in
-  one line that on a deployment with no such scope yet this makes `/auth/session` mint cookies
-  for strangers (§13.4).
+### 3b. A secret header only nginx sets
 
-### 3b. The nginx recipe for bb-auth-me
+Covers: R3 (a precondition to opening the GUI to strangers). Found and proven on a local
+instance on 2026-11-23: a forged `X-Auth-Email` with no cookie got the admin dashboard. Design:
+§13.3.
 
-Covers: R3. Asked by the user on 2026-11-23.
+`bb-auth-web` requires `BB_AUTH_WEB_PROXY_SECRET` at startup (at least 32 characters of
+`[A-Za-z0-9_-]`, fatal otherwise, naming the variable and never the value) and refuses with a
+`403` any request whose `X-BB-Web-Secret` does not match, before the identity or the settings are
+read. Whether this applies to **every** request or only to mutations is the user's to confirm
+(see "Waiting for the user"); the design recommends every request, and the step is written that
+way. The postinst appends a generated secret to `bb-auth-web.env` when the variable is absent and
+(re)writes `/opt/bb-auth/etc/bb-auth-web.nginx` (`root:root 0600`, one `proxy_set_header` line)
+from it on every configure; its preflight checks the variable. The README's GUI location
+includes that file. The secret is never logged, printed or rendered.
 
-The README documents the nginx location that serves `bb-auth-me`, in the same form as the GUI's:
-`auth_request` to the gate, `$bb_url` set in the location, every possible identity header set or
-cleared (`IDENTITY_ATTRS`) and the configured profile headers passed, `BB_AUTH_ME_BASE_PATH`
-matching the location, the `401` to the sign-in page and the `403` to `@bb_denied`, and the
-`authenticated` scope in the access file that must cover it.
+- Done when: tests that failed first show no secret and a wrong secret both `403` on `GET` and
+  `POST`, the right one passing, the value in no response, and the startup refusing a missing or
+  short secret; `shellcheck` is clean on the postinst; `dpkg-deb -c` shows nothing new in the
+  package beyond the scripts; and on rpi-01 (with the user's go-ahead) a `curl` to
+  `127.0.0.1:8091` with a forged `X-Auth-Email` and no secret is `403` while the GUI through
+  nginx still works for an administrator.
 
-- Done when: the snippet passes `nginx -t` on rpi-01 (read-only check, run on a copy) and the
-  README says which scope covers it.
+### 3c. Move the self-service page into bb-auth-web as `/me/`, and delete bb-auth-me
 
-### 3c. Install on rpi-01
+Covers: R3. Design: §13.2, §13.10.
 
-Covers: R3. Test host named by the user on 2026-11-23: `rpi-01`.
+`bb-auth-web` routes `<base>/me` and everything under it to the self-service page before its
+`web.admins` check; every other path keeps that check, and an unknown path outside `/me/` stays
+a `403` for a non-administrator. The page's sections, look and selector come across (its `K`
+keys into `bb-auth-web`'s table, its arrangement into `admin.css`, the logo passed to
+`page_csp`), using `bb-auth-web`'s preference handling. Then `src/bin/bb-auth-me.rs` and its
+`[[bin]]` are deleted, and `AGENTS.md`, the README and `docs/ARCHITECTURE.md` §2 and §3 stop
+naming it.
 
-With the user's go-ahead for each change: the four packages installed, the nginx location from
-3b added and reloaded, and the `authenticated` scope added to the live access file.
+- Done when: the 26 `bb-auth-me` tests pass in `bb-auth-web`'s test module against `<base>/me/`,
+  with a `web.admins` that does not name the caller and the proxy secret sent; new tests that
+  failed first show a non-administrator gets `200` on `/me/` and `403` on every other route and
+  on an unknown path; `cargo test`, `cargo clippy --all-targets` and `cargo fmt --check` are
+  clean with four targets; `node e2e/run.js` and the scripting-off walk pass; and the page looks
+  right in a browser in both themes and both languages.
 
-- Done when: on rpi-01 the GUI and `bb-auth-me` both save in both orders, `sudo bb-auth-adm`
-  saves after both, every save reloads the gate, purging either editor leaves the other saving,
-  a rename onto `settings.json` as `bb-auth-me` fails, an upgrade from the current packages
-  raises no dpkg file conflict, a gate-only host still changes no ownership, and the page loads
-  through nginx in a browser for a signed-in person.
+### 3d. The nginx recipe for `/me/`, and install on rpi-01
+
+Covers: R3. Test host named by the user on 2026-11-23: `rpi-01.bombicci.local`.
+
+The README documents the access-file entries that split the GUI's area (the `me` scope,
+`authenticated`, covering `<base>/me` and `<base>/me/*`, listed before the administrators'
+`restricted` scope, §13.2), that the GUI's location now forwards the configured profile headers,
+and, in one line, that the first `authenticated` scope makes `/auth/session` mint cookies for
+strangers (§13.5). With the user's go-ahead for each change: the packages installed on rpi-01,
+the nginx location updated and reloaded, the two scopes added to the live access file.
+
+- Done when: the snippet passes `nginx -t` on rpi-01; `bb-auth-adm can` grants a stranger
+  `<base>/me/` and `<base>/me` and refuses them `<base>/`; and in a browser through nginx a
+  signed-in non-administrator sees their page and is refused the admin pages, while an
+  administrator reaches both.
 
 ### 4. Self-service API keys
 
@@ -126,7 +156,7 @@ Hard requirements (invariants this feature touches):
 
 - **Keys only narrow.** The form offers an `id`, a `duration`, and either no restriction or any
   subset of the scopes the owner's keys reach (`Access::key_scopes_for`, added to the library
-  test first, §13.7), grouped under their application. It submits `application/scope` pairs;
+  test first, §13.8), grouped under their application. It submits `application/scope` pairs;
   each is checked against that set, and one outside it is a `400` with nothing written, never
   dropped silently.
 - **No URLs on screen.** The key form and key list show application and scope names, never a URL
@@ -138,10 +168,11 @@ Hard requirements (invariants this feature touches):
 - **Reveal-once stays.** The raw bearer shows exactly once, in the `200` answering the `POST`,
   after the write lands, with `Cache-Control: no-store`, and is never stored, re-rendered or logged.
 - **Write path unchanged.** `add_api_key`, `rotate_api_key`, `remove_api_key` through
-  `AccessWrite` and the `rev` 409 check.
-- **No JavaScript.** GET never mutates; POST carries the strict same-origin check and `rev`.
+  `AccessWrite`, the `rev` 409 check and `bb-auth-web`'s write lock.
+- **No JavaScript.** GET never mutates; POST carries the proxy secret, the strict same-origin
+  check and `rev`.
 - **Bound**: at most 10 keys per row, `duration` from `1d` to `365d`, `id` matching `[a-z0-9-]{1,32}`.
-- **Journal**: `[bb-auth-me] <uuid>: key add|rotate|remove <id>`, nothing else.
+- **Journal**: `[bb-auth-web] <uuid> (self): key add|rotate|remove <id>`, nothing else.
 
 Tests: authorization (administrator, roster user, stranger, denied); `key_scopes_for` agrees
 with `decide` for a key; a pair outside the set `400` with the file unchanged; the file gets
@@ -157,25 +188,27 @@ e2e flow with scripting off.
 Covers: R2.
 
 `cognito_endpoint` moves to the library as a `Settings` method (the gate's test keeps passing).
-The re-authentication of §13.6: choose one of one's own emails, `InitiateAuth` (`USER_AUTH`,
+The re-authentication of §13.7: choose one of one's own emails, `InitiateAuth` (`USER_AUTH`,
 `EMAIL_OTP`), a code form carrying Cognito's `Session` in a hidden field, then
 `RespondToAuthChallenge` and `UpdateUserAttributes`, with the tokens dropped at the end of that
 request. Editable: `gate.profile_claims` minus `email`, `phone_number`, `preferred_username`;
-`email` shown read-only. Tests use a fake Cognito endpoint and never the real pool; the first
-real edit needs the user's go-ahead.
+`email` shown read-only. `bb-auth-web.service` loses `IPAddressDeny=any` and
+`IPAddressAllow=localhost`, which block the call to Cognito (cost in §13.7). Tests use a fake
+Cognito endpoint and never the real pool; the first real edit needs the user's go-ahead.
 
 - Done when: tests show a wrong code changes nothing, an email not among the caller's and a
   non-editable attribute are refused before Cognito is called, and no token reaches a response
-  or a log; and a user changes an editable attribute in a browser against the real pool (with the
-  user's go-ahead), and it shows in their next token's profile claims.
+  or a log; a non-loopback `BB_AUTH_WEB_LISTEN` without the opt-in still refuses to start; and a
+  user changes an editable attribute in a browser against the real pool (with the user's
+  go-ahead), and it shows in their next token's profile claims.
 
 ### 6. `remove_user` keeps an exclusion as an email
 
-Covers: R4 (prerequisite), and changes `bb-auth-adm` and `bb-auth-web` too, as decided.
+Covers: R4 (prerequisite), and changes `bb-auth-adm` and the admin pages too, as decided.
 
 Today `remove_user` drops the removed uuid from every scope's `excluded`; it must rewrite it to
 the row's primary email, as it already does for `denied`, so a removed person who re-registers is
-still kept out (§13.7). Library change, test first.
+still kept out (§13.8). Library change, test first.
 
 - Done when: a library test that failed first shows a scope that excluded the uuid now excludes
   the primary email, a row with no email leaves nothing behind, and the written file compiles;
@@ -203,6 +236,9 @@ final page links to `/auth/logout`.
 
 ## Waiting for the user
 
+- Before step 3b: whether the proxy secret is required on **every** request (recommended:
+  otherwise any local process can still read the roster, the settings and the audit's addresses,
+  §13.3) or only on requests that add or remove, as first said.
 - Before step 5: a read-only check of the real pool (`aws cognito-idp describe-user-pool` and
   `describe-user-pool-client`): email sign-in, `ALLOW_USER_AUTH`, `WriteAttributes`,
   `AuthSessionValidity`, `AttributesRequireVerificationBeforeUpdate`. The user runs it, or
