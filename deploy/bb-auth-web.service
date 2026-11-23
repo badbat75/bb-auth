@@ -73,6 +73,14 @@ AmbientCapabilities=
 # file and renamed onto it (that is what makes it atomic), plus the .bak copy, so both
 # creating and renaming inside var/lib must be allowed.
 ReadWritePaths=/opt/bb-auth/var/lib
+# The HMAC key is in bb-auth.env, which is root:bb-auth 0640, and this unit is in group
+# bb-auth for the access file, so the group bit hands the GUI the key that signs every
+# session cookie and lets it mint a cookie for anybody. The directory and not the file: a
+# per-file mount is lazily detached when a process outside the namespace renames onto it
+# (Linux 3.18+), so an operator's `sed -i` on that env file would quietly give the key back.
+# The EnvironmentFile= above still loads, because systemd reads env files on the manager's
+# file system, before the sandbox is applied (systemd.exec(5)).
+InaccessiblePaths=/opt/bb-auth/etc
 UMask=0077
 
 [Install]
