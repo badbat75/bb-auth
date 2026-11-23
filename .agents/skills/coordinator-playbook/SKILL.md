@@ -11,6 +11,10 @@ Rules are in `AGENTS.md` and `PLAN.md`. Format of this file: `AGENTS.md`, under 
   from its last, unrelated line.
 - Before a real run, say what result you expect. When the result differs, say so plainly and find out
   why: an unexpected result is often the most useful finding of the run.
+- Do not ask the user whether to go on to the next step or slice: go on, and ask only what the rules
+  require (ambiguity, real effects, a requirement change).
+- Before a commit that changes shipped code, bump the version (W11): the patch in `Cargo.toml`, then
+  `cargo check` to carry it into `Cargo.lock`, then the "Due out as" line of `CHANGELOG.md`.
 - Ask the user for real runs one at a time, with the exact command and the expected result.
 
 ### Who runs each role
