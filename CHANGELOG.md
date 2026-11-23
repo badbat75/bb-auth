@@ -108,7 +108,13 @@ and nowhere else, no token validated, no cookie minted, no secret held, `web.adm
 It shows the caller's addresses and roster uuid, then four read-only sections: where they reach
 (the applications and scope names, grouped by application, never a URL), the groups naming them,
 their API keys (id, expiry date or "never", and the restriction the key carries, never the hash
-or the bearer) and the profile claims the deployment forwards, decoded. A `403` answers a denied
+or the bearer) and the profile claims the deployment forwards, decoded, a configured claim with
+nothing forwarded shown as "None.". The page wears the settings file's `ui` section like the
+other two HTML programs: brand name and logo, the operator's stylesheet, and `ui.theme` as the
+default theme, in a centred card. The person can choose only the theme (light, dark, system) and
+the language (English, Italian, auto), from a selector with a submit button and no script; one
+submit answers one `302` that sets the `theme` and `lang` cookies, the same names `bb-auth-web`
+writes, so a choice made in one program carries to the other on one host. A `403` answers a denied
 identity, a `401` when nginx sent no identity, and a `500` naming the setting when the deployment
 injects none. No package and no unit yet, so an upgrade installs nothing new.
 

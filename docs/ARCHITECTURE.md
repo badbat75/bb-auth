@@ -72,7 +72,7 @@ the gate is the gate's, and stays in one file.
 | `src/bin/bb-auth.rs` (`bb-auth`) | **The gate**, still a single file read top to bottom: HTTP, config, the session cookie, id_token validation, the nginx contract, and the four pages it serves out of `src/assets/` (sign-in, social callback, refusal, error). |
 | `src/bin/bb-auth-adm.rs` (`bb-auth-adm`) | **The access-file admin CLI.** CRUD over `applications` / `scopes` / `user_groups` / `denied` / `users` / `api_keys`, key minting and rotation, and `can EMAIL URL` — which calls the library's `decide`, so it answers the question the gate will answer. Every edit and every write is a library call (`AccessWrite`), so it cannot save a file the gate would reject; what is left here is flags, warnings and the wording of a verdict. See §12. |
 | `src/bin/bb-auth-web.rs` (`bb-auth-web`) | **The access-file admin GUI**: server-rendered (`maud`; no page needs JavaScript, the one inline handler is a Settings-menu shortcut with a `<noscript>` submit behind it) over the library, read *and* write — CRUD through `AccessWrite` alone, `POST`-only mutations behind a same-origin check and a `rev` (sha256-of-file) concurrency check. Loopback behind nginx `auth_request`, identity from the `X-Auth-Email` nginx injects plus its own administrator allowlist (`web.admins` in the settings file, read fresh on every request and editable from its own Settings tab). Links the library, none of the gate. |
-| `src/bin/bb-auth-me.rs` (`bb-auth-me`) | **The self-service page**: server-rendered (`maud`) over the library, none of the gate, for one person's **own** account and nobody else's. What is built is the identity half (plan step 2b-1): both files read fresh on every request, `X-Auth-Email` split into the list of addresses the gate actually sends, the `denied` veto checked ahead of everything, and a page naming the caller and their uuid, plus the four **read-only** sections step 2b-2 added: reach (the applications and scope names, grouped by application, never a URL), groups, keys (id, expiry, restriction, never the hash or the bearer) and profile (the configured claims, percent-decoded). Loopback behind nginx `auth_request`, identity from `X-Auth-Email` and nowhere else, `web.admins` not read, because an administrator here is one more person. **Not packaged yet**: no `.deb`, no unit, and `scripts/build.sh` and `scripts/package.sh` build only the other three, so a deploy installs nothing new (plan step 3). See §13. |
+| `src/bin/bb-auth-me.rs` (`bb-auth-me`) | **The self-service page**: server-rendered (`maud`) over the library, none of the gate, for one person's **own** account and nobody else's. What is built is the identity half (plan step 2b-1): both files read fresh on every request, `X-Auth-Email` split into the list of addresses the gate actually sends, the `denied` veto checked ahead of everything, and a page naming the caller and their uuid, plus the four **read-only** sections step 2b-2 added: reach (the applications and scope names, grouped by application, never a URL), groups, keys (id, expiry, restriction, never the hash or the bearer) and profile (the configured claims, percent-decoded), plus the look step 2b-3 added: the `ui` section (brand name, logo, operator stylesheet, `ui.theme` as the default theme) in a centred card, and a script-free selector for the two preferences a person can choose, theme and language, whose one submit answers one `302` setting the `theme` and `lang` cookies `bb-auth-web` writes too. Loopback behind nginx `auth_request`, identity from `X-Auth-Email` and nowhere else, `web.admins` not read, because an administrator here is one more person. **Not packaged yet**: no `.deb`, no unit, and `scripts/build.sh` and `scripts/package.sh` build only the other three, so a deploy installs nothing new (plan step 3). See §13. |
 
 Inside `src/bin/bb-auth.rs`, in file order:
 
@@ -1138,14 +1138,22 @@ proxy_set_header X-Auth-Family-Name $bb_family;
 
 ## 13. The self-service binary (`bb-auth-me`)
 
-**Status: approved by the user on 2026-11-23, and plan steps 2b-1 and 2b-2 are built.** The
+**Status: approved by the user on 2026-11-23, and plan steps 2b-1, 2b-2 and 2b-3 are built.** The
 binary exists as a fifth target, and it is the identity half of 13.4: both files read fresh on
 every request, the header split into the list of addresses the gate sends, the `denied` veto
 ahead of everything, and a minimal page naming the caller and their uuid, with that table's
 `401`, `500` and `403` answered as written. Step 2b-2 filled that page with its four read-only
 sections: reach (the applications and scope names `Access::scopes_reached` returns, grouped by
 application, never a URL), groups, keys (id, expiry, restriction, never the hash or the bearer)
-and profile (the configured claims, percent-decoded). What is not built is the rest of what
+and profile (the configured claims, percent-decoded, a configured claim with nothing forwarded
+shown as "None."). Step 2b-3 gave the page its look: the settings file's `ui` section read per
+request like the other two HTML programs (brand name and logo, the operator's stylesheet,
+`ui.theme` as the default theme stamped as `data-theme`), in a centred card, and a selector form
+with a submit button and no script for the two preferences a person may choose: theme (light,
+dark, system) and language (English, Italian, auto, resolved cookie then `Accept-Language` then
+English). One submit answers one `302` that sets the `theme` and `lang` cookies, the same names
+`bb-auth-web` writes, so a choice made in either program carries to the other on one host.
+What is not built is the rest of what
 13.1 promises: the package, unit and ownership (step 3), the keys' writes (step 4) and the
 profile edit (step 5). The questions this section left open were answered the same day and are
 recorded in 13.10. As each step lands, its mechanism moves to

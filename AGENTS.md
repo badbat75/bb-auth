@@ -147,7 +147,14 @@ One crate, five targets, and the split is load-bearing:
   `Access::scopes_reached` returns, grouped by application, never a URL), *Groups* (the
   `user_groups` naming the caller's uuid), *API keys* (each key's id, its expiry date or
   "never", and its restriction, never the hash or the bearer) and *Profile* (each configured
-  `gate.profile_claims` claim and the value nginx forwarded, percent-decoded). A stranger and
+  `gate.profile_claims` claim and the value nginx forwarded, percent-decoded, where a configured
+  claim with nothing forwarded shows "None."). Step 2b-3 added the look: the `ui` section read
+  per request like the other two HTML programs (brand name and logo, the operator's stylesheet,
+  `ui.theme` as the default theme stamped as `data-theme`), in a centred card, and the person
+  chooses only the theme (light, dark, system) and the language (English, Italian, auto) from a
+  selector form with a submit button and no script; one submit answers one `302` that sets the
+  `theme` and `lang` cookies, the same names `bb-auth-web` writes, so a choice carries between
+  the two on one host. A stranger and
   an administrator with no roster row see the same page. The keys' writes, the profile edit
   and the Cognito leg are the next steps. It links the library, none of the gate, and its
   design is
@@ -197,7 +204,7 @@ This repo is developed on Windows but the artifact is a Linux/aarch64 binary.
 # file and the writers (src/lib.rs), the gate including its token verifier and its router
 # over a real socket (src/bin/bb-auth.rs), the CLI's argument grammar (src/bin/bb-auth-adm.rs),
 # the GUI including nine that drive real HTTP (src/bin/bb-auth-web.rs) and the self-service
-# page's fifteen, also over a real socket (src/bin/bb-auth-me.rs). A handful are
+# page's twenty-six, also over a real socket (src/bin/bb-auth-me.rs). A handful are
 # cfg(unix) (the SIGHUP reload's fail-soft, the writer's mode preservation, the audit file's
 # own mode) and therefore run on Linux, never on the development host (run them under WSL
 # before a release).
@@ -465,7 +472,7 @@ section under-read itself by a fifth, and two of the seven are lockout-class.
   like the gate's business. `write_atomically` stays private and
   serves both writers. The same rule, one step further out, is what admits the
   **presentation contract** (`THEME_CSS`, `BASE_CSS`, `UiTheme`, `stylesheet_link`,
-  `html_escape`, `compile_asset_url`): two programs emit HTML now, and a second answer to
+  `html_escape`, `compile_asset_url`): three programs emit HTML now, and a second answer to
   "what does `--accent` name" or "where does the operator's stylesheet land in the cascade"
   would mean `ui.stylesheet_url` restyles one surface and leaves the other standing in another
   palette. A stylesheet in a library needs that argument made out loud, and the argument is
@@ -474,7 +481,7 @@ section under-read itself by a fifth, and two of the seven are lockout-class.
   being a rounded rectangle on one page and a lozenge on the other, or a field from being 12px
   tall here and 7px there. Each of those is somebody editing the file in front of them, which
   is drift invisible from inside either file, so a THING (a button, a field, a card, a tag, a
-  message) is defined once in `BASE_CSS` and both programs emit it. **It reaches the response
+  message) is defined once in `BASE_CSS` and all three programs emit it. **It reaches the response
   too**, one step further out and by the same argument: two programs answer a browser with an
   HTML document, so "what headers does one carry" and "where did this `POST` come from" must
   not have two answers either. `PAGE_SECURITY_HEADERS`, `page_csp`, `csp_hash` and
@@ -553,7 +560,7 @@ section under-read itself by a fifth, and two of the seven are lockout-class.
   `audit` section (`client_ip_header`, `request_id_header`, `rotation`, `retention`);
   `web.admins`;
   and the whole `ui` section (`stylesheet_url`, `logo_url`, `brand_name`, `theme`), which is
-  the **look of every page either program serves** and the one section both of them read. The
+  the **look of every page any of the three serves** and the one section all three read. The
   `ui` four pass the middle part precisely because the built-in stylesheet is complete: the
   worst a wrong value there achieves is an unstyled page, never a closed door.
 

@@ -64,3 +64,8 @@ files outside the repo.
   type is missing, start one before doing its work yourself.
 - OpenCode's first answer after a file changes can be stale: `opencode debug agents` gave `[]`, and
   `debug config` missed a new file. Query again before believing it.
+- Headless Edge never finishes a `--screenshot` while a page waits on a host it cannot reach (an
+  unreachable `ui.logo_url` hung it for good). Check the `<img>` with curl, and take the screenshot
+  with that setting removed and under `timeout`.
+- A local coder that starts its own server can end with exit 144 once its work is done. Check the tree
+  and the tests before rerunning it, and tell it in the brief not to start servers or call `pkill`.

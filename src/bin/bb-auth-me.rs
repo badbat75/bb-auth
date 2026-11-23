@@ -3,7 +3,8 @@
 //! vouching for, and answers that person with a page about their own account: where they reach,
 //! the groups they are filed in, their API keys and the profile claims the proxy forwards. The
 //! Cognito leg (editing a profile at the pool) is the next step, so what is here is **read
-//! only**: no form, no write, nothing that can lock anybody out.
+//! only**: the one form the page carries is a display preference, which writes a cookie and
+//! nothing else, so there is no write and nothing that can lock anybody out.
 //!
 //! The trust model is `bb-auth-web`'s, unchanged: **just another application bb-auth fronts**.
 //! It binds loopback, speaks plain HTTP behind a TLS-terminating nginx, and takes its identity
@@ -21,7 +22,7 @@
 use bb_auth_core::{
     csp_hash, default_settings_path, format_date, norm_email, open_access_file, open_settings_file,
     page_csp, stylesheet_link, version_line, Access, AccessFile, ApiKeyRecord, AppRecord,
-    ScopeRecord, Settings, BASE_CSS, IDENTITY_HEADER, PAGE_SECURITY_HEADERS, THEME_CSS,
+    ScopeRecord, Settings, UiTheme, BASE_CSS, IDENTITY_HEADER, PAGE_SECURITY_HEADERS, THEME_CSS,
 };
 use maud::{html, Markup, PreEscaped, DOCTYPE};
 use tiny_http::{Header, Request, Response, Server, StatusCode};
@@ -30,14 +31,31 @@ use tiny_http::{Header, Request, Response, Server, StatusCode};
 /// in-flight request is what keeps a page that is reading two files from holding the port.
 const WORKERS: usize = 2;
 
+/// How long a preference cookie lives. Copied from `bb-auth-web`, and the same number there
+/// matters: a person who chose dark in the admin console and reaches this page on the same
+/// host gets dark, because both programs write the same cookie with the same life.
+const PREFERENCE_COOKIE_MAX_AGE: i64 = 31_536_000;
+
+/// Cookie remembering the language choice. Copied from `bb-auth-web`, name included: the
+/// console writes this one, so a choice made there carries here without either program knowing
+/// about the other. It carries no identity and no capability, so it is not `Secure`: this
+/// binary speaks plain HTTP on loopback and cannot know the scheme the browser used, and a
+/// display preference is not worth a flag that would be a lie about half the deployments.
+const LANG_COOKIE: &str = "lang";
+
+/// Cookie remembering the theme choice. Same reasoning as [`LANG_COOKIE`], and the same name as
+/// the console's, for the same reason.
+const THEME_COOKIE: &str = "theme";
+
 /// `BB_AUTH_ME_LISTEN`, `BB_AUTH_ACCESS_FILE`, `BB_AUTH_SETTINGS_FILE`, `BB_AUTH_ME_BASE_PATH`.
 struct Config {
     listen: String,
     access_path: String,
     settings_path: String,
     /// The prefix nginx mounts this at. Carried from the env file now because the env contract
-    /// is fixed by §13.2. The startup banner prints it, and only the banner reads it: no page
-    /// renders an href yet, so nothing resolves a URL against it.
+    /// is fixed by §13.2. The startup banner prints it, and the page resolves its one URL
+    /// against it: the preference form's `action` and the target of a preference redirect are
+    /// both this plus `/`.
     base_path: String,
 }
 
@@ -96,21 +114,158 @@ fn env_flag(key: &str) -> bool {
 // Language
 // ---------------------------------------------------------------------------
 
-/// The languages this binary carries. One for now; the shape is `bb-auth-web`'s so that adding
-/// a second is an arm in [`m`] and nothing else, and so that a key nobody translated is a
-/// compile error rather than a fallback.
+/// The languages this binary carries. Two, and the shape is `bb-auth-web`'s so that adding a
+/// third is an arm in [`m`] and nothing else, and so that a key nobody translated is a compile
+/// error rather than a fallback.
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 enum Lang {
     En,
+    It,
 }
 
 impl Lang {
-    /// The `lang=` attribute.
+    /// The `lang=` attribute, the cookie value and the query parameter value: one spelling.
     fn code(self) -> &'static str {
         match self {
             Lang::En => "en",
+            Lang::It => "it",
         }
     }
+
+    /// How the language names itself, for its option in the selector. A language menu that
+    /// translated its own entries would hide the one a person is looking for behind the
+    /// language they cannot read, which is the one case where translating is the bug. Copied
+    /// from `bb-auth-web` for that reason, and not because the two lists must agree.
+    fn name(self) -> &'static str {
+        match self {
+            Lang::En => "English",
+            Lang::It => "Italiano",
+        }
+    }
+}
+
+/// Parse a language name, from the query or the cookie. `None` for anything else: an unknown
+/// value is simply not a preference, and nothing is remembered for it. Copied from
+/// `bb-auth-web`.
+fn parse_lang(s: &str) -> Option<Lang> {
+    match s.trim().to_ascii_lowercase().as_str() {
+        "en" => Some(Lang::En),
+        "it" => Some(Lang::It),
+        _ => None,
+    }
+}
+
+/// What the selector offers, which is not the same set as [`Lang`]: `Auto` is the choice to
+/// make no choice, and it resolves per request against the browser's `Accept-Language` (see
+/// [`negotiate_lang`]). Copied from `bb-auth-web`, with the reason it needs a type of its own:
+/// [`Lang`] has to stay the two the table actually holds, because every string on the page is
+/// looked up by one, so `Auto` could never travel that far.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+enum LangPref {
+    Auto,
+    Fixed(Lang),
+}
+
+impl LangPref {
+    /// The cookie value and the query parameter value: one spelling, and for a fixed choice it
+    /// is [`Lang::code`]'s own, so `?lang=it` still means exactly what it always meant.
+    fn code(self) -> &'static str {
+        match self {
+            LangPref::Auto => "auto",
+            LangPref::Fixed(l) => l.code(),
+        }
+    }
+
+    /// The label its option in the selector shows, rendered in `lang`. Only `Auto` is
+    /// translated: the other two name themselves (see [`Lang::name`]).
+    fn label(self, lang: Lang) -> &'static str {
+        match self {
+            LangPref::Auto => t(lang, K::LangAuto),
+            LangPref::Fixed(l) => l.name(),
+        }
+    }
+}
+
+/// Parse a language preference, from the query or the cookie: the two language codes plus
+/// `auto`. `None` for anything else, exactly as [`parse_lang`] does and for the same reason.
+fn parse_lang_pref(s: &str) -> Option<LangPref> {
+    match s.trim().to_ascii_lowercase().as_str() {
+        "auto" => Some(LangPref::Auto),
+        _ => parse_lang(s).map(LangPref::Fixed),
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Theme
+// ---------------------------------------------------------------------------
+
+/// The three appearances a page can render in are [`UiTheme`], the library's, and not a second
+/// enum here saying the same three words: the settings file names a theme, this binary and the
+/// console both stamp it onto `html` as `data-theme`, and one selector in [`THEME_CSS`] keys off
+/// it. Copied from `bb-auth-web`, where the argument is made in full. What stays local is the
+/// label an option shows, which is prose about the page and so translates.
+fn theme_label(theme: UiTheme) -> K {
+    match theme {
+        UiTheme::Light => K::ThemeLight,
+        UiTheme::Dark => K::ThemeDark,
+        UiTheme::System => K::ThemeSystem,
+    }
+}
+
+/// Parse a theme name out of the query or the cookie, where **empty means no choice** rather
+/// than `System`, copied from `bb-auth-web`: a cookie whose value is blank has not said anything
+/// at all, and must fall back exactly as a missing cookie does, so that a deployment's own
+/// default still applies. `None` for an unrecognised value, for the same reason.
+fn parse_theme(s: &str) -> Option<UiTheme> {
+    match s.trim() {
+        "" => None,
+        v => UiTheme::parse(v),
+    }
+}
+
+/// Which theme to render in. Query, then cookie, then `UiTheme::System`: most explicit wins,
+/// and `System` is the floor rather than a configured default, since there is nothing to
+/// configure; it is what every session already has until it chooses otherwise. Copied from
+/// `bb-auth-web`, and [`shell`] is where it falls through to the deployment's own default.
+fn negotiate_theme(query: Option<&str>, cookie: Option<&str>) -> UiTheme {
+    if let Some(t) = query.and_then(parse_theme) {
+        return t;
+    }
+    if let Some(t) = cookie.and_then(parse_theme) {
+        return t;
+    }
+    UiTheme::System
+}
+
+/// The preference in force and the language it renders as. Query, then cookie, then
+/// `Accept-Language`, then English: most explicit wins. Copied from `bb-auth-web`, and the
+/// reason both halves come back is the reason it has there: the [`Lang`] looks every string up,
+/// while the [`LangPref`] is which option the selector must show as chosen, and `Auto` and `en`
+/// can render the identical page while being different answers to that one.
+///
+/// The `Accept-Language` check is deliberately crude: does the header start with `it`? A full
+/// RFC 4647 negotiation over two languages would be more code than the question is worth, and
+/// both wrong answers are one choice in the list from being right (and then remembered).
+fn negotiate_lang(
+    query: Option<&str>,
+    cookie: Option<&str>,
+    accept: Option<&str>,
+    default: Lang,
+) -> (LangPref, Lang) {
+    let pref = query
+        .and_then(parse_lang_pref)
+        .or_else(|| cookie.and_then(parse_lang_pref))
+        .unwrap_or(LangPref::Auto);
+    let lang = match pref {
+        LangPref::Fixed(l) => l,
+        LangPref::Auto
+            if accept.is_some_and(|a| a.trim().to_ascii_lowercase().starts_with("it")) =>
+        {
+            Lang::It
+        }
+        LangPref::Auto => default,
+    };
+    (pref, lang)
 }
 
 /// A string the page displays. An enum rather than a literal so [`t`]'s match is **exhaustive**:
@@ -142,13 +297,22 @@ enum K {
     Nothing,
     KeyNever,
     KeyAllScopes,
+    Language,
+    Theme,
+    LangAuto,
+    Apply,
+    ThemeLight,
+    ThemeDark,
+    ThemeSystem,
 }
 
-/// Pick one of a key's spellings. One arm today, and the match is what makes adding a language
-/// a compile-time checklist.
-fn m(lang: Lang, en: &'static str) -> &'static str {
+/// Pick one of a key's spellings. The match is what makes adding a language a compile-time
+/// checklist, and every key carries both spellings: this is the page a person reaches when
+/// something is already wrong, so the strings are compiled in and nothing is fetched.
+fn m(lang: Lang, en: &'static str, it: &'static str) -> &'static str {
     match lang {
         Lang::En => en,
+        Lang::It => it,
     }
 }
 
@@ -156,41 +320,75 @@ fn m(lang: Lang, en: &'static str) -> &'static str {
 /// decision that depended on one would change with the language.
 fn t(lang: Lang, key: K) -> &'static str {
     match key {
-        K::Title => m(lang, "Your account"),
-        K::SignedInAs => m(lang, "Signed in as"),
-        K::Uuid => m(lang, "Your account id"),
-        K::NoRow => m(lang, "bb-auth has no roster row for this identity."),
-        K::NoIdentityTitle => m(lang, "No identity"),
+        K::Title => m(lang, "Your account", "Il tuo account"),
+        K::SignedInAs => m(lang, "Signed in as", "Accesso come"),
+        K::Uuid => m(lang, "Your account id", "Il tuo id account"),
+        K::NoRow => m(
+            lang,
+            "bb-auth has no roster row for this identity.",
+            "bb-auth non ha una riga nella rubrica per questa identità.",
+        ),
+        K::NoIdentityTitle => m(lang, "No identity", "Nessuna identità"),
         K::NoIdentityBody => m(
             lang,
             "The proxy gated this page but sent no X-Auth-Email, so there is nobody to show a page about.",
+            "Il proxy ha protetto questa pagina ma non ha inviato X-Auth-Email, quindi non c'è nessuno di cui mostrare una pagina.",
         ),
-        K::NoEmailTitle => m(lang, "No email identity"),
+        K::NoEmailTitle => m(lang, "No email identity", "Nessuna identità email"),
         K::NoEmailBody => m(
             lang,
             "gate.identity_attrs does not list email, so nginx injects no X-Auth-Email and this page has no identity to act on.",
+            "gate.identity_attrs non include email, quindi nginx non invia X-Auth-Email e questa pagina non ha un'identità su cui agire.",
         ),
-        K::DeniedTitle => m(lang, "Refused"),
-        K::DeniedBody => m(lang, "This identity is denied."),
-        K::AmbiguousTitle => m(lang, "More than one account"),
+        K::DeniedTitle => m(lang, "Refused", "Rifiutato"),
+        K::DeniedBody => m(
+            lang,
+            "This identity is denied.",
+            "Questa identità è negata.",
+        ),
+        K::AmbiguousTitle => m(
+            lang,
+            "More than one account",
+            "Più di un account",
+        ),
         K::AmbiguousBody => m(
             lang,
             "The identity header names accounts that are not the same person, so this page cannot say who it is about.",
+            "L'header di identità nomina account che non sono la stessa persona, quindi questa pagina non può dire di chi parla.",
         ),
-        K::SettingsTitle => m(lang, "Cannot read the settings"),
-        K::AccessTitle => m(lang, "Cannot read the access file"),
+        K::SettingsTitle => m(
+            lang,
+            "Cannot read the settings",
+            "Impossibile leggere le impostazioni",
+        ),
+        K::AccessTitle => m(
+            lang,
+            "Cannot read the access file",
+            "Impossibile leggere il file di accesso",
+        ),
         // The four section headings. Each is a noun naming what the list under it is, because
         // the page is read by a person looking for one of those four things.
-        K::ReachTitle => m(lang, "Where you reach"),
-        K::GroupsTitle => m(lang, "Groups"),
-        K::KeysTitle => m(lang, "API keys"),
-        K::ProfileTitle => m(lang, "Profile"),
+        K::ReachTitle => m(lang, "Where you reach", "Dove puoi arrivare"),
+        K::GroupsTitle => m(lang, "Groups", "Gruppi"),
+        K::KeysTitle => m(lang, "API keys", "Chiavi API"),
+        K::ProfileTitle => m(lang, "Profile", "Profilo"),
         // One word for all four empty sections. It stays one word on purpose: the sections
         // carry no prose, so a sentence here would be the one thing a test about a *name*
         // could match by accident.
-        K::Nothing => m(lang, "None."),
-        K::KeyNever => m(lang, "never"),
-        K::KeyAllScopes => m(lang, "all scopes"),
+        K::Nothing => m(lang, "None.", "Nessuno."),
+        K::KeyNever => m(lang, "never", "mai"),
+        K::KeyAllScopes => m(lang, "all scopes", "tutti gli scope"),
+        // The selector's two labels, its submit button, and the options that are prose. The
+        // language names itself (see [`Lang::name`]), so only `Auto` is translated here.
+        K::Language => m(lang, "Language", "Lingua"),
+        K::Theme => m(lang, "Theme", "Tema"),
+        // Named after what decides when nobody has: the browser. "Auto" alone would leave a
+        // person guessing what it follows.
+        K::LangAuto => m(lang, "Auto (browser)", "Auto (browser)"),
+        K::Apply => m(lang, "Apply", "Applica"),
+        K::ThemeLight => m(lang, "Light", "Chiaro"),
+        K::ThemeDark => m(lang, "Dark", "Scuro"),
+        K::ThemeSystem => m(lang, "System", "Sistema"),
     }
 }
 
@@ -202,38 +400,146 @@ fn t(lang: Lang, key: K) -> &'static str {
 /// configured", and it is the honest answer on every page rendered **before** the settings file
 /// has been read: the `401` and the settings `500` both happen above that read, and a page that
 /// cannot know the operator's stylesheet shows the built-in one rather than guessing.
+///
+/// `theme` here is the **deployment's** default, kept beside the visitor's own choice rather
+/// than folded into it, in `bb-auth-web`'s shape: the two answer different questions and both
+/// have to survive to the page, since the selector must show `System` as chosen while the page
+/// renders the dark the administrator asked for.
 #[derive(Clone, Copy, Default)]
 struct Look<'a> {
+    /// `ui.theme`: which arm of the palette a page starts in when the visitor has expressed no
+    /// preference of their own.
+    theme: UiTheme,
     /// `ui.stylesheet_url`: an operator's own stylesheet, loaded after the built-in one.
     stylesheet: Option<&'a str>,
     /// `ui.logo_url`: needed for the policy, since it is the one image a page may fetch.
     logo: Option<&'a str>,
+    /// `ui.brand_name`: the name the page calls this deployment. `None` is the binary's own
+    /// name, which is what makes an unconfigured deployment look unconfigured rather than
+    /// borrow somebody's brand.
+    brand: Option<&'a str>,
+}
+
+/// What the page calls itself when `ui.brand_name` says nothing. The binary's own name, copied
+/// from `bb-auth`'s `DEFAULT_BRAND` for the same reason.
+const DEFAULT_BRAND: &str = "bb-auth-me";
+
+/// This binary's **arrangement**: one centred card with a gutter at the sides, the brand above
+/// it, and the preference row at the bottom. Emitted after [`THEME_CSS`] (the palette) and
+/// [`BASE_CSS`] (the components), so it only says where things go, never what they are made of,
+/// and it defines no colour of its own: every value is a palette token, which is what keeps
+/// `ui.stylesheet_url` able to restyle this page and the other two programs at once.
+///
+/// It is a `const` in this file rather than a sixth asset because it is the arrangement of one
+/// program's pages, which is exactly the thing `BASE_CSS` says a layout keeps to itself. It is
+/// part of the [`csp_hash`] input in [`respond`], since it is emitted inside the one `style`
+/// block the policy names.
+const CSS: &str = "
+body{display:flex;justify-content:center;padding:24px 16px}
+main.card{width:100%;max-width:620px;margin:auto}
+.brand{text-align:center;margin-bottom:18px}
+.brand img{width:64px;height:64px;object-fit:contain;filter:var(--logo-filter)}
+.brand .name{display:block;color:var(--muted);font-size:.92rem}
+.prefs{display:flex;flex-wrap:wrap;gap:12px;align-items:flex-end;margin-top:26px}
+.prefs label{flex:1 1 150px}
+.prefs button{flex:0 0 auto}
+";
+
+/// What the chrome needs that is not the page: this browser's two preferences, the language they
+/// render as, and the prefix the selector form goes back to.
+///
+/// A struct rather than four more arguments because every page of this binary is answered through
+/// [`respond`], and a preference that reached only some of them is a page whose selector shows
+/// something other than what that page is rendered in.
+struct Prefs<'a> {
+    /// The language every string on the page is looked up by.
+    lang: Lang,
+    /// Which option the selector shows as the chosen language, which is not the same thing as
+    /// `lang`: `Auto` renders as one of the two and must still come back as `Auto`.
+    lang_pref: LangPref,
+    /// Which appearance **this browser** asked for, `System` included. It is not on its own what
+    /// the page renders in: [`shell`] falls through to [`Look::theme`] after it.
+    theme: UiTheme,
+    /// `BB_AUTH_ME_BASE_PATH`, normalised to have no trailing slash. The form's `action` and the
+    /// target of a preference redirect are both this plus `/`.
+    base: &'a str,
 }
 
 /// The chrome every page of this binary is wrapped in: the palette, the components built out of
-/// it, then the operator's stylesheet, so an override wins by source order and needs no
-/// `!important`. No layout of its own yet: `BASE_CSS` is the whole answer for now, which is the
-/// point of sharing it, and the arrangement the next steps want is theirs to add.
-fn shell(lang: Lang, title: &str, content: Markup, look: Look) -> Markup {
+/// it, this file's arrangement, then the operator's stylesheet, so an override wins by source
+/// order and needs no `!important`.
+fn shell(prefs: &Prefs, title: &str, content: Markup, look: Look) -> Markup {
+    // The two list boxes' options, each in the order they are offered, both leading with the
+    // choice that follows something outside this page (the OS, the browser), because that is
+    // where every session starts and what the other options are departures from.
+    let langs = [
+        LangPref::Auto,
+        LangPref::Fixed(Lang::En),
+        LangPref::Fixed(Lang::It),
+    ];
+    let themes = [UiTheme::System, UiTheme::Light, UiTheme::Dark];
+    let action = format!("{}/", prefs.base);
     html! {
         (DOCTYPE)
-        html lang=(lang.code()) {
+        // The theme, resolved here and in one expression, because the fallback order is the
+        // rule: this browser's choice, then the deployment's default, then nothing at all.
+        // `data-theme=[…]` is maud's optional-attribute form, so the `None` two `System`s
+        // produce omits the attribute outright rather than emitting `data-theme=""`, which is
+        // what leaves the `prefers-color-scheme` rule in `THEME_CSS` as the one deciding.
+        html lang=(prefs.lang.code()) data-theme=[prefs.theme.attr().or(look.theme.attr())] {
             head {
                 meta charset="utf-8";
                 meta name="viewport" content="width=device-width,initial-scale=1";
                 title { "bb-auth-me · " (title) }
-                // The two raw emissions on the page, both compile-time constants and never
-                // request data. The order is the contract: the palette, then the components
-                // that read it, the same bytes the gate's pages and `bb-auth-web` emit.
-                style { (PreEscaped(THEME_CSS)) (PreEscaped(BASE_CSS)) }
+                // The three deliberately raw emissions on the page, all three compile-time
+                // constants and never request data. The order is the contract: the palette, the
+                // components that read it (the same bytes the gate's pages and `bb-auth-web`
+                // emit), then this binary's arrangement of them.
+                style { (PreEscaped(THEME_CSS)) (PreEscaped(BASE_CSS)) (PreEscaped(CSS)) }
                 // Raw because the library builds a whole `<link>` element from a URL that has
                 // already passed `compile_asset_url`, and maud has no way to say "an element".
                 (PreEscaped(stylesheet_link(look.stylesheet)))
             }
             body {
                 main class="card" {
+                    // The brand, and the logo only when the administrator set one: nothing
+                    // configured means the page fetches no image at all. The `alt` is empty on
+                    // purpose, because the name beside it already says what the picture is.
+                    header class="brand" {
+                        @if let Some(logo) = look.logo {
+                            img src=(logo) alt="";
+                        }
+                        span class="name" { (look.brand.unwrap_or(DEFAULT_BRAND)) }
+                    }
                     h1 { (title) }
                     (content)
+                    // The selector: theme, then language, then a visible submit. A plain `GET`
+                    // back to this same page, so a bookmark and a reload cannot change anything,
+                    // and the button is not decoration: this binary emits no script and no
+                    // handler, so picking an option is only half an interaction without it.
+                    form class="prefs" method="get" action=(action) {
+                        label {
+                            span class="lbl" { (t(prefs.lang, K::Theme)) }
+                            select name=(THEME_COOKIE) {
+                                @for th in themes {
+                                    option value=(th.code()) selected[th == prefs.theme] {
+                                        (t(prefs.lang, theme_label(th)))
+                                    }
+                                }
+                            }
+                        }
+                        label {
+                            span class="lbl" { (t(prefs.lang, K::Language)) }
+                            select name=(LANG_COOKIE) {
+                                @for p in langs {
+                                    option value=(p.code()) selected[p == prefs.lang_pref] {
+                                        (p.label(prefs.lang))
+                                    }
+                                }
+                            }
+                        }
+                        button { (t(prefs.lang, K::Apply)) }
+                    }
                 }
             }
         }
@@ -252,6 +558,51 @@ fn header_value<'a>(req: &'a Request, name: &str) -> Option<&'a str> {
         .iter()
         .find(|h| h.field.as_str().as_str().eq_ignore_ascii_case(name))
         .map(|h| h.value.as_str())
+}
+
+/// Pull one cookie's value out of a `Cookie:` header. Copied from `bb-auth-web`, and it has to
+/// be its own parse here: a header is a list of `name=value` pairs and `strip_prefix` on the
+/// name is what stops `xtheme=dark` answering for `theme`.
+fn cookie_value<'a>(cookie_header: &'a str, name: &str) -> Option<&'a str> {
+    cookie_header
+        .split(';')
+        .filter_map(|p| p.trim().strip_prefix(name))
+        .find_map(|rest| rest.strip_prefix('='))
+}
+
+/// The value of query parameter `name`. Copied from `bb-auth-web`, including the reason
+/// `form_urlencoded` **is** the right grammar: this is what a browser puts in the query string
+/// when it submits a form, percent-encoding and all.
+fn query_param(query: &str, name: &str) -> Option<String> {
+    form_urlencoded::parse(query.as_bytes())
+        .find(|(k, _)| k == name)
+        .map(|(_, v)| v.into_owned())
+}
+
+/// `302` to `location`, setting one preference cookie per `(name, value)` pair in `choices`.
+/// Copied from `bb-auth-web`, cookie spelling included, and the shape is the point: the same
+/// `Path=/` and the same `Max-Age` mean a choice made in the admin console is the same cookie
+/// this page writes, so one pick carries across both programs on the host.
+///
+/// The list, rather than one pair, is what lets a single submit carry two choices: the selector
+/// sends `theme` and `lang` in the same `GET`, and a response that remembered only one of them
+/// would silently drop the other, since the redirect takes the whole query out of the URL.
+///
+/// The redirect, rather than a page, is what makes the choice a URL: the browser lands back on
+/// the page with the parameters gone, so a bookmark or a reload does not re-apply a preference
+/// the person has since changed. `location` is the base path plus `/`, printable ASCII by
+/// construction, so [`h`] cannot panic on it, and every value is one of a closed enum's own
+/// codes.
+fn respond_preference_redirect(req: Request, location: &str, choices: &[(&str, &str)]) {
+    let mut resp = Response::empty(StatusCode(302))
+        .with_header(h("Location", location))
+        .with_header(h("Cache-Control", "no-store"));
+    for (cookie_name, value) in choices {
+        let cookie =
+            format!("{cookie_name}={value}; Max-Age={PREFERENCE_COOKIE_MAX_AGE}; Path=/; HttpOnly; SameSite=Lax");
+        resp = resp.with_header(h("Set-Cookie", &cookie[..]));
+    }
+    let _ = req.respond(resp);
 }
 
 /// The inverse of the gate's `pct_encode`: `%XX` decoded, every other byte literal. A copy of
@@ -294,23 +645,26 @@ fn pct_decode(s: &str) -> String {
 /// The policy is **derived** from the same `&str`s the page is built out of, so the two cannot
 /// disagree: `script-src 'none'` because this binary emits no script and no handler at all (a
 /// page here works with scripting off), and `style-src` the [`csp_hash`] of the exact inline
-/// block, which is [`THEME_CSS`] plus [`BASE_CSS`] and nothing else. `form-action 'self'`
-/// because there is no form yet, and a page that posts nowhere cannot be permitted to land
-/// anywhere.
-fn respond(req: Request, status: u16, lang: Lang, title: &str, content: Markup, look: Look) {
+/// block, which is [`THEME_CSS`] plus [`BASE_CSS`] plus [`CSS`] and nothing else. `form-action
+/// 'self'` because the one form on the page is the preference selector, which goes back to this
+/// same page and nowhere else.
+fn respond(req: Request, status: u16, prefs: &Prefs, title: &str, content: Markup, look: Look) {
     let csp = page_csp(
         "'none'",
-        &csp_hash(&format!("{THEME_CSS}{BASE_CSS}")),
+        &csp_hash(&format!("{THEME_CSS}{BASE_CSS}{CSS}")),
         "'self'",
         look.stylesheet,
         look.logo,
         &[],
     );
-    let mut resp =
-        Response::from_data(shell(lang, title, content, look).into_string().into_bytes())
-            .with_status_code(StatusCode(status))
-            .with_header(h("Content-Type", "text/html; charset=utf-8"))
-            .with_header(h("Content-Security-Policy", &csp));
+    let mut resp = Response::from_data(
+        shell(prefs, title, content, look)
+            .into_string()
+            .into_bytes(),
+    )
+    .with_status_code(StatusCode(status))
+    .with_header(h("Content-Type", "text/html; charset=utf-8"))
+    .with_header(h("Content-Security-Policy", &csp));
     for (k, v) in PAGE_SECURITY_HEADERS {
         resp.add_header(h(k, v));
     }
@@ -510,8 +864,14 @@ fn page_me(lang: Lang, ids: &[String], uuid: Option<&str>, own: &Own) -> Markup 
                     @for (claim, value) in &own.claims {
                         li {
                             code { (claim) }
+                            // The word for none, not an empty value: a claim the deployment
+                            // configured and nginx did not forward is a fact about the wiring,
+                            // and a person has to be able to see it is missing rather than
+                            // squint at a blank after a colon.
                             @if let Some(v) = value {
                                 ": " code { (v) }
+                            } @else {
+                                " " code { (t(lang, K::Nothing)) }
                             }
                         }
                     }
@@ -531,7 +891,31 @@ fn page_me(lang: Lang, ids: &[String], uuid: Option<&str>, own: &Own) -> Markup 
 /// vs `200` for the estate's standing reason: a lock a caller escapes by sending *less* is not a
 /// lock.
 fn handle(req: Request, cfg: &Config) {
-    let lang = Lang::En;
+    // The query and the two headers the preferences come from, read once and up front: the
+    // language decides the words on a `401` as much as the words on the page, so a refusal that
+    // answers in English to a browser that asked in Italian is the same bug in a smaller shape.
+    let query = match req.url().split_once('?') {
+        Some((_, q)) => q.to_string(),
+        None => String::new(),
+    };
+    let cookie = header_value(&req, "Cookie").unwrap_or("").to_string();
+    let accept = header_value(&req, "Accept-Language").map(|a| a.to_string());
+    let (lang_pref, lang) = negotiate_lang(
+        query_param(&query, LANG_COOKIE).as_deref(),
+        cookie_value(&cookie, LANG_COOKIE),
+        accept.as_deref(),
+        Lang::En,
+    );
+    let theme = negotiate_theme(
+        query_param(&query, THEME_COOKIE).as_deref(),
+        cookie_value(&cookie, THEME_COOKIE),
+    );
+    let prefs = Prefs {
+        lang,
+        lang_pref,
+        theme,
+        base: cfg.base_path.trim_end_matches('/'),
+    };
     // Identity comes from nginx and from nowhere else. A header of spaces is the same broken
     // deployment as no header at all: nginx wrote it and put nobody in it.
     let raw = match header_value(&req, IDENTITY_HEADER) {
@@ -540,7 +924,7 @@ fn handle(req: Request, cfg: &Config) {
             respond(
                 req,
                 401,
-                lang,
+                &prefs,
                 t(lang, K::NoIdentityTitle),
                 html! { p { (t(lang, K::NoIdentityBody)) } },
                 Look::default(),
@@ -561,7 +945,7 @@ fn handle(req: Request, cfg: &Config) {
             respond(
                 req,
                 500,
-                lang,
+                &prefs,
                 t(lang, K::SettingsTitle),
                 html! { p { (e) } },
                 Look::default(),
@@ -570,8 +954,10 @@ fn handle(req: Request, cfg: &Config) {
         }
     };
     let look = Look {
+        theme: settings.theme,
         stylesheet: settings.stylesheet_url.as_deref(),
         logo: settings.logo_url.as_deref(),
+        brand: settings.brand_name.as_deref(),
     };
     // `gate.identity_attrs` without `email` means nginx injects no `X-Auth-Email`, so there is
     // no identity for this page to act on. The page names the setting, because the operator
@@ -580,7 +966,7 @@ fn handle(req: Request, cfg: &Config) {
         respond(
             req,
             500,
-            lang,
+            &prefs,
             t(lang, K::NoEmailTitle),
             html! { p { (t(lang, K::NoEmailBody)) } },
             look,
@@ -596,7 +982,7 @@ fn handle(req: Request, cfg: &Config) {
             respond(
                 req,
                 500,
-                lang,
+                &prefs,
                 t(lang, K::AccessTitle),
                 html! { p { (e) } },
                 look,
@@ -611,11 +997,35 @@ fn handle(req: Request, cfg: &Config) {
         respond(
             req,
             403,
-            lang,
+            &prefs,
             t(lang, K::DeniedTitle),
             html! { p { (t(lang, K::DeniedBody)) } },
             look,
         );
+        return;
+    }
+    // An explicit `?theme=` or `?lang=` is a **choice**, not a page: it is remembered in the
+    // cookie and the browser is sent back to this page without the parameters, so a bookmark or a
+    // reload does not carry around a preference the person has since changed. Both parameters are
+    // read from the same query and answered with **one** redirect carrying one `Set-Cookie` per
+    // recognised choice, because the selector's single submit sends both in one `GET`: a redirect
+    // of its own per parameter would take the whole query out of the URL, and the second choice
+    // picked on the same form would never reach the cookie.
+    //
+    // It sits **after** the identity checks and the veto, so a stranger and a vetoed identity are
+    // answered exactly as they are with no query at all: a preference is never a way to reach a
+    // page. And an unrecognised value is not a choice, so it sets no cookie; a submit whose values
+    // are all unrecognised is not a choice at all, and falls through to the page.
+    let home = format!("{}/", prefs.base);
+    let mut choices: Vec<(&str, &str)> = Vec::new();
+    if let Some(t) = query_param(&query, THEME_COOKIE).and_then(|v| parse_theme(&v)) {
+        choices.push((THEME_COOKIE, t.code()));
+    }
+    if let Some(p) = query_param(&query, LANG_COOKIE).and_then(|v| parse_lang_pref(&v)) {
+        choices.push((LANG_COOKIE, p.code()));
+    }
+    if !choices.is_empty() {
+        respond_preference_redirect(req, &home, &choices);
         return;
     }
     // Every value must resolve to the same row, or to no row at all. Two rows in one header is
@@ -627,7 +1037,7 @@ fn handle(req: Request, cfg: &Config) {
         respond(
             req,
             500,
-            lang,
+            &prefs,
             t(lang, K::AmbiguousTitle),
             html! { p { (t(lang, K::AmbiguousBody)) } },
             look,
@@ -649,7 +1059,7 @@ fn handle(req: Request, cfg: &Config) {
     respond(
         req,
         200,
-        lang,
+        &prefs,
         t(lang, K::Title),
         page_me(lang, &ids, uuids[0], &own),
         look,
@@ -1427,5 +1837,535 @@ mod tests {
         );
 
         cleanup(&path);
+    }
+
+    // ---------------------------------------------------------------------------
+    // The look and the preferences (plan step 2b-3).
+    //
+    // The administrator sets the look in the settings file's `ui` section, the same section
+    // that restyles the admin console and the gate's pages. The person may change two things
+    // about their own view, the theme and the language, each remembered in a cookie whose name
+    // and value are the console's, so a choice made in one program carries to the other on the
+    // same host. One difference from the console: this binary emits no script and no handler at
+    // all, so its selector form carries a visible submit button and no `onchange`.
+    // ---------------------------------------------------------------------------
+
+    /// The deployment's settings plus the administrator's default theme.
+    const SETTINGS_THEME_DARK: &str = r#"{ "version": 3, "gate": { "client_id": "email-client",
+        "issuer": "https://cognito-idp.eu-central-1.amazonaws.com/eu-central-1_TEST",
+        "authorized_hosts": ["badbat75.com", "*.badbat75.com"] },
+        "web": { "admins": ["admin@x.com"] },
+        "ui": { "theme": "dark" } }"#;
+
+    /// The deployment's settings plus the brand name and the logo an administrator set.
+    const SETTINGS_BRAND: &str = r#"{ "version": 3, "gate": { "client_id": "email-client",
+        "issuer": "https://cognito-idp.eu-central-1.amazonaws.com/eu-central-1_TEST",
+        "authorized_hosts": ["badbat75.com", "*.badbat75.com"] },
+        "web": { "admins": ["admin@x.com"] },
+        "ui": { "brand_name": "BadBat75",
+                "logo_url": "https://assets.badbat75.com/logo.png" } }"#;
+
+    /// The request a preference test makes: signed in as `identity`, with the browser's
+    /// `Cookie` header carrying the preferences it already chose and an `Accept-Language` when
+    /// the caller has one. Both are assembled here so each test spells the preference it is
+    /// about and nothing else.
+    fn call_pref(
+        base: &str,
+        identity: Option<&str>,
+        cookie: Option<&str>,
+        accept: Option<&str>,
+    ) -> Got {
+        let mut extra: Vec<(&str, &str)> = Vec::new();
+        if let Some(c) = cookie {
+            extra.push(("Cookie", c));
+        }
+        if let Some(a) = accept {
+            extra.push(("Accept-Language", a));
+        }
+        call_with(base, identity, &extra)
+    }
+
+    /// The `<html …>` start tag. `THEME_CSS` spells `data-theme` inside its own selectors, so
+    /// an assertion about the attribute has to look at the tag and not at the page.
+    fn html_tag(body: &str) -> String {
+        let start = body
+            .find("<html")
+            .unwrap_or_else(|| panic!("the page has no <html tag: {}", readable(body)));
+        let rest = &body[start..];
+        let end = rest.find('>').unwrap_or(rest.len());
+        rest[..=end].to_string()
+    }
+
+    /// The text of the first `<h1>` (or `<h2>`) in `haystack`. A translation test compares one
+    /// heading, because a whole section also carries names, emails and ids, and those are the
+    /// file's vocabulary, which is never translated.
+    fn heading(haystack: &str, tag: &str) -> String {
+        let open = format!("<{tag}>");
+        let start = haystack
+            .find(&open)
+            .unwrap_or_else(|| panic!("the page has no <{tag}>: {}", readable(haystack)));
+        let rest = &haystack[start + open.len()..];
+        let end = rest.find(&format!("</{tag}>")).unwrap_or_else(|| {
+            panic!("<{tag}> is opened and never closed: {}", readable(haystack))
+        });
+        rest[..end].to_string()
+    }
+
+    /// The administrator's `ui.theme` is the theme a page starts in, stamped on `<html>` as
+    /// `data-theme` exactly as the admin console stamps it. A deployment that configured
+    /// nothing gets no attribute at all, which is what leaves the browser and the OS deciding.
+    #[test]
+    fn the_administrators_default_theme_is_stamped_on_the_html_tag() {
+        let path = scratch("theme-default", SETTINGS_THEME_DARK);
+        let base = serve(cfg_for(&path));
+
+        let g = call(&base, Some("bob@x.com"));
+        assert_eq!(g.status, 200, "bob reaches the page: {}", readable(&g.body));
+        assert!(
+            html_tag(&g.body).contains(r#"data-theme="dark""#),
+            "ui.theme dark must reach the html tag: {}",
+            html_tag(&g.body)
+        );
+
+        // No `ui` section at all: no attribute, so `prefers-color-scheme` is what paints.
+        let plain = scratch("theme-none", SETTINGS);
+        let plain_base = serve(cfg_for(&plain));
+        let g = call(&plain_base, Some("bob@x.com"));
+        assert_eq!(g.status, 200, "bob reaches the page: {}", readable(&g.body));
+        assert!(
+            !html_tag(&g.body).contains("data-theme"),
+            "a deployment that set no theme must emit no data-theme at all: {}",
+            html_tag(&g.body)
+        );
+
+        cleanup(&path);
+        cleanup(&plain);
+    }
+
+    /// The person's own cookie outranks the administrator's default, and `system` is the choice
+    /// to give the choice back: it falls through to the deployment's default rather than
+    /// painting a third thing, so a session that un-chose ends up where it started.
+    #[test]
+    fn a_theme_cookie_outranks_the_administrators_default() {
+        let path = scratch("theme-cookie", SETTINGS_THEME_DARK);
+        let base = serve(cfg_for(&path));
+
+        let g = call_pref(&base, Some("bob@x.com"), Some("theme=light"), None);
+        assert_eq!(g.status, 200, "bob reaches the page: {}", readable(&g.body));
+        assert!(
+            html_tag(&g.body).contains(r#"data-theme="light""#),
+            "the person's own choice must outrank the deployment's default: {}",
+            html_tag(&g.body)
+        );
+
+        let g = call_pref(&base, Some("bob@x.com"), Some("theme=system"), None);
+        assert_eq!(g.status, 200, "bob reaches the page: {}", readable(&g.body));
+        assert!(
+            html_tag(&g.body).contains(r#"data-theme="dark""#),
+            "system falls through to the administrator's dark: {}",
+            html_tag(&g.body)
+        );
+
+        cleanup(&path);
+    }
+
+    /// Choosing a preference is a `GET` with a parameter, answered by a cookie and a redirect
+    /// that takes the parameter back out of the URL, so a bookmark does not carry a preference
+    /// around forever. The cookie names and values are the console's, which is what makes a
+    /// choice made in one program carry to the other on the same host.
+    #[test]
+    fn a_theme_or_language_choice_becomes_a_cookie_and_a_redirect_home() {
+        let path = scratch("pref-redirect", SETTINGS);
+        let base = serve(cfg_for(&path));
+
+        let g = call(&format!("{base}?theme=dark"), Some("bob@x.com"));
+        assert_eq!(
+            g.status,
+            302,
+            "?theme=dark must be applied and redirected, not answered with a page: {}",
+            readable(&g.body)
+        );
+        let cookie = g
+            .header("Set-Cookie")
+            .expect("the choice must be remembered in a cookie");
+        assert!(
+            cookie.starts_with("theme=dark;"),
+            "the cookie must be the console's own theme cookie: {cookie}"
+        );
+        for part in ["Path=/", "HttpOnly", "SameSite=Lax"] {
+            assert!(
+                cookie.contains(part),
+                "the preference cookie must carry {part}: {cookie}"
+            );
+        }
+        assert_eq!(
+            g.header("Location"),
+            Some("/"),
+            "the redirect goes back to this page with the parameter gone: {:?}",
+            g.header("Location")
+        );
+
+        let g = call(&format!("{base}?lang=it"), Some("bob@x.com"));
+        assert_eq!(
+            g.status,
+            302,
+            "?lang=it must be applied and redirected: {}",
+            readable(&g.body)
+        );
+        let cookie = g
+            .header("Set-Cookie")
+            .expect("the choice must be remembered in a cookie");
+        assert!(
+            cookie.starts_with("lang=it;"),
+            "the cookie must be the console's own lang cookie: {cookie}"
+        );
+        assert_eq!(
+            g.header("Location"),
+            Some("/"),
+            "the redirect goes back to this page with the parameter gone: {:?}",
+            g.header("Location")
+        );
+
+        cleanup(&path);
+    }
+
+    /// The selector's one submit carries `theme` and `lang` in the same `GET`, so one request
+    /// has to remember both. It cannot today: the theme check answers with a redirect of its
+    /// own, and `Location: /` takes the whole query out of the URL, so the language picked on
+    /// the same form is dropped on the way home. A preference that is never stored is a choice
+    /// that did not happen, and the person watches their own pick revert on the next load.
+    #[test]
+    fn one_submit_of_the_selector_remembers_both_choices() {
+        let path = scratch("pref-both", SETTINGS);
+        let base = serve(cfg_for(&path));
+
+        // Every `Set-Cookie` the response carries, counted. A single submit is one response, so
+        // the count is the contract: a response that set one cookie is one choice remembered,
+        // whatever the one header says.
+        fn cookies(g: &Got) -> Vec<&str> {
+            g.headers
+                .iter()
+                .filter(|(k, _)| k.eq_ignore_ascii_case("Set-Cookie"))
+                .map(|(_, v)| v.as_str())
+                .collect()
+        }
+
+        let g = call(&format!("{base}?theme=light&lang=it"), Some("bob@x.com"));
+        assert_eq!(
+            g.status,
+            302,
+            "one submit of both preferences must be applied and redirected: {}",
+            readable(&g.body)
+        );
+        assert_eq!(
+            g.header("Location"),
+            Some("/"),
+            "the redirect goes back to this page with the parameters gone: {:?}",
+            g.header("Location")
+        );
+        let set = cookies(&g);
+        assert_eq!(
+            set.len(),
+            2,
+            "one submit of two preferences must set two cookies in one response, and it set \
+             {set:?} (all headers: {:?})",
+            g.headers
+        );
+        assert!(
+            set.iter().any(|c| c.starts_with("theme=light;")),
+            "the theme picked on this submit must be remembered: {set:?}"
+        );
+        assert!(
+            set.iter().any(|c| c.starts_with("lang=it;")),
+            "the language picked on the same submit must be remembered too: {set:?}"
+        );
+
+        // One recognised value and one nobody recognises is one choice, not two: the
+        // unrecognised value is not a preference and must set nothing, while the recognised
+        // half still lands.
+        let g = call(&format!("{base}?theme=light&lang=xx"), Some("bob@x.com"));
+        assert_eq!(
+            g.status,
+            302,
+            "the recognised half of a submit is still a choice: {}",
+            readable(&g.body)
+        );
+        let set = cookies(&g);
+        assert_eq!(
+            set.len(),
+            1,
+            "a value nobody recognises must set no cookie, and the response set {set:?}"
+        );
+        assert!(
+            set[0].starts_with("theme=light;"),
+            "the recognised half must be the theme cookie: {set:?}"
+        );
+
+        cleanup(&path);
+    }
+
+    /// A value that is not one of the three themes, or one of the two languages plus `auto`, is
+    /// not a preference at all: nothing is remembered and the page is served as it was.
+    /// Storing a nonsense value would leave the person looking at a choice the page cannot show
+    /// as chosen, and would let a crafted link write a cookie for them.
+    #[test]
+    fn a_preference_nobody_recognises_sets_no_cookie() {
+        let path = scratch("pref-bogus", SETTINGS);
+        let base = serve(cfg_for(&path));
+
+        for q in ["theme=purple", "lang=xx"] {
+            let g = call(&format!("{base}?{q}"), Some("bob@x.com"));
+            assert_eq!(
+                g.status,
+                200,
+                "{q} is not a choice, so the page is served as it was: {}",
+                readable(&g.body)
+            );
+            assert!(
+                g.header("Set-Cookie").is_none(),
+                "{q} must set no cookie, and the response set {:?}",
+                g.header("Set-Cookie")
+            );
+        }
+
+        cleanup(&path);
+    }
+
+    /// The language is the person's cookie, failing that the browser's `Accept-Language`,
+    /// failing that English: most explicit wins, and `auto` is the choice to keep letting the
+    /// browser decide, which is what a session that never chose has always been getting.
+    #[test]
+    fn the_language_is_the_cookie_then_the_browser_header_then_english() {
+        let path = scratch("lang", SETTINGS);
+        let base = serve(cfg_for(&path));
+
+        let cases: [(Option<&str>, Option<&str>, &str); 5] = [
+            (Some("lang=it"), None, "it"),
+            (None, Some("it-IT,it;q=0.9"), "it"),
+            (None, Some("de-DE"), "en"),
+            (Some("lang=en"), Some("it"), "en"),
+            (Some("lang=auto"), Some("it"), "it"),
+        ];
+        for (cookie, accept, want) in cases {
+            let g = call_pref(&base, Some("bob@x.com"), cookie, accept);
+            assert_eq!(g.status, 200, "bob reaches the page: {}", readable(&g.body));
+            assert!(
+                html_tag(&g.body).contains(&format!(r#"lang="{want}""#)),
+                "cookie {cookie:?} with Accept-Language {accept:?} must render lang=\"{want}\": {}",
+                html_tag(&g.body)
+            );
+        }
+
+        cleanup(&path);
+    }
+
+    /// The Italian strings are compiled into the binary, not fetched: this is the page a person
+    /// reaches when something is already wrong, and a page that needs a translation host has
+    /// picked the worst moment to have a dependency. The headings are the prose, so they are
+    /// what proves the table is being read at all.
+    #[test]
+    fn the_italian_page_is_translated() {
+        let path = scratch_full("lang-it");
+        let base = serve(cfg_for(&path));
+
+        let en = call_pref(&base, Some("bob@x.com"), Some("lang=en"), None);
+        let it = call_pref(&base, Some("bob@x.com"), Some("lang=it"), None);
+        assert_eq!(
+            en.status,
+            200,
+            "bob reaches the page: {}",
+            readable(&en.body)
+        );
+        assert_eq!(
+            it.status,
+            200,
+            "bob reaches the page: {}",
+            readable(&it.body)
+        );
+
+        let reach_h2 = |g: &Got| heading(&section(&g.body, "reach"), "h2");
+        assert_ne!(
+            reach_h2(&en),
+            reach_h2(&it),
+            "the reach heading must be translated, and both pages say the same thing in it"
+        );
+        assert_ne!(
+            heading(&en.body, "h1"),
+            heading(&it.body, "h1"),
+            "the page's own title must be translated too"
+        );
+
+        cleanup(&path);
+    }
+
+    /// The selector is a plain `GET` form with a visible submit button. Unlike the admin console
+    /// this binary emits no script and no handler at all, so there is no `onchange` to apply a
+    /// pick on the fly, and a browser with scripting off is not a fallback here but the only
+    /// browser there is.
+    #[test]
+    fn the_page_carries_a_theme_and_language_selector_with_a_submit_button() {
+        let path = scratch("selector", SETTINGS);
+        let base = serve(cfg_for(&path));
+
+        let g = call_pref(&base, Some("bob@x.com"), Some("theme=dark"), None);
+        assert_eq!(g.status, 200, "bob reaches the page: {}", readable(&g.body));
+        let body = readable(&g.body);
+        let form = body.find("<form").expect("the page must carry a form");
+        let theme = body
+            .find(r#"<select name="theme""#)
+            .expect("the page must carry a theme list box");
+        let lang = body
+            .find(r#"<select name="lang""#)
+            .expect("the page must carry a language list box");
+        assert!(
+            form < theme && theme < lang,
+            "both list boxes sit inside one form: {body}"
+        );
+        assert!(
+            body.contains(r#"method="get""#),
+            "a preference is a GET, so a bookmark and a reload cannot change anything: {body}"
+        );
+        for value in ["light", "dark", "system"] {
+            assert!(
+                body.contains(&format!(r#"<option value="{value}""#)),
+                "the theme list must offer {value}: {body}"
+            );
+        }
+        for value in ["en", "it", "auto"] {
+            assert!(
+                body.contains(&format!(r#"<option value="{value}""#)),
+                "the language list must offer {value}: {body}"
+            );
+        }
+        assert!(
+            body.contains("<button"),
+            "the form needs a visible submit button, since no script applies a pick: {body}"
+        );
+        assert!(
+            body.contains(r#"<option value="dark" selected>"#),
+            "the option in force must be marked chosen: {body}"
+        );
+
+        cleanup(&path);
+    }
+
+    /// The brand and the logo come from the same `ui` section that restyles the admin console
+    /// and the gate's pages, so one save signs every surface of the estate in one name. A
+    /// deployment that configured neither shows no image and no brand: the built-in page is
+    /// complete, and a page that needs an asset host to be up is a page that cannot get in.
+    #[test]
+    fn the_administrators_brand_and_logo_reach_the_page() {
+        let path = scratch("brand", SETTINGS_BRAND);
+        let base = serve(cfg_for(&path));
+
+        let g = call(&base, Some("bob@x.com"));
+        assert_eq!(g.status, 200, "bob reaches the page: {}", readable(&g.body));
+        assert!(
+            g.body.contains("BadBat75"),
+            "the brand the administrator set must name the page: {}",
+            readable(&g.body)
+        );
+        assert!(
+            g.body
+                .contains(r#"<img src="https://assets.badbat75.com/logo.png""#),
+            "the logo the administrator set must be shown: {}",
+            readable(&g.body)
+        );
+
+        let plain = scratch("brand-none", SETTINGS);
+        let plain_base = serve(cfg_for(&plain));
+        let g = call(&plain_base, Some("bob@x.com"));
+        assert_eq!(g.status, 200, "bob reaches the page: {}", readable(&g.body));
+        assert!(
+            !g.body.contains("<img"),
+            "nothing configured, so the page fetches no image: {}",
+            readable(&g.body)
+        );
+        assert!(
+            !g.body.contains("BadBat75"),
+            "nothing configured, so the page claims no brand: {}",
+            readable(&g.body)
+        );
+
+        cleanup(&path);
+        cleanup(&plain);
+    }
+
+    /// A claim the deployment configured and the proxy did not forward is a fact the estate
+    /// never said, and the page has to say so in words: a name with nothing after it reads as
+    /// "your name is empty", which is a statement about the person that nobody actually made.
+    #[test]
+    fn a_claim_nobody_forwarded_shows_the_word_for_none() {
+        let path = scratch_full("claim-none");
+        let base = serve(cfg_for(&path));
+
+        let g = call(&base, Some("bob@x.com"));
+        assert_eq!(g.status, 200, "bob reaches the page: {}", readable(&g.body));
+        let s = section(&g.body, "profile");
+        assert!(
+            s.contains("given_name"),
+            "the page must still name the claim it has nothing to show: {s}"
+        );
+        assert!(
+            s.contains("None."),
+            "a claim with no forwarded value shows the word for none, never an empty value: {s}"
+        );
+        assert!(
+            !s.contains("given_name</code>:"),
+            "the word for none replaces a value, it does not follow a bare colon: {s}"
+        );
+
+        cleanup(&path);
+    }
+
+    /// The estate's rule, on every page this step adds and on the refusals beside them: no
+    /// script tag, no handler of any kind. The preference form is the first thing here that a
+    /// script would be tempting to wire up, so the rule is walked across every variant.
+    #[test]
+    fn every_look_and_preference_page_carries_no_script_and_no_handler() {
+        let path = scratch("nojs-look", SETTINGS_THEME_DARK);
+        let base = serve(cfg_for(&path));
+        let brand = scratch("nojs-brand", SETTINGS_BRAND);
+        let brand_base = serve(cfg_for(&brand));
+
+        // Only queries that are not a choice: a real one is answered with a `302` and no body.
+        let pages: [(Option<&str>, Option<&str>, &str, u16); 7] = [
+            (Some("bob@x.com"), None, "", 200),
+            (Some("bob@x.com"), Some("theme=light"), "", 200),
+            (Some("bob@x.com"), Some("lang=it"), "", 200),
+            (Some("bob@x.com"), None, "?theme=purple", 200),
+            (Some("bob@x.com"), None, "?lang=xx", 200),
+            (None, None, "", 401),
+            (Some("spammer@x.com"), None, "", 403),
+        ];
+        for root in [&base, &brand_base] {
+            for (identity, cookie, query, want) in pages {
+                let url = if query.is_empty() {
+                    root.to_string()
+                } else {
+                    format!("{root}{query}")
+                };
+                let g = call_pref(&url, identity, cookie, Some("it"));
+                assert_eq!(
+                    g.status,
+                    want,
+                    "{identity:?} at {url} with cookie {cookie:?}: {}",
+                    readable(&g.body)
+                );
+                assert!(
+                    !g.body.to_ascii_lowercase().contains("<script"),
+                    "{identity:?} at {url}: no script tag, the page works with scripting off: {}",
+                    readable(&g.body)
+                );
+                assert!(
+                    !carries_inline_handler(&g.body),
+                    "{identity:?} at {url}: no inline handler, the selector uses a submit button: {}",
+                    readable(&g.body)
+                );
+            }
+        }
+
+        cleanup(&path);
+        cleanup(&brand);
     }
 }
