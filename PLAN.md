@@ -92,6 +92,8 @@ sandbox; a per-file mount detaches on a rename).
 
 ### 3b. A secret header only nginx sets
 
+Decided by the user on 2026-11-23: the secret is required on **every** request, reads included.
+
 Covers: R3 (a precondition to opening the GUI to strangers). Found and proven on a local
 instance on 2026-11-23: a forged `X-Auth-Email` with no cookie got the admin dashboard. Design:
 §13.3.
@@ -99,9 +101,7 @@ instance on 2026-11-23: a forged `X-Auth-Email` with no cookie got the admin das
 `bb-auth-web` requires `BB_AUTH_WEB_PROXY_SECRET` at startup (at least 32 characters of
 `[A-Za-z0-9_-]`, fatal otherwise, naming the variable and never the value) and refuses with a
 `403` any request whose `X-BB-Web-Secret` does not match, before the identity or the settings are
-read. Whether this applies to **every** request or only to mutations is the user's to confirm
-(see "Waiting for the user"); the design recommends every request, and the step is written that
-way. The postinst appends a generated secret to `bb-auth-web.env` when the variable is absent and
+read. The postinst appends a generated secret to `bb-auth-web.env` when the variable is absent and
 (re)writes `/opt/bb-auth/etc/bb-auth-web.nginx` (`root:root 0600`, one `proxy_set_header` line)
 from it on every configure; its preflight checks the variable. The README's GUI location
 includes that file. The secret is never logged, printed or rendered.
@@ -133,6 +133,10 @@ naming it.
   right in a browser in both themes and both languages.
 
 ### 3d. The nginx recipe for `/me/`, and install on rpi-01
+
+Decided by the user on 2026-11-23: the GUI moves to a neutral base, `/account`, so the page is
+`/account/me/` and the admin pages are under `/account/` (`BB_AUTH_WEB_BASE_PATH` and the nginx
+location; configuration only).
 
 Covers: R3. Test host named by the user on 2026-11-23: `rpi-01.bombicci.local`.
 
@@ -236,9 +240,6 @@ final page links to `/auth/logout`.
 
 ## Waiting for the user
 
-- Before step 3b: whether the proxy secret is required on **every** request (recommended:
-  otherwise any local process can still read the roster, the settings and the audit's addresses,
-  §13.3) or only on requests that add or remove, as first said.
 - Before step 5: a read-only check of the real pool (`aws cognito-idp describe-user-pool` and
   `describe-user-pool-client`): email sign-in, `ALLOW_USER_AUTH`, `WriteAttributes`,
   `AuthSessionValidity`, `AttributesRequireVerificationBeforeUpdate`. The user runs it, or
