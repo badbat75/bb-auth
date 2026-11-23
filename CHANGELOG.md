@@ -22,11 +22,11 @@ Versions are the crate's (`Cargo.toml`); packages add a Debian revision
 
 ## Unreleased
 
-**Due out as 1.99.9, and the numbers before it are behind us.** 1.99.7 and 1.99.8 were written
-down and never deployed: the version is now bumped with each change to shipped code (plan W11),
-so a number can name bytes that were built and never ran, and the next deploy spends 1.99.9.
+**Due out as 1.99.7, and the numbers before it are behind us.** The version is the last
+deployed one plus one, and it stays there until the next deploy spends it (plan W11): every
+section below that names no earlier number ships in 1.99.7.
 1.99.6 was spent by a deploy on 2026-09-11 from `gb855ed2`, which carried everything below
-except what the sections named after 1.99.7 and 1.99.8 add. 1.99.5 was spent by a deploy
+except the three sections above the audit's. 1.99.5 was spent by a deploy
 on 2026-09-11 from `g15ae13e`, which carried everything in the section named after it except
 the Settings page opening folded. 1.99.4 was spent by a deploy
 on 2026-09-10 from `gfd77f1f`, which carried the audit and nothing of what the section below
@@ -47,7 +47,7 @@ environment and into the settings file; and a confirmation step in front of the 
 that can stop people getting in.
 
 **A version gets a section of its own here only once it is tagged and released, and a
-release candidate is neither.** 1.99.9 is a version number, not a release: it names bytes to be
+release candidate is neither.** 1.99.7 is a version number, not a release: it names bytes to be
 built, and it is **not tagged**, because a tag is what says "this is a thing you can install
 and go back to" and a candidate is not that. So this section stays under this
 heading through however many 1.99.x there are, and becomes `## 2.0.0` on the day 2.0.0 is

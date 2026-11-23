@@ -33,7 +33,7 @@ as the column says. A requirement still open must be covered by a step.
 | W8 | Everything in English; only the conversation with the user may be in their language | Applies to every step |
 | W9 | Displayed text in the `K` translation table or the page templates, ready for more languages | Applies to every step |
 | W10 | Agents run only the tests of the part they work on, plus linter and format check; the tester runs the full suite once, on main after the merge, before installing | Applies to every step |
-| W11 | Bump the version before committing a change to shipped code (binaries, library, assets, packaging): the patch number in `Cargo.toml`, `Cargo.lock` with it, and the version `CHANGELOG.md` says is due out | Applies to every step |
+| W11 | The version is the last released (deployed) version plus one, and stays there until the next release: bump the patch number in `Cargo.toml`, `Cargo.lock` with it, and the version `CHANGELOG.md` says is due out, once, right after a release, never per commit | Applies to every step |
 
 ## Definition of Done
 
