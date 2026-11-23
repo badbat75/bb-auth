@@ -18,7 +18,14 @@ Rules are in `AGENTS.md`. Format of this file: `AGENTS.md`, under "Skills".
   unit's own env file: `EnvironmentFile=` is read by the manager before any bind mount
   (systemd.exec(5)).
 
+- rpi-01's applications own whole hosts (base `https://<host>`), so a new path on a host is a
+  scope in that host's application, listed before its catch-all, never a new application.
+  Read the live file with `sudo bb-auth-adm -f /opt/bb-auth/var/lib/access.json show`.
+
 ## Pitfalls
+
+- rpi-01's `auth.badbat75.com` vhost gates at server level (`snippets/bb-auth.conf`), unlike the
+  README's per-location recipe: read `sudo nginx -T` before writing a location for it.
 
 - `X-Auth-Email` can hold several emails joined by a space: never treat the whole header as one email.
 - systemd `IPAddressDeny` also filters outbound traffic, so a unit that calls Cognito cannot copy

@@ -16,7 +16,7 @@ as the column says. A requirement still open must be covered by a step.
 |---|---|---|
 | R1 | Self-service API keys: a user mints, rotates and removes their own `bbk_` tokens, without an administrator | Step 4 |
 | R2 | Self-service profile: a user sees what bb-auth knows about them and edits their own Cognito profile attributes | Step 5 |
-| R3 | The self-service surface is a section of the admin GUI (`bb-auth-web`, at `<base>/me/`), open to any signed-in identity, never reading `web.admins` and acting only on the caller's own account, so further user-facing features have a home. Changed by the user on 2026-11-23 from "a fourth binary of its own" | Design revised (`docs/ARCHITECTURE.md` §13); page built as `bb-auth-me`, unpackaged; steps 3a, 3b, 3c, 3d |
+| R3 | The self-service surface is a section of the admin GUI (`bb-auth-web`), served at its own prefix `/account/` (`BB_AUTH_WEB_ACCOUNT_PATH`) beside the admin pages at `/admin/`, open to any signed-in identity, never reading `web.admins` and acting only on the caller's own account, so further user-facing features have a home. Changed by the user on 2026-11-23 from "a fourth binary of its own", and that evening from `<base>/me/` to `/account/` so the administrators' URLs do not move | Design revised (`docs/ARCHITECTURE.md` §13); page built as `bb-auth-me`, unpackaged; steps 3c, 3d |
 | R4 | Self-service deletion: a user deletes their own account and its related data, at once, after a confirmation: the roster row, keys, references in scopes and groups, and the Cognito user. The audit is not edited: their lines expire with `audit.retention`, and the page says so | Steps 6, 7. For a social-only user the Cognito half is left to an administrator and the page says so: accepted by the user on 2026-11-23 |
 
 ### How we work
@@ -67,7 +67,7 @@ on 2026-11-23; the work before it is in `git log`. The self-service page exists 
 ## Next steps
 
 Decided by the user on 2026-11-23 (afternoon), reversing the morning's fourth binary: the
-self-service surface is **a section of `bb-auth-web`**, at `<base>/me/`, open to any identity
+self-service surface is **a section of `bb-auth-web`**, at `/account/` beside the admin pages at `/admin/` (changed that evening from `<base>/me/`), open to any identity
 nginx vouches for, never reading `web.admins`, and acting only on the caller's own account:
 the API keys (R1), an **editable** Cognito profile (R2) and deleting one's own account (R4). The
 page already built as `bb-auth-me` (steps 2b-1 to 2b-3) moves there and that target goes. The
@@ -76,44 +76,49 @@ process that writes both files, so two gaps found the same day are closed **firs
 GUI is opened to anyone who is not an administrator: `bb-auth-web` can read the HMAC key, and it
 believes `X-Auth-Email` from any local process. The design is `docs/ARCHITECTURE.md` §13.
 
-### 3c. Move the self-service page into bb-auth-web as `/me/`, and delete bb-auth-me
+### 3c. Move the self-service page into bb-auth-web at `/account/`, and delete bb-auth-me
 
 Covers: R3. Design: §13.2, §13.10.
 
-`bb-auth-web` routes `<base>/me` and everything under it to the self-service page before its
-`web.admins` check; every other path keeps that check, and an unknown path outside `/me/` stays
-a `403` for a non-administrator. The page's sections, look and selector come across (its `K`
-keys into `bb-auth-web`'s table, its arrangement into `admin.css`, the logo passed to
-`page_csp`), using `bb-auth-web`'s preference handling. Then `src/bin/bb-auth-me.rs` and its
-`[[bin]]` are deleted, and `AGENTS.md`, the README and `docs/ARCHITECTURE.md` §2 and §3 stop
-naming it.
+`bb-auth-web` gains `BB_AUTH_WEB_ACCOUNT_PATH` (default `/account`), fatal at startup when empty or
+when it overlaps the admin base at a path boundary either way; an empty admin base is therefore
+refused too, which is a breaking change for a GUI mounted at the root, said in the CHANGELOG.
+After the proxy secret, the identity header and the settings file, a path that is the prefix or
+under it goes to the self-service handler, which never reads `web.admins`; everything else keeps
+the admin flow, so an unknown path outside the prefix stays a `403` for a non-administrator. The
+page's sections, look and selector come across (its `K` keys into `bb-auth-web`'s table, its
+arrangement into `admin.css`, the logo origin in that page's CSP), and one selector submit is one
+`302` to `/account/` setting both cookies. Then `src/bin/bb-auth-me.rs` and its `[[bin]]` are
+deleted, and `AGENTS.md`, the README and `docs/ARCHITECTURE.md` §2 and §3 stop naming it.
 
-- Done when: the 26 `bb-auth-me` tests pass in `bb-auth-web`'s test module against `<base>/me/`,
-  with a `web.admins` that does not name the caller and the proxy secret sent; new tests that
-  failed first show a non-administrator gets `200` on `/me/` and `403` on every other route and
-  on an unknown path; `cargo test`, `cargo clippy --all-targets` and `cargo fmt --check` are
-  clean with four targets; `node e2e/run.js` and the scripting-off walk pass; and the page looks
-  right in a browser in both themes and both languages.
+- Done when: the 26 `bb-auth-me` tests pass in `bb-auth-web`'s test module against `/account/`
+  (admin base `/admin`, a `web.admins` that does not name the caller, the proxy secret sent);
+  new tests that failed first show a non-administrator gets `200` on `/account/` and `/account`,
+  `404` on `/account/nope`, `403` on every admin route, on `/admin/nope` and on `/nope`, and that
+  `/accounts` is not the page; the overlap rule is a fatal startup naming the variable; `cargo
+  test`, `cargo clippy --all-targets` and `cargo fmt --check` are clean with four targets; `node
+  e2e/run.js` and the scripting-off walk pass; and the page looks right in a browser in both
+  themes and both languages.
 
-### 3d. The nginx recipe for `/me/`, and install on rpi-01
-
-Decided by the user on 2026-11-23: the GUI moves to a neutral base, `/account`, so the page is
-`/account/me/` and the admin pages are under `/account/` (`BB_AUTH_WEB_BASE_PATH` and the nginx
-location; configuration only).
+### 3d. The nginx recipe for `/account/`, and install on rpi-01
 
 Covers: R3. Test host named by the user on 2026-11-23: `rpi-01.bombicci.local`.
 
-The README documents the access-file entries that split the GUI's area (the `me` scope,
-`authenticated`, covering `<base>/me` and `<base>/me/*`, listed before the administrators'
-`restricted` scope, §13.2), that the GUI's location now forwards the configured profile headers,
-and, in one line, that the first `authenticated` scope makes `/auth/session` mint cookies for
-strangers (§13.5). With the user's go-ahead for each change: the packages installed on rpi-01,
-the nginx location updated and reloaded, the two scopes added to the live access file.
+The README documents a second location, `/account/`, mirroring the admin one with the same
+secret include but forwarding the configured profile headers, plus `location = /account` as a
+`301` to `/account/`, and the access-file scope that opens it (`authenticated`, covering
+`https://<host>/account` and `https://<host>/account/*`), and in one line that the first
+`authenticated` scope makes `/auth/session` mint cookies for strangers (§13.5). Decided by the
+user on 2026-11-23: on rpi-01 the new location **replaces** the static `/account/` page and its
+`/account/whoami` and `/account/delete` locations, so self-service account deletion is missing
+until step 7; the backend on 8480 behind those two is left running, unused, and is not ours to
+remove. With the user's go-ahead for each change: the packages installed, the nginx locations
+replaced and reloaded, and the bare URL added to the existing `auth/self-service` scope.
 
-- Done when: the snippet passes `nginx -t` on rpi-01; `bb-auth-adm can` grants a stranger
-  `<base>/me/` and `<base>/me` and refuses them `<base>/`; and in a browser through nginx a
-  signed-in non-administrator sees their page and is refused the admin pages, while an
-  administrator reaches both.
+- Done when: `nginx -t` passes on rpi-01; `curl -I` shows `/account` answering `301` to
+  `/account/`; `bb-auth-adm can` grants a stranger `/account/` and `/account` and refuses them
+  `/admin/`; and in a browser through nginx a signed-in non-administrator sees their page and is
+  refused the admin pages, while an administrator reaches both.
 
 ### 4. Self-service API keys
 

@@ -72,7 +72,7 @@ the gate is the gate's, and stays in one file.
 | `src/bin/bb-auth.rs` (`bb-auth`) | **The gate**, still a single file read top to bottom: HTTP, config, the session cookie, id_token validation, the nginx contract, and the four pages it serves out of `src/assets/` (sign-in, social callback, refusal, error). |
 | `src/bin/bb-auth-adm.rs` (`bb-auth-adm`) | **The access-file admin CLI.** CRUD over `applications` / `scopes` / `user_groups` / `denied` / `users` / `api_keys`, key minting and rotation, and `can EMAIL URL` — which calls the library's `decide`, so it answers the question the gate will answer. Every edit and every write is a library call (`AccessWrite`), so it cannot save a file the gate would reject; what is left here is flags, warnings and the wording of a verdict. See §12. |
 | `src/bin/bb-auth-web.rs` (`bb-auth-web`) | **The access-file admin GUI**: server-rendered (`maud`; no page needs JavaScript, the one inline handler is a Settings-menu shortcut with a `<noscript>` submit behind it) over the library, read *and* write — CRUD through `AccessWrite` alone, `POST`-only mutations behind a same-origin check and a `rev` (sha256-of-file) concurrency check. Loopback behind nginx `auth_request`, identity from the `X-Auth-Email` nginx injects plus its own administrator allowlist (`web.admins` in the settings file, read fresh on every request and editable from its own Settings tab). Links the library, none of the gate. |
-| `src/bin/bb-auth-me.rs` (`bb-auth-me`) | **The self-service page**: server-rendered (`maud`) over the library, none of the gate, for one person's **own** account and nobody else's. What is built is the identity half (plan step 2b-1): both files read fresh on every request, `X-Auth-Email` split into the list of addresses the gate actually sends, the `denied` veto checked ahead of everything, and a page naming the caller and their uuid, plus the four **read-only** sections step 2b-2 added: reach (the applications and scope names, grouped by application, never a URL), groups, keys (id, expiry, restriction, never the hash or the bearer) and profile (the configured claims, percent-decoded), plus the look step 2b-3 added: the `ui` section (brand name, logo, operator stylesheet, `ui.theme` as the default theme) in a centred card, and a script-free selector for the two preferences a person can choose, theme and language, whose one submit answers one `302` setting the `theme` and `lang` cookies `bb-auth-web` writes too. Loopback behind nginx `auth_request`, identity from `X-Auth-Email` and nowhere else, `web.admins` not read, because an administrator here is one more person. **Never packaged, and not to be**: the user decided on 2026-11-23 that self-service becomes `<base>/me/` inside `bb-auth-web`, so this page and its tests move there and the target is deleted (§13.10). |
+| `src/bin/bb-auth-me.rs` (`bb-auth-me`) | **The self-service page**: server-rendered (`maud`) over the library, none of the gate, for one person's **own** account and nobody else's. What is built is the identity half (plan step 2b-1): both files read fresh on every request, `X-Auth-Email` split into the list of addresses the gate actually sends, the `denied` veto checked ahead of everything, and a page naming the caller and their uuid, plus the four **read-only** sections step 2b-2 added: reach (the applications and scope names, grouped by application, never a URL), groups, keys (id, expiry, restriction, never the hash or the bearer) and profile (the configured claims, percent-decoded), plus the look step 2b-3 added: the `ui` section (brand name, logo, operator stylesheet, `ui.theme` as the default theme) in a centred card, and a script-free selector for the two preferences a person can choose, theme and language, whose one submit answers one `302` setting the `theme` and `lang` cookies `bb-auth-web` writes too. Loopback behind nginx `auth_request`, identity from `X-Auth-Email` and nowhere else, `web.admins` not read, because an administrator here is one more person. **Never packaged, and not to be**: the user decided on 2026-11-23 that self-service moves inside `bb-auth-web`, at `/account/` (`BB_AUTH_WEB_ACCOUNT_PATH`, §13.2), so this page and its tests move there and the target is deleted (§13.10). |
 
 Inside `src/bin/bb-auth.rs`, in file order:
 
@@ -1136,10 +1136,11 @@ proxy_set_header X-Auth-Family-Name $bb_family;
 
 ---
 
-## 13. Self-service, as a section of `bb-auth-web` (`<base>/me/`)
+## 13. Self-service, as a section of `bb-auth-web` (`/account/`)
 
 **Status: redesigned on 2026-11-23 (afternoon) at the user's decision, replacing the separate
-binary the morning's design described; 13.12 records the reversal and what it costs.** What is
+binary the morning's design described, and moved to its own prefix `/account/` that evening;
+13.12 records both reversals.** What is
 built is the page plan steps 2b-1, 2b-2 and 2b-3 produced, still as its own target,
 `src/bin/bb-auth-me.rs` (26 tests): the identity half (both files read fresh on every request,
 `X-Auth-Email` split into the list of addresses the gate sends, the `denied` veto ahead of
@@ -1165,12 +1166,12 @@ instance and reported; it was not re-run for this section.
 
 ### 13.1 What it is, and what it reaches
 
-A set of routes inside `bb-auth-web`, under `<base>/me/`, that lets one person act on **their
+A set of routes inside `bb-auth-web`, under `/account/` (13.2), that lets one person act on **their
 own** account and on nobody else's. Same process, same unit, same uid, same writer:
 
-| The `/me/` routes can | They cannot |
+| The `/account/` routes can | They cannot |
 |---|---|
-| Read the access file and the settings file | Write the settings file: no `/me/` handler calls `SettingsWrite` |
+| Read the access file and the settings file | Write the settings file: no self-service handler calls `SettingsWrite` |
 | Write the access file through `AccessWrite` only, and only the caller's own row: add, rotate and remove that row's `bbk_` keys, and remove the row with the sweep `remove_user` does | Touch another row, `denied`, `user_groups` other than through the deletion sweep, or any application or scope |
 | Call Cognito's public user-pool API with an access token the person has just obtained by answering an email code (13.7) | Hold any Cognito or AWS credential between requests; call any `Admin*` operation |
 | Write one journal line per mutation | Write the audit file (13.6) |
@@ -1184,28 +1185,41 @@ under the morning's design; what the merge adds is that the settings file and ev
 handler are now one routing bug away from a stranger, which is why 13.2 makes the
 classification a closed list with a test over every route.
 
-### 13.2 Where it lives: one listener, one nginx location, two scopes
+### 13.2 Where it lives: one listener, two prefixes, two nginx locations
 
-**Decision: `<base>/me/` on `bb-auth-web`'s existing listener and its existing nginx location.**
-With the README's base `/admin`, that is `/admin/me/`. The split between "any signed-in
-person" and "administrators only" is made where every other such split is made, in the access
-file, by first match inside one application:
+**Decision (the user, 2026-11-23 evening): the admin pages stay under `BB_AUTH_WEB_BASE_PATH`
+(`/admin` on rpi-01 and in the example env), and the self-service page lives under its own
+prefix, `BB_AUTH_WEB_ACCOUNT_PATH`, default `/account`.** One binary, one listener
+(`127.0.0.1:8091`), one proxy secret checked first on both prefixes.
 
-```json
-{ "name": "console", "base": ["https://auth.example.com/admin"],
-  "scopes": [
-    { "name": "me", "access": "authenticated",
-      "urls": ["https://auth.example.com/admin/me", "https://auth.example.com/admin/me/*"] },
-    { "name": "admin", "access": "restricted", "users": ["<admin uuid>"],
-      "urls": ["https://auth.example.com/admin/*"] } ] }
-```
+**Why an env var and not the settings file.** Against the three-part rule it fails part 1 in
+the way that matters: the value is read per request, but it is one half of a contract whose
+other half is an nginx `location`, which changes only with an nginx reload, so making it hot
+buys nothing and lets a GUI save move the page away from the location that serves it. No
+second program has an opinion about it, and it must be checked against the admin base at
+startup, which is only a single check if both come from the same place. So it sits beside
+`BB_AUTH_WEB_BASE_PATH`, in `bb-auth-web.env`.
 
-The narrower scope is listed first, which is the carve-out first-match exists for (§12,
-"Scopes, and first match wins"). The bare `/admin/me` pattern is there so a link without the
-trailing slash lands in `me` and not in `admin`, where a non-administrator would get the gate's
-`403`. One nginx location is enough because the gate already receives the full path in
-`$bb_url` and decides per URL; a second location would only repeat the same `auth_request`
-block.
+**Validation, at startup, fatal on failure and naming the variable:** the value goes through
+`normalize_base_path` (printable ASCII, no `?` or `#`, one leading `/`, trailing `/` stripped);
+the result must not be empty (an empty prefix would be the whole host and swallow the admin
+pages); and it must not overlap the admin base at a path boundary in either direction, by the
+rule `base_covers` applies to areas (equal, `/admin/account` under `/admin`, or `/admin` under
+`/account`, are all refused; `/accounts` beside `/account` is not an overlap). An **empty admin
+base covers every path**, so it is refused too: the GUI mounted at the root cannot coexist with
+a self-service prefix. That is a cost for anybody running the GUI at the root (the README's
+default); the packaged env example and rpi-01 both set `/admin`, so no known deployment pays it.
+
+**URL shapes.** The page is `GET /account/`. `/account` with no slash is answered by nginx with
+a `301` to `/account/` from an exact `location = /account` (the `return` runs in the rewrite
+phase, before the gate, and discloses nothing); nginx's own implicit `301` for a prefix location
+ending in `/` exists ([location](https://nginx.org/en/docs/http/ngx_http_core_module.html#location))
+but whether it precedes `auth_request` is **not verified**, so the recipe does not rely on it. If
+`/account` reaches the binary anyway, it is the page, as `/admin` is the dashboard. The
+selector is `GET /account/?theme=…&lang=…` (either or both), answered by one `302` to
+`/account/` setting each named cookie (`Path=/`, so a choice carries to the admin pages and
+back). Nothing else exists under the prefix today: any other path under it is a `404`, the same
+for everybody; the key, profile and deletion routes of 13.6 to 13.9 will be added under it.
 
 Inside the binary the check order of `handle` becomes:
 
@@ -1214,25 +1228,47 @@ Inside the binary the check order of `handle` becomes:
 | 1 | The proxy secret (13.3) | `403`, built-in look, nothing else read | every request |
 | 2 | `X-Auth-Email` present | `401`, as today | every request |
 | 3 | The settings file compiles | `500`, as today | every request |
-| 4 | **Is the path under `<base>/me`?** A prefix test, before `route` | | |
-| 4a | yes: the `/me/` handler, which reads no `web.admins` and runs the table of 13.5 | as 13.5 | `/me/` only |
+| 4 | **Is the path `<account>` or under `<account>/`?** A prefix test at a path boundary, before `route` | | |
+| 4a | yes: the self-service handler, which reads no `web.admins` and runs the table of 13.5 | as 13.5 | the account prefix only |
 | 4b | no: `web.admins` empty is `500`, not naming the caller is `403`, then `route`, whose miss is the `404` | as today | everything else |
 
-Step 4 runs **before** `route`, so an unknown path outside `/me/` still answers a
-non-administrator with the `403` and never with a `404` that says which paths exist. The
-`/me/` routes are a closed enum of their own, and the test of 13.11 walks every other `Route`
-variant as a non-administrator and requires the `403`. A `POST` under `/me/` goes through the
-same `csrf_ok`, the same `rev` over the access file's bytes (`edited_file`) and the same
-`WRITE_LOCK` as every GUI save, so the two surfaces' writes are now serialized by one mutex in
-one process, which the separate binary could only get from `rev`.
+Step 4 runs **before** the admin check, so an unknown path outside the account prefix (under
+the admin base or outside both) still answers a non-administrator with the `403` and never with
+a `404` that says which paths exist. The self-service routes are a closed enum of their own,
+and the test of 13.11 walks every admin `Route` variant as a non-administrator and requires the
+`403`. A `POST` under the prefix will go through the same `csrf_ok`, the same `rev` over the
+access file's bytes (`edited_file`) and the same `WRITE_LOCK` as every GUI save.
+
+**nginx: a second location, a copy of the admin one.** `location /account/` carries everything
+the README's `location /admin/` carries (the `set $bb_url` with the hardcoded host and `$uri`,
+`auth_request`, `X-Auth-Email` lifted and set, the other `IDENTITY_ATTRS` headers cleared,
+`Host $host`, `include /opt/bb-auth/etc/bb-auth-web.nginx;`, `error_page 401 = @bb_signin`,
+`error_page 403 = @bb_denied`, `proxy_pass http://127.0.0.1:8091;` with no URI part), plus one
+difference: it **forwards** each configured profile header (`auth_request_set` from
+`$upstream_http_x_auth_<claim>`, then `proxy_set_header`), because the page shows them, where
+the admin location keeps clearing them. Beside it, `location = /account { return 301 /account/; }`.
+The secret include has to be in both locations, since a location that sets any header of its
+own inherits none (13.3).
+
+**The access file.** Applications partition by literal base, so the account prefix is covered
+in whichever application already owns that host's area:
+
+- **One application whose base is the host** (rpi-01: `auth`, base `https://auth.badbat75.com`):
+  an `authenticated` scope with `https://<host>/account` and `https://<host>/account/*`,
+  listed **before** the restricted catch-all, the carve-out first match exists for. A second
+  application with base `https://<host>/account` would overlap the host's base and is refused.
+- **One application per prefix** (bases `https://<host>/admin` and `https://<host>/account`): the
+  account application holds that one `authenticated` scope and its order means nothing. This is
+  the README's recipe, because it cannot be broken by reordering scopes.
+
+The bare `/account` pattern costs nothing and keeps a deployment that gates `/account` instead
+of redirecting it from refusing a non-administrator there through the restricted catch-all.
 
 Rejected:
 
-- **A prefix of its own outside the base** (say `/me/` beside `/admin/`). A second path
-  setting in the binary and a second nginx location, to buy a URL that does not say "admin".
-  The same is had for free by mounting the GUI at a neutral base (for example `/account`, with
-  the admin pages at `/account/...`), which is the operator's choice of `BB_AUTH_WEB_BASE_PATH`
-  and needs no code.
+- **`<base>/me/` inside the admin base** (this section's previous decision): reversed by the
+  user on 2026-11-23 (evening), because administrators' URLs must not move and `/admin/me/` is
+  a bad URL to hand somebody who is not an administrator.
 - **A separate binary**, the morning's design: reversed by the user (13.12).
 
 ### 13.3 The proxy secret
@@ -1251,7 +1287,7 @@ or remove", so this needs the user's yes).** A forged `GET` with the mutation-on
 would still read: every roster row with its emails and uuid, every group, every application and
 scope with its URL patterns, the settings (the administrator list, the issuer, the app client,
 the cookie domain), and the Audit tab, which holds the address, user agent and account of every
-sign-in and refusal on the estate; and under `/me/`, any named person's reach, groups and key
+sign-in and refusal on the estate; and under `/account/`, any named person's reach, groups and key
 ids. That is a personal-data read open to every local user. Requiring the secret everywhere
 costs nothing more: nginx sets it on the one location anyway, and one check before everything
 is simpler than a check inside the `POST` branch.
@@ -1317,12 +1353,14 @@ settings file, and the audit under `/var/log/bb-auth`).
 Cost: one line, and a unit that will not start if `/opt/bb-auth/etc` is missing, which on a
 host where the GUI's own env file lives there cannot happen.
 
-### 13.5 Who reaches `/me/`
+### 13.5 Who reaches `/account/`
 
-nginx gates it as part of the GUI's location (13.2), so `auth_request`, `set $bb_url`, the lifted
-`X-Auth-Email`, the cleared `IDENTITY_ATTRS` headers and the proxy secret are the GUI's own. One
-addition: that location now forwards the configured **profile** headers too, because the page
-shows them.
+nginx gates it with its own `location /account/` (13.2), a copy of the admin one: `auth_request`,
+`set $bb_url`, the lifted `X-Auth-Email`, the cleared `IDENTITY_ATTRS` headers and the proxy
+secret. The one difference is that it forwards the configured **profile** headers, because the
+page shows them. On rpi-01 the access file already has an `authenticated` scope over
+`/account/*` (`auth/self-service`, for the static deletion page this replaces), so the
+`/auth/session` consequence below is already in force there.
 
 **The access file covers it with an `authenticated` scope** (decided, 13.12), so any identity
 Cognito vouches for reaches the page, enrolled or not. That grant lists nobody, so its cost is
@@ -1340,7 +1378,7 @@ invariant says. `bb-auth --check-access` and the startup banner already name eve
 `authenticated` scope, so nothing new is needed to make it visible; the README's recipe says
 this paragraph's consequence in one line.
 
-The `/me/` handler decides from the access file it opens on every request:
+The self-service handler decides from the access file it opens on every request:
 
 | Caller | What it gets |
 |---|---|
@@ -1413,7 +1451,7 @@ need one:
   [RespondToAuthChallenge](https://docs.aws.amazon.com/cognito-user-identity-pools/latest/APIReference/API_RespondToAuthChallenge.html)).
   It is the flow `/auth/login` already runs in the browser (`login.html`).
 
-**Decision: the `/me/` handler runs that same email-code sign-in itself, server-side, as a
+**Decision: the self-service handler runs that same email-code sign-in itself, server-side, as a
 re-authentication in front of each Cognito action, and throws the tokens away at the end of the
 request that obtained them.** Three requests, no JavaScript, no state on the server:
 
@@ -1526,15 +1564,17 @@ doing so with nothing to migrate. What is not trivial, and is the work of step (
 - **The `K` table.** `bb-auth-me`'s keys join `bb-auth-web`'s, where names such as
   `NoIdentityTitle` already exist: identical texts are reused, the rest take a `Me` prefix.
 - **The look.** The centred card's arrangement moves from `bb-auth-me`'s inline `CSS` into
-  `admin.css`, so `admin_csp` keeps hashing one style block. `/me/` pages also show
+  `admin.css`, so `admin_csp` keeps hashing one style block. The `/account/` pages also show
   `ui.logo_url` and `ui.brand_name`, so their policy passes the logo to `page_csp`, as
   `bb-auth-me` does today.
-- **The selector.** `bb-auth-me` sets both cookies in one `302`; `bb-auth-web` answers
-  `?lang=&theme=` with two round trips on loopback. Keep `bb-auth-web`'s, which already handles
-  the same form, and drop the other.
+- **The selector.** `bb-auth-me` sets both cookies in one `302`; the admin pages answer
+  `?lang=&theme=` with two round trips. The account page keeps one `302` carrying one
+  `Set-Cookie` per named preference (13.2), built from the same cookie string the admin pages
+  use, because its selector is one visible submit and a second hop is a choice that can be
+  lost; the admin pages keep theirs.
 - **The tests.** The 26 move into `bb-auth-web`'s test module on its existing real-socket
-  harness, retargeted at `<base>/me/`, with a settings fixture whose `web.admins` names somebody
-  else (which is what proves `/me/` never reads it) and, once 13.3 lands, the proxy secret on
+  harness, retargeted at `/account/` with the admin base `/admin`, a settings fixture whose
+  `web.admins` names somebody else (which is what proves the page never reads it) and, once 13.3 lands, the proxy secret on
   every request. They keep their names and assertions; what changes is the path and the
   fixture. New tests are in 13.11.
 - **Deleted:** `src/bin/bb-auth-me.rs`, its `[[bin]]` in `Cargo.toml`, and its mentions in
@@ -1552,16 +1592,17 @@ hand-back between two editor packages; and a fourth `.deb` in the build and depl
 
 | Decision | Test or real run |
 |---|---|
-| Proxy secret | Unit: no secret is `403` on `GET` and `POST`, an admin route and a `/me/` route alike; a wrong one the same; the right one passes; the value is in no response body; a missing or short secret is a fatal startup whose message names the variable and not the value. Real, on rpi-01: `curl` to `127.0.0.1:8091` with a forged `X-Auth-Email` and no secret is `403` (today's finding, reproduced and closed), the same page through nginx is `200` |
+| Proxy secret | Unit: no secret is `403` on `GET` and `POST`, an admin route and an `/account/` route alike; a wrong one the same; the right one passes; the value is in no response body; a missing or short secret is a fatal startup whose message names the variable and not the value. Real, on rpi-01: `curl` to `127.0.0.1:8091` with a forged `X-Auth-Email` and no secret is `403` (today's finding, reproduced and closed), the same page through nginx is `200` |
 | HMAC key unreadable | Real, on rpi-01: the service starts and listens (its env was loaded), and `sudo cat /proc/$(systemctl show -p MainPID --value bb-auth-web)/root/opt/bb-auth/etc/bb-auth.env` fails, since that path resolves in the service's mount namespace |
-| Route classification | Unit: a non-administrator gets `200` on `/me/` and `403` on every other `Route` variant and on an unknown path under the base; `/me/` answers with a `web.admins` that does not name the caller |
-| One nginx location, two scopes | Unit (`decide` on the example of 13.2): a stranger is granted `/admin/me/` and `/admin/me`, refused `/admin/`; an administrator is granted both. Real: the same through nginx on rpi-01 |
+| Route classification | Unit, with base `/admin` and account path `/account`: a non-administrator gets `200` on `/account/` and `/account`, a `302` to `/account/` with both cookies on `/account/?theme=dark&lang=it`, and `403` on every admin `Route` variant, on an unknown path under `/admin/` and on one outside both (`/nope`); `/account/nope` is `404` for an administrator and a non-administrator alike; the page answers with a `web.admins` that does not name the caller; `/accounts` is not the page |
+| Prefix validation | Unit: `BB_AUTH_WEB_ACCOUNT_PATH` unset is `/account`; `account/` normalises to `/account`; empty, equal to the admin base, under it (`/admin/account`), above it (`/admin` with base `/admin/x`), and any value with an empty admin base are refused naming the variable; `/accounts` beside `/account` is accepted |
+| Two locations, the account scope | Unit (`decide` on both layouts of 13.2): a stranger is granted `/account/` and `/account`, refused `/admin/`; an administrator is granted both. Real, on rpi-01: `nginx -t`, `bb-auth-adm can` the same, `curl -I https://auth.badbat75.com/account` is `301` to `/account/`, and in a browser a non-administrator sees their page and is refused `/admin/` |
 | Identity from `X-Auth-Email` only | Unit: missing header `401`; two values of one row act on that row; values of two rows `500`; a form field naming another uuid changes nothing |
 | The callers of 13.5 | Unit: denied `403` even for a mutation `POST`; a stranger sees no key form and a key `POST` is refused; an administrator with no row is a stranger |
-| No URLs on screen | Unit (moved from `bb-auth-me`): no rendered `/me/` page contains a URL pattern or base from the fixture |
+| No URLs on screen | Unit (moved from `bb-auth-me`): no rendered `/account/` page contains a URL pattern or base from the fixture |
 | `key_scopes_for` | Library unit: `decide` grants a key on a URL inside every returned scope, and refuses on a scope excluded or not admitting a key |
 | Keys: narrowing, bounds, rotate, reveal once, `rev` | Unit: a pair outside the set is `400` with the file bytes unchanged; the file gets exactly the submitted pairs; the eleventh key, `never` and `366d` refused; rotate leaves `scopes` bytes identical; the bearer appears in one response only, with `no-store`; a stale `rev` is `409` |
-| No JavaScript | `the_page_carries_one_handler_and_no_script` keeps passing with the `/me/` pages included, and the `nojs.js` e2e walk covers them |
+| No JavaScript | `the_page_carries_one_handler_and_no_script` keeps passing with the `/account/` pages included, and the `nojs.js` e2e walk covers them |
 | Cognito re-auth | Unit against a fake endpoint: a wrong code changes nothing; an email not among the caller's and a non-editable attribute are refused before Cognito is called; tokens appear in no response or log. Real pool once, with the user's go-ahead |
 | Egress | Real, on rpi-01 after the profile step: the unit has no `IPAddress*` line, a profile edit reaches Cognito, and a non-loopback `BB_AUTH_WEB_LISTEN` without the opt-in still refuses to start |
 | Deletion order | Unit with the fake endpoint: `DeleteUser` failing leaves the row gone and says so; the write failing never calls `DeleteUser` |
@@ -1589,15 +1630,20 @@ service.
 
 Afternoon, the user's decisions, final:
 
-1. **No separate binary.** Self-service is `<base>/me/` inside `bb-auth-web`; the `bb-auth-me`
+1. **No separate binary.** Self-service is a section of `bb-auth-web`; the `bb-auth-me`
    target goes, and its page and tests move (13.10).
-2. **`/me/` is open to any identity nginx vouches for, never reads `web.admins`, and acts only on
+2. **The self-service page is open to any identity nginx vouches for, never reads `web.admins`, and acts only on
    the caller's own account** (keys, profile, deletion), writing through `AccessWrite`, `rev` and
    the same-origin check like every other GUI write.
 3. **A secret header only nginx sets** is required by `bb-auth-web`, which stays on loopback TCP
    (13.3). The user said "requests that add or remove"; **the architect recommends every
    request**, for the read exposure 13.3 lists, and that needs the user's confirmation.
 4. **`bb-auth-web` cannot read the HMAC key**: `InaccessiblePaths=/opt/bb-auth/etc` (13.4).
+
+Evening, the user's decision: **the self-service page is `/account/`, not `<base>/me/`**
+(`BB_AUTH_WEB_ACCOUNT_PATH`, 13.2), because administrators' URLs must not move and `/admin/me/`
+is a bad URL to hand a non-administrator. On rpi-01 it replaces the static deletion page at
+`/account/`, so self-service account deletion is missing until plan step 7 (accepted).
 
 **The reversal, plainly.** The morning's rule was that "a non-admin surface must not share a
 binary with the admin CRUD". The first afternoon decision reverses it. What that costs:
