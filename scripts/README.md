@@ -35,8 +35,8 @@ point: what is left below is the part that needs a person.
    suite first), ships, installs and verifies. `verify.sh` runs `bb-auth --self-test`, so a
    gate that cannot verify a signature fails the deploy instead of failing every login.
 6. **Read the two lines that matter** in the output: the max GLIBC symbol against the
-   declared `libc6 (>= …)` floor, and the binary sizes, since `[profile.release]` is
-   size-optimised on purpose.
+   declared `libc6 (>= …)` floor, and the binary sizes, since a jump there is the first
+   sign a dependency grew.
 
 A rollback is `dpkg -i` of the previous packages: see "Rollback" in
 [`../README.md`](../README.md), and the list of builds that must never be rolled back to.

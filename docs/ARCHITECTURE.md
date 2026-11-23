@@ -456,8 +456,8 @@ needs only the GNU toolchain — no system OpenSSL or cert store:
 | `serde` / `serde_json` | Claims + JWKS deserialization. |
 | `tz-rs` (`alloc` only) | `bb-auth-web` only: reading the audit's times in a zone, from the host's own `/usr/share/zoneinfo`. No dependencies, no `unsafe`, no bundled database. |
 
-**Release profile** (`Cargo.toml`): `opt-level="z"`, LTO, single codegen unit,
-`panic="abort"`, stripped — optimized for binary size.
+**Release profile** (`Cargo.toml`): `opt-level=3`, LTO, single codegen unit,
+`panic="abort"`, stripped: optimized for speed (`opt-level=3`, the user's choice on 2026-11-23).
 
 **Cross-compile** (`scripts/build.sh`, run on Linux or WSL): targets
 `aarch64-unknown-linux-gnu` by default (edit for another target). The script

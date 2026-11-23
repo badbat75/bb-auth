@@ -103,7 +103,7 @@ tz-rs = { version = "0.7", default-features = false, features = ["alloc"] }
 libc = "0.2"
 
 [profile.release]
-opt-level = "z"   # optimize for size — tiny binary, fast enough for a gate
+opt-level = 3     # optimize for speed, chosen by the user on 2026-11-23
 lto = true
 codegen-units = 1
 panic = "abort"

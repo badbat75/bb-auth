@@ -336,7 +336,7 @@ says the aarch64 cross-compile still needs no system TLS library and no system c
 Then run `bash scripts/package.sh`, which is the only check that compiles for the real
 target. Two things it prints are worth reading: the **max GLIBC symbol** (it must stay at or
 below the `libc6 (>= …)` floor the packages declare in `Cargo.toml`) and the binary sizes,
-because `[profile.release]` is size-optimised on purpose.
+because a jump there is the first sign a dependency grew.
 
 The gap that used to sit here is now half closed, and the half that remains is worth naming.
 `rsa_signature_verification_works` covers the JWKS parse and a real RS256 verification against
@@ -442,7 +442,7 @@ section under-read itself by a fifth, and two of the seven are lockout-class.
 [**Dependencies and the build**](#dependencies-and-the-build)
 
 - Dependencies stay pure-Rust, on `ring` or RustCrypto
-- Release profile is size-optimized
+- Release profile is speed-optimized
 
 [**Deploy and packaging**](#deploy-and-packaging)
 
@@ -1150,8 +1150,8 @@ the unit creates through `LogsDirectory` precisely so that the gate's own prefix
   stay empty, and confirm `webpki-roots` is still there. No async runtime
   (`tiny_http` is blocking + threaded) — keeps the binary and resident memory small.
 
-- **Release profile is size-optimized** (`opt-level="z"`, LTO, `panic="abort"`, stripped). Leave
-  it that way unless asked.
+- **Release profile is speed-optimized** (`opt-level=3`, LTO, `panic="abort"`, stripped). The user
+  chose speed over size on 2026-11-23; leave it that way unless asked.
 
 ### Deploy and packaging
 
