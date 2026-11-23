@@ -1132,3 +1132,424 @@ proxy_set_header X-Auth-Family-Name $bb_family;
   what keeps `bb-auth-adm can` answering the gate's question.
 - **Never logged.** The log line already carries the email; a profile value is PII it does
   not need. The startup banner lists the configured claim *names*, which are config.
+
+---
+
+## 13. The self-service binary (`bb-auth-me`)
+
+**Status: approved by the user on 2026-11-23, nothing built yet.** This section is the
+design the steps in `PLAN.md` implement; the questions it left open were
+answered the same day and are recorded in 13.10. When the code exists, the mechanism moves to
+rustdoc and the rules to `AGENTS.md`, as everywhere else, and this section shrinks to the
+component view.
+
+What was read to write it: `AGENTS.md`, `PLAN.md`, this document, `docs/SECURITY.md`,
+`src/lib.rs` (`AccessWrite`, `write_atomically`, `remove_user`, `add_api_key`,
+`rotate_api_key`, `SealedKey`, `Written`, `decide`, `decide_api_key`, `scopes_for`,
+`vetoes_identifier`, `AuditEvent`, `request_site`, `page_csp`), `src/bin/bb-auth-web.rs`
+(`handle`, `csrf_ok`, `audit`), `src/bin/bb-auth.rs` (`identity_headers`,
+`cognito_endpoint`), `src/assets/login.html` and `callback.html`, `deploy/*.service`,
+`deploy/bb-auth-reload.path`, `deploy/debian/*/postinst` and `postrm`, and
+`[package.metadata.deb]` in `Cargo.toml`.
+
+### 13.1 What it is, and what it reaches
+
+A fourth binary, `src/bin/bb-auth-me.rs`, server-rendered with `maud` like `bb-auth-web`,
+that lets one person act on **their own** account, and on nobody else's:
+
+| It can | It cannot |
+|---|---|
+| Read the access file and the settings file | Write the settings file (code, and the unit's mount: 13.3) |
+| Write the access file, through `AccessWrite` only, and only the caller's own row: add, rotate and remove that row's `bbk_` keys, and remove the row with the sweep `remove_user` does | Touch another row, `denied`, `user_groups` membership other than by the deletion sweep, or any application or scope |
+| Call Cognito's public user-pool API with an access token the person has just obtained by answering an email code (13.6) | Hold any Cognito or AWS credential between requests; call any `Admin*` operation |
+| Write one journal line per mutation | Write the audit file (13.5) |
+
+It is **just another app bb-auth fronts**, in exactly the sense `bb-auth-web` is: loopback
+only, gated by nginx `auth_request`, identity from `X-Auth-Email` and from nowhere else.
+`web.admins` confers nothing here: an administrator is one more person.
+
+The honest limit, stated the way the settings file states its own: **a process that may
+write the access file can, if compromised, write any of it.** The narrowness above is a
+property of the code (one row, the library's editing core) and not of the kernel, exactly as
+it already is for `bb-auth-web`. That is why nothing in 13.3 spends complexity on isolating
+the two editors from each other's access-file writes: no file permission can express "only
+this row".
+
+### 13.2 Name, unit, package
+
+| | |
+|---|---|
+| Binary | `/opt/bb-auth/bin/bb-auth-me` |
+| Package | `bb-auth-me`, optional like the other two tools, `depends` on `bb-auth (= <same version>)` for the reason the others do |
+| Unit | `/usr/lib/systemd/system/bb-auth-me.service` |
+| Env file | `/opt/bb-auth/etc/bb-auth-me.env`, operator-owned, created once from `share/bb-auth-me.env.example`: `BB_AUTH_ACCESS_FILE`, `BB_AUTH_ME_LISTEN` (default `127.0.0.1:8092`), `BB_AUTH_ME_BASE_PATH`. No secret |
+| Service user | `bb-auth-web`, shared with the GUI (13.3) |
+| Reads | `access.json`, `settings.json` (`gate.issuer`, `gate.client_id`, `gate.identity_attrs`, `gate.profile_claims`, `audit.retention`, the `ui` section) |
+| Writes | `access.json` (and its `.bak`), nothing else |
+| Network | binds loopback, refuses a non-loopback bind as `bb-auth-web` does; outbound HTTPS to the issuer's origin only (13.6) |
+
+`bb-auth-me` and not `bb-auth-user` or `bb-auth-self`, because the URL it is usually mounted
+at reads as the page's purpose (`/me/`), and a name that says "user" next to a file whose
+section is called `users` would read as a second roster editor.
+
+### 13.3 Ownership with two unprivileged writers
+
+The constraint is the library's writer, `write_atomically`: it renames a temp file into
+place (so a writer needs write permission on the **directory**) and restores the replaced
+file's uid and gid before the rename, aborting if it cannot (so an unprivileged writer must
+**already own** the file and be in its group). An unprivileged process may only `chown` to
+its own uid. Two writers with two uids therefore cannot both preserve the owner: whichever
+did not write last gets `EPERM` on every save.
+
+**Decision: both editor services run as one account, `bb-auth-web`.** Whichever editor
+package configures first creates it (`getent || useradd`, as the GUI's postinst already
+does, with `--groups bb-auth`), and both postinsts run the same idempotent block that today
+lives only in the GUI's: `var/lib` to `bb-auth-web:bb-auth 0750`, `access.json` (and `.bak`)
+to `bb-auth-web:bb-auth 0640`. The writer is unchanged, `sudo bb-auth-adm` is unchanged, and
+"a host without an editor changes no ownership" stays true, now as "without **any**
+unprivileged editor". Each editor's `postrm purge` hands the files back to `root:bb-auth`
+only when the **other** editor package is not installed (`dpkg-query -W`), since today's
+unconditional hand-back would break the remaining editor.
+
+What keeps `bb-auth-me` off the settings file, given it now has the uid that may write it:
+its unit adds `ReadOnlyPaths=/opt/bb-auth/var/lib/settings.json` (and `.bak`) inside the
+`ReadWritePaths=/opt/bb-auth/var/lib` hole, which bind-mounts the file read-only so neither a
+write nor a rename onto it can land. **Unverified:** the systemd manual documents nesting
+`ReadWritePaths=` inside `ReadOnlyPaths=`, not the reverse
+([systemd.exec(5)](https://www.freedesktop.org/software/systemd/man/latest/systemd.exec.html)),
+so the packaging step must prove it on a real host: a rename onto `settings.json` as the
+service fails, a save of `access.json` succeeds.
+
+Rejected:
+
+- **A user of its own (`bb-auth-me`).** Needs the writer to stop preserving the uid
+  (restore gid and mode, keep the writer's own uid), plus a new editors' group owning a
+  directory the gate must still traverse but not write, plus a `.bak` that two uids can
+  replace. That is a change to a lockout invariant ("preserves mode and owner") and three
+  new moving parts, to buy an isolation 13.1 says no permission can provide.
+- **`CAP_CHOWN` on the new unit.** Lets it `chown` `settings.json` to itself and then write
+  it: strictly worse than the shared account.
+- **Routing writes through `bb-auth-web`.** The user decided the surfaces are separate
+  binaries; a write API on the admin GUI is a new interface on the most privileged surface.
+
+Cost: the account name is historical on a host that runs only `bb-auth-me`. It is kept and
+not renamed (decided, 13.10): a rename would migrate a deployed unit and its files to change
+nothing but a label.
+
+**`bb-auth-reload.path` moves to the gate's package.** Today it ships with the GUI, and an
+edit by `bb-auth-me` on a host without the GUI would otherwise never go live. It watches two
+files and sends one `systemctl reload`, which a gate-only host can carry at no cost ("a
+doubled reload costs nothing"). Moving a file between packages needs `Breaks:` and
+`Replaces: bb-auth-web (<< <this version>)` on the gate's variant; the version-strict
+dependencies make every install move all packages together.
+
+The unit mirrors `bb-auth-web.service` with two differences: it **drops**
+`IPAddressDeny=any` / `IPAddressAllow=localhost`, because those cgroup filters also block
+the outbound call to Cognito (cost: the loopback-only rule is then held by the binary's bind
+check alone, not by the kernel as well), and it adds the read-only mount above.
+
+### 13.4 Who reaches it
+
+nginx gates its location exactly like the GUI's (`auth_request`, `set $bb_url`, lift and
+set `X-Auth-Email`, clear every `IDENTITY_ATTRS` header, forward the configured profile
+headers so the page can show them). **The access file covers that URL with an
+`authenticated` scope** (decided, 13.10), so any identity Cognito vouches for reaches the
+page, enrolled or not, and the stranger row of the table below is a real caller rather than a
+defensive one.
+
+That grant lists nobody, so it belongs with the two kinds AGENTS.md calls the ones an
+operator most often did not mean to leave open, and its cost is said out loud here. **Since
+self-signup is open, `authenticated` means anyone who can register.** On this page that is
+deliberate and bounded: a stranger sees that bb-auth knows nothing about them, edits their own
+Cognito profile and deletes their own Cognito user, and gets no key form, because a key needs a
+roster owner. **The side effect is not on this page but at `/auth/session`**, which mints a
+cookie for a valid id_token whose identifier has somewhere to go, and "somewhere" includes
+*any* `authenticated` scope existing at all (`Access::any_authenticated_scope`). On a
+deployment that had none before, adding this scope is what starts handing every self-signup a
+session cookie. That cookie reaches only `authenticated` and `anonymous` scopes, since every
+`restricted` scope still names people, so nothing is opened beyond what such scopes already
+grant; but an operator who believed strangers were turned away at the sign-in page should know
+they no longer are. And it multiplies with `gate.allow_unverified_social`, exactly as the
+invariant says: together they mean any social account, unverified email, no enrolment, now
+holding a cookie.
+
+Nothing needs to change for it to be visible. `bb-auth --check-access` already prints every
+`authenticated` scope by name ("authenticated (any identity Cognito vouches for, enrolled or
+not)"), and the startup banner already warns "scopes that grant without listing anybody",
+naming them. The package step's closing message tells the operator to add the scope, and says this
+paragraph's consequence in one line, which is the only change it implies.
+
+Inside, the binary decides from the access file it opens on every request, never from a
+cached copy:
+
+| Caller | What it gets |
+|---|---|
+| No `X-Auth-Email` | `401`, as the GUI: a broken deployment, not an anonymous visitor |
+| `gate.identity_attrs` lacks `email` | `500` naming the setting: there is no identity to act on |
+| **Denied** (`vetoes_identifier` on any value) | `403`, nothing else. Checked first. The gate refuses a vetoed identity before it gets here; this is the second lock, for a file edited mid-request |
+| **Roster user** | The page, keys, profile, deletion |
+| **Administrator** | Same as a roster user (or a stranger): `web.admins` is not read. Deletion warns that it does not remove them from `web.admins`, which only an administrator can edit |
+| **Authenticated stranger** (no row) | What bb-auth knows (no row; the `authenticated` scopes that do not exclude them, under their applications), the profile, and deleting the **Cognito** user. No keys: a key must have a roster owner |
+
+**What the page shows of the access file is applications and scope names, and never a URL**
+(decided, 13.10): no URL pattern and no base, on any page, the profile page, the key form and
+the key list included. The scopes a person reaches (`Access::scopes_reached`, 13.7) are, by
+kind:
+
+- **`restricted`**: reached when its members include their uuid, listed directly or through a
+  `@group` (groups are expanded at load, so `members` already holds both), and its
+  `credentials` admit a login.
+- **`authenticated`**: reached by every identity Cognito vouches for, so by everybody signed
+  in, strangers included.
+- **`anonymous`**: not listed. It is reached by everyone with no credential at all, so it says
+  nothing about this person, and neither veto applies to it.
+
+A scope's `excluded` naming the person (by uuid, by email, or through a `@group`) removes that
+scope from the list, as `decide` would refuse it. `denied` removes everything: a vetoed
+identity gets the `403` of the table below and sees no list at all. Scopes are shown grouped
+under their application in file order. It is membership, not a promise for every URL: first
+match wins inside an application, so a listed scope may be shadowed for some URLs by an
+earlier one, which the page does not try to explain without showing URLs.
+
+`X-Auth-Email` carries **every** identifier of the row, space-joined (`identity_headers`),
+so the binary splits on spaces; every value must resolve to the same row, or none must,
+or the request is a `500` (a header nginx built from two identities is not a person).
+
+### 13.5 API keys (R1)
+
+All through the existing library calls (`add_api_key`, `rotate_api_key`,
+`remove_api_key`), keyed by the caller's uuid, never by a form field.
+
+- **Narrow only, by scope** (decided, 13.10). The form offers "everything I reach" (no
+  `scopes` field, which the gate already reads as "at most what the owner reaches") or any
+  subset of the scopes the owner's keys reach (`Access::key_scopes_for`, 13.7), shown as
+  checkboxes grouped under their application. It submits `application/scope` pairs, and
+  each one is checked against that set: a pair outside it is a `400` and nothing is written,
+  never a pair dropped silently. What is written is the key's ordinary `scopes` list, the
+  submitted pairs, sorted. The restriction is a restriction either way (`decide_api_key` then
+  `decide`), so this check keeps the file honest rather than keeping anybody out.
+- **Shown with scope names, never URLs.** The key list shows each key's id, expiry, and
+  either "everything you reach" or its `scopes` entries grouped by application. An entry the
+  owner no longer reaches (their grants changed, or an administrator wrote it) is shown and
+  marked as not currently reachable, rather than hidden.
+- **Rotate keeps the restriction byte for byte.** `rotate_api_key` already changes only
+  `key_hash` and `released`; the self-service rotate offers no field that could change
+  `scopes`, so a key an administrator narrowed stays exactly as narrow. Remove is by id.
+- **Reveal once.** `SealedKey::reveal` needs the `Written` receipt; the bearer is rendered
+  once, in the `200` that answered the `POST` (never behind a redirect, never in a URL, with
+  `Cache-Control: no-store`), and is in no log line.
+- **`rev`.** Every form carries the sha256 of the file bytes it was rendered from; a
+  mismatch is a `409` and nothing is written.
+- **Abuse bound, as constants in the binary** (not settings: no second program has an
+  opinion, and nothing here is per-deployment yet): at most 10 keys per row (counting keys
+  an administrator made, since the bound is on the row), `duration` required and between
+  `1d` and `365d` (no `never`), `id` from `[a-z0-9-]{1,32}`. An administrator is not bound
+  by these, which is correct: they are a limit on self-service, not a rule of the file.
+- **Audit.** Not the audit file. That file has one writer, the gate, under `LogsDirectory`
+  in the gate's unit, and records authentication; a second writer would need a second uid
+  writing a directory the GUI reads as tamper-free. Mutations go to the journal in the shape
+  `bb-auth-web` already uses: `[bb-auth-me] <uuid>: key add <id>`, `key rotate <id>`,
+  `key remove <id>`, `profile update <attribute names>`, `account delete`. Never a bearer,
+  a hash or an attribute value.
+
+### 13.6 Cognito: profile edit and user deletion (R2, R4) without JavaScript
+
+bb-auth holds no Cognito credential, and the gate receives only an `id_token`. Both
+operations need one:
+
+- `UpdateUserAttributes` and `DeleteUser` are authorized by **the user's own access token**
+  with the scope `aws.cognito.signin.user.admin`, and IAM is not evaluated for them
+  ([UpdateUserAttributes](https://docs.aws.amazon.com/cognito-user-identity-pools/latest/APIReference/API_UpdateUserAttributes.html),
+  [DeleteUser](https://docs.aws.amazon.com/cognito-user-identity-pools/latest/APIReference/API_DeleteUser.html)).
+- A token from API sign-in carries exactly that scope
+  ([access token](https://docs.aws.amazon.com/cognito/latest/developerguide/amazon-cognito-user-pools-using-the-access-token.html)).
+- `InitiateAuth` and `RespondToAuthChallenge` are public, IAM is not evaluated for them, and
+  `USER_AUTH` with `PREFERRED_CHALLENGE=EMAIL_OTP` returns a `Session` that the
+  `EMAIL_OTP_CODE` response turns into `AccessToken`, `IdToken` and `RefreshToken`
+  ([InitiateAuth](https://docs.aws.amazon.com/cognito-user-identity-pools/latest/APIReference/API_InitiateAuth.html),
+  [RespondToAuthChallenge](https://docs.aws.amazon.com/cognito-user-identity-pools/latest/APIReference/API_RespondToAuthChallenge.html)).
+  It is the flow `/auth/login` already runs in the browser (`login.html`).
+
+**Decision: the binary runs that same email-code sign-in itself, server-side, as a
+re-authentication step in front of each Cognito action, and throws the tokens away at the
+end of the request that obtained them.** Three requests, no JavaScript, no state on the
+server:
+
+1. The person submits the edit (or confirms the deletion) and picks which of their own
+   emails to prove (a select over the `X-Auth-Email` values). The binary calls
+   `InitiateAuth` with `USERNAME` = that email and `ClientId` = `gate.client_id`, at the
+   issuer's origin (`cognito_endpoint`, moved to the library: 13.7).
+2. It renders a code form carrying, as hidden fields, Cognito's `Session`, the chosen email,
+   the action and its values (and the `rev`, for a deletion). `Cache-Control: no-store`.
+3. The code `POST` (same-origin, like every `POST`) re-checks everything against the live
+   files (identity, veto, the email still among the caller's, the attribute names still
+   editable), calls `RespondToAuthChallenge`, then the action with the `AccessToken`, and
+   drops all three tokens. None is logged, stored, or put in a cookie.
+
+The `Session` lasts `AuthSessionValidity`, 3 to 15 minutes per app client
+([UserPoolClientType](https://docs.aws.amazon.com/cognito-user-identity-pools/latest/APIReference/API_UserPoolClientType.html));
+the default is **unverified** here. A late code is Cognito's `NotAuthorizedException`
+and the page starts again.
+
+Why this binds the action to the right Cognito user without reading any token: `USERNAME`
+is one of the caller's own identifiers (from nginx, re-checked against the file), and the
+code is delivered to that inbox, so whoever completes step 3 controls it. The tokens arrive
+on a TLS connection the binary opened to the issuer's own origin (`ureq` + rustls, already in
+the tree). **Assumed:** the pool signs in by email (username attributes or a verified email
+alias), which is what `login.html` relies on too; a read-only `describe-user-pool` confirms it.
+
+What it costs: one more email code per edit or deletion. That is also re-authentication in
+front of an irreversible action, which a deletion should have anyway.
+
+Rejected:
+
+- **Admin calls with IAM credentials** (`AdminUpdateUserAttributes`, `AdminDeleteUser`).
+  A long-lived AWS secret on the host with power over **every** user of the pool, behind a
+  service whose only identity check is an nginx header; SigV4 to sign it; and the AWS SDK
+  for Rust defaults to `hyper` + `rustls` + **`aws-lc-rs`** and loads the **system** root
+  certificates ([SDK for Rust, HTTP](https://docs.aws.amazon.com/sdk-for-rust/latest/dg/http.html)),
+  with an async runtime in its examples: three invariants at once (pure-Rust crypto on `ring`
+  or RustCrypto, no system cert store, no async runtime). A hand-written SigV4 over `ureq`
+  avoids the dependencies but not the secret.
+- **Keeping the browser's access token** (the login page holds one). Into the cookie: a
+  `COOKIE_VERSION` bump that logs everybody out, and a Cognito bearer carried on every
+  request to every app. Into a server store: breaks stateless sessions. Into the page via
+  JavaScript: breaks the no-JavaScript rule.
+- **Authorization-code flow through the hosted UI.** Needs `gate.oauth_domain`, a callback
+  registered on the app client, PKCE state carried in a cookie across the redirect, and a
+  sign-in on a page that is not this estate's. More moving parts for the same token.
+
+**Federated (social) users cannot do this.** `InitiateAuth` cannot sign in a federated user
+(InitiateAuth reference, above). For them the page says their profile is their provider's,
+which Cognito re-maps at every sign-in ("Amazon Cognito updates the mapped attributes with
+the latest information from the IdP",
+[attribute mapping](https://docs.aws.amazon.com/cognito/latest/developerguide/cognito-user-pools-specifying-attribute-mapping.html)),
+and that this page cannot delete their Cognito user. **Unverified:** that the federated
+profile would be re-created at their next social sign-in anyway, which would make deleting
+it moot. Their deletion is the access-file half only, and the page tells them an
+administrator must delete their Cognito account (decided, and accepted as meeting R4: 13.10).
+
+**Which attributes are editable.** Those named in `gate.profile_claims`, minus `email`,
+`phone_number`, `preferred_username` and anything under `dev:`; `sub` and the reserved
+claims cannot be named there at all. The argument: what bb-auth propagates is what it has an
+opinion about; the excluded three are sign-in identifiers. Cognito's own `WriteAttributes`
+on the app client is the second authority, and an attribute it does not grant is refused
+with `NotAuthorizedException` ([attribute permissions](https://docs.aws.amazon.com/cognito/latest/developerguide/user-pool-settings-attributes.html#user-pool-settings-attribute-permissions-and-scopes)),
+which the page reports. Profile claims keep authorizing nothing: this changes what Cognito
+asserts, which reaches the gate only as decoration in the next token, and `decide` never
+sees it.
+
+**`email` is not editable.** It is the roster's identity key, so changing it is a change in
+two systems that would have to be atomic. In Cognito, depending on
+`AttributesRequireVerificationBeforeUpdate`, the new value either waits for verification or
+replaces the sign-in name at once, unverified
+([verifying changed emails](https://docs.aws.amazon.com/cognito/latest/developerguide/signing-up-users-in-your-app.html#verifying-when-users-change-their-email-or-phone-number)).
+The second case is a lockout here (`email_verified` is mandatory for native users); the first
+leaves the roster naming an address the token no longer carries once verified. Neither lets
+anybody in, but both lock the person out, so an email change stays an administrator's job
+(add the new address to the row, then the person changes it). The page shows the emails and
+says so.
+
+### 13.7 What moves into the library
+
+By the membership rule (a thing belongs there iff a file more than one program reads has an
+opinion about it):
+
+- **`cognito_endpoint`**, today private to the gate: derived from `gate.issuer`, and two
+  programs must now agree on where the pool's API is. Becomes a `Settings` method.
+- **`Access::key_scopes_for(uuid)` and `Access::scopes_reached(uuid)`**, beside
+  `scopes_for`. They restate `decide`'s rule as a set, which is exactly what must never
+  drift from `decide` ("keep the rule in the library, or `bb-auth-adm can` starts answering
+  a different question"). `key_scopes_for` is the `restricted` scopes whose members include
+  the uuid, whose `credentials` admit a key, and whose `excluded` does not name the uuid:
+  `decide` refuses a key on every other kind of scope (an `authenticated` scope is
+  `CredentialRefused` for a key). `scopes_reached` is defined in 13.4. Tests drive `decide`
+  on a URL inside each returned scope and require a grant.
+- **`remove_user` rewrites a uuid in a scope's `excluded` to the primary email, as it
+  already does for `denied`, instead of dropping it.** Today it drops it on the argument
+  that a uuid is never reused; but the same person re-registering is exactly the
+  walk-back-in the `denied` rewrite exists to prevent, and on an `authenticated` scope the
+  exclusion was their only barrier. Self-deletion makes the person who is excluded the one
+  who triggers the sweep, so here it would be a veto lifted by the person it vetoes. One
+  sweep for all three editors, so this changes `bb-auth-adm` and `bb-auth-web` too, which is
+  intended (decided, 13.10). It gets its own test-first step, ahead of the deletion step,
+  and the `excluded` wording in AGENTS.md changes with it.
+
+Nothing else moves. The presentation contract is already shared (`THEME_CSS`, `BASE_CSS`,
+`UiTheme`, `stylesheet_link`, `html_escape`, `PAGE_SECURITY_HEADERS`, `page_csp`,
+`request_site`), and the binary uses all of it: `page_csp` with `'self'` for `form-action`
+as the GUI does, `request_site` with the GUI's strict policy (`same-origin` only), the `ui`
+settings for the look. Its own: the Cognito client (only it calls Cognito), the abuse
+constants, its `K` translation table, its page arrangement. No `<script>`, no handler: the
+GUI's one exception (`SETTINGS_ONCHANGE`) has no counterpart here.
+
+### 13.8 Account deletion (R4): order and partial failure
+
+After the confirmation page and the email code of 13.6, in this order:
+
+1. **The roster row**, through `AccessWrite` with the `rev` from the confirmation form:
+   `remove_user` on the caller's uuid (keys, scope and group references, the `excluded` and
+   `denied` rewrites of 13.7).
+2. **The Cognito user**, `DeleteUser` with the access token from step 3 of 13.6, which is
+   minutes old.
+
+Why this order: if step 2 fails, what is left is a Cognito user with no row, an
+`authenticated` stranger, who reaches only `authenticated` scopes and holds no key. The
+other order, on a failed write, leaves a row with live **API keys** and every grant, waiting
+for the same person to re-register. If step 1 fails (`409`, I/O), nothing has changed and
+the person starts again. If step 2 fails, the page says the row is gone and the Cognito
+account is not, and offers the retry, which the person can still reach as a stranger,
+since the page's scope is `authenticated` (13.4).
+
+A `denied` entry is never lifted: `remove_user` rewrites a user veto into a stranger veto
+on the same address, and a vetoed identity never reaches this page (13.4). A **stranger's**
+deletion touches the access file not at all (an email in `denied` or `excluded` stays: it is
+the only veto that person has). The audit is not edited; the confirmation page says that
+their sign-in lines are kept until `audit.retention` drops them (or, with no retention set,
+until rotation does, which it says as a size). The final page links to `/auth/logout`,
+because their cookie is still valid and now names a stranger.
+
+### 13.9 How each decision is shown to hold
+
+| Decision | Test or real run |
+|---|---|
+| Identity from `X-Auth-Email` only, split on spaces | Unit: missing header `401`; two values of one row act on that row; values of two rows `500`; a form field naming another uuid changes nothing |
+| Four callers | Unit over a fixture: denied `403` even for a mutation `POST`; stranger sees no key form and a key `POST` is refused; admin not in roster is a stranger |
+| No URLs on screen | Unit: no rendered page (profile, key form, key list, refusals) contains a URL pattern or base from the fixture; a restricted scope reached through a `@group` is listed; an `anonymous` scope is not; an `authenticated` one is, for a stranger too; an excluded scope is not; a denied caller sees no list |
+| `key_scopes_for`, `scopes_reached` | Library unit: `decide` grants (key, or login) on a URL inside every scope returned, and refuses on a scope excluded or not admitting the credential |
+| Narrow by scope, bounds | Unit: the form posts `application/scope` pairs; a pair outside `key_scopes_for` is `400` and the file bytes are unchanged; the file gets exactly the submitted pairs; eleventh key refused; `never` and `366d` refused; the written file still compiles |
+| Display and rotate of a narrowed key | Unit: an administrator-narrowed key lists its entries by scope name with no URL, an unreachable entry marked; rotate leaves its `scopes` bytes identical |
+| Reveal once | Unit: the bearer appears in the one response and in no later `GET`, no log line; `Cache-Control: no-store` |
+| `rev` | Unit: a stale `rev` is `409` and the file bytes are unchanged |
+| No JavaScript | `the_page_carries_one_handler_and_no_script`-style test (zero handlers here) and a scripting-off e2e walk |
+| Cognito re-auth | Unit against a fake Cognito endpoint (`InitiateAuth`, `RespondToAuthChallenge`, `UpdateUserAttributes`, `DeleteUser`): a wrong code changes nothing; an email not among the caller's is refused before Cognito is called; a non-editable attribute is refused before Cognito is called; tokens appear in no response or log. Real pool once, with a test account and the user's go-ahead |
+| Deletion order | Unit with the fake endpoint failing `DeleteUser`: the row is gone, the page says the Cognito account remains; with the write failing: `DeleteUser` is never called |
+| `excluded` rewrite | Library unit: after `remove_user`, a scope that excluded the uuid excludes the primary email |
+| Ownership | Real run on a host (packaging step): GUI and `bb-auth-me` both save, in both orders; `sudo bb-auth-adm` saves after both; the gate reloads each time; purging one editor leaves the other saving; a rename onto `settings.json` as `bb-auth-me` fails |
+| Reload unit move | Real run: upgrade from the current packages with `dpkg -i` raises no file conflict, and `bb-auth-reload.path` is active on a gate-only host |
+
+### 13.10 Decisions recorded on 2026-11-23
+
+The open questions of the proposal, as the user answered them (item 5 is the coordinator's
+default, kept unless the user says otherwise):
+
+1. **Cognito mechanism**: approved as in 13.6. A server-side `USER_AUTH` / `EMAIL_OTP`
+   re-authentication before each profile edit or deletion; no IAM, no AWS SDK.
+2. **Scope over the page**: `authenticated`. Strangers see the profile and can delete their
+   Cognito user, and get no keys; the `/auth/session` consequence is in 13.4.
+3. **`remove_user`** keeps a uuid in a scope's `excluded` as the person's primary email, as
+   it does for `denied`, in all three editors (13.7).
+4. **Social-only users**: self-deletion removes only their access-file data, and the page
+   says an administrator must delete the Cognito account. Accepted as meeting R4.
+5. **Service account**: the shared `bb-auth-web` account stays and is not renamed, because a
+   rename migrates a deployed unit and its files for a label (13.3).
+6. **Visibility**: the page shows the applications and scope names a person reaches, and no
+   URL pattern or base anywhere; `anonymous` scopes are not listed, `excluded` removes a
+   scope, `denied` removes everything (13.4).
+7. **Key narrowing by scope**: any subset of the scopes the owner's keys reach, grouped under
+   their application; the form submits `application/scope` pairs, each checked, and anything
+   outside the set is refused, never dropped; rotate keeps the restriction byte for byte
+   (13.5).
+
+Items 6 and 7 supersede a variant briefly recorded the same day that showed applications
+only and narrowed keys by whole application.
