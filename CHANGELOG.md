@@ -82,6 +82,20 @@ not read the discovery document, so the new members there do not reach it.
 between the two reads could leave that worker waiting forever, since std's `RwLock` puts a
 new reader behind a waiting writer. It now reads once.
 
+### Fixed: an administrator with a second email was locked out of the admin GUI
+
+**Nothing to do.** A person `web.admins` names and the admin GUI refused is admitted again by
+this build, with no config, settings or nginx change: the list is written exactly as it was.
+
+The gate names an identity by **every** email on the caller's roster row, joined by a single
+space (`identity_headers`), since a person is a uuid plus the addresses that resolve to it.
+`bb-auth-web` compared that whole string against `web.admins`, so a row carrying a second
+address arrived as `admin@x.com other@x.com` and matched nothing: the lockout landed on the
+one interface that edits the list naming its own administrators. The header is now read as
+the list it is, and any one address in it admits the request. The `403` still shows the
+header as it arrived, since debugging a lockout means seeing what nginx actually sent, and
+nothing here changes the cookie, the access file or the settings file's version.
+
 ### New: the audit, and an Audit tab to read it
 
 The gate now records what it has answered, and `bb-auth-web` grew a fifth tab that reads it

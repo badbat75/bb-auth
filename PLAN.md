@@ -74,18 +74,6 @@ decisions listed in §13.10: the binary is `bb-auth-me`, behind an `authenticate
 as the shared `bb-auth-web` account, re-authenticating with a server-side email code before any
 Cognito action.
 
-### 1. Check bb-auth-web's admin check against a multi-email `X-Auth-Email`
-
-Covers: no requirement; a possible existing defect found during the design, unverified.
-
-The gate joins every email of a roster row with a space in `X-Auth-Email` (`identity_headers`).
-`bb-auth-web`'s `handle` runs `norm_email` on the whole header before `settings.is_admin`. Whether
-an administrator whose row holds two emails is refused (a lockout) or handled is not known.
-
-- Done when: a test sends `X-Auth-Email: admin@x.com other@x.com` for an administrator and the
-  outcome is known; if it is refused, a failing test came first and the fix makes it pass, and the
-  same splitting rule is the one step 2 uses.
-
 ### 2. The user binary: identity and a read-only page
 
 Covers: R3, part of R1 and R2.
@@ -95,7 +83,8 @@ emails, groups, the applications and scope names they reach (`Access::scopes_rea
 the library test first, §13.4 and §13.7), key ids, expiry and scopes, denied or not, the profile
 headers nginx forwards), and no URL pattern or base anywhere, in the shared
 presentation (`THEME_CSS`, `BASE_CSS`, `ui`, `page_csp`,
-`PAGE_SECURITY_HEADERS`), with no script. No packaging, no write.
+`PAGE_SECURITY_HEADERS`), with no script. No packaging, no write. `X-Auth-Email` is split on ASCII whitespace and each
+part `norm_email`ed, the rule `bb-auth-web`'s `handle` already applies.
 
 - Done when: unit tests show missing `X-Auth-Email` is `401`, two values of one row resolve to it,
   values of two rows are `500`, `identity_attrs` without `email` is `500`, and the four callers

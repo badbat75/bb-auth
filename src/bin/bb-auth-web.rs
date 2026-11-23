@@ -7354,7 +7354,14 @@ fn handle(mut req: Request, cfg: &Config) {
             return;
         }
     };
-    let email = norm_email(&raw_email);
+    // The header is a list, not one address: the gate puts **every** email of the roster row
+    // into it, joined by a single space (`identity_headers` in `bb-auth`, `who.emails.join(" ")`).
+    // Comparing that whole string against `web.admins` would lock out the administrator who
+    // happens to hold a second address, from the only interface that can edit that list.
+    let identities: Vec<String> = raw_email.split_ascii_whitespace().map(norm_email).collect();
+    // What nginx sent, as the refusal page has to show it: an operator debugging a lockout
+    // needs the header as it arrived, not one address picked out of it.
+    let who = identities.join(" ");
 
     // The allowlist, fresh off disk on every request, because this is the one service that
     // can edit it. Three outcomes, and they are deliberately different pages: a file that
@@ -7395,16 +7402,27 @@ fn handle(mut req: Request, cfg: &Config) {
         );
         return;
     }
-    if !settings.is_admin(&email) {
-        let v = anon_view(cfg, lang, lang_pref, theme, look);
-        let page = notice(
-            "bad",
-            v.t(K::NotAdminTitle),
-            html! { p { code { (email) } " " (v.t(K::NotAdminBody)) } },
-        );
-        respond_page(req, 403, shell(&v, v.t(K::NotAdminTitle), page), &v.look);
-        return;
-    }
+    // Any one of the addresses the header carries is enough to be admitted, and the one this
+    // request is answered under is the first of them that is an administrator: the audit line
+    // and the Settings "cannot remove yourself" guard below name one identity, and the whole
+    // header is not one.
+    let email = match identities
+        .iter()
+        .find(|e| settings.is_admin(e.as_str()))
+        .cloned()
+    {
+        Some(e) => e,
+        None => {
+            let v = anon_view(cfg, lang, lang_pref, theme, look);
+            let page = notice(
+                "bad",
+                v.t(K::NotAdminTitle),
+                html! { p { code { (who) } " " (v.t(K::NotAdminBody)) } },
+            );
+            respond_page(req, 403, shell(&v, v.t(K::NotAdminTitle), page), &v.look);
+            return;
+        }
+    };
 
     // From the same settings read the look came from, and for the same reason: what the
     // access check predicts and what admitted this request must come from one version of the
@@ -11403,6 +11421,74 @@ mod tests {
             .expect("a response");
         assert_eq!(r.status(), 404);
         let _ = std::fs::remove_file(&path);
+    }
+
+    /// The gate puts **every** email of a roster row into one `X-Auth-Email`, joined by a
+    /// single space (`identity_headers` in `bb-auth`: `who.emails.join(" ")`), so an
+    /// administrator with a second address arrives as `admin@x.com other@x.com`. Comparing
+    /// that whole string against `web.admins` locks out the one person who can edit
+    /// `web.admins`, and the only way back in is a hand edit over SSH, so the header has to
+    /// be read as the list of identities it is.
+    #[test]
+    fn serving_admits_an_administrator_whose_row_carries_several_emails() {
+        let path = scratch("serve-multi-email", SAMPLE);
+        let cfg = cfg_for(&path, "");
+        let server = Server::http("127.0.0.1:0").expect("bind an ephemeral port");
+        let port = server.server_addr().to_ip().expect("an ip address").port();
+        std::thread::spawn(move || {
+            for req in server.incoming_requests() {
+                handle(req, &cfg);
+            }
+        });
+        let at = |p: &str| format!("http://127.0.0.1:{port}{p}");
+
+        // The administrator's address first, and second: the gate's join follows the roster's
+        // order, which is nobody's contract, so a match that depended on the position of one
+        // address was never a match.
+        for header in ["Admin@X.com other@x.com", "other@x.com admin@x.com"] {
+            let mut r = client()
+                .get(at("/"))
+                .header(IDENTITY_HEADER, header)
+                .call()
+                .expect("a response");
+            assert_eq!(r.status(), 200, "{header} names an administrator");
+            let body = r.body_mut().read_to_string().unwrap();
+            assert!(
+                body.contains("user_groups") && body.contains("Warnings"),
+                "{header} must land on the dashboard a single-email admin sees: {body}"
+            );
+        }
+
+        // Several addresses and not one of them an administrator: still the 403, and it
+        // still names the caller, because an operator debugging a lockout has to be able to
+        // see what nginx actually sent.
+        let mut r = client()
+            .get(at("/"))
+            .header(IDENTITY_HEADER, "someone@x.com nobody@x.com")
+            .call()
+            .expect("a response");
+        assert_eq!(r.status(), 403);
+        let body = r.body_mut().read_to_string().unwrap();
+        assert!(
+            body.contains("someone@x.com"),
+            "the refusal must name the caller: {body}"
+        );
+
+        // A header that says nothing is a broken deployment and not a stranger, so it is
+        // answered by the page that explains nginx, not by a 403 naming an empty identity.
+        let mut r = client()
+            .get(at("/"))
+            .header(IDENTITY_HEADER, "   ")
+            .call()
+            .expect("a response");
+        assert_eq!(r.status(), 401);
+        assert!(r
+            .body_mut()
+            .read_to_string()
+            .unwrap()
+            .contains("auth_request"));
+
+        cleanup(&path);
     }
 
     /// The whole `POST` contract over real HTTP, under a base path: a confirmation page that

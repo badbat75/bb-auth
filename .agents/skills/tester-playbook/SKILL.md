@@ -13,6 +13,11 @@ Rules are in `AGENTS.md`. Format of this file: `AGENTS.md`, under "Skills".
   and run them again once the code exists.
 - Use one fixture per test.
 - Fill fixtures with real names and values captured from the real system.
+- In `bb-auth-web`, test a request end to end over a real socket: copy
+  `serving_enforces_the_identity_header_and_the_admin_allowlist` (`scratch` with a unique name,
+  `cfg_for`, `client()`, `IDENTITY_HEADER`, `cleanup`). The fixture's administrator is `admin@x.com`.
+- To show that an assertion after a red one already passes, move it ahead for one run, then
+  restore the order: nothing after the first panic runs.
 
 ## Pitfalls
 
