@@ -76,20 +76,6 @@ process that writes both files, so two gaps found the same day are closed **firs
 GUI is opened to anyone who is not an administrator: `bb-auth-web` can read the HMAC key, and it
 believes `X-Auth-Email` from any local process. The design is `docs/ARCHITECTURE.md` §13.
 
-### 3a. bb-auth-web cannot read the HMAC key
-
-Covers: R3 (a precondition to opening the GUI to strangers). Design: §13.4.
-
-`deploy/bb-auth-web.service` gains `InaccessiblePaths=/opt/bb-auth/etc`, the directory and not
-the file, with a comment saying why (the env file is read by the service manager before the
-sandbox; a per-file mount detaches on a rename).
-
-- Done when: on rpi-01, with the user's go-ahead for the install, `bb-auth-web` starts and
-  listens (its env was loaded), `sudo cat /proc/$(systemctl show -p MainPID --value
-  bb-auth-web)/root/opt/bb-auth/etc/bb-auth.env` fails, a GUI save still lands and reloads the
-  gate, and the Audit tab still reads `/var/log/bb-auth`. Until rpi-01 is reached, the step
-  stays open with only the unit change and `systemd-analyze verify` on it done.
-
 ### 3b2. verify.sh speaks to the GUI with the proxy secret
 
 Covers: R3. Found on rpi-01 on 2026-11-23 while closing step 3b.
