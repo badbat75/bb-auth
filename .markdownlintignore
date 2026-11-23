@@ -8,3 +8,8 @@ dist/
 # `npm install` in e2e/: a lint whose result depends on whether you have run the E2E suite
 # is a lint nobody can act on.
 e2e/node_modules/
+
+# Agent role prompts and skills: frontmatter plus instructions, read by the agent harnesses rather
+# than by people, so they carry no top-level heading on purpose.
+.agents/
+.opencode/

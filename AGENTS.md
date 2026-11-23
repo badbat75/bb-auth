@@ -8,6 +8,9 @@ agent can start here, and there is deliberately no tool-specific file beside it.
 an authentication gate, and almost every rule in it exists because breaking that rule locks
 somebody out or lets somebody in.
 
+**Start here: read `PLAN.md`.** It holds the user's requirements, the Definition of Done, and what is
+left to do, in order.
+
 | | |
 | --- | --- |
 | [What this is](#what-this-is) | the four targets, and why the split is load-bearing |
@@ -17,6 +20,7 @@ somebody out or lets somebody in.
 | [Conventions](#conventions) | English, why-not-what, no new em-dashes, one home per rule |
 | [Invariants](#invariants--do-not-break-these) | **41 rules, in ten groups, indexed at the top of the section** |
 | [Config & deploy notes](#config--deploy-notes) | the configuration reference (the deploy *rules* are invariants) |
+| [Working from the plan](#working-from-the-plan) | `PLAN.md`, agent commands, skills and roles |
 
 ## What this is
 
@@ -1245,3 +1249,91 @@ What is left below is configuration, which is a reference rather than a rule.
   "six". The only secret is `BB_AUTH_HMAC_KEY` (≥32 bytes), and it is in the env file. Full reference:
   [deploy/bb-auth.env.example](deploy/bb-auth.env.example),
   [deploy/settings.example.json](deploy/settings.example.json) and `docs/ARCHITECTURE.md` §8/§8a.
+
+## Working from the plan
+
+- Take the first open step unless the user says otherwise. Split it if it is too big for one sitting.
+- The plan can change. The coordinator or the user can change any part of it when needed: steps, order,
+  requirements or Definition of Done. Other agents propose changes to the coordinator. The commit says
+  why, and the coordinator tells the user whenever a requirement changes.
+- If a requirement is added, make sure a step covers it.
+- A step is done only when it meets the Definition of Done in `PLAN.md` as well as its own "Done when".
+- Steps in `PLAN.md` are only open work. When a step is done, remove it, and update the requirements'
+  "State" and "Where things stand" if they changed.
+- Do this in the same commit as the work. The commit message says what was closed and how it was
+  checked, so `git log` is the record of closed work. Do not keep a done list in the plan.
+- New work that comes up goes in the plan, in its place in the order. A step that turns out wrong gets
+  rewritten, not worked around.
+
+## Agent commands
+
+Agents run the checks the table under [Commands](#commands) matches to their change, plus:
+
+```powershell
+cargo clippy --all-targets
+cargo fmt --check
+```
+
+The user runs the whole board once, on `main` after the merge and before a release: `cargo test`,
+`node e2e/run.js`, `cargo doc --no-deps`, and the cfg(unix) tests under WSL.
+
+## Layout
+
+See [What lives where](#what-lives-where) and [Where documentation lives](#where-documentation-lives).
+
+## Rules
+
+**Test first, always.** Write a failing test, run it and see it fail, then write the code. A change
+without a test that failed first is not done. Tests never touch real systems or real data.
+
+**Keep it simple.** Minimum that solves the problem, no speculative options or abstractions.
+
+**Facts need a source.** Check commands, APIs and limits against official documentation or a real run.
+In the docs, keep what was measured, read in a source and assumed apart. Mark guesses as guesses.
+
+**Displayed text.** Text the admin GUI shows goes through the `K` translation table in
+`src/bin/bb-auth-web.rs`, and the pages' text lives in `src/assets/*.html`, never inline in logic. Logic
+must not depend on that text.
+
+## Actions with real effects
+
+- What counts here: a deploy (`scripts/deploy.ps1`, `scripts/verify.sh` on a host), a live host's access
+  file, settings file or env file, the Cognito user pool, and any real `bbk_` key or HMAC key.
+- Reading is fine. Anything that changes the real thing needs the user's go-ahead each time.
+- Agents may be blocked from running some commands. Give the user the exact command to run, and say what
+  it does, how long it takes and what result to expect.
+- A command must undo what it changed by itself, wherever it can.
+
+## Skills
+
+Each role has a skill in `.agents/skills/` in the standard `SKILL.md` format; `.claude/skills` is a
+symlink to that directory.
+
+- A skill says how its role does the work in this project. Rules stay in this file. It has two sections:
+  - "How to": commands that work, conventions, where things are, procedures. Written as instructions.
+    Add to it when you find out how something is done here, and change it when that changes.
+  - "Pitfalls": traps met so far that a careful agent would still fall into, one line each. Add one when
+    something went wrong in a way that was not obvious.
+- When a pitfall becomes a way of working, rewrite it as a step in "How to" (or as a rule in this file)
+  and remove it from "Pitfalls".
+- Only what is specific to this project or its tools. General good practice does not go in a skill.
+- An agent can update its own skill. The coordinator can update any of them.
+- Keep them short, and remove what stops being true. Say why in the commit, like any other change.
+
+## Roles
+
+Role definitions live in `.opencode/agents/`; `.claude/agents` is a symlink to that directory, so
+OpenCode and Claude Code read the same files. Keep the frontmatter to the fields both accept (`name`,
+`description`, `mode`), and write role limits in the body rather than in harness-specific tool lists.
+
+- `coordinator`: plans and sequences the work, checks each result. The default agent for a session, set
+  in `.claude/settings.json` and `.opencode/opencode.json`.
+- `architect`: designs the software and infrastructure architecture, in `docs/ARCHITECTURE.md`. Writes no
+  code.
+- `tester`: writes the failing tests.
+- `coder`: makes them pass.
+- `docs`: keeps the documentation true.
+
+Cycle: coordinator takes the next step from `PLAN.md` and picks one small slice, architect designs it
+when it changes the architecture, tester writes tests and shows them red, coder turns them green,
+coordinator reruns everything, docs updates what changed.

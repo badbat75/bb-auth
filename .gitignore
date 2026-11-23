@@ -19,8 +19,12 @@
 # Agent tool state, which is per-machine and never the repository's business. It holds
 # whatever the operator has approved, and on this checkout that has included a live `bbk_`
 # bearer inside a permission entry: it was covered only by the machine's own global
-# excludes, which is a property of that machine and not of the next clone.
-/.claude/
+# excludes, which is a property of that machine and not of the next clone. Only the shared agent setup
+# (the two symlinks and settings.json, which names the default agent) is tracked.
+/.claude/*
+!/.claude/agents
+!/.claude/skills
+!/.claude/settings.json
 
 # Browser E2E suite (e2e/) — installed deps and per-run artifacts, never tracked
 /e2e/node_modules
