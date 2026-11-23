@@ -13,7 +13,7 @@ left to do, in order.
 
 | | |
 | --- | --- |
-| [What this is](#what-this-is) | the four targets, and why the split is load-bearing |
+| [What this is](#what-this-is) | the five targets, and why the split is load-bearing |
 | [Where documentation lives](#where-documentation-lives) | this file holds the rules, rustdoc holds the mechanism |
 | [Commands](#commands) | what to run, and **which check matches which change** |
 | [After a dependency change](#after-a-dependency-change) | the two `cargo tree` greps, and what they mean |
@@ -49,25 +49,25 @@ per-deployment through `BB_AUTH_*` env vars **and a settings file** (`settings.j
 the access file): the settings that must change without a restart live there, because a
 process cannot re-read its own environment.
 
-One crate, four targets, and the split is load-bearing:
+One crate, five targets, and the split is load-bearing:
 
 - **[src/lib.rs](src/lib.rs)** (`bb_auth_core`): **the files the programs share**. The
   access file above all: its schema, its parser, the URL matcher, the two-level resolution
   (`Access::resolve`), the grant model (`decide` / `decide_api_key`), and how one is *edited
   and written* (`open_access_file`, `AccessWrite`, the document mutations). And
   **the settings file** beside it (`SettingsFile`, `compile_settings`, `SettingsWrite`, plus
-  `compile_profile_claims` / `compile_identity_attrs`, which are here because all three
+  `compile_profile_claims` / `compile_identity_attrs`, which are here because all four
   programs validate them). And **the audit file** (`AuditEvent`, `AuditWriter`, `read_audit`),
   which is the same rule pointing the other way: the gate writes those lines and the GUI reads
   them, so a second answer to what one line means would be a reader showing something the
   writer never said. And **the presentation contract**: the palette
   (`THEME_CSS`, [src/assets/theme.css](src/assets/theme.css)), the components built out of it
   (`BASE_CSS`, [src/assets/base.css](src/assets/base.css)), and `UiTheme` / `stylesheet_link`
-  / `html_escape` / `compile_asset_url` beside them. Same membership rule: two programs emit
+  / `html_escape` / `compile_asset_url` beside them. Same membership rule: three programs emit
   HTML, and they must agree byte for byte on what `--accent` names, on what a button and a
-  field are made of, and on where an operator's stylesheet lands in the cascade, or the two
+  field are made of, and on where an operator's stylesheet lands in the cascade, or the
   surfaces drift apart one edit at a time and nobody working inside either file can see it.
-  What is *not* there is either program's **arrangement** of those components. Everything
+  What is *not* there is each program's **arrangement** of those components. Everything
   more than one program must agree on, byte for byte.
 - **[src/bin/bb-auth.rs](src/bin/bb-auth.rs)** — **the gate**, and everything the access file has no
   opinion about: HTTP, the session cookie, id_token validation, the nginx contract, and the
@@ -85,9 +85,10 @@ One crate, four targets, and the split is load-bearing:
   (server-rendered, `maud`): the same CRUD as the CLI, made **only** through the library's
   editing core, plus a **Settings** tab over the settings file, in that file's own four
   sections: what the gate answers with, what the audit records and for how long, who
-  administers this, and how the pages look (the last one being the gate's pages too, which is
-  why one save restyles both programs), each a group that folds to its heading with no script
-  and that the page opens folded, and an **Audit** tab over the file the gate writes. Five
+  administers this, and how the pages look (the last one being the gate's pages and the
+  self-service page too, which is why one save restyles all three programs), each a group that
+  folds to its heading with no script and that the page opens folded, and an **Audit** tab over
+  the file the gate writes. Five
   tabs, and none of them
   is `denied` or `user_groups`: those two are **sections of the users
   page**, groups above the roster, because a group only means anything in terms of the roster
@@ -132,6 +133,20 @@ One crate, four targets, and the split is load-bearing:
   a missing header is a 401, not an anonymous visitor. `web.admins` is its own
   allowlist on top of that, required and never empty, because an `authenticated` scope covering
   its URL would otherwise open the admin surface to any Cognito account.
+- **[src/bin/bb-auth-me.rs](src/bin/bb-auth-me.rs)**: **the self-service page**, what one
+  signed-in person does to **their own** account, so that minting a key and reading or editing
+  a profile stop needing an administrator. It is `bb-auth-web`'s trust model with the privilege
+  taken out: loopback only, gated by nginx `auth_request`, identity read from the
+  `X-Auth-Email` nginx injects and from nowhere else, no token validated, no cookie minted, no
+  secret held, and `web.admins` not read, because an administrator here is one more person
+  acting on their own account. What exists is the identity half (plan step 2b-1): both files
+  read fresh on every request, the header split into the list of addresses
+  the gate really sends (every email of one row, space-joined), the `denied` veto checked ahead
+  of everything, and a page naming the caller and their uuid. The keys, the profile and the
+  Cognito leg are the next steps. It links the library, none of the gate, and its design is
+  [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md) §13. It is **not packaged yet**: no `.deb`, no
+  unit, and `scripts/build.sh` and `scripts/package.sh` know only the other three binaries, so
+  a deploy installs nothing new (plan step 3).
 
 The defining constraint vs. authorization-code OIDC proxies (oauth2-proxy): those drive the
 login themselves and *cannot* accept a token the browser already holds. bb-auth is built for
@@ -171,10 +186,11 @@ one runs on, who calls whom, and which invariant each one is there to hold.
 This repo is developed on Windows but the artifact is a Linux/aarch64 binary.
 
 ```powershell
-# Tests: unit tests in all four targets, run on the host, no network needed. The access
+# Tests: unit tests in all five targets, run on the host, no network needed. The access
 # file and the writers (src/lib.rs), the gate including its token verifier and its router
-# over a real socket (src/bin/bb-auth.rs), the CLI's argument grammar (src/bin/bb-auth-adm.rs)
-# and the GUI including nine that drive real HTTP (src/bin/bb-auth-web.rs). A handful are
+# over a real socket (src/bin/bb-auth.rs), the CLI's argument grammar (src/bin/bb-auth-adm.rs),
+# the GUI including nine that drive real HTTP (src/bin/bb-auth-web.rs) and the self-service
+# page's six, also over a real socket (src/bin/bb-auth-me.rs). A handful are
 # cfg(unix) (the SIGHUP reload's fail-soft, the writer's mode preservation, the audit file's
 # own mode) and therefore run on Linux, never on the development host (run them under WSL
 # before a release).
@@ -188,7 +204,7 @@ cargo test session_roundtrip          # a single test by name
 cargo run --bin bb-auth -- --self-test
 
 # Which build is this? `v<version>-g<commit>`, `-dirty` when the tree was not committed,
-# and all three programs answer it.
+# and all four programs answer it.
 cargo run --bin bb-auth -- --version
 
 # Does an env file name everything the gate refuses to start without? The gate's postinst
@@ -202,7 +218,7 @@ cargo run --bin bb-auth -- --check-env /opt/bb-auth/etc/bb-auth.env
 # scopes that grant without listing anybody (anonymous, authenticated).
 cargo run --bin bb-auth -- --check-access .\deploy\access.example.json
 
-# Validate a SETTINGS file with the parser all three programs use. Prints the derived
+# Validate a SETTINGS file with the parser all four programs use. Prints the derived
 # header for every claim and attribute, names the GUI's administrators, and says how the
 # pages will look (the stylesheet by name: whether it loads is the browser's business).
 cargo run --bin bb-auth -- --check-settings .\deploy\settings.example.json
@@ -225,8 +241,9 @@ cargo run --bin bb-auth-adm -- -f .\deploy\access.json can bob@x.com https://app
 cargo run --bin bb-auth-adm -- -s .\deploy\settings.json settings show
 cargo run --bin bb-auth-adm -- -s .\deploy\settings.json settings set --claims given_name,family_name
 cargo run --bin bb-auth-adm -- -s .\deploy\settings.json settings admin add bob@x.com
-# The `ui` four: the look of every page BOTH programs serve, so one stylesheet restyles the
-# sign-in page and the admin GUI together. Pass an empty value to unset any of them.
+# The `ui` four: the look of every page EVERY program serves, so one stylesheet restyles the
+# sign-in page, the admin GUI and the self-service page together. Pass an empty value to unset
+# any of them.
 cargo run --bin bb-auth-adm -- -s .\deploy\settings.json settings set --brand 'BadBat75' --theme dark
 cargo run --bin bb-auth-adm -- -s .\deploy\settings.json settings set --stylesheet 'https://assets.x.com/css/theme.css'
 
@@ -238,7 +255,7 @@ node e2e/run.js
 cargo check
 cargo clippy --all-targets
 cargo fmt
-cargo doc --no-deps                   # must emit zero warnings, across all four targets
+cargo doc --no-deps                   # must emit zero warnings, across all five targets
 
 # Release cross-compile for the target. It does NOT hand itself to WSL, so run it from a
 # Linux/WSL shell: from Git Bash it stays on Windows and fails for want of a cross gcc.
@@ -269,7 +286,7 @@ passed, on code untouched since it passed, tells you nothing you did not already
 | What changed | What to run |
 | --- | --- |
 | `src/assets/admin.css` alone | `cargo test --bin bb-auth-web` and `node e2e/shots.js <scene>` |
-| `src/assets/theme.css` or `src/assets/base.css` | `cargo test` (the palette's four arms are pinned by `the_theme_defines_every_token_in_all_four_arms`, the sharing by `only_the_palette_names_a_colour` and `the_components_are_shared_and_the_layouts_only_arrange_them`) and `node e2e/shots.js config` **and a look at `/auth/login`**: both files are emitted by both programs, so a change to either repaints the admin interface and the sign-in page together, and half of that is invisible to the admin's own suite |
+| `src/assets/theme.css` or `src/assets/base.css` | `cargo test` (the palette's four arms are pinned by `the_theme_defines_every_token_in_all_four_arms`, the sharing by `only_the_palette_names_a_colour` and `the_components_are_shared_and_the_layouts_only_arrange_them`) and `node e2e/shots.js config` **and a look at `/auth/login`**: both files are emitted by all three HTML programs, so a change to either repaints the admin interface, the sign-in page and the self-service page together, and most of that is invisible to the admin's own suite |
 | `src/assets/auth.css` alone | `cargo test --bin bb-auth` and a look at the page in a browser |
 | `src/assets/*.html` | `cargo test --bin bb-auth` (the page tests read the rendered document) and a look at the page in a browser: no test can tell you a login form is unusable, or that a refusal reads as an accusation. All four pages are here: `login.html`, `callback.html`, `denied.html`, `error.html` |
 | `maud` markup, or a `K` translation key | the above, plus `cargo test` (several tests assert on rendered HTML) and `node e2e/run.js` |

@@ -60,18 +60,19 @@ Three actors outside bb-auth itself:
 
 ## 3. Code structure
 
-One crate, four targets. The seam is the **access file** (and, since 3.1, the settings
+One crate, five targets. The seam is the **access file** (and, since 3.1, the settings
 file and the presentation contract beside it, for the same reason and by the same rule):
-its schema, its parser, its matcher and its grant model are the one thing two programs
-must agree on byte for byte, so they live in a library both link. Everything else about
+its schema, its parser, its matcher and its grant model are the one thing the programs
+must agree on byte for byte, so they live in a library all of them link. Everything else about
 the gate is the gate's, and stays in one file.
 
 | Target | What it is |
 |--------|------------|
-| `src/lib.rs` (`bb_auth_core`) | **The access file.** Schema (`AccessFile`), parser (`compile_access`), URL matcher (`glob_match` / `UrlScope`), the two-level resolution (`Access::resolve`, `base_covers`), the grant model (`decide`, `decide_api_key`), identity and key minting (`mint_uuid`, `mint_api_key`), and how a file is edited and written (`open_access_file`, `AccessWrite`, the document mutations). Plus the settings file, and **the presentation contract** (`THEME_CSS` from `src/assets/theme.css`, `BASE_CSS` from `src/assets/base.css`, `UiTheme`, `stylesheet_link`, `html_escape`, `compile_asset_url`): the palette two programs paint from **and the components they build out of it**, on the same membership rule as everything else here. A thing (a button, a field, a card, a tag, a message) is defined once for both; how a page arranges those things is not. Reads no env, opens no socket, holds no HTTP, prints nothing. |
-| `src/bin/bb-auth.rs` (`bb-auth`) | **The gate**, still a single file read top to bottom: HTTP, config, the session cookie, id_token validation, the nginx contract, and the three pages it serves out of `src/assets/` (sign-in, social callback, error). |
+| `src/lib.rs` (`bb_auth_core`) | **The access file.** Schema (`AccessFile`), parser (`compile_access`), URL matcher (`glob_match` / `UrlScope`), the two-level resolution (`Access::resolve`, `base_covers`), the grant model (`decide`, `decide_api_key`), identity and key minting (`mint_uuid`, `mint_api_key`), and how a file is edited and written (`open_access_file`, `AccessWrite`, the document mutations). Plus the settings file, and **the presentation contract** (`THEME_CSS` from `src/assets/theme.css`, `BASE_CSS` from `src/assets/base.css`, `UiTheme`, `stylesheet_link`, `html_escape`, `compile_asset_url`): the palette three programs paint from **and the components they build out of it**, on the same membership rule as everything else here. A thing (a button, a field, a card, a tag, a message) is defined once for all of them; how a page arranges those things is not. Reads no env, opens no socket, holds no HTTP, prints nothing. |
+| `src/bin/bb-auth.rs` (`bb-auth`) | **The gate**, still a single file read top to bottom: HTTP, config, the session cookie, id_token validation, the nginx contract, and the four pages it serves out of `src/assets/` (sign-in, social callback, refusal, error). |
 | `src/bin/bb-auth-adm.rs` (`bb-auth-adm`) | **The access-file admin CLI.** CRUD over `applications` / `scopes` / `user_groups` / `denied` / `users` / `api_keys`, key minting and rotation, and `can EMAIL URL` — which calls the library's `decide`, so it answers the question the gate will answer. Every edit and every write is a library call (`AccessWrite`), so it cannot save a file the gate would reject; what is left here is flags, warnings and the wording of a verdict. See §12. |
 | `src/bin/bb-auth-web.rs` (`bb-auth-web`) | **The access-file admin GUI**: server-rendered (`maud`; no page needs JavaScript, the one inline handler is a Settings-menu shortcut with a `<noscript>` submit behind it) over the library, read *and* write — CRUD through `AccessWrite` alone, `POST`-only mutations behind a same-origin check and a `rev` (sha256-of-file) concurrency check. Loopback behind nginx `auth_request`, identity from the `X-Auth-Email` nginx injects plus its own administrator allowlist (`web.admins` in the settings file, read fresh on every request and editable from its own Settings tab). Links the library, none of the gate. |
+| `src/bin/bb-auth-me.rs` (`bb-auth-me`) | **The self-service page**: server-rendered (`maud`) over the library, none of the gate, for one person's **own** account and nobody else's. What is built is the identity half (plan step 2b-1): both files read fresh on every request, `X-Auth-Email` split into the list of addresses the gate actually sends, the `denied` veto checked ahead of everything, and a page naming the caller and their uuid. Loopback behind nginx `auth_request`, identity from `X-Auth-Email` and nowhere else, `web.admins` not read, because an administrator here is one more person. **Not packaged yet**: no `.deb`, no unit, and `scripts/build.sh` and `scripts/package.sh` build only the other three, so a deploy installs nothing new (plan step 3). See §13. |
 
 Inside `src/bin/bb-auth.rs`, in file order:
 
@@ -282,10 +283,10 @@ fresh on every request, because this is the one service that can edit it.
 
 ### 8a. The settings file
 
-`compile_settings` (in the library, so all three programs agree on it) turns it into
-`Settings`. Three sections: `gate` and `web` are one per service, and `ui` is the one both
-read. Each service ignores what is not its own, and all of it goes through the same parser,
-so an edit made by either is one the other would accept.
+`compile_settings` (in the library, so all four programs agree on it) turns it into
+`Settings`. Three sections: `gate` and `web` are one per service, and `ui` is the one all
+three of the HTML services read. Each service ignores what is not its own, and all of it goes
+through the same parser, so an edit made by one is one the others would accept.
 
 | Setting | Default | Notes |
 |---------|---------|-------|
@@ -1137,10 +1138,15 @@ proxy_set_header X-Auth-Family-Name $bb_family;
 
 ## 13. The self-service binary (`bb-auth-me`)
 
-**Status: approved by the user on 2026-11-23, nothing built yet.** This section is the
-design the steps in `PLAN.md` implement; the questions it left open were
-answered the same day and are recorded in 13.10. When the code exists, the mechanism moves to
-rustdoc and the rules to `AGENTS.md`, as everywhere else, and this section shrinks to the
+**Status: approved by the user on 2026-11-23, and plan step 2b-1 is built.** The binary
+exists as a fifth target, and it is the identity half of 13.4: both files read fresh on every
+request, the header split into the list of addresses the gate sends, the `denied` veto ahead of
+everything, and a minimal page naming the caller and their uuid, with that table's `401`, `500`
+and `403` answered as written. What is not built is the rest of what 13.1 promises: the page's
+content (step 2b-2), the package, unit and ownership (step 3), the keys (step 4) and the
+profile (step 5). The questions this section left open were answered the same day and are
+recorded in 13.10. As each step lands, its mechanism moves to
+rustdoc and its rules to `AGENTS.md`, as everywhere else, and this section shrinks to the
 component view.
 
 What was read to write it: `AGENTS.md`, `PLAN.md`, this document, `docs/SECURITY.md`,
@@ -1182,7 +1188,7 @@ this row".
 | Binary | `/opt/bb-auth/bin/bb-auth-me` |
 | Package | `bb-auth-me`, optional like the other two tools, `depends` on `bb-auth (= <same version>)` for the reason the others do |
 | Unit | `/usr/lib/systemd/system/bb-auth-me.service` |
-| Env file | `/opt/bb-auth/etc/bb-auth-me.env`, operator-owned, created once from `share/bb-auth-me.env.example`: `BB_AUTH_ACCESS_FILE`, `BB_AUTH_ME_LISTEN` (default `127.0.0.1:8092`), `BB_AUTH_ME_BASE_PATH`. No secret |
+| Env file | `/opt/bb-auth/etc/bb-auth-me.env`, operator-owned, created once from `share/bb-auth-me.env.example`: `BB_AUTH_ACCESS_FILE`, `BB_AUTH_SETTINGS_FILE` (default: `settings.json` beside the access file, the same rule the packages already use, so one env line cannot point the two files at two deployments), `BB_AUTH_ME_LISTEN` (default `127.0.0.1:8092`), `BB_AUTH_ME_BASE_PATH`, `BB_AUTH_ME_ALLOW_NONLOOPBACK` (the deliberate yes that lets a non-loopback bind start: absent means such a bind is fatal, as `bb-auth-web`'s is). No secret |
 | Service user | `bb-auth-web`, shared with the GUI (13.3) |
 | Reads | `access.json`, `settings.json` (`gate.issuer`, `gate.client_id`, `gate.identity_attrs`, `gate.profile_claims`, `audit.retention`, the `ui` section) |
 | Writes | `access.json` (and its `.bak`), nothing else |

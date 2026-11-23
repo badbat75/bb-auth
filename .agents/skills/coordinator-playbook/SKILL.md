@@ -30,7 +30,7 @@ Every Claude Code subagent runs on Opus, whatever its role: pass
 The coordinator itself is not bound to Opus: it runs on whatever model the session uses. The role
 files carry no model, to stay readable by both harnesses.
 
-Command, from the repo root (flags checked against `opencode run --help` on OpenCode 2.3.0; the roles
+Command, from the repo root (flags checked against `opencode run --help` on OpenCode 2.4.0; the roles
 are the files in `.opencode/agents/`):
 
     opencode run --agent <tester|coder|docs> -m llama.cpp/Swift-Qwen3.8-Flash-Next \
@@ -55,6 +55,9 @@ files outside the repo.
 7. Repository content goes to the endpoint set in `~/.config/opencode/opencode.json`.
 
 ## Pitfalls
+
+- A run that dies mid-task (an OpenCode update closed one) may have finished its edits: check the
+  log, the tree and the tests before rerunning, and never take its missing REPORT as a failure of the work.
 
 - Agents defined in a new `.claude/agents` directory appear only after a new session starts. If an agent
   type is missing, start one before doing its work yourself.

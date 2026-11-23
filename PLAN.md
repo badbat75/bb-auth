@@ -16,7 +16,7 @@ as the column says. A requirement still open must be covered by a step.
 |---|---|---|
 | R1 | Self-service API keys: a user mints, rotates and removes their own `bbk_` tokens, without an administrator | Steps 2b-2, 4 |
 | R2 | Self-service profile: a user sees what bb-auth knows about them and edits their own Cognito profile attributes | Steps 2b-2, 5 |
-| R3 | The self-service surface is a fourth binary of its own, dedicated to users and separate from the admin GUI, so further user-facing features have a home | Design approved (`docs/ARCHITECTURE.md` §13); steps 2b-1, 2b-2, 3 |
+| R3 | The self-service surface is a fourth binary of its own, dedicated to users and separate from the admin GUI, so further user-facing features have a home | Design approved (`docs/ARCHITECTURE.md` §13); steps 2b-2, 3 |
 | R4 | Self-service deletion: a user deletes their own account and its related data, at once, after a confirmation: the roster row, keys, references in scopes and groups, and the Cognito user. The audit is not edited: their lines expire with `audit.retention`, and the page says so | Steps 6, 7. For a social-only user the Cognito half is left to an administrator and the page says so: accepted by the user on 2026-11-23 |
 
 ### How we work
@@ -75,25 +75,9 @@ decisions listed in §13.10: the binary is `bb-auth-me`, behind an `authenticate
 as the shared `bb-auth-web` account, re-authenticating with a server-side email code before any
 Cognito action.
 
-### 2b-1. The user binary: identity
-
-Covers: R3.
-
-A new `[[bin]]` `bb-auth-me` (`src/bin/bb-auth-me.rs`), configured from `BB_AUTH_ACCESS_FILE`,
-`BB_AUTH_SETTINGS_FILE` (default: beside the access file), `BB_AUTH_ME_LISTEN` (default
-`127.0.0.1:8092`, a non-loopback bind refused as `bb-auth-web` does) and `BB_AUTH_ME_BASE_PATH`.
-It reads both files fresh per request and answers the callers of §13.4 with a minimal page in the
-shared presentation: `X-Auth-Email` split on ASCII whitespace and each part `norm_email`ed.
-
-- Done when: tests over a real socket show: no `X-Auth-Email` is `401`; `identity_attrs` without
-  `email` is `500` naming the setting; values from two different rows are `500`; any value
-  `denied` is `403`, checked first; two values of one row, a roster user, an administrator not in
-  the roster and a stranger each get `200` naming them; the page carries `PAGE_SECURITY_HEADERS`
-  and zero `<script>` and handlers; the binary starts against the example files and answers curl.
-
 ### 2b-2. The user binary: what the page shows
 
-Covers: R3, part of R1 and R2. Built on 2b-1.
+Covers: R3, part of R1 and R2. Builds on the identity handling already in `bb-auth-me`.
 
 `src/bin/bb-auth-me.rs` serves one page showing what bb-auth knows about the caller (uuid,
 emails, groups, the applications and scope names they reach (`Access::scopes_reached`, already in the library), key ids,
