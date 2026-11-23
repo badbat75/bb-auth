@@ -90,28 +90,18 @@ sandbox; a per-file mount detaches on a rename).
   gate, and the Audit tab still reads `/var/log/bb-auth`. Until rpi-01 is reached, the step
   stays open with only the unit change and `systemd-analyze verify` on it done.
 
-### 3b. A secret header only nginx sets
+### 3b2. verify.sh speaks to the GUI with the proxy secret
 
-Decided by the user on 2026-11-23: the secret is required on **every** request, reads included.
+Covers: R3. Found on rpi-01 on 2026-11-23 while closing step 3b.
 
-Covers: R3 (a precondition to opening the GUI to strangers). Found and proven on a local
-instance on 2026-11-23: a forged `X-Auth-Email` with no cookie got the admin dashboard. Design:
-§13.3.
+`scripts/verify.sh` checks that `GET bb-auth-web /` with no identity header is `401`; since the GUI
+now refuses any request without `X-BB-Web-Secret` first, it gets `403` and the deploy reports
+`FAILED` on a healthy host. It runs as root, so it can read `BB_AUTH_WEB_PROXY_SECRET` from the
+GUI's env file and send it, never printing it, and should also check that the same request
+without the secret is `403`.
 
-`bb-auth-web` requires `BB_AUTH_WEB_PROXY_SECRET` at startup (at least 32 characters of
-`[A-Za-z0-9_-]`, fatal otherwise, naming the variable and never the value) and refuses with a
-`403` any request whose `X-BB-Web-Secret` does not match, before the identity or the settings are
-read. The postinst appends a generated secret to `bb-auth-web.env` when the variable is absent and
-(re)writes `/opt/bb-auth/etc/bb-auth-web.nginx` (`root:root 0600`, one `proxy_set_header` line)
-from it on every configure; its preflight checks the variable. The README's GUI location
-includes that file. The secret is never logged, printed or rendered.
-
-- Done when: tests that failed first show no secret and a wrong secret both `403` on `GET` and
-  `POST`, the right one passing, the value in no response, and the startup refusing a missing or
-  short secret; `shellcheck` is clean on the postinst; `dpkg-deb -c` shows nothing new in the
-  package beyond the scripts; and on rpi-01 (with the user's go-ahead) a `curl` to
-  `127.0.0.1:8091` with a forged `X-Auth-Email` and no secret is `403` while the GUI through
-  nginx still works for an administrator.
+- Done when: `verify.sh` is green on rpi-01 (run by hand, read-only) with both checks, the secret
+  appears in none of its output, and `shellcheck` is clean.
 
 ### 3c. Move the self-service page into bb-auth-web as `/me/`, and delete bb-auth-me
 
