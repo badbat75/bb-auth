@@ -14,9 +14,9 @@ as the column says. A requirement still open must be covered by a step.
 
 | ID | Requirement | State |
 |---|---|---|
-| R1 | Self-service API keys: a user mints, rotates and removes their own `bbk_` tokens, without an administrator | Steps 2, 4 |
-| R2 | Self-service profile: a user sees what bb-auth knows about them and edits their own Cognito profile attributes | Steps 2, 5 |
-| R3 | The self-service surface is a fourth binary of its own, dedicated to users and separate from the admin GUI, so further user-facing features have a home | Design approved (`docs/ARCHITECTURE.md` §13); steps 2, 3 |
+| R1 | Self-service API keys: a user mints, rotates and removes their own `bbk_` tokens, without an administrator | Steps 2a, 2b, 4 |
+| R2 | Self-service profile: a user sees what bb-auth knows about them and edits their own Cognito profile attributes | Steps 2a, 2b, 5 |
+| R3 | The self-service surface is a fourth binary of its own, dedicated to users and separate from the admin GUI, so further user-facing features have a home | Design approved (`docs/ARCHITECTURE.md` §13); steps 2b, 3 |
 | R4 | Self-service deletion: a user deletes their own account and its related data, at once, after a confirmation: the roster row, keys, references in scopes and groups, and the Cognito user. The audit is not edited: their lines expire with `audit.retention`, and the page says so | Steps 6, 7. For a social-only user the Cognito half is left to an administrator and the page says so: accepted by the user on 2026-11-23 |
 
 ### How we work
@@ -74,25 +74,40 @@ decisions listed in §13.10: the binary is `bb-auth-me`, behind an `authenticate
 as the shared `bb-auth-web` account, re-authenticating with a server-side email code before any
 Cognito action.
 
-### 2. The user binary: identity and a read-only page
+### 2a. `Access::scopes_reached` in the library
+
+Covers: part of R1 and R2.
+
+`Access::scopes_reached(identifier)` in `src/lib.rs`, beside `scopes_for`: the `(app, scope)`
+pairs a signed-in identity reaches, in file order, as §13.4 defines them. It takes an
+identifier (an email) rather than the uuid §13.7 names, because a stranger has no uuid and still
+reaches `authenticated` scopes, and can still be excluded from one by email; it asks the same
+`vetoes_identifier`, `excludes_identifier` and `uuid_of` that `decide` asks. Restricted: a member
+(directly or through a `@group`) whose scope admits a login. Authenticated: everybody. Anonymous:
+never listed. Excluded: dropped. Denied: empty.
+
+- Done when: library tests, written first, show each rule above on one fixture (roster user,
+  member through a group, stranger, excluded by uuid and by email, denied, a restricted scope
+  whose credentials refuse a login), and show it agrees with `decide` both ways: for every
+  scope it returns, `decide(Subject::Identifier(..))` grants on a URL inside that scope, and for
+  every non-anonymous scope it does not return, `decide` refuses there.
+
+### 2b. The user binary: identity and a read-only page
 
 Covers: R3, part of R1 and R2.
 
 `src/bin/bb-auth-me.rs` serves one page showing what bb-auth knows about the caller (uuid,
-emails, groups, the applications and scope names they reach (`Access::scopes_reached`, added to
-the library test first, §13.4 and §13.7), key ids, expiry and scopes, denied or not, the profile
-headers nginx forwards), and no URL pattern or base anywhere, in the shared
-presentation (`THEME_CSS`, `BASE_CSS`, `ui`, `page_csp`,
-`PAGE_SECURITY_HEADERS`), with no script. No packaging, no write. `X-Auth-Email` is split on ASCII whitespace and each
-part `norm_email`ed, the rule `bb-auth-web`'s `handle` already applies.
+emails, groups, the applications and scope names they reach (`scopes_reached`, step 2a), key ids,
+expiry and scopes, denied or not, the profile headers nginx forwards), and no URL pattern or base
+anywhere, in the shared presentation (`THEME_CSS`, `BASE_CSS`, `ui`, `page_csp`,
+`PAGE_SECURITY_HEADERS`), with no script. No packaging, no write. `X-Auth-Email` is split on ASCII
+whitespace and each part `norm_email`ed, the rule `bb-auth-web`'s `handle` already applies.
 
 - Done when: unit tests show missing `X-Auth-Email` is `401`, two values of one row resolve to it,
   values of two rows are `500`, `identity_attrs` without `email` is `500`, and the four callers
   (roster user, administrator not in the roster, stranger, denied) get what §13.4 says; no page
-  contains a URL pattern or base from the fixture; a scope reached through a `@group` is listed,
-  an `anonymous` scope is not, an `authenticated` one is, an excluded one is not; a library test
-  shows `decide` grants inside every scope `scopes_reached` returns; a test
-  pins zero `<script>` and zero handlers; the page is checked in a browser.
+  contains a URL pattern or base from the fixture; a test pins zero `<script>` and zero handlers;
+  the page is checked in a browser.
 
 ### 3. Package and ownership
 
