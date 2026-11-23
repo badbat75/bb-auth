@@ -130,7 +130,13 @@ One crate, five targets, and the split is load-bearing:
   against a `bb-auth-adm` over SSH is a 409 instead of a silent clobber. It links the library,
   none of the gate, and is **just another app bb-auth fronts**: loopback only, gated by nginx
   `auth_request`, identity read from the `X-Auth-Email` nginx injects and from nowhere else —
-  a missing header is a 401, not an anonymous visitor. `web.admins` is its own
+  a missing header is a 401, not an anonymous visitor. Ahead of that header sits the **proxy
+  secret**: every request, `GET` or `POST`, must carry `X-BB-Web-Secret` matching
+  `BB_AUTH_WEB_PROXY_SECRET`, compared in constant time (`compile_proxy_secret`,
+  `proxy_secret_matches`) before the identity header or the settings file is read, and a request
+  that does not is a `403`. The reason: loopback is reachable by every user and every other
+  service on the host, and each of them can write `X-Auth-Email`, so the secret is the only thing
+  that says a request came through nginx (docs/ARCHITECTURE.md §13.3). `web.admins` is its own
   allowlist on top of that, required and never empty, because an `authenticated` scope covering
   its URL would otherwise open the admin surface to any Cognito account.
 - **[src/bin/bb-auth-me.rs](src/bin/bb-auth-me.rs)**: **the self-service page**, what one
@@ -1277,8 +1283,11 @@ What is left below is configuration, which is a reference rather than a rule.
   settings file** (`compile_settings`) for the settings that must be hot. Which ones those
   are, and the three-part rule that decides it, is stated once in the invariants above and
   deliberately not counted again here: the two copies had already drifted to "ten" and
-  "six". The only secret is `BB_AUTH_HMAC_KEY` (≥32 bytes), and it is in the env file. Full reference:
+  "six". The only secret of the gate is `BB_AUTH_HMAC_KEY` (≥32 bytes), and it is in the env
+  file; the GUI's env file holds one of its own, `BB_AUTH_WEB_PROXY_SECRET`, which the install
+  generates and never prints (docs/ARCHITECTURE.md §13.3). Full reference:
   [deploy/bb-auth.env.example](deploy/bb-auth.env.example),
+  [deploy/bb-auth-web.env.example](deploy/bb-auth-web.env.example),
   [deploy/settings.example.json](deploy/settings.example.json) and `docs/ARCHITECTURE.md` §8/§8a.
 
 ## Working from the plan

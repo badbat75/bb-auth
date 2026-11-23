@@ -37,6 +37,53 @@ configure)
             "$DEST/share/bb-auth-web.env.example" "$ENV_FILE"
     fi
 
+    # Reads one variable out of the env file, last occurrence wins, whitespace stripped. Used
+    # by the proxy secret below and by the preflight.
+    envval() {
+        grep -E "^[[:space:]]*$1=" "$ENV_FILE" 2>/dev/null | tail -1 | cut -d= -f2- | tr -d '[:space:]' || true
+    }
+
+    # --- the proxy secret ---
+    # nginx sends this on every request it proxies here and the GUI refuses any request that
+    # does not carry it: loopback is reachable by every user and every other service on the
+    # host, and each of them can write X-Auth-Email, so the header that names an administrator
+    # is worth nothing without a value only nginx knows (docs/ARCHITECTURE.md §13.3).
+    #
+    # Appended ONLY when the variable is absent, and an existing value is never rewritten: the
+    # env file is operator-owned, and a secret that changed on every upgrade would break every
+    # deployment whose nginx include was written by hand. 33 random bytes are 44 base64
+    # characters, and the two `tr`s leave them inside `[A-Za-z0-9_-]`, which is what lets the
+    # value go into an env file, a shell, a header and an nginx line with nothing to quote.
+    # The value is never echoed: a postinst runs with its output in the package log.
+    if ! grep -q '^[[:space:]]*BB_AUTH_WEB_PROXY_SECRET=' "$ENV_FILE" 2>/dev/null; then
+        PROXY_SECRET="$(head -c 33 /dev/urandom | base64 -w0 | tr '+/' '-_' | tr -d '=')"
+        printf 'BB_AUTH_WEB_PROXY_SECRET=%s\n' "$PROXY_SECRET" >> "$ENV_FILE"
+    fi
+
+    # The nginx half, rewritten from the env file on EVERY configure. One source, one derived
+    # copy: an upgrade can never leave a proxy line naming a secret the running binary no longer
+    # reads, which is what two hand-edited copies drift into.
+    #
+    # root:root 0600 is enough because the nginx **master** is what reads the configuration, and
+    # on Debian it runs as root. The GUI's own user is deliberately not given this file: it can
+    # read the env file it was started with, and a second readable copy of the same secret is a
+    # second file to get lost. Written beside its target and renamed onto it, because a proxy
+    # that reloads mid-write would read a half line.
+    NGINX_FILE="$DEST/etc/bb-auth-web.nginx"
+    PROXY_SECRET="$(envval BB_AUTH_WEB_PROXY_SECRET)"
+    if [ -n "$PROXY_SECRET" ]; then
+        TMP="$NGINX_FILE.tmp.$$"
+        # The umask is set before the file exists: under the default 022 the temp would be
+        # world-readable for the window between the printf and the chmod below.
+        (
+            umask 077
+            printf 'proxy_set_header X-BB-Web-Secret %s;\n' "$PROXY_SECRET" > "$TMP"
+        )
+        chown root:root "$TMP"
+        chmod 0600 "$TMP"
+        mv -f "$TMP" "$NGINX_FILE"
+    fi
+
     # --- the access file changes hands ---
     # Idempotent, re-asserted on every configure. The DIRECTORY moves too, because the
     # replacement is a temp file written beside the target and renamed onto it, and
@@ -77,9 +124,6 @@ configure)
     # --- preflight, for the same reason as the gate's ---
     # Both of these are fatal in the binary, and a fatal startup under
     # Restart=on-failure is a boot loop.
-    envval() {
-        grep -E "^[[:space:]]*$1=" "$ENV_FILE" 2>/dev/null | tail -1 | cut -d= -f2- | tr -d '[:space:]' || true
-    }
     FAIL=0
     # The allowlist lives in the settings file (web.admins), where this service can edit it
     # and see the edit, and it must name somebody: empty must never come to mean 'everyone'.
@@ -100,6 +144,17 @@ configure)
         echo "bb-auth-web: BB_AUTH_ACCESS_FILE=${WEB_ACCESS:-<unset>}, but the gate reads $ACCESS_FILE." >&2
         echo "bb-auth-web:              The GUI would edit a file nothing serves, and every save" >&2
         echo "bb-auth-web:              would silently do nothing." >&2
+        FAIL=1
+    fi
+    # The proxy secret, and the length only: the binary is the one that enforces the charset,
+    # per startup. A missing one is the boot loop this preflight exists to catch, and the value
+    # is never printed, because a postinst's output goes into the package log.
+    if [ "${#PROXY_SECRET}" -lt 32 ]; then
+        echo "bb-auth-web: BB_AUTH_WEB_PROXY_SECRET is missing, or shorter than 32 characters." >&2
+        echo "bb-auth-web:              Every request to this port is refused without it, and the" >&2
+        echo "bb-auth-web:              binary refuses to start at all. The install appends a" >&2
+        echo "bb-auth-web:              generated one; if $ENV_FILE has no such line, that file" >&2
+        echo "bb-auth-web:              is not writable by root and nothing here can fix it." >&2
         FAIL=1
     fi
 
@@ -148,6 +203,8 @@ configure)
         fi
         echo "bb-auth-web: answers only through nginx. Gate its location with auth_request"
         echo "bb-auth-web: and inject X-Auth-Email (README, \"The admin GUI behind the gate\")."
+        echo "bb-auth-web: That location must carry the proxy secret too, then reload nginx:"
+        echo "bb-auth-web:   include $NGINX_FILE;"
     fi
     ;;
 

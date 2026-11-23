@@ -1368,6 +1368,8 @@ server {
         # bb-auth-web compares Origin against Host on a POST when the browser sends no
         # Sec-Fetch-Site, so Host has to arrive as the browser sent it.
         proxy_set_header Host             $host;
+        # The proxy secret the GUI requires, in a file the install writes from bb-auth-web.env.
+        include /opt/bb-auth/etc/bb-auth-web.nginx;
         # The GUI has no use for a display name; clear them rather than relay the
         # client's. (Only needed if profile_claims names them at all.)
         proxy_set_header X-Auth-Given-Name  "";

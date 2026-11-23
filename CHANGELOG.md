@@ -71,6 +71,38 @@ when there is no tag to check out.
 release logs anybody out.** The settings file goes from version 1 to version 3, which needs an
 edit before the binaries land: see "Upgrading" below.
 
+### New: bb-auth-web requires a secret only nginx sets, and cannot read the HMAC key
+
+**Upgrade note, and it is the one section here with work in it: after installing, every request
+to the admin GUI is a `403` until nginx sends the secret.** Add
+`include /opt/bb-auth/etc/bb-auth-web.nginx;` inside the GUI's `location`, then
+`systemctl reload nginx`. Do both in the same maintenance window as the package: the install
+restarts the service, and from that restart until the nginx reload every page of the GUI answers
+`403`. The file to include is written by the install from the secret in the GUI's env file, so it
+is there to include before nginx is touched, and the `403` page says the request did not come
+through the proxy.
+
+**Why.** `bb-auth-web` believes `X-Auth-Email`, and its trust model said nothing reaches that
+port except nginx. Loopback is not that: every user and every other service on the host can reach
+the port, and each of them can write that header, so a forged one got the admin dashboard, `200`,
+and with it the roster with every email and uuid, the settings, and the audit with every sign-in's
+address, user agent and account. So every request, `GET` or `POST`, now carries
+`X-BB-Web-Secret`, which nginx sets from `BB_AUTH_WEB_PROXY_SECRET`, and a request whose value
+does not match is a `403` answered before the identity header or the settings file is read. The
+value is required at startup (at least 32 characters of `[A-Za-z0-9_-]`, which is what lets it go
+into an env file, a shell, a header and an nginx line with nothing to quote), compared in constant
+time, and never printed, logged or rendered: the startup banner says only "proxy secret: set". The
+install appends a generated 44-character value to `bb-auth-web.env` when that line is absent, and
+never rewrites one that is already there.
+
+**The GUI can no longer read the HMAC key.** `bb-auth.env` is `root:bb-auth 0640` and the GUI is
+in group `bb-auth` (it has to be, to restore the access file's group), so the process a stranger's
+browser talks to could read the key that signs every session cookie and mint a cookie for anybody.
+Its unit now sets `InaccessiblePaths=/opt/bb-auth/etc`, and that is safe because the binary reads
+nothing under that directory at run time: systemd reads an `EnvironmentFile=` before the sandbox
+exists. Nothing to do for that half, and nothing here changes the cookie, access-file or
+settings-file format.
+
 ### Carried by 1.99.7: Cognito's `acr` and `amr`, and a reload that could hang a worker
 
 **Nothing to do before November 2026.** AWS adds an `acr` string and an `amr` array to every

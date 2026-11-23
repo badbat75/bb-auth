@@ -29,15 +29,25 @@
 //! * nginx gates its URL with `auth_request` against the gate, and injects the authorized
 //!   email with `auth_request_set` + `proxy_set_header X-Auth-Email` — the contract
 //!   documented on `bb-auth`'s `IDENTITY_HEADER`, unchanged and unextended;
-//! * this binary reads that header and nothing else. It validates no token, holds no secret
-//!   and mints no cookie — there is no credential here to steal.
+//! * nginx also sets [`PROXY_SECRET_HEADER`] on that location, from `BB_AUTH_WEB_PROXY_SECRET`,
+//!   and this binary refuses any request that does not carry it. Loopback is reachable by every
+//!   user and every other service on the host, and each of them can write `X-Auth-Email`, so the
+//!   secret is the one thing that says "this came through the proxy": nginx sets it, and nothing
+//!   else on the host knows it. It is compared on every request, in constant time
+//!   ([`proxy_secret_matches`]), and the value is never printed, logged or rendered.
+//!   `docs/ARCHITECTURE.md` §13.3.
+//! * this binary reads that header and nothing else. It validates no token and mints no
+//!   cookie: the only credential here is the proxy secret, which authorizes a *transport*,
+//!   never a person, and buys nothing to anyone who cannot reach the port through nginx.
 //!
 //! Trusting the header is sound for one reason only: `proxy_set_header` overwrites whatever
 //! the client sent, on **every** gated location, and the service is unreachable except
 //! through nginx. Both halves are load-bearing. Exposing this port directly, or gating it
 //! from a location that forgets the `proxy_set_header`, would let anyone name themselves —
 //! so a missing header is a `401` here rather than an anonymous session, which turns a
-//! broken deployment into an error page instead of a silent open door.
+//! broken deployment into an error page instead of a silent open door. The proxy secret is
+//! what closes the other half: a process that reaches this port directly, having read nothing
+//! it should not, is answered a `403` before its identity is looked at.
 //!
 //! And the header is not the last word: the email must also be on **`web.admins`** in the
 //! settings file.
@@ -45,9 +55,10 @@
 //! GUI's URL would otherwise open the admin surface to any Cognito account. It is required,
 //! and must be non-empty — empty must never mean "everyone".
 //!
-//! Both checks are **route-global** and run before the router: there is no path — not a
-//! `404`, not a `POST`, not a broken access file — that answers anything to someone nginx
-//! did not vouch for and `web.admins` does not name.
+//! All three checks are **route-global** and run before the router, in that order: there is
+//! no path (not a `404`, not a `POST`, not a broken access file) that answers anything to a
+//! request the proxy did not send, to someone nginx did not vouch for, or to someone
+//! `web.admins` does not name.
 //!
 //! # Mutations
 //!
@@ -225,6 +236,7 @@ use bb_auth_core::{
     SOCIAL_IDPS, THEME_CSS,
 };
 use maud::{html, Markup, PreEscaped, DOCTYPE};
+use sha2::{Digest, Sha256};
 use std::io::Read;
 use tiny_http::{Header, Method, Request, Response, Server, StatusCode};
 
@@ -284,6 +296,15 @@ const PREFERENCE_COOKIE_MAX_AGE: i64 = 31_536_000;
 /// [`preserved_query`]) — no link this GUI builds has one, and the failure mode is a menu
 /// that stops applying on change, not a broken page.
 const SETTINGS_ONCHANGE: &str = "this.form.submit()";
+
+/// The header that carries the proxy secret: `BB_AUTH_WEB_PROXY_SECRET` on this end, and the
+/// one line of `/opt/bb-auth/etc/bb-auth-web.nginx` on nginx's (`proxy_set_header`, which
+/// **overwrites** whatever the client sent under that name).
+///
+/// Deliberately not under `X-Auth-`: that prefix is where the gate derives a header from every
+/// claim an operator can name (`derive_profile_header`), so a claim called `web_secret` would
+/// be able to collide with this one.
+const PROXY_SECRET_HEADER: &str = "X-BB-Web-Secret";
 
 /// Blocking request threads. Fixed, and deliberately not an env var: this serves the
 /// handful of people on `web.admins`, not the public.
@@ -710,6 +731,8 @@ enum K {
     CredSession,
     CredAnonymous,
     AppSees,
+    NoProxyTitle,
+    NoProxyBody,
     NoIdentityTitle,
     NoIdentityBody,
     NotAdminTitle,
@@ -1574,6 +1597,20 @@ fn t(lang: Lang, key: K) -> &'static str {
         K::CredSession => m(lang, "Session", "Sessione"),
         K::CredAnonymous => m(lang, "None", "Nessuna"),
         K::AppSees => m(lang, "the application sees", "l'applicazione vede"),
+        K::NoProxyTitle => m(
+            lang,
+            "Not through the proxy",
+            "Non arriva dal proxy",
+        ),
+        K::NoProxyBody => m(
+            lang,
+            "this request did not carry the proxy secret, so it did not arrive through nginx. \
+             The admin interface answers only through the proxy that sets it (README, \"The \
+             admin GUI behind the gate\").",
+            "questa richiesta non porta il secret del proxy, quindi non arriva da nginx. \
+             L'interfaccia di amministrazione risponde solo attraverso il proxy che lo imposta \
+             (README, \"The admin GUI behind the gate\").",
+        ),
         K::NoIdentityTitle => m(lang, "No identity header", "Nessun header di identità"),
         K::NoIdentityBody => m(
             lang,
@@ -2159,6 +2196,15 @@ struct Config {
     /// default on both sides. This end never writes it, and the unit that runs this end has no
     /// business being able to: an audit an administrator can edit is not one.
     audit_path: String,
+    /// `BB_AUTH_WEB_PROXY_SECRET`: the shared secret nginx sets in `X-BB-Web-Secret` on every
+    /// request it proxies here, and the only thing that tells this port "you came through the
+    /// proxy" (docs/ARCHITECTURE.md §13.3).
+    ///
+    /// Required, and validated at startup by [`compile_proxy_secret`]. It is compared on every
+    /// request, as the first check in [`handle`], through [`proxy_secret_matches`] and never
+    /// with `==`; and it is never printed, logged or rendered, because a value that reaches
+    /// the journal at boot is a secret for as long as the journal is kept.
+    proxy_secret: String,
 }
 
 /// Read an env var, falling back to `default` when unset.
@@ -2203,6 +2249,60 @@ fn normalize_base_path(raw: &str) -> Result<String, String> {
     })
 }
 
+/// Validate `BB_AUTH_WEB_PROXY_SECRET` (docs/ARCHITECTURE.md §13.3): at least 32 characters,
+/// all of `[A-Za-z0-9_-]`, so the value survives a shell, an env file and an nginx
+/// `proxy_set_header` line with nothing to quote.
+///
+/// Required, with no default: a deployment that starts without a secret is a deployment where
+/// the check is not running, and a generated one is one line of the install.
+///
+/// Every refusal names the variable and **never the value**. A startup message goes to the
+/// journal, and a secret printed once at boot is a secret in the journal for as long as the
+/// journal is kept; the length is safe to say, the bytes are not.
+fn compile_proxy_secret(raw: &str) -> Result<String, String> {
+    if raw.chars().count() < 32 {
+        return Err(format!(
+            "BB_AUTH_WEB_PROXY_SECRET must be at least 32 characters of [A-Za-z0-9_-] (this \
+             one is {}); the install generates one, so an env file that predates it needs the \
+             line appended once",
+            raw.chars().count()
+        ));
+    }
+    if !raw
+        .chars()
+        .all(|c| c.is_ascii_alphanumeric() || c == '_' || c == '-')
+    {
+        return Err(
+            "BB_AUTH_WEB_PROXY_SECRET holds a character outside [A-Za-z0-9_-], which cannot go \
+             into an env file, a shell, an nginx `proxy_set_header` line or a header value \
+             without quoting it"
+                .to_string(),
+        );
+    }
+    Ok(raw.to_string())
+}
+
+/// Does the secret this request carries match the one this process was started with
+/// (docs/ARCHITECTURE.md §13.3)?
+///
+/// Both sides are hashed first, so the two inputs are always the same 32 bytes and the fold
+/// over XOR reads every one of them: a plain `==` on strings stops at the first differing
+/// byte, and a secret whose prefix can be probed one byte at a time is a secret with a search
+/// attached to it. `sha2` is already in the tree (the cookie's HMAC, the form's `rev`), so
+/// this buys the property for no dependency.
+///
+/// An absent header arrives as the empty string and fails like any other value: the refusal
+/// for "no secret" and "wrong secret" is the same page, because a difference between them is
+/// a probe that tells a local process when it has found the port.
+fn proxy_secret_matches(sent: &str, expected: &str) -> bool {
+    let sent = Sha256::digest(sent.as_bytes());
+    let expected = Sha256::digest(expected.as_bytes());
+    sent.iter()
+        .zip(expected.iter())
+        .fold(0u8, |acc, (a, b)| acc | (a ^ b))
+        == 0
+}
+
 impl Config {
     /// Build the config from the environment, exiting on the first fatal problem.
     fn from_env() -> Config {
@@ -2239,6 +2339,13 @@ impl Config {
             eprintln!("[bb-auth-web] FATAL: {e}");
             std::process::exit(1);
         });
+        // Required, and fatal here: a GUI that starts with no secret is a GUI whose check is
+        // not running, and the one thing it is asked to protect is the header it trusts.
+        let proxy_secret = compile_proxy_secret(&env_or("BB_AUTH_WEB_PROXY_SECRET", ""))
+            .unwrap_or_else(|e| {
+                eprintln!("[bb-auth-web] FATAL: {e}");
+                std::process::exit(1);
+            });
         Config {
             listen: env_or("BB_AUTH_WEB_LISTEN", "127.0.0.1:8091"),
             access_path,
@@ -2246,6 +2353,7 @@ impl Config {
             base_path,
             default_lang,
             logout_url,
+            proxy_secret,
             audit_path: env_or("BB_AUTH_AUDIT_FILE", DEFAULT_AUDIT_FILE)
                 .trim()
                 .to_string(),
@@ -7302,12 +7410,14 @@ fn anon_view<'a>(
     }
 }
 
-/// Serve one request: identify, authorize, route, then either render or mutate.
+/// Serve one request: prove the proxy sent it, identify, authorize, route, then either render
+/// or mutate.
 ///
-/// The order is the point. Identity and the admin allowlist come **before** the router and
-/// before the file is opened, so there is no path — not a 404, not a `POST`, not a broken
-/// access file — that answers anything to someone nginx did not vouch for. The two guards
-/// are route-global and method-blind by construction: they are here, above everything.
+/// The order is the point. The proxy secret, the identity and the admin allowlist come
+/// **before** the router and before the file is opened, so there is no path (not a 404, not a
+/// `POST`, not a broken access file) that answers anything to someone nginx did not vouch for,
+/// reached from outside the proxy. The three guards are route-global and method-blind by
+/// construction: they are here, above everything.
 fn handle(mut req: Request, cfg: &Config) {
     let target = req.url().to_string();
     let (path, query) = match target.split_once('?') {
@@ -7337,6 +7447,32 @@ fn handle(mut req: Request, cfg: &Config) {
         .and_then(|c| cookie_value(c, GROUPS_COOKIE))
         .and_then(GroupsPref::parse)
         .unwrap_or_default();
+    // The proxy secret, ahead of the identity header and of the settings file
+    // (docs/ARCHITECTURE.md §13.3). This port answers on loopback, and loopback is reachable by
+    // every user and every other service on the host, each of which can write `X-Auth-Email`:
+    // the secret is what says "this request came through nginx", because nginx sets it on the
+    // one location and nothing else on the host knows it. It is checked here, above everything,
+    // so a forged administrator's name buys a `403` and not the dashboard, and it is checked on
+    // a `GET` as much as on a `POST`: a read of the roster, the settings and the audit is the
+    // personal data this exists to keep in. Everything above this line reads request headers
+    // only, so nothing here has looked at an identity, a file or the settings yet.
+    if !proxy_secret_matches(
+        header_value(&req, PROXY_SECRET_HEADER).unwrap_or(""),
+        &cfg.proxy_secret,
+    ) {
+        // The built-in look, like the two refusals below it: the settings file is the thing
+        // this request has not been allowed to read, so it cannot be asked what the page
+        // should look like. The page says the request did not come through the proxy, names no
+        // header value, and is the same one for an absent secret and a wrong one.
+        let v = anon_view(cfg, lang, lang_pref, theme, Look::default());
+        let page = notice(
+            "bad",
+            v.t(K::NoProxyTitle),
+            html! { p { (v.t(K::NoProxyBody)) } },
+        );
+        respond_page(req, 403, shell(&v, v.t(K::NoProxyTitle), page), &v.look);
+        return;
+    }
     // Identity comes from nginx and from nowhere else. A missing header is a broken
     // deployment, not an anonymous visitor — say so, and fail closed.
     let raw_email = match header_value(&req, IDENTITY_HEADER) {
@@ -8089,6 +8225,13 @@ fn main() {
         "[bb-auth-web] identity comes from the {IDENTITY_HEADER} header — this port must be \
          reachable ONLY through nginx, behind bb-auth's own auth_request"
     );
+    // Names the header and the file it comes from, never the value: a startup message goes to
+    // the journal, and a secret that lands there once is a secret in the journal for as long as
+    // the journal is kept.
+    eprintln!(
+        "[bb-auth-web] proxy secret: set. A request whose {PROXY_SECRET_HEADER} does not match \
+         is a 403, so nginx must include /opt/bb-auth/etc/bb-auth-web.nginx in the GUI's location."
+    );
     eprintln!(
         "[bb-auth-web] this instance WRITES {} — every edit is validated with the gate's own \
          parser first, and goes live on: systemctl reload bb-auth",
@@ -8198,6 +8341,10 @@ mod tests {
             // Beside the access file, so a test that wants an audit writes one there and a
             // test that does not gets an empty page rather than another test's rows.
             audit_path: format!("{path}.audit"),
+            // The fixture's proxy secret, so every over-the-wire test that goes through
+            // [`get_with_secret`] / [`post_with_secret`] is a request the proxy would have
+            // made, and the refusals below are about the secret and nothing else.
+            proxy_secret: TEST_SECRET.to_string(),
         }
     }
 
@@ -8240,6 +8387,62 @@ mod tests {
             .max_redirects(0)
             .build()
             .new_agent()
+    }
+
+    /// The header nginx will set with the proxy secret, and the fixture's secret
+    /// (docs/ARCHITECTURE.md §13.3). The value is 38 characters of `[A-Za-z0-9_-]`, so it
+    /// passes the startup rule the moment that rule is implemented, and it is long enough that
+    /// a prefix of it is a meaningful "wrong secret" to send.
+    const SECRET_HEADER: &str = "X-BB-Web-Secret";
+    const TEST_SECRET: &str = "test_web_proxy_secret_0123456789ABCDEF";
+
+    /// A `GET` carrying the fixture's proxy secret. Every over-the-wire test uses this,
+    /// because the secret check sits **above** the identity check: a request that does not
+    /// send it is a `403` whatever else it carries, and a test about the allowlist, the `rev`
+    /// or the language cookie has to be a request the proxy would have made. A test that wants
+    /// the refusal builds its request with [`client`] and no secret.
+    fn get_with_secret<T>(url: T) -> ureq::RequestBuilder<ureq::typestate::WithoutBody>
+    where
+        ureq::http::Uri: TryFrom<T>,
+        <ureq::http::Uri as TryFrom<T>>::Error: Into<ureq::http::Error>,
+    {
+        client().get(url).header(SECRET_HEADER, TEST_SECRET)
+    }
+
+    /// The `POST` half of [`get_with_secret`].
+    fn post_with_secret<T>(url: T) -> ureq::RequestBuilder<ureq::typestate::WithBody>
+    where
+        ureq::http::Uri: TryFrom<T>,
+        <ureq::http::Uri as TryFrom<T>>::Error: Into<ureq::http::Error>,
+    {
+        client().post(url).header(SECRET_HEADER, TEST_SECRET)
+    }
+
+    /// Every header value and the body of a response, as one string, for a test that has to
+    /// prove a value appears **nowhere** in what came back. A non-UTF-8 header contributes
+    /// nothing: it cannot carry an ASCII secret anyway.
+    fn everything_in(mut r: ureq::http::Response<ureq::Body>) -> String {
+        let mut all = String::new();
+        for (name, value) in r.headers().iter() {
+            all.push_str(&format!("{name}: {}\n", value.to_str().unwrap_or("")));
+        }
+        all.push_str(&r.body_mut().read_to_string().unwrap());
+        all
+    }
+
+    /// Serve the GUI over a real socket on an ephemeral port, from a fixture on disk, and
+    /// return the port. The tests below need the socket because the check under test is on the
+    /// request path, above the router.
+    fn serve(path: &str, base: &str) -> u16 {
+        let cfg = cfg_for(path, base);
+        let server = Server::http("127.0.0.1:0").expect("bind an ephemeral port");
+        let port = server.server_addr().to_ip().expect("an ip address").port();
+        std::thread::spawn(move || {
+            for req in server.incoming_requests() {
+                handle(req, &cfg);
+            }
+        });
+        port
     }
 
     /// The fingerprint a form rendered from this file would carry.
@@ -8937,8 +9140,7 @@ mod tests {
                 handle(req, &served);
             }
         });
-        let mut r = client()
-            .get(format!("http://127.0.0.1:{port}/"))
+        let mut r = get_with_secret(format!("http://127.0.0.1:{port}/"))
             .header(IDENTITY_HEADER, "admin@x.com")
             .call()
             .expect("a response");
@@ -8972,6 +9174,54 @@ mod tests {
         assert_eq!(parse_lang(" IT "), Some(Lang::It));
         assert_eq!(parse_lang("fr"), None);
         assert_eq!(parse_lang(""), None);
+    }
+
+    /// The startup rule for `BB_AUTH_WEB_PROXY_SECRET` (docs/ARCHITECTURE.md §13.3): required,
+    /// at least 32 characters, and only `[A-Za-z0-9_-]`, so the value survives a shell, an env
+    /// file and an nginx `proxy_set_header` line with nothing to quote. Every refusal names the
+    /// variable, because a journal line that says only "bad secret" is a search; and no refusal
+    /// contains the value, because a secret printed at boot is a secret in the journal for ever.
+    #[test]
+    fn the_startup_refuses_a_missing_short_or_unsafe_proxy_secret_naming_the_variable() {
+        let refused = |raw: &str| {
+            let e = compile_proxy_secret(raw).expect_err("refused at startup");
+            assert!(
+                e.contains("BB_AUTH_WEB_PROXY_SECRET"),
+                "the message must name the variable: {e}"
+            );
+            e
+        };
+
+        // Absent: `from_env` hands the empty string to this, and an unset variable has no safe
+        // default, so the process refuses to start.
+        refused("");
+
+        // One character short of the floor.
+        let short = "a".repeat(31);
+        let e = refused(&short);
+        assert!(
+            !e.contains(&short),
+            "the message must not echo the value: {e}"
+        );
+
+        // Long enough, and one character outside the charset.
+        let spaced = format!("{} x", "a".repeat(30));
+        assert_eq!(spaced.chars().count(), 32);
+        let e = refused(&spaced);
+        assert!(
+            !e.contains(&spaced),
+            "the message must not echo the value: {e}"
+        );
+
+        // A value that meets the rule is accepted unchanged, and that includes the fixture's,
+        // so every over-the-wire test here is a deployment that could start.
+        let ok = format!("{}-_ab", "a".repeat(28));
+        assert_eq!(ok.chars().count(), 32);
+        assert_eq!(compile_proxy_secret(&ok).expect("accepted"), ok);
+        assert_eq!(
+            compile_proxy_secret(TEST_SECRET).expect("accepted"),
+            TEST_SECRET
+        );
     }
 
     // --- routing ------------------------------------------------------------
@@ -9438,8 +9688,7 @@ mod tests {
         });
 
         for at in every_route() {
-            let mut r = client()
-                .get(format!("http://127.0.0.1:{port}{}", at.path()))
+            let mut r = get_with_secret(format!("http://127.0.0.1:{port}{}", at.path()))
                 .header(IDENTITY_HEADER, "admin@x.com")
                 .call()
                 .expect("a response");
@@ -9995,8 +10244,7 @@ mod tests {
             }
         });
         let get = |query: &str, cookie: &str| {
-            let mut r = client()
-                .get(format!("http://127.0.0.1:{port}/audit?{query}"))
+            let mut r = get_with_secret(format!("http://127.0.0.1:{port}/audit?{query}"))
                 .header(IDENTITY_HEADER, "admin@x.com");
             if !cookie.is_empty() {
                 r = r.header("Cookie", cookie);
@@ -10209,8 +10457,7 @@ mod tests {
             }
         });
         let get = |target: &str, cookie: Option<&str>| {
-            let mut r = client()
-                .get(format!("http://127.0.0.1:{port}{target}"))
+            let mut r = get_with_secret(format!("http://127.0.0.1:{port}{target}"))
                 .header(IDENTITY_HEADER, "admin@x.com");
             if let Some(c) = cookie {
                 r = r.header("Cookie", c);
@@ -11313,8 +11560,7 @@ mod tests {
 
         // Authenticated, not an administrator: the settings were read to find that out, so
         // the page they are refused with is the one this deployment asked for.
-        let mut r = client()
-            .get(at("/"))
+        let mut r = get_with_secret(at("/"))
             .header(IDENTITY_HEADER, "someone@x.com")
             .call()
             .expect("a response");
@@ -11337,8 +11583,7 @@ mod tests {
         );
 
         // The administrator's own page, for contrast: same look, which is the point.
-        let mut r = client()
-            .get(at("/"))
+        let mut r = get_with_secret(at("/"))
             .header(IDENTITY_HEADER, "admin@x.com")
             .call()
             .expect("a response");
@@ -11347,7 +11592,7 @@ mod tests {
 
         // And the one that cannot: no identity header at all is answered above the settings
         // read, so it wears the built-in look and links nothing.
-        let mut r = client().get(at("/")).call().expect("a response");
+        let mut r = get_with_secret(at("/")).call().expect("a response");
         assert_eq!(r.status(), 401);
         assert!(
             !r.body_mut().read_to_string().unwrap().contains("<link"),
@@ -11356,8 +11601,7 @@ mod tests {
 
         // Nor can the page that exists BECAUSE the settings are unreadable.
         std::fs::write(settings_path(&path), "{ not json").unwrap();
-        let mut r = client()
-            .get(at("/"))
+        let mut r = get_with_secret(at("/"))
             .header(IDENTITY_HEADER, "admin@x.com")
             .call()
             .expect("a response");
@@ -11380,7 +11624,7 @@ mod tests {
         let at = |p: &str| format!("http://127.0.0.1:{port}{p}");
 
         // No header at all: a broken deployment, not an anonymous visitor.
-        let mut r = client().get(at("/")).call().expect("a response");
+        let mut r = get_with_secret(at("/")).call().expect("a response");
         assert_eq!(r.status(), 401);
         assert!(r
             .body_mut()
@@ -11389,8 +11633,7 @@ mod tests {
             .contains("auth_request"));
 
         // Authenticated, but not on the allowlist.
-        let mut r = client()
-            .get(at("/"))
+        let mut r = get_with_secret(at("/"))
             .header(IDENTITY_HEADER, "someone@x.com")
             .call()
             .expect("a response");
@@ -11402,8 +11645,7 @@ mod tests {
             .contains("someone@x.com"));
 
         // An administrator gets the dashboard, in the configured language.
-        let mut r = client()
-            .get(at("/"))
+        let mut r = get_with_secret(at("/"))
             .header(IDENTITY_HEADER, "Admin@X.com") // normalised, so capitalisation is fine
             .call()
             .expect("a response");
@@ -11414,8 +11656,7 @@ mod tests {
             "{body}"
         );
         // And an unknown path is a 404, not a fall-through to the dashboard.
-        let r = client()
-            .get(at("/nope"))
+        let r = get_with_secret(at("/nope"))
             .header(IDENTITY_HEADER, "admin@x.com")
             .call()
             .expect("a response");
@@ -11446,8 +11687,7 @@ mod tests {
         // order, which is nobody's contract, so a match that depended on the position of one
         // address was never a match.
         for header in ["Admin@X.com other@x.com", "other@x.com admin@x.com"] {
-            let mut r = client()
-                .get(at("/"))
+            let mut r = get_with_secret(at("/"))
                 .header(IDENTITY_HEADER, header)
                 .call()
                 .expect("a response");
@@ -11462,8 +11702,7 @@ mod tests {
         // Several addresses and not one of them an administrator: still the 403, and it
         // still names the caller, because an operator debugging a lockout has to be able to
         // see what nginx actually sent.
-        let mut r = client()
-            .get(at("/"))
+        let mut r = get_with_secret(at("/"))
             .header(IDENTITY_HEADER, "someone@x.com nobody@x.com")
             .call()
             .expect("a response");
@@ -11476,8 +11715,7 @@ mod tests {
 
         // A header that says nothing is a broken deployment and not a stranger, so it is
         // answered by the page that explains nginx, not by a 403 naming an empty identity.
-        let mut r = client()
-            .get(at("/"))
+        let mut r = get_with_secret(at("/"))
             .header(IDENTITY_HEADER, "   ")
             .call()
             .expect("a response");
@@ -11488,6 +11726,147 @@ mod tests {
             .unwrap()
             .contains("auth_request"));
 
+        cleanup(&path);
+    }
+
+    /// A request that reaches this port without the secret nginx sets did not come through the
+    /// proxy (docs/ARCHITECTURE.md §13.3), so the `X-Auth-Email` it carries is worth nothing:
+    /// any local process can write that header. The check sits above the identity header and
+    /// above the settings read, so an administrator's name buys a `403` here, not the dashboard.
+    #[test]
+    fn a_request_with_no_proxy_secret_is_refused_before_the_identity_is_read() {
+        let path = scratch("secret-absent", SAMPLE);
+        let port = serve(&path, "");
+        let mut r = client()
+            .get(format!("http://127.0.0.1:{port}/"))
+            .header(IDENTITY_HEADER, "admin@x.com")
+            .call()
+            .expect("a response");
+        assert_eq!(r.status(), 403, "a forged identity and no secret");
+        let body = r.body_mut().read_to_string().unwrap();
+        assert!(
+            !body.contains("Dashboard"),
+            "the refusal must not be the admin dashboard: {body}"
+        );
+        cleanup(&path);
+    }
+
+    /// The right length and the right charset are not the right value. What is sent here is the
+    /// fixture's secret with its last character changed, so a comparison that stops at the
+    /// first difference and one that reads the whole string give the same answer.
+    #[test]
+    fn a_request_with_the_wrong_proxy_secret_is_refused() {
+        let path = scratch("secret-wrong", SAMPLE);
+        let port = serve(&path, "");
+        let wrong = format!("{}z", &TEST_SECRET[..TEST_SECRET.len() - 1]);
+        let mut r = client()
+            .get(format!("http://127.0.0.1:{port}/"))
+            .header(SECRET_HEADER, wrong)
+            .header(IDENTITY_HEADER, "admin@x.com")
+            .call()
+            .expect("a response");
+        assert_eq!(r.status(), 403, "a secret this deployment did not set");
+        let body = r.body_mut().read_to_string().unwrap();
+        assert!(
+            !body.contains("Dashboard"),
+            "the refusal must not be the admin dashboard: {body}"
+        );
+        cleanup(&path);
+    }
+
+    /// The proxy's own request, and nothing else about it moves: the secret is one header
+    /// nginx adds, so an administrator who arrives through nginx still sees the dashboard.
+    #[test]
+    fn a_request_with_the_right_proxy_secret_is_served() {
+        let path = scratch("secret-right", SAMPLE);
+        let port = serve(&path, "");
+        let mut r = get_with_secret(format!("http://127.0.0.1:{port}/"))
+            .header(IDENTITY_HEADER, "admin@x.com")
+            .call()
+            .expect("a response");
+        assert_eq!(r.status(), 200, "the secret the proxy sends");
+        let body = r.body_mut().read_to_string().unwrap();
+        assert!(body.contains("Dashboard"), "the dashboard: {body}");
+        cleanup(&path);
+    }
+
+    /// A mutation is the case this exists to close, and it is refused by the same check as a
+    /// read, so a `POST` that is otherwise perfect (same-origin, an administrator's identity,
+    /// a current `rev`) still writes nothing without the secret.
+    #[test]
+    fn a_post_with_no_proxy_secret_is_refused_and_writes_nothing() {
+        let path = scratch("secret-post", SAMPLE);
+        let port = serve(&path, "/admin");
+        let url = format!("http://127.0.0.1:{port}/admin/users/bob%40x.com/rm");
+        let before = read(&path);
+        let rev = rev_of(&path);
+        let r = client()
+            .post(&url)
+            .header(IDENTITY_HEADER, "admin@x.com")
+            .header("Sec-Fetch-Site", "same-origin")
+            .send_form([("rev", rev.as_str())])
+            .expect("a response");
+        assert_eq!(r.status(), 403, "a mutation with no secret");
+        assert_eq!(read(&path), before, "the access file untouched");
+        cleanup(&path);
+    }
+
+    /// The secret is a gate in front of the existing checks, not a replacement for them: once it
+    /// is satisfied, a request that names nobody is still the `401` that explains nginx, which is
+    /// the answer an operator needs when the proxy is wired but the identity is not.
+    #[test]
+    fn the_right_proxy_secret_still_leaves_a_missing_identity_a_401() {
+        let path = scratch("secret-no-identity", SAMPLE);
+        let port = serve(&path, "");
+        let mut r = get_with_secret(format!("http://127.0.0.1:{port}/"))
+            .call()
+            .expect("a response");
+        assert_eq!(
+            r.status(),
+            401,
+            "the secret passes, the identity is missing"
+        );
+        assert!(r
+            .body_mut()
+            .read_to_string()
+            .unwrap()
+            .contains("auth_request"));
+        cleanup(&path);
+    }
+
+    /// The secret is a secret, so it is in no response: not in the page that refuses a request
+    /// that did not carry it (echoing the header a client guessed would confirm the guess), and
+    /// not in the page served to an administrator (a value in a document is a value in every
+    /// browser extension, cache and proxy log between here and the operator).
+    #[test]
+    fn the_proxy_secret_appears_in_no_response() {
+        let path = scratch("secret-unrendered", SAMPLE);
+        let port = serve(&path, "");
+        let at = |p: &str| format!("http://127.0.0.1:{port}{p}");
+
+        let r = client()
+            .get(at("/"))
+            .header(IDENTITY_HEADER, "admin@x.com")
+            .call()
+            .expect("a response");
+        assert_eq!(r.status(), 403, "the refusal this test is about");
+        let refused = everything_in(r);
+        assert!(
+            !refused.contains(TEST_SECRET),
+            "no header and no body of the 403 may carry the secret: {refused}"
+        );
+
+        let r = get_with_secret(at("/"))
+            .header(IDENTITY_HEADER, "admin@x.com")
+            .call()
+            .expect("a response");
+        assert_eq!(r.status(), 200, "the page an administrator sees");
+        let served = everything_in(r);
+        assert!(
+            !served.contains(TEST_SECRET),
+            "no header and no body of the 200 may carry the secret: {}",
+            &served[..served.len().min(400)]
+        );
         cleanup(&path);
     }
 
@@ -11506,13 +11885,11 @@ mod tests {
             }
         });
         let url = format!("http://127.0.0.1:{port}/admin/users/bob%40x.com/rm");
-        let agent = client();
-        let post = || agent.post(&url).header(IDENTITY_HEADER, "admin@x.com");
+        let post = || post_with_secret(&url).header(IDENTITY_HEADER, "admin@x.com");
 
         // The confirmation page is a GET, and a GET changes nothing.
         let before = read(&path);
-        let mut r = client()
-            .get(&url)
+        let mut r = get_with_secret(&url)
             .header(IDENTITY_HEADER, "admin@x.com")
             .call()
             .expect("a response");
@@ -11526,16 +11903,15 @@ mod tests {
         let rev = rev_in(&page);
         assert_eq!(rev, rev_of(&path));
 
-        // The identity header and the allowlist guard a POST exactly as they guard a GET:
-        // they are above the router, so no method reaches a mutation without them.
-        let r = agent
-            .post(&url)
+        // The proxy secret, the identity header and the allowlist guard a `POST` exactly as
+        // they guard a GET: they are above the router, so no method reaches a mutation without
+        // them.
+        let r = post_with_secret(&url)
             .header("Sec-Fetch-Site", "same-origin")
             .send_form([("rev", rev.as_str())])
             .expect("a response");
         assert_eq!(r.status(), 401, "no identity header");
-        let mut r = agent
-            .post(&url)
+        let mut r = post_with_secret(&url)
             .header(IDENTITY_HEADER, "someone@x.com")
             .header("Sec-Fetch-Site", "same-origin")
             .send_form([("rev", rev.as_str())])
@@ -11596,13 +11972,12 @@ mod tests {
         assert_eq!(read(&path), after);
 
         // And the redirect target renders the banner it was sent with.
-        let mut r = client()
-            .get(format!(
-                "http://127.0.0.1:{port}/admin/users?msg=user-removed"
-            ))
-            .header(IDENTITY_HEADER, "admin@x.com")
-            .call()
-            .expect("a response");
+        let mut r = get_with_secret(format!(
+            "http://127.0.0.1:{port}/admin/users?msg=user-removed"
+        ))
+        .header(IDENTITY_HEADER, "admin@x.com")
+        .call()
+        .expect("a response");
         assert_eq!(r.status(), 200);
         let landed = r.body_mut().read_to_string().unwrap();
         assert!(landed.contains("user removed"), "{landed}");

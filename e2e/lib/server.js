@@ -10,6 +10,7 @@
 
 const { spawn, spawnSync } = require('child_process');
 const fs = require('fs');
+const http = require('http');
 const net = require('net');
 const os = require('os');
 const path = require('path');
@@ -18,6 +19,14 @@ const E2E_DIR = path.resolve(__dirname, '..');
 const REPO = path.resolve(E2E_DIR, '..');
 const FIXTURE = path.join(REPO, 'deploy', 'access.example.json');
 const CHANNEL = process.env.E2E_BROWSER_CHANNEL || 'msedge';
+
+/**
+ * The proxy secret this suite starts the GUI with, and the value the harness puts on every
+ * request. Any 32+ characters of `[A-Za-z0-9_-]` works (see `compile_proxy_secret`); this one
+ * is fixed so a failing scene is reproducible.
+ */
+const PROXY_SECRET = 'e2e_test_web_proxy_secret_0123456789ABCDEF';
+const PROXY_SECRET_HEADER = 'X-BB-Web-Secret';
 
 /** Run a command, inheriting stdio; a non-zero exit is fatal to the whole run. */
 function sh(cmd, cwd) {
@@ -86,6 +95,10 @@ function startServer(bin, accessFile, auditFile, port) {
         // be a path under /var/log that this suite must never read or create.
         BB_AUTH_AUDIT_FILE: auditFile,
         BB_AUTH_WEB_LISTEN: `127.0.0.1:${port}`,
+        // The secret the front proxy (startProxy) puts on every request. Set here rather than
+        // left unset: the binary refuses to start without one, and a suite that started a
+        // secret-less binary would be evidence about a deployment that cannot exist.
+        BB_AUTH_WEB_PROXY_SECRET: PROXY_SECRET,
         BB_AUTH_WEB_BASE_PATH: '/admin',
         BB_AUTH_WEB_DEFAULT_LANG: 'en',
         // Root-relative, which is the shape a real deployment uses when the gate and the GUI
@@ -114,6 +127,39 @@ function startServer(bin, accessFile, auditFile, port) {
       clearTimeout(timer);
       reject(new Error(`server exited early (${code}). stderr:\n${log}`));
     });
+  });
+}
+
+/**
+ * A stand-in for nginx, in front of the GUI, that adds the proxy secret to every request.
+ *
+ * The suite has no nginx and drives a real browser straight at the binary, and the binary now
+ * refuses any request that does not carry `X-BB-Web-Secret` (docs/ARCHITECTURE.md §13.3). A
+ * proxy is the only way to put that header on *every* request a page makes: Playwright's
+ * `extraHTTPHeaders` covers the contexts the harness builds, but the areas and the visual walk
+ * open their own, and a header set per context is a header a scene can forget.
+ *
+ * It overwrites whatever the client sent under that name, which is what nginx's
+ * `proxy_set_header` does, and it forwards `Host:` untouched: the GUI's same-origin fallback
+ * compares `Origin`'s host with `Host`'s, and a proxy that rewrote it would refuse every write
+ * on an otherwise healthy run.
+ */
+function startProxy(upstreamPort, port) {
+  return new Promise((resolve, reject) => {
+    const proxy = http.createServer((req, res) => {
+      const headers = { ...req.headers, [PROXY_SECRET_HEADER.toLowerCase()]: PROXY_SECRET };
+      const up = http.request(
+        { host: '127.0.0.1', port: upstreamPort, path: req.url, method: req.method, headers },
+        (upRes) => {
+          res.writeHead(upRes.statusCode, upRes.headers);
+          upRes.pipe(res);
+        }
+      );
+      up.on('error', () => res.destroy());
+      req.pipe(up);
+    });
+    proxy.once('error', reject);
+    proxy.listen(port, '127.0.0.1', () => resolve(proxy));
   });
 }
 
@@ -149,16 +195,22 @@ async function boot() {
   const { chromium } = ensureDeps();
   const bin = buildBin();
   const { dir, file: accessFile, settings: settingsFile, audit: auditFile } = tempAccessFile();
+  // Two ports: the GUI's own, which nothing outside this process is allowed to talk to, and
+  // the front proxy's, which is what the browser and every raw `api()` call address. The suite
+  // has no nginx, so the proxy is what stands in for the one location that sets the secret.
   const port = await freePort();
+  const proxyPort = await freePort();
 
-  let server, browser;
+  let server, proxy, browser;
   const stop = async () => {
     if (browser) await browser.close().catch(() => {});
+    if (proxy) proxy.close();
     if (server) server.kill();
     fs.rmSync(dir, { recursive: true, force: true });
   };
   try {
     server = await startServer(bin, accessFile, auditFile, port);
+    proxy = await startProxy(port, proxyPort);
     browser = await chromium.launch({ channel: CHANNEL, headless: true });
   } catch (e) {
     await stop();
@@ -166,13 +218,13 @@ async function boot() {
   }
   const ctx = {
     browser,
-    origin: `http://127.0.0.1:${port}`,
-    base: `http://127.0.0.1:${port}/admin`,
+    origin: `http://127.0.0.1:${proxyPort}`,
+    base: `http://127.0.0.1:${proxyPort}/admin`,
     accessFile,
     settingsFile,
     auditFile,
   };
-  console.log(`== server on ${ctx.origin} (file: ${accessFile}) | browser: ${CHANNEL} ==\n`);
+  console.log(`== server on ${ctx.origin} via the proxy secret (file: ${accessFile}) | browser: ${CHANNEL} ==\n`);
   return { ctx, stop };
 }
 
