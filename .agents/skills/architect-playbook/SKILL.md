@@ -19,3 +19,9 @@ Rules are in `AGENTS.md`. Format of this file: `AGENTS.md`, under "Skills".
 - `X-Auth-Email` can hold several emails joined by a space: never treat the whole header as one email.
 - systemd `IPAddressDeny` also filters outbound traffic, so a unit that calls Cognito cannot copy
   `bb-auth-web`'s loopback lock.
+- A systemd per-file `ReadOnlyPaths=` does not survive another namespace's rename onto that file: it
+  is lazily detached (Linux 3.18, commit 8ed936b5671b). Guard a directory instead.
+- bb-auth-web believes `X-Auth-Email` from any process that can reach its loopback port, not only from
+  nginx. A design that adds a local caller must say what that caller could ask for.
+- Group `bb-auth` reads `bb-auth.env` (the HMAC key) and the audit: a new unit in that group needs
+  `InaccessiblePaths=` for what it must not read.
