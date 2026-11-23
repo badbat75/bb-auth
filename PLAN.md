@@ -76,19 +76,6 @@ process that writes both files, so two gaps found the same day are closed **firs
 GUI is opened to anyone who is not an administrator: `bb-auth-web` can read the HMAC key, and it
 believes `X-Auth-Email` from any local process. The design is `docs/ARCHITECTURE.md` §13.
 
-### 3b2. verify.sh speaks to the GUI with the proxy secret
-
-Covers: R3. Found on rpi-01 on 2026-11-23 while closing step 3b.
-
-`scripts/verify.sh` checks that `GET bb-auth-web /` with no identity header is `401`; since the GUI
-now refuses any request without `X-BB-Web-Secret` first, it gets `403` and the deploy reports
-`FAILED` on a healthy host. It runs as root, so it can read `BB_AUTH_WEB_PROXY_SECRET` from the
-GUI's env file and send it, never printing it, and should also check that the same request
-without the secret is `403`.
-
-- Done when: `verify.sh` is green on rpi-01 (run by hand, read-only) with both checks, the secret
-  appears in none of its output, and `shellcheck` is clean.
-
 ### 3c. Move the self-service page into bb-auth-web as `/me/`, and delete bb-auth-me
 
 Covers: R3. Design: §13.2, §13.10.

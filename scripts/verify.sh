@@ -179,9 +179,27 @@ if [ -x "$DEST/bin/bb-auth-web" ]; then
   WEB_LISTEN="$(envval BB_AUTH_WEB_LISTEN "$WEB_ENV_FILE")"
   WEB_LISTEN="${WEB_LISTEN:-127.0.0.1:8091}"
   # A 401 IS the ready signal: identity comes from the X-Auth-Email nginx injects and
-  # curl sends none, so a served 401 means bound, configured and failing closed.
-  chk "GET bb-auth-web / (no identity header) == 401" "401" \
+  # curl sends none, so a served 401 means bound, configured and failing closed. The GUI
+  # refuses a request that did not come through the proxy before it reads an identity or a
+  # file, so the ready signal has to carry the secret nginx sets, and the refusal in front
+  # of it earns its own line: it is the check that says this loopback port is shut to every
+  # other user and service on the host, which is the whole reason the secret exists.
+  chk "GET bb-auth-web / (no proxy secret) == 403" "403" \
       "$(curl -s -o /dev/null -w '%{http_code}' --max-time 3 "http://$WEB_LISTEN/" || true)"
+  WEB_SECRET="$(envval BB_AUTH_WEB_PROXY_SECRET "$WEB_ENV_FILE")"
+  if [ -z "$WEB_SECRET" ]; then
+    # No request attempted: a probe without the secret is the check above, and it would
+    # report a 403 as though the GUI were healthy.
+    bad "GET bb-auth-web / (proxy secret, no identity header) == 401: BB_AUTH_WEB_PROXY_SECRET is missing from $WEB_ENV_FILE, so the request cannot be made"
+  else
+    # The secret reaches curl as a config line on stdin, never as an argument: a -H
+    # argument is readable by every user on the host through /proc, and this one opens the
+    # roster, the settings and the audit. printf is a builtin so no process ever carries it,
+    # and chk prints the label and the status alone.
+    chk "GET bb-auth-web / (proxy secret, no identity header) == 401" "401" \
+        "$(printf 'header = "X-BB-Web-Secret: %s"\n' "$WEB_SECRET" \
+            | curl -s -o /dev/null -w '%{http_code}' --max-time 3 -K - "http://$WEB_LISTEN/" || true)"
+  fi
 
   # The allowlist lives in the settings file. Emptiness is what must never mean
   # "everyone", and the binary refuses to serve without it, so this is the check that keeps
