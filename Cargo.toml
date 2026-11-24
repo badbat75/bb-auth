@@ -32,12 +32,6 @@ path = "src/bin/bb-auth-adm.rs"
 name = "bb-auth-web"
 path = "src/bin/bb-auth-web.rs"
 
-# The self-service page a signed-in person uses: their own row, their own keys, their own
-# profile. Loopback only, behind the gate's auth_request. Links the lib, none of the gate.
-[[bin]]
-name = "bb-auth-me"
-path = "src/bin/bb-auth-me.rs"
-
 [dependencies]
 # Tiny blocking, threaded HTTP server — pure Rust, no async runtime (low resident memory).
 tiny_http = "0.12"

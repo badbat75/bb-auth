@@ -658,16 +658,22 @@ sent for you (see "Making an edit live" below).
 
 It is *just another app bb-auth fronts*: it binds loopback, and nginx gates its URL with
 `auth_request` like any other, injecting the authorized email as `X-Auth-Email` (the
-contract in "Passing the identity to the app"). It validates no token and holds no
-secret — which is exactly why it must never be reachable except through nginx. A request
-with no identity header answers `401` and says so, rather than serving anyone.
+contract in "Passing the identity to the app"). It validates no token, and the one secret
+it holds is `BB_AUTH_WEB_PROXY_SECRET`: every request must carry it in `X-BB-Web-Secret`,
+compared in constant time, before the identity header is read. That is exactly why it must
+never be reachable except through nginx: loopback is reachable by every user and every other
+service on the host, and each of them can write `X-Auth-Email`. A request that does not carry
+it answers `403`; one that carries it but names nobody answers `401` and says so, rather than
+serving anyone.
 
 | Var | Required | Default | Meaning |
 |-----|----------|---------|---------|
 | `BB_AUTH_ACCESS_FILE` | yes | — | the access file to render (the gate's own variable name) |
 | `BB_AUTH_SETTINGS_FILE` | no | `settings.json` beside it | the settings file, read **and written** (the gate's own variable name) |
 | `BB_AUTH_WEB_LISTEN` | no | `127.0.0.1:8091` | bind address. Keep it on loopback |
-| `BB_AUTH_WEB_BASE_PATH` | no | *(empty)* | the URL prefix nginx mounts it at, e.g. `/admin` |
+| `BB_AUTH_WEB_PROXY_SECRET` | **yes** | *(none)* | the shared secret every request must carry in `X-BB-Web-Secret`, compared in constant time before the identity header is read; a request without it is a `403`. At least 32 characters of `[A-Za-z0-9_-]`. The install generates one and never prints it. A missing one is a **fatal startup**: a GUI that starts with no secret is a GUI whose check is not running |
+| `BB_AUTH_WEB_BASE_PATH` | no | *(empty)* | the URL prefix nginx mounts it at, e.g. `/admin`. **An empty value is a fatal startup**: the same binary serves the self-service page beside this prefix, and a console mounted at `/` is every path, leaving no room beside it. Set it, e.g. `/admin` |
+| `BB_AUTH_WEB_ACCOUNT_PATH` | no | `/account` | the URL prefix of the **self-service page**, the one page here a person who is not an administrator reaches. It must sit **beside** the base above and never inside it, and an empty value is refused: the page is dispatched ahead of `web.admins`, so a prefix nested in the console's would answer the console's URLs as the page |
 | `BB_AUTH_WEB_DEFAULT_LANG` | no | `en` | `en` or `it`; a `?lang=` choice is remembered in a cookie |
 | `BB_AUTH_WEB_LOGOUT_URL` | no | *(none)* | where the header's "Sign out" points. **Unset means no control at all**, which is the only safe default: this binary knows neither its own scheme nor its own host, and the one thing it is handed is a client-supplied `Host:`. A bad value is refused at startup |
 | `BB_AUTH_AUDIT_FILE` | no | `/var/log/bb-auth/audit.jsonl` | the audit the **Audit** tab reads, written by the gate (the gate's own variable name, so unset on both sides means one file). Read-only here; empty means the tab says the audit is off rather than looking empty |
@@ -684,6 +690,18 @@ That list is deliberate defense in depth, not a second copy of the roster: an
 Cognito account, and self-signup is open. The GUI will not let an administrator remove
 themselves from it; `bb-auth-adm settings admin rm` will, over SSH, which is the escape
 hatch that keeps the guard from being a trap.
+
+One page of this binary is not an administrator's: the **self-service page** at
+`BB_AUTH_WEB_ACCOUNT_PATH` (`/account`), where one signed-in person reads **their own** account:
+where they reach, the groups naming them, their API keys (id, expiry date, restriction; never the
+bearer) and the profile claims the deployment forwards. It is the console's trust model with the
+privilege taken out, and `web.admins` is **not** read there at all, because an administrator there
+is one more person looking at their own account. That is why the prefix is dispatched *ahead of*
+the administrator list, and why the two prefixes must be siblings: a page nested under `/admin`
+would answer the console's URLs as the page, and a console at `/` is every path, leaving no prefix
+beside it to mount the page on, which is what makes an empty `BB_AUTH_WEB_BASE_PATH` a fatal
+startup. The nginx recipe below mounts the console only; the page's own location is not
+documented yet.
 
 The file is read fresh on **every request** — no cache, no reload signal, and no
 server-side session. An edit made over SSH with `bb-auth-adm` a second ago is on the next

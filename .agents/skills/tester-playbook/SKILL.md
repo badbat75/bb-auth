@@ -22,6 +22,14 @@ Rules are in `AGENTS.md`. Format of this file: `AGENTS.md`, under "Skills".
   count the `^warning` lines.
 - To show that an assertion after a red one already passes, move it ahead for one run, then
   restore the order: nothing after the first panic runs.
+- The e2e harness (`e2e/lib/server.js`) starts the GUI at `BB_AUTH_WEB_BASE_PATH=/admin` and leaves
+  `BB_AUTH_WEB_ACCOUNT_PATH` at its `/account` default, so the two prefixes are siblings and
+  `compile_account_path` accepts the suite as it stands. Its administrator is `admin@example.com`
+  (the Rust fixture's is `admin@x.com`); a roster row that is **not** an administrator is
+  `you@example.com`, which is the identity for the `/account` page.
+- A scratch screenshot script can live outside the repo and `require()` `e2e/lib/server.js` by
+  absolute path: `boot()` then gives the same server the suite starts, proxy secret included, with
+  the working tree untouched.
 
 ## Pitfalls
 
@@ -29,3 +37,5 @@ Rules are in `AGENTS.md`. Format of this file: `AGENTS.md`, under "Skills".
 - An id taken from one temporary fixture does not match another, and the test fails with the wrong error.
 - A fake holds whatever you write, while the real system can answer differently. A test passing on a
   fake proves nothing about the real thing.
+- Renaming a test prefix with `sed` silently eats the palette: `ME_` is inside `THEME_` and `me_` is
+  inside `THEME_CSS`, `scheme`, `machine`. Use `\b` on both sides and re-grep for the old prefix after.

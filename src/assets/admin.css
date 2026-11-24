@@ -243,6 +243,37 @@ details.settings > summary::-webkit-details-marker{display:none}
 .secret .hint{display:block;margin:8px 0 0}
 
 /* ---------------------------------------------------------------------------
+   The self-service page
+
+   A centred column of panels and nothing else: this page is one person's own account, so it
+   has no header bar, no tabs and no table. Everything below is arrangement. The panels are
+   base.css's `.panel`, so the surface is the same object the console's are, and every colour
+   here is a palette token, because this file is inside the CSP style hash of both pages.
+   --------------------------------------------------------------------------- */
+
+/* Narrower than the console's `main`, which needs width for tables: this page is a list of
+   names, and a list of names reads as a column, not as a sheet. */
+.selfserve{max-width:620px;margin:0 auto;padding:28px 16px 48px}
+/* The deployment's mark and name, above the page's own heading. `filter:var(--logo-filter)` is
+   the palette's logo arm, so a mark the operator set for a light ground stays legible on the
+   dark arm. */
+.selfserve-brand{display:flex;flex-wrap:wrap;align-items:center;gap:10px;margin:0 0 16px}
+.selfserve-brand img{height:30px;width:auto;filter:var(--logo-filter)}
+.selfserve-brand .name{font-weight:600;letter-spacing:.02em}
+/* A section's heading is the first thing in a panel that already carries top padding, so the
+   two would stack. The console says the same thing with `h2.tight` written at each heading;
+   here the heading carries no class, because the section's own `id` is the whole markup
+   contract this page has, and a rule scoped to the page is how the same result is had without
+   adding an attribute to it. */
+.selfserve .panel h2{margin-top:0}
+/* The selector at the foot of the page: two list boxes side by side, and the page's one main
+   action under them. `.lbl` is base.css's field label and `button.primary` its main action, so
+   both are the objects every form in the estate already paints. */
+.selfserve-prefs{margin:22px 0 0}
+.selfserve-prefs .fields{display:flex;flex-wrap:wrap;gap:12px}
+.selfserve-prefs .fields label{flex:1 1 150px}
+
+/* ---------------------------------------------------------------------------
    Phone layout
 
    A compact single-row header, and every table row becomes a stacked card so no column is
@@ -265,6 +296,9 @@ details.settings > summary::-webkit-details-marker{display:none}
      tabs: the full second line and the horizontal scroll would send it off on its own. */
   nav:not(.acct){order:3;flex:1 1 100%;flex-wrap:nowrap;overflow-x:auto;gap:1px;
     padding-bottom:2px}
+  /* The self-service column has no table to fit, so the only thing a phone costs it is the
+     side padding, and 16px of it is a third of the width of a small screen. */
+  .selfserve{padding:16px 12px 32px}
   table{min-width:0}
   table,thead,tbody,tr,td{display:block}
   /* The audit's two column shares are about a table competing for width, and there is no

@@ -639,7 +639,7 @@ impl Access {
     }
 
     /// Every scope a signed-in `identifier` reaches: the list the self-service page
-    /// (bb-auth-me) shows a person.
+    /// (`bb-auth-web`'s `/account`) shows a person.
     ///
     /// This is [`decide`]'s rule for a browser login restated as a set rather than as one
     /// answer, so it asks the very helpers [`decide`] asks ([`Access::vetoes_identifier`],

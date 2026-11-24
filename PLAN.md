@@ -16,7 +16,7 @@ as the column says. A requirement still open must be covered by a step.
 |---|---|---|
 | R1 | Self-service API keys: a user mints, rotates and removes their own `bbk_` tokens, without an administrator | Step 4 |
 | R2 | Self-service profile: a user sees what bb-auth knows about them and edits their own Cognito profile attributes | Step 5 |
-| R3 | The self-service surface is a section of the admin GUI (`bb-auth-web`), served at its own prefix `/account/` (`BB_AUTH_WEB_ACCOUNT_PATH`) beside the admin pages at `/admin/`, open to any signed-in identity, never reading `web.admins` and acting only on the caller's own account, so further user-facing features have a home. Changed by the user on 2026-11-23 from "a fourth binary of its own", and that evening from `<base>/me/` to `/account/` so the administrators' URLs do not move | Design revised (`docs/ARCHITECTURE.md` §13); page built as `bb-auth-me`, unpackaged; steps 3c, 3d |
+| R3 | The self-service surface is a section of the admin GUI (`bb-auth-web`), served at its own prefix `/account/` (`BB_AUTH_WEB_ACCOUNT_PATH`) beside the admin pages at `/admin/`, open to any signed-in identity, never reading `web.admins` and acting only on the caller's own account, so further user-facing features have a home. Changed by the user on 2026-11-23 from "a fourth binary of its own", and that evening from `<base>/me/` to `/account/` so the administrators' URLs do not move | Design revised (`docs/ARCHITECTURE.md` §13); page built in `bb-auth-web` at `/account`, not yet exposed; steps 3c2, 3d |
 | R4 | Self-service deletion: a user deletes their own account and its related data, at once, after a confirmation: the roster row, keys, references in scopes and groups, and the Cognito user. The audit is not edited: their lines expire with `audit.retention`, and the page says so | Steps 6, 7. For a social-only user the Cognito half is left to an administrator and the page says so: accepted by the user on 2026-11-23 |
 
 ### How we work
@@ -61,8 +61,8 @@ as not checked, and the step stays open.
 
 The gate, the CLI (`bb-auth-adm`) and the admin GUI (`bb-auth-web`) are built and deployed; `README.md`,
 `AGENTS.md` and `CHANGELOG.md` say what they do. The agent structure (roles, skills, this plan) was added
-on 2026-11-23; the work before it is in `git log`. The self-service page exists as an unpackaged
-`bb-auth-me` target, to be folded into `bb-auth-web` (step 3c).
+on 2026-11-23; the work before it is in `git log`. The self-service page is the `/account` section of `bb-auth-web`, not yet exposed through nginx
+(step 3d).
 
 ## Next steps
 
@@ -70,35 +70,22 @@ Decided by the user on 2026-11-23 (afternoon), reversing the morning's fourth bi
 self-service surface is **a section of `bb-auth-web`**, at `/account/` beside the admin pages at `/admin/` (changed that evening from `<base>/me/`), open to any identity
 nginx vouches for, never reading `web.admins`, and acting only on the caller's own account:
 the API keys (R1), an **editable** Cognito profile (R2) and deleting one's own account (R4). The
-page already built as `bb-auth-me` (steps 2b-1 to 2b-3) moves there and that target goes. The
+page first built as `bb-auth-me` (steps 2b-1 to 2b-3) has moved there and that target is gone. The
 reversal's cost, stated in `docs/ARCHITECTURE.md` §13.12, is that strangers now talk to the
 process that writes both files, so two gaps found the same day are closed **first**, before the
 GUI is opened to anyone who is not an administrator: `bb-auth-web` can read the HMAC key, and it
 believes `X-Auth-Email` from any local process. The design is `docs/ARCHITECTURE.md` §13.
 
-### 3c. Move the self-service page into bb-auth-web at `/account/`, and delete bb-auth-me
+### 3c2. Two blemishes on the account page
 
-Covers: R3. Design: §13.2, §13.10.
+Covers: R3. Found on 2026-11-24 while closing step 3c, in the screenshots.
 
-`bb-auth-web` gains `BB_AUTH_WEB_ACCOUNT_PATH` (default `/account`), fatal at startup when empty or
-when it overlaps the admin base at a path boundary either way; an empty admin base is therefore
-refused too, which is a breaking change for a GUI mounted at the root, said in the CHANGELOG.
-After the proxy secret, the identity header and the settings file, a path that is the prefix or
-under it goes to the self-service handler, which never reads `web.admins`; everything else keeps
-the admin flow, so an unknown path outside the prefix stays a `403` for a non-administrator. The
-page's sections, look and selector come across (its `K` keys into `bb-auth-web`'s table, its
-arrangement into `admin.css`, the logo origin in that page's CSP), and one selector submit is one
-`302` to `/account/` setting both cookies. Then `src/bin/bb-auth-me.rs` and its `[[bin]]` are
-deleted, and `AGENTS.md`, the README and `docs/ARCHITECTURE.md` §2 and §3 stop naming it.
+The Italian "None." under *Chiavi API* reads "Nessuno." and should agree with the feminine noun
+("Nessuna."), while the profile section keeps its own wording; and the page background stops short
+of the viewport, leaving a band of another shade at the bottom in both themes.
 
-- Done when: the 26 `bb-auth-me` tests pass in `bb-auth-web`'s test module against `/account/`
-  (admin base `/admin`, a `web.admins` that does not name the caller, the proxy secret sent);
-  new tests that failed first show a non-administrator gets `200` on `/account/` and `/account`,
-  `404` on `/account/nope`, `403` on every admin route, on `/admin/nope` and on `/nope`, and that
-  `/accounts` is not the page; the overlap rule is a fatal startup naming the variable; `cargo
-  test`, `cargo clippy --all-targets` and `cargo fmt --check` are clean with four targets; `node
-  e2e/run.js` and the scripting-off walk pass; and the page looks right in a browser in both
-  themes and both languages.
+- Done when: a test that failed first pins the Italian wording per section; the background fills
+  the viewport in both themes in a fresh screenshot; the slice's checks are clean.
 
 ### 3d. The nginx recipe for `/account/`, and install on rpi-01
 

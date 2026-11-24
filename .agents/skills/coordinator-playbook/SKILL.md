@@ -75,3 +75,6 @@ files outside the repo.
 - aorus also runs the user's llama.cpp-framework work (its builds and its own opencode agents), and
   the local model serves both. Run one local agent at a time, no parallel cargo or e2e beside it,
   and never touch that project's processes.
+- A local agent that exits 1 with no report may be the model server, not the agent: grep its
+  output for `out of memory` (strata, the engine behind the local model, out of GPU memory when
+  llama.cpp-framework work loads the cards) before rerunning the same brief.

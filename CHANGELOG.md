@@ -71,6 +71,39 @@ when there is no tag to check out.
 release logs anybody out.** The settings file goes from version 1 to version 3, which needs an
 edit before the binaries land: see "Upgrading" below.
 
+### New: the self-service page is part of `bb-auth-web`, at `/account`
+
+**Upgrade note: a GUI mounted at the root no longer starts.** The self-service page is mounted
+beside the admin console, and a console at `/` is every path, leaving no prefix beside it, so a
+`BB_AUTH_WEB_BASE_PATH` that is unset, empty or `/` is now a **fatal startup** naming both prefixes
+and saying "Mount the console under a prefix". Set it to a prefix, for example `/admin`. The env
+template the install writes names `/admin`, so a host installed from the template needs nothing;
+a hand-written env file that left the variable out is the one that fails, and it fails before it
+binds a port, so nothing is served half-configured.
+
+**What moved.** The page one signed-in person uses for **their own** account is now a section of
+`bb-auth-web`, at `/account` (`BB_AUTH_WEB_ACCOUNT_PATH`, default `/account`), on the console's own
+listener and unit. It is the console's trust model with the privilege taken out: the proxy secret
+is checked first on every request, exactly as it is on the admin URLs, the identity comes from the
+`X-Auth-Email` nginx injects and nowhere else, and `web.admins` is **not** read at all, because an
+administrator there is one more person looking at their own account. That is why the prefix is
+dispatched *ahead of* the allowlist, and why the two prefixes must be siblings: a page nested
+inside `/admin` would answer the console's URLs as the page, so `compile_account_path` refuses
+equal, nested and containing at startup. It shows the caller's addresses and roster uuid, then four
+read-only sections: where they reach (the applications and scope names, grouped by application,
+never a URL), the groups naming them, their API keys (id, expiry date or "never", and the
+restriction, never the hash or the bearer) and the profile claims the deployment forwards, decoded.
+A `403` answers a denied identity, a `401` when nginx sent no identity. The page wears the `ui`
+section like the console does, in a centred card, and its theme and language selector is a form
+with a submit button and no handler at all: one submit answers one `302` setting the `theme` and
+`lang` cookies, the same names the console writes, so a choice carries between the two surfaces on
+one host.
+
+**`bb-auth-me` is gone, and there is nothing to uninstall.** The fifth target, its `[[bin]]` and
+its file are deleted, and its tests moved with the page. It was **never packaged**: no `.deb`, no
+unit, and the build and package scripts never knew it, so an upgrade installs nothing new and
+removes nothing from a host. Nothing here changes the cookie, access-file or settings-file format.
+
 ### New: bb-auth-web requires a secret only nginx sets, and cannot read the HMAC key
 
 **Upgrade note, and it is the one section here with work in it: after installing, every request
@@ -132,6 +165,9 @@ header as it arrived, since debugging a lockout means seeing what nginx actually
 nothing here changes the cookie, the access file or the settings file's version.
 
 ### New: bb-auth-me, the self-service page (not packaged yet)
+
+**Superseded:** this target no longer exists. The page is a section of `bb-auth-web`, at
+`/account`: see the section above the proxy secret's. What follows is what shipped at the time.
 
 **Nothing to do, and nothing installed.** A fifth target, `src/bin/bb-auth-me.rs`: the page one
 signed-in person uses for **their own** account, so that minting a key and reading or editing a

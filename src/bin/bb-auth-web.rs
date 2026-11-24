@@ -55,10 +55,14 @@
 //! GUI's URL would otherwise open the admin surface to any Cognito account. It is required,
 //! and must be non-empty — empty must never mean "everyone".
 //!
-//! All three checks are **route-global** and run before the router, in that order: there is
-//! no path (not a `404`, not a `POST`, not a broken access file) that answers anything to a
-//! request the proxy did not send, to someone nginx did not vouch for, or to someone
-//! `web.admins` does not name.
+//! The first three checks are **route-global** and run before anything is routed, in that
+//! order: there is no path (not a `404`, not a `POST`, not a broken access file) that answers
+//! anything to a request the proxy did not send, or to someone nginx did not vouch for. The
+//! fourth is not route-global, and that is the seam of this binary: the self-service page at
+//! [`Config::account_path`] is dispatched **ahead of** the `web.admins` allowlist, because it
+//! is the page a person who is not an administrator reads. Everything outside that prefix is
+//! answered only to an administrator, and a non-administrator's request to it is a `403` and
+//! never a `404` that names which paths exist.
 //!
 //! # Mutations
 //!
@@ -128,6 +132,7 @@
 //! | `BB_AUTH_SETTINGS_FILE` | no | `settings.json` beside the access file | the settings file, read **and written** |
 //! | `BB_AUTH_WEB_LISTEN` | no | `127.0.0.1:8091` | bind address. Keep it on loopback |
 //! | `BB_AUTH_WEB_BASE_PATH` | no | *(empty)* | URL prefix nginx mounts the GUI at, e.g. `/admin` |
+//! | `BB_AUTH_WEB_ACCOUNT_PATH` | no | `/account` | URL prefix of the self-service page. Must sit **beside** the base, never inside it: see [`compile_account_path`] |
 //! | `BB_AUTH_WEB_DEFAULT_LANG` | no | `en` | `en` or `it`, when the request expresses no preference |
 //! | `BB_AUTH_WEB_LOGOUT_URL` | no | *(empty)* | where the Sign out control points, or no control at all. See [`Config::logout_url`] |
 //!
@@ -216,6 +221,39 @@
 //! person operates are [`BASE_CSS`], both come from the library and both programs emit the
 //! same bytes; [`CSS`] is only this program's ARRANGEMENT of them, and it names no colour and
 //! no control of its own.
+//!
+//! # The self-service page
+//!
+//! One page here is not an administrator's: the **self-service page** at
+//! [`Config::account_path`] (by default `/account`), which is what one signed-in person does
+//! to **their own** account, so that reading what they reach, and choosing a theme and a
+//! language, stop needing an administrator. It is the console's trust model with the privilege
+//! taken out: the proxy secret, the identity header and the settings file are read exactly as
+//! they are everywhere else, and `web.admins` is **not** read at all, because an administrator
+//! here is one more person acting on their own account. A stranger Cognito vouches for and a
+//! roster user see the same page, and the `denied` veto is answered with a `403` ahead of
+//! everything the page would otherwise say about them.
+//!
+//! Four read-only sections, as siblings: *Where you reach* (the applications and scope names
+//! [`Access::scopes_reached`] returns, never a URL, since a URL is the gate's business and an
+//! application's, not something to hand to a person), *Groups*, *API keys* (each key's id, its
+//! expiry and its restriction, never the hash and never the bearer, which is printed once at
+//! the moment it is minted and exists nowhere else) and *Profile* (each configured
+//! `gate.profile_claims` claim and the value nginx forwarded, percent-decoded).
+//!
+//! The prefix is a **sibling** of [`Config::base_path`] and not a child of it, and
+//! [`compile_account_path`] refuses a deployment where they overlap: the dispatch runs ahead of
+//! the allowlist, so a page nested inside the console's URLs would answer `/admin/…` URLs as
+//! the page. Its own arrangement is a centred card, in [`CSS`] beside the console's tables,
+//! because the palette and the objects are already shared; it carries **no handler at all**,
+//! not even the Settings menu's one, and its preference form is a `GET` form with a submit
+//! button, answered by one `302` that sets one cookie per recognised choice and redirects back
+//! to the page with the parameters gone. The cookie names are the console's own, so a choice
+//! carries between the two surfaces on one host.
+//!
+//! It is a **prefix of this binary**, not a settings-file value: it decides which code answers
+//! a request, and the settings file is for what is read per request. `docs/ARCHITECTURE.md`
+//! §13.2.
 
 use bb_auth_core::{
     add_api_key, add_application, add_denied, add_scope, add_user, add_user_email, add_user_group,
@@ -229,11 +267,11 @@ use bb_auth_core::{
     rename_application, rename_scope, request_site, request_url, rotate_api_key, scope_mut,
     scope_pos, sha256_hex, shadowing_scope, social_idp_label, stylesheet_link, user_group_mut,
     user_group_refs, user_label, user_pos, user_refs, version_line, Access, AccessFile,
-    AccessWrite, ApiKeySpec, AppSpec, AuditCredential, AuditEvent, AuditKind, AuditLimit,
-    AuditPolicy, AuditUnit, Decision, GateSettings, GuardedSetting, RequestSite, ScopeSpec,
-    SealedKey, SettingsFile, SettingsWrite, SocialButtonSpec, Subject, UiTheme, UserSpec,
-    WiredButton, Written, BASE_CSS, DEFAULT_AUDIT_FILE, IDENTITY_HEADER, PAGE_SECURITY_HEADERS,
-    SOCIAL_IDPS, THEME_CSS,
+    AccessWrite, ApiKeyRecord, ApiKeySpec, AppSpec, AuditCredential, AuditEvent, AuditKind,
+    AuditLimit, AuditPolicy, AuditUnit, Decision, GateSettings, GuardedSetting, RequestSite,
+    ScopeSpec, SealedKey, Settings, SettingsFile, SettingsWrite, SocialButtonSpec, Subject,
+    UiTheme, UserSpec, WiredButton, Written, BASE_CSS, DEFAULT_AUDIT_FILE, IDENTITY_HEADER,
+    PAGE_SECURITY_HEADERS, SOCIAL_IDPS, THEME_CSS,
 };
 use maud::{html, Markup, PreEscaped, DOCTYPE};
 use sha2::{Digest, Sha256};
@@ -956,6 +994,25 @@ enum K {
     DefaultThemeHelp,
     DefaultThemeBad,
     Days,
+    // --- the self-service page ---
+    //
+    // Deliberately few, because the page's contract is about which fact belongs in which
+    // section: prose in one is a word a test about another could match by accident, and the
+    // sections carry a heading, the names, and one short "none" line.
+    AccountTitle,
+    AccountUuid,
+    AccountNoRow,
+    AccountReach,
+    AccountKeys,
+    AccountProfile,
+    AccountNone,
+    AccountKeyAllScopes,
+    AccountVetoTitle,
+    AccountVetoBody,
+    AccountAmbiguousTitle,
+    AccountAmbiguousBody,
+    AccountNoEmailTitle,
+    AccountNoEmailBody,
 }
 
 /// Pick one of a key's two spellings.
@@ -2017,6 +2074,60 @@ fn t(lang: Lang, key: K) -> &'static str {
         K::MsgGroupRemoved => m(lang, "user group removed", "gruppo di utenti rimosso"),
         K::MsgDeniedAdded => m(lang, "email denied", "email negata"),
         K::MsgDeniedRemoved => m(lang, "veto lifted", "veto tolto"),
+
+        // --- the self-service page ---
+        //
+        // The headings are the prose, and the only prose: the names in each section are the
+        // access file's vocabulary, which is never translated.
+        K::AccountTitle => m(lang, "Your account", "Il tuo account"),
+        K::AccountUuid => m(lang, "your uuid", "il tuo uuid"),
+        K::AccountNoRow => m(
+            lang,
+            "bb-auth has no roster row for you.",
+            "bb-auth non ha una tua riga nella lista.",
+        ),
+        K::AccountReach => m(lang, "Where you reach", "Dove puoi arrivare"),
+        K::AccountKeys => m(lang, "API keys", "Chiavi API"),
+        K::AccountProfile => m(lang, "Profile", "Profilo"),
+        K::AccountNone => m(lang, "None.", "Nessuno."),
+        K::AccountKeyAllScopes => m(
+            lang,
+            "every scope you reach",
+            "ogni scope che raggiungi",
+        ),
+        K::AccountVetoTitle => m(lang, "You are refused", "Sei escluso"),
+        K::AccountVetoBody => m(
+            lang,
+            "this deployment has a veto on your identity, so there is no account to show.",
+            "questa installazione ha un veto sulla tua identità, quindi non c'è un account da \
+             mostrare.",
+        ),
+        K::AccountAmbiguousTitle => m(
+            lang,
+            "The identity header names two accounts",
+            "L'header di identità nomina due account",
+        ),
+        K::AccountAmbiguousBody => m(
+            lang,
+            "the identity header carries addresses that belong to different roster rows, and \
+             there is no page about both of them.",
+            "l'header di identità porta indirizzi di righe diverse della lista, e non c'è una \
+             pagina che parli di entrambe.",
+        ),
+        K::AccountNoEmailTitle => m(
+            lang,
+            "No email identity is forwarded",
+            "Nessuna identità email è inoltrata",
+        ),
+        // Names the setting, because the operator reading this is the only person who can fix
+        // it, and a page that only said "no identity" would send them to the wrong file.
+        K::AccountNoEmailBody => m(
+            lang,
+            "gate.identity_attrs names no email, so the proxy forwards no identity for this \
+             page to act on.",
+            "gate.identity_attrs non nomina l'email, quindi il proxy non inoltra nessuna \
+             identità su cui questa pagina può agire.",
+        ),
     }
 }
 
@@ -2205,6 +2316,11 @@ struct Config {
     /// with `==`; and it is never printed, logged or rendered, because a value that reaches
     /// the journal at boot is a secret for as long as the journal is kept.
     proxy_secret: String,
+    /// `BB_AUTH_WEB_ACCOUNT_PATH`: the prefix the self-service page is mounted at
+    /// (docs/ARCHITECTURE.md §13.2). Normalised and checked against `base_path` at startup by
+    /// [`compile_account_path`], so a deployment where the two prefixes overlap is a refusal
+    /// to start and not a page that answers the wrong half of its own URLs.
+    account_path: String,
 }
 
 /// Read an env var, falling back to `default` when unset.
@@ -2256,6 +2372,9 @@ fn normalize_base_path(raw: &str) -> Result<String, String> {
 /// Required, with no default: a deployment that starts without a secret is a deployment where
 /// the check is not running, and a generated one is one line of the install.
 ///
+/// It is the first check [`handle`] makes, ahead of the self-service page's dispatch, so the
+/// page is not a way around it (docs/ARCHITECTURE.md §13.2).
+///
 /// Every refusal names the variable and **never the value**. A startup message goes to the
 /// journal, and a secret printed once at boot is a secret in the journal for as long as the
 /// journal is kept; the length is safe to say, the bytes are not.
@@ -2280,6 +2399,84 @@ fn compile_proxy_secret(raw: &str) -> Result<String, String> {
         );
     }
     Ok(raw.to_string())
+}
+
+/// The self-service page's prefix: `BB_AUTH_WEB_ACCOUNT_PATH`, normalised, checked against the
+/// console's own [`Config::base_path`] (docs/ARCHITECTURE.md §13.2). The `/account` default is
+/// the caller's, not this function's: a variable **set to empty** is a refusal, because an
+/// operator who typed `BB_AUTH_WEB_ACCOUNT_PATH=` in an env file meant to say something, and a
+/// prefix of nothing is the whole host.
+///
+/// The two prefixes are **siblings**, and that is what the checks are for. The page is the one
+/// part of this program a person who is not an administrator reaches, so it is dispatched
+/// *before* the `web.admins` allowlist, and a prefix nested inside the console's would put
+/// `/admin/account/` in front of the console's own routes: the dispatch would answer those URLs
+/// as the self-service page, and a person with no roster row would be standing inside the
+/// administrator surface's URL space. So a prefix equal to the base, inside it, or containing
+/// it, is a refusal to start, and the message names both.
+///
+/// The base is normalised the same way here as at startup, because the comparison is between
+/// two prefixes and one of them arrives from the env file: `/admin` and `/admin/` are the same
+/// prefix, and a check that read them as two strings would wave an overlapping deployment
+/// through. A base that normalises to nothing is refused as well: `/` is every path, so a
+/// console mounted at the root has no sibling space left to mount anything beside.
+///
+/// The prefix is checked for the same reason the base is: it is emitted into a `Location:` and
+/// into a form's `action`, so printable ASCII with no quote, no backslash and no `@` is what
+/// makes that safe with no per-request check.
+fn compile_account_path(account: &str, base: &str) -> Result<String, String> {
+    // Normalised with the console's own rule, so the comparison below is between two prefixes
+    // in one spelling and `/account` and `/account/` are one answer, not two.
+    let account =
+        normalize_base_path(account).map_err(|e| format!("BB_AUTH_WEB_ACCOUNT_PATH: {e}"))?;
+    if account.is_empty() {
+        return Err(
+            "BB_AUTH_WEB_ACCOUNT_PATH is empty: a prefix of nothing is the whole host, so the \
+             self-service page would be dispatched ahead of the administrator allowlist for \
+             every URL this program answers. Name a prefix, such as /account."
+                .to_string(),
+        );
+    }
+    let base = normalize_base_path(base)
+        .map_err(|e| format!("BB_AUTH_WEB_ACCOUNT_PATH cannot be placed: {e}"))?;
+    if base.is_empty() {
+        return Err(
+            "BB_AUTH_WEB_ACCOUNT_PATH cannot be placed: BB_AUTH_WEB_BASE_PATH is `/`, which is \
+             every path, so a console mounted at the root has no prefix left beside it to mount \
+             the self-service page on. Mount the console under a prefix."
+                .to_string(),
+        );
+    }
+    // Does `outer`'s area contain `inner`'s? At a path boundary, which is the rule
+    // `bb_auth_core::base_covers` states for an application's area: `/accounts` beside
+    // `/account` shares no boundary and is a legal neighbour, while `/admin/account` under
+    // `/admin` is not.
+    let contains =
+        |outer: &str, inner: &str| inner == outer || inner.starts_with(&format!("{outer}/"));
+    if contains(&base, &account) {
+        return Err(format!(
+            "BB_AUTH_WEB_ACCOUNT_PATH ({account}) is the console's own prefix ({base}) or sits \
+             inside it: the self-service page is dispatched before the administrator allowlist, \
+             so a prefix nested in the console's answers the console's URLs as the page. Choose \
+             a prefix beside {base}, such as /account."
+        ));
+    }
+    if contains(&account, &base) {
+        return Err(format!(
+            "BB_AUTH_WEB_ACCOUNT_PATH ({account}) contains the console's own prefix ({base}): \
+             every administrator URL would be dispatched to the self-service page instead."
+        ));
+    }
+    for (pos, ch) in account.char_indices() {
+        if matches!(ch, '"' | '\'' | '\\' | '@') {
+            return Err(format!(
+                "BB_AUTH_WEB_ACCOUNT_PATH has a {ch:?} at offset {pos}: the prefix is emitted \
+                 into a Location: and into a form action, so it carries no quote, no backslash \
+                 and no userinfo."
+            ));
+        }
+    }
+    Ok(account)
 }
 
 /// Does the secret this request carries match the one this process was started with
@@ -2346,11 +2543,21 @@ impl Config {
                 eprintln!("[bb-auth-web] FATAL: {e}");
                 std::process::exit(1);
             });
+        // The self-service page's prefix, checked against the console's own: two prefixes that
+        // overlap are a page answering the administrator surface's URLs, which is a refusal to
+        // start, not a page that works on most of its own URLs.
+        let account_path =
+            compile_account_path(&env_or("BB_AUTH_WEB_ACCOUNT_PATH", "/account"), &base_path)
+                .unwrap_or_else(|e| {
+                    eprintln!("[bb-auth-web] FATAL: {e}");
+                    std::process::exit(1);
+                });
         Config {
             listen: env_or("BB_AUTH_WEB_LISTEN", "127.0.0.1:8091"),
             access_path,
             settings_path,
             base_path,
+            account_path,
             default_lang,
             logout_url,
             proxy_secret,
@@ -7363,6 +7570,641 @@ fn parse_group_members(doc: &AccessFile, text: &str) -> Result<Vec<String>, Stri
     }
     Ok(users)
 }
+// ---------------------------------------------------------------------------
+// The self-service page
+// ---------------------------------------------------------------------------
+
+/// The self-service page's look: the four `ui` values, all four of which it paints.
+///
+/// [`Look`] is the console's, and carries only what that shell shows: a theme and a stylesheet,
+/// because its header bar names no brand and shows no logo. This page shows both, and widening
+/// `Look` by two fields the console ignores is how a struct starts lying about what it means.
+///
+/// `AccountLook::default()` is "nothing configured", and it is the honest answer on every page
+/// rendered **before** the settings file has been read: the `401` happens above that read, and a
+/// page that cannot know the operator's stylesheet shows the built-in one rather than guessing.
+///
+/// `theme` here is the **deployment's** default, kept beside the visitor's own choice rather than
+/// folded into it: the two answer different questions and both have to survive to the page, since
+/// the selector must show `System` as chosen while the page renders the dark the administrator
+/// asked for.
+#[derive(Clone, Copy, Default)]
+struct AccountLook<'a> {
+    /// `ui.theme`: which arm of the palette a page starts in when the visitor has expressed no
+    /// preference of their own.
+    theme: UiTheme,
+    /// `ui.stylesheet_url`: an operator's own stylesheet, loaded after the built-in one.
+    stylesheet: Option<&'a str>,
+    /// `ui.logo_url`: needed for the policy as much as for the markup, since it is the one image
+    /// this page may fetch.
+    logo: Option<&'a str>,
+    /// `ui.brand_name`: the name the page calls this deployment.
+    brand: Option<&'a str>,
+}
+
+/// The name the page calls this deployment when `ui.brand_name` is empty. A package creates the
+/// settings file with that field empty, so this is what a first install shows.
+const DEFAULT_ACCOUNT_BRAND: &str = "bb-auth";
+
+/// What the chrome needs that is not the page: this browser's two preferences, the language they
+/// render as, and the URL the selector form goes back to.
+///
+/// A struct rather than four more arguments because every page under the prefix is answered
+/// through [`respond_account`], and a preference that reached only some of them is a page whose
+/// selector shows something other than what that page is rendered in.
+struct AccountPrefs<'a> {
+    /// The language every string on the page is looked up by.
+    lang: Lang,
+    /// Which option the selector shows as the chosen language, which is not the same thing as
+    /// `lang`: `Auto` renders as one of the two and must still come back as `Auto`.
+    lang_pref: LangPref,
+    /// Which appearance **this browser** asked for, `System` included. It is not on its own what
+    /// the page renders in: [`account_shell`] falls through to [`AccountLook::theme`] after it.
+    theme: UiTheme,
+    /// The prefix with a trailing slash: the form's `action` and the target of the preference
+    /// redirect, both built from [`Config::account_path`].
+    page: &'a str,
+}
+
+/// This page's `Content-Security-Policy`.
+///
+/// The style hash is the **same** value [`admin_csp`] computes, because the `<style>` block is
+/// the same bytes: the palette, the components and [`CSS`]. That is why the card's arrangement
+/// lives in `src/assets/admin.css` and not beside this code: a second stylesheet is a second
+/// hash, and a page whose policy is a list of hashes to keep in step is a page that breaks when
+/// one of them is edited.
+///
+/// `script-src` is `'none'`: this page carries no script and no handler of any kind. The console
+/// bends the estate's no-script rule exactly once, for the Settings list box, and it has a
+/// `<noscript>` button behind it; this page has no reason to bend it at all, so its policy says
+/// so and needs no fallback.
+///
+/// `form-action` is `'self'`: the selector is a `GET` back to this same page, which is the whole
+/// interaction.
+///
+/// `img-src` is the one place this policy is wider than the console's, and the reason is
+/// `ui.logo_url`, which the console's header does not show and this page does.
+fn account_csp(look: &AccountLook) -> String {
+    let style = csp_hash(&format!("{THEME_CSS}{BASE_CSS}{CSS}"));
+    page_csp("'none'", &style, "'self'", look.stylesheet, look.logo, &[])
+}
+
+/// The chrome every page under the prefix is wrapped in: the palette, the components built out of
+/// it, the centred-card arrangement, then the operator's stylesheet, so an override wins by
+/// source order and needs no `!important`.
+///
+/// It is not [`shell`], and the difference is the console's own furniture: a header bar with five
+/// tabs, a `details` carrying the one inline handler this program emits, and a footer naming the
+/// administrator. None of that belongs on a page a person reaches about their own account, and
+/// the `details` would put the Settings handler on a page whose rule is that it carries none.
+fn account_shell(prefs: &AccountPrefs, title: &str, content: Markup, look: AccountLook) -> Markup {
+    // The two list boxes' options, each in the order they are offered, both leading with the
+    // choice that follows something outside this page (the browser, the OS), because that is
+    // where every session starts and what the other options are departures from.
+    let langs = [
+        LangPref::Auto,
+        LangPref::Fixed(Lang::En),
+        LangPref::Fixed(Lang::It),
+    ];
+    let themes = [UiTheme::System, UiTheme::Light, UiTheme::Dark];
+    let brand = look.brand.unwrap_or(DEFAULT_ACCOUNT_BRAND);
+    html! {
+        (DOCTYPE)
+        // The theme, resolved here and in one expression, because the fallback order is the
+        // rule: this browser's choice, then the deployment's default, then nothing at all.
+        // `data-theme=[…]` is maud's optional-attribute form, so the `None` two `System`s
+        // produce omits the attribute outright rather than emitting `data-theme=""`, which is
+        // what leaves the `prefers-color-scheme` rule in `THEME_CSS` as the one deciding.
+        html lang=(prefs.lang.code()) data-theme=[prefs.theme.attr().or(look.theme.attr())] {
+            head {
+                meta charset="utf-8";
+                meta name="viewport" content="width=device-width,initial-scale=1";
+                title { (brand) " · " (title) }
+                // The three deliberately raw emissions on the page, and all three are
+                // compile-time constants: never request data and never anything read out of the
+                // access file. The order is the console's order, because the policy's hash
+                // covers all three together.
+                style { (PreEscaped(THEME_CSS)) (PreEscaped(BASE_CSS)) (PreEscaped(CSS)) }
+                // Raw because the library builds a whole `<link>` element from a URL that has
+                // already passed `compile_asset_url`, and maud has no way to say "an element".
+                (PreEscaped(stylesheet_link(look.stylesheet)))
+            }
+            body {
+                main class="selfserve" {
+                    header class="selfserve-brand" {
+                        // The logo only when the administrator set one: nothing configured means
+                        // the page fetches no image at all. The `alt` is empty on purpose, because
+                        // the name beside it already says what the picture is.
+                        @if let Some(logo) = look.logo {
+                            img src=(logo) alt="";
+                        }
+                        span class="name" { (brand) }
+                    }
+                    h1 { (title) }
+                    (content)
+                    // The selector: theme, then language, then a visible submit. A plain `GET`
+                    // back to this same page, so a bookmark and a reload cannot change anything,
+                    // and the button is not decoration: this page emits no script and no handler,
+                    // so picking an option is only half an interaction without it.
+                    form class="selfserve-prefs" method="get" action=(prefs.page) {
+                        div class="fields" {
+                            label {
+                                span class="lbl" { (t(prefs.lang, K::SettingTheme)) }
+                                select name=(THEME_COOKIE) {
+                                    @for th in themes {
+                                        option value=(th.code()) selected[th == prefs.theme] {
+                                            (t(prefs.lang, theme_label(th)))
+                                        }
+                                    }
+                                }
+                            }
+                            label {
+                                span class="lbl" { (t(prefs.lang, K::SettingLanguage)) }
+                                select name=(LANG_COOKIE) {
+                                    @for p in langs {
+                                        option value=(p.code()) selected[p == prefs.lang_pref] {
+                                            (p.label(prefs.lang))
+                                        }
+                                    }
+                                }
+                            }
+                        }
+                        button class="primary" { (t(prefs.lang, K::Apply)) }
+                    }
+                }
+            }
+        }
+    }
+}
+
+/// One HTML page under the prefix, with the estate's shared headers and this page's own policy.
+///
+/// It does not go through [`respond_page`], because that answers with [`admin_csp`], whose
+/// `img-src 'none'` is a true statement about the console and a false one about a page that shows
+/// the deployment's logo.
+fn respond_account(
+    req: Request,
+    status: u16,
+    prefs: &AccountPrefs,
+    title: &str,
+    content: Markup,
+    look: AccountLook,
+) {
+    let page = account_shell(prefs, title, content, look);
+    let mut resp = Response::from_data(page.into_string().into_bytes())
+        .with_status_code(StatusCode(status))
+        .with_header(h("Content-Type", "text/html; charset=utf-8"))
+        .with_header(h("Content-Security-Policy", &account_csp(&look)));
+    for (k, v) in PAGE_SECURITY_HEADERS {
+        resp.add_header(h(k, v));
+    }
+    let _ = req.respond(resp);
+}
+
+/// `302` back to the page, setting **one cookie per preference this request named**.
+///
+/// One response for both, because the selector is a form with a submit button and no script: one
+/// `GET` carries `theme` and `lang` together, and a program that answered one at a time would
+/// leave the person watching the other half of their own submit revert on the next load. The
+/// console gets away with one cookie per redirect only because its handler fires per list box.
+///
+/// A value nobody recognises sets nothing: storing it would write a cookie the page cannot show
+/// as chosen, and would let a crafted link write a preference for somebody.
+///
+/// `location` is [`Config::account_path`] plus a slash, so it is printable ASCII by construction
+/// and [`h`] cannot panic on it; the cookie values are one of a closed enum's own codes.
+fn respond_account_preferences(
+    req: Request,
+    location: &str,
+    theme: Option<UiTheme>,
+    lang: Option<LangPref>,
+) {
+    let mut resp = Response::empty(StatusCode(302)).with_header(h("Location", location));
+    if let Some(chosen) = theme {
+        resp.add_header(h(
+            "Set-Cookie",
+            &format!(
+                "{THEME_COOKIE}={}; Max-Age={PREFERENCE_COOKIE_MAX_AGE}; Path=/; HttpOnly; \
+                 SameSite=Lax",
+                chosen.code()
+            ),
+        ));
+    }
+    if let Some(chosen) = lang {
+        resp.add_header(h(
+            "Set-Cookie",
+            &format!(
+                "{LANG_COOKIE}={}; Max-Age={PREFERENCE_COOKIE_MAX_AGE}; Path=/; HttpOnly; \
+                 SameSite=Lax",
+                chosen.code()
+            ),
+        ));
+    }
+    resp.add_header(h("Cache-Control", "no-store"));
+    let _ = req.respond(resp);
+}
+
+/// What the four sections show, all of it read out of the two files this request opened.
+///
+/// A struct because the page function takes the caller's identity separately (it comes from the
+/// request, not from the files), and a page that took six loose arguments was a page whose
+/// arguments could be swapped without a compiler noticing.
+struct AccountOwn<'a> {
+    /// Each application the caller reaches, with the scope names under it, in file order.
+    reached: Vec<(&'a str, Vec<&'a str>)>,
+    /// The `user_groups` that list the caller's uuid.
+    groups: Vec<&'a str>,
+    /// The keys whose owner is the caller's uuid, sorted by id.
+    keys: Vec<&'a ApiKeyRecord>,
+    /// Each configured `gate.profile_claims` entry, with the value the proxy forwarded.
+    claims: Vec<(&'a str, Option<String>)>,
+}
+
+/// The scopes a signed-in caller reaches, grouped by application in file order.
+///
+/// The grouping is [`bb_auth_core::Access::scopes_reached`] restated as pairs of names, because
+/// the page shows an application and then its scopes, and a renderer that walked the raw list
+/// would have to notice the application changed at every step.
+fn account_reached<'a>(access: &'a Access, identifier: &str) -> Vec<(&'a str, Vec<&'a str>)> {
+    let mut out: Vec<(&str, Vec<&str>)> = Vec::new();
+    for (app, scope) in access.scopes_reached(identifier) {
+        match out.last_mut() {
+            Some((name, scopes)) if *name == app.name => scopes.push(scope.name.as_str()),
+            _ => out.push((app.name.as_str(), vec![scope.name.as_str()])),
+        }
+    }
+    out
+}
+
+/// The groups that list `uuid`.
+///
+/// The **document** is asked, not the table: `compile_access` expands a `@group` into each
+/// scope's members and keeps no group names, and the question a person has is "under which named
+/// set am I filed", which a scope's member list cannot answer (a `@group` lists none of them
+/// directly). Members are compared the way the library compares them, with [`norm_email`]. A
+/// caller with no roster row is in no group, because a group lists uuids.
+fn account_groups<'a>(doc: &'a AccessFile, uuid: Option<&str>) -> Vec<&'a str> {
+    let Some(want) = uuid else {
+        return Vec::new();
+    };
+    let want = norm_email(want);
+    doc.user_groups
+        .iter()
+        .filter(|(_, members)| members.iter().any(|m| norm_email(m) == want))
+        .map(|(name, _)| name.as_str())
+        .collect()
+}
+
+/// The keys whose owner is `uuid`, sorted by id.
+///
+/// Sorted because [`Access::by_key_hash`] is a `HashMap`, and a page that reshuffled a person's
+/// keys between two reloads is a page nobody can compare with the file they wrote. The bearer and
+/// its hash are not in an [`ApiKeyRecord`] at all, which is what keeps this list free of the
+/// secret: the file stores only a hash, and the bearer exists nowhere after minting.
+fn account_keys<'a>(access: &'a Access, uuid: Option<&str>) -> Vec<&'a ApiKeyRecord> {
+    let Some(owner) = uuid else {
+        return Vec::new();
+    };
+    let mut keys: Vec<&ApiKeyRecord> = access
+        .by_key_hash
+        .values()
+        .filter(|k| k.uuid == owner)
+        .collect();
+    keys.sort_by(|a, b| a.key_id.cmp(&b.key_id));
+    keys
+}
+
+/// Each configured claim, with the value this request actually carried for its derived header.
+///
+/// The claim names come from the settings and the values from the request, and keeping them in one
+/// function is what makes "configured" and "forwarded" one list rather than two a renderer has to
+/// line up by hand. `None` when no header arrived, and the page shows the name with the word for
+/// none: a page that filled in a value nobody sent would be telling a person something the estate
+/// never said.
+fn account_claims<'a>(settings: &'a Settings, req: &Request) -> Vec<(&'a str, Option<String>)> {
+    settings
+        .profile_claims
+        .iter()
+        .map(|c| {
+            (
+                c.claim.as_str(),
+                header_value(req, &c.header).map(pct_decode),
+            )
+        })
+        .collect()
+}
+
+/// A key's expiry as the file states it: the date it expires, or the words for "no expiry".
+fn account_key_expiry(lang: Lang, key: &ApiKeyRecord) -> String {
+    match key.expires {
+        Some(e) => format_date(e),
+        None => t(lang, K::NeverExpires).to_string(),
+    }
+}
+
+/// A key's own restriction: the `app/scope` names it carries, sorted, or the words for "the
+/// owner's whole reach". A restriction is a subtraction, so an owner has to be able to see that a
+/// key is narrower than they are.
+fn account_key_restriction(lang: Lang, key: &ApiKeyRecord) -> String {
+    match &key.scopes {
+        None => t(lang, K::AccountKeyAllScopes).to_string(),
+        Some(scopes) => {
+            let mut names: Vec<&str> = scopes.iter().map(String::as_str).collect();
+            names.sort_unstable();
+            names.join(", ")
+        }
+    }
+}
+
+/// The page a caller gets: who they are, as the header carried it, their uuid when the access file
+/// has a row for them, and the four sections about their own account.
+///
+/// A stranger is named too, and told there is no row: the `authenticated` scope §13.4 chose for
+/// this URL admits any identity Cognito vouches for, so "bb-auth knows nothing about you" is a
+/// page a real caller reaches, not a defensive one. A stranger and an administrator with no roster
+/// row get the same page, because `web.admins` is not read here.
+///
+/// The sections are siblings and each carries only a heading, the names, and one short "none"
+/// line: the page's contract is about **which fact belongs in which section**, and prose in one is
+/// a word a test about another could match by accident.
+fn page_account(lang: Lang, ids: &[String], uuid: Option<&str>, own: &AccountOwn) -> Markup {
+    html! {
+        p {
+            (t(lang, K::SignedInAs)) ": "
+            @for id in ids {
+                code { (id) } " "
+            }
+        }
+        @if let Some(u) = uuid {
+            p { (t(lang, K::AccountUuid)) ": " code { (u) } }
+        } @else {
+            p class="muted" { (t(lang, K::AccountNoRow)) }
+        }
+        section id="reach" class="panel" {
+            h2 { (t(lang, K::AccountReach)) }
+            @if own.reached.is_empty() {
+                p class="muted" { (t(lang, K::AccountNone)) }
+            } @else {
+                @for (app, scopes) in &own.reached {
+                    p { code { (app) } }
+                    ul {
+                        @for scope in scopes {
+                            li { code { (scope) } }
+                        }
+                    }
+                }
+            }
+        }
+        section id="groups" class="panel" {
+            h2 { (t(lang, K::Groups)) }
+            @if own.groups.is_empty() {
+                p class="muted" { (t(lang, K::AccountNone)) }
+            } @else {
+                ul {
+                    @for g in &own.groups {
+                        li { code { (g) } }
+                    }
+                }
+            }
+        }
+        section id="keys" class="panel" {
+            h2 { (t(lang, K::AccountKeys)) }
+            @if own.keys.is_empty() {
+                p class="muted" { (t(lang, K::AccountNone)) }
+            } @else {
+                ul {
+                    @for k in &own.keys {
+                        li {
+                            code { (k.key_id) }
+                            ul {
+                                li { code { (account_key_expiry(lang, k)) } }
+                                li { code { (account_key_restriction(lang, k)) } }
+                            }
+                        }
+                    }
+                }
+            }
+        }
+        section id="profile" class="panel" {
+            h2 { (t(lang, K::AccountProfile)) }
+            @if own.claims.is_empty() {
+                p class="muted" { (t(lang, K::AccountNone)) }
+            } @else {
+                ul {
+                    @for (claim, value) in &own.claims {
+                        li {
+                            code { (claim) }
+                            // The word for none, not an empty value: a claim the deployment
+                            // configured and nginx did not forward is a fact about the wiring, and
+                            // a person has to be able to see it is missing rather than squint at a
+                            // blank after a colon.
+                            @if let Some(v) = value {
+                                ": " code { (v) }
+                            } @else {
+                                " " code { (t(lang, K::AccountNone)) }
+                            }
+                        }
+                    }
+                }
+            }
+        }
+    }
+}
+
+/// The uuid every address in the header resolves to, or `None` when the file has no row for any of
+/// them. `Err` when they do not all resolve to the same one.
+///
+/// A stranger is `Ok(None)`, and reaches the page: the `authenticated` scope admits identities the
+/// file has never heard of, and "bb-auth knows nothing about you" is a fact about the caller that
+/// the page is the right place to say.
+fn account_uuid_of<'a>(access: &'a Access, ids: &[String]) -> Result<Option<&'a str>, ()> {
+    let mut found: Option<&str> = None;
+    for id in ids {
+        if let Some(u) = access.uuid_of(id) {
+            match found {
+                // Two addresses of one row name one uuid, and that is the ordinary case.
+                Some(seen) if seen == u => {}
+                Some(_) => return Err(()),
+                None => found = Some(u),
+            }
+        }
+    }
+    Ok(found)
+}
+
+/// Answer one request under the self-service prefix.
+///
+/// The order is the console's own, and for the console's own reasons: the proxy secret has already
+/// been proved by the caller here, so the first thing this does is read the identity, and the
+/// `denied` veto is checked **ahead** of the row resolution that decides `500` vs `200`. The gate
+/// refuses a vetoed identity before it reaches this page, so this is the second lock for a file
+/// edited mid-request, and a lock a caller escapes by sending *less* is not a lock.
+///
+/// `web.admins` is never read. An administrator here is one more person acting on their own
+/// account, and a list in the settings file must not become a second, invisible way to be granted
+/// something on a page whose whole subject is the access file.
+fn handle_account(
+    req: Request,
+    cfg: &Config,
+    path: &str,
+    query: &str,
+    lang_pref: LangPref,
+    lang: Lang,
+    theme: UiTheme,
+) {
+    // The page's own URL: the prefix plus a slash. The form's `action` and the target of a
+    // preference redirect are both this, and the bare prefix is answered as the page too, so
+    // `/account` and `/account/` are one page rather than a page and a redirect.
+    let page = format!("{}/", cfg.account_path);
+    let prefs = AccountPrefs {
+        lang,
+        lang_pref,
+        theme,
+        page: &page,
+    };
+    // Below the prefix, only the page exists. A path that is nothing is a `404` for every caller
+    // alike, administrator included, because a page that answers a stranger `403` and an
+    // administrator `404` is a page describing its own layout to whoever asks.
+    if path != cfg.account_path && path != page {
+        respond_account(
+            req,
+            404,
+            &prefs,
+            t(lang, K::NotFoundTitle),
+            html! { p { (t(lang, K::NotFoundBody)) } },
+            AccountLook::default(),
+        );
+        return;
+    }
+    // Identity comes from nginx and from nowhere else, exactly as it does for the console: a
+    // missing header is a broken deployment, not an anonymous visitor, and this page's whole
+    // subject is a person, so there is nothing to render without one.
+    let raw = match header_value(&req, IDENTITY_HEADER) {
+        Some(e) if !e.trim().is_empty() => e.to_string(),
+        _ => {
+            // The built-in look, and here there is no other: the settings have not been read, and
+            // a request with no identity at all is not going to reach them.
+            respond_account(
+                req,
+                401,
+                &prefs,
+                t(lang, K::NoIdentityTitle),
+                html! { p { (t(lang, K::NoIdentityBody)) } },
+                AccountLook::default(),
+            );
+            return;
+        }
+    };
+    // The header is a list, not one address: the gate puts **every** email of the roster row into
+    // it, joined by a single space. Every one of them is shown, because the page is about the
+    // identity the estate handed over, not about one address picked out of it.
+    let ids: Vec<String> = raw.split_ascii_whitespace().map(norm_email).collect();
+    // A preference is applied before anything is rendered, so the page a person lands on after a
+    // submit is in the language and the appearance they just picked. `None` for a value nobody
+    // recognises, which is what makes an unrecognised value set no cookie and leave the page as it
+    // was.
+    let want_theme = query_param(query, THEME_COOKIE).and_then(|v| parse_theme(&v));
+    let want_lang = query_param(query, LANG_COOKIE).and_then(|v| parse_lang_pref(&v));
+    if want_theme.is_some() || want_lang.is_some() {
+        respond_account_preferences(req, &page, want_theme, want_lang);
+        return;
+    }
+    // The settings, fresh off disk, for the same reason the console reads them per request: the
+    // `ui` section is what makes one save restyle every surface of the estate at once.
+    let settings = match open_settings_file(&cfg.settings_path) {
+        Ok((_, s)) => s,
+        Err(e) => {
+            respond_account(
+                req,
+                500,
+                &prefs,
+                t(lang, K::FileErrorTitle),
+                html! { p { (e) } },
+                AccountLook::default(),
+            );
+            return;
+        }
+    };
+    let look = AccountLook {
+        theme: settings.theme,
+        stylesheet: settings.stylesheet_url.as_deref(),
+        logo: settings.logo_url.as_deref(),
+        brand: settings.brand_name.as_deref(),
+    };
+    // `gate.identity_attrs` without `email` means nginx injects no `X-Auth-Email`, so there is no
+    // identity for this page to act on. The page names the setting, because the operator reading it
+    // is the only person who can fix it.
+    if !settings.identity_attrs.iter().any(|a| a.attr == "email") {
+        respond_account(
+            req,
+            500,
+            &prefs,
+            t(lang, K::AccountNoEmailTitle),
+            html! { p { (t(lang, K::AccountNoEmailBody)) } },
+            look,
+        );
+        return;
+    }
+    // The access file, fresh off disk too: this page answers "what may I do", and an answer cached
+    // from an earlier request is an answer about a file that is not the one the gate is enforcing.
+    let (doc, access) = match open_access_file(&cfg.access_path) {
+        Ok(pair) => pair,
+        Err(e) => {
+            respond_account(
+                req,
+                500,
+                &prefs,
+                t(lang, K::FileErrorTitle),
+                html! { p { (e) } },
+                look,
+            );
+            return;
+        }
+    };
+    // The veto, ahead of everything the file has to say about grants.
+    if ids.iter().any(|e| access.vetoes_identifier(e)) {
+        respond_account(
+            req,
+            403,
+            &prefs,
+            t(lang, K::AccountVetoTitle),
+            html! { p { (t(lang, K::AccountVetoBody)) } },
+            look,
+        );
+        return;
+    }
+    // Every address in the header has to resolve to the **same** row. The gate builds the header
+    // out of one row's emails, so several values that resolve to different rows is nginx having
+    // written one header for two people, and there is no page that is about both.
+    let uuid = match account_uuid_of(&access, &ids) {
+        Ok(u) => u,
+        Err(()) => {
+            respond_account(
+                req,
+                500,
+                &prefs,
+                t(lang, K::AccountAmbiguousTitle),
+                html! { p { (t(lang, K::AccountAmbiguousBody)) } },
+                look,
+            );
+            return;
+        }
+    };
+    let own = AccountOwn {
+        reached: account_reached(&access, &ids[0]),
+        groups: account_groups(&doc, uuid),
+        keys: account_keys(&access, uuid),
+        claims: account_claims(&settings, &req),
+    };
+    respond_account(
+        req,
+        200,
+        &prefs,
+        t(lang, K::AccountTitle),
+        page_account(lang, &ids, uuid, &own),
+        look,
+    );
+}
 
 // ---------------------------------------------------------------------------
 // The request
@@ -7471,6 +8313,16 @@ fn handle(mut req: Request, cfg: &Config) {
             html! { p { (v.t(K::NoProxyBody)) } },
         );
         respond_page(req, 403, shell(&v, v.t(K::NoProxyTitle), page), &v.look);
+        return;
+    }
+    // The self-service page, dispatched **ahead of the administrator allowlist** and of the
+    // identity refusal below it (docs/ARCHITECTURE.md §13.2). It is the one page of this program a
+    // person who is not on `web.admins` reaches, so an allowlist that ran first would answer them
+    // a `403` about a console they were never meant to open. The prefix test is anchored at the
+    // **start** of the path and made at a path boundary, so `/admin/account` stays the console's
+    // and `/accounts` is not the page.
+    if path == cfg.account_path || path.starts_with(&format!("{}/", cfg.account_path)) {
+        handle_account(req, cfg, &path, &query, lang_pref, lang, theme);
         return;
     }
     // Identity comes from nginx and from nowhere else. A missing header is a broken
@@ -8334,6 +9186,10 @@ mod tests {
             access_path: path.to_string(),
             settings_path: settings_path(path),
             base_path: base.to_string(),
+            // The self-service prefix, fixed for every fixture in this module, so the console
+            // and the page have the two prefixes the design gives them (`/admin` and
+            // `/account`) in every test, including the ones that never ask for the page.
+            account_path: "/account".into(),
             default_lang: Lang::En,
             // Configured, so the control renders and the tests below see the shape a real
             // deployment has. The unset case is its own test.
@@ -11982,5 +12838,1746 @@ mod tests {
         let landed = r.body_mut().read_to_string().unwrap();
         assert!(landed.contains("user removed"), "{landed}");
         cleanup(&path);
+    }
+
+    // =====================================================================
+    // The self-service page at `/account/` (plan step 3c, docs/ARCHITECTURE.md §13.2).
+    //
+    // These are the tests `bb-auth-me` answers today, ported to this binary, because the page
+    // is moving here: one program then serves the console and the self-service page out of one
+    // pair of files, and the routing tests at the end are the boundary the move has to create.
+    // Every request here carries the proxy secret, because the secret check sits **above** the
+    // identity check: a request without it is a `403` whatever else it carries, so a test about
+    // the page has to be a request the proxy would have made.
+    //
+    // Two prefixes, not one: the console is mounted at `/admin` and the page lives at its own
+    // prefix `/account` (`BB_AUTH_WEB_ACCOUNT_PATH`, the field `cfg_for` fills in). The admin
+    // base is never empty in these fixtures, because an empty base covers every path and so
+    // cannot coexist with a self-service prefix: `compile_account_path` refuses it at startup.
+    //
+    // The fixtures' `web.admins` names `admin@x.com` and nobody else, on purpose. Bob, carol
+    // and the stranger all reach `/account/` and none of them is an administrator, which is the
+    // proof that this page never reads the allowlist; `admin@x.com` is the administrator with
+    // no roster row, and `/account/` answers them exactly as it answers a stranger.
+    // =====================================================================
+
+    /// One application, one `authenticated` scope (the grant docs/ARCHITECTURE.md §13.4 chose
+    /// for this page, so a stranger is a real caller), two roster rows, and the `denied` veto.
+    const ACCOUNT_ACCESS: &str = r#"{ "version": 1,
+      "applications": [
+        { "name": "mpa", "base": ["https://app.x.com/mpa"],
+          "scopes": [ { "name": "onboarding", "urls": ["https://app.x.com/mpa/*"],
+                        "access": "authenticated" } ] }
+      ],
+      "denied": ["spammer@x.com"],
+      "users": [
+        { "uuid": "11111111-1111-4111-8111-111111111111",
+          "emails": ["bob@x.com", "bob@old.com"] },
+        { "uuid": "22222222-2222-4222-8222-222222222222", "emails": ["carol@x.com"] }
+      ] }"#;
+
+    /// The deployment's settings: the pool, the hosts it may redirect to, and one
+    /// administrator who is **not** any of the callers. `identity_attrs` is left at its
+    /// default, which is `email`.
+    const ACCOUNT_SETTINGS: &str = r#"{ "version": 3, "gate": { "client_id": "email-client",
+        "issuer": "https://cognito-idp.eu-central-1.amazonaws.com/eu-central-1_TEST",
+        "authorized_hosts": ["badbat75.com", "*.badbat75.com"] },
+        "web": { "admins": ["admin@x.com"] } }"#;
+
+    /// The same file with `gate.identity_attrs` narrowed to `uuid`: nginx then injects no
+    /// `X-Auth-Email` at all, so there is no identity for this page to act on.
+    const ACCOUNT_SETTINGS_NO_EMAIL: &str = r#"{ "version": 3, "gate": { "client_id": "email-client",
+        "issuer": "https://cognito-idp.eu-central-1.amazonaws.com/eu-central-1_TEST",
+        "authorized_hosts": ["badbat75.com", "*.badbat75.com"],
+        "identity_attrs": ["uuid"] },
+        "web": { "admins": ["admin@x.com"] } }"#;
+
+    /// Every caller §13.4's table lists, in the header form each one arrives in. The page
+    /// must name each of them, as the header carried it, normalised.
+    const ACCOUNT_CALLERS: [&str; 5] = [
+        "bob@x.com",
+        "BOB@old.com bob@x.com",
+        "carol@x.com",
+        "admin@x.com",
+        "stranger@elsewhere.com",
+    ];
+
+    const ACCOUNT_BOB: &str = "11111111-1111-4111-8111-111111111111";
+    const ACCOUNT_CAROL: &str = "22222222-2222-4222-8222-222222222222";
+
+    /// The two raw bearers whose hashes the fixture stores. The keys exist so a test can say
+    /// the page carries **neither** the bearer nor its hash: a page that printed a hash is
+    /// one step from printing the file's secret material.
+    const ACCOUNT_BEARER_LAPTOP: &str = "bbk_testkeytestkeytestkey";
+    const ACCOUNT_BEARER_CI: &str = "bbk_secondkeysecondkey00";
+
+    /// Two applications, every access kind, and bob in all of them in a different way: `mpa`
+    /// reaches him through `@admins` (`admin`), through `authenticated` (`onboarding`) and
+    /// not at all (`healthz`, anonymous, which says nothing about a person); `mcp` reaches him
+    /// through `logs` and not through `api`, whose credentials are `api_key` only, so a
+    /// browser login never reaches it.
+    const ACCOUNT_ACCESS_FULL: &str = r#"{ "version": 1,
+  "applications": [
+    { "name": "mpa", "base": ["https://app.x.com/mpa"],
+      "scopes": [
+        { "name": "healthz", "urls": ["https://app.x.com/mpa/healthz"], "access": "anonymous" },
+        { "name": "admin", "urls": ["https://app.x.com/mpa/admin/*"], "access": "restricted",
+          "groups": ["@admins"], "credentials": ["login"] },
+        { "name": "onboarding", "urls": ["https://app.x.com/mpa/*"], "access": "authenticated" } ] },
+    { "name": "mcp", "base": ["https://ai.x.com/mcp"],
+      "scopes": [
+        { "name": "logs", "urls": ["https://ai.x.com/mcp/logs/*"], "access": "restricted",
+          "users": ["__BOB__"] },
+        { "name": "api", "urls": ["https://ai.x.com/mcp/*"], "access": "restricted",
+          "users": ["__BOB__"], "credentials": ["api_key"] } ] } ],
+  "user_groups": { "admins": ["__BOB__"] },
+  "denied": ["spammer@x.com"],
+  "users": [
+    { "uuid": "__BOB__", "emails": ["bob@x.com", "bob@old.com"],
+      "api_keys": [
+        { "id": "laptop", "key_hash": "__LAPTOP_HASH__", "released": "2026-01-01",
+          "duration": "never", "scopes": ["mcp/api"] },
+        { "id": "ci", "key_hash": "__CI_HASH__", "released": "2026-01-01", "duration": "365d" } ] },
+    { "uuid": "__CAROL__", "emails": ["carol@x.com"] } ] }"#;
+
+    /// The fixture with its uuids and key hashes filled in, the hashes by the library's own
+    /// fingerprint, so the hashes a test looks for and the hashes in the file are the same
+    /// bytes by construction.
+    fn account_access_full() -> String {
+        ACCOUNT_ACCESS_FULL
+            .replace("__BOB__", ACCOUNT_BOB)
+            .replace("__CAROL__", ACCOUNT_CAROL)
+            .replace("__LAPTOP_HASH__", &sha256_hex(ACCOUNT_BEARER_LAPTOP))
+            .replace("__CI_HASH__", &sha256_hex(ACCOUNT_BEARER_CI))
+    }
+
+    /// The deployment's settings, plus `gate.profile_claims`: the page shows the claims the
+    /// proxy forwards, and `given_name` is the one whose derived header (`X-Auth-Given-Name`)
+    /// a test can put on the wire.
+    const ACCOUNT_SETTINGS_FULL: &str = r#"{ "version": 3, "gate": { "client_id": "email-client",
+        "issuer": "https://cognito-idp.eu-central-1.amazonaws.com/eu-central-1_TEST",
+        "authorized_hosts": ["badbat75.com", "*.badbat75.com"],
+        "profile_claims": ["given_name"] },
+        "web": { "admins": ["admin@x.com"] } }"#;
+
+    /// The deployment's settings plus the administrator's default theme.
+    const ACCOUNT_SETTINGS_THEME_DARK: &str = r#"{ "version": 3, "gate": { "client_id": "email-client",
+        "issuer": "https://cognito-idp.eu-central-1.amazonaws.com/eu-central-1_TEST",
+        "authorized_hosts": ["badbat75.com", "*.badbat75.com"] },
+        "web": { "admins": ["admin@x.com"] },
+        "ui": { "theme": "dark" } }"#;
+
+    /// The deployment's settings plus the brand name and the logo an administrator set.
+    const ACCOUNT_SETTINGS_BRAND: &str = r#"{ "version": 3, "gate": { "client_id": "email-client",
+        "issuer": "https://cognito-idp.eu-central-1.amazonaws.com/eu-central-1_TEST",
+        "authorized_hosts": ["badbat75.com", "*.badbat75.com"] },
+        "web": { "admins": ["admin@x.com"] },
+        "ui": { "brand_name": "BadBat75",
+                "logo_url": "https://assets.badbat75.com/logo.png" } }"#;
+
+    /// The admin base these fixtures mount the console at. Never empty: a GUI mounted at the
+    /// root covers every path, so it has no room beside it for a self-service prefix, and
+    /// `compile_account_path` refuses that combination at startup. `/admin` is what the
+    /// packaged env example and rpi-01 both set.
+    const ADMIN_BASE: &str = "/admin";
+    /// The self-service prefix, and the value [`cfg_for`] puts in `Config::account_path` for
+    /// every fixture in this module (`BB_AUTH_WEB_ACCOUNT_PATH`, default `/account`).
+    const ACCOUNT_PATH: &str = "/account";
+    /// The page as §13.2 spells it, with the trailing slash: the URL a request asks for, and
+    /// the `Location:` a preference submit answers with.
+    const ACCOUNT_PAGE: &str = "/account/";
+
+    /// The access file and the settings file beside it, under a name unique to this test:
+    /// tests run in parallel and share one temp directory. The `account-` in the file name
+    /// keeps this suite's fixtures from colliding with the console's.
+    fn account_scratch(name: &str, settings: &str) -> String {
+        let p = std::env::temp_dir().join(format!("bb-auth-web-account-{name}.json"));
+        std::fs::write(&p, ACCOUNT_ACCESS).expect("write the access fixture");
+        let path = p.to_string_lossy().into_owned();
+        std::fs::write(settings_path(&path), settings).expect("write the settings fixture");
+        path
+    }
+
+    /// The richer fixture, written the same way and under its own name, for every test about
+    /// **what the page shows** rather than about who reaches it at all.
+    fn account_scratch_full(name: &str) -> String {
+        let p = std::env::temp_dir().join(format!("bb-auth-web-account-{name}.json"));
+        std::fs::write(&p, account_access_full()).expect("write the full access fixture");
+        let path = p.to_string_lossy().into_owned();
+        std::fs::write(settings_path(&path), ACCOUNT_SETTINGS_FULL)
+            .expect("write the full settings fixture");
+        path
+    }
+
+    /// The whole GUI served over a real socket on an ephemeral loopback port: console at
+    /// [`ADMIN_BASE`], page at [`ACCOUNT_PATH`]. The thread is never joined: the test process
+    /// exits and the socket goes with it.
+    fn account_port(path: &str) -> u16 {
+        serve(path, ADMIN_BASE)
+    }
+
+    /// The page's own URL, `GET /account/`, on that server. A test that asks for a different
+    /// shape under the prefix builds its URL from [`ACCOUNT_PATH`] and says so.
+    fn account_serve(path: &str) -> String {
+        format!("http://127.0.0.1:{}{ACCOUNT_PATH}/", account_port(path))
+    }
+
+    /// The client for these requests. Same two settings as [`client`] (a refusal is asserted
+    /// on by its **body**, and a redirect is the thing under test rather than a step), plus a
+    /// deadline, so a handler that never answers fails the test instead of hanging it.
+    fn account_client() -> ureq::Agent {
+        ureq::Agent::config_builder()
+            .http_status_as_error(false)
+            .max_redirects(0)
+            .timeout_global(Some(std::time::Duration::from_secs(5)))
+            .build()
+            .new_agent()
+    }
+
+    /// One response, read the way these tests read it: every header, because a preference
+    /// test counts the `Set-Cookie` headers a single response carries.
+    #[derive(Debug)]
+    struct AccountGot {
+        status: u16,
+        headers: Vec<(String, String)>,
+        body: String,
+    }
+
+    impl AccountGot {
+        fn header(&self, name: &str) -> Option<&str> {
+            self.headers
+                .iter()
+                .find(|(k, _)| k.eq_ignore_ascii_case(name))
+                .map(|(_, v)| v.as_str())
+        }
+        /// Every `Set-Cookie` value, in the order they arrived. One submit of the preference
+        /// form is one response, so the count is the contract.
+        fn cookies(&self) -> Vec<&str> {
+            self.headers
+                .iter()
+                .filter(|(k, _)| k.eq_ignore_ascii_case("Set-Cookie"))
+                .map(|(_, v)| v.as_str())
+                .collect()
+        }
+    }
+
+    /// `GET /account/` carrying the identity header nginx injects, and the proxy secret this
+    /// deployment answers on, or carrying no identity at all.
+    fn account_call(url: &str, identity: Option<&str>) -> AccountGot {
+        account_call_with(url, identity, &[])
+    }
+
+    /// The same request, carrying extra request headers as well, so a test can put a profile
+    /// header on the wire exactly as the gate emits it: percent-encoded, `X-Auth-Given-Name:
+    /// Bob%20Smith`, because that is the construction the estate's safety argument rests on.
+    fn account_call_with(url: &str, identity: Option<&str>, extra: &[(&str, &str)]) -> AccountGot {
+        let mut req = account_client()
+            .get(url)
+            .header(SECRET_HEADER, TEST_SECRET)
+            .header("Sec-Fetch-Site", "same-origin");
+        if let Some(v) = identity {
+            req = req.header(IDENTITY_HEADER, v);
+        }
+        for &(k, v) in extra {
+            req = req.header(k, v);
+        }
+        let mut r = req.call().expect("a response");
+        let headers = r
+            .headers()
+            .iter()
+            .map(|(k, v)| (k.as_str().to_string(), v.to_str().unwrap_or("").to_string()))
+            .collect();
+        AccountGot {
+            status: r.status().as_u16(),
+            headers,
+            body: r.body_mut().read_to_string().expect("a body"),
+        }
+    }
+
+    /// The request a preference test makes: signed in as `identity`, with the browser's
+    /// `Cookie` header carrying the preferences it already chose and an `Accept-Language` when
+    /// the caller has one. Both are assembled here so each test spells the preference it is
+    /// about and nothing else.
+    fn account_call_pref(
+        url: &str,
+        identity: Option<&str>,
+        cookie: Option<&str>,
+        accept: Option<&str>,
+    ) -> AccountGot {
+        let mut extra: Vec<(&str, &str)> = Vec::new();
+        if let Some(c) = cookie {
+            extra.push(("Cookie", c));
+        }
+        if let Some(a) = accept {
+            extra.push(("Accept-Language", a));
+        }
+        account_call_with(url, identity, &extra)
+    }
+
+    /// Case-insensitive search for an inline event handler: a space, `on`, at least one ASCII
+    /// letter, `=`. That is the shape of `onclick=` and of every other `on…=` attribute, and
+    /// the self-service page may carry none: the estate's rule is that a page works with
+    /// scripting off, and unlike the console this page has no `<noscript>` behind a handler.
+    fn account_carries_inline_handler(document: &str) -> bool {
+        let lower = document.to_ascii_lowercase();
+        let bytes = lower.as_bytes();
+        for (i, b) in bytes.iter().enumerate() {
+            if *b != b' ' || !bytes[i + 1..].starts_with(b"on") {
+                continue;
+            }
+            let mut j = i + 2;
+            while j < bytes.len() && bytes[j].is_ascii_alphabetic() {
+                j += 1;
+            }
+            if j > i + 2 && bytes.get(j) == Some(&b'=') {
+                return true;
+            }
+        }
+        false
+    }
+
+    /// The page with its inline stylesheets collapsed to a marker. `THEME_CSS` and `BASE_CSS`
+    /// are the bulk of every document this binary sends, and a failure that quotes the whole
+    /// page buries the line that failed under forty kilobytes of palette.
+    fn account_readable(body: &str) -> String {
+        let mut out = String::new();
+        let mut rest = body;
+        while let Some(i) = rest.find("<style") {
+            out.push_str(&rest[..i]);
+            rest = &rest[i..];
+            let end = rest
+                .find("</style>")
+                .map_or(rest.len(), |e| e + "</style>".len());
+            out.push_str("[style omitted]");
+            rest = &rest[end..];
+        }
+        out.push_str(rest);
+        out
+    }
+
+    /// One section of the page: from `<section id="X"` to the next `</section>`. The page's
+    /// sections are siblings and never nested, so the first closing tag ends the section that
+    /// started, and an assertion about `keys` cannot be satisfied by words that belong to
+    /// `reach`. A page with no such section is the failure this contract is about, so it is
+    /// reported as one.
+    fn account_section(body: &str, id: &str) -> String {
+        let open = format!("<section id=\"{id}\"");
+        let start = body.find(&open).unwrap_or_else(|| {
+            panic!(
+                "the page must carry {}; it does not: {}",
+                open,
+                account_readable(body)
+            )
+        });
+        let rest = &body[start..];
+        let end = rest.find("</section>").unwrap_or_else(|| {
+            panic!(
+                "{} is opened and never closed: {}",
+                open,
+                account_readable(body)
+            )
+        });
+        rest[..end].to_string()
+    }
+
+    /// The `<html …>` start tag. `THEME_CSS` spells `data-theme` inside its own selectors, so
+    /// an assertion about the attribute has to look at the tag and not at the page.
+    fn account_html_tag(body: &str) -> String {
+        let start = body
+            .find("<html")
+            .unwrap_or_else(|| panic!("the page has no <html tag: {}", account_readable(body)));
+        let rest = &body[start..];
+        let end = rest.find('>').unwrap_or(rest.len());
+        rest[..=end].to_string()
+    }
+
+    /// The text of the first `<h1>` (or `<h2>`) in `haystack`. A translation test compares one
+    /// heading, because a whole section also carries names, emails and ids, and those are the
+    /// file's vocabulary, which is never translated.
+    fn account_heading(haystack: &str, tag: &str) -> String {
+        let open = format!("<{tag}>");
+        let start = haystack
+            .find(&open)
+            .unwrap_or_else(|| panic!("the page has no <{tag}>: {}", account_readable(haystack)));
+        let rest = &haystack[start + open.len()..];
+        let end = rest.find(&format!("</{tag}>")).unwrap_or_else(|| {
+            panic!(
+                "<{tag}> is opened and never closed: {}",
+                account_readable(haystack)
+            )
+        });
+        rest[..end].to_string()
+    }
+
+    /// A missing `X-Auth-Email` means nginx gated this location and forgot to inject the
+    /// identity. That is a broken deployment, not an anonymous visitor, so the page refuses
+    /// rather than rendering a page about nobody: an open door here is silent.
+    #[test]
+    fn account_a_request_with_no_identity_header_is_a_401() {
+        let path = account_scratch("no-header", ACCOUNT_SETTINGS);
+        let base = account_serve(&path);
+
+        let g = account_call(&base, None);
+        assert_eq!(
+            g.status, 401,
+            "a header nobody sent is not an anonymous visitor: {g:?}"
+        );
+
+        // A header set to spaces is the same broken deployment: nginx wrote the header and
+        // put nobody in it, and an identity of spaces is not a person either.
+        let g = account_call(&base, Some("   "));
+        assert_eq!(g.status, 401, "a header of spaces names nobody: {g:?}");
+
+        cleanup(&path);
+    }
+
+    /// `gate.identity_attrs` without `email` means nginx injects no `X-Auth-Email`, so this
+    /// page has no identity to act on at all. That is a deployment fault, and the answer has
+    /// to name the setting, because the operator reading it is the only person who can fix it.
+    #[test]
+    fn account_settings_without_the_email_attribute_are_a_500_naming_the_setting() {
+        let path = account_scratch("no-email-attr", ACCOUNT_SETTINGS_NO_EMAIL);
+        let base = account_serve(&path);
+
+        let g = account_call(&base, Some("bob@x.com"));
+        assert_eq!(
+            g.status,
+            500,
+            "a deployment that injects no email has no caller to serve: {}",
+            account_readable(&g.body)
+        );
+        assert!(
+            g.body.contains("identity_attrs"),
+            "the page must name the setting to fix: {}",
+            account_readable(&g.body)
+        );
+
+        cleanup(&path);
+    }
+
+    /// `X-Auth-Email` carries every identifier of one row, space-joined, so several values
+    /// that resolve to **different** rows is nginx having built one header out of two people.
+    /// There is no page that is about both, so this is a fault, not a caller.
+    #[test]
+    fn account_values_from_two_different_rows_are_a_500() {
+        let path = account_scratch("two-rows", ACCOUNT_SETTINGS);
+        let base = account_serve(&path);
+
+        let g = account_call(&base, Some("bob@x.com carol@x.com"));
+        assert_eq!(
+            g.status,
+            500,
+            "two rows in one header is not one person: {}",
+            account_readable(&g.body)
+        );
+
+        cleanup(&path);
+    }
+
+    /// `denied` is checked **first**, ahead of the row resolution that decides 500 vs 200:
+    /// the gate refuses a vetoed identity before it ever reaches this page, so this is the
+    /// second lock for a file edited mid-request, and a lock that a caller escapes by
+    /// sending *less* is not a lock.
+    #[test]
+    fn account_a_vetoed_identity_is_a_403_checked_before_the_rest() {
+        let path = account_scratch("vetoed", ACCOUNT_SETTINGS);
+        let base = account_serve(&path);
+
+        let g = account_call(&base, Some("spammer@x.com"));
+        assert_eq!(
+            g.status,
+            403,
+            "a vetoed identity gets a refusal, not the page: {}",
+            account_readable(&g.body)
+        );
+
+        // A vetoed value joined to a live one is still a vetoed request, and it is a 403
+        // rather than the 500 the two-rows rule would hand it: the veto outranks it.
+        let g = account_call(&base, Some("bob@x.com spammer@x.com"));
+        assert_eq!(g.status, 403, "the veto outranks the two-row 500: {g:?}");
+
+        cleanup(&path);
+    }
+
+    /// Every caller in §13.4's table reaches the page, and the page names them: a roster
+    /// user, a row whose two emails both arrived, an administrator (whose `web.admins` entry
+    /// is **not** read here, so they are treated as any stranger), and a stranger no row
+    /// knows, whom the `authenticated` scope lets in.
+    #[test]
+    fn account_a_signed_in_caller_gets_a_page_naming_them() {
+        let path = account_scratch("callers", ACCOUNT_SETTINGS);
+        let base = account_serve(&path);
+
+        for who in ACCOUNT_CALLERS {
+            let g = account_call(&base, Some(who));
+            assert_eq!(
+                g.status,
+                200,
+                "{who} is signed in and reaches the page: {}",
+                account_readable(&g.body)
+            );
+            for part in who.split_ascii_whitespace() {
+                let id = norm_email(part);
+                assert!(g.body.contains(&id), "the page must name {id}: {g:?}");
+            }
+        }
+
+        cleanup(&path);
+    }
+
+    /// This page is one of the estate's HTML documents, so it carries the shared header set
+    /// the library decides once, and a policy of its own; and it is a page a stranger reaches,
+    /// so it carries no script and no inline handler at all.
+    #[test]
+    fn account_every_page_carries_the_shared_headers_and_no_script() {
+        let path = account_scratch("headers", ACCOUNT_SETTINGS);
+        let base = account_serve(&path);
+
+        for who in ACCOUNT_CALLERS {
+            let g = account_call(&base, Some(who));
+            assert_eq!(g.status, 200, "{who}");
+            for (k, v) in PAGE_SECURITY_HEADERS {
+                assert_eq!(
+                    g.header(k),
+                    Some(v),
+                    "{who}: the response must carry {k}: {v}"
+                );
+            }
+            assert!(
+                g.header("Content-Security-Policy").is_some(),
+                "{who}: every HTML page carries a policy: {g:?}"
+            );
+            assert!(
+                !g.body.to_ascii_lowercase().contains("<script"),
+                "{who}: no script tag, the page works with scripting off"
+            );
+            assert!(
+                !account_carries_inline_handler(&g.body),
+                "{who}: no inline handler: {g:?}"
+            );
+        }
+
+        cleanup(&path);
+    }
+
+    /// The answer to "where can I go?" is a list of places, so the section names each
+    /// application and then that application's scopes, in the order the file writes them: an
+    /// operator comparing the page with the file they wrote should read them in the same
+    /// order. `anonymous` is absent because it grants with no credential and so says nothing
+    /// about this person, and a scope whose credentials are `api_key` only is absent because
+    /// the caller reading this page is signed in with a browser, not with a key.
+    #[test]
+    fn account_the_reach_section_lists_every_app_and_scope_bob_reaches_in_file_order() {
+        let path = account_scratch_full("reach-bob");
+        let base = account_serve(&path);
+
+        let g = account_call(&base, Some("bob@x.com"));
+        assert_eq!(
+            g.status,
+            200,
+            "bob is a roster user: {}",
+            account_readable(&g.body)
+        );
+        let s = account_section(&g.body, "reach");
+        for name in ["mpa", "admin", "onboarding", "mcp", "logs"] {
+            assert!(
+                s.contains(name),
+                "bob reaches {name}, so the reach section must list it: {s}"
+            );
+        }
+        let at = |n: &str| s.find(n).unwrap_or_default();
+        assert!(
+            at("mpa") < at("admin") && at("admin") < at("onboarding"),
+            "an application must be named before its own scopes, and its scopes in file order: {s}"
+        );
+        assert!(
+            at("onboarding") < at("mcp") && at("mcp") < at("logs"),
+            "the applications are listed in file order, each before the scopes it owns: {s}"
+        );
+        assert!(
+            !s.contains("healthz"),
+            "an anonymous scope is reached by everyone with no credential, so it says nothing \
+             about bob and must not be listed: {s}"
+        );
+        assert!(
+            !s.contains("api"),
+            "mcp/api admits only an api_key, and a browser login never reaches it: {s}"
+        );
+
+        cleanup(&path);
+    }
+
+    /// A group is how an operator writes a reusable set of people, so the groups section
+    /// answers the question a person actually has: not "which scopes list my uuid" (a
+    /// `@group` lists none of them directly) but "under which named set am I filed".
+    #[test]
+    fn account_the_groups_section_names_the_groups_the_caller_belongs_to() {
+        let path = account_scratch_full("groups-bob");
+        let base = account_serve(&path);
+
+        let g = account_call(&base, Some("bob@x.com"));
+        assert_eq!(
+            g.status,
+            200,
+            "bob is a roster user: {}",
+            account_readable(&g.body)
+        );
+        let s = account_section(&g.body, "groups");
+        assert!(
+            s.contains("admins"),
+            "bob is a member of the admins group, so the page must name it: {s}"
+        );
+
+        cleanup(&path);
+    }
+
+    /// The keys section is where a person learns which machine credentials exist for them, so
+    /// it shows the id, the expiry and the restriction, all of them facts the file states. The
+    /// secret is the one thing that must never come back: the file stores only a hash, the
+    /// bearer is shown once at minting, and a page that reprinted either would be a way to
+    /// read a credential out of a page that is not its reveal.
+    #[test]
+    fn account_the_keys_section_shows_id_expiry_and_restriction_and_never_the_secret() {
+        let path = account_scratch_full("keys-bob");
+        let base = account_serve(&path);
+
+        let g = account_call(&base, Some("bob@x.com"));
+        assert_eq!(
+            g.status,
+            200,
+            "bob is a roster user: {}",
+            account_readable(&g.body)
+        );
+        let s = account_section(&g.body, "keys");
+        assert!(
+            s.contains("laptop") && s.contains("ci"),
+            "bob has two keys, so both ids must be listed: {s}"
+        );
+        assert!(
+            s.contains("never"),
+            "the laptop key's duration is `never`, and that is the fact a person acts on: {s}"
+        );
+        assert!(
+            s.contains("2027-01-01"),
+            "the ci key was released 2026-01-01 for 365 days, so it expires 2027-01-01: {s}"
+        );
+        assert!(
+            s.contains("mcp/api"),
+            "the laptop key is restricted to mcp/api, and an owner has to see that a key is \
+             narrower than they are: {s}"
+        );
+
+        // Absence is asserted on the whole document, not on the section: a bearer printed
+        // anywhere, in a comment or a data attribute, is the same leak.
+        for secret in [
+            ACCOUNT_BEARER_LAPTOP.to_string(),
+            ACCOUNT_BEARER_CI.to_string(),
+            sha256_hex(ACCOUNT_BEARER_LAPTOP),
+            sha256_hex(ACCOUNT_BEARER_CI),
+        ] {
+            assert!(
+                !g.body.contains(&secret),
+                "the page must carry neither a raw key nor its hash, and it carries {secret}"
+            );
+        }
+
+        cleanup(&path);
+    }
+
+    /// The profile section shows what the estate hands to the applications behind the gate:
+    /// the claims the deployment configured, as the proxy forwarded them. The gate sends a
+    /// claim value percent-encoded (that construction is the whole header-safety argument), so
+    /// the page has to decode it: a name rendered as `Bob%20Smith` is a name nobody can read,
+    /// and a claim shown with no name against it is not evidence of anything.
+    #[test]
+    fn account_the_profile_section_shows_a_forwarded_claim_by_name_and_decoded() {
+        let path = account_scratch_full("profile-bob");
+        let base = account_serve(&path);
+
+        let g = account_call_with(
+            &base,
+            Some("bob@x.com"),
+            &[("X-Auth-Given-Name", "Bob%20Smith")],
+        );
+        assert_eq!(
+            g.status,
+            200,
+            "bob is a roster user: {}",
+            account_readable(&g.body)
+        );
+        let s = account_section(&g.body, "profile");
+        assert!(
+            s.contains("given_name"),
+            "the page must name the claim it is showing, since that is the name the deployment \
+             configured: {s}"
+        );
+        assert!(
+            s.contains("Bob Smith"),
+            "the forwarded value is percent-encoded on the wire and must reach the page decoded: {s}"
+        );
+
+        // Nothing forwarded, nothing shown: a page that invented a value would be showing a
+        // person a fact about them that the estate never said.
+        let g = account_call(&base, Some("bob@x.com"));
+        assert_eq!(g.status, 200, "bob is signed in with no claim forwarded");
+        let s = account_section(&g.body, "profile");
+        assert!(
+            !s.contains("Bob"),
+            "no header arrived, so the page may not show a given name: {s}"
+        );
+
+        cleanup(&path);
+    }
+
+    /// A stranger is a real caller, because the page's own scope is `authenticated`, and what
+    /// they reach is exactly the scopes that grant on identity alone: no restricted scope
+    /// lists them, they belong to no group, and a key needs a roster owner, so there are none
+    /// to show.
+    #[test]
+    fn account_a_stranger_reaches_only_the_authenticated_scope_and_has_no_groups_or_keys() {
+        let path = account_scratch_full("stranger");
+        let base = account_serve(&path);
+
+        let g = account_call(&base, Some("stranger@elsewhere.com"));
+        assert_eq!(
+            g.status,
+            200,
+            "a stranger Cognito vouches for reaches this page: {}",
+            account_readable(&g.body)
+        );
+        let s = account_section(&g.body, "reach");
+        assert!(
+            s.contains("mpa") && s.contains("onboarding"),
+            "the authenticated scope is reached by everyone signed in, so the page must list \
+             it under its application: {s}"
+        );
+        for name in ["admin", "logs", "mcp", "healthz", "api"] {
+            assert!(
+                !s.contains(name),
+                "the stranger reaches no {name}, so the page must not name it: {s}"
+            );
+        }
+        assert!(
+            !account_section(&g.body, "groups").contains("admins"),
+            "a stranger is in no group: {}",
+            account_section(&g.body, "groups")
+        );
+        let k = account_section(&g.body, "keys");
+        assert!(
+            !k.contains("laptop") && !k.contains("ci"),
+            "a key must have a roster owner, so a stranger has no keys to be shown: {k}"
+        );
+
+        cleanup(&path);
+    }
+
+    /// `web.admins` is not read here: an administrator with no roster row is one more person
+    /// looking at their own account. So the page they get is the stranger's page, section for
+    /// section. Anything else would make a list in the settings file a second, invisible way
+    /// to be granted something on a page whose whole subject is the access file.
+    ///
+    /// In this binary the point is sharper than it was in `bb-auth-me`: `admin@x.com` is the
+    /// name in `web.admins`, so the same identity that owns the console is the one that must
+    /// be answered here like any other caller.
+    #[test]
+    fn account_an_administrator_with_no_row_is_answered_exactly_as_a_stranger() {
+        let path = account_scratch_full("admin-is-a-stranger");
+        let base = account_serve(&path);
+
+        for id in ["reach", "groups", "keys"] {
+            let stranger = account_section(
+                &account_call(&base, Some("stranger@elsewhere.com")).body,
+                id,
+            );
+            let admin = account_section(&account_call(&base, Some("admin@x.com")).body, id);
+            assert_eq!(
+                stranger, admin,
+                "the {id} section must say the same thing to an administrator with no roster \
+                 row as to any other caller with no row"
+            );
+        }
+
+        cleanup(&path);
+    }
+
+    /// This page is served to whoever nginx vouches for, a stranger included, so the access
+    /// file's URLs are not information to hand out: which areas exist, and which paths inside
+    /// them are gated, is exactly what somebody holding any account at all should not learn.
+    /// Names of applications and scopes are fine, and are what §13.4 chose to show instead.
+    #[test]
+    fn account_no_page_shows_a_url_from_the_access_file() {
+        let path = account_scratch_full("no-urls");
+        let base = account_serve(&path);
+
+        for who in ["bob@x.com", "carol@x.com", "stranger@elsewhere.com"] {
+            let g = account_call(&base, Some(who));
+            assert_eq!(
+                g.status,
+                200,
+                "{who} reaches the page: {}",
+                account_readable(&g.body)
+            );
+            for url in ["https://app.x.com", "https://ai.x.com", "/mpa/", "/mcp/"] {
+                assert!(
+                    !g.body.contains(url),
+                    "{who}: the page must not leak {url} from the access file"
+                );
+            }
+        }
+
+        cleanup(&path);
+    }
+
+    /// `denied` removes everything, and that includes the list: the veto is answered with a
+    /// refusal before the page is built, so a section of grants on a refusal page would be the
+    /// page telling a person it is refusing them what it just said they can reach.
+    #[test]
+    fn account_a_denied_identity_gets_a_403_and_sees_no_list_at_all() {
+        let path = account_scratch_full("denied-full");
+        let base = account_serve(&path);
+
+        let g = account_call(&base, Some("spammer@x.com"));
+        assert_eq!(
+            g.status,
+            403,
+            "a vetoed identity gets a refusal, on the rich fixture too: {}",
+            account_readable(&g.body)
+        );
+        assert!(
+            !g.body.contains("<section id=\"reach\""),
+            "a refusal carries no list of what the caller reaches: {}",
+            account_readable(&g.body)
+        );
+
+        cleanup(&path);
+    }
+
+    /// The estate's rule is that a page works with scripting off, and the identity page has
+    /// nothing to script. The rich page is the one that tempts a developer into a disclosure
+    /// toggle, so it is the one worth pinning.
+    #[test]
+    fn account_the_rich_page_carries_no_script_and_no_inline_handler() {
+        let path = account_scratch_full("nojs-full");
+        let base = account_serve(&path);
+
+        let g = account_call(&base, Some("bob@x.com"));
+        assert_eq!(
+            g.status,
+            200,
+            "bob is a roster user: {}",
+            account_readable(&g.body)
+        );
+        assert!(
+            !g.body.to_ascii_lowercase().contains("<script"),
+            "no script tag: the page works with scripting off"
+        );
+        assert!(
+            !account_carries_inline_handler(&g.body),
+            "no inline handler of any kind: {}",
+            account_readable(&g.body)
+        );
+
+        cleanup(&path);
+    }
+
+    /// The administrator's `ui.theme` is the theme a page starts in, stamped on `<html>` as
+    /// `data-theme` exactly as the admin console stamps it. A deployment that configured
+    /// nothing gets no attribute at all, which is what leaves the browser and the OS deciding.
+    #[test]
+    fn account_the_administrators_default_theme_is_stamped_on_the_html_tag() {
+        let path = account_scratch("theme-default", ACCOUNT_SETTINGS_THEME_DARK);
+        let base = account_serve(&path);
+
+        let g = account_call(&base, Some("bob@x.com"));
+        assert_eq!(
+            g.status,
+            200,
+            "bob reaches the page: {}",
+            account_readable(&g.body)
+        );
+        assert!(
+            account_html_tag(&g.body).contains(r#"data-theme="dark""#),
+            "ui.theme dark must reach the html tag: {}",
+            account_html_tag(&g.body)
+        );
+
+        // No `ui` section at all: no attribute, so `prefers-color-scheme` is what paints.
+        let plain = account_scratch("theme-none", ACCOUNT_SETTINGS);
+        let plain_base = account_serve(&plain);
+        let g = account_call(&plain_base, Some("bob@x.com"));
+        assert_eq!(
+            g.status,
+            200,
+            "bob reaches the page: {}",
+            account_readable(&g.body)
+        );
+        assert!(
+            !account_html_tag(&g.body).contains("data-theme"),
+            "a deployment that set no theme must emit no data-theme at all: {}",
+            account_html_tag(&g.body)
+        );
+
+        cleanup(&path);
+        cleanup(&plain);
+    }
+
+    /// The person's own cookie outranks the administrator's default, and `system` is the choice
+    /// to give the choice back: it falls through to the deployment's default rather than
+    /// painting a third thing, so a session that un-chose ends up where it started.
+    #[test]
+    fn account_a_theme_cookie_outranks_the_administrators_default() {
+        let path = account_scratch("theme-cookie", ACCOUNT_SETTINGS_THEME_DARK);
+        let base = account_serve(&path);
+
+        let g = account_call_pref(&base, Some("bob@x.com"), Some("theme=light"), None);
+        assert_eq!(
+            g.status,
+            200,
+            "bob reaches the page: {}",
+            account_readable(&g.body)
+        );
+        assert!(
+            account_html_tag(&g.body).contains(r#"data-theme="light""#),
+            "the person's own choice must outrank the deployment's default: {}",
+            account_html_tag(&g.body)
+        );
+
+        let g = account_call_pref(&base, Some("bob@x.com"), Some("theme=system"), None);
+        assert_eq!(
+            g.status,
+            200,
+            "bob reaches the page: {}",
+            account_readable(&g.body)
+        );
+        assert!(
+            account_html_tag(&g.body).contains(r#"data-theme="dark""#),
+            "system falls through to the administrator's dark: {}",
+            account_html_tag(&g.body)
+        );
+
+        cleanup(&path);
+    }
+
+    /// Choosing a preference is a `GET` with a parameter, answered by a cookie and a redirect
+    /// that takes the parameter back out of the URL, so a bookmark does not carry a preference
+    /// around forever. The cookie names and values are the console's, which is what makes a
+    /// choice made in one program carry to the other on the same host, and the redirect lands
+    /// back on `/account/` rather than on the console's dashboard.
+    #[test]
+    fn account_a_theme_or_language_choice_becomes_a_cookie_and_a_redirect_home() {
+        let path = account_scratch("pref-redirect", ACCOUNT_SETTINGS);
+        let base = account_serve(&path);
+
+        let g = account_call(&format!("{base}?theme=dark"), Some("bob@x.com"));
+        assert_eq!(
+            g.status,
+            302,
+            "?theme=dark must be applied and redirected, not answered with a page: {}",
+            account_readable(&g.body)
+        );
+        let cookie = g
+            .header("Set-Cookie")
+            .expect("the choice must be remembered in a cookie");
+        assert!(
+            cookie.starts_with("theme=dark;"),
+            "the cookie must be the console's own theme cookie: {cookie}"
+        );
+        for part in ["Path=/", "HttpOnly", "SameSite=Lax"] {
+            assert!(
+                cookie.contains(part),
+                "the preference cookie must carry {part}: {cookie}"
+            );
+        }
+        assert_eq!(
+            g.header("Location"),
+            Some(ACCOUNT_PAGE),
+            "the redirect goes back to this page with the parameter gone: {:?}",
+            g.header("Location")
+        );
+
+        let g = account_call(&format!("{base}?lang=it"), Some("bob@x.com"));
+        assert_eq!(
+            g.status,
+            302,
+            "?lang=it must be applied and redirected: {}",
+            account_readable(&g.body)
+        );
+        let cookie = g
+            .header("Set-Cookie")
+            .expect("the choice must be remembered in a cookie");
+        assert!(
+            cookie.starts_with("lang=it;"),
+            "the cookie must be the console's own lang cookie: {cookie}"
+        );
+        assert_eq!(
+            g.header("Location"),
+            Some(ACCOUNT_PAGE),
+            "the redirect goes back to this page with the parameter gone: {:?}",
+            g.header("Location")
+        );
+
+        cleanup(&path);
+    }
+
+    /// The selector's one submit carries `theme` and `lang` in the same `GET`, so one request
+    /// has to remember both. The console cannot today: its theme check answers with a redirect
+    /// of its own, so a submit that names both preferences is answered one at a time and the
+    /// browser has to come back in for the second. On the self-service page the selector is a
+    /// visible form with a submit button and no script, so one request is the whole
+    /// interaction, and a preference that is never stored is a choice that did not happen: the
+    /// person watches their own pick revert on the next load.
+    #[test]
+    fn account_one_submit_of_the_selector_remembers_both_choices() {
+        let path = account_scratch("pref-both", ACCOUNT_SETTINGS);
+        let base = account_serve(&path);
+
+        let g = account_call(&format!("{base}?theme=light&lang=it"), Some("bob@x.com"));
+        assert_eq!(
+            g.status,
+            302,
+            "one submit of both preferences must be applied and redirected: {}",
+            account_readable(&g.body)
+        );
+        assert_eq!(
+            g.header("Location"),
+            Some(ACCOUNT_PAGE),
+            "the redirect goes back to this page with the parameters gone: {:?}",
+            g.header("Location")
+        );
+        let set = g.cookies();
+        assert_eq!(
+            set.len(),
+            2,
+            "one submit of two preferences must set two cookies in one response, and it set \
+             {set:?} (all headers: {:?})",
+            g.headers
+        );
+        assert!(
+            set.iter().any(|c| c.starts_with("theme=light;")),
+            "the theme picked on this submit must be remembered: {set:?}"
+        );
+        assert!(
+            set.iter().any(|c| c.starts_with("lang=it;")),
+            "the language picked on the same submit must be remembered too: {set:?}"
+        );
+        for c in &set {
+            assert!(
+                c.contains("Path=/"),
+                "a preference cookie is `Path=/`, so a choice made on the page carries to the \
+                 console and back on one host: {c}"
+            );
+        }
+
+        // One recognised value and one nobody recognises is one choice, not two: the
+        // unrecognised value is not a preference and must set nothing, while the recognised
+        // half still lands.
+        let g = account_call(&format!("{base}?theme=light&lang=xx"), Some("bob@x.com"));
+        assert_eq!(
+            g.status,
+            302,
+            "the recognised half of a submit is still a choice: {}",
+            account_readable(&g.body)
+        );
+        let set = g.cookies();
+        assert_eq!(
+            set.len(),
+            1,
+            "a value nobody recognises must set no cookie, and the response set {set:?}"
+        );
+        assert!(
+            set[0].starts_with("theme=light;"),
+            "the recognised half must be the theme cookie: {set:?}"
+        );
+
+        cleanup(&path);
+    }
+
+    /// A value that is not one of the three themes, or one of the two languages plus `auto`, is
+    /// not a preference at all: nothing is remembered and the page is served as it was.
+    /// Storing a nonsense value would leave the person looking at a choice the page cannot show
+    /// as chosen, and would let a crafted link write a cookie for them.
+    #[test]
+    fn account_a_preference_nobody_recognises_sets_no_cookie() {
+        let path = account_scratch("pref-bogus", ACCOUNT_SETTINGS);
+        let base = account_serve(&path);
+
+        for q in ["theme=purple", "lang=xx"] {
+            let g = account_call(&format!("{base}?{q}"), Some("bob@x.com"));
+            assert_eq!(
+                g.status,
+                200,
+                "{q} is not a choice, so the page is served as it was: {}",
+                account_readable(&g.body)
+            );
+            assert!(
+                g.header("Set-Cookie").is_none(),
+                "{q} must set no cookie, and the response set {:?}",
+                g.header("Set-Cookie")
+            );
+        }
+
+        cleanup(&path);
+    }
+
+    /// The language is the person's cookie, failing that the browser's `Accept-Language`,
+    /// failing that English: most explicit wins, and `auto` is the choice to keep letting the
+    /// browser decide, which is what a session that never chose has always been getting.
+    #[test]
+    fn account_the_language_is_the_cookie_then_the_browser_header_then_english() {
+        let path = account_scratch("lang", ACCOUNT_SETTINGS);
+        let base = account_serve(&path);
+
+        let cases: [(Option<&str>, Option<&str>, &str); 5] = [
+            (Some("lang=it"), None, "it"),
+            (None, Some("it-IT,it;q=0.9"), "it"),
+            (None, Some("de-DE"), "en"),
+            (Some("lang=en"), Some("it"), "en"),
+            (Some("lang=auto"), Some("it"), "it"),
+        ];
+        for (cookie, accept, want) in cases {
+            let g = account_call_pref(&base, Some("bob@x.com"), cookie, accept);
+            assert_eq!(
+                g.status,
+                200,
+                "bob reaches the page: {}",
+                account_readable(&g.body)
+            );
+            assert!(
+                account_html_tag(&g.body).contains(&format!(r#"lang="{want}""#)),
+                "cookie {cookie:?} with Accept-Language {accept:?} must render lang=\"{want}\": {}",
+                account_html_tag(&g.body)
+            );
+        }
+
+        cleanup(&path);
+    }
+
+    /// The Italian strings are compiled into the binary, not fetched: this is the page a person
+    /// reaches when something is already wrong, and a page that needs a translation host has
+    /// picked the worst moment to have a dependency. The headings are the prose, so they are
+    /// what proves the table is being read at all.
+    #[test]
+    fn account_the_italian_page_is_translated() {
+        let path = account_scratch_full("lang-it");
+        let base = account_serve(&path);
+
+        let en = account_call_pref(&base, Some("bob@x.com"), Some("lang=en"), None);
+        let it = account_call_pref(&base, Some("bob@x.com"), Some("lang=it"), None);
+        assert_eq!(
+            en.status,
+            200,
+            "bob reaches the page: {}",
+            account_readable(&en.body)
+        );
+        assert_eq!(
+            it.status,
+            200,
+            "bob reaches the page: {}",
+            account_readable(&it.body)
+        );
+
+        let reach_h2 = |g: &AccountGot| account_heading(&account_section(&g.body, "reach"), "h2");
+        assert_ne!(
+            reach_h2(&en),
+            reach_h2(&it),
+            "the reach heading must be translated, and both pages say the same thing in it"
+        );
+        assert_ne!(
+            account_heading(&en.body, "h1"),
+            account_heading(&it.body, "h1"),
+            "the page's own title must be translated too"
+        );
+
+        cleanup(&path);
+    }
+
+    /// The selector is a plain `GET` form with a visible submit button. Unlike the console this
+    /// page emits no script and no handler at all, so there is no `onchange` to apply a pick on
+    /// the fly, and a browser with scripting off is not a fallback here but the only browser
+    /// there is.
+    #[test]
+    fn account_the_page_carries_a_theme_and_language_selector_with_a_submit_button() {
+        let path = account_scratch("selector", ACCOUNT_SETTINGS);
+        let base = account_serve(&path);
+
+        let g = account_call_pref(&base, Some("bob@x.com"), Some("theme=dark"), None);
+        assert_eq!(
+            g.status,
+            200,
+            "bob reaches the page: {}",
+            account_readable(&g.body)
+        );
+        let body = account_readable(&g.body);
+        let form = body.find("<form").expect("the page must carry a form");
+        let theme = body
+            .find(r#"<select name="theme""#)
+            .expect("the page must carry a theme list box");
+        let lang = body
+            .find(r#"<select name="lang""#)
+            .expect("the page must carry a language list box");
+        assert!(
+            form < theme && theme < lang,
+            "both list boxes sit inside one form: {body}"
+        );
+        assert!(
+            body.contains(r#"method="get""#),
+            "a preference is a GET, so a bookmark and a reload cannot change anything: {body}"
+        );
+        for value in ["light", "dark", "system"] {
+            assert!(
+                body.contains(&format!(r#"<option value="{value}""#)),
+                "the theme list must offer {value}: {body}"
+            );
+        }
+        for value in ["en", "it", "auto"] {
+            assert!(
+                body.contains(&format!(r#"<option value="{value}""#)),
+                "the language list must offer {value}: {body}"
+            );
+        }
+        assert!(
+            body.contains("<button"),
+            "the form needs a visible submit button, since no script applies a pick: {body}"
+        );
+        assert!(
+            body.contains(r#"<option value="dark" selected>"#),
+            "the option in force must be marked chosen: {body}"
+        );
+
+        cleanup(&path);
+    }
+
+    /// The brand and the logo come from the same `ui` section that restyles the admin console
+    /// and the gate's pages, so one save signs every surface of the estate in one name. A
+    /// deployment that configured neither shows no image and no brand: the built-in page is
+    /// complete, and a page that needs an asset host to be up is a page that cannot get in.
+    #[test]
+    fn account_the_administrators_brand_and_logo_reach_the_page() {
+        let path = account_scratch("brand", ACCOUNT_SETTINGS_BRAND);
+        let base = account_serve(&path);
+
+        let g = account_call(&base, Some("bob@x.com"));
+        assert_eq!(
+            g.status,
+            200,
+            "bob reaches the page: {}",
+            account_readable(&g.body)
+        );
+        assert!(
+            g.body.contains("BadBat75"),
+            "the brand the administrator set must name the page: {}",
+            account_readable(&g.body)
+        );
+        assert!(
+            g.body
+                .contains(r#"<img src="https://assets.badbat75.com/logo.png""#),
+            "the logo the administrator set must be shown: {}",
+            account_readable(&g.body)
+        );
+
+        let plain = account_scratch("brand-none", ACCOUNT_SETTINGS);
+        let plain_base = account_serve(&plain);
+        let g = account_call(&plain_base, Some("bob@x.com"));
+        assert_eq!(
+            g.status,
+            200,
+            "bob reaches the page: {}",
+            account_readable(&g.body)
+        );
+        assert!(
+            !g.body.contains("<img"),
+            "nothing configured, so the page fetches no image: {}",
+            account_readable(&g.body)
+        );
+        assert!(
+            !g.body.contains("BadBat75"),
+            "nothing configured, so the page claims no brand: {}",
+            account_readable(&g.body)
+        );
+
+        cleanup(&path);
+        cleanup(&plain);
+    }
+
+    /// A claim the deployment configured and the proxy did not forward is a fact the estate
+    /// never said, and the page has to say so in words: a name with nothing after it reads as
+    /// "your name is empty", which is a statement about the person that nobody actually made.
+    #[test]
+    fn account_a_claim_nobody_forwarded_shows_the_word_for_none() {
+        let path = account_scratch_full("claim-none");
+        let base = account_serve(&path);
+
+        let g = account_call(&base, Some("bob@x.com"));
+        assert_eq!(
+            g.status,
+            200,
+            "bob reaches the page: {}",
+            account_readable(&g.body)
+        );
+        let s = account_section(&g.body, "profile");
+        assert!(
+            s.contains("given_name"),
+            "the page must still name the claim it has nothing to show: {s}"
+        );
+        assert!(
+            s.contains("None."),
+            "a claim with no forwarded value shows the word for none, never an empty value: {s}"
+        );
+        assert!(
+            !s.contains("given_name</code>:"),
+            "the word for none replaces a value, it does not follow a bare colon: {s}"
+        );
+
+        cleanup(&path);
+    }
+
+    /// The estate's rule, on every page this step adds and on the refusals beside them: no
+    /// script tag, no handler of any kind. The preference form is the first thing here that a
+    /// script would be tempting to wire up, so the rule is walked across every variant.
+    #[test]
+    fn account_every_look_and_preference_page_carries_no_script_and_no_handler() {
+        let path = account_scratch("nojs-look", ACCOUNT_SETTINGS_THEME_DARK);
+        let base = account_serve(&path);
+        let brand = account_scratch("nojs-brand", ACCOUNT_SETTINGS_BRAND);
+        let brand_base = account_serve(&brand);
+
+        // Only queries that are not a choice: a real one is answered with a `302` and no body.
+        let pages: [(Option<&str>, Option<&str>, &str, u16); 7] = [
+            (Some("bob@x.com"), None, "", 200),
+            (Some("bob@x.com"), Some("theme=light"), "", 200),
+            (Some("bob@x.com"), Some("lang=it"), "", 200),
+            (Some("bob@x.com"), None, "?theme=purple", 200),
+            (Some("bob@x.com"), None, "?lang=xx", 200),
+            (None, None, "", 401),
+            (Some("spammer@x.com"), None, "", 403),
+        ];
+        for root in [&base, &brand_base] {
+            for (identity, cookie, query, want) in pages {
+                let url = if query.is_empty() {
+                    root.to_string()
+                } else {
+                    format!("{root}{query}")
+                };
+                let g = account_call_pref(&url, identity, cookie, Some("it"));
+                assert_eq!(
+                    g.status,
+                    want,
+                    "{identity:?} at {url} with cookie {cookie:?}: {}",
+                    account_readable(&g.body)
+                );
+                assert!(
+                    !g.body.to_ascii_lowercase().contains("<script"),
+                    "{identity:?} at {url}: no script tag, the page works with scripting off: {}",
+                    account_readable(&g.body)
+                );
+                assert!(
+                    !account_carries_inline_handler(&g.body),
+                    "{identity:?} at {url}: no inline handler, the selector uses a submit button: {}",
+                    account_readable(&g.body)
+                );
+            }
+        }
+
+        cleanup(&path);
+        cleanup(&brand);
+    }
+
+    // ---------------------------------------------------------------------
+    // The boundary the move has to create (plan step 3c, docs/ARCHITECTURE.md §13.2).
+    //
+    // `/account/` is the one page of this program a person who is not an administrator reaches,
+    // and it is the only one: the console's routes stay behind `web.admins`, and the self-service
+    // page sits in front of them at a prefix of its own. These tests are the seam, so they are
+    // all about status codes and none about the page's contents, which the tests above pin.
+    //
+    // The shape they pin is §13.2's: the prefix test runs **before** the allowlist, so a path
+    // outside the prefix is a `403` for a non-administrator and never a `404` that tells them
+    // which paths exist, while a path inside it is answered identically to every caller.
+    // ---------------------------------------------------------------------
+
+    /// One of every route this GUI answers, with whether reaching it writes. Written out
+    /// variant by variant because `Route` carries names a derived list would have to invent;
+    /// `a_self_service_caller_is_refused_every_admin_route` keeps the list honest by matching
+    /// every variant of the enum, so a route added tomorrow fails that test until it is here.
+    fn account_every_route() -> Vec<(Route, bool)> {
+        let bob = ACCOUNT_BOB.to_string();
+        let mpa = || "mpa".to_string();
+        let admin = || "admin".to_string();
+        let laptop = || "laptop".to_string();
+        vec![
+            (Route::Dashboard, false),
+            (Route::Apps, false),
+            (Route::App(mpa()), false),
+            (Route::Denied, false),
+            (Route::Users, false),
+            (Route::User(bob.clone()), false),
+            (Route::Audit, false),
+            (Route::Config, false),
+            (Route::AppAdd, true),
+            (Route::AppEdit(mpa()), true),
+            (Route::AppRm(mpa()), true),
+            (Route::ScopeAdd(mpa()), true),
+            (Route::ScopeEdit(mpa(), admin()), true),
+            (Route::ScopeRm(mpa(), admin()), true),
+            (Route::ScopeMove(mpa(), admin()), true),
+            (Route::UserAdd, true),
+            (Route::UserEdit(bob.clone()), true),
+            (Route::UserRm(bob.clone()), true),
+            (Route::EmailAdd(bob.clone()), true),
+            (Route::EmailRm(bob.clone(), "bob@old.com".to_string()), true),
+            (Route::KeyAdd(bob.clone()), true),
+            (Route::KeyEdit(bob.clone(), laptop()), true),
+            (Route::KeyRotate(bob.clone(), laptop()), true),
+            (Route::KeyRm(bob.clone(), laptop()), true),
+            (Route::GroupAdd, true),
+            (Route::GroupEdit("admins".to_string()), true),
+            (Route::GroupRm("admins".to_string()), true),
+            (Route::DenyAdd, true),
+            (Route::DenyRm("spammer@x.com".to_string()), true),
+        ]
+    }
+
+    /// A roster user who is on no `web.admins` reaches `/account/`, with or without the trailing
+    /// slash. This is the whole point of the move: the self-service page exists so that a person
+    /// who cannot open the console can mint their own key and read their own profile, so a
+    /// caller the allowlist does not name has to be answered with the page and not with the
+    /// console's `403`. The bare `/account` is the same page: nginx answers it with a `301` from
+    /// `location = /account`, so the binary only sees it when an operator gated the bare path
+    /// instead, and §13.2 says it is the page then, exactly as `/admin` is the dashboard.
+    #[test]
+    fn a_roster_user_who_is_no_administrator_reaches_the_self_service_page() {
+        let path = account_scratch_full("boundary-account-200");
+        let port = account_port(&path);
+
+        for url in [
+            format!("http://127.0.0.1:{port}{ACCOUNT_PATH}/"),
+            format!("http://127.0.0.1:{port}{ACCOUNT_PATH}"),
+        ] {
+            let mut r = get_with_secret(&url)
+                .header(IDENTITY_HEADER, "bob@x.com")
+                .call()
+                .expect("a response");
+            assert_eq!(
+                r.status(),
+                200,
+                "{url}: bob is on the roster, and the account prefix is not the admin surface"
+            );
+            let body = r.body_mut().read_to_string().unwrap();
+            assert!(
+                body.contains("bob@x.com"),
+                "the page names its caller: {}",
+                account_readable(&body)
+            );
+            // And it is not the console wearing a different hat: no tab, no section of the file.
+            assert!(
+                !body.contains("user_groups"),
+                "the self-service page must not be the console's users page: {}",
+                account_readable(&body)
+            );
+        }
+
+        cleanup(&path);
+    }
+
+    /// Every other route of this program stays behind `web.admins` for that caller. The check
+    /// is walked across the whole `Route` enum rather than over a handful of paths, because the
+    /// danger of the move is the route nobody thought about: an `/account/` arm that answers
+    /// everything below it, or a console page that starts rendering for a caller the allowlist
+    /// does not name. A `POST` is included, with a `rev` read from the file so it is a request
+    /// that would genuinely write, and the file's bytes are the final word: a `403` that wrote
+    /// something is not a refusal.
+    #[test]
+    fn a_self_service_caller_is_refused_every_admin_route() {
+        let path = account_scratch_full("boundary-admin-403");
+        let port = account_port(&path);
+        let before = read(&path);
+        let rev = rev_of(&path);
+
+        // The list is complete, and the exhaustive match is what says so: a `Route` variant
+        // added tomorrow stops this test compiling until it is listed above.
+        fn variant(at: &Route) -> usize {
+            match at {
+                Route::Dashboard => 0,
+                Route::Apps => 1,
+                Route::App(_) => 2,
+                Route::Denied => 3,
+                Route::Users => 4,
+                Route::User(_) => 5,
+                Route::Audit => 6,
+                Route::Config => 7,
+                Route::AppAdd => 8,
+                Route::AppEdit(_) => 9,
+                Route::AppRm(_) => 10,
+                Route::ScopeAdd(_) => 11,
+                Route::ScopeEdit(_, _) => 12,
+                Route::ScopeRm(_, _) => 13,
+                Route::ScopeMove(_, _) => 14,
+                Route::UserAdd => 15,
+                Route::UserEdit(_) => 16,
+                Route::UserRm(_) => 17,
+                Route::EmailAdd(_) => 18,
+                Route::EmailRm(_, _) => 19,
+                Route::KeyAdd(_) => 20,
+                Route::KeyEdit(_, _) => 21,
+                Route::KeyRotate(_, _) => 22,
+                Route::KeyRm(_, _) => 23,
+                Route::GroupAdd => 24,
+                Route::GroupEdit(_) => 25,
+                Route::GroupRm(_) => 26,
+                Route::DenyAdd => 27,
+                Route::DenyRm(_) => 28,
+            }
+        }
+        let routes = account_every_route();
+        let seen: std::collections::HashSet<usize> =
+            routes.iter().map(|(r, _)| variant(r)).collect();
+        let missing: Vec<usize> = (0..=28).filter(|i| !seen.contains(i)).collect();
+        assert!(
+            missing.is_empty(),
+            "account_every_route must name every Route variant, and it is missing {missing:?}"
+        );
+
+        for (at, mutating) in routes {
+            let url = format!("http://127.0.0.1:{port}{ADMIN_BASE}{}", at.path());
+
+            let r = get_with_secret(&url)
+                .header(IDENTITY_HEADER, "bob@x.com")
+                .call()
+                .expect("a GET response");
+            assert_eq!(
+                r.status(),
+                403,
+                "GET {} is the administrator's page, not a roster user's",
+                at.path()
+            );
+
+            if !mutating {
+                continue;
+            }
+            // A POST that carries everything a browser would send: the origin, the identity,
+            // and the fingerprint of the file as it stands. Only the allowlist is missing.
+            let r = post_with_secret(&url)
+                .header(IDENTITY_HEADER, "bob@x.com")
+                .header("Sec-Fetch-Site", "same-origin")
+                .send_form([("rev", rev.as_str())])
+                .expect("a POST response");
+            assert_eq!(
+                r.status(),
+                403,
+                "POST {} by a caller the allowlist does not name",
+                at.path()
+            );
+        }
+
+        assert_eq!(
+            read(&path),
+            before,
+            "a refusal may not write: the access file is byte for byte what it was"
+        );
+
+        cleanup(&path);
+    }
+
+    /// A URL that is not the self-service page and not a console page is a `403` for this
+    /// caller, not a `404`. The `404` is the answer the program gives an **administrator**, and
+    /// handing it to a stranger makes the refusal a probe: which paths exist, and which do not,
+    /// is exactly the enumeration the estate refuses to offer a caller holding any account at
+    /// all. The refusal is the same page for both, so the status carries no information.
+    ///
+    /// `/admin` is in the list because the dashboard is a route, and a route is not an open
+    /// door; `/admin/account` is in it because the prefix test is anchored at the **start** of
+    /// the path, and a prefix that matched anywhere in it would hand the page to a URL the
+    /// console owns.
+    #[test]
+    fn a_url_outside_the_self_service_page_is_a_403_for_a_non_administrator() {
+        let path = account_scratch_full("boundary-nope-403");
+        let port = account_port(&path);
+
+        for url in [
+            "/admin",
+            "/admin/",
+            "/admin/nope",
+            "/admin/apps/mpa",
+            "/admin/account",
+            "/nope",
+            "/",
+        ] {
+            let r = get_with_secret(format!("http://127.0.0.1:{port}{url}"))
+                .header(IDENTITY_HEADER, "bob@x.com")
+                .call()
+                .expect("a response");
+            assert_eq!(
+                r.status(),
+                403,
+                "{url} must be refused, and a 404 there says the path does not exist"
+            );
+        }
+
+        cleanup(&path);
+    }
+
+    /// Below `/account/` the opposite: a path that is nothing is a `404`, for the administrator
+    /// and for the roster user alike. The self-service page is one page, so there is nothing
+    /// under it to discover, and the two callers must get the identical answer, because a page
+    /// that answers a stranger `403` and an administrator `404` is a page describing its own
+    /// layout to whoever asks.
+    #[test]
+    fn a_path_under_the_self_service_page_that_is_nothing_is_a_404() {
+        let path = account_scratch_full("boundary-account-nope-404");
+        let port = account_port(&path);
+
+        for who in ["bob@x.com", "admin@x.com"] {
+            for url in [
+                format!("{ACCOUNT_PATH}/nope"),
+                format!("{ACCOUNT_PATH}/nope/deeper"),
+            ] {
+                let r = get_with_secret(format!("http://127.0.0.1:{port}{url}"))
+                    .header(IDENTITY_HEADER, who)
+                    .call()
+                    .expect("a response");
+                assert_eq!(
+                    r.status(),
+                    404,
+                    "{who}: `{url}` is nothing, and the answer must not depend on who is asking"
+                );
+            }
+        }
+
+        cleanup(&path);
+    }
+
+    /// The proxy secret is route-global and it is not relaxed for the one page a
+    /// non-administrator reaches: a request that did not come through nginx is a `403` at
+    /// `/account/` exactly as it is at `/admin/`, because the identity header it carries is
+    /// worth nothing until nginx vouches for the request, and `/account/` reads that header as
+    /// its subject.
+    #[test]
+    fn the_self_service_page_still_needs_the_proxy_secret() {
+        let path = account_scratch_full("boundary-account-secret");
+        let port = account_port(&path);
+
+        for url in [
+            format!("http://127.0.0.1:{port}{ACCOUNT_PATH}/"),
+            format!("http://127.0.0.1:{port}{ADMIN_BASE}/"),
+        ] {
+            let mut r = client()
+                .get(&url)
+                .header(IDENTITY_HEADER, "bob@x.com")
+                .call()
+                .expect("a response");
+            assert_eq!(r.status(), 403, "{url}: a forged identity and no secret");
+            let body = r.body_mut().read_to_string().unwrap();
+            assert!(
+                !body.contains("bob@x.com"),
+                "{url}: the refusal must not be the self-service page naming its caller: {}",
+                account_readable(&body)
+            );
+        }
+
+        cleanup(&path);
+    }
+
+    /// `/accounts` is not the page. The prefix test is a test at a **path boundary**, not
+    /// `starts_with`, and the difference is a deployment that has an application under
+    /// `/accounts` being served this page by a prefix meant to stop at `/account`. For the
+    /// non-administrator it is the ordinary refusal; for an administrator it is the ordinary
+    /// `404`, because it is not a console route either. The startup rule refuses the same
+    /// overlap in the other direction, and says so in `compile_account_path`.
+    #[test]
+    fn a_neighbour_of_the_account_prefix_is_not_the_page() {
+        let path = account_scratch_full("boundary-accounts");
+        let port = account_port(&path);
+
+        let r = get_with_secret(format!("http://127.0.0.1:{port}/accounts"))
+            .header(IDENTITY_HEADER, "bob@x.com")
+            .call()
+            .expect("a response");
+        assert_eq!(
+            r.status(),
+            403,
+            "`/accounts` is not the page, so a caller the allowlist does not name is refused it"
+        );
+
+        let r = get_with_secret(format!("http://127.0.0.1:{port}/accounts"))
+            .header(IDENTITY_HEADER, "admin@x.com")
+            .call()
+            .expect("a response");
+        assert_eq!(
+            r.status(),
+            404,
+            "`/accounts` is no console route either, and an administrator is the one caller \
+             who is told that"
+        );
+
+        cleanup(&path);
+    }
+
+    /// `BB_AUTH_WEB_ACCOUNT_PATH` is checked against `BB_AUTH_WEB_BASE_PATH` at startup, by the
+    /// rule `base_covers` applies to an application's area: neither prefix may contain the other
+    /// **at a path boundary**, in either direction, because nginx locations nest the same way
+    /// and a `location /admin/` would otherwise own the page. An empty admin base covers every
+    /// path, so it is refused too, which is the breaking change for a GUI mounted at the root
+    /// that plan step 3c says goes in the CHANGELOG.
+    ///
+    /// The name `compile_account_path` is the tester's, taken from the design's own suggestion
+    /// (docs/ARCHITECTURE.md §13.2); the coder keeps whatever the code lands on.
+    #[test]
+    fn the_account_prefix_is_validated_against_the_admin_base_at_startup() {
+        // Accepted: the default, a trailing slash normalised away, a deeper admin base, and the
+        // neighbour that only looks nested (`/accounts` beside `/account` shares no boundary).
+        for (account, base, want) in [
+            ("/account", "/admin", "/account"),
+            ("/account/", "/admin", "/account"),
+            ("/account", "/admin/x", "/account"),
+            ("/accounts", "/account", "/accounts"),
+        ] {
+            assert_eq!(
+                compile_account_path(account, base).as_deref(),
+                Ok(want),
+                "`{account}` beside base `{base}` is a legal pair"
+            );
+        }
+
+        // Refused, and every refusal names the variable, because the operator reading a failed
+        // start is the only person who can edit the env file, and a message that names the
+        // value is a message about a string they already have.
+        for (account, base, why) in [
+            (
+                "",
+                "/admin",
+                "an empty prefix is the whole host, and swallows the console",
+            ),
+            (
+                "/admin",
+                "/admin",
+                "equal to the admin base: one path, two answers",
+            ),
+            (
+                "/admin/account",
+                "/admin",
+                "inside the admin base: nginx's location owns the page",
+            ),
+            (
+                "/admin",
+                "/admin/x",
+                "containing the admin base: this prefix would own that console",
+            ),
+            ("/account", "", "an empty admin base covers every path"),
+            (
+                "/account",
+                "/",
+                "a base of `/` is the same root, normalised",
+            ),
+        ] {
+            let e = compile_account_path(account, base)
+                .err()
+                .unwrap_or_else(|| {
+                    panic!("`{account}` beside base `{base}` must be refused: {why}")
+                });
+            assert!(
+                e.contains("BB_AUTH_WEB_ACCOUNT_PATH"),
+                "the refusal must name the variable to fix: `{account}` / `{base}` said {e}"
+            );
+        }
     }
 }
