@@ -213,7 +213,11 @@ confirmations, copy icon and lifted bound stay); (8b) the header, with icon cont
 `pill ico` component, §13.17, approved by the user on 2026-11-24); (8c) the sections' lists, chips
 and empty states; (8d) the theme itself, which the user finds unsightly (2026-11-24): the designer
 reviews the palette, type and spacing, and says what belongs in our built-in theme and what in the
-operator's `tokens.css`, which this repository does not hold. Steps 5 and 7 add their forms into this layout later (Profile, a last panel).
+operator's `tokens.css`, which this repository does not hold. The user's constraint (2026-11-24):
+the theme contract (the custom properties `THEME_CSS` defines and an operator stylesheet may
+redefine) does not change. If a new token turns out to be needed, it is added with a fallback so an
+existing `tokens.css` still renders correctly, no token is renamed or removed, and any such
+addition ships with a short migration guide for theme authors (CHANGELOG and README). Steps 5 and 7 add their forms into this layout later (Profile, a last panel).
 
 - Done when: the user approves screenshots of the page in both themes and both languages, at
   desktop and phone width, with the forms of steps 4, 5 and 7 on it; e2e and the scripting-off
