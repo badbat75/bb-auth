@@ -17,10 +17,19 @@ Rules are in `AGENTS.md`. Format of this file: `AGENTS.md`, under "Skills".
 - A prose count of code (`about 7,000 lines`, `nine that drive real HTTP`) is a measurement with
   no source in the file. Re-measure it (`wc -l`, the `cargo test` summary) before repeating it,
   and when the thing it counts moved between targets, drop the number rather than invent one.
+- To check a `bb-auth-adm` recipe before documenting it, run it on a **scratch copy** under
+  `/tmp/opencode` (`bb-auth-adm -f /tmp/opencode/…/access.json init`, then the recipe, then
+  `can WHO URL` for the verdict the docs claim). Every write leaves an `access.json.bak` beside
+  the file it wrote, so never point it at a tracked file such as `deploy/access.example.json`.
+  `cargo build --bin bb-auth-adm` is instant when the tree is current.
 
 ## Pitfalls
 
 - A source about something similar looks like a source, but is only a hint.
+- A scope pattern must match its application's base **including the scheme**: `*://host/*` is
+  refused as outside base `https://host`. So a documented catch-all is `https://host/*`, and a
+  recipe that runs `scope add … --user X` needs `user add X` first, since a name not in the
+  roster aborts that command.
 - `npx markdownlint-cli2 "**/*.md" "#target" "#dist" "#e2e/node_modules"` is **not clean**: it
   reports ~22 pre-existing MD041 and MD032 errors in the `.agents/`, `.claude/` and `.opencode/`
   skill and agent files, because MD041 fires on their YAML frontmatter. Judge the run by whether

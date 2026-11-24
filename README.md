@@ -673,7 +673,7 @@ serving anyone.
 | `BB_AUTH_WEB_LISTEN` | no | `127.0.0.1:8091` | bind address. Keep it on loopback |
 | `BB_AUTH_WEB_PROXY_SECRET` | **yes** | *(none)* | the shared secret every request must carry in `X-BB-Web-Secret`, compared in constant time before the identity header is read; a request without it is a `403`. At least 32 characters of `[A-Za-z0-9_-]`. The install generates one and never prints it. A missing one is a **fatal startup**: a GUI that starts with no secret is a GUI whose check is not running |
 | `BB_AUTH_WEB_BASE_PATH` | no | *(empty)* | the URL prefix nginx mounts it at, e.g. `/admin`. **An empty value is a fatal startup**: the same binary serves the self-service page beside this prefix, and a console mounted at `/` is every path, leaving no room beside it. Set it, e.g. `/admin` |
-| `BB_AUTH_WEB_ACCOUNT_PATH` | no | `/account` | the URL prefix of the **self-service page**, the one page here a person who is not an administrator reaches. It must sit **beside** the base above and never inside it, and an empty value is refused: the page is dispatched ahead of `web.admins`, so a prefix nested in the console's would answer the console's URLs as the page |
+| `BB_AUTH_WEB_ACCOUNT_PATH` | no | `/account` | the URL prefix of the **self-service page**, the one page here a person who is not an administrator reaches. It must sit **beside** the base above and never inside it, and an empty value is refused: the page is dispatched ahead of `web.admins`, so a prefix nested in the console's would answer the console's URLs as the page. It is also the prefix the nginx recipe mounts a location at, so the env file and that location change together |
 | `BB_AUTH_WEB_DEFAULT_LANG` | no | `en` | `en` or `it`; a `?lang=` choice is remembered in a cookie |
 | `BB_AUTH_WEB_LOGOUT_URL` | no | *(none)* | where the header's "Sign out" points. **Unset means no control at all**, which is the only safe default: this binary knows neither its own scheme nor its own host, and the one thing it is handed is a client-supplied `Host:`. A bad value is refused at startup |
 | `BB_AUTH_AUDIT_FILE` | no | `/var/log/bb-auth/audit.jsonl` | the audit the **Audit** tab reads, written by the gate (the gate's own variable name, so unset on both sides means one file). Read-only here; empty means the tab says the audit is off rather than looking empty |
@@ -700,8 +700,8 @@ is one more person looking at their own account. That is why the prefix is dispa
 the administrator list, and why the two prefixes must be siblings: a page nested under `/admin`
 would answer the console's URLs as the page, and a console at `/` is every path, leaving no prefix
 beside it to mount the page on, which is what makes an empty `BB_AUTH_WEB_BASE_PATH` a fatal
-startup. The nginx recipe below mounts the console only; the page's own location is not
-documented yet.
+startup. The nginx recipe below mounts both prefixes, and the scope that opens this one is
+the recipe's last step.
 
 The file is read fresh on **every request** — no cache, no reload signal, and no
 server-side session. An edit made over SSH with `bb-auth-adm` a second ago is on the next
@@ -1347,7 +1347,8 @@ configuration (`gate.cookie_domain` + `gate.authorized_hosts`).
 [`bb-auth-web`](#editing-it-in-a-browser--bb-auth-web) is fronted the same way as anything
 else — there is no special case for it, and that is the point. Mount it on whichever vhost
 you keep for auth (here `auth.badbat75.com`, an existing server block), at the prefix its
-`BB_AUTH_WEB_BASE_PATH` names:
+`BB_AUTH_WEB_BASE_PATH` names, and the self-service page beside it at
+`BB_AUTH_WEB_ACCOUNT_PATH`:
 
 ```nginx
 server {
@@ -1409,6 +1410,55 @@ server {
         proxy_pass http://127.0.0.1:8091;
     }
 
+    # The self-service page, at the prefix BB_AUTH_WEB_ACCOUNT_PATH names (/account).
+    # Same binary, same port, same gate: one listener answers both prefixes. The bare
+    # URL gets an explicit `301` rather than nginx's implicit redirect for a prefix
+    # location ending in `/`: that one is documented, its order against auth_request is
+    # not. `return` runs in the rewrite phase, ahead of the gate, so it discloses nothing.
+    location = /account { return 301 /account/; }
+
+    location /account/ {
+        # The same wiring as /admin/ above, written out again rather than inherited: a
+        # location that sets any proxy_set_header of its own inherits none of the
+        # server's, so the secret include and the identity headers all live HERE too.
+        set $bb_url https://auth.badbat75.com$uri;
+        auth_request /internal/auth-gate;
+
+        auth_request_set $bb_email $upstream_http_x_auth_email;
+        proxy_set_header X-Auth-Email     $bb_email;
+        proxy_set_header X-Auth-Uuid      "";
+        proxy_set_header X-Forwarded-User "";
+        proxy_set_header Remote-User      "";
+        proxy_set_header Host             $host;
+        include /opt/bb-auth/etc/bb-auth-web.nginx;
+
+        # The ONE difference from /admin/: this page shows the profile claims, so the
+        # headers the gate derives from gate.profile_claims are lifted from the
+        # subrequest and forwarded, exactly as the main vhost forwards them to an app.
+        # These two are what profile_claims [given_name, family_name] derives; forward
+        # the set the deployment actually configures, since a claim configured and not
+        # forwarded is a row of the page that says it knows nothing. The admin location
+        # clears the same names, because a display name there would be the client's own
+        # words relayed to an administrator.
+        auth_request_set $bb_given  $upstream_http_x_auth_given_name;
+        auth_request_set $bb_family $upstream_http_x_auth_family_name;
+        proxy_set_header X-Auth-Given-Name  $bb_given;
+        proxy_set_header X-Auth-Family-Name $bb_family;
+
+        auth_request_set $bb_login $upstream_http_x_auth_login_url;
+        error_page 401 = @bb_signin;
+        # A person the access file keeps out of this area gets the refusal page, not a
+        # trip back to the sign-in page they just came from.
+        error_page 403 = @bb_denied;
+
+        # NO URI part, as above. And this prefix is half of a contract:
+        # BB_AUTH_WEB_ACCOUNT_PATH must name exactly the prefix this location mounts, so
+        # change the env file and this line together. A location pointing at a prefix the
+        # binary does not serve is answered by the console's own dispatch: a `403` to a
+        # person the administrator list does not name, a `404` to one it does.
+        proxy_pass http://127.0.0.1:8091;
+    }
+
     location @bb_signin {
         return 302 $bb_login_safe?rd=$scheme://$host$request_uri;
     }
@@ -1420,7 +1470,7 @@ server {
 }
 ```
 
-Three operator notes, and the first is the one that matters:
+Four operator notes, and the first is the one that matters:
 
 - **The admin area must be a scope that lists each admin.** The gate is the lock;
   `web.admins` in the settings file is the backstop behind it. Enrol each admin:
@@ -1438,6 +1488,31 @@ Three operator notes, and the first is the one that matters:
   to anyone who can register, and Cognito self-signup is open — it would put every account
   in front of the admin surface with only `web.admins` left standing. Two locks or
   one is the whole difference.
+- **The page's scope is the estate's first `authenticated` one**, the mirror of the rule
+  above, taken on purpose: this page reads no `web.admins`, acts on nobody else's account,
+  and is meant for every signed-in person.
+
+  ```bash
+  $ADM app add account --base 'https://auth.badbat75.com/account'
+  $ADM scope add account self-service --access authenticated \
+      --url 'https://auth.badbat75.com/account' --url 'https://auth.badbat75.com/account/*'
+  ```
+
+  A second application beside the first is what the recipe uses, because areas partition by
+  literal base and the order of scopes inside one then means nothing. If your file gives the
+  whole host a single application, put the scope there and list it **before** any restricted
+  catch-all: scopes are first match wins, so a catch-all in front of it answers first
+  (measured on a scratch file here: `scope mv auth all --at 0` moved the catch-all up and
+  `can` flipped that URL from AUTHORIZED to DENIED). The bare `/account` pattern costs
+  nothing and covers a deployment that gates `/account` instead of redirecting it. Ask the
+  same decision function: `can stranger@x.com https://auth.badbat75.com/account/` answers
+  AUTHORIZED, and the same command on `/admin/` answers DENIED.
+
+  **The cost, in one line:** the first `authenticated` scope on the estate is what makes
+  `/auth/session` mint a cookie for an identity in no roster row, so from here every
+  self-signup leaves the sign-in page holding a session, and it reaches the `authenticated`
+  and `anonymous` scopes and nothing that names people. That is the choice this page asks
+  for, and `--check-access` and the startup banner already name every scope that does it.
 - **Every gated location must set or clear `X-Auth-Email`**, here as everywhere — see
   [Passing the identity to the app](#passing-the-identity-to-the-app). `proxy_set_header`
   only overrides the names it lists, so an unlisted one travels straight through from the
