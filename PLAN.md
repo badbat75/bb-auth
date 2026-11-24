@@ -109,10 +109,9 @@ rotate leaves its `scopes` bytes identical; the bounds, reveal-once, the `rev` c
 e2e flow with scripting off.
 
 Done so far: `Access::key_scopes_for` (4a), minting (4b), rotating and removing (4c) from
-`/account`. Left: the self-service POST tests time out under parallel load (each starts a server,
-the client has a 5 s global deadline, writes serialize and fsync), which `scripts/package.sh` would
-hit since it runs `cargo test`, so they must be made reliable first (4d); the e2e flow with
-scripting off; then the install on rpi-01 and the browser check below.
+`/account`. Made reliable in parallel (4d). Left: the
+worker count (4e, below); the e2e flow with scripting off; then the install on rpi-01 and the
+browser check below.
 
 - Done when: a roster user mints, rotates and removes a key of their own in a browser, while a
   stranger and a denied user cannot.

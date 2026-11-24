@@ -47,11 +47,16 @@ Rules are in `AGENTS.md`. Format of this file: `AGENTS.md`, under "Skills".
 - A fixture key with `duration: "never"` is the right probe for "rotate leaves the window alone":
   the self-service page refuses to *mint* `never`, so a rotate that rewrote the window cannot hide
   behind a value the page would never have written.
-- The `bb-auth-web` socket suite is **flaky under full-target parallelism**: every account test
-  starts its own server and the client has a 5s global timeout, so a full `cargo test --bin
-  bb-auth-web` can show `Timeout(Global)` on tests that pass alone. Run
-  `cargo test --bin bb-auth-web -- --test-threads=1` before blaming an edit for a failure, and
-  report a parallel-only failure as flakiness, not as a regression.
+- The `bb-auth-web` write tests are **latency-bound by the disk, not by the code**: a mutation
+  `POST` is answered only after `mutate` takes the process-wide `WRITE_LOCK` and
+  `write_atomically` fsyncs the temp file and the directory, so one request's latency is one
+  fsync (measured 0.1-4.2 s on a disk busy with another project's builds). The harness therefore
+  serializes its own writers (`WRITE_PERMIT`, a `Mutex<()>` held across the request) and
+  `ACCOUNT_DEADLINE_SECS` (60) is a **deadlock detector, not a latency budget**: never lower it to
+  "fail fast", and never read a `Timeout(Global)` in this target as a hang before timing the disk
+  (a 4 KB `write+fsync+rename+dir-fsync` in `tempfile.gettempdir()`). A suite wall time of 100 s
+  at load 6 is the same floor, 39 writes x fsync, serialized by `WRITE_LOCK` with or without the
+  permit; it is not a regression.
 - `/account` dispatches a fixed allowlist of paths (the prefix, the page, `<prefix>/keys`), so a
   new mutation path is a `404` for every caller until the code lands. The console answers a
   mutation refusal (unknown id, not your row) with the `400` refusal page and has no `404` for a

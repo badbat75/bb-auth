@@ -13665,6 +13665,44 @@ mod tests {
         format!("http://127.0.0.1:{}{ACCOUNT_PATH}/", account_port(path))
     }
 
+    /// The deadline every over-the-wire account request carries, in seconds.
+    ///
+    /// It is a **deadlock detector, not a latency budget**, and the number is measured. A
+    /// mutation `POST` is answered only after [`mutate`] has taken the process-wide
+    /// [`WRITE_LOCK`] and `write_atomically` has fsynced the temp file and the directory, so
+    /// its latency is that write's fsync latency. Measured on this machine: 2-400 ms for the
+    /// suite's 39 mutation `POST`s run one at a time; the same write+fsync+rename+dir-fsync
+    /// sequence probed on a disk busy with another project's builds, 40 ms to **4.2 s**. Left
+    /// to run at large, the 11 write tests queue behind one lock, and the tail of that queue
+    /// measured **20.9 s** at load 10, against the 5 s this file used to allow: 5-11
+    /// `Timeout(Global)` failures per full parallel run, 150/150 under `--test-threads=1`.
+    /// That is queueing, and the tests assert status codes and file bytes, never how long a
+    /// save took.
+    ///
+    /// So the harness serializes its own writers ([`WRITE_PERMIT`]), which bounds one
+    /// request's wait at one write (measured: max 2.4 s at load 7, 6.6 s at load 12), and this
+    /// sits about nine times above the worst request ever measured here. A handler that never
+    /// answers, a lock taken twice, a request the router drops, still fails, in this many
+    /// seconds, instead of hanging.
+    const ACCOUNT_DEADLINE_SECS: u64 = 60;
+
+    /// One in-flight account `POST` at a time, for the whole test process. The same shape as
+    /// the production [`WRITE_LOCK`], on the client side of the socket.
+    ///
+    /// That lock is **process wide**, so per-test fixtures cannot dodge it: the suite's 11
+    /// write tests are a queue ~11 writes deep at any moment, and one request's latency is the
+    /// sum of the fsyncs ahead of it. Measured at load 7-10: `p90` 1.2-20.4 s and `max` 20.9 s
+    /// unthrottled, versus `max` 0.6-2.4 s with the permit, and the suite's own wall time fell
+    /// from 3.9-35.8 s to 2.3-9.0 s, because that queueing was only ever wasted clock.
+    ///
+    /// This cannot mask a hang: a handler that deadlocks keeps its request open until the
+    /// deadline, and every writer behind it acquires the permit and fails at its own deadline
+    /// too. What it stops measuring is aggregate write throughput, which no test here asserts
+    /// on. A lock poisoned by a panicking test is taken anyway, for the reason [`mutate`]
+    /// gives for the same choice: failing every writer after one test's panic is the worse
+    /// answer.
+    static WRITE_PERMIT: std::sync::Mutex<()> = std::sync::Mutex::new(());
+
     /// The client for these requests. Same two settings as [`client`] (a refusal is asserted
     /// on by its **body**, and a redirect is the thing under test rather than a step), plus a
     /// deadline, so a handler that never answers fails the test instead of hanging it.
@@ -13672,7 +13710,7 @@ mod tests {
         ureq::Agent::config_builder()
             .http_status_as_error(false)
             .max_redirects(0)
-            .timeout_global(Some(std::time::Duration::from_secs(5)))
+            .timeout_global(Some(std::time::Duration::from_secs(ACCOUNT_DEADLINE_SECS)))
             .build()
             .new_agent()
     }
@@ -15407,6 +15445,8 @@ mod tests {
         if let Some(v) = identity {
             req = req.header(IDENTITY_HEADER, v);
         }
+        // Held across the request: see [`WRITE_PERMIT`].
+        let _permit = WRITE_PERMIT.lock().unwrap_or_else(|e| e.into_inner());
         let mut r = req
             .send_form(fields.iter().copied())
             .expect("a POST response");
