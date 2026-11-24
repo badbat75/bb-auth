@@ -33,6 +33,9 @@ screenshots of the result before the slice closes. A role added mid-session is n
 until the session restarts: until then run it as `general-purpose` with "read and follow
 .opencode/agents/designer.md" at the top of the brief.
 
+If a local coder run fails again on a slice already split, hand that part to a Claude `coder`
+subagent with `model: "sonnet"` (the user's decision, 2026-11-24).
+
 Every Claude Code subagent runs on Opus, whatever its role: pass
 `model: "opus"` on each Agent tool call (for example `subagent_type: "architect"`, `model: "opus"`).
 The coordinator itself is not bound to Opus: it runs on whatever model the session uses. The role
