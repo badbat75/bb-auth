@@ -118,6 +118,7 @@ Installed on rpi-01 on 2026-11-24 (gd49d43a): the user minted and removed a key 
 
 Asked by the user on 2026-11-24 after trying 4g on rpi-01, and decided (4h), on `/account` and on
 the admin console alike:
+
 - the copy control is a small copy **icon** (inline SVG, labelled for screen readers), not a text
   button;
 - removing a key asks for **confirmation** first, which with no page needing JavaScript means a
