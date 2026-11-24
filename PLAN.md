@@ -114,18 +114,7 @@ Done so far: `Access::key_scopes_for` (4a), minting (4b), rotating and removing 
 browser check below.
 
 Installed on rpi-01 on 2026-11-24 (gd49d43a): the user minted and removed a key in a browser
-(journal: `(self): key add test`, `key remove test`); a rotate is still to be seen. Asked by the
-user then, and decided (4g): the page that reveals a bearer shows **only the key**, not the
-`Authorization: Bearer` line, and carries a **copy button**, on `/account` and on the admin
-console alike. Copying needs JavaScript, so the rule "no page carries a script" becomes "no page
-needs one": one constant script (`COPY_SCRIPT`) on the reveal page only, allowed by that response's
-CSP by its hash (designed in `docs/ARCHITECTURE.md` §13.14: a hash rather than a nonce because the
-script never changes), the button hidden without scripting, where one click still selects the
-whole key, and the hint still saying how to send it (`Authorization: Bearer <key>`).
-
-- Done when (4g): `no_page_but_the_reveal_carries_a_script`, `the_reveal_shows_only_the_key` and
-  `only_the_reveal_policy_names_the_copy_script` failed first and pass; the e2e walk shows the
-  button with scripting on and none with scripting off; AGENTS.md carries the amended rule.
+(journal: `(self): key add test`, `key remove test`); a rotate is still to be seen. The reveal page shows only the key with a copy button (4g, done).
 
 - Done when: a roster user mints, rotates and removes a key of their own in a browser, while a
   stranger and a denied user cannot.

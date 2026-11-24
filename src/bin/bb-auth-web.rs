@@ -178,6 +178,12 @@
 //! around forever. The rest of the query goes back into the form as hidden fields, which is
 //! what keeps an access-check verdict on screen across a preference change.
 //!
+//! That handler is the only inline handler this binary emits, and the estate's rule is that no
+//! page may **need** a script, not that no page carries one: the bearer reveal carries
+//! [`COPY_SCRIPT`] for its copy button, and a browser running no code gets that page as it was
+//! before, with no button (§13.14). `no_page_but_the_reveal_carries_a_script` pins the handler
+//! list and the one script together, and `nojs.js` walks both in a real browser.
+//!
 //! **Language** is English and Italian, from a table compiled into the binary ([`t`]), plus
 //! `Auto`: the choice to make no choice, which resolves per request against the browser's
 //! `Accept-Language` and is what a session that never chose has always been getting (see
@@ -317,15 +323,19 @@ const LOCALTIME_FILE: &str = "/etc/localtime";
 /// [`respond_preference_redirect`].
 const PREFERENCE_COOKIE_MAX_AGE: i64 = 31_536_000;
 
-/// **The only JavaScript this GUI emits**, on the two Settings list boxes and nowhere else.
+/// **The only inline handler this GUI emits**, on the two Settings list boxes and nowhere else.
 ///
 /// A `<select>` has no native way to say "I changed, act on it", so applying a preference the
 /// moment it is picked needs a script — one expression of it. It is an *enhancement*: with
 /// scripting off, the `<noscript>` submit button [`shell`] renders instead does exactly the
 /// same thing, one click later, and that path sets **both** preferences in one trip where
 /// this one sets whichever was just touched. Nothing on any page depends on it, and no other
-/// element in this binary carries a handler of any kind (`the_page_carries_one_handler_and_no_script`
-/// pins that, and `nojs.js` pins it in a real browser).
+/// element in this binary carries a handler of any kind. The binary's one `<script>` is
+/// [`COPY_SCRIPT`], carried by the bearer reveal and by nothing else (§13.14): a script is not
+/// a handler, so the handler allowlist stays exactly this one expression and `/account/`'s
+/// policy needs no `'unsafe-hashes'` to run the reveal's button.
+/// `no_page_but_the_reveal_carries_a_script` pins both halves, and `nojs.js` pins them in a
+/// real browser.
 ///
 /// `this.form.submit()` and not `requestSubmit()`: the older method is universal, and it
 /// submits without firing the submit event, which is exactly what is wanted here since there
@@ -334,6 +344,49 @@ const PREFERENCE_COOKIE_MAX_AGE: i64 = 31_536_000;
 /// [`preserved_query`]) — no link this GUI builds has one, and the failure mode is a menu
 /// that stops applying on change, not a broken page.
 const SETTINGS_ONCHANGE: &str = "this.form.submit()";
+
+/// The one `<script>` this program emits, on the bearer reveal and nowhere else (§13.14).
+///
+/// Copying to the clipboard needs scripting, and the estate's rule is that no page may *need* a
+/// script, not that no page carries one. So the server renders the button `hidden` and this is
+/// the only thing that shows it: a browser running no code, a browser that is not a secure
+/// context, and a browser with no `navigator.clipboard` all get exactly the page as it was
+/// before, the key selectable by hand and no control that does nothing.
+///
+/// `addEventListener` and not an `on…` attribute, so the handler allowlist
+/// (`no_page_but_the_reveal_carries_a_script`) stays exactly the two Settings list boxes, and
+/// `/account`'s policy needs no `'unsafe-hashes'` to run it.
+///
+/// `Navigator.clipboard` and `Clipboard.writeText` are "available only in secure contexts
+/// (HTTPS), in some or all supporting browsers", and `writeText` rejects with `NotAllowedError`
+/// "if writing to the clipboard is not allowed" (MDN, Navigator/clipboard and
+/// Clipboard/writeText). "Some or all" is why both `isSecureContext` and the property are
+/// checked rather than either. There is no `document.execCommand("copy")` fallback: MDN marks it
+/// deprecated and "not implemented consistently or fully by user agents", and the fallback this
+/// page needs already exists, which is the selection the rejection path makes.
+///
+/// The key is read out of the DOM at click time, so it is in this constant nowhere: the script
+/// is a compile-time constant, the reveal's own policy names its hash, and the bearer stays in
+/// exactly one place in the response.
+///
+/// The word is set **on the click**, and a rejection replaces it, rather than the word following
+/// the promise. `writeText` is a permission check and an IPC round trip, so a word that waits
+/// for it leaves a clicked button saying nothing for a tick, which is exactly what a dead button
+/// looks like, and this is the one control on the estate's most important page. The cost is that
+/// a refused copy shows `data-done` for that same tick before `data-failed` replaces it.
+const COPY_SCRIPT: &str = r#"(function () {
+  var code = document.getElementById("bearer");
+  var btn = document.getElementById("bearer-copy");
+  if (!code || !btn || !window.isSecureContext || !navigator.clipboard) { return; }
+  btn.hidden = false;
+  btn.addEventListener("click", function () {
+    btn.textContent = btn.getAttribute("data-done");
+    navigator.clipboard.writeText(code.textContent).catch(function () {
+      window.getSelection().selectAllChildren(code);
+      btn.textContent = btn.getAttribute("data-failed");
+    });
+  });
+})();"#;
 
 /// The header that carries the proxy secret: `BB_AUTH_WEB_PROXY_SECRET` on this end, and the
 /// one line of `/opt/bb-auth/etc/bb-auth-web.nginx` on nginx's (`proxy_set_header`, which
@@ -382,10 +435,11 @@ static WRITE_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
 ///
 /// Light and dark come from `prefers-color-scheme`, and an explicit choice overrides it through
 /// the `data-theme` attribute [`shell`] puts on `html`; both live in [`THEME_CSS`]. There is
-/// still no script on any page: not for a form, not for a confirmation, not for reordering a
-/// scope, not for opening the Settings menu, and not for the theme it sets either. The override
-/// is CSS specificity, nothing more. (The one handler in the binary, [`SETTINGS_ONCHANGE`],
-/// saves a click on a list box and paints nothing.)
+/// still no script on any page that paints: not for a form, not for a confirmation, not for
+/// reordering a scope, not for opening the Settings menu, and not for the theme it sets either.
+/// The override is CSS specificity, nothing more. (The one handler in the binary,
+/// [`SETTINGS_ONCHANGE`], saves a click on a list box and paints nothing, and the one script,
+/// [`COPY_SCRIPT`], is the bearer reveal's copy button and paints nothing either.)
 const CSS: &str = include_str!("../assets/admin.css");
 
 // ---------------------------------------------------------------------------
@@ -871,7 +925,14 @@ enum K {
     // --- the minted bearer ---
     BearerHeading,
     BearerOnce,
-    BearerClickHint,
+    /// The two halves of the click hint, with the word `Bearer` emitted between them as a
+    /// `code` element. Split because a word the person has to type is markup, not prose: a
+    /// backtick inside a translated sentence reaches the page as a backtick.
+    BearerHintLead,
+    BearerHintTail,
+    CopyKey,
+    CopyDone,
+    CopyFailed,
     // --- refusals a form makes on its own ---
     ExcludedNotAnon,
     EmailRequired,
@@ -1975,10 +2036,19 @@ fn t(lang: Lang, key: K) -> &'static str {
              solo il suo sha256, e quel lookup è tutta la verifica. Non è recuperabile — si \
              può solo sostituire con una rotazione.",
         ),
-        K::BearerClickHint => m(
+        K::BearerHintLead => m(
             lang,
-            "Click the credential to select it all, then copy.",
-            "Fai clic sulla credenziale per selezionarla tutta, poi copiala.",
+            "Click the key to select it all, then copy. Send it as a bearer token: the word",
+            "Fai clic sulla chiave per selezionarla tutta, poi copiala. Mandala come token \
+             bearer: la parola",
+        ),
+        K::BearerHintTail => m(lang, ", a space, then the key.", ", uno spazio, poi la chiave."),
+        K::CopyKey => m(lang, "Copy the key", "Copia la chiave"),
+        K::CopyDone => m(lang, "Copied", "Copiata"),
+        K::CopyFailed => m(
+            lang,
+            "Copy refused: the key is selected, copy it with the keyboard.",
+            "Copia negata: la chiave è selezionata, copiala con la tastiera.",
         ),
 
         K::ExcludedNotAnon => m(
@@ -3240,11 +3310,11 @@ impl Form {
 /// because a page is a snapshot of a file that changes under it, `nosniff` because a browser
 /// guessing at a content type is a browser deciding something we already know, and the
 /// charset because the roster is full of names that are not ASCII.
-fn respond_page(req: Request, status: u16, page: Markup, look: &Look) {
+fn respond_page(req: Request, status: u16, page: Markup, look: &Look, reveal: bool) {
     let mut resp = Response::from_data(page.into_string().into_bytes())
         .with_status_code(StatusCode(status))
         .with_header(h("Content-Type", "text/html; charset=utf-8"))
-        .with_header(h("Content-Security-Policy", &admin_csp(look)));
+        .with_header(h("Content-Security-Policy", &admin_csp(look, reveal)));
     for (k, v) in PAGE_SECURITY_HEADERS {
         resp.add_header(h(k, v));
     }
@@ -3254,9 +3324,10 @@ fn respond_page(req: Request, status: u16, page: Markup, look: &Look) {
 /// This GUI's `Content-Security-Policy`.
 ///
 /// Hashes and not a nonce, because everything this program executes or styles is a
-/// compile-time constant: the `<style>` block is [`THEME_CSS`] + [`BASE_CSS`] + [`CSS`] and
-/// the only scripting on any page is [`SETTINGS_ONCHANGE`], one attribute on one list box.
-/// So the policy is derived from the same `&str`s the page is, and the two cannot disagree.
+/// compile-time constant: the `<style>` block is [`THEME_CSS`] + [`BASE_CSS`] + [`CSS`], the
+/// handler on the Settings list boxes is [`SETTINGS_ONCHANGE`], and the one `<script>`, the
+/// reveal's [`COPY_SCRIPT`], is a constant too. So the policy is derived from the same `&str`s
+/// the page is, and the two cannot disagree.
 ///
 /// `'unsafe-hashes'` is what an inline event handler needs: a nonce cannot be put on an
 /// attribute, and the alternative to naming this one handler by its hash is `'unsafe-inline'`,
@@ -3272,8 +3343,21 @@ fn respond_page(req: Request, status: u16, page: Markup, look: &Look) {
 /// a page of this program, so nothing of the estate's wider boundary applies: a redirect off
 /// this host would be a bug, and a policy that permitted one would be the wrong place to find
 /// out.
-fn admin_csp(look: &Look) -> String {
-    let script = format!("'unsafe-hashes' {}", csp_hash(SETTINGS_ONCHANGE));
+///
+/// `reveal` is the bearer reveal and nothing else (§13.14): the one page allowed a `<script>`,
+/// so its policy names that script's hash beside the Settings handler's. The console's shell
+/// carries the Settings list boxes on every page including this one, so both hashes ride the
+/// same `'unsafe-hashes'` source, and every other page's policy is byte for byte what it was.
+fn admin_csp(look: &Look, reveal: bool) -> String {
+    let script = if reveal {
+        format!(
+            "'unsafe-hashes' {} {}",
+            csp_hash(SETTINGS_ONCHANGE),
+            csp_hash(COPY_SCRIPT)
+        )
+    } else {
+        format!("'unsafe-hashes' {}", csp_hash(SETTINGS_ONCHANGE))
+    };
     let style = csp_hash(&format!("{THEME_CSS}{BASE_CSS}{CSS}"));
     page_csp(&script, &style, "'self'", look.stylesheet, None, &[])
 }
@@ -6845,28 +6929,71 @@ fn page_deny_form(v: &View, f: &DenyForm, err: Option<&Refusal>) -> Markup {
     }
 }
 
+/// The block that reveals a freshly minted bearer, rendered by **both** surfaces: the console's
+/// [`page_minted`] and the self-service page's [`page_account_minted`] (§13.14).
+///
+/// One function because the two must not drift. The key, the button and the script are the same
+/// bytes on the console and on `/account/`; only the words around them are each page's own.
+///
+/// The `code id="bearer"` carries **the key and nothing else**, with no whitespace around it,
+/// because that text is what a click selects (`user-select: all` in `admin.css`) and what the
+/// button copies. The button is server-rendered `hidden`: a browser running no code must show no
+/// control that does nothing, and [`COPY_SCRIPT`] is the only thing that shows it, so the script
+/// goes last, after the two elements it looks up exist, and needs no load event. `type="button"`
+/// because this block sits where a form may later be wrapped around it, and a button that submits
+/// one is a mutation on a click.
+///
+/// The bearer is in **exactly one place** in the response: the text of this `code`. The script is
+/// a compile-time constant and reads the key from the DOM at click time, and the button's two
+/// data attributes carry only translated text, so the key is in no script, no attribute, no URL
+/// and no header. The hint below the panel spells the word `Bearer` in a `code` of its own: that
+/// is a word somebody types, not the credential, and it is the reason the hint sits **outside**
+/// the panel. Inside `.secret` a `code` is the key's block chip (`admin.css`), so a second one
+/// there would render as a second box the size of the secret.
+fn bearer_reveal(lang: Lang, bearer: &str) -> Markup {
+    html! {
+        div class="secret" {
+            div { strong { (t(lang, K::BearerHeading)) } }
+            p { (t(lang, K::BearerOnce)) }
+            code id="bearer" { (bearer) }
+            // `hidden="hidden"`: the serialised form of the boolean attribute, which is what
+            // `admin.css`'s `.secret button[hidden]` pins shut against an operator stylesheet
+            // that gives `button` a `display` of its own.
+            button type="button" id="bearer-copy" hidden="hidden"
+                data-done=(t(lang, K::CopyDone)) data-failed=(t(lang, K::CopyFailed)) {
+                (t(lang, K::CopyKey))
+            }
+            script { (PreEscaped(COPY_SCRIPT)) }
+        }
+        // The word is an element, so the sentence is two translated halves around it, and the
+        // word itself is not translated: it is what the person types.
+        p class="hint" {
+            (t(lang, K::BearerHintLead)) " " code { "Bearer" } (t(lang, K::BearerHintTail))
+        }
+    }
+}
+
 /// The page a mint answers with — and the one place a `bbk_` bearer is ever rendered.
 ///
 /// Rendered **directly**, not after a redirect: a `303` would put the result behind a fresh
 /// `GET` that has no bearer to show, and the bearer exists nowhere else — the file keeps
 /// only its sha256. It is not logged and never travels in a URL.
+///
+/// The key itself, the copy button and the script are [`bearer_reveal`], shared with the
+/// self-service page so the two surfaces cannot answer the same moment differently.
 fn page_minted(v: &View, owner_uuid: &str, owner_label: &str, id: &str, bearer: &str) -> Markup {
     html! {
         h1 { (owner_label) " · api_keys · " (id) }
-        div class="secret" {
-            div { strong { (v.t(K::BearerHeading)) } }
-            p { (v.t(K::BearerOnce)) }
-            code { "Authorization: Bearer " (bearer) }
-            p class="hint" { (v.t(K::BearerClickHint)) }
-        }
+        (bearer_reveal(v.lang, bearer))
         p { (back(v, &Route::User(owner_uuid.to_string()))) }
     }
 }
 
 /// The `409`: the file moved under the form. Nothing was written, and the way out is a
 /// fresh read of what the file says now — with a pointer at the browser's Back button,
-/// which (no page here runs a script on load, so nothing disturbs the bfcache) still holds
-/// the form exactly as it was filled in.
+/// which (no page here runs a script **on load**: the one script this program emits,
+/// [`COPY_SCRIPT`], is the bearer reveal's copy button, wired to a click, so nothing
+/// disturbs the bfcache) still holds the form exactly as it was filled in.
 fn page_conflict(v: &View) -> Markup {
     // A `POST`-only route has no form to reload, so it goes back to its section.
     let back = match &v.at {
@@ -7836,19 +7963,28 @@ struct AccountPrefs<'a> {
 /// hash, and a page whose policy is a list of hashes to keep in step is a page that breaks when
 /// one of them is edited.
 ///
-/// `script-src` is `'none'`: this page carries no script and no handler of any kind. The console
-/// bends the estate's no-script rule exactly once, for the Settings list box, and it has a
-/// `<noscript>` button behind it; this page has no reason to bend it at all, so its policy says
-/// so and needs no fallback.
+/// `script-src` is `'none'`, because this page carries no script and no handler of any kind. The
+/// console bends the estate's no-script rule once for the Settings list box; this page has no
+/// reason to bend it at all, so its policy says so and needs no fallback.
+///
+/// `reveal` is the bearer reveal and nothing else (§13.14): the one page under this prefix that
+/// carries a `<script>`, so its policy names that one script's hash and nothing else. A policy
+/// that said `'none'` beside a hash would be a policy that runs nothing, so the two sources
+/// replace each other rather than joining.
 ///
 /// `form-action` is `'self'`: the selector is a `GET` back to this same page, which is the whole
 /// interaction.
 ///
 /// `img-src` is the one place this policy is wider than the console's, and the reason is
 /// `ui.logo_url`, which the console's header does not show and this page does.
-fn account_csp(look: &AccountLook) -> String {
+fn account_csp(look: &AccountLook, reveal: bool) -> String {
     let style = csp_hash(&format!("{THEME_CSS}{BASE_CSS}{CSS}"));
-    page_csp("'none'", &style, "'self'", look.stylesheet, look.logo, &[])
+    let script = if reveal {
+        csp_hash(COPY_SCRIPT)
+    } else {
+        "'none'".to_string()
+    };
+    page_csp(&script, &style, "'self'", look.stylesheet, look.logo, &[])
 }
 
 /// The chrome every page under the prefix is wrapped in: the palette, the components built out of
@@ -7951,12 +8087,13 @@ fn respond_account(
     title: &str,
     content: Markup,
     look: AccountLook,
+    reveal: bool,
 ) {
     let page = account_shell(prefs, title, content, look);
     let mut resp = Response::from_data(page.into_string().into_bytes())
         .with_status_code(StatusCode(status))
         .with_header(h("Content-Type", "text/html; charset=utf-8"))
-        .with_header(h("Content-Security-Policy", &account_csp(&look)));
+        .with_header(h("Content-Security-Policy", &account_csp(&look, reveal)));
     for (k, v) in PAGE_SECURITY_HEADERS {
         resp.add_header(h(k, v));
     }
@@ -8281,18 +8418,15 @@ fn account_key_forms(lang: Lang, keys_path: &str, rev: &str, id: &str) -> Markup
 ///
 /// Rendered **directly**, for the console's reason ([`page_minted`]): a redirect would put the
 /// result behind a `GET` that has no bearer to show, and the bearer exists nowhere else. The
-/// words are the console's three, because "shown once, copy it now" is one fact with one
-/// spelling in this program, and a person who sees it in two places must not read two claims.
-/// A rotate lands on the same page for the same reason: it mints a secret, and the old one is
-/// already dead at the next reload.
+/// block is [`bearer_reveal`], the console's own: the key, the copy button and the script are one
+/// rendering, so a person who mints from the console and from `/account/` sees one page, and the
+/// words are the console's three, because "shown once, copy it now" is one fact with one spelling
+/// in this program, and a person who sees it in two places must not read two claims. A rotate
+/// lands on the same page for the same reason: it mints a secret, and the old one is already dead
+/// at the next reload.
 fn page_account_minted(lang: Lang, page: &str, bearer: &str) -> Markup {
     html! {
-        div class="secret" {
-            div { strong { (t(lang, K::BearerHeading)) } }
-            p { (t(lang, K::BearerOnce)) }
-            code { "Authorization: Bearer " (bearer) }
-            p class="hint" { (t(lang, K::BearerClickHint)) }
-        }
+        (bearer_reveal(lang, bearer))
         p { a href=(page) { "← " (t(lang, K::Back)) } }
     }
 }
@@ -8475,6 +8609,7 @@ fn handle_account(
             t(lang, K::NotFoundTitle),
             html! { p { (t(lang, K::NotFoundBody)) } },
             AccountLook::default(),
+            false,
         );
         return;
     }
@@ -8493,6 +8628,7 @@ fn handle_account(
                 t(lang, K::NoIdentityTitle),
                 html! { p { (t(lang, K::NoIdentityBody)) } },
                 AccountLook::default(),
+                false,
             );
             return;
         }
@@ -8523,6 +8659,7 @@ fn handle_account(
                 t(lang, K::FileErrorTitle),
                 html! { p { (e) } },
                 AccountLook::default(),
+                false,
             );
             return;
         }
@@ -8544,6 +8681,7 @@ fn handle_account(
             t(lang, K::AccountNoEmailTitle),
             html! { p { (t(lang, K::AccountNoEmailBody)) } },
             look,
+            false,
         );
         return;
     }
@@ -8559,6 +8697,7 @@ fn handle_account(
                 t(lang, K::FileErrorTitle),
                 html! { p { (e) } },
                 look,
+                false,
             );
             return;
         }
@@ -8572,6 +8711,7 @@ fn handle_account(
             t(lang, K::AccountVetoTitle),
             html! { p { (t(lang, K::AccountVetoBody)) } },
             look,
+            false,
         );
         return;
     }
@@ -8588,6 +8728,7 @@ fn handle_account(
                 t(lang, K::AccountAmbiguousTitle),
                 html! { p { (t(lang, K::AccountAmbiguousBody)) } },
                 look,
+                false,
             );
             return;
         }
@@ -8606,6 +8747,7 @@ fn handle_account(
                 t(lang, K::FileErrorTitle),
                 html! { p { (msg) } },
                 look,
+                false,
             );
             return;
         }
@@ -8648,6 +8790,7 @@ fn handle_account(
         t(lang, K::AccountTitle),
         page_account(lang, &ids, uuid, &own),
         look,
+        false,
     );
 }
 
@@ -8722,6 +8865,7 @@ fn account_key_post(
             t(lang, K::CsrfTitle),
             html! { p { (t(lang, K::CsrfBody)) } },
             look,
+            false,
         );
         return;
     }
@@ -8736,6 +8880,7 @@ fn account_key_post(
             t(lang, K::AccountNoRowTitle),
             html! { p { (t(lang, K::AccountNoRowBody)) } },
             look,
+            false,
         );
         return;
     };
@@ -8757,6 +8902,7 @@ fn account_key_post(
                 t(lang, K::FileErrorTitle),
                 html! { p { (msg) } },
                 look,
+                false,
             );
             return;
         }
@@ -8775,6 +8921,7 @@ fn account_key_post(
                 p { a href=(prefs.page) { "← " (t(lang, K::ConflictBack)) } }
             },
             look,
+            false,
         );
         return;
     }
@@ -8788,6 +8935,7 @@ fn account_key_post(
                 t(lang, K::FileErrorTitle),
                 html! { p { (e) } },
                 look,
+                false,
             );
             return;
         }
@@ -8906,7 +9054,9 @@ fn account_key_post(
         // here that are not POST-redirect-GET: the bearer cannot ride a redirect, because a
         // `Location:` is a URL and a URL is a credential in a proxy log. The page that shows it
         // once has to be the response to the `POST`, and a reload of that page re-sends the
-        // `POST`: the same price the console's mint page pays, for the same reason.
+        // `POST`: the same price the console's mint page pays, for the same reason. It is also
+        // the one response under this prefix that carries a script (§13.14), so it is the one
+        // that passes `reveal`: a `400` here mints nothing, and a `409` has no key to copy.
         Ok(Some(bearer)) => respond_account(
             req,
             200,
@@ -8914,6 +9064,7 @@ fn account_key_post(
             &format!("{} · {}", t(lang, K::AccountKeys), id),
             page_account_minted(lang, prefs.page, &bearer),
             look,
+            true,
         ),
         // A revoke mints nothing, so it follows the estate's rule and answers `303` to the page
         // it came from. No `?msg=`: the key is gone from the list, and that is the confirmation.
@@ -8928,6 +9079,7 @@ fn account_key_post(
                 p { a href=(prefs.page) { "← " (t(lang, K::Back)) } }
             },
             look,
+            false,
         ),
     }
 }
@@ -9038,7 +9190,13 @@ fn handle(mut req: Request, cfg: &Config) {
             v.t(K::NoProxyTitle),
             html! { p { (v.t(K::NoProxyBody)) } },
         );
-        respond_page(req, 403, shell(&v, v.t(K::NoProxyTitle), page), &v.look);
+        respond_page(
+            req,
+            403,
+            shell(&v, v.t(K::NoProxyTitle), page),
+            &v.look,
+            false,
+        );
         return;
     }
     // The self-service page, dispatched **ahead of the administrator allowlist** and of the
@@ -9064,7 +9222,13 @@ fn handle(mut req: Request, cfg: &Config) {
                 v.t(K::NoIdentityTitle),
                 html! { p { (v.t(K::NoIdentityBody)) } },
             );
-            respond_page(req, 401, shell(&v, v.t(K::NoIdentityTitle), page), &v.look);
+            respond_page(
+                req,
+                401,
+                shell(&v, v.t(K::NoIdentityTitle), page),
+                &v.look,
+                false,
+            );
             return;
         }
     };
@@ -9094,6 +9258,7 @@ fn handle(mut req: Request, cfg: &Config) {
                 500,
                 shell(&v, v.t(K::FileErrorTitle), page_file_error(&v, &e)),
                 &v.look,
+                false,
             );
             return;
         }
@@ -9113,6 +9278,7 @@ fn handle(mut req: Request, cfg: &Config) {
             500,
             shell(&v, v.t(K::FileErrorTitle), page_file_error(&v, &e)),
             &v.look,
+            false,
         );
         return;
     }
@@ -9133,7 +9299,13 @@ fn handle(mut req: Request, cfg: &Config) {
                 v.t(K::NotAdminTitle),
                 html! { p { code { (who) } " " (v.t(K::NotAdminBody)) } },
             );
-            respond_page(req, 403, shell(&v, v.t(K::NotAdminTitle), page), &v.look);
+            respond_page(
+                req,
+                403,
+                shell(&v, v.t(K::NotAdminTitle), page),
+                &v.look,
+                false,
+            );
             return;
         }
     };
@@ -9172,7 +9344,13 @@ fn handle(mut req: Request, cfg: &Config) {
                 v.t(K::NotFoundTitle),
                 html! { p { (v.t(K::NotFoundBody)) } },
             );
-            respond_page(req, 404, shell(&v, v.t(K::NotFoundTitle), page), &v.look);
+            respond_page(
+                req,
+                404,
+                shell(&v, v.t(K::NotFoundTitle), page),
+                &v.look,
+                false,
+            );
             return;
         }
     };
@@ -9211,7 +9389,7 @@ fn handle(mut req: Request, cfg: &Config) {
         };
         if !allowed {
             let page = notice("bad", v.t(K::CsrfTitle), html! { p { (v.t(K::CsrfBody)) } });
-            respond_page(req, 403, shell(&v, v.t(K::CsrfTitle), page), &v.look);
+            respond_page(req, 403, shell(&v, v.t(K::CsrfTitle), page), &v.look, false);
             return;
         }
         let form = Form::parse(&read_body(&mut req));
@@ -9221,7 +9399,13 @@ fn handle(mut req: Request, cfg: &Config) {
                 respond_redirect(req, &location);
             }
             Outcome::Page(status, title, content) => {
-                respond_page(req, status, shell(&v, title, content), &v.look)
+                // The bearer reveal is the only page this program runs a script on (§13.14),
+                // and a `200` on one of these two routes can only be the reveal: every refusal
+                // the mint and the rotate arms make is a `400`, a stale `rev` is a `409`, and a
+                // route that mints nothing is not one of these two.
+                let reveal =
+                    status == 200 && matches!(v.at, Route::KeyAdd(_) | Route::KeyRotate(..));
+                respond_page(req, status, shell(&v, title, content), &v.look, reveal)
             }
         }
         return;
@@ -9317,7 +9501,7 @@ fn handle(mut req: Request, cfg: &Config) {
             Ok((doc, _)) => page_config(&v, &ConfigForm::of(&doc), None, None),
             Err(e) => page_file_error(&v, &e),
         };
-        respond_page(req, 200, shell(&v, v.t(K::Config), content), &v.look);
+        respond_page(req, 200, shell(&v, v.t(K::Config), content), &v.look, false);
         return;
     }
 
@@ -9329,6 +9513,7 @@ fn handle(mut req: Request, cfg: &Config) {
                 500,
                 shell(&v, v.t(K::FileErrorTitle), page_file_error(&v, &e)),
                 &v.look,
+                false,
             );
             return;
         }
@@ -9705,7 +9890,7 @@ fn handle(mut req: Request, cfg: &Config) {
             }
         }
     };
-    respond_page(req, status, shell(&v, title, content), &v.look);
+    respond_page(req, status, shell(&v, title, content), &v.look, false);
 }
 
 /// One user's key, by owner (uuid or email) and id — what a key form and its two
@@ -11292,7 +11477,8 @@ mod tests {
         let open = html.find("<style>").expect("the built-in stylesheet");
         let close = html.find("</style>").expect("a closed style element");
         let inline = &html[open + "<style>".len()..close];
-        let csp = admin_csp(&Look::default());
+        // Not a reveal: this is the page that carries the stylesheet and no script.
+        let csp = admin_csp(&Look::default(), false);
         assert!(
             csp.contains(&csp_hash(inline)),
             "style-src must name the hash of the bytes in the page"
@@ -11312,20 +11498,24 @@ mod tests {
         assert!(csp.contains("form-action 'self';"), "{csp}");
     }
 
+    /// The estate's rule, in its 13.14 shape: **no page may need a script**, and exactly one
+    /// page is allowed to carry one.
+    ///
+    /// The first half is the old test, unchanged: every route of [`every_route`], over a
+    /// socket, carries zero `<script`, no `javascript:` href, and an allowlist of handlers
+    /// that is still exactly the two Settings list boxes (`SETTINGS_ONCHANGE`). The copy
+    /// button is built with `addEventListener`, so the widening of the rule to "the reveal
+    /// carries a script" must not widen the *handler* rule by one attribute.
+    ///
+    /// The second half is new, and it is the half the design buys the script with: each of
+    /// the four reveal responses (the console's mint and rotate, the self-service page's mint
+    /// and rotate) carries **exactly one** `<script>`, its content is `COPY_SCRIPT` byte for
+    /// byte, and that response's own `Content-Security-Policy` names its sha256. The pairing
+    /// is the point: a script on a page whose policy does not name it is a button that never
+    /// appears, and a hash in a policy with no script beside it is a page that allows a
+    /// constant it does not run.
     #[test]
-    fn the_page_carries_one_handler_and_no_script() {
-        // The invariant is not "no JavaScript": it is that no page may *need* a script. One
-        // inline handler is allowed to save a click on the Settings list boxes; anything
-        // else (a `<script>` tag, a second kind of handler, a `javascript:` href) would be a
-        // page that stops working when scripting is off, which this GUI must never be.
-        //
-        // Every page shape, over a socket, and an allowlist rather than a blacklist. The
-        // previous version rendered four read-only pages and looked for six named handlers,
-        // which says nothing about `onmouseover` anywhere, `onchange` on a seventh element,
-        // or any of the eighteen form pages it could not render at all: it could only find
-        // the mistakes somebody had already thought of. The browser suite (`e2e/nojs.js`)
-        // has enumerated attributes this way all along, and it runs on a machine with a
-        // browser, which no automated run of this repository's has.
+    fn no_page_but_the_reveal_carries_a_script() {
         let path = scratch("nojs-all", SAMPLE);
         let served = cfg_for(&path, "");
         let server = Server::http("127.0.0.1:0").expect("bind an ephemeral port");
@@ -11365,6 +11555,542 @@ mod tests {
                 "the no-script submit must be there, and inside noscript: {at:?}"
             );
         }
+        cleanup(&path);
+
+        let (cases, paths) = reveal_cases("reveal-script");
+        for (label, g) in cases.iter() {
+            assert_eq!(
+                g.status,
+                200,
+                "{label}: a reveal is the direct `POST` response, so the walk below has one: \
+                 {}",
+                account_readable(&g.body)
+            );
+            let scripts = scripts_in(&g.body);
+            assert_eq!(
+                scripts.len(),
+                1,
+                "{label}: the reveal is the one page allowed a script, and it is allowed \
+                 exactly one ({} found): {}",
+                scripts.len(),
+                account_readable(&g.body)
+            );
+            assert_eq!(
+                g.body.matches("<script").count(),
+                1,
+                "{label}: one opening tag, whatever the count of blocks says"
+            );
+            // The policy and the page are derived from the same `&str`, which is the design's
+            // argument for a hash over a nonce. This is what says so: the bytes in the page
+            // *are* the constant the policy names, so neither can be edited alone.
+            assert_eq!(
+                scripts[0], COPY_SCRIPT,
+                "{label}: the one script must be COPY_SCRIPT byte for byte, or the hash the \
+                 policy names is not the hash of what runs"
+            );
+            let csp = g
+                .header("Content-Security-Policy")
+                .unwrap_or_else(|| panic!("{label}: every page carries a policy"));
+            assert!(
+                csp.contains(&csp_hash(COPY_SCRIPT)),
+                "{label}: the policy of this very response must name the script it carries: {csp}"
+            );
+
+            // The handler rule is unchanged by the new script: the console's reveal keeps the
+            // shell's two list boxes, the self-service reveal carries no handler at all, and
+            // the copy button is wired with `addEventListener`, never an attribute.
+            let markup = markup_without_scripts(&g.body);
+            let handlers = handlers_in(&markup);
+            for h in handlers.iter() {
+                assert_eq!(
+                    h,
+                    &format!("onchange=\"{SETTINGS_ONCHANGE}\""),
+                    "{label}: the copy script is a script, not a handler, and {h} is a handler"
+                );
+            }
+            let want = if label.starts_with("console") { 2 } else { 0 };
+            assert_eq!(
+                handlers.len(),
+                want,
+                "{label}: the console's shell carries its two Settings handlers, the \
+                 self-service page carries none"
+            );
+        }
+        for p in paths {
+            cleanup(&p);
+        }
+    }
+
+    /// The four responses that reveal a freshly minted bearer, driven over real sockets: the
+    /// console's mint and rotate `POST`s, and the self-service page's mint and rotate.
+    ///
+    /// One helper, because the rule under test is that the console and the self-service page
+    /// **cannot drift** (13.14: one `bearer_reveal`, two callers). A test that walked one of
+    /// the four is a test that lets the other three change. Each case is named by what made
+    /// it, so a failure says which of the four, and the fixtures are handed back for the
+    /// caller to clean.
+    ///
+    /// The console's two ride one fixture and one server, re-reading the `rev` between them:
+    /// the mint's own write moves the file, and a rotate posted with the mint's `rev` is a
+    /// `409`, which is the thing the third test wants and not the reveal.
+    fn reveal_cases(name: &str) -> (Vec<(String, AccountGot)>, Vec<String>) {
+        let mut cases: Vec<(String, AccountGot)> = Vec::new();
+        let mut paths: Vec<String> = Vec::new();
+
+        // --- the console: mint, then rotate, over one fixture and one server --------------
+        let path = scratch(&format!("{name}-console"), SAMPLE);
+        let served = cfg_for(&path, ADMIN_BASE);
+        let server = Server::http("127.0.0.1:0").expect("bind an ephemeral port");
+        let port = server.server_addr().to_ip().expect("an ip address").port();
+        std::thread::spawn(move || {
+            for req in server.incoming_requests() {
+                handle(req, &served);
+            }
+        });
+        let rev = rev_of(&path);
+        cases.push((
+            "console mint".to_string(),
+            console_post(
+                port,
+                &Route::KeyAdd(BOB.to_string()),
+                &[("rev", &rev), ("id", "reveal"), ("duration", "365d")],
+            ),
+        ));
+        let rev = rev_of(&path);
+        cases.push((
+            "console rotate".to_string(),
+            console_post(
+                port,
+                &Route::KeyRotate(BOB.to_string(), "laptop".to_string()),
+                &[("rev", &rev)],
+            ),
+        ));
+        paths.push(path);
+
+        // --- the self-service page: mint, then rotate, over its own two fixtures ----------
+        let path = account_scratch_access(&format!("{name}-account-mint"), &account_access_mint());
+        let base = account_serve(&path);
+        let rev = sha256_hex(&read(&path));
+        cases.push((
+            "account mint".to_string(),
+            account_post(
+                &format!("{base}keys"),
+                Some("bob@x.com"),
+                &[
+                    ("rev", rev.as_str()),
+                    ("id", "phone"),
+                    ("duration", "30d"),
+                    ("restrict", "all"),
+                ],
+            ),
+        ));
+        paths.push(path);
+
+        let path =
+            account_scratch_access(&format!("{name}-account-rotate"), &account_access_keys());
+        let base = account_serve(&path);
+        let rev = sha256_hex(&read(&path));
+        cases.push((
+            "account rotate".to_string(),
+            account_post(
+                &format!("{base}keys/rotate"),
+                Some("bob@x.com"),
+                &[("rev", rev.as_str()), ("id", "laptop")],
+            ),
+        ));
+        paths.push(path);
+
+        (cases, paths)
+    }
+
+    /// A console `POST` over the socket, read whole. The in-process [`post`] helper cannot
+    /// serve these tests: it calls [`mutate`] and renders the shell itself, so it has no
+    /// response and no `Content-Security-Policy` to assert on, and the pairing of a page with
+    /// the policy of *that response* is exactly what is under test.
+    fn console_post(port: u16, at: &Route, fields: &[(&str, &str)]) -> AccountGot {
+        let url = format!("http://127.0.0.1:{port}{ADMIN_BASE}{}", at.path());
+        // The same client-side serialization the account helpers use: one fsync per in-flight
+        // write, so a slow disk costs latency and never a deadline.
+        let _permit = WRITE_PERMIT.lock().unwrap_or_else(|e| e.into_inner());
+        let r = post_with_secret(&url)
+            .header(IDENTITY_HEADER, "admin@x.com")
+            .header("Sec-Fetch-Site", "same-origin")
+            .send_form(fields.iter().copied())
+            .expect("a POST response");
+        got_of(r)
+    }
+
+    /// A response read whole: status, every header, the body.
+    fn got_of(mut r: ureq::http::Response<ureq::Body>) -> AccountGot {
+        let headers = r
+            .headers()
+            .iter()
+            .map(|(k, v)| (k.as_str().to_string(), v.to_str().unwrap_or("").to_string()))
+            .collect();
+        AccountGot {
+            status: r.status().as_u16(),
+            headers,
+            body: r.body_mut().read_to_string().expect("a body"),
+        }
+    }
+
+    /// The content of every `<script …>…</script>` block in `html`, in document order.
+    fn scripts_in(html: &str) -> Vec<String> {
+        let mut out = Vec::new();
+        let mut rest = html;
+        while let Some(i) = rest.find("<script") {
+            let after = &rest[i + "<script".len()..];
+            let Some(open) = after.find('>') else { break };
+            let body = &rest[i + "<script".len() + open + 1..];
+            let Some(close) = body.find("</script>") else {
+                break;
+            };
+            out.push(body[..close].to_string());
+            rest = &body[close + "</script>".len()..];
+        }
+        out
+    }
+
+    /// `html` with every script block replaced by an empty one, so [`handlers_in`] sees the
+    /// markup and not the script's own source. The scan is for **attributes**, and a string
+    /// inside a script (`" on click"`, `x = on;`) is not an attribute: an allowlist that
+    /// tripped on script text would be a rule about how the script happens to be spelled.
+    fn markup_without_scripts(html: &str) -> String {
+        let mut out = String::with_capacity(html.len());
+        let mut rest = html;
+        while let Some(i) = rest.find("<script") {
+            let after = &rest[i + "<script".len()..];
+            let Some(open) = after.find('>') else { break };
+            let body = &rest[i + "<script".len() + open + 1..];
+            let Some(close) = body.find("</script>") else {
+                break;
+            };
+            out.push_str(&rest[..i]);
+            out.push_str("<script></script>");
+            rest = &body[close + "</script>".len()..];
+        }
+        out.push_str(rest);
+        out
+    }
+
+    /// The text of `<code id="{id}">…</code>`, exactly as the page wrote it, with nothing
+    /// trimmed. What a click selects (`user-select: all`) and what the copy button copies is
+    /// that text, so whitespace around it is a key that does not paste.
+    fn code_text(html: &str, id: &str) -> String {
+        let open = format!("<code id=\"{id}\">");
+        let at = html.find(&open).unwrap_or_else(|| {
+            panic!(
+                "the reveal must carry {open}: {}",
+                &html[..html.len().min(600)]
+            )
+        });
+        let rest = &html[at + open.len()..];
+        let close = rest.find("</code>").expect("a closed code element");
+        rest[..close].to_string()
+    }
+
+    /// The whole tag `needle` sits in, from its `<` to its `>`, so an assertion about an
+    /// attribute cannot be satisfied by the same word in prose beside it.
+    fn tag_containing(html: &str, needle: &str) -> String {
+        let at = html
+            .find(needle)
+            .unwrap_or_else(|| panic!("the page must carry a tag with {needle}"));
+        let start = html[..at].rfind('<').unwrap_or(at);
+        let end = html[at..]
+            .find('>')
+            .map(|i| at + i + 1)
+            .unwrap_or(html.len());
+        html[start..end].to_string()
+    }
+
+    /// The reveal page shows **the key**, and nothing that reads like a credential header.
+    ///
+    /// The user's decision (13.14) is that the page shows `bbk_…` alone, not the
+    /// `Authorization: Bearer` line. Two properties carry that, and both are about the bytes
+    /// a person copies:
+    ///
+    /// * the text of `code#bearer` **is** the bearer, with nothing around it, and it occurs
+    ///   exactly once in the response, so the one place the secret is is the one place a
+    ///   click selects;
+    /// * the bearer is never glued to `Bearer `. The hint is allowed to *name* the header in
+    ///   prose ("paste it as `Authorization: Bearer <key>`"), so a search for the word
+    ///   `Authorization` is not the rule; the rule is that no occurrence of the secret sits
+    ///   behind that prefix, which is what stops the page handing out a line somebody pastes
+    ///   into the wrong field.
+    ///
+    /// The button is checked here too, because it is the reason the script exists: a real
+    /// `type="button"` (the block is in no form, and a button that can submit one is a
+    /// mutation on a click) carrying `hidden`, so a browser with scripting off shows no
+    /// control that does nothing.
+    #[test]
+    fn the_reveal_shows_only_the_key() {
+        let (cases, paths) = reveal_cases("reveal-only");
+        for (label, g) in cases.iter() {
+            assert_eq!(g.status, 200, "{label}: {}", account_readable(&g.body));
+            let shown = code_text(&g.body, "bearer");
+            assert!(
+                shown.starts_with("bbk_") && shown.len() >= 40,
+                "{label}: the text of code#bearer is the credential itself, not a label and \
+                 not a prefix of it: {shown:?}"
+            );
+            assert_eq!(
+                g.body.matches(shown.as_str()).count(),
+                1,
+                "{label}: the bearer occurs exactly once in the response, and that one \
+                 occurrence is the code element, since the code's text is the bearer"
+            );
+            assert!(
+                !g.body.contains("Authorization: Bearer bbk_"),
+                "{label}: no `Authorization: Bearer bbk_…` line anywhere in the response"
+            );
+            for (i, _) in g.body.match_indices(shown.as_str()) {
+                let before = &g.body[i.saturating_sub(7)..i];
+                assert_ne!(
+                    before, "Bearer ",
+                    "{label}: the key is shown alone, never as a header value"
+                );
+            }
+
+            let tag = tag_containing(&g.body, "id=\"bearer-copy\"");
+            let attrs: Vec<&str> = tag
+                .trim_start_matches('<')
+                .trim_end_matches('>')
+                .split_whitespace()
+                .collect();
+            assert!(
+                tag.starts_with("<button"),
+                "{label}: the copy control is a button, and a link that runs a script is a \
+                 link that does nothing with scripting off: {tag}"
+            );
+            assert!(
+                attrs.contains(&"type=\"button\""),
+                "{label}: type=\"button\", because a bare `button` is a submit button and \
+                 this block sits where a form may later be wrapped around it: {tag}"
+            );
+            assert!(
+                attrs
+                    .iter()
+                    .any(|a| *a == "hidden" || a.starts_with("hidden=")),
+                "{label}: the button starts hidden, so the scripting-off page shows no dead \
+                 control: {tag}"
+            );
+        }
+        for p in paths {
+            cleanup(&p);
+        }
+    }
+
+    /// The copy script is allowed **on the reveal and nowhere else**.
+    ///
+    /// The widening is a response path, not a flag every page passes (13.14), so the
+    /// assertions go both ways: the `false` policies are byte-for-byte what they were (the
+    /// self-service page still says `script-src 'none'`), the `true` ones name the hash, and
+    /// over the wire no page in the estate names it except the four reveals. A policy that
+    /// names a script the page does not carry is harmless to a browser and a slow rot: it is
+    /// the page that gains a script later, by accident, that this pins shut.
+    ///
+    /// The two refusals on the mint path are here for the same reason: a `400` (a window the
+    /// page refuses) and a `409` (the `rev` the reveal page still holds) are rendered by the
+    /// same code as the reveal, and neither mints anything, so neither has a key to copy.
+    #[test]
+    fn only_the_reveal_policy_names_the_copy_script() {
+        let hash = csp_hash(COPY_SCRIPT);
+
+        let plain = admin_csp(&Look::default(), false);
+        assert!(
+            !plain.contains(&hash),
+            "a console page with no script must not allow one: {plain}"
+        );
+        assert!(
+            admin_csp(&Look::default(), true).contains(&hash),
+            "the console's reveal policy must name the script the reveal carries"
+        );
+
+        let plain = account_csp(&AccountLook::default(), false);
+        assert!(
+            !plain.contains(&hash),
+            "the self-service page's own rule is that it carries no script: {plain}"
+        );
+        assert!(
+            plain.contains("script-src 'none'"),
+            "and the non-reveal policy says so exactly as it did before: {plain}"
+        );
+        let reveal = account_csp(&AccountLook::default(), true);
+        assert!(
+            reveal.contains(&hash),
+            "the self-service reveal policy must name the script the reveal carries"
+        );
+        assert!(
+            !reveal.contains("script-src 'none'"),
+            "a policy that says `'none'` and names a hash is a policy that runs nothing: {reveal}"
+        );
+
+        // Over the wire: every console page, and the self-service page, carry a policy that
+        // names no script.
+        let path = scratch("reveal-csp", SAMPLE);
+        let served = cfg_for(&path, ADMIN_BASE);
+        let server = Server::http("127.0.0.1:0").expect("bind an ephemeral port");
+        let port = server.server_addr().to_ip().expect("an ip address").port();
+        std::thread::spawn(move || {
+            for req in server.incoming_requests() {
+                handle(req, &served);
+            }
+        });
+        for at in every_route() {
+            let g = got_of(
+                get_with_secret(format!("http://127.0.0.1:{port}{ADMIN_BASE}{}", at.path()))
+                    .header(IDENTITY_HEADER, "admin@x.com")
+                    .call()
+                    .expect("a response"),
+            );
+            let csp = g
+                .header("Content-Security-Policy")
+                .unwrap_or_else(|| panic!("{at:?}: every page carries a policy"));
+            assert!(
+                !csp.contains(&hash),
+                "{at:?} carries no script, so its policy must not allow one: {csp}"
+            );
+        }
+        cleanup(&path);
+
+        let apath = account_scratch_access("reveal-csp-account", &account_access_mint());
+        let base = account_serve(&apath);
+        let g = account_call(&base, Some("bob@x.com"));
+        assert_eq!(g.status, 200, "bob reaches the page");
+        let csp = g
+            .header("Content-Security-Policy")
+            .expect("the page carries a policy");
+        assert!(
+            !csp.contains(&hash),
+            "the page that offers the mint form carries no script: {csp}"
+        );
+
+        // The `400`: a window this page refuses to mint. The `409`: the same form posted
+        // again, which is what reloading the reveal page does.
+        let mint = format!("{base}keys");
+        let rev = sha256_hex(&read(&apath));
+        let bad = account_post(
+            &mint,
+            Some("bob@x.com"),
+            &[
+                ("rev", rev.as_str()),
+                ("id", "refused"),
+                ("duration", "never"),
+                ("restrict", "all"),
+            ],
+        );
+        assert_eq!(
+            bad.status,
+            400,
+            "a refused window is a 400: {}",
+            account_readable(&bad.body)
+        );
+        assert!(
+            !bad.body.contains("<script"),
+            "a refusal mints nothing, so it has no key to copy"
+        );
+        assert!(
+            !bad.header("Content-Security-Policy")
+                .unwrap_or_default()
+                .contains(&hash),
+            "and its policy allows no script"
+        );
+
+        // The `409`: the reveal page's own `rev`, posted again. The mint's write is what
+        // makes it stale, so the mint has to happen first, and the replay has to name the
+        // key the mint created (a stale `rev` on a key that exists is the mint's own 409).
+        let fields = [
+            ("rev", rev.as_str()),
+            ("id", "again"),
+            ("duration", "30d"),
+            ("restrict", "all"),
+        ];
+        let minted = account_post(&mint, Some("bob@x.com"), &fields);
+        assert_eq!(
+            minted.status,
+            200,
+            "the mint itself, so its own `rev` is the stale one: {}",
+            account_readable(&minted.body)
+        );
+        let replay = account_post(&mint, Some("bob@x.com"), &fields);
+        assert_eq!(
+            replay.status,
+            409,
+            "the reveal page's own `rev` is stale by its own write: {}",
+            account_readable(&replay.body)
+        );
+        assert!(
+            !replay.body.contains("<script"),
+            "a 409 has no bearer, so it has nothing to copy"
+        );
+        assert!(
+            !replay
+                .header("Content-Security-Policy")
+                .unwrap_or_default()
+                .contains(&hash),
+            "and its policy allows no script"
+        );
+        cleanup(&apath);
+
+        // The console's two refusals, over its socket.
+        let path = scratch("reveal-csp-console", SAMPLE);
+        let served = cfg_for(&path, ADMIN_BASE);
+        let server = Server::http("127.0.0.1:0").expect("bind an ephemeral port");
+        let port = server.server_addr().to_ip().expect("an ip address").port();
+        std::thread::spawn(move || {
+            for req in server.incoming_requests() {
+                handle(req, &served);
+            }
+        });
+        let rev = rev_of(&path);
+        let bad = console_post(
+            port,
+            &Route::KeyAdd(BOB.to_string()),
+            &[("rev", &rev), ("id", ""), ("duration", "365d")],
+        );
+        assert_eq!(
+            bad.status,
+            400,
+            "a key with no id is a 400, not a mint: {}",
+            account_readable(&bad.body)
+        );
+        assert!(
+            !bad.body.contains("<script"),
+            "the console's 400 carries no script"
+        );
+        assert!(
+            !bad.header("Content-Security-Policy")
+                .unwrap_or_default()
+                .contains(&hash),
+            "and no script in its policy"
+        );
+        let fields = [("rev", rev.as_str()), ("id", "ci"), ("duration", "365d")];
+        let minted = console_post(port, &Route::KeyAdd(BOB.to_string()), &fields);
+        assert_eq!(
+            minted.status,
+            200,
+            "the mint itself, so its own `rev` is the stale one: {}",
+            account_readable(&minted.body)
+        );
+        let replay = console_post(port, &Route::KeyAdd(BOB.to_string()), &fields);
+        assert_eq!(
+            replay.status,
+            409,
+            "a replay of the mint form is the 409, and it is rendered by the code that \
+             renders the reveal: {}",
+            account_readable(&replay.body)
+        );
+        assert!(
+            !replay.body.contains("<script"),
+            "the console's 409 carries no script"
+        );
+        assert!(
+            !replay
+                .header("Content-Security-Policy")
+                .unwrap_or_default()
+                .contains(&hash),
+            "and no script in its policy"
+        );
         cleanup(&path);
     }
 
@@ -12635,12 +13361,9 @@ mod tests {
             status, 200,
             "a mint renders its result, it does not redirect"
         );
-        let bearer = html
-            .split("Authorization: Bearer ")
-            .nth(1)
-            .and_then(|r| r.split('<').next())
-            .expect("the bearer, once")
-            .to_string();
+        // The reveal shows the key alone (§13.14), so the bearer is the text of the code
+        // element and not the tail of a header line.
+        let bearer = code_text(html, "bearer");
         assert!(bearer.starts_with("bbk_"), "{bearer}");
         assert!(html.contains("stored nowhere"), "{html}");
 

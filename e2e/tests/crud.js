@@ -212,7 +212,8 @@ async function run(ctx, t) {
     t.check('the reveal is the direct POST response (no redirect)',
       page.url().endsWith('/users/' + BOT + '/keys/+add'), page.url());
     const reveal = await mainText(page);
-    t.check('the reveal shows the bearer as a ready-to-paste header', reveal.includes('Authorization: Bearer bbk_'));
+    t.check('the reveal shows the key alone, with no Authorization line (§13.14)',
+      reveal.includes('bbk_') && !reveal.includes('Authorization'), reveal.slice(0, 300));
     const bearer = (reveal.match(/bbk_[A-Za-z0-9_-]+/) || [null])[0];
     const keyOf = (id) => userBy(ctx, 'bot@example.com').api_keys.find((k) => k.id === id);
     const minted = keyOf('e2e-key');

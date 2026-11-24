@@ -116,14 +116,16 @@ One crate, four targets, and the split is load-bearing:
   when the page reads the file on every request and every filter is already in the address. **Scopes are deliberately excluded from that**:
   their order is their meaning and the ↑/↓ buttons move them within the *file*, so a filtered
   view would show positions that are not the file's and a move that appears to do nothing.
-  **No page may need JavaScript**, and the *only* thing standing on the far side of that
-  rule is `SETTINGS_ONCHANGE`, one
-  inline handler that applies a Settings list box the moment it is picked, with a
-  `<noscript>` submit button behind it doing the same job one click later. There is no
-  `<script>` tag anywhere and nothing else carries a handler of any kind; a page that stops
-  working with scripting off is the thing that must never ship
-  (`the_page_carries_one_handler_and_no_script`, and `nojs.js` runs the whole GUI with
-  scripting disabled). A `GET` never mutates;
+  **No page may need JavaScript.** Two things stand on the far side of that rule. One is
+  `SETTINGS_ONCHANGE`, one inline handler that applies a Settings list box the moment it is
+  picked, with a `<noscript>` submit button behind it. The other is `COPY_SCRIPT`, the one
+  `<script>` this GUI emits, carried only by the page that reveals a freshly minted or rotated
+  key and allowed only by that response's CSP, by its hash; it reveals a hidden copy button,
+  and with scripting off no button shows and one click still selects the whole key. No other
+  element carries a handler and no other page carries a script; a page that stops working with
+  scripting off is the thing that must never ship
+  (`no_page_but_the_reveal_carries_a_script`, and `nojs.js` runs the whole GUI with scripting
+  disabled). A `GET` never mutates;
   every mutation is a `POST` guarded by a strict same-origin check (`Sec-Fetch-Site`, else
   `Origin`'s host vs `Host`'s — never the scheme, it speaks plain HTTP behind nginx) and by a
   hidden `rev` = sha256 of the file's exact bytes as the form was rendered, so a lost update
@@ -154,11 +156,12 @@ One crate, four targets, and the split is load-bearing:
   proxy secret is route-global and is not relaxed for this page, and a non-administrator's
   request to an admin route is a `403`, never a `404` that names which paths exist. What the
   page shows is the caller's addresses (every email of one roster row, space-joined, as the gate
-  sends them) and, where a row exists, its uuid, then four **read-only** sections: *Where you
-  reach* (the applications and scope names `Access::scopes_reached` returns, grouped by
-  application, never a URL), *Groups* (the `user_groups` naming the caller's uuid), *API keys*
-  (each key's id, its expiry date or "never", and its restriction, never the hash or the
-  bearer) and *Profile* (each configured `gate.profile_claims` claim and the value nginx
+  sends them) and, where a row exists, its uuid, then four sections, three of them
+  **read-only**: *Where you reach* (the applications and scope names `Access::scopes_reached`
+  returns, grouped by application, never a URL), *Groups* (the `user_groups` naming the
+  caller's uuid), *API keys* (each key's id, its expiry date or "never", and its restriction,
+  never the hash or the bearer, plus the mint form and the rotate and revoke button each key
+  carries) and *Profile* (each configured `gate.profile_claims` claim and the value nginx
   forwarded, percent-decoded, where a configured claim with nothing forwarded shows "None.").
   The `denied` veto is answered with a `403` ahead of everything the page would otherwise say
   about the caller, and a stranger and an administrator with no roster row see the same page.
@@ -168,7 +171,12 @@ One crate, four targets, and the split is load-bearing:
   auto) from a selector form with a submit button and **no handler at all**, not even the
   Settings menu's one: one submit answers one `302` that sets the `theme` and `lang` cookies,
   the same names the console writes, so a choice carries between the two surfaces on one host.
-  The keys' writes, the profile edit and the Cognito leg are the next steps. Its design is
+  The keys' writes are there: mint, rotate and revoke of the caller's **own** keys, each a
+  `POST` to a path under the account prefix (`/account/keys`, `/account/keys/rotate`,
+  `/account/keys/remove`), each carrying the file's `rev` so a stale form is a `409` that writes
+  nothing, and a mint or a rotate answers directly with the bearer shown once through the
+  console's own reveal, copy button included. The profile edit and the Cognito leg are the next
+  steps. Its design is
   [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md) §13.
 
 The defining constraint vs. authorization-code OIDC proxies (oauth2-proxy): those drive the

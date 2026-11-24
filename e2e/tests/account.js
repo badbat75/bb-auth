@@ -4,10 +4,12 @@
 // this one drives the sibling prefix, which is the half of the binary a person who is not an
 // administrator reaches (docs/ARCHITECTURE.md §13).
 //
-// Scripting off is the point of the area and not a garnish: this page emits no `<script>`
-// tag and no handler at all, not even the console's two list boxes, so every mutation here
-// is a plain form `POST` and the reveal-once bearer has to survive a Back button and a
-// reload in a browser running no code.
+// Scripting off is the point of the area and not a garnish: this page carries no handler at
+// all, not even the console's two list boxes, so every mutation here is a plain form `POST`
+// and the reveal-once bearer has to survive a Back button and a reload in a browser running
+// no code. The one page under the prefix that emits a `<script>` is the bearer reveal
+// (§13.14), and its script is the copy button and nothing else: with scripting off the key is
+// still shown, in `#bearer`, and the button is not shown at all.
 //
 // The contract checked, in order: the mint reveals a `bbk_` bearer exactly once and the file
 // keeps only its hash; Back and a reload show the key in the list and no secret; a rotate
@@ -34,8 +36,9 @@ const myKeys = (ctx) =>
 const idsOf = (ctx) => myKeys(ctx).map((k) => k.id);
 const keyById = (ctx, id) => myKeys(ctx).find((k) => k.id === id);
 
-/** The bearer a reveal page shows, out of the `Authorization: Bearer bbk_…` line. */
-const bearerIn = (text) => (text.match(/Bearer (bbk_[A-Za-z0-9_-]+)/) || [])[1];
+/** The bearer a reveal page shows: the text of `code#bearer` and nothing else (§13.14). The
+ *  page shows the key alone, so this is the same string a click selects and the button copies. */
+const bearerIn = (html) => (html.match(/<code id="bearer"[^>]*>([^<]*)<\/code>/) || [])[1];
 const occurrences = (hay, needle) => (needle ? hay.split(needle).length - 1 : 0);
 
 // With scripting off, `page.evaluate` is unavailable, so the page-shape checks parse the
@@ -96,6 +99,19 @@ async function run(ctx, t) {
   t.check('the bearer is the whole credential',
     !!first && first.startsWith('bbk_') && first.length >= 40, first);
   t.eq('the page shows that bearer exactly once', occurrences(mintedHtml, first), 1);
+  // §13.14: the reveal shows the key alone, and it is the one page in this area that
+  // carries a script, for the copy button and nothing else.
+  t.check('the reveal shows the key alone, with no Authorization line',
+    !mintedHtml.includes('Authorization'), mintedHtml.slice(0, 400));
+  t.eq('the reveal response carries exactly one <script>', tags(mintedHtml, /<script/i).length, 1);
+  t.eq('the copy button is on the page', await page.locator('#bearer-copy').count(), 1);
+  t.check('it is a button that can never submit a form',
+    (await page.locator('#bearer-copy').getAttribute('type')) === 'button',
+    await page.locator('#bearer-copy').getAttribute('type'));
+  t.eq('it carries hidden, so the server never shows a dead control',
+    (await page.locator('#bearer-copy').getAttribute('hidden')) !== null, true);
+  t.eq('and a browser running no code shows it not',
+    await page.locator('#bearer-copy').isVisible(), false);
   t.check('the reveal page is headed by the key it made',
     (await page.locator('h1').innerText()).includes('self-serve'), await page.locator('h1').innerText());
   t.check('the file has the key', idsOf(ctx).includes('self-serve'), JSON.stringify(idsOf(ctx)));
@@ -114,6 +130,8 @@ async function run(ctx, t) {
   await page.reload();
   t.check('a reload of the page shows no bearer either', !(await mainText(page)).includes('bbk_'),
     (await mainText(page)).slice(0, 300));
+  t.eq('and no script: the reveal is the only page in this area that carries one',
+    tags(await page.content(), /<script/i).length, 0);
   t.check('the reload lists the key', (await keys.innerText()).includes('self-serve'),
     await keys.innerText());
   t.eq('the file still has exactly one such key', idsOf(ctx).filter((i) => i === 'self-serve').length, 1);
@@ -128,6 +146,9 @@ async function run(ctx, t) {
   t.check('the new bearer is not the mint\'s', !!second && second !== first,
     `${first} vs ${second}`);
   t.eq('the page shows the new bearer exactly once', occurrences(rotHtml, second), 1);
+  t.check('the rotate shows the key alone, with no Authorization line',
+    !rotHtml.includes('Authorization'), rotHtml.slice(0, 400));
+  t.eq('the rotate response carries exactly one <script>', tags(rotHtml, /<script/i).length, 1);
   t.eq('the rotate replaced the secret, not the key',
     idsOf(ctx).filter((i) => i === 'self-serve').length, 1);
   t.check('the file\'s key_hash changed in place',
@@ -185,6 +206,8 @@ async function run(ctx, t) {
   t.check('it points back at the page',
     (await tabB.locator('a[href="/account/"]').count()) >= 1, page.url());
   t.check('the 409 shows no bearer', !stale.includes('bbk_'), stale.slice(0, 300));
+  t.eq('the 409 carries no script: nothing was minted, so there is nothing to copy',
+    tags(await tabB.content(), /<script/i).length, 0);
   t.check('the stale tab minted nothing', !idsOf(ctx).includes('stale-tab'), JSON.stringify(idsOf(ctx)));
   t.eq('the file has exactly the first tab\'s key', idsOf(ctx), ['first-tab']);
 

@@ -644,8 +644,8 @@ the one list without them, deliberately: their order is their meaning and the �
 move them within the file, so a filtered view would show positions that are not the file's.
 
 It **edits** the file too — the same CRUD as `bb-auth-adm`, made through the same library
-code, so it cannot save a file the gate would reject. Three rules make that safe with no
-script and no server-side session: a `GET` never mutates; every `POST` must be
+code, so it cannot save a file the gate would reject. Three rules make that safe with
+scripting off and no server-side session: a `GET` never mutates; every `POST` must be
 same-origin (`Sec-Fetch-Site`, else `Origin`'s host against `Host`'s — hosts, not schemes,
 since this speaks plain HTTP behind nginx); and every form carries a hidden `rev`, the
 sha256 of the file's exact bytes when the form was rendered. If the file moved in between —

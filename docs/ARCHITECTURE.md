@@ -1780,7 +1780,7 @@ sending; revisit if `$upstream_response_time` ever shows it happening.
 
 What was read: `src/bin/bb-auth-web.rs` (`page_minted`, `page_account_minted`, the
 `K::Bearer*` texts, `respond_page`, `admin_csp`, `respond_account`, `account_csp`,
-`SETTINGS_ONCHANGE`, `the_page_carries_one_handler_and_no_script`, `handlers_in`),
+`SETTINGS_ONCHANGE`, `no_page_but_the_reveal_carries_a_script`, `handlers_in`),
 `src/lib.rs` (`page_csp`, `csp_hash`, `PAGE_SECURITY_HEADERS`), `src/bin/bb-auth.rs`
 (`csp_nonce`), `src/assets/base.css` and `admin.css` (`.secret code`), `e2e/tests/nojs.js`
 and `e2e/tests/account.js`.

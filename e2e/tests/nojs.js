@@ -7,10 +7,23 @@
 // decision function, read-only by construction.
 //
 // The rule is "no page may need it" rather than "no JavaScript": the Settings list boxes
-// carry one inline handler that saves a click, and the last block here runs the whole GUI
-// with scripting switched off to prove nothing else does.
+// carry one inline handler that saves a click, the bearer reveal carries one script for its
+// copy button (§13.14), and the last block here runs the whole GUI with scripting switched
+// off to prove nothing else does.
 
+const crypto = require('crypto');
 const { doc, bytes, newPage, submit, mainText } = require('../lib/harness');
+
+/** The CSP source expression that names a script whose bytes are `s`. */
+const cspHashOf = (s) => 'sha256-' + crypto.createHash('sha256').update(s, 'utf8').digest('base64');
+
+/** The mint's reveal page, reached by filling the key form of `user` and submitting it. */
+async function revealKey(page, base, user, id) {
+  await page.goto(`${base}/users/${encodeURIComponent(user)}/keys/+add`);
+  await page.fill('input[name=id]', id);
+  await page.fill('input[name=duration]', '365d');
+  return submit(page, 'main form button[type=submit]');
+}
 
 async function run(ctx, t) {
   const { context, page } = await newPage(ctx);
@@ -26,6 +39,53 @@ async function run(ctx, t) {
           .map((a) => `${el.tagName.toLowerCase()}[${el.getAttribute('name')}] ${a.name}=${a.value}`)));
       t.eq(`the only JavaScript on ${p} is the settings list boxes`, handlers.join(' | '),
         'select[lang] onchange=this.form.submit() | select[theme] onchange=this.form.submit()');
+    }
+
+    // --- the one page that is allowed a script: the bearer reveal (§13.14) ------------
+    // The copy button needs the clipboard, so this page is the estate's single exception to
+    // "no page carries a script". Everything the rule promised about it is checked here: the
+    // key alone in `#bearer`, one script, that response's own policy naming its hash, the
+    // handler allowlist untouched, and a click that says it copied.
+    const rMint = await revealKey(page, ctx.base, 'b3f1c8a2-4e77-4f1a-9c0d-1e2f3a4b5c6d', 'nojs-copy');
+    t.eq('the mint is answered 200 by the reveal', rMint.status(), 200);
+    t.eq('the reveal carries exactly one <script>', await page.locator('script').count(), 1);
+    const key = (await page.locator('#bearer').innerText()).trim();
+    t.check('the reveal shows the key in #bearer', key.startsWith('bbk_') && key.length >= 40, key);
+    t.check('and shows the key alone, with no Authorization line',
+      !(await mainText(page)).includes('Authorization'), (await mainText(page)).slice(0, 400));
+    const script = await page.evaluate(() => [...document.querySelectorAll('script')].map((s) => s.textContent).join(''));
+    const csp = rMint.headers()['content-security-policy'] || '';
+    t.check("the response's own policy names the script it carries",
+      csp.includes(cspHashOf(script)), csp);
+    t.check('and the policy names no script by anything looser than a hash',
+      !/script-src[^;]*'unsafe-inline'/.test(csp), csp);
+    const revealHandlers = await page.evaluate(() => [...document.querySelectorAll('*')]
+      .flatMap((el) => [...el.attributes].filter((a) => a.name.startsWith('on')).map((a) => a.name)));
+    t.eq('the reveal carries the shell\'s two handlers and no third: the copy button is wired '
+      + 'with addEventListener', revealHandlers.sort().join(' '), 'onchange onchange');
+    const copy = page.locator('#bearer-copy');
+    t.eq('the copy button is visible with scripting on', await copy.isVisible(), true);
+    t.eq('and it is a button that cannot submit a form', await copy.getAttribute('type'), 'button');
+    const done = await copy.getAttribute('data-done');
+    t.check('it carries the text a successful copy shows', !!done, String(done));
+    // The clipboard is a permission, and headless gives it to a loopback origin on request.
+    // Where the browser will not grant it, the click still has to answer with the failure
+    // text, so the check below is about the button's word, not the clipboard's bytes.
+    let granted = true;
+    try {
+      await context.grantPermissions(['clipboard-read', 'clipboard-write'], { origin: ctx.origin });
+    } catch (e) {
+      granted = false;
+    }
+    await copy.click();
+    t.check('a click shows the copied text', (await copy.innerText()).trim() === done,
+      `${await copy.innerText()} vs ${done}`);
+    if (granted) {
+      const onClipboard = await page.evaluate(() => navigator.clipboard.readText());
+      t.eq('and the clipboard holds exactly the key', onClipboard, key);
+    } else {
+      t.check('clipboard contents not verifiable: this browser granted no permission', true,
+        'grantPermissions failed');
     }
 
     // PRG: save, land on the msg page, reload it — a GET, so nothing can repeat.
@@ -151,6 +211,20 @@ async function run(ctx, t) {
     t.check('and a save still writes with no script anywhere', bytes(ctx) !== beforeSave);
     t.check('the file has the new row',
       doc(ctx).denied.includes('noscript@example.com'), JSON.stringify(doc(ctx).denied));
+
+    // The reveal with scripting off (§13.14). The rule is that no page *needs* a script, and
+    // this is the one page that carries one, so the scripting-off walk has to reach it: the
+    // key is shown in `#bearer`, the copy button is not shown at all, and the script the
+    // server emitted runs nothing.
+    const rOff = await revealKey(page, ctx.base, 'b3f1c8a2-4e77-4f1a-9c0d-1e2f3a4b5c6d', 'nojs-off');
+    t.eq('the mint is answered 200 with scripting off', rOff.status(), 200);
+    const offKey = (await page.locator('#bearer').innerText()).trim();
+    t.check('the key is shown, in #bearer', offKey.startsWith('bbk_'), offKey);
+    t.check('and the page shows the key alone, with no Authorization line',
+      !(await mainText(page)).includes('Authorization'), (await mainText(page)).slice(0, 400));
+    t.eq('the copy button is not shown', await page.locator('#bearer-copy').isVisible(), false);
+    t.eq('the response carries the one script this browser ignores',
+      await page.locator('script').count(), 1);
 
     // A list's filter is a GET form, so it navigates with no script at all. This is the
     // whole reason filtering and paging live in the query string.

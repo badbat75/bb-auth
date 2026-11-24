@@ -77,7 +77,7 @@ async function run(ctx, t) {
     await page.fill('input[name=duration]', '30d');
     const mintFields = await formBytes(page); // the exact bytes a reload would re-POST
     await submit(page);
-    t.check('the mint reveals the bearer once', (await mainText(page)).includes('Authorization: Bearer bbk_'));
+    t.check('the mint reveals the bearer once', (await mainText(page)).includes('bbk_'));
     const keyCount = (id) =>
       doc(ctx).users.find((u) => (u.emails || []).includes('bot@example.com')).api_keys.filter((k) => k.id === id).length;
     t.eq('one key named demo exists', keyCount('demo'), 1);
@@ -103,7 +103,7 @@ async function run(ctx, t) {
     const mintFieldsIt = await formBytes(page);
     await submit(page);
     t.check('the Italian reveal keeps the reveal-once contract',
-      (await mainText(page)).includes('Authorization: Bearer bbk_'));
+      (await mainText(page)).includes('bbk_'));
     const rMintIt = await resubmit(page, mintUrl, mintFieldsIt);
     t.eq('the Italian mint conflict is a 409', rMintIt.status(), 409);
     const mcIt = await mainText(page);

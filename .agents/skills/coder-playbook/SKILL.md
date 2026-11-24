@@ -19,7 +19,10 @@ Rules are in `AGENTS.md`. Format of this file: `AGENTS.md`, under "Skills".
   (it builds, starts and kills its own server) with `require('<repo>/e2e/node_modules/playwright')` and
   `chromium.launch({ channel: 'msedge' })`: Playwright's own browsers are not installed on this host.
   Sample the screenshot with PIL (`Image.getpixel` down a column) before editing CSS; a band you cannot
-  measure is a band you will "fix" by guessing.
+  measure is a band you will "fix" by guessing. `e2e/shots.js` writes at 2x, so divide by 2 for CSS px,
+  and sample a column inside a box's own padding: a colour scan for `--chip` with a loose tolerance
+  also matches the `--bg-grad` ground a few px below a panel, which reads as the box ending where the
+  panel does.
 - The estate's ground is a glow: `--bg-grad` is a `radial-gradient(1200px 600px at 50% -10%, …)` that
   reaches its outer stop at 60% of the ellipse, so it goes flat about 240px down. A page that reads as a
   lit band over a flat field wants a flat ground, and the one rule for that is
@@ -34,6 +37,12 @@ Rules are in `AGENTS.md`. Format of this file: `AGENTS.md`, under "Skills".
   directly; the console's reveal page is then a re-submittable `POST`, which is the only reason
   `mutate` special-cases a stale `rev` there ("the key already exists"). A page whose way back is a
   `GET` link needs none of that.
+- Adding a parameter to a widely-called function: let `cargo test`'s error list find the call sites.
+  A scripted paren-walk inserts the argument before the closing `)`, which turns a multi-line call
+  into `…,\n    , false);` and is invisible until the compiler complains.
+- A `hidden` attribute is only a presentational hint, so a server-rendered "not shown" control needs
+  a CSS rule of its own (`.secret button[hidden]{display:none}` in `admin.css`): the operator's
+  stylesheet loads after ours and a plain `button{display:…}` there shows the dead button.
 - `rotate_api_key` mints a **new** secret on every call, so a rotate is exactly one call: keep the
   `SealedKey` it returns, commit, then `reveal(&written)`. A "check it exists, then rotate" pair
   mints two secrets and shows the second. The ownership check comes free: `key_mut` resolves the
@@ -56,9 +65,21 @@ Rules are in `AGENTS.md`. Format of this file: `AGENTS.md`, under "Skills".
 - maud emits attributes in the order written, and the tests here string-match markup like
   `<section id="keys"`. Put the `id` first, and keep headings bare (`<h2>`, no class), when a test
   extracts them; scope the styling rule to a parent class instead of adding an attribute.
+- The test module's `match mutate(...)` is exhaustive and read-only, so `Outcome` cannot gain a
+  variant or a field without breaking it. When a task forbids editing tests, derive the fact at the
+  one call site instead (the bearer reveal is `status == 200 && matches!(v.at, Route::KeyAdd(_) |
+  Route::KeyRotate(..))`), and report the deviation from the design doc's suggested shape.
 - A clippy warning can land in the tester's test module (its `map.get(x).is_none()` assertion trips
   `unnecessary_get_then_check`), where a task's edit limit forbids touching it. Clippy exits 0 on a
   warning, so report the line and leave the test alone.
+- A displayed string is specified twice: the Rust test and the e2e. The reveal's e2e checks forbid the
+  literal word `Authorization` in the whole document (`e2e/tests/account.js`) and in `main`'s text
+  (`nojs.js`, `crud.js`), where the Rust test only forbids the bearer glued to a `Bearer` prefix. So
+  the hint names the shape as "the word `Bearer`, a space, then the key". Run `node e2e/run.js` for
+  any change to displayed text, not only `cargo test`.
+- Playwright's `click()` returns after the event dispatch, not after a promise the handler started, so
+  a button label set in `navigator.clipboard.writeText(…).then(…)` is still the old word when the test
+  reads `innerText()` a line later. Set the label on the click and replace it in `.catch`.
 - The GUI suites' socket tests carry a 5s global ureq deadline (`account_client`, `client`), every
   write in the process serializes on `WRITE_LOCK`, and `write_atomically` fsyncs, so the POST-heavy
   tests intermittently fail at `.expect("a POST response")` with a timeout when the machine is busy

@@ -240,7 +240,12 @@ details.settings > summary::-webkit-details-marker{display:none}
 .secret code{display:block;margin:10px 0 0;padding:16px 18px;background:var(--chip);
   border:1px solid var(--card-border);border-radius:var(--r-ctl);font-size:1.15em;
   line-height:1.6;word-break:break-all;-webkit-user-select:all;user-select:all;cursor:pointer}
-.secret .hint{display:block;margin:8px 0 0}
+/* The copy button sits under the key's code box with a gap of its own: the hint is a sibling
+   after the panel, so no margin is shared with it. */
+.secret button{margin:8px 0 0}
+/* `hidden` is only a hint, and an operator's stylesheet loads after ours and may give `button`
+   a `display` of its own, which would show the copy button to a browser running no code. */
+.secret button[hidden]{display:none}
 
 /* ---------------------------------------------------------------------------
    The self-service page

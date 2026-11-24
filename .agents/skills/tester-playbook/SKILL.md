@@ -20,6 +20,23 @@ Rules are in `AGENTS.md`. Format of this file: `AGENTS.md`, under "Skills".
   --exclude .git` the tree to `/tmp/opencode/<name>`, add the stub **there**, run `cargo test --lib`
   there, then mutate the stub (drop a filter, sort the result) and confirm the new tests go red. A
   mutation that leaves them green is a test that asserts nothing.
+- When that stub copy gets **built more than once** (a red stub, then a green one, then the e2e
+  suite against it), rsync the tree **with** `target/` instead: the copy is a few GB and takes
+  minutes, the first build is 2 s instead of 10, and `cp -a e2e/node_modules` there lets
+  `node <runner> <area>` run against the stubbed binary. Discard the copy afterwards.
+- Assert anything about a **response** (CSP, `X-Frame-Options`, status line) over a real socket.
+  The in-process `post(&cfg, Route, fields)` helper calls `mutate` and builds the `shell` itself, so
+  its `Got` carries **no headers at all**: it cannot see a `Content-Security-Policy`, and a test
+  written against it passes for the wrong reason.
+- To run **one** e2e area, copy `e2e/run.js`'s per-area reset into a script outside the repo that
+  `require()`s `e2e/lib/server.js` by absolute path: `fs.copyFileSync(FIXTURE, ctx.accessFile)`,
+  rewrite `ctx.settingsFile` from `SETTINGS_FIXTURE`, `fs.rmSync(ctx.auditFile)`, then
+  `require('.../e2e/tests/<area>').run(ctx, new Checker(area, null))`. `run.js` itself runs all nine.
+- A clipboard assertion is possible headless: `context.grantPermissions(['clipboard-read',
+  'clipboard-write'], { origin: ctx.origin })` succeeds for the loopback origin on the `msedge`
+  channel, so `navigator.clipboard.readText()` can be compared byte for byte. Wrap the grant in
+  `try/catch` and emit a passing "not verifiable" check when it throws, so a browser that refuses
+  the permission fails the *behaviour* (the button's word) and not the harness.
 - Use one fixture per test.
 - Fill fixtures with real names and values captured from the real system.
 - In `bb-auth-web`, test a request end to end over a real socket: copy
@@ -83,6 +100,17 @@ Rules are in `AGENTS.md`. Format of this file: `AGENTS.md`, under "Skills".
 ## Pitfalls
 
 - A test polling a stub in another thread hung forever.
+- The console's mint (`Route::KeyAdd`) refuses **only an empty `id`**: `0d`, `never` and a long
+  window all mint a key, because the duration is the library's to judge. So a "bad field" probe
+  aimed at the console writes a key, and the page's `rev` is stale for the next request, which
+  answers `409` instead of the `400` under test. The account page is the strict one (`never`, `0d`,
+  `366d`, an empty duration and a bad id are all `400`).
+- A `400` writes nothing, so the `rev` on the page a `400` rendered is still current. A `409` test
+  therefore needs a **real write first**: mint (200), then replay the same fields with the same
+  `rev`. Replaying after a `400` is a second `400`, and the test passes for the wrong reason.
+- A page scan for `on…=` attributes must strip `<script>` bodies **first**: a script's own source
+  contains `on…` sequences (`addEventListener`, string literals), so the handler allowlist fails on
+  a page that carries no handler attribute at all.
 - The mutation journal (`audit()`, `[bb-auth-web] <who>: <verb> <target>`) is `eprintln!` on the
   server's stderr, so no over-the-socket test can read it: a PLAN requirement that says "journal
   `<uuid> (self): key rotate <id>`" is not assertable from this suite, and has to be stated as the

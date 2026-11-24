@@ -71,6 +71,17 @@ when there is no tag to check out.
 release logs anybody out.** The settings file goes from version 1 to version 3, which needs an
 edit before the binaries land: see "Upgrading" below.
 
+### Changed: the bearer reveal shows only the key, with a copy button
+
+* **The page that reveals a bearer now carries the estate's one script.** A freshly minted or
+  rotated `bbk_` key shows the key alone, with a copy button, on the admin console and on
+  `/account` alike. Copying needs scripting, so the rule is "no page needs a script" rather
+  than "no page carries one": `COPY_SCRIPT` is a compile-time constant, is emitted on that page
+  only, and is allowed by that response's CSP by its hash. With scripting off, in a browser that
+  is not a secure context, or with no `navigator.clipboard`, no button shows and one click on
+  the key still selects all of it, and the hint says how to send it: the word `Bearer`, a space,
+  then the key. No cookie, access-file or settings-file format changes.
+
 ### New: the self-service page is part of `bb-auth-web`, at `/account`
 
 **Upgrade note: a GUI mounted at the root no longer starts.** The self-service page is mounted
