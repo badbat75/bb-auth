@@ -94,3 +94,8 @@ files outside the repo.
   with 19 compactions and left 8 compile errors. Split a coder brief so one part fits one context
   (add every K key the tests name in part 1, so the test module compiles and later parts go red one
   test at a time), and check `opencode session export <id>` for `compaction` entries when a run drags.
+- Killing an `opencode run` client does NOT stop its session: it runs inside the shared
+  `opencode serve --service` and keeps editing the tree (s8a-coder went on for 3 hours after its
+  client was killed, and clobbered another agent's work). Check `opencode session export <id>`
+  (`info.time.updated`) after stopping one. The HTTP routes need auth; stopping the service stops
+  every project's agents, so ask the user and tell the llama.cpp-framework coordinator.
