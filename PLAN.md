@@ -162,6 +162,20 @@ final page links to `/auth/logout`.
   against the real pool (with the user's go-ahead), the access file no longer names them where it
   named them (an exclusion now names their email), and they can no longer sign in.
 
+### 8. The account page's look
+
+Covers: R3. Decided by the user on 2026-11-24: the page stays basic until steps 4, 5 and 7 have
+put their forms on it, and is then designed once, around what it actually holds.
+
+The architect proposes a layout for `/account` (a header with the brand and the person's name,
+the sections arranged as the admin console arranges its own, each action beside the item it acts
+on), built only from `BASE_CSS` components and `admin.css` arrangement, with no script, then the
+page is restyled to it.
+
+- Done when: the user approves screenshots of the page in both themes and both languages, at
+  desktop and phone width, with the forms of steps 4, 5 and 7 on it; e2e and the scripting-off
+  walk still pass.
+
 ## Waiting for the user
 
 - Before step 5: a read-only check of the real pool (`aws cognito-idp describe-user-pool` and
