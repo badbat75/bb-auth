@@ -125,14 +125,18 @@ whose own comment says it was sized for "the handful of people on `web.admins`".
 handlers stop the GUI for everyone, and step 5 adds a network call to Cognito inside a handler.
 
 `BB_AUTH_WEB_WORKERS` (env, like the gate's `BB_AUTH_WORKERS`: a worker count is fixed at
-startup) sets the maximum number of request threads, with a reasonable default chosen and argued
-by the architect (§13), validated at startup (a number of at least 1 and a sane upper bound, fatal
-otherwise, naming the variable). The architect also says whether `WRITE_LOCK` is held across more
-than it must (the fsync, the reparse), since every write occupies a worker for that long.
+startup) sets the maximum number of request threads. Designed in `docs/ARCHITECTURE.md` §13.13:
+default 8, a general default argued from the workload and not from one host (no handler is
+CPU-bound, so the ruler is how many slow handlers may be in flight while page views still get
+through), accepted 1 to 64, and anything else (0, 65, negative, empty, padded, non-numeric) a fatal
+startup naming the variable, unlike the gate's silent fallback. The startup line prints
+`workers=N`. Also: `account_key_post` holds `WRITE_LOCK` until the response is sent; its guard
+ends right after the commit, as `mutate`'s does.
 
-- Done when: the design is in `docs/ARCHITECTURE.md` §13; a test that failed first shows the
-  value is read, defaulted and refused out of range; `deploy/bb-auth-web.env.example`, the README
-  env table and AGENTS.md name it; the slice's checks are clean.
+- Done when: a test that failed first shows unset is 8, 1 and 64 are accepted, and 0, 65, -1, empty,
+  a leading space, `8x` and `eight` are refused naming the variable; the lock change is in the diff
+  and the concurrent one-success-one-`409` test still passes; `deploy/bb-auth-web.env.example`, the
+  README env table and AGENTS.md name the variable; the slice's checks are clean.
 
 ### 5. Editable Cognito profile
 
@@ -146,6 +150,11 @@ request. Editable: `gate.profile_claims` minus `email`, `phone_number`, `preferr
 `email` shown read-only. `bb-auth-web.service` loses `IPAddressDeny=any` and
 `IPAddressAllow=localhost`, which block the call to Cognito (cost in §13.7). Tests use a fake
 Cognito endpoint and never the real pool; the first real edit needs the user's go-ahead.
+
+Inherited from §13.13: every Cognito call carries `timeout_global` of 5 s (assumed, not measured),
+no retry, at most two calls per request, so a slow Cognito cannot pin the workers; a test with a
+fake endpoint that never answers shows the handler answering within the bound and the worker
+serving the next request.
 
 - Done when: tests show a wrong code changes nothing, an email not among the caller's and a
   non-editable attribute are refused before Cognito is called, and no token reaches a response

@@ -274,9 +274,10 @@ The admin GUI is a separate service with a separate env file
 (`deploy/bb-auth-web.env.example`, installed as `etc/bb-auth-web.env`): `BB_AUTH_ACCESS_FILE`
 and `BB_AUTH_SETTINGS_FILE`, the same names for the same files, plus `BB_AUTH_WEB_LISTEN`,
 `BB_AUTH_WEB_BASE_PATH`, `BB_AUTH_WEB_DEFAULT_LANG`, `BB_AUTH_WEB_LOGOUT_URL` (unset means
-the header carries no Sign out control at all) and `BB_AUTH_WEB_ALLOW_NONLOOPBACK` (a
+the header carries no Sign out control at all), `BB_AUTH_WEB_ALLOW_NONLOOPBACK` (a
 non-loopback listen address is otherwise a fatal startup, because this service's only
-credential is a header nginx sets). It holds no secret at all, and its
+credential is a header nginx sets) and `BB_AUTH_WEB_WORKERS` (request threads, default `8`,
+1 to 64, anything else a fatal startup naming the variable: §13.13). It holds no secret at all, and its
 administrator allowlist is not an env var: it is `web.admins` in the settings file, read
 fresh on every request, because this is the one service that can edit it.
 
@@ -1606,6 +1607,9 @@ hand-back between two editor packages; and a fourth `.deb` in the build and depl
 | Egress | Real, on rpi-01 after the profile step: the unit has no `IPAddress*` line, a profile edit reaches Cognito, and a non-loopback `BB_AUTH_WEB_LISTEN` without the opt-in still refuses to start |
 | Deletion order | Unit with the fake endpoint: `DeleteUser` failing leaves the row gone and says so; the write failing never calls `DeleteUser` |
 | `excluded` rewrite | Library unit: after `remove_user`, a scope that excluded the uuid excludes the primary email |
+| Worker count (13.13) | Unit, on the parser alone (no env mutation, so tests stay parallel-safe): unset is `8`; `1` and `64` are accepted; `0`, `65`, `-1`, empty, `8` with a leading space, `8x` and `eight` are refused with a message naming `BB_AUTH_WEB_WORKERS`. Startup: the banner prints `workers=N`, so a real run shows the value the process took |
+| Write lock scope (13.13) | Unit, kept as a regression guard: two concurrent key `POST`s and two concurrent console saves against one `rev` give one success and one `409`, never two successes. The guard's narrower scope in `account_key_post` changes nothing a test can see while the page fits a socket buffer, and is checked by reading the diff |
+| Cognito timeout (13.13) | Unit, step 5, against a fake endpoint that accepts and never answers: the handler answers within the per-call bound plus a margin, with a page saying Cognito did not answer, and the worker serves the next request |
 
 ### 13.12 Decisions recorded on 2026-11-23
 
@@ -1655,9 +1659,118 @@ binary with the admin CRUD". The first afternoon decision reverses it. What that
 - **Egress on the most privileged process** once the profile step lands (13.7), where the
   separate binary would have carried it alone.
 - **One process, one failure domain**: a crash or an overload from self-service traffic takes
-  the admin pages with it (`WORKERS = 2` was sized for a handful of administrators and may need
-  raising; **unmeasured**).
+  the admin pages with it (`WORKERS = 2` was sized for a handful of administrators; plan step
+  4e makes it `BB_AUTH_WEB_WORKERS`, default 8, argued in 13.13).
 
 What it buys: no second package, unit, env file, port, service account or ownership scheme
 (13.10's closed questions), the shared presentation and preferences with no copy to drift, and
 self-service writes serialized with admin writes by one mutex rather than only by `rev`.
+
+### 13.13 The worker pool and the write lock (plan step 4e)
+
+What was read: `src/bin/bb-auth-web.rs` (`WORKERS`, `WRITE_LOCK`, `mutate`,
+`account_key_post`, `main`'s worker loop, `env_or`, the other env parsers), `src/lib.rs`
+(`write_atomically`), `src/bin/bb-auth.rs` (`BB_AUTH_WORKERS`, `JWKS_TIMEOUT`), and the crate
+sources in `~/.cargo/registry`: `tiny_http-0.12.0/src/lib.rs` and `src/util/task_pool.rs`,
+`ureq-3.4.0/src/config.rs`.
+
+**What a worker is, read in the source.** `tiny_http` 0.12 runs its own accept thread, which
+hands every connection to an internal pool that keeps 4 threads and grows by one per busy
+connection (`TaskPool::spawn`, `MIN_THREADS = 4`); those threads parse requests and push them
+onto one queue with no bound (`MessagesQueue`, `lib.rs` around line 284 to 335). Our workers
+are only the threads that call `server.recv()` and run a handler. So `WORKERS` bounds how many
+**handlers run at once**, not how many connections are open, and a request that finds every
+worker busy is not refused: it waits in that queue. Too few workers shows up as latency for
+everybody, never as an error, which is exactly the failure 4e exists for.
+
+**Decision: `BB_AUTH_WEB_WORKERS`, an env var in `bb-auth-web.env`, default `8`, accepted from
+1 to 64; unset means the default, and any other value (0, 65, negative, empty, padded,
+non-numeric) is a fatal startup whose message names the variable.**
+
+- *Env and not the settings file*: it fails part 1 of the three-part rule exactly as the
+  gate's `BB_AUTH_WORKERS` does. The threads are spawned once, in `main`, and a value read per
+  request would change nothing until a restart, so it belongs where restart-only values live.
+- *Fatal and not the gate's `unwrap_or(4)`*: a silent fallback turns `BB_AUTH_WEB_WORKERS=16x`
+  into 8 with nothing anywhere saying so, which is the operator's intent lost without a trace.
+  Every other value this binary parses from its env is already fatal on a bad value
+  (`BB_AUTH_WEB_BASE_PATH`, `BB_AUTH_WEB_DEFAULT_LANG`, `BB_AUTH_WEB_ACCOUNT_PATH`,
+  `BB_AUTH_WEB_PROXY_SECRET`), and the boot-loop argument that makes the gate careful does not
+  carry over: a GUI that refuses to start locks nobody out of any application, and
+  `bb-auth-adm` over SSH is untouched. Empty is refused rather than defaulted because `env_or`
+  hands an empty value through as a value, and `BB_AUTH_WEB_ACCOUNT_PATH` already reads an
+  empty assignment as somebody meaning to say something. Zero is refused rather than raised to
+  one, since a service that binds its port and never answers is the worst of both. The gate's
+  own fallback is not changed by this step; the inconsistency is noted, not fixed.
+- *Why 8, from the workload and not from any host*: a handler here does one of three things.
+  A read (two small files parsed, a page rendered) takes milliseconds and is CPU-light. A
+  write holds `WRITE_LOCK` for a read, two parses, a write and two fsyncs, so writes run one
+  at a time whatever the worker count, and a second writer only waits. From step 5, a
+  Cognito action waits on the network for up to its timeout (below) while using no CPU. None
+  of those is CPU-bound, so the core count is the wrong ruler; the right one is how many
+  **slow handlers may be in flight while reads still flow**. Eight lets one write, a few
+  waiting writers and several Cognito calls run at once and still leave workers for page
+  views, at the cost of a few idle threads, which is a stack reservation each and nothing
+  measurable in CPU (not measured here). It is the gate's 4 doubled because this service has
+  the slow handlers the gate does not, and it is small because nothing in the workload
+  parallelises: more workers past the slow-handler count only queue on the lock or on Cognito.
+- *Why 64 as the ceiling*: past it the threads have nothing to do in parallel (writes
+  serialise, reads are milliseconds), and a deployment that really needs more concurrent
+  handlers than that on an admin and self-service page has outgrown a blocking
+  thread-per-handler design, which is a design question and not a number. The ceiling is there to turn a
+  typo (`800`) into a refusal rather than to forbid anything a real deployment needs.
+- *How an operator sizes it*: count the slow handlers at the busiest moment, which is the
+  rate of Cognito-calling requests times the bound on one of them (Little's law: 1 profile
+  edit a second at 10 s each is 10 in flight), plus one for a write, plus a few for page
+  views, and round up. Watch nginx's `$upstream_response_time` on the GUI's locations: page
+  views that slow down while nothing is writing mean the workers are all waiting on something,
+  and the queue above is where the time went. rpi-01 is one deployment that runs the default.
+
+Rejected: sizing by core count (the handlers wait, they do not compute); keeping 2 (two slow
+handlers stop the page for everyone, which is 4e's premise); an async runtime (forbidden by
+the dependency invariant, and nothing here needs it).
+
+**`WRITE_LOCK`: what it must cover, and the one place it covers more.** The lock exists for one
+race `rev` cannot see: two workers that read the same bytes compute the same fingerprint, and
+both are entitled to write. So it must be held from **the read whose bytes `rev` is compared
+against, until the rename that replaces them**: no other writer in this process may rename
+between this one's check and this one's rename. Everything between is inside by necessity,
+not by habit:
+
+- the parses (`open_access_file` on the way in, `AccessWrite::prepare` on the way out) work on
+  bytes derived from that read, and validate-before-write is only a guarantee when the bytes
+  compiled are the bytes committed, so neither can move out;
+- the file's fsync cannot move out, because it must come before the rename (a rename that
+  lands ahead of its data is how a crash leaves an empty access file, which `write_atomically`
+  says), the rename must be inside, and the temp file's content cannot be written before the
+  lock since it depends on what was read under it;
+- the directory's fsync after the rename could in principle follow the unlock, but it lives
+  inside `write_atomically`, the single door both editors share, and splitting that door to
+  save milliseconds per write on a serial path is not worth a second shape of write.
+
+So the console's `mutate` holds exactly what it must (the form is parsed before it is called,
+and the guard drops when it returns). **`account_key_post` holds more**: the guard is a local
+that lives to the end of the function, so the response (the reveal page carrying the bearer,
+or the redirect) is written to the socket while the lock is still held. Today that costs close
+to nothing, since nginx buffers upstream responses and the page fits a socket buffer, but it
+couples every writer's wait to one response's send for no reason. **Proposed for 4e: end the
+guard's scope at the commit**, before anything is rendered or sent. Its body is already read
+before the lock, as it should be.
+
+**A Cognito call in a handler (step 5 inherits this).** The default above already counts
+Cognito calls as slow handlers, so it needs no extra margin; what keeps a slow Cognito from
+pinning all workers **indefinitely** is the timeout, and `ureq` 3.4 has none by default
+(`Timeouts::default` sets every field to `None` except `await_100`, `config.rs` around line
+893). **Decision: every Cognito call goes through an agent built with
+`timeout_global(Some(5 s))`, which `ureq` documents as end to end, DNS to the last body byte;
+no retry inside the request; and at most two calls per request** (`RespondToAuthChallenge` then
+the action), so one handler waits at most about 10 s. That is well under nginx's default
+upstream read timeout of 60 s (as the gate's `JWKS_TIMEOUT` rustdoc records; not re-checked
+here), so the handler gives up and frees its worker before nginx gives up on it, the same
+ordering the gate's JWKS fetch keeps at 3 s. Five seconds and not the gate's three because these
+are API calls that do work (`InitiateAuth` sends an email) rather than a cached document;
+**assumed**, not measured against the real pool. A timed-out call is reported to the person as
+Cognito not answering, with nothing written. Rejected for now: a separate cap on concurrent
+Cognito calls (a semaphore below the worker count, so admin pages always keep a worker). With
+the timeout, a Cognito outage costs each attempt at most 10 s of one worker, the callers are
+signed-in people, and a scripted one could still hold workers only for as long as they keep
+sending; revisit if `$upstream_response_time` ever shows it happening.

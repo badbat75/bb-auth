@@ -22,7 +22,14 @@ Rules are in `AGENTS.md`. Format of this file: `AGENTS.md`, under "Skills".
   scope in that host's application, listed before its catch-all, never a new application.
   Read the live file with `sudo bb-auth-adm -f /opt/bb-auth/var/lib/access.json show`.
 
+- A worker count here (`BB_AUTH_WORKERS`, `BB_AUTH_WEB_WORKERS`) bounds concurrent handlers, not
+  connections: `tiny_http` 0.12 queues every parsed request with no bound, so too few workers is
+  latency, never a refusal (`tiny_http-0.12.0/src/lib.rs`, `util/task_pool.rs` in the cargo registry).
+
 ## Pitfalls
+
+- `ureq` 3 has no timeout by default (`Timeouts::default`, `config.rs`): every outbound call needs
+  `timeout_global` on its agent, or a slow peer pins a worker for ever.
 
 - rpi-01's `auth.badbat75.com` vhost gates at server level (`snippets/bb-auth.conf`), unlike the
   README's per-location recipe: read `sudo nginx -T` before writing a location for it.
