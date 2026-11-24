@@ -21,7 +21,7 @@ const path = require('path');
 
 const { E2E_DIR, FIXTURE, SETTINGS_FIXTURE, boot } = require('./lib/server');
 
-const AREAS = ['auth', 'crud', 'settings', 'validation', 'conflict', 'i18n', 'audit', 'nojs'];
+const AREAS = ['auth', 'crud', 'settings', 'validation', 'conflict', 'i18n', 'audit', 'nojs', 'account'];
 
 async function main() {
   const shotsDir = process.env.E2E_SHOTS === '1' ? path.join(E2E_DIR, 'artifacts') : null;

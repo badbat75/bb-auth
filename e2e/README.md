@@ -38,7 +38,9 @@ node e2e/run.js        # from the repo root (or `npm test` inside e2e/)
 
 The runner builds the binary if needed, copies `deploy/access.example.json` to a per-run
 temp file (tests mutate it — the server is **never** pointed at a repo file), starts
-`bb-auth-web` on an ephemeral loopback port with `BB_AUTH_WEB_BASE_PATH=/admin`, waits
+`bb-auth-web` on an ephemeral loopback port with `BB_AUTH_WEB_BASE_PATH=/admin` (and
+`BB_AUTH_WEB_ACCOUNT_PATH` left at its `/account` default, which is why the two prefixes are
+siblings and `account.js` can drive both), waits
 for its listening line, runs every test area against it, kills it, and exits non-zero on
 any failure. Each area starts from a fresh copy of the fixture, so the suite is
 idempotent and areas are order-independent.
@@ -60,6 +62,7 @@ idempotent and areas are order-independent.
 | `i18n.js` | the two display preferences: `?lang=` / `?theme=` answer 302 + a cookie, the choice persists across plain navigations, the 401/403/verdict copy is translated, `html lang=` is the proof; plus the Settings menu, where picking an option applies it on the spot, keeps the rest of the query, and offers `auto` as a real stored choice |
 | `audit.js` | the Audit tab over the file the gate writes and this GUI never does: newest first, a key event naming the row it acted as, a reason code rendered as a sentence, where a sign-in came from (address, request id, account, and a long user agent clamped to two lines), the list boxes and the filter box applying together on one submit, the time zone (the custom-zone box shown only while `Custom` is chosen, which is CSS and so only a browser can check; the choice remembered as a cookie and kept out of the address; a zone the host lacks named as missing), the pager, a Refresh that keeps the whole view, and the empty state a deployment that has recorded nothing shows |
 | `nojs.js` | no page needs a script: zero `<script>` tags, and the only handler in the GUI is the two Settings list boxes' — then the whole thing again with **scripting disabled**, where the menu grows its submit button back and one click sets both preferences. Plus PRG (a reload after save repeats nothing) and the read-only access check, a section of the application and person pages, answering with the gate's verdicts |
+| `account.js` | the **self-service page** at `/account`, the one surface a roster person who is *not* on `web.admins` reaches, driven with **scripting off** (the page emits no script and no handler at all): the keys section and its mint form render, a `restrict=all` mint reveals a `bbk_` bearer exactly once and the file keeps only its hash, Back and a reload show the key in the list and no secret, a rotate shows a *different* bearer once and replaces the hash in place, a revoke is a `303` back to the page, the same identity is a `403` on `/admin/`, and a form left open in a second tab is a `409` that mints nothing |
 
 ## The visual walk-through (`shots.js`)
 

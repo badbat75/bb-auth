@@ -92,3 +92,12 @@ Rules are in `AGENTS.md`. Format of this file: `AGENTS.md`, under "Skills".
   fake proves nothing about the real thing.
 - Renaming a test prefix with `sed` silently eats the palette: `ME_` is inside `THEME_` and `me_` is
   inside `THEME_CSS`, `scheme`, `machine`. Use `\b` on both sides and re-grep for the old prefix after.
+- The account page's mint and rotate answer the reveal page with a **`200`** (not a `303` PRG), so
+  `page.reload()` on them **re-POSTs** and mints a second key. The reveal-once walk a person does is
+  `page.goBack()` to the page, then `page.reload()` on *that*.
+- In a `javaScriptEnabled: false` context every harness helper built on `page.evaluate`
+  (`resubmit`, `formBytes`) throws. Read a hidden field with `locator('input[name=rev]').inputValue()`
+  and navigate with `goBack()`/`reload()`.
+- The account page's `#keys` section carries **two** `h2` (the section's "API keys" and the mint
+  form's "Add a key"), so `locator('#keys').locator('h2')` is a Playwright strict-mode violation.
+  Add `.first()`, and name the heading you mean.
