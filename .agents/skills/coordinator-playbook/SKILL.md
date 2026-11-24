@@ -87,3 +87,7 @@ files outside the repo.
 - On rpi-01, root cannot overwrite a file a normal user created in /tmp (fs.protected_regular),
   so a `sudo` step must write its output to a root-owned `mktemp`, never to a path a dry run
   already created as you.
+- A slice that touches more than a few functions overruns the local model's context: s8a ran 2h40
+  with 19 compactions and left 8 compile errors. Split a coder brief so one part fits one context
+  (add every K key the tests name in part 1, so the test module compiles and later parts go red one
+  test at a time), and check `opencode session export <id>` for `compaction` entries when a run drags.
