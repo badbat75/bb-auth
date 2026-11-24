@@ -1940,6 +1940,9 @@ stay.
 
 #### The copy icon
 
+**Amended by §13.17 (icons):** the control is now the shared `pill ico` component, its name
+in hidden text rather than `aria-label`; the glyphs, the status span and the script stand.
+
 Still the one control `COPY_SCRIPT` reveals, still server-rendered `hidden`, still in
 `bearer_reveal` and therefore identical on both surfaces. The markup becomes:
 
@@ -2265,7 +2268,8 @@ nothing. `/account/` does the same:
 - `a.pill` reading `K::Rotate` ("rotate") to `<prefix>/keys/rotate?id=<id>`, with
   `aria-label` "`K::AccountKeyRotate` `<id>`" ("Rotate key laptop");
 - `a.pill.rm` reading "×" to `<prefix>/keys/remove?id=<id>`, with `aria-label` and `title`
-  "`K::AccountKeyRemove` `<id>`" ("Revoke key laptop").
+  "`K::AccountKeyRemove` `<id>`" ("Revoke key laptop"). (Superseded by §13.17's icon
+  component: the × becomes `a.pill.rm.ico` with an SVG glyph and the name as hidden text.)
 
 The × is the user's word for the control, as a text glyph inside the existing pill, so it
 takes the pill's muted colour and its red hover from `base.css` and its colour and shape from
@@ -2538,13 +2542,107 @@ groups "Groups an administrator has put you in."; keys "A key lets a script or a
 as you. It reaches at most what you reach."; profile "What your sign-in tells these
 applications about you." (Italian in the `K` table.)
 
+#### Icons instead of words: one component (asked 2026-11-24)
+
+The user: "let's start using some icons instead of buttons (settings and logout, for
+example)". Mockups redone in `/tmp/keysdesign/mock2/` (`account-*`, `account-menu-*`,
+`console-after-*`, `console-after-menu-*`, light, dark, phone, 320 px, each with and without the
+token file); target sizes measured in them: 39 by 39 CSS px in the desktop bar, 30 by 30 on a
+phone and in a table row.
+
+**The component is the pill, squared.** `.pill` already is the estate's outline control: its
+border, its accent colour, its hover, its `.rm` red hover, its `:focus-visible` ring from
+`base.css`. An icon button is that object with a glyph instead of a word, so it is
+`class="pill ico"` (and `pill rm ico` for a destructive one) and adds only what a glyph needs.
+In **`base.css`**, because both programs emit it and the gate's pages may want one later:
+
+- `.pill.ico{justify-content:center;padding:4px;min-width:24px;min-height:24px}`: the pill's
+  own vertical padding on all four sides, so an icon is exactly as tall as a text pill beside
+  it and square; the minimums are WCAG 2.5.8's 24 by 24
+  (<https://www.w3.org/WAI/WCAG22/Understanding/target-size-minimum.html>).
+- `.pill.ico svg{width:1.45em;height:1.45em;fill:none;stroke:currentColor;stroke-width:2;
+  stroke-linecap:round;stroke-linejoin:round}`: the glyph is the pill's line height, and
+  `currentColor` is what lets the palette, the hover and a token file paint it with no token
+  of its own.
+- `.vh`, the visually hidden text utility (`position:absolute; width:1px; height:1px;
+  overflow:hidden; clip:rect(0 0 0 0); white-space:nowrap; border:0`). Looked for first: there
+  is none; the phone block hides `thead` with the same declarations inline, which is the one
+  other place that needed it.
+
+In **`admin.css`**, one added rule: `.bar .pill.ico{padding:7px}`, with `padding:4px` inside the
+phone block, because the bar's own `.bar .pill` sets `7px 15px` and an icon there must be
+square at the bar's height. Looked for first: excluding icons from `.bar .pill` with `:not`,
+which would also drop the bar's font size and make the glyph smaller than its neighbours.
+
+**The name is text inside the control, hidden visually**, not an `aria-label`: `<svg
+aria-hidden="true" focusable="false">` then `<span class="vh">` with the words, plus `title`
+with the same words as a pointer tooltip. The reason is the Preferences trigger: it is a
+`summary`, which MDN says has no implicit ARIA role and permits none, with browsers differing
+in what they expose (<https://developer.mozilla.org/en-US/docs/Web/HTML/Reference/Elements/summary>),
+so an `aria-label` on it is not a name every reader can rely on, while text content is. One
+mechanism for every icon control, rather than `aria-label` on links and text on the one
+summary. `aria-hidden` removes the glyph from the accessibility tree
+(<https://developer.mozilla.org/en-US/docs/Web/Accessibility/ARIA/Reference/Attributes/aria-hidden>).
+
+**The glyphs are drawn here**, as a few lines of SVG geometry in a 24 by 24 box with no
+`fill`, `stroke` or `style` attribute, so no third-party notice has to travel with the
+binaries. Five are needed: sliders (Preferences: three lines with three knobs), sign-out (an
+open bracket and an arrow leaving it), × (two strokes), copy (two overlapping rounded squares)
+and check. A set was considered: Lucide is ISC-licensed, with the icons derived from Feather
+under MIT, and both licences require their copyright and permission notice in every copy
+(<https://github.com/lucide-icons/lucide/blob/main/LICENSE>); for five shapes this simple, a
+notice file is more than the shapes are worth. Nothing is fetched at runtime: each glyph is
+inline in the page, which the policy allows with no `img-src` (§13.15).
+
+**Where it is used now:**
+
+- The shared header: Preferences becomes the sliders `summary.pill.ico` (name `K::Settings`)
+  opening the same `details` menu, which still needs no script; Sign out becomes the sign-out
+  `a.pill.ico` (name `K::SignOut`), still the plain link to the gate's logout. Sliders and not
+  a gear: the menu sets two display preferences, and a gear beside a "Settings" tab in the
+  console would promise the access settings. The identity text stays beside them, so the bar
+  still says who is signed in in words.
+- The keys table's revoke: `a.pill.rm.ico` with the × glyph (name "Revoke key `<id>`"),
+  replacing the text "×" of §13.16; the user's first request was an × button.
+- The 4h copy control becomes this component: `button.pill.ico` with the copy and check
+  glyphs, the name in `.vh` (`K::CopyKey`), the status span unchanged. Its own `.secret .copy`
+  sizing rules from §13.15 go; the glyph swap on `data-state` stays as the one rule that is
+  the reveal's.
+
+**Where words stay**, because an icon would make the person recall what a glyph means instead
+of reading it (Nielsen's "recognition rather than recall"); icons without labels are safe only
+for actions everybody already knows by their glyph:
+
+- "rotate" on a key: the obvious glyph, a circular arrow, reads as "refresh", which is not
+  what it does;
+- "edit", "+ New key", "+ add", "← back", "Create key", "cancel", and every submit button: a
+  word is shorter to understand than any pencil or plus, and a submit names its consequence;
+- the console's tabs, the Preferences menu's contents and every confirmation page;
+- a page-level "remove" beside a heading (the console's user, application and scope pages):
+  an × there reads as "close this page".
+
+**The console's other row actions:** recommended, as their own slice, that every row-level
+`remove` (`act_rm` inside a table row or a list item: users, emails, groups, denied entries,
+keys, scopes) become the × `pill rm ico` with the name "Remove `<thing>`", for the same reason
+as on `/account/`, and with the same safety net, since each leads to a confirmation page.
+`edit` and `rotate` stay words.
+
+**Tests:** `icon_controls_are_named_by_hidden_text`: every `.pill.ico` contains exactly one
+`svg aria-hidden="true" focusable="false"` with no `fill`, `stroke` or `style` attribute, one
+`span.vh` with the translated name, and a `title` equal to it; the header has the sliders
+`summary` and, when configured, the sign-out link; `the_icon_target_is_at_least_24px` in the
+e2e walk (bounding boxes in the bar, a table row and the reveal, at desktop and phone width).
+`the_copy_control_is_an_icon_with_a_name` changes from an `aria-label` to the `.vh` text, and
+`each_key_row_acts_like_a_console_row` expects the × as an icon with "Revoke key `<id>`" as
+its text.
+
 #### The operator's theme
 
 Every rule above is an existing rule or is written in existing custom properties only; no new
 token is needed, so the token file needs no change. With the token file loaded, light and
 dark, the header, the brand with its logo (painted through `--logo-filter`, which the token
-file inverts on dark), the table, the tags, the `div.err` and the confirmation all take the
-operator's palette and shape: no rule of ours escaped it (`account-*-tok-*.png`). The token
+file inverts on dark), the table, the tags, the icon glyphs (`currentColor`), the `div.err` and
+the confirmation all take the operator's palette and shape: no rule of ours escaped it (`account-*-tok-*.png`). The token
 file's web font was not loaded in the mockups, so the typeface is the one token not seen.
 
 #### What the page adds, and what was tried first

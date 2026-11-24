@@ -29,3 +29,5 @@ Rules are in `AGENTS.md`. Format of this file: `AGENTS.md`, under "Skills".
 
 - `autofocus` is ignored when the URL has a fragment (MDN): a link that opens a form must not add `#id`.
 - `td.pills` is `display:flex`, so its border stops short whenever another cell in the row wraps.
+- `aspect-ratio` on a padded, border-box `.pill` squeezes its vertical padding to nothing: give an icon pill equal padding instead.
+- A `summary` has no ARIA role (MDN), so name an icon-only one with hidden text (`.vh`), not `aria-label`.

@@ -209,8 +209,11 @@ out, the usual pattern, replacing the preferences form at the foot of the page; 
 it to §13.17.
 
 Slices, in order: (8a) the keys table with the 4h rework (it replaces 4h's form; 4h's parser,
-confirmations, copy icon and lifted bound stay); (8b) the header; (8c) the sections' lists, chips
-and empty states. Steps 5 and 7 add their forms into this layout later (Profile, a last panel).
+confirmations, copy icon and lifted bound stay); (8b) the header, with icon controls (one shared
+`pill ico` component, §13.17, approved by the user on 2026-11-24); (8c) the sections' lists, chips
+and empty states; (8d) the theme itself, which the user finds unsightly (2026-11-24): the designer
+reviews the palette, type and spacing, and says what belongs in our built-in theme and what in the
+operator's `tokens.css`, which this repository does not hold. Steps 5 and 7 add their forms into this layout later (Profile, a last panel).
 
 - Done when: the user approves screenshots of the page in both themes and both languages, at
   desktop and phone width, with the forms of steps 4, 5 and 7 on it; e2e and the scripting-off
