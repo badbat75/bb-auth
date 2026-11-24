@@ -43,6 +43,11 @@ Rules are in `AGENTS.md`. Format of this file: `AGENTS.md`, under "Skills".
 - A scratch screenshot script can live outside the repo and `require()` `e2e/lib/server.js` by
   absolute path: `boot()` then gives the same server the suite starts, proxy secret included, with
   the working tree untouched.
+- Over the account socket helpers: `account_serve(&path)` **starts** the server and returns its
+  page URL, so derive every other URL under the prefix from that string (`format!("{base}keys")`).
+  Calling `account_port` again on the same path starts a **second** server on a second port.
+  ureq 3's `send_form` takes an `IntoIterator` of tuples, so a `&[(&str, &str)]` field list needs
+  `.iter().copied()`.
 
 ## Pitfalls
 

@@ -29,6 +29,11 @@ Rules are in `AGENTS.md`. Format of this file: `AGENTS.md`, under "Skills".
   (`execute`) has no `fs` and no `shell` tool, so it cannot edit this repo at all.
 - A check piped through `grep -c '^warning'` exits 1 when the count is 0, so read the number, not the
   exit code, when a command line ends in one.
+- `PAGE_SECURITY_HEADERS` already carries `Cache-Control: no-store`, so a page that reveals a secret
+  needs no cache header of its own. A bearer cannot survive a redirect, so a mint answers `200`
+  directly; the console's reveal page is then a re-submittable `POST`, which is the only reason
+  `mutate` special-cases a stale `rev` there ("the key already exists"). A page whose way back is a
+  `GET` link needs none of that.
 
 ## Pitfalls
 
@@ -45,3 +50,8 @@ Rules are in `AGENTS.md`. Format of this file: `AGENTS.md`, under "Skills".
 - A clippy warning can land in the tester's test module (its `map.get(x).is_none()` assertion trips
   `unnecessary_get_then_check`), where a task's edit limit forbids touching it. Clippy exits 0 on a
   warning, so report the line and leave the test alone.
+- The GUI suites' socket tests carry a 5s global ureq deadline (`account_client`, `client`), every
+  write in the process serializes on `WRITE_LOCK`, and `write_atomically` fsyncs, so the POST-heavy
+  tests intermittently fail at `.expect("a POST response")` with a timeout when the machine is busy
+  (a full `cargo test` compiling the other three targets). Re-run before believing it, and prove it
+  with `--test-threads=1`: the fix is never to shorten the handler's lock.

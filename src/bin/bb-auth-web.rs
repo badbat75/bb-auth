@@ -262,16 +262,16 @@ use bb_auth_core::{
     compile_login_url, compile_oauth_domain, compile_page_url, cookie_domain_covers, csp_hash,
     decide, default_settings_path, edit_urls, format_date, format_datetime, group_ref,
     guarded_changes, key_expiry, key_mut, move_scope, norm_email, now, open_access_file,
-    open_settings_file, page_csp, parse_exclusion, read_audit, remove_api_key, remove_application,
-    remove_denied, remove_scope, remove_user, remove_user_email, remove_user_group,
-    rename_application, rename_scope, request_site, request_url, rotate_api_key, scope_mut,
-    scope_pos, sha256_hex, shadowing_scope, social_idp_label, stylesheet_link, user_group_mut,
-    user_group_refs, user_label, user_pos, user_refs, version_line, Access, AccessFile,
-    AccessWrite, ApiKeyRecord, ApiKeySpec, AppSpec, AuditCredential, AuditEvent, AuditKind,
-    AuditLimit, AuditPolicy, AuditUnit, Decision, GateSettings, GuardedSetting, RequestSite,
-    ScopeSpec, SealedKey, Settings, SettingsFile, SettingsWrite, SocialButtonSpec, Subject,
-    UiTheme, UserSpec, WiredButton, Written, BASE_CSS, DEFAULT_AUDIT_FILE, IDENTITY_HEADER,
-    PAGE_SECURITY_HEADERS, SOCIAL_IDPS, THEME_CSS,
+    open_settings_file, page_csp, parse_duration, parse_exclusion, read_audit, remove_api_key,
+    remove_application, remove_denied, remove_scope, remove_user, remove_user_email,
+    remove_user_group, rename_application, rename_scope, request_site, request_url, rotate_api_key,
+    scope_mut, scope_pos, sha256_hex, shadowing_scope, social_idp_label, stylesheet_link,
+    user_group_mut, user_group_refs, user_label, user_pos, user_refs, version_line, Access,
+    AccessFile, AccessWrite, ApiKeyRecord, ApiKeySpec, AppSpec, AuditCredential, AuditEvent,
+    AuditKind, AuditLimit, AuditPolicy, AuditUnit, Decision, Dur, GateSettings, GuardedSetting,
+    RequestSite, ScopeSpec, SealedKey, Settings, SettingsFile, SettingsWrite, SocialButtonSpec,
+    Subject, UiTheme, UserSpec, WiredButton, Written, BASE_CSS, DEFAULT_AUDIT_FILE,
+    IDENTITY_HEADER, PAGE_SECURITY_HEADERS, SOCIAL_IDPS, THEME_CSS,
 };
 use maud::{html, Markup, PreEscaped, DOCTYPE};
 use sha2::{Digest, Sha256};
@@ -998,16 +998,33 @@ enum K {
     //
     // Deliberately few, because the page's contract is about which fact belongs in which
     // section: prose in one is a word a test about another could match by accident, and the
-    // sections carry a heading, the names, and one short "none" line.
+    // sections carry a heading, the names, and one short "none" line. The mint form's words are
+    // the one place this page carries prose, and they are the shape of what it asks for and the
+    // reason a submission was refused: the person reading them has no administrator in the room,
+    // so each has to say what to write instead.
     AccountTitle,
     AccountUuid,
     AccountNoRow,
+    AccountNoRowTitle,
+    AccountNoRowBody,
     AccountReach,
     AccountKeys,
     AccountProfile,
     AccountNone,
     AccountKeysNone,
     AccountKeyAllScopes,
+    AccountKeyAdd,
+    AccountKeyCreate,
+    AccountKeyIdHint,
+    AccountKeyDurationHint,
+    AccountKeyRestrict,
+    AccountKeyRestrictAll,
+    AccountKeyRestrictSome,
+    AccountKeyScopeGroups,
+    AccountKeyBound,
+    AccountKeyFull,
+    AccountKeyDup,
+    AccountKeyUnknownScope,
     AccountVetoTitle,
     AccountVetoBody,
     AccountAmbiguousTitle,
@@ -2087,6 +2104,21 @@ fn t(lang: Lang, key: K) -> &'static str {
             "bb-auth has no roster row for you.",
             "bb-auth non ha una tua riga nella lista.",
         ),
+        // The refusal a mint gets from a caller with no row. It says what is missing rather
+        // than blaming the request, because the person reading it is the one who has to ask
+        // for the row.
+        K::AccountNoRowTitle => m(
+            lang,
+            "There is no account to mint into",
+            "Non c'è un account in cui creare la chiave",
+        ),
+        K::AccountNoRowBody => m(
+            lang,
+            "bb-auth has no roster row for this identity, so there is no account a key of \
+             yours could belong to.",
+            "bb-auth non ha una riga nella lista per questa identità, quindi non c'è un account \
+             a cui una tua chiave possa appartenere.",
+        ),
         K::AccountReach => m(lang, "Where you reach", "Dove puoi arrivare"),
         K::AccountKeys => m(lang, "API keys", "Chiavi API"),
         K::AccountProfile => m(lang, "Profile", "Profilo"),
@@ -2100,6 +2132,60 @@ fn t(lang: Lang, key: K) -> &'static str {
             lang,
             "every scope you reach",
             "ogni scope che raggiungi",
+        ),
+        // The mint form. `id` and `duration` are the file's own field names and stay as
+        // written in it, exactly as the console's key form leaves them.
+        K::AccountKeyAdd => m(lang, "Add a key", "Aggiungi una chiave"),
+        K::AccountKeyCreate => m(lang, "Create key", "Crea la chiave"),
+        K::AccountKeyIdHint => m(
+            lang,
+            "lowercase letters, digits and dashes, up to 32",
+            "lettere minuscole, cifre e trattini, fino a 32",
+        ),
+        K::AccountKeyDurationHint => m(
+            lang,
+            "between 1 and 365 days, written <n>d",
+            "tra 1 e 365 giorni, scritto <n>d",
+        ),
+        K::AccountKeyRestrict => m(lang, "Restriction", "Restrizione"),
+        K::AccountKeyRestrictAll => m(
+            lang,
+            "every scope you reach",
+            "ogni scope che raggiungi",
+        ),
+        K::AccountKeyRestrictSome => m(
+            lang,
+            "only the scopes you pick",
+            "solo gli scope che scegli",
+        ),
+        K::AccountKeyScopeGroups => m(
+            lang,
+            "the scopes a key of yours can be limited to",
+            "gli scope a cui una tua chiave può essere limitata",
+        ),
+        // The refusals this form answers with. Each names what to write instead, because a
+        // person with no administrator at hand has to fix it themselves.
+        K::AccountKeyBound => m(
+            lang,
+            "a key id is lowercase letters, digits and dashes, up to 32, and a duration is \
+             <n>d between 1d and 365d.",
+            "l'id di una chiave è lettere minuscole, cifre e trattini, fino a 32, e una durata \
+             è <n>d tra 1d e 365d.",
+        ),
+        K::AccountKeyFull => m(
+            lang,
+            "this account has ten keys, which is the most this page mints.",
+            "questo account ha dieci chiavi, il massimo che questa pagina crea.",
+        ),
+        K::AccountKeyDup => m(
+            lang,
+            "this account already has a key with that id.",
+            "questo account ha già una chiave con quell'id.",
+        ),
+        K::AccountKeyUnknownScope => m(
+            lang,
+            "a scope you picked is not one a key of yours can reach.",
+            "uno degli scope scelti non è uno che una tua chiave può raggiungere.",
         ),
         K::AccountVetoTitle => m(lang, "You are refused", "Sei escluso"),
         K::AccountVetoBody => m(
@@ -3020,6 +3106,18 @@ impl Form {
     /// A checkbox: present at all ⇒ ticked. Browsers omit an unticked box entirely.
     fn checked(&self, name: &str) -> bool {
         self.0.iter().any(|(k, _)| k == name)
+    }
+
+    /// Every value submitted under `name`, in the order the browser sent them. A group of
+    /// checkboxes sharing one name is a list, not a textarea, so it is not [`Form::lines`]:
+    /// a browser sends each ticked box as its own pair and sends nothing for an unticked one.
+    fn all(&self, name: &str) -> Vec<String> {
+        self.0
+            .iter()
+            .filter(|(k, _)| k == name)
+            .map(|(_, v)| v.trim().to_string())
+            .filter(|v| !v.is_empty())
+            .collect()
     }
 
     /// A textarea of URL patterns, one per line: trimmed, blanks dropped. `@refs` are left
@@ -7824,6 +7922,15 @@ struct AccountOwn<'a> {
     keys: Vec<&'a ApiKeyRecord>,
     /// Each configured `gate.profile_claims` entry, with the value the proxy forwarded.
     claims: Vec<(&'a str, Option<String>)>,
+    /// The scopes a key of the caller's may be narrowed to, from
+    /// [`bb_auth_core::Access::key_scopes_for`]. Empty for a caller with no row, which is what
+    /// takes the mint form out of the page.
+    mintable: Vec<(&'a str, &'a str)>,
+    /// The `POST` target of the mint form, and the fingerprint of the file as this page was
+    /// rendered. Both belong to the request, not to the files, so they arrive beside the facts
+    /// the files gave rather than as two more arguments to the page.
+    keys_path: &'a str,
+    rev: &'a str,
 }
 
 /// The scopes a signed-in caller reaches, grouped by application in file order.
@@ -7922,6 +8029,133 @@ fn account_key_restriction(lang: Lang, key: &ApiKeyRecord) -> String {
     }
 }
 
+/// The most keys this page mints onto one roster row. The administrator's CLI has no such
+/// bound, and does not need one: an operator typing `bb-auth-adm key add` over SSH is one
+/// person doing a counted thing. This form is reachable by every signed-in identity on the
+/// estate, and a row accumulating keys is a row whose credentials nobody can review.
+const ACCOUNT_MAX_KEYS: usize = 10;
+
+/// The shortest and longest window a self-service mint may ask for, in seconds.
+///
+/// `bb-auth-adm` accepts `never`, and the console offers it, because an operator who mints a
+/// machine credential for a build agent knows the agent is retired one day. A person with no
+/// administrator at hand has no such moment, and a key that never expires on a self-service
+/// account is a credential that outlives the reason it was made.
+const ACCOUNT_KEY_MIN_SECS: u64 = 86_400;
+const ACCOUNT_KEY_MAX_SECS: u64 = 365 * 86_400;
+
+/// Is `id` one this page will file? `[a-z0-9-]{1,32}`, which is the shape that stays readable
+/// in a log line and in a `key rotate`, and is short enough to be the whole name of a thing.
+fn account_key_id_ok(id: &str) -> bool {
+    (1..=32).contains(&id.len())
+        && id
+            .bytes()
+            .all(|b| b.is_ascii_lowercase() || b.is_ascii_digit() || b == b'-')
+}
+
+/// Is `duration` a window this page will file? See [`ACCOUNT_KEY_MIN_SECS`]: the parse is the
+/// library's, so `365d`, `8760h` and a bare `365` are all one year, and the bound is on the
+/// seconds they mean, not on the spelling.
+fn account_key_window_ok(duration: &str) -> bool {
+    matches!(
+        parse_duration(duration),
+        Some(Dur::Secs(secs)) if (ACCOUNT_KEY_MIN_SECS..=ACCOUNT_KEY_MAX_SECS).contains(&secs)
+    )
+}
+
+/// The mint form, in the keys section.
+///
+/// Five fields and a submit button, and two of the console's are deliberately absent. There is
+/// no **owner** field: the owner is the person asking, read from the identity header nginx
+/// wrote, and a field that chose the row would let any signed-in person mint a credential on
+/// anybody's account. There is no `released`: a key's issue date is a fact about a secret being
+/// created now, and the handler stamps it.
+///
+/// The checkboxes are [`bb_auth_core::Access::key_scopes_for`], so the pairs on offer are
+/// exactly the pairs the handler accepts, and each checkbox's value is the `application/scope`
+/// pair the file stores. A hand-written form can still name a pair that is not on the list, and
+/// the handler answers that with a `400`: a pair the gate would refuse mints a key that fails
+/// on its very first request.
+///
+/// No URL appears. The restriction is named by application and scope, never by the pattern
+/// behind it (§13.6): a URL from the file is information about the estate, and this page is
+/// about the person.
+fn account_mint_form(lang: Lang, keys_path: &str, rev: &str, scopes: &[(&str, &str)]) -> Markup {
+    // Grouped by application, in the order `key_scopes_for` yields them, which is file order.
+    let mut apps: Vec<(&str, Vec<&str>)> = Vec::new();
+    for (app, scope) in scopes {
+        match apps.iter_mut().find(|(name, _)| *name == *app) {
+            Some((_, names)) => names.push(*scope),
+            None => apps.push((*app, vec![*scope])),
+        }
+    }
+    html! {
+        form method="post" action=(keys_path) class="edit" {
+            input type="hidden" name="rev" value=(rev);
+            h2 { (t(lang, K::AccountKeyAdd)) }
+            (text_field(
+                "id",
+                "id",
+                "",
+                "laptop",
+                Some(t(lang, K::AccountKeyIdHint)),
+                false,
+            ))
+            (text_field(
+                "duration",
+                "duration",
+                "",
+                "365d",
+                Some(t(lang, K::AccountKeyDurationHint)),
+                false,
+            ))
+            div {
+                span class="lbl" { (t(lang, K::AccountKeyRestrict)) }
+                label class="radio" {
+                    input type="radio" name="restrict" value="all" checked;
+                    span { (t(lang, K::AccountKeyRestrictAll)) }
+                }
+                label class="radio" {
+                    input type="radio" name="restrict" value="some";
+                    span { (t(lang, K::AccountKeyRestrictSome)) }
+                }
+                span class="hint" { (t(lang, K::AccountKeyScopeGroups)) }
+                @for (app, names) in apps {
+                    div {
+                        span class="lbl" { code { (app) } }
+                        @for name in names {
+                            label class="radio" {
+                                input type="checkbox" name="scope"
+                                      value=(format!("{app}/{name}"));
+                                span { code { (name) } }
+                            }
+                        }
+                    }
+                }
+            }
+            button type="submit" class="primary" { (t(lang, K::AccountKeyCreate)) }
+        }
+    }
+}
+
+/// The page a mint answers with, and the one place this page ever renders a bearer.
+///
+/// Rendered **directly**, for the console's reason ([`page_minted`]): a redirect would put the
+/// result behind a `GET` that has no bearer to show, and the bearer exists nowhere else. The
+/// words are the console's three, because "shown once, copy it now" is one fact with one
+/// spelling in this program, and a person who sees it in two places must not read two claims.
+fn page_account_minted(lang: Lang, page: &str, bearer: &str) -> Markup {
+    html! {
+        div class="secret" {
+            div { strong { (t(lang, K::BearerHeading)) } }
+            p { (t(lang, K::BearerOnce)) }
+            code { "Authorization: Bearer " (bearer) }
+            p class="hint" { (t(lang, K::BearerClickHint)) }
+        }
+        p { a href=(page) { "← " (t(lang, K::Back)) } }
+    }
+}
+
 /// The page a caller gets: who they are, as the header carried it, their uuid when the access file
 /// has a row for them, and the four sections about their own account.
 ///
@@ -7989,6 +8223,12 @@ fn page_account(lang: Lang, ids: &[String], uuid: Option<&str>, own: &AccountOwn
                         }
                     }
                 }
+            }
+            // The mint form, and only for a caller the file has a row for: a key is filed under
+            // a uuid, so a stranger has no account to mint into, and a form that would be
+            // refused before it was read is a promise the page cannot keep.
+            @if uuid.is_some() {
+                (account_mint_form(lang, own.keys_path, own.rev, &own.mintable))
             }
         }
         section id="profile" class="panel" {
@@ -8062,16 +8302,21 @@ fn handle_account(
     // preference redirect are both this, and the bare prefix is answered as the page too, so
     // `/account` and `/account/` are one page rather than a page and a redirect.
     let page = format!("{}/", cfg.account_path);
+    // The mint's `POST` target, one path below the page. It is a path and not a query flag
+    // because a mutation is a `POST` to a URL that names the mutation, exactly as every console
+    // route does, and because the keys section's form has to name it in its `action`.
+    let keys = format!("{}/keys", cfg.account_path);
+    let posting = *req.method() == Method::Post;
     let prefs = AccountPrefs {
         lang,
         lang_pref,
         theme,
         page: &page,
     };
-    // Below the prefix, only the page exists. A path that is nothing is a `404` for every caller
-    // alike, administrator included, because a page that answers a stranger `403` and an
-    // administrator `404` is a page describing its own layout to whoever asks.
-    if path != cfg.account_path && path != page {
+    // Below the prefix, only the page and the mint exist. A path that is nothing is a `404` for
+    // every caller alike, administrator included, because a page that answers a stranger `403`
+    // and an administrator `404` is a page describing its own layout to whoever asks.
+    if path != cfg.account_path && path != page && path != keys {
         respond_account(
             req,
             404,
@@ -8196,11 +8441,47 @@ fn handle_account(
             return;
         }
     };
+    // The mint, the one mutation this page offers, and the reason the file's exact bytes are
+    // kept: the form's `rev` is the fingerprint of the file as this page renders it, the same
+    // lost-update guard every console form carries.
+    let bytes = match std::fs::read_to_string(&cfg.access_path) {
+        Ok(bytes) => bytes,
+        Err(e) => {
+            let msg = format!("read {}: {e}", cfg.access_path);
+            respond_account(
+                req,
+                500,
+                &prefs,
+                t(lang, K::FileErrorTitle),
+                html! { p { (msg) } },
+                look,
+            );
+            return;
+        }
+    };
+    let rev = sha256_hex(&bytes);
+    // A `POST` to the mint path is answered here, after the identity, the veto and the row
+    // resolution, because each of those is a refusal this submission has to meet on the same
+    // terms as the `GET` that rendered its form.
+    if posting {
+        account_mint(req, cfg, &prefs, lang, look, uuid);
+        return;
+    }
     let own = AccountOwn {
         reached: account_reached(&access, &ids[0]),
         groups: account_groups(&doc, uuid),
         keys: account_keys(&access, uuid),
         claims: account_claims(&settings, &req),
+        mintable: match uuid {
+            Some(u) => access
+                .key_scopes_for(u)
+                .iter()
+                .map(|(a, s)| (a.name.as_str(), s.name.as_str()))
+                .collect(),
+            None => Vec::new(),
+        },
+        keys_path: &keys,
+        rev: &rev,
     };
     respond_account(
         req,
@@ -8210,6 +8491,206 @@ fn handle_account(
         page_account(lang, &ids, uuid, &own),
         look,
     );
+}
+
+/// Answer the mint: `POST <prefix>/keys`.
+///
+/// The order is the console's, for the console's reasons ([`mutate`]), and it is the order that
+/// makes "nothing was written" a fact on every refusal path rather than a hope:
+///
+/// 1. the same-origin door, before the body is read, because a mint hands out a credential and
+///    a form on somebody else's page minting onto a signed-in person's account is the exact
+///    attack this door exists for;
+/// 2. the row, which the identity header resolves to and no form field may choose;
+/// 3. [`WRITE_LOCK`], then the file's current bytes against the form's `rev`, then
+///    [`open_access_file`], which refuses to start editing from bytes the gate would reject;
+/// 4. the abuse bounds, before anything is minted, because a secret created for a refusal is a
+///    secret handed out for nothing;
+/// 5. [`add_api_key`] and [`AccessWrite`], the library's own door, and the bearer opened against
+///    the receipt of the completed write.
+///
+/// The refusal pages are short: this page's caller has no administrator in the room, so each
+/// message names what to write instead, and the way back is the page they came from.
+fn account_mint(
+    mut req: Request,
+    cfg: &Config,
+    prefs: &AccountPrefs,
+    lang: Lang,
+    look: AccountLook,
+    uuid: Option<&str>,
+) {
+    // (1) The door, and the console's strict policy: `same-origin` and nothing else.
+    if !csrf_ok(
+        header_value(&req, "Sec-Fetch-Site"),
+        header_value(&req, "Origin"),
+        header_value(&req, "Host"),
+    ) {
+        respond_account(
+            req,
+            403,
+            prefs,
+            t(lang, K::CsrfTitle),
+            html! { p { (t(lang, K::CsrfBody)) } },
+            look,
+        );
+        return;
+    }
+    // (2) A key is filed under a uuid, so a caller the file has no row for has no account to
+    // mint into. The page says the same thing to them (§13.6); a hand-crafted `POST` gets the
+    // same answer, and the vetoed caller never reaches here: the veto is answered above.
+    let Some(owner) = uuid else {
+        respond_account(
+            req,
+            403,
+            prefs,
+            t(lang, K::AccountNoRowTitle),
+            html! { p { (t(lang, K::AccountNoRowBody)) } },
+            look,
+        );
+        return;
+    };
+    let form = Form::parse(&read_body(&mut req));
+    // (3) Serialized against every other write in this process, exactly as the console's
+    // `mutate` is: two workers, one person with two tabs, and a loser whose mint vanishes
+    // behind a success page is the silent clobber the `rev` cannot see.
+    let _writing = WRITE_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+    let raw = match std::fs::read_to_string(&cfg.access_path) {
+        Ok(bytes) => bytes,
+        Err(e) => {
+            let msg = format!("read {}: {e}", cfg.access_path);
+            respond_account(
+                req,
+                500,
+                prefs,
+                t(lang, K::FileErrorTitle),
+                html! { p { (msg) } },
+                look,
+            );
+            return;
+        }
+    };
+    if form.get("rev").trim() != sha256_hex(&raw) {
+        // The console's `409` in this page's shell. The advice is the console's too, and it is
+        // the honest one: nothing was written, and the file says something the form never saw.
+        respond_account(
+            req,
+            409,
+            prefs,
+            t(lang, K::ConflictTitle),
+            html! {
+                p { (t(lang, K::ConflictBody)) }
+                p { (t(lang, K::ConflictRecover)) }
+                p { a href=(prefs.page) { "← " (t(lang, K::ConflictBack)) } }
+            },
+            look,
+        );
+        return;
+    }
+    let (mut doc, access) = match open_access_file(&cfg.access_path) {
+        Ok(pair) => pair,
+        Err(e) => {
+            respond_account(
+                req,
+                500,
+                prefs,
+                t(lang, K::FileErrorTitle),
+                html! { p { (e) } },
+                look,
+            );
+            return;
+        }
+    };
+    let id = form.get("id").trim().to_string();
+    let duration = form.get("duration").trim().to_string();
+    let restrict = form.get("restrict").trim().to_string();
+    let pairs = form.all("scope");
+    // (4) then (5), in one closure so that "every path out of here wrote nothing" is a fact
+    // about the shape of the code: the only `Ok` is the one that has committed.
+    let done = (|| -> Result<String, String> {
+        if !account_key_id_ok(&id) || !account_key_window_ok(&duration) {
+            return Err(t(lang, K::AccountKeyBound).to_string());
+        }
+        // The row's keys, read off the **document**, not the compiled table: the bound is on how
+        // many credentials one identity carries, and a key whose hash the gate skipped is still a
+        // row a person has to review.
+        let mine = user_pos(&doc, owner).map_or(&[][..], |i| &doc.users[i].api_keys);
+        // The bound counts the administrator's keys too: it is a bound on the row, not on how
+        // many mints this page handed out.
+        if mine.len() >= ACCOUNT_MAX_KEYS {
+            return Err(t(lang, K::AccountKeyFull).to_string());
+        }
+        // An id is how a key is named back (in the journal line, and in `bb-auth-adm key
+        // rotate`), so two keys called `laptop` on one row is one name naming two secrets.
+        if mine.iter().any(|k| k.id.trim() == id) {
+            return Err(t(lang, K::AccountKeyDup).to_string());
+        }
+        // `all` writes **no** `scopes` field, which the gate reads as the owner's whole reach.
+        // `some` writes the submitted pairs sorted: the submitted order is a browser's, and one
+        // canonical spelling is what makes a restriction a comparison rather than a string match.
+        let scopes = match restrict.as_str() {
+            "all" => None,
+            "some" => {
+                let allowed = access.key_scopes_for(owner);
+                for pair in &pairs {
+                    if !allowed
+                        .iter()
+                        .any(|(a, s)| format!("{}/{}", a.name, s.name) == *pair)
+                    {
+                        return Err(t(lang, K::AccountKeyUnknownScope).to_string());
+                    }
+                }
+                let mut sorted = pairs.clone();
+                sorted.sort();
+                Some(sorted)
+            }
+            // Neither of the two the form can send. Refused rather than read as `all`: a key
+            // with no restriction is the widest credential this page mints, and a request that
+            // did not choose it must not get it by default.
+            _ => return Err(t(lang, K::AccountKeyBound).to_string()),
+        };
+        let sealed = add_api_key(
+            &mut doc,
+            owner,
+            ApiKeySpec {
+                id: id.clone(),
+                // Today, and not a field: a key's issue date is a fact about a secret that is
+                // being created right now.
+                released: format_date(now()),
+                duration: duration.clone(),
+                scopes,
+                ..Default::default()
+            },
+        )?;
+        let written = AccessWrite::prepare(&doc)?.commit(&cfg.access_path)?;
+        // The acting identity, marked as acting for itself, and the key's id. No bearer and no
+        // hash: the line says which credential exists, and the file is what says anything more.
+        audit(&format!("{owner} (self)"), "key add", &id);
+        Ok(sealed.reveal(&written))
+    })();
+    // The key's id rides in the title, because the shell renders the title as the page's one
+    // heading: "API keys · phone" says which secret this is, which is the fact a person with two
+    // browser tabs open needs in front of them.
+    match done {
+        Ok(bearer) => respond_account(
+            req,
+            200,
+            prefs,
+            &format!("{} · {}", t(lang, K::AccountKeys), id),
+            page_account_minted(lang, prefs.page, &bearer),
+            look,
+        ),
+        Err(msg) => respond_account(
+            req,
+            400,
+            prefs,
+            t(lang, K::AccountKeyAdd),
+            html! {
+                div class="err" { (msg) }
+                p { a href=(prefs.page) { "← " (t(lang, K::Back)) } }
+            },
+            look,
+        ),
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -14660,5 +15141,687 @@ mod tests {
                 "the refusal must name the variable to fix: `{account}` / `{base}` said {e}"
             );
         }
+    }
+
+    // =====================================================================
+    // Self-service key minting (docs/ARCHITECTURE.md §13.6): the keys section
+    // offers a form, and `POST /account/keys` mints through the library's
+    // `add_api_key`, keyed by the uuid the identity header resolves to, never
+    // by a form field.
+    //
+    // The statuses follow the console's own conventions, because the same
+    // machinery answers both surfaces: a refused submission is the `400` the
+    // console's `mutate` answers every form refusal with, a stale `rev` is the
+    // `409`, a cross-site `POST` is the CSRF `403`, and a caller with no row
+    // to mint into is refused with the `403` the page already gives a vetoed
+    // identity.
+    // =====================================================================
+
+    /// The full fixture plus a scope that **only carol** reaches, and bob with
+    /// no keys at all. The mint tests need a pair that sits outside bob's
+    /// `key_scopes_for` set for a reason other than naming nothing, and a file
+    /// whose bytes start clean, so "the file is unchanged" is a fact about
+    /// this request and not about a fixture's prehistoric keys.
+    const ACCOUNT_ACCESS_MINT: &str = r#"{ "version": 1,
+  "applications": [
+    { "name": "mpa", "base": ["https://app.x.com/mpa"],
+      "scopes": [
+        { "name": "admin", "urls": ["https://app.x.com/mpa/admin/*"], "access": "restricted",
+          "groups": ["@admins"], "credentials": ["login"] },
+        { "name": "onboarding", "urls": ["https://app.x.com/mpa/*"], "access": "authenticated" } ] },
+    { "name": "mcp", "base": ["https://ai.x.com/mcp"],
+      "scopes": [
+        { "name": "logs", "urls": ["https://ai.x.com/mcp/logs/*"], "access": "restricted",
+          "users": ["__BOB__"] },
+        { "name": "api", "urls": ["https://ai.x.com/mcp/*"], "access": "restricted",
+          "users": ["__BOB__"], "credentials": ["api_key"] },
+        { "name": "vault", "urls": ["https://ai.x.com/mcp/vault/*"], "access": "restricted",
+          "users": ["__CAROL__"] } ] } ],
+  "user_groups": { "admins": ["__BOB__"] },
+  "denied": ["spammer@x.com"],
+  "users": [
+    { "uuid": "__BOB__", "emails": ["bob@x.com", "bob@old.com"] },
+    { "uuid": "__CAROL__", "emails": ["carol@x.com"] } ] }"#;
+
+    fn account_access_mint() -> String {
+        ACCOUNT_ACCESS_MINT
+            .replace("__BOB__", ACCOUNT_BOB)
+            .replace("__CAROL__", ACCOUNT_CAROL)
+    }
+
+    /// The mint fixture with bob's row already holding ten keys: the bound is
+    /// ten per row counting every key, the administrator's included, so the
+    /// fixture's own two keys are not enough to reach it and these ten are
+    /// indistinguishable from keys an administrator minted.
+    fn account_access_ten_keys() -> String {
+        let keys = (1..=10)
+            .map(|i| {
+                format!(
+                    "{{ \"id\": \"key{i}\", \"key_hash\": \"{:064x}\", \"released\": \"2026-01-01\", \
+                     \"duration\": \"365d\" }}",
+                    i
+                )
+            })
+            .collect::<Vec<_>>()
+            .join(", ");
+        ACCOUNT_ACCESS_MINT
+            .replace(
+                r#""uuid": "__BOB__", "emails": ["bob@x.com", "bob@old.com"] },"#,
+                &format!(
+                    r#""uuid": "__BOB__", "emails": ["bob@x.com", "bob@old.com"], "api_keys": [{keys}] }},"#
+                ),
+            )
+            .replace("__BOB__", ACCOUNT_BOB)
+            .replace("__CAROL__", ACCOUNT_CAROL)
+    }
+
+    /// A fixture written from given access text, with the full settings beside
+    /// it: the mint tests run over their own two variants of the roster.
+    fn account_scratch_access(name: &str, access: &str) -> String {
+        let p = std::env::temp_dir().join(format!("bb-auth-web-account-{name}.json"));
+        std::fs::write(&p, access).expect("write the access fixture");
+        let path = p.to_string_lossy().into_owned();
+        std::fs::write(settings_path(&path), ACCOUNT_SETTINGS_FULL)
+            .expect("write the settings fixture");
+        path
+    }
+
+    /// A `POST` under the prefix, as the proxy-and-browser pair sends one: the
+    /// secret, the identity header, the same-origin marker, and a form body.
+    fn account_post(url: &str, identity: Option<&str>, fields: &[(&str, &str)]) -> AccountGot {
+        account_post_as(url, identity, fields, "same-origin", true)
+    }
+
+    /// The same `POST` with the two things that gate it spelled out: the
+    /// `Sec-Fetch-Site` the browser writes, and whether the proxy secret is on
+    /// the request at all.
+    fn account_post_as(
+        url: &str,
+        identity: Option<&str>,
+        fields: &[(&str, &str)],
+        sec_fetch: &str,
+        with_secret: bool,
+    ) -> AccountGot {
+        let mut req = account_client()
+            .post(url)
+            .header("Sec-Fetch-Site", sec_fetch);
+        if with_secret {
+            req = req.header(SECRET_HEADER, TEST_SECRET);
+        }
+        if let Some(v) = identity {
+            req = req.header(IDENTITY_HEADER, v);
+        }
+        let mut r = req
+            .send_form(fields.iter().copied())
+            .expect("a POST response");
+        let headers = r
+            .headers()
+            .iter()
+            .map(|(k, v)| (k.as_str().to_string(), v.to_str().unwrap_or("").to_string()))
+            .collect();
+        AccountGot {
+            status: r.status().as_u16(),
+            headers,
+            body: r.body_mut().read_to_string().expect("a body"),
+        }
+    }
+
+    /// The minted bearer as the page shows it: the one `bbk_` token in the
+    /// document, read to the end of the base64url run the library's mint
+    /// produces. A page that shows two is showing somebody's mint twice.
+    fn account_bearer_in(body: &str) -> String {
+        let i = body.find("bbk_").unwrap_or_else(|| {
+            panic!(
+                "the mint page must show the bearer: {}",
+                account_readable(body)
+            )
+        });
+        let rest = &body[i..];
+        let end = rest
+            .find(|c: char| !(c.is_ascii_alphanumeric() || c == '_' || c == '-'))
+            .unwrap_or(rest.len());
+        rest[..end].to_string()
+    }
+
+    /// The keys section offers the mint form: a `POST` to `/account/keys`
+    /// carrying the file fingerprint, an id, a duration, the restrict choice,
+    /// and one checkbox per scope `Access::key_scopes_for` returns for the
+    /// caller, valued `application/scope` and grouped under the application.
+    /// A scope the caller's keys cannot reach gets no checkbox, because a key
+    /// narrowed to it fails on its very first request, and no URL from the
+    /// file appears: the restriction is named by scope, never by a URL (§13.6).
+    #[test]
+    fn account_the_keys_section_offers_a_mint_form_with_one_checkbox_per_narrowable_scope() {
+        let path = account_scratch_access("mint-form", &account_access_mint());
+        let base = account_serve(&path);
+
+        let g = account_call(&base, Some("bob@x.com"));
+        assert_eq!(
+            g.status,
+            200,
+            "bob is a roster user: {}",
+            account_readable(&g.body)
+        );
+        let s = account_section(&g.body, "keys");
+        assert!(
+            s.contains("method=\"post\"") && s.contains("action=\"/account/keys\""),
+            "the mint is a POST to the page's own prefix: {s}"
+        );
+        assert!(
+            s.contains("name=\"rev\"") && s.contains(&sha256_hex(&read(&path))),
+            "the form carries the fingerprint of the file as rendered, the same lost-update \
+             guard every console form carries: {s}"
+        );
+        for field in ["name=\"id\"", "name=\"duration\"", "name=\"restrict\""] {
+            assert!(s.contains(field), "the form must carry {field}: {s}");
+        }
+        assert!(
+            s.contains("mcp/logs") && s.contains("mcp/api"),
+            "bob's keys reach mcp/logs and mcp/api, so the form must offer exactly those, \
+             under the application name: {s}"
+        );
+        for outside in ["mcp/vault", "mpa/admin", "mpa/onboarding"] {
+            assert!(
+                !s.contains(&format!("value=\"{outside}\"")),
+                "{outside} is not in bob's key_scopes_for set (carol's scope, login-only \
+                 credentials, authenticated): a checkbox the gate refuses mints a key that \
+                 fails on its first request: {s}"
+            );
+        }
+        assert!(
+            s.contains("type=\"submit\""),
+            "the page works with scripting off, so the form ends in a submit button: {s}"
+        );
+        assert!(
+            !s.contains("https://"),
+            "the restriction is named by application and scope, never by a URL: {s}"
+        );
+
+        cleanup(&path);
+    }
+
+    /// A stranger has no row to file a key under, an administrator with no
+    /// row is one more stranger, and a vetoed caller is out everywhere: none
+    /// of them gets the form, and a hand-crafted `POST` is refused with the
+    /// `403` the console gives a caller the route does not serve. Nothing is
+    /// written: a mint is a credential, and a refusal that files one is an
+    /// admission.
+    #[test]
+    fn account_a_stranger_and_a_vetoed_caller_get_no_form_and_a_posted_mint_writes_nothing() {
+        let path = account_scratch_access("mint-no-caller", &account_access_mint());
+        let base = account_serve(&path);
+        let keys = format!("{base}keys");
+        let before = read(&path);
+        let rev = sha256_hex(&before);
+
+        for id in ["stranger@elsewhere.com", "admin@x.com", "spammer@x.com"] {
+            let g = account_call(&base, Some(id));
+            if g.status == 200 {
+                let s = account_section(&g.body, "keys");
+                assert!(
+                    !s.contains("method=\"post\"") && !s.contains("/account/keys"),
+                    "{id} has no row to mint into, so the keys section must carry no form: {s}"
+                );
+            }
+            let p = account_post(
+                &keys,
+                Some(id),
+                &[
+                    ("rev", rev.as_str()),
+                    ("id", "phone"),
+                    ("duration", "30d"),
+                    ("restrict", "all"),
+                ],
+            );
+            assert_eq!(
+                p.status,
+                403,
+                "a mint POST from {id} is refused: {}",
+                account_readable(&p.body)
+            );
+        }
+        assert_eq!(
+            read(&path),
+            before,
+            "a refusal may not write: the access file is byte for byte what it was"
+        );
+
+        cleanup(&path);
+    }
+
+    /// The whole reveal-once contract (§13.6): the `POST` that mints answers
+    /// with the bearer in its own `200` (never behind a redirect, because a
+    /// bearer cannot survive one), `Cache-Control: no-store`, the bearer
+    /// exactly once in the body, the file carrying the key under the caller's
+    /// row with the hash of that bearer and never the bearer, and the next
+    /// `GET` of the page not carrying it at all. `restrict=all` writes no
+    /// `scopes` field, which the gate reads as "at most what the owner
+    /// reaches".
+    #[test]
+    fn account_a_mint_shows_the_bearer_once_and_files_only_its_hash() {
+        let path = account_scratch_access("mint-all", &account_access_mint());
+        let base = account_serve(&path);
+        let keys = format!("{base}keys");
+        let rev = sha256_hex(&read(&path));
+
+        let g = account_post(
+            &keys,
+            Some("bob@x.com"),
+            &[
+                ("rev", rev.as_str()),
+                ("id", "phone"),
+                ("duration", "30d"),
+                ("restrict", "all"),
+            ],
+        );
+        assert_eq!(
+            g.status,
+            200,
+            "a valid mint is answered by a page, not a redirect: {}",
+            account_readable(&g.body)
+        );
+        assert_eq!(
+            g.header("Cache-Control"),
+            Some("no-store"),
+            "the page carries a credential: no cache may keep it"
+        );
+        let bearer = account_bearer_in(&g.body);
+        assert!(
+            bearer.starts_with("bbk_"),
+            "the bearer is a bbk_ credential: {bearer}"
+        );
+        assert_eq!(
+            g.body.matches(bearer.as_str()).count(),
+            1,
+            "the bearer is shown exactly once, and the page carries it {n} times: {bearer}",
+            n = g.body.matches(bearer.as_str()).count()
+        );
+
+        let file = read(&path);
+        let doc: serde_json::Value = serde_json::from_str(&file).expect("the written file parses");
+        let key = doc["users"][0]["api_keys"]
+            .as_array()
+            .and_then(|ks| ks.iter().find(|k| k["id"] == "phone"))
+            .unwrap_or_else(|| panic!("the minted key is filed under the caller's row: {file}"));
+        assert_eq!(
+            key["duration"], "30d",
+            "the submitted window is filed: {file}"
+        );
+        assert!(
+            key.get("scopes").is_none(),
+            "restrict=all writes no scopes field, which the gate reads as the owner's full \
+             reach: {file}"
+        );
+        assert!(
+            !file.contains(&bearer),
+            "the file keeps only sha256(bearer), never the bearer"
+        );
+        assert!(
+            file.contains(&sha256_hex(&bearer)),
+            "the hash of the shown bearer is the filed credential"
+        );
+
+        let g = account_call(&base, Some("bob@x.com"));
+        assert!(
+            !g.body.contains(&bearer),
+            "the bearer is shown once: the next GET of the page does not carry it"
+        );
+
+        cleanup(&path);
+    }
+
+    /// `restrict=some` writes exactly the submitted pairs, sorted (§13.6): the
+    /// submitted order is a browser's, not a fact about the file, and one
+    /// canonical spelling is what makes "this key is narrowed to these
+    /// scopes" a comparison and not a string match.
+    #[test]
+    fn account_a_mint_narrowed_to_two_scopes_writes_exactly_those_pairs_sorted() {
+        let path = account_scratch_access("mint-some", &account_access_mint());
+        let base = account_serve(&path);
+        let keys = format!("{base}keys");
+        let rev = sha256_hex(&read(&path));
+
+        let g = account_post(
+            &keys,
+            Some("bob@x.com"),
+            &[
+                ("rev", rev.as_str()),
+                ("id", "two"),
+                ("duration", "90d"),
+                ("restrict", "some"),
+                ("scope", "mcp/logs"),
+                ("scope", "mcp/api"),
+            ],
+        );
+        assert_eq!(
+            g.status,
+            200,
+            "both pairs are in bob's set, so the mint stands: {}",
+            account_readable(&g.body)
+        );
+
+        let file = read(&path);
+        let doc: serde_json::Value = serde_json::from_str(&file).expect("the written file parses");
+        let scopes = doc["users"][0]["api_keys"]
+            .as_array()
+            .and_then(|ks| ks.iter().find(|k| k["id"] == "two"))
+            .and_then(|k| k["scopes"].as_array())
+            .unwrap_or_else(|| panic!("the key is filed with its restriction: {file}"));
+        let got: Vec<&str> = scopes.iter().map(|s| s.as_str().unwrap()).collect();
+        assert_eq!(
+            got,
+            ["mcp/api", "mcp/logs"],
+            "the two pairs, sorted, and nothing else: {file}"
+        );
+
+        cleanup(&path);
+    }
+
+    /// A pair outside `key_scopes_for` is a `400` and nothing is written
+    /// (§13.6): carol's scope, an `authenticated` scope (Cognito vouches for
+    /// no static key of ours), and a pair that names nothing. A silently
+    /// dropped pair would mint a key **wider** than the person asked for,
+    /// which is the one direction a restriction must never move.
+    #[test]
+    fn account_a_scope_outside_the_callers_own_set_is_a_400_that_writes_nothing() {
+        let path = account_scratch_access("mint-outside", &account_access_mint());
+        let base = account_serve(&path);
+        let keys = format!("{base}keys");
+        let before = read(&path);
+
+        for pair in ["mcp/vault", "mpa/onboarding", "mcp/nope"] {
+            let rev = sha256_hex(&read(&path));
+            let g = account_post(
+                &keys,
+                Some("bob@x.com"),
+                &[
+                    ("rev", rev.as_str()),
+                    ("id", "phone"),
+                    ("duration", "30d"),
+                    ("restrict", "some"),
+                    ("scope", pair),
+                ],
+            );
+            assert_eq!(
+                g.status,
+                400,
+                "the pair {pair} is outside bob's set, so the mint is refused: {}",
+                account_readable(&g.body)
+            );
+            assert_eq!(
+                read(&path),
+                before,
+                "the refusal of {pair} wrote nothing: the file is byte for byte what it was"
+            );
+        }
+
+        cleanup(&path);
+    }
+
+    /// The abuse bounds are constants (§13.6): `id` from `[a-z0-9-]{1,32}`,
+    /// `duration` required and `1d` to `365d` with no `never`, at most ten
+    /// keys per row counting the administrator's. Each is a `400` that writes
+    /// nothing. The duplicate id rides on the full fixture because bob's two
+    /// fixture keys are what make `laptop` a duplicate, and the tenth-key
+    /// bound counts keys the caller did not make.
+    #[test]
+    fn account_every_mint_bound_is_a_400_that_writes_nothing() {
+        let long = "x".repeat(33);
+        let cases = [
+            ("Bad ID", "30d", "the id is not [a-z0-9-]{1,32}"),
+            (long.as_str(), "30d", "the id is 33 characters"),
+            ("phone", "", "the duration is missing"),
+            (
+                "phone",
+                "never",
+                "the self-service form may not mint a key that never expires",
+            ),
+            ("phone", "0d", "zero days is not a window"),
+            ("phone", "366d", "a year is the bound"),
+        ];
+        let path = account_scratch_access("mint-bounds", &account_access_mint());
+        let base = account_serve(&path);
+        let keys = format!("{base}keys");
+        let before = read(&path);
+        for (id, duration, why) in cases {
+            let rev = sha256_hex(&read(&path));
+            let g = account_post(
+                &keys,
+                Some("bob@x.com"),
+                &[
+                    ("rev", rev.as_str()),
+                    ("id", id),
+                    ("duration", duration),
+                    ("restrict", "all"),
+                ],
+            );
+            assert_eq!(
+                g.status,
+                400,
+                "{id} / {duration}: {why}: {}",
+                account_readable(&g.body)
+            );
+            assert_eq!(
+                read(&path),
+                before,
+                "{id} / {duration}: the refusal wrote nothing"
+            );
+        }
+        cleanup(&path);
+
+        // A duplicate id, on the fixture whose bob already holds `laptop`.
+        let dup = account_scratch_full("mint-dup");
+        let dup_base = account_serve(&dup);
+        let before_dup = read(&dup);
+        let rev = sha256_hex(&read(&dup));
+        let g = account_post(
+            &format!("{dup_base}keys"),
+            Some("bob@x.com"),
+            &[
+                ("rev", rev.as_str()),
+                ("id", "laptop"),
+                ("duration", "30d"),
+                ("restrict", "all"),
+            ],
+        );
+        assert_eq!(
+            g.status,
+            400,
+            "an id names a key in `key rotate`, so a second `laptop` is refused: {}",
+            account_readable(&g.body)
+        );
+        assert_eq!(
+            read(&dup),
+            before_dup,
+            "the duplicate refusal wrote nothing"
+        );
+        cleanup(&dup);
+
+        // The eleventh key on a row that already holds ten.
+        let ten = account_scratch_access("mint-ten", &account_access_ten_keys());
+        let ten_base = account_serve(&ten);
+        let before_ten = read(&ten);
+        let rev = sha256_hex(&read(&ten));
+        let g = account_post(
+            &format!("{ten_base}keys"),
+            Some("bob@x.com"),
+            &[
+                ("rev", rev.as_str()),
+                ("id", "phone"),
+                ("duration", "30d"),
+                ("restrict", "all"),
+            ],
+        );
+        assert_eq!(
+            g.status,
+            400,
+            "ten keys per row is the bound, and these ten count: {}",
+            account_readable(&g.body)
+        );
+        assert_eq!(
+            read(&ten),
+            before_ten,
+            "the eleventh-key refusal wrote nothing"
+        );
+        cleanup(&ten);
+    }
+
+    /// A `rev` that is not the file's current fingerprint is the console's
+    /// `409`: the file moved under the form (a `bb-auth-adm` over SSH, another
+    /// tab), and minting onto bytes nobody saw would clobber that edit.
+    #[test]
+    fn account_a_mint_on_a_stale_rev_is_a_409_that_writes_nothing() {
+        let path = account_scratch_access("mint-stale", &account_access_mint());
+        let base = account_serve(&path);
+        let keys = format!("{base}keys");
+        let before = read(&path);
+
+        let g = account_post(
+            &keys,
+            Some("bob@x.com"),
+            &[
+                (
+                    "rev",
+                    "0000000000000000000000000000000000000000000000000000000000000000",
+                ),
+                ("id", "phone"),
+                ("duration", "30d"),
+                ("restrict", "all"),
+            ],
+        );
+        assert_eq!(
+            g.status,
+            409,
+            "a form submitted onto bytes it never saw is a conflict: {}",
+            account_readable(&g.body)
+        );
+        assert_eq!(
+            read(&path),
+            before,
+            "the conflict wrote nothing: the access file is byte for byte what it was"
+        );
+
+        cleanup(&path);
+    }
+
+    /// The two doors in front of every mutation, answered as the console
+    /// answers them: a `POST` the browser says came from another site is the
+    /// CSRF `403`, and a `POST` that did not come through nginx at all is the
+    /// proxy-secret `403`. Both write nothing, and the mint is the mutation
+    /// most worth locking, because it hands out a credential.
+    #[test]
+    fn account_a_mint_post_from_another_site_or_outside_the_proxy_is_refused() {
+        let path = account_scratch_access("mint-doors", &account_access_mint());
+        let base = account_serve(&path);
+        let keys = format!("{base}keys");
+        let before = read(&path);
+        let rev = sha256_hex(&read(&path));
+        let fields = [
+            ("rev", rev.as_str()),
+            ("id", "phone"),
+            ("duration", "30d"),
+            ("restrict", "all"),
+        ];
+
+        let g = account_post_as(&keys, Some("bob@x.com"), &fields, "cross-site", true);
+        assert_eq!(
+            g.status,
+            403,
+            "a cross-site mint is login CSRF for a credential: {}",
+            account_readable(&g.body)
+        );
+        assert_eq!(read(&path), before, "the cross-site refusal wrote nothing");
+
+        let g = account_post_as(&keys, Some("bob@x.com"), &fields, "same-origin", false);
+        assert_eq!(
+            g.status,
+            403,
+            "a request without the proxy secret never reached this page through nginx: {}",
+            account_readable(&g.body)
+        );
+        assert_eq!(read(&path), before, "the secretless refusal wrote nothing");
+
+        cleanup(&path);
+    }
+
+    /// The mint is keyed by the uuid the identity header resolves to, never
+    /// by a form field (§13.6): fields a caller can write are not evidence of
+    /// who the caller is, and a field that chose the row would let any
+    /// signed-in person mint a credential on anybody's account.
+    #[test]
+    fn account_a_mint_ignores_the_identity_in_the_form_and_files_on_the_header() {
+        let path = account_scratch_access("mint-identity", &account_access_mint());
+        let base = account_serve(&path);
+        let keys = format!("{base}keys");
+        let rev = sha256_hex(&read(&path));
+
+        let g = account_post(
+            &keys,
+            Some("bob@x.com"),
+            &[
+                ("rev", rev.as_str()),
+                ("id", "phone"),
+                ("duration", "30d"),
+                ("restrict", "all"),
+                ("email", "carol@x.com"),
+                ("uuid", ACCOUNT_CAROL),
+            ],
+        );
+        assert_eq!(
+            g.status,
+            200,
+            "the mint stands on the header alone: {}",
+            account_readable(&g.body)
+        );
+
+        let file = read(&path);
+        let doc: serde_json::Value = serde_json::from_str(&file).expect("the written file parses");
+        assert!(
+            doc["users"][0]["api_keys"]
+                .as_array()
+                .is_some_and(|ks| ks.iter().any(|k| k["id"] == "phone")),
+            "the key lands under the caller's row: {file}"
+        );
+        assert!(
+            doc["users"][1].get("api_keys").is_none_or(|ks| ks
+                .as_array()
+                .is_some_and(|ks| !ks.iter().any(|k| k["id"] == "phone"))),
+            "the form named carol's uuid, and carol's row must not carry the key: {file}"
+        );
+
+        cleanup(&path);
+    }
+
+    /// The estate's standing rule, re-asserted on the page **with** the new
+    /// form: no `<script>` and no inline handler anywhere. The mint form is
+    /// plain fields and a submit button, because a page that needs scripting
+    /// to hand out a credential is the thing that must never ship.
+    #[test]
+    fn account_the_page_with_the_mint_form_still_carries_no_script_and_no_handler() {
+        let path = account_scratch_access("mint-noscript", &account_access_mint());
+        let base = account_serve(&path);
+
+        let g = account_call(&base, Some("bob@x.com"));
+        assert_eq!(
+            g.status,
+            200,
+            "bob reaches the page: {}",
+            account_readable(&g.body)
+        );
+        assert!(
+            account_section(&g.body, "keys").contains("action=\"/account/keys\""),
+            "the page under test is the one that carries the form: {}",
+            account_section(&g.body, "keys")
+        );
+        assert!(
+            !g.body.contains("<script"),
+            "no script tag: the estate rule the form must not break"
+        );
+        assert!(
+            !account_carries_inline_handler(&g.body),
+            "no inline handler of any kind"
+        );
+
+        cleanup(&path);
     }
 }

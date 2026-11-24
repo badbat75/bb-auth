@@ -277,6 +277,9 @@ body:has(.selfserve){background:var(--bg)}
    contract this page has, and a rule scoped to the page is how the same result is had without
    adding an attribute to it. */
 .selfserve .panel h2{margin-top:0}
+/* The mint form lives inside the keys panel, under the list of keys, so its heading is not the
+   first thing in the panel and the rule above would leave it flush against the last key. */
+.selfserve form.edit h2{margin:20px 0 10px}
 /* The selector at the foot of the page: two list boxes side by side, and the page's one main
    action under them. `.lbl` is base.css's field label and `button.primary` its main action, so
    both are the objects every form in the estate already paints. */
