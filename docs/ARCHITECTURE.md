@@ -2495,7 +2495,7 @@ enough, for both surfaces at once, then required that the operator's theme keep 
 | tabs | the five `nav` pills | an empty `nav`, which is what the console's own `403` page already renders |
 | identity | **new**: `span.who.muted` in `nav.acct`, the address | the same: the given name and the first address ("Bot · `bot@example.com`"), or the address alone |
 | Preferences | `details.settings` "Preferences" (`K::Settings`), Language then Theme, `onchange` applies, `noscript` Apply | the same `details` and `.menu` and order, **no `onchange`**, and the Apply `button` in `div.actions` always present |
-| Sign out | `a.pill` to `BB_AUTH_WEB_LOGOUT_URL`, absent when unset | the same pill and the same setting |
+| Sign out | `a.pill` to `BB_AUTH_WEB_LOGOUT_URL`, absent when unset | the same pill and the same setting, with its `rd` dropped (below) |
 
 **Where they differ, and why.** The account page carries no handler at all (AGENTS.md, the
 self-service paragraph) and its policy has no `'unsafe-hashes'`; the console's handler only
@@ -2527,12 +2527,63 @@ The identity in the bar gives way there (it would push the bar to a second line)
 at the top of the menu; on `/account/` the page body names the person anyway.
 Screenshots: `account-menu-tok-phone.png`, `console-after-phone.png`.
 
-**Sign out, an open question for the architect.** `BB_AUTH_WEB_LOGOUT_URL` may carry an `rd`
-that brings an administrator back to the console after signing in again. The same link on
-`/account/` would bring a person who is not an administrator to the console, a `403`. Either
-the account page omits its `rd` (the gate then falls back to the page's `Referer`, which is a
-backup and not a mechanism, and otherwise to the sign-in page) or a second setting names the
-account's own round trip. Until decided, the account renders the pill from the same setting.
+**Sign out on `/account/`: the operator's link with its `rd` dropped (decided for 8b).** The
+code paths, read before deciding: `Config::logout_url` is `BB_AUTH_WEB_LOGOUT_URL` passed
+through `compile_asset_url` once at startup, and `shell` emits it verbatim as the pill's
+`href`; the gate's `/auth/logout` lands where `logout_target` says, which is `rd_candidate`
+(the `?rd=`, else the `Referer`) through `safe_rd`, and the login page when neither spoke. So
+the `rd` an operator writes on that variable is the console's round trip, and on `/account/` it
+would bring a person who is not an administrator to a `403`. The account page therefore renders
+the **same variable with its `rd` query parameter removed**, derived once at startup beside
+`Config::logout_url` (`Config::account_logout_url`, from a pure `logout_without_rd`): every
+other parameter, the path and the host are kept as the operator wrote them, a value with no
+`rd` is used unchanged, and an unset variable is no pill on either surface. The person signs
+out, lands on the sign-in page and stops there, which is the destination the variable's own
+documentation already calls honest for somebody who just ended their session; signing in again
+from there lands where any sign-in without an `rd` lands (`safe_rd`'s default), which is the
+gate's existing behaviour and not something this page adds.
+
+Why this keeps every invariant: the link can only lose a parameter, never gain one, so it names
+no landing place the operator did not already write, and the gate's `safe_rd` against
+`gate.authorized_hosts` still decides where any logout may land. No setting is added, so the
+three-part rule for the settings file is not asked. The `Referer` is **not** what brings the
+person back, and the design must not lean on it: every page of this program carries
+`Referrer-Policy: no-referrer` (`PAGE_SECURITY_HEADERS`), so a click on `/account/` sends none
+and `logout_target` falls through to the login page, which is the intended result rather than a
+backup that happens to work.
+
+Rejected: **a second variable** naming the account's round trip (`BB_AUTH_WEB_ACCOUNT_LOGOUT_URL`
+or a `web` field in the settings file), which would buy only "after signing in again, land on
+`/account/`", a need nobody has stated, for one more value an operator must keep in step with
+the first; **rewriting the `rd`** to the account page, which this program cannot do honestly,
+since it knows neither its scheme nor its host (the reason the variable exists) and the
+operator's `rd` may name a page that is not the console at all; **a relative `rd`** to the
+account path, which `safe_rd` resolves against `BB_AUTH_ORIGINAL_URL_HEADER`, a header nginx
+does not set on the ungated logout location, so it would fall back to the login page anyway and
+silently; **relying on the `Referer`**, absent here by our own policy; **the same link
+unchanged**, which is the `403`.
+
+How it is shown to hold: `logout_without_rd_keeps_everything_else` (unit, on the pure
+function: `/auth/logout?rd=https%3A%2F%2Fa.x.com%2Fadmin%2F` becomes `/auth/logout`;
+`https://a.x.com/auth/logout?x=1&rd=…` becomes `https://a.x.com/auth/logout?x=1`; a parameter
+merely starting with `rd`, such as `rdx=1`, is kept; a value with no query is returned as it
+is) and `the_account_sign_out_carries_no_rd` (over a socket, with `BB_AUTH_WEB_LOGOUT_URL`
+carrying an `rd`: the console's Sign out `href` is the value as written, the account page's is
+the value without its `rd`, and with the variable unset neither page has the control).
+
+**One `h1` on the account's confirmation (from the designer's review of 8a).** Today
+`account_shell` writes `h1` with the page's title on every page and `page_confirm_at` writes a
+second one with the action, so a rotate or a revoke confirmation reads "Your account" then
+"Revoke key". It fits the header: once the bar carries the brand and the identity, "whose
+account is this" is answered above the page, and the confirmation reads as the console's
+already does, where the `h1` is the action and the bar says where you are. So
+`page_confirm_at` is split into its card (the `p.lede` and the `.panel.bad` with the form,
+`confirm_card`) and its heading, the console keeping both through `page_confirm_at`
+unchanged, and `page_account_confirm` returns only the card while its caller passes the action
+word (`K::AccountKeyRotate`, `K::AccountKeyRemove`) as the shell's title, so the one `h1` and
+the `<title>` both name the action. Every other page under the prefix keeps the shell's one
+`h1`. Test: `the_account_confirmation_has_one_h1` (both operations, exactly one `<h1>`, whose
+text is the action word, and the `<title>` ends with it).
 
 #### The body
 
@@ -2693,6 +2744,32 @@ page); `the_console_footer_no_longer_names_the_identity`; `each_section_says_wha
 in as" change.
 
 **Slices.** 8a: §13.16 (the table, the + row, the confirmations through a shared
-`page_confirm`, the `td.pills` fix, the duration select on both surfaces). 8b: the shared
-header on both surfaces, the identity, the footer change, the removal of the foot form. 8c:
-the body's lede, sub-lines, lists and empty states.
+`page_confirm`, the `td.pills` fix, the duration select on both surfaces). 8c: the body's lede,
+sub-lines, lists and empty states. 8b: the shared header on both surfaces, the identity, the
+footer change, the removal of the foot form, in three tester and coder passes, each over a few
+functions:
+
+- **8b-1, the console's header.** `top_bar` factored out of `shell` (only `shell` calls it
+  yet); the identity from a pure `identity_label(given_name, email_header)` (the `given_name`
+  claim's forwarded value when the deployment configures that claim, then the **first** address
+  of `X-Auth-Email`, which may hold several joined by a space) as `span.who.muted` in
+  `nav.acct` and as the menu's first `p.lede`; Preferences as the sliders `summary.pill.ico`
+  and Sign out as the sign-out `a.pill.ico`; the footer's "signed in as" removed; in
+  `admin.css` the `.bar .pill.ico` padding and the phone rule hiding `nav.acct .who`. Green:
+  `the_identity_is_the_given_name_and_the_first_address`,
+  `the_console_footer_no_longer_names_the_identity`, `icon_controls_are_named_by_hidden_text`
+  extended to a console page (both header icons), and the existing shell tests that asserted
+  the footer, updated. The e2e walk's `iconBoxes` already measures the bar once it holds icons.
+- **8b-2, the account's header.** `account_shell` calls `top_bar` with the account's brand
+  slot, an empty `nav`, the identity, and the menu with no `onchange` and its Apply button
+  always present, the form a `GET` to `AccountPrefs::page`; the foot form and its
+  `.selfserve-prefs` rules removed, `.selfserve-brand` margin `0`. `AccountPrefs` carries what
+  the bar needs (the identity once it is read, and the Sign out `href`), so `account_shell`'s
+  callers do not change. The pill still uses `Config::logout_url` here. Green:
+  `both_surfaces_share_one_header`, `the_account_menu_has_no_handler`, and
+  `icon_controls_are_named_by_hidden_text` extended to the account page.
+- **8b-3, the two decisions above.** `logout_without_rd` and `Config::account_logout_url`, fed
+  to the account's pill; `confirm_card` split out of `page_confirm_at` and used by
+  `page_account_confirm`, whose caller passes the action word as the title. Green:
+  `logout_without_rd_keeps_everything_else`, `the_account_sign_out_carries_no_rd`,
+  `the_account_confirmation_has_one_h1`.

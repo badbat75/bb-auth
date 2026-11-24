@@ -49,3 +49,5 @@ Rules are in `AGENTS.md`. Format of this file: `AGENTS.md`, under "Skills".
   never expires unless the handler refuses empty first.
 - The console already confirms a key removal (`act_rm` links to a `GET` `page_confirm`): read the
   console's flow before designing a "new" confirmation.
+- Every page here sends `Referrer-Policy: no-referrer` (`PAGE_SECURITY_HEADERS`), so the gate's
+  `Referer` fallback (`rd_candidate`) never fires for a link on our own pages: design with `?rd=`.
