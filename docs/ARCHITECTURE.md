@@ -1417,7 +1417,7 @@ keyed by the caller's uuid, never by a form field.
   submitted pairs, sorted. The restriction is a restriction either way, so this check keeps the
   file honest rather than keeping anybody out.
 - **Shown with scope names, never URLs.** Each key's id, expiry, and either "everything you
-  reach" or its entries (as `app/scope` chips since 13.16). An entry the owner no longer reaches is shown
+  reach" or its entries (one `app/scope` per line since 13.16). An entry the owner no longer reaches is shown
   and marked, not hidden.
 - **Rotate keeps the restriction byte for byte.** `rotate_api_key` changes only `key_hash` and
   `released`, and the self-service rotate offers no field that could change `scopes`.
@@ -2022,9 +2022,10 @@ console needs no change for this requirement, and `/account/` takes the **same s
 
 - the list's revoke control becomes `form method="get" action="<prefix>/keys/remove"` with a
   hidden `id` and the same `button.danger` (`K::AccountKeyRemove`): it still looks and reads as
-  today's button, and it navigates rather than mutates (amended by §13.16: still this `GET`
-  form with its hidden `id`, but the button is the keys table's × icon, named
-  "Revoke key `<id>`", and a sibling ↻ icon reaches the same kind of page for a rotate);
+  today's button, and it navigates rather than mutates (amended by §13.16: the control is
+  now the console's own row action, a link `a.pill.rm` reading "×" to
+  `<prefix>/keys/remove?id=<id>`, named "Revoke key `<id>`", beside an `a.pill` "rotate"
+  to the rotate confirmation, exactly as `act_rm` and `act` are in the console);
 - `GET <prefix>/keys/remove?id=<id>` passes the doors every `/account/` request meets (proxy
   secret, identity header, veto `403`, row resolution, a stranger's `403`), looks the id up on
   **the caller's row only**, and renders a confirmation card: heading `K::AccountKeyRemove`,
@@ -2065,8 +2066,9 @@ a hand-written client keeps working, which is what the console's `POST` already 
 `days` field, the default and `duration_from_form` all stand. What changes is the markup: the
 component is one `select name="duration"` with five `option`s instead of five radios, on both
 surfaces, because on `/account/` it now lives in one cell of a table row, and one component
-rendered two ways would be two components. The radio markup below is kept as the record of
-what 4h decided.
+rendered two ways would be two components. In `form.edit` the select and the days field sit in
+the existing `span.limit` row. The radio markup below is kept as the record of what 4h
+decided.
 
 One component, `duration_choice`, rendered by both `account_mint_form` and `page_key_form`:
 
@@ -2158,8 +2160,8 @@ invalid marking the other fields do.
 
 - *A select instead of radios.* Five options fit on screen, a radio group shows them all
   without opening anything, and the custom field reads as belonging to the row before it.
-  (Reversed by §13.16: in one table cell five radio rows are the tallest thing in the row,
-  and the space argument goes the other way.)
+  (Reversed by §13.16: in the table's new row a select and the days field share one line
+  through the existing `.limit`, where five radio rows would be the tallest thing in it.)
 - *Hiding the days field with `:has()` until custom is checked.* It degrades to visible where
   `:has()` is not supported, but where it is, a number typed and then hidden by a change of
   mind is still submitted, and step 2 would then refuse a value the person cannot see. An
@@ -2198,8 +2200,9 @@ Unit tests in `bb-auth-web.rs`:
   is `200`, names `laptop`, carries a `POST` form to the same path with the file's current
   `rev` and the id, and leaves the file's bytes unchanged; an id on another row, an unknown id
   and no id are `404` naming nothing; a stranger is `403`, a denied caller `403`; the `POST`
-  from that form removes the key. (Survives §13.16 as written, except that the control's
-  button has no text: what it asserts on is the `aria-label`, "Revoke key `laptop`".)
+  from that form removes the key. (Changed by §13.16 in its first clause only: the revoke
+  control is a link `a.pill.rm` to `<prefix>/keys/remove?id=laptop` with the `aria-label`
+  "Revoke key `laptop`", not a `GET` form; the rest stands.)
 
 E2E: `account.js` (scripting off) mints with 6 months and sees the expiry 182 days out, with
 custom 40, and with no expiry and sees "never"; revokes through the confirmation, first
@@ -2209,365 +2212,369 @@ a click shows the check glyph and the status text `K::CopyDone`, and the clipboa
 the key; with scripting off the icon is not visible. `shots.js` gains the reveal and the key
 form, in both themes, which is the look no assertion can give.
 
-### 13.16 The keys as a table, with a + row (plan step 4, asked 2026-11-24)
+### 13.16 The keys as a table, with a + row (plan step 8a, asked 2026-11-24)
 
-What was read: `PLAN.md` steps 4 (the 4h paragraph) and 8, §13.6, §13.14 and §13.15,
-`src/bin/bb-auth-web.rs` (`page_account`, `account_mint_form`, `account_key_forms`,
-`handle_account`, `account_key_post`, `account_key_expiry`, `account_key_restriction`,
-`ACCOUNT_MAX_KEYS`, the console's `page_user` keys table, `page_key_form`, `expiry_markup`),
-`src/assets/base.css` and `admin.css` (`.selfserve`, the tables, the phone block). What was
-looked at: the current `/account/` for a person with no keys and for one with two, and the
-console's person page, light, dark and at phone width; then a mockup built on the real
-`theme.css`, `base.css` and `admin.css` plus the rules proposed below, screenshotted at 1280 px
-in both themes and at 360 and 320 px (throwaway, under `/tmp/keysdesign/mock/`: `page-*`,
-`new-*`, `error-*`, `full-*`, `confirm-*`). No page-level horizontal scroll at 320 px in any
-of them (measured: `scrollWidth` never exceeded the viewport).
+What was read: `PLAN.md` steps 4 and 8, §13.6, §13.14 and §13.15, `src/bin/bb-auth-web.rs`
+(`page_account`, `account_mint_form`, `account_key_forms`, `handle_account`,
+`account_key_post`, `account_shell`, the console's `shell`, `page_user` and its keys table,
+`act`, `act_rm`, `page_confirm`, `form_shell`, `text_field`, `url_list`, `expiry_markup`),
+`src/assets/base.css`, `admin.css`, and the operator's token file as deployed on rpi-01 (a
+copy, whose header promises custom properties on `:root` and nothing that selects a
+component). What was looked at: the current `/account/` with no keys and with two, and the
+console's person page, light, dark and at phone width; then mockups built only from the real
+`theme.css`, `base.css` and `admin.css` plus the few rules listed under *What is new*, shot at
+1280 px light and dark, at 360 and 320 px, each **twice**, with the built-in palette and with
+the token file loaded after our CSS as `ui.stylesheet_url` does (throwaway, in
+`/tmp/keysdesign/mock2/`: `account-*`, `account-error-*`, `account-full-*`,
+`account-confirm-*`, `account-menu-*`, `console-after-*`, `header-console-before-*`; a `-tok`
+suffix is the token-file run; network fetches were blocked, so the token file's web font was
+not loaded and the typeface is the only token not seen). No page-level horizontal scroll at
+360 or 320 px in any of them (measured on `scrollWidth`).
 
-**The user's request, 2026-11-24:** a table of key name, scopes and expiry, an × on each row
-that removes the key, and a + at the end of the table that adds a row and so a key; interfaces
-simple enough to read at a glance.
+**The requests, 2026-11-24.** A table of key name, scopes and expiry, an × per row that
+removes the key, and a + at the end that adds a row and so a key; interfaces simple enough to
+read at a glance; and, later the same day, **reuse everything that already exists**: a new
+component or rule only where nothing existing fits, each one argued below. This section was
+first written with its own icon buttons, chips and table classes; that version is replaced by
+this one, and every one of those inventions is gone.
 
-#### The table
+#### The table: the console's own
 
-`section#keys` holds one `table class="keys"`, always, with these columns:
+`section#keys` holds the console's key table markup, the same `table`/`thead`/`tbody` with no
+class, so the console's table rules, its row hover and its phone stacking all apply as they
+are:
 
-| Column | Header (`K`) | Cell |
+| Column | Header | Cell (all existing functions) |
 |---|---|---|
-| name | `KeyColName` "Name" | the id, `td.mono.name`, never broken (`white-space:nowrap`) |
-| scopes | `KeyColScopes` "Scopes" | `K::AccountKeyAllScopes` in muted text, or one `code.tag` chip per `app/scope`, sorted; a pair the owner no longer reaches is a `tag warn` chip followed by the visible words `K::KeyScopeGone` ("no longer reached"), never colour alone (§13.6: shown and marked, not hidden) |
-| expires | `KeyColExpires` "Expires" | the date, or a `tag` "never" (`K::KeyNever`); within `SOON_DAYS` a `tag warn` `K::ExpiresSoon` before the date; past it a `tag bad` `K::Expired` before the date, muted |
-| actions | `KeyColActions` "Actions", visually hidden (`.vh`) | ↻ then ×, two icon buttons |
+| name | `K::KeyColName` "Name" | `td.mono` with the id, as the console's `id` cell |
+| scopes | `K::Scopes` | `url_list(lang, k.scopes, K::KeyScopesAll)`: one `app/scope` per line in `ul.plain.mono`, or "all scopes" muted; the console passes its own operator wording (`KeyScopeInherit`) to the same function |
+| expiry | `K::ColExpiry` | `expiry_markup` unchanged: "expires 2027-07-08 (225d)", or the `never expires`, `expires soon` and `expired` tags |
+| actions | empty `th`, as the console's | `td.pills` holding `span.pills` with two row actions |
 
-The expires cell drops the console's leading word "expires" and its "(225d)": under a column
-headed "Expires" the word is the header said twice, and the tag is what carries urgency. The
-three states differ by a word as well as a colour, so nothing is said by colour alone (WCAG
-1.4.1, <https://www.w3.org/WAI/WCAG22/Understanding/use-of-color.html>).
+The header row reads "Name / Scopes / Expiry" where the console's reads "id / ... ": the
+console labels by the file's field names on purpose, and this page is read by somebody who
+has never seen the file. A pair the owner no longer reaches is marked inside `url_list`'s
+line with the existing `tag warn` and the words `K::KeyScopeGone` ("no longer reached"), so
+nothing is said by colour alone (WCAG 1.4.1,
+<https://www.w3.org/WAI/WCAG22/Understanding/use-of-color.html>).
 
-**× revokes, through 4h's confirmation.** Each row's last cell holds two `form method="get"`,
-the shape §13.15 chose, now with an icon instead of a word:
+**The row actions are the console's row actions.** In the console a row is acted on by
+`act` (an `a.pill`) and `act_rm` (an `a.pill.rm`), each a link to a `GET` page that changes
+nothing. `/account/` does the same:
 
-- `form method="get" action="<prefix>/keys/rotate"` with hidden `id`, holding
-  `button class="icon-btn" aria-label="<K::AccountKeyRotate> <id>" title=<same>` and an inline
-  `svg` (circular arrow);
-- `form method="get" action="<prefix>/keys/remove"` with hidden `id`, holding
-  `button class="icon-btn rm" aria-label="<K::AccountKeyRemove> <id>" title=<same>` and an
-  inline `svg` (×).
+- `a.pill` reading `K::Rotate` ("rotate") to `<prefix>/keys/rotate?id=<id>`, with
+  `aria-label` "`K::AccountKeyRotate` `<id>`" ("Rotate key laptop");
+- `a.pill.rm` reading "×" to `<prefix>/keys/remove?id=<id>`, with `aria-label` and `title`
+  "`K::AccountKeyRemove` `<id>`" ("Revoke key laptop").
 
-Both SVGs are geometry only, `aria-hidden="true" focusable="false"`, painted by `currentColor`
-exactly as the copy icon is (§13.15), and the name is the `aria-label`, MDN's pattern for an
-icon-only button
-(<https://developer.mozilla.org/en-US/docs/Web/Accessibility/ARIA/Reference/Attributes/aria-label>).
-The name carries the id because ten rows of buttons all called "Revoke key" are ten identical
-entries in a screen reader's list of controls (WCAG 2.4.6,
-<https://www.w3.org/WAI/WCAG22/Understanding/headings-and-labels.html>). The words are the
-existing `K::AccountKeyRotate` / `K::AccountKeyRemove` followed by the id, which reads in both
-languages ("Revoke key laptop", "Revoca la chiave laptop") and needs no format string in `K`.
-`title` is the same text, as a tooltip for a pointer user who does not know the glyph. The
-box is 32 by 32 CSS px, above the 24 by 24 of WCAG 2.5.8
-(<https://www.w3.org/WAI/WCAG22/Understanding/target-size-minimum.html>), with 6 px between the
-two. At rest the glyph is `--muted` on a `--card-border` outline; on hover the × turns
-`--error` and the ↻ `--text`, so the destructive one parts company before the click.
+The × is the user's word for the control, as a text glyph inside the existing pill, so it
+takes the pill's muted colour and its red hover from `base.css` and its colour and shape from
+whatever token file is loaded; no SVG and no icon-button class are needed. The name carries
+the id because ten links all called "Revoke key" are ten identical entries in a screen
+reader's list of links (WCAG 2.4.6, <https://www.w3.org/WAI/WCAG22/Understanding/headings-and-labels.html>);
+"rotate" keeps its visible word, which the longer name contains (WCAG 2.5.3,
+<https://www.w3.org/WAI/WCAG22/Understanding/label-in-name.html>). The pill is about 26 px tall
+and wider than 24 px, which meets WCAG 2.5.8's 24 by 24
+(<https://www.w3.org/WAI/WCAG22/Understanding/target-size-minimum.html>), and the two have the
+`.pills` gap between them. A link rather than 4h's `GET` form, because that is what the
+console's `act_rm` is; the confirmation page is still the one that mutates.
 
-A `GET` form rather than a link because 4h's test already pins it, and because a real
-`button` is what a person expects an × to be; it navigates either way, and the confirmation is
-the page that mutates.
+**Rotate stays, as a text pill beside the ×** (approved by the user). It must stay possible
+and confirmed: step 4 is not done until a person rotates a key in a browser, and a rotate is
+the one way to replace a leaked secret while keeping the name and the restriction byte for
+byte, which removing and re-adding would make the person re-tick from memory.
 
-**Rotate stays, as the ↻ beside the ×** (the user did not mention it). It must stay possible,
-and confirmed, for two reasons: plan step 4 is not done until a person has rotated a key in a
-browser, and a rotate is the one way to replace a leaked secret while keeping the key's name,
-its restriction byte for byte and therefore every configuration that names it. Folding it into
-the × (remove, then add a key of the same name) loses the restriction unless the person
-re-ticks it, which is recall where recognition was possible. The cost is one more glyph that
-is less universal than ×, which the tooltip and the confirmation page pay for: a wrong guess
-costs a page that says what will happen and a Cancel.
+**The confirmation pages are the console's `page_confirm`.** Its markup is `h1` (what), a
+`p.lede` (what that means), a `div.panel.bad` holding the object and a `form.edit` with
+`div.actions`: a submit (`button.danger` for a revoke) and a `cancel` pill. Both
+`GET <prefix>/keys/remove?id=` (4h) and `GET <prefix>/keys/rotate?id=` render exactly that,
+inside `account_shell`. Today `page_confirm` and the `form_shell` it calls take a console
+`View` for three things (the form's action, `rev`, the cancel link); they take those three
+values instead, so one function renders both surfaces' confirmations. Texts:
+`K::AccountKeyRemoveWarn` (4h) and `K::AccountKeyRotateWarn` ("A new secret replaces this one.
+Anything still using the old one stops getting in within seconds. The name and the scopes
+stay; the expiry starts again from today."), the last clause because `rotate_api_key` stamps a
+new `released`. Doors and `404`s as §13.15 states for the revoke. Screenshot:
+`account-confirm-*.png`.
 
-`GET <prefix>/keys/rotate?id=<id>` is the twin of 4h's revoke confirmation, behind the same
-doors and with the same `404` for an id not on the caller's row: heading `K::AccountKeyRotate`
-and the id, the key's own row of the table (name, scopes, expires) so the person sees what
-they are about to touch, `K::AccountKeyRotateWarn` ("A new secret replaces this one. Anything
-still using the old one stops getting in within seconds. The name and the scopes stay; the
-expiry starts again from today."), a `POST` form to the same path carrying `rev` and `id` with
-`button` `K::AccountKeyRotate`, and a `K::Cancel` pill back to the page. The revoke page is
-the same card with `K::AccountKeyRemoveWarn` and `button.danger`. Screenshot:
-`confirm-light.png`. The expiry sentence is there because `rotate_api_key` stamps a new
-`released`, so a rotate also extends a key, which a person would otherwise discover later.
-
-**Empty state.** A row with no keys still gets the table, so the + is where it will always
-be: one `tbody` row, `td colspan="4" class="muted"`, `K::AccountKeysNone` reworded to "No API
-keys yet." (Italian "Ancora nessuna chiave API."). A stranger (no roster row) gets the same
-empty row and **no** + row, since a key is filed under a uuid; the page's header already says
-why (§13.17).
+**Empty state.** With no keys there is no table, as in the console (`page_user` shows a muted
+line instead): `p.muted` with `K::AccountKeysNone` reworded to "No API keys yet.", then
+the + below it.
 
 #### The + row
 
-The `tfoot` holds one row, `td colspan="4"`, with `a class="pill" href="<prefix>/keys/new"`
-reading "+ New key" (`K::AccountKeyNew`). Text and not a bare "+": a lone glyph says "add" but
-not what, and the visible words are what a voice-control user says to press it (WCAG 2.5.3,
-<https://www.w3.org/WAI/WCAG22/Understanding/label-in-name.html>). It is a link because it
-only renders a page.
+Under the table, the console's add control: `p.primary` holding `a.pill` "+ New key"
+(`K::AccountKeyNew`, approved by the user), to `GET <prefix>/keys/new`. The console puts its
+`p.primary` above a table; here it is below, because the user asked for the + at the end and
+because the row it opens appears there.
 
-**`GET <prefix>/keys/new`** is the same account page, behind the same doors, with one
-difference: the `tfoot` is gone and the `tbody` ends with an editable row, then a row of its
-actions. A path rather than a query flag because the page's query string already belongs to
-the theme and language preferences, and because "the new-key form" is a thing with a name,
-like every console `+add` route. No fragment in the link: the name field carries `autofocus`,
-which focuses and scrolls to it, and MDN states that a fragment in the URL takes precedence
-over `autofocus` (<https://developer.mozilla.org/en-US/docs/Web/HTML/Reference/Global_attributes/autofocus>).
-MDN's warning about `autofocus` (a screen reader "teleports" without notice) does not bite
-here: the person just pressed "New key", and landing in its first field is what that press
-asked for.
+`GET <prefix>/keys/new` renders the same page with the `p.primary` gone and **one more
+`tbody` row**: a single `td colspan="4"` holding a `form.edit`, which is the console's own
+form furniture, posting to `<prefix>/keys`. A `form` may not wrap a table row, but it may sit
+inside a cell, so no `form` attribute is needed. Inside it, in order, all existing pieces:
 
-The editable row, `tr.new#key-new`:
-
-- **Name:** `input type="text" name="id" form="key-new-form" aria-label=K::KeyColName
-  placeholder="laptop" required maxlength="32" pattern="[a-z0-9-]{1,32}" autocapitalize="off"
-  spellcheck="false" autocomplete="off" autofocus`, then `span.hint` `K::AccountKeyIdHint`
-  shortened to "a-z, 0-9 and -". `pattern` and `required` are constraint validation, done by
-  the browser with or without scripting, so a capital letter is caught before the round trip;
-  MDN asks for the format to be explained in visible text beside it, which the hint is
+- `text_field` for the name (label `K::KeyColName`, `name="id"`, placeholder `laptop`, hint
+  `K::AccountKeyIdHint`), plus `required`, `maxlength="32"`, `pattern="[a-z0-9-]{1,32}"` and
+  `autofocus`. `pattern` and `required` are the browser's constraint validation and need no
+  script; MDN asks for the format to be stated in visible text, which the hint does
   (<https://developer.mozilla.org/en-US/docs/Web/HTML/Reference/Elements/input>). The server
-  still checks everything, since a form is a suggestion.
-- **Scopes:** a `fieldset` with a visually hidden `legend` (`K::KeyColScopes`) holding two
-  radios `name="restrict"`: `all` checked (`K::KeyScopesAll`, "All scopes") and `some`
-  (`K::KeyScopesOnly`, "Only:"), with the `key_scopes_for` pairs as checkboxes `name="scope"`
-  indented under "Only:", each labelled by its `app/scope` in `code`. Absent entirely when
-  `key_scopes_for` is empty, as today. Kept as two radios plus checkboxes, not one list of
-  checkboxes where none ticked means all: "nothing ticked" granting the widest key is the
-  default the current handler deliberately refuses.
-- **Expires:** `duration_choice`, now `select name="duration" aria-label=K::KeyColExpires`
-  with five options reading as the end of the column's sentence: "in 1 year" (`365d`,
-  `selected`), "in 6 months" (`182d`), "in 3 months" (`91d`), "after a number of days"
-  (`custom`), "never" (`never`); under it `label.days` holding `input name="days"
-  inputmode="numeric" size="5" aria-label=K::DurDaysLabel` and the word "days". The `K::Dur*`
-  texts of §13.15 are reworded to those phrases, so the console's form reads the same.
-- **Actions** (the next row, `tr.new-actions`, `td colspan="4"`): `form id="key-new-form"
-  method="post" action="<prefix>/keys" class="actions"` holding hidden `rev`, `button
-  type="submit"` `K::AccountKeyCreate` and a `K::Cancel` pill linking to the page.
+  checks everything again.
+- The restriction as the current mint form has it, `span.lbl` and `label.radio` rows
+  (`form.edit .radio`): "all scopes" (`K::KeyScopesAll`) checked, "only these:"
+  (`K::KeyScopesOnly`), then a checkbox row per `key_scopes_for` pair in `code`. Absent when
+  there is nothing to narrow to, as today. Not one list where none ticked means all: the
+  widest key by omission is what the handler deliberately refuses.
+- The duration: `span.lbl` `K::KeyColExpires` ("Expires") and the existing `span.limit` row
+  holding `duration_choice`'s `select name="duration"` ("in 1 year" `365d` selected, "in 6
+  months" `182d`, "in 3 months" `91d`, "after a number of days" `custom`, "never" `never`)
+  and the `days` input (`aria-label` `K::DurDaysLabel`, placeholder "days").
+- `div.actions`: `button` `K::AccountKeyCreate` and the `cancel` pill back to the page, which
+  is `form_shell`'s own ending.
 
-**Why the `form` attribute.** A `form` element cannot wrap a table row: the HTML parser does
-not allow it there, and the rows above already hold their own `GET` forms, which cannot nest
-inside another form. So the `form` element sits in the actions row and every input names it:
-MDN, "The `form` attribute lets you place an input anywhere in the document but have it
-included with a form elsewhere in the document" (same URL as above). This is plain HTML; no
-script is involved and the page keeps working with scripting off.
+No fragment on the + link: `autofocus` puts the person in the name field and scrolls to it,
+and MDN states that a fragment in the URL wins over `autofocus`
+(<https://developer.mozilla.org/en-US/docs/Web/HTML/Reference/Global_attributes/autofocus>).
+Its warning that a screen reader "teleports" does not bite: the person just pressed "New
+key", and its first field is where that press asked to go.
 
-**Why a second row for Save and Cancel.** At the page's 620 px the four cells hold a field,
-a radio group, a select and the actions column, and two buttons in that last column squeeze
-the other three into wrapping. Below the fields, the buttons sit where the eye ends up after
-the last field, and the 32 px actions column stays the width it is in the rows above.
+**Errors (`400`)** are `form_shell`'s: the refusal's sentence in `div.err#ERR_ID` at the top
+of the form, the field it is about marked by `text_field`'s `invalid` (red border,
+`aria-invalid`, `aria-describedby` pointing at the message), and every value as posted (name,
+radio, ticks, option, days). Which field: the id bound and `AccountKeyDup` on `id`; the
+duration refusals of §13.15 on `duration`; `AccountKeyUnknownScope` and the new
+`KeyScopesWithoutOnly` ("You ticked scopes; choose 'only these', or untick them.") on the
+restriction, with no field marked since a radio group has no `invalid` style;
+`AccountKeyFull` on none. WCAG 3.3.1 and 3.3.3 ask for the error to be identified in text and
+the fix suggested (<https://www.w3.org/WAI/WCAG22/Understanding/error-identification.html>,
+<https://www.w3.org/WAI/WCAG22/Understanding/error-suggestion.html>); each message names its
+fix. `409`, `403` and `500` keep their own pages. `KeyScopesWithoutOnly` is the twin of
+§13.15's `KeyDaysWithoutCustom`: ticks beside "all scopes" are a choice the person thinks they
+made, and today the handler drops them and files the widest key. Screenshot:
+`account-error-*.png`.
 
-**Errors (`400`).** A refused `POST <prefix>/keys` renders this same page with the row still
-open: every value as posted (the id, the radio, the ticked scopes, the chosen option, the
-days), and the message under the field it is about, as `span.field-error id="key-new-<field>-err"`,
-with that input getting `class="invalid" aria-invalid="true"
-aria-describedby="key-new-<field>-err" autofocus`. Which field: `AccountKeyBound`'s id half
-and `AccountKeyDup` on `id`; `KeyDurationRequired`, `KeyDaysWithoutCustom`, `KeyDaysInvalid`
-and the one-day floor on `duration` (the message under the days field when the choice is
-custom); `AccountKeyUnknownScope` and the new `KeyScopesWithoutOnly` on the scopes cell. A
-message about no single field (`AccountKeyFull`, a file error) is a `msg error` above the
-table. The `409`, the `403`s and the `500`s keep their own pages: there is nothing to fix in
-the row. WCAG 3.3.1 asks that the item in error be identified and described in text, and 3.3.3
-that a known fix be suggested (<https://www.w3.org/WAI/WCAG22/Understanding/error-identification.html>,
-<https://www.w3.org/WAI/WCAG22/Understanding/error-suggestion.html>); every message above
-names its own fix. Screenshot: `error-light.png`, `error-dark.png`, `error-phone.png`.
+**The 10-key bound.** At ten keys the `p.primary` is replaced by `p.muted`
+`K::AccountKeyFullRow` ("An account holds at most 10 keys. Revoke one to add another."); `GET
+keys/new` shows the same sentence and no row. Not a disabled control: it is skipped by the
+keyboard and says nothing about why. Screenshot: `account-full-*.png`.
 
-`KeyScopesWithoutOnly` ("You ticked scopes; choose Only, or untick them.") is the scopes twin
-of §13.15's `KeyDaysWithoutCustom`, for the same reason: ticks beside "All scopes" are a
-choice the person thinks they made, and quietly filing the widest key instead is a silent
-substitution. Today the handler ignores them, which is that substitution.
+**JavaScript: none.** Links, `GET` pages and `POST` forms only.
 
-**The 10-key bound.** At ten keys the `tfoot` row holds no link but `p.keys-full`,
-`K::AccountKeyFullRow` ("An account holds at most 10 keys. Revoke one to add another."), in
-muted text. Not a disabled button: a disabled control is skipped by the keyboard and says
-nothing about why, while a sentence is read by everybody and names the way out.
-`GET <prefix>/keys/new` at ten keys renders the page with that sentence instead of the row,
-`200`; the `POST` still refuses with `AccountKeyFull`. Screenshot: `full-dark.png`.
+#### What the console gains, and what stays its own
 
-**JavaScript: none.** Everything above is a link, a `GET` form or a `POST` form. Nothing was
-found that a script would make clearly better: hiding the days field until "after a number of
-days" is chosen was rejected in §13.15, and opening the row in place would save one page load
-at the price of a second way for the page to work.
-
-#### One component, two surfaces
-
-What the console and `/account/` share, byte for byte, are the **parts**: `duration_choice`
-(the select and the days field), the expires cell (which the console's `expiry_markup` becomes,
-minus the "expires" word under a column that says it, keeping its "(225d)" for operators),
-the scopes chips, and the `icon-btn` with its two glyphs. The **arrangement** is each
-surface's own, as §13.15 already decided for the confirmation: the console keeps its columns
-(released and duration matter to an operator), its row of `edit` / `rotate` / `remove` pills,
-which is how every console table acts on a row, and its separate add page, which carries
-fields the person never sees (released, free-text pairs). Making the console's key table the
-account's would make it the one console table whose actions are icons, trading the console's
-own consistency for a cross-surface one nobody sees side by side. The icon button moves to
-`base.css` if the gate ever needs one.
+The parts are now literally shared: `url_list`, `expiry_markup`, `page_confirm`, `form_shell`,
+`text_field`, `duration_choice`, `.pill` / `.pill.rm`, `p.primary`, the table. The console
+keeps its columns (released and duration matter to an operator), its `edit` action and its
+separate add page with fields a person never sees. The console's `remove` pill could read "×"
+too; that is left to the user, since it would change every console table at once.
 
 #### Phone width
 
-The existing phone block already turns every table into stacked cards with `data-label`
-headings, and that is kept. Three rules are added, scoped to `table.keys`: the name cell
-drops its label and becomes the card's title in bold; the actions cell is placed at the top
-right of the card (`position:absolute` inside a `position:relative` row), so the × sits next
-to the name it removes; and `tfoot` joins the `display:block` list. The editable row stacks
-the same way, each field under its column's label at full width, with the actions row under
-it. Screenshot: `page-phone.png`, `error-phone.png`, and at 320 px the `*-p320.png` set. WCAG
-1.4.10 asks for no two-dimensional scrolling at 320 CSS px, with data tables named as content
-that may need it (<https://www.w3.org/WAI/WCAG22/Understanding/reflow.html>); stacked cards
-mean the exception is not needed.
+Nothing new: the existing phone block stacks every table row into a card with `data-label`
+headings, and the new row is one full-width cell holding a form, which already stacks.
+Screenshot: `account-*-phone.png`, `account-*-p320.png`. WCAG 1.4.10 asks for no
+two-dimensional scrolling at 320 CSS px (<https://www.w3.org/WAI/WCAG22/Understanding/reflow.html>),
+and stacked cards need no exception.
 
-#### CSS, in `admin.css` (arrangement only, every colour a token)
+#### What is new, and what was tried first
 
-`.vh` (visually hidden), `table.keys` (`min-width:0`, cells `vertical-align:middle`, ids and
-dates `nowrap`), `th.act` / `td.act` (`width:1%`, `nowrap`, right-aligned), `.icon-btn` and its
-`svg` as above, `.icon-btn.rm:hover`, `table.keys tfoot td`, `tr.new` / `tr.new-actions` on
-`--bg`, `.field-error` (`--error`, `--fs-sm`), `.keys-full`, and the three phone rules.
-`.selfserve .keyact` and `.selfserve form.edit h2` go, with the markup that needed them.
+- **`td.pills`, replaced in place** (both surfaces): today `td.pills{display:flex;...}`. A flex
+  `td` is no longer a table cell, so its bottom border stops short of the row whenever another
+  cell wraps to two lines; the mockup showed it on every wrapped row, and the console has the
+  same defect waiting for a long cell. The replacement keeps the cell a cell and puts the
+  no-wrap where the pills are: `td.pills{text-align:right;white-space:nowrap}` and
+  `td.pills .pills{flex-wrap:nowrap}`, with `text-align:left` in the phone block where today's
+  rule has `justify-content:flex-start`. The markup gains a `span.pills` inside the cell,
+  which is the existing group component. Tried first: leaving the rule (the defect stays) and
+  `span.pills` alone in a plain `td` (the pills then wrap onto two lines in a narrow column).
+- Nothing else in this section. Dropped from the earlier version: `.vh`, `table.keys`,
+  `.icon-btn` and its SVGs, `tfoot` styling, `tr.new`, `.field-error`, `.keys-full`, and the
+  three phone rules, each replaced by the existing piece named above.
+
+Removed with the markup that needed them: `.selfserve .keyact`, `.selfserve form.edit h2`.
 
 #### `K` changes
 
-New: `KeyColName`, `KeyColScopes`, `KeyColExpires`, `KeyColActions`, `KeyNever` ("never",
-"mai"), `KeyScopeGone`, `KeyScopesAll`, `KeyScopesOnly`, `KeyScopesWithoutOnly`,
-`AccountKeyNew` ("+ New key", "+ Nuova chiave"), `AccountKeyFullRow`, `AccountKeyRotateWarn`.
-Reworded: `AccountKeysNone` ("No API keys yet."), `AccountKeyIdHint` (short form),
-`DurOneYear` / `DurSixMonths` / `DurThreeMonths` / `DurCustom` / `DurNever` (the "in 1 year"
-phrasing). Removed, because the column headers and the two new radio labels replace them:
-`AccountKeyIdLabel`, `AccountKeyDurationLabel`, `AccountKeyRestrict`, `AccountKeyScopeGroups`,
-`AccountKeyRestrictAll` and `AccountKeyRestrictSome`. `AccountKeyAdd` stays, as the title of
-the refusal pages.
+New: `KeyColName`, `KeyColExpires`, `KeyScopesAll` ("all scopes", "tutti gli ambiti"),
+`KeyScopesOnly`, `KeyScopesWithoutOnly`, `KeyScopeGone`, `AccountKeyNew` ("+ New key",
+"+ Nuova chiave"), `AccountKeyFullRow`, `AccountKeyRotateWarn`. Reused: `Scopes`,
+`ColExpiry`, `Rotate`, `Cancel`, `AccountKeyRotate`, `AccountKeyRemove`, `AccountKeyCreate`,
+`AccountKeyIdHint`. Reworded: `AccountKeysNone` ("No API keys yet."), the five `Dur*` of
+§13.15 ("in 1 year" and so on). Removed: `AccountKeyIdLabel`, `AccountKeyDurationLabel`,
+`AccountKeyRestrict`, `AccountKeyScopeGroups`, `AccountKeyRestrictAll`,
+`AccountKeyRestrictSome`, `AccountKeyAllScopes` (replaced by `KeyScopesAll`). `AccountKeyAdd`
+stays as the refusal pages' title.
 
 #### How the table is shown to hold
 
-Unit tests, `bb-auth-web.rs`:
+- `the_keys_are_the_consoles_table`: for a row with keys, `section#keys` has one `table` with
+  four `th` (the last empty), one `tbody tr` per key, the id in a `td.mono`, `KeyScopesAll`
+  or the pairs, `expiry_markup`'s words; no URL in the section; with no keys, no `table` and
+  the `AccountKeysNone` line.
+- `each_key_row_acts_like_a_console_row`: per key, a `td.pills` holding an `a.pill` to
+  `keys/rotate?id=<id>` and an `a.pill.rm` reading "×" to `keys/remove?id=<id>`, each with
+  the verb-plus-id `aria-label`; no `form` of any method on the plain page except the
+  header's preferences.
+- `the_new_key_row_is_a_page_of_its_own`: the plain page has the `+ New key` link and no input
+  named `id`; `GET keys/new` is `200`, has no such link, and has one `td colspan="4"` holding
+  a `form.edit` posting to `keys` with `rev`, the `id` input carrying `autofocus`, `required`,
+  `pattern`, one `select name="duration"` with the five options, `365d` selected; a
+  stranger's page has neither.
+- `a_refused_key_keeps_the_row_and_says_where`: `id=My Laptop` answers `400` with the row open,
+  the value kept, `div.err` with the message, the input `aria-invalid="true"`; ticks with
+  `restrict=all` give `KeyScopesWithoutOnly`; the file's bytes unchanged.
+- `the_tenth_key_closes_the_row`, and `rotating_a_key_asks_first_on_the_account_page` (the twin
+  of 4h's revoke test, including `scopes` byte for byte after the `POST`).
+- `page_confirm_renders_both_surfaces`: the console's key revoke page is byte-identical to
+  today's after the refactor.
 
-- `the_keys_are_a_table`: for a row with keys, `section#keys` has one `table.keys` whose
-  `thead` has four `th` in the order above, the last carrying `.vh` text; one `tbody tr` per
-  key, the id in the first cell, `AccountKeyAllScopes` or one chip per pair, a never-expiring
-  key showing `KeyNever`, an expired one `K::Expired`; no URL anywhere in the section.
-- `each_key_row_carries_two_named_icon_controls`: per key, a `GET` form to `keys/rotate` and
-  one to `keys/remove`, each with a hidden `id` equal to the row's id and a `button` with no
-  text, an `aria-label` of the verb plus the id, and an `svg aria-hidden="true"`; no `POST`
-  form on the plain page at all.
-- `the_new_key_row_is_a_page_of_its_own`: the plain page has the `+ New key` link to
-  `keys/new` and no input named `id`; `GET keys/new` is `200`, has no such link, has a
-  `form#key-new-form` posting to `keys` with `rev`, and every `id`, `restrict`, `scope`,
-  `duration`, `days` input carries `form="key-new-form"`; the `id` input has `autofocus`,
-  `required`, `pattern`; a stranger's page has neither link nor row.
-- `a_refused_key_keeps_the_row_and_says_where`: posting `id=My Laptop` answers `400` with
-  the row open, `value="My Laptop"`, the input `aria-invalid="true"` and an
-  `aria-describedby` naming a `.field-error` that carries the message; the chosen duration
-  option is still `selected` and ticked scopes still `checked`; the file is unchanged.
-  Likewise ticks with `restrict=all` give `KeyScopesWithoutOnly` on the scopes cell.
-- `the_tenth_key_closes_the_row`: at ten keys the page and `keys/new` show
-  `AccountKeyFullRow` and no link and no row.
-- `rotating_a_key_asks_first_on_the_account_page`: the twin of 4h's revoke test for
-  `GET keys/rotate?id=`, including that the `POST` keeps `scopes` byte for byte.
+E2E (`account.js`, scripting off): `+ New key`, a bad id refused by the field with the value
+kept, a mint with "in 6 months", Back shows the row, rotate and revoke through their
+confirmations (cancelling once first). `shots.js` gains `account`, `account-new`,
+`account-error`, `account-rm`.
 
-E2E (`account.js`, scripting off): open `+ New key`, submit a bad id and see the message by the
-field with the value kept, fix it, mint with "in 6 months" and see the reveal; Back shows the
-key as a row; rotate through its confirmation; revoke through its confirmation, cancelling
-once first. `shots.js` gains `account`, `account-new`, `account-error` and `account-rm`
-scenes, which also give the user the screenshots step 8 asks for.
-
-#### Impact on the 4h tests being written now
+#### Impact on the 4h tests
 
 - `the_copy_control_is_an_icon_with_a_name`, `the_duration_choice_maps_onto_the_grammar`,
-  `a_self_service_key_may_never_expire`: **unchanged**; the posted values are the same.
-- `the_key_form_offers_five_choices`: **changes**. One `select name="duration"` with five
-  `option`s (`365d`, `182d`, `91d`, `custom`, `never`), `365d` `selected`, plus the `days`
-  input with an `aria-label`; on `/account/` it is read from `GET keys/new`; the console's
-  edit form marks the stored choice `selected`.
-- `revoking_a_key_asks_first_on_the_account_page`: **survives**; only an assertion on the
-  button's text becomes one on its `aria-label`.
-- `e2e/tests/account.js`: its `MINT` selector (`form[action="/account/keys"] input[name=id]`)
-  no longer finds the inputs, which sit outside the `form` element; use
-  `input[form="key-new-form"][name=id]` after opening `keys/new`, and `selectOption` for the
-  duration.
+  `a_self_service_key_may_never_expire`: unchanged (the posted values are the same).
+- `the_key_form_offers_five_choices`: one `select` with five options, `365d` selected, plus
+  the `days` input; on `/account/` read from `GET keys/new`.
+- `revoking_a_key_asks_first_on_the_account_page`: the control is an `a.pill.rm` link, not a
+  `GET` form; the confirmation and the `POST` are unchanged.
+- `e2e/tests/account.js`: the mint opens `keys/new` first and uses `selectOption` for the
+  duration; the `form[action="/account/keys"]` selector still finds the inputs.
 
 #### Rejected
 
-- *Inline editing of an existing row* (rename, change scopes). Nobody asked, and an edit of a
-  live credential's restriction is the console's job.
-- *A disabled + at ten keys.* See above: unreadable reason, unreachable by keyboard.
-- *A `details` disclosure for "Only:".* Its summary cannot change from "All scopes" when a box
-  is ticked without a script, so it would state the wrong thing.
-- *One list of checkboxes, none ticked meaning all.* The widest key by omission.
-- *Opening the row with a script and falling back to the link.* Two ways for one control to
-  work, to save one page load on an action taken a few times a year.
+- *Own icon buttons, chips, a `table.keys` class, an in-row field per column.* All tried in
+  the first version of this section and all replaced by existing pieces; the per-column row
+  also needed the `form` attribute and squeezed every field at the page's 620 px.
+- *A disabled + at ten keys*, *a `details` for "only these"* (its summary cannot change
+  without a script), *none ticked meaning all*, *opening the row with a script*.
 
-### 13.17 The account page as a whole (plan step 8, brought forward 2026-11-24)
+### 13.17 The account page as a whole, and the one header (plan steps 8b and 8c)
 
-The user asked, alongside 13.16, for the whole page to be better as a page. Read and looked
-at as for 13.16; the mockups are the same files, which show the whole page.
+The user asked for the whole page to be better, then for "a header with the user's info, the
+classic settings and sign out, not that thing at the end of the page", then for everything to
+reuse what exists, then allowed the console's header itself to be revised if it was not good
+enough, for both surfaces at once, then required that the operator's theme keep working
+(rpi-01: `brand_name` "BadBat75", a logo, `theme` system, and the token file as
+`stylesheet_url`). Mockups as in 13.16.
 
-**What a person comes for, in order.** Who am I signed in as; what does that open; then the
-things they can do (keys today; profile edits in step 5; deleting the account in step 7);
-then how the page looks. The page today gives each section the same weight and puts the
-preferences, the least important thing on it, behind the biggest button on it.
+#### The header: the console's, shared
 
-**Header.** The brand row stays first and keeps wearing the `ui` section (name, logo, the
-operator's stylesheet, `ui.theme` as `data-theme`). Under it `div.who`: `h1`
-`K::AccountTitle`; the **first address** in `div.primary-id`, a size up and bold, because it
-is the one fact every person checks; the other addresses as `code.tag` chips in
-`ul.ids.chips` (`aria-label` `K::AccountOtherAddresses`), absent when there is only one; then
-the uuid, demoted to a muted small line `K::AccountIdLabel` ("Account id") plus the uuid. It
-stays on the page, since support asks for it, but it is the least read fact in the header.
-A stranger sees the address and, in place of the uuid line, `K::AccountNoRow` as a muted
-panel saying what that means for them (they can read what they reach; keys need an account).
+`/account/` gets the console's header, the same markup from one function: `shell`'s
+`header.top > div.bar` is factored out as `top_bar(brand, tabs, acct)` and both `shell` and
+`account_shell` call it. Every class is existing: `header.top`, `.bar`, `.brand`, `nav`,
+`nav.acct`, `details.settings`, `summary.pill`, `.menu`, `form.edit`, `.actions`, `.pill`.
 
-**Sections.** The four keep their ids and their order (`#reach`, `#groups`, `#keys`,
-`#profile`), which keeps every existing test's anchor; groups stay beside reach because they
-are the "why" of it. Each panel is an `h2` plus one muted `p.sub` sentence saying what the
-section is for, so a person who has never heard "scope" reads the page anyway:
-`K::AccountReachSub` ("The applications your sign-in opens, and the areas inside each."),
-`K::AccountGroupsSub` ("Groups an administrator has put you in."), `K::AccountKeysSub` ("A key
-lets a script or a tool sign in as you. It reaches at most what you reach."),
-`K::AccountProfileSub` ("What your sign-in tells these applications about you."). The heading
-"User groups" becomes "Groups" on this page (`K::AccountGroups`): the page is about one user.
+| Slot | Console | `/account/` |
+|---|---|---|
+| brand | `a.brand` "bb-auth-web" plus version, links home | `span.brand.selfserve-brand`: the `ui.logo_url` image (when set) and `ui.brand_name`, where the page shows them today; not a link, since the page is the only one |
+| tabs | the five `nav` pills | an empty `nav`, which is what the console's own `403` page already renders |
+| identity | **new**: `span.who.muted` in `nav.acct`, the address | the same: the given name and the first address ("Bot · `bot@example.com`"), or the address alone |
+| Preferences | `details.settings` "Preferences" (`K::Settings`), Language then Theme, `onchange` applies, `noscript` Apply | the same `details` and `.menu` and order, **no `onchange`**, and the Apply `button` in `div.actions` always present |
+| Sign out | `a.pill` to `BB_AUTH_WEB_LOGOUT_URL`, absent when unset | the same pill and the same setting |
 
-- **Where you reach** becomes `dl.facts`: the application as `dt`, its scopes as chips in the
-  `dd`, so each application is one line rather than a heading and a bulleted list.
-- **Groups**: chips in one line.
-- **API keys**: §13.16.
-- **Profile**: `dl.facts`, claim name as `dt`, value as `dd`; a configured claim with nothing
-  forwarded reads `K::AccountNotProvided` ("not provided") in muted text rather than "None.",
-  which read as if the value were the word None. Step 5's edit goes in this panel.
-- **Delete my account** (step 7) is a last panel of its own, `panel bad`, after Profile and
-  before the preferences, so the one irreversible action is never between two safe ones.
+**Where they differ, and why.** The account page carries no handler at all (AGENTS.md, the
+self-service paragraph) and its policy has no `'unsafe-hashes'`; the console's handler only
+saves one click and its `noscript` button already shows the shape that works without it. So
+the account's menu is the console's menu as a browser with scripting off sees it, and the
+write stays as today: one submit, one `302` that sets the `theme` and `lang` cookies, the same
+names the console writes. The form's `action` is the account page. The brand slot shows the
+operator's brand because this page is the operator's estate seen by a person, while the
+console names the tool to its administrators.
 
-**Empty states** name what is missing instead of "None.": `K::AccountReachNone` ("Your
-sign-in opens no application yet."), `K::AccountGroupsNone` ("You are in no group."),
-`AccountKeysNone` as in 13.16, `K::AccountProfileNone` ("This deployment shares no profile
-details."). A generic "None." under four headings made a person read the heading again to
-learn what was absent (Nielsen's "match between system and the real world").
+**The identity, added to the console too.** Today the console says who is signed in only in
+its footer, below the fold on a long page; Nielsen's first heuristic (visibility of system
+status) puts "who am I acting as" where the session controls are. It goes in `nav.acct`
+before Preferences, muted, as text and not a control, and is also the first line of the
+Preferences panel (`p.lede`), which is where it remains on a phone. The console's footer drops
+its "signed in as" (one home for the fact) and keeps the version. The given name comes from
+the forwarded profile claim `given_name` when the deployment configures it, else nothing is
+shown but the address. Screenshots, before and after:
+`header-console-before-{light,dark,phone}.png` and `header-console-before-menu-*.png`, then
+`console-after-*.png` and `console-after-menu-*.png`.
 
-**Preferences** move to a footer row, `form.selfserve-prefs.compact` after a hairline: the two
-selects at their natural width side by side and Apply as a `pill`, not a full-width
-`button.primary`. It is still one `GET` form with a real submit button and no handler. The
-page's filled buttons are then only the ones that create or destroy something, so the
-strongest colour on the page always means an action with a consequence.
+Nothing else in the console header changes: on the comparison its controls are legible, the
+menu works without a script, and the one weakness seen (the fifth tab clipped at 360 px, with
+only a horizontal scroll to reach it) is the tabs' own and not part of this request; it is
+named here for a later look.
 
-**Spacing and type.** Panels keep `base.css`'s `.panel` and its 16 px gap; inside, `h2` sits
-flush with a 2 px gap to its sentence and 12 px under it. No new colours, no new components in
-`base.css`: chips are `.tag`, the outline button is `.pill`, the danger panel is `.panel.bad`.
+**Phone.** The existing phone block applies: one line holding the brand and the two pills.
+The identity in the bar gives way there (it would push the bar to a second line) and is read
+at the top of the menu; on `/account/` the page body names the person anyway.
+Screenshots: `account-menu-tok-phone.png`, `console-after-phone.png`.
 
-**Phone.** One column already; `dl.facts` becomes one column (term over value), the chips
-wrap, the preferences stack. Measured in the mockup: no horizontal scroll at 360 or 320 px.
+**Sign out, an open question for the architect.** `BB_AUTH_WEB_LOGOUT_URL` may carry an `rd`
+that brings an administrator back to the console after signing in again. The same link on
+`/account/` would bring a person who is not an administrator to the console, a `403`. Either
+the account page omits its `rd` (the gate then falls back to the page's `Referer`, which is a
+backup and not a mechanism, and otherwise to the sign-in page) or a second setting names the
+account's own round trip. Until decided, the account renders the pill from the same setting.
 
-**New `K`:** `AccountOtherAddresses`, `AccountIdLabel`, `AccountGroups`, `AccountReachSub`,
-`AccountGroupsSub`, `AccountKeysSub`, `AccountProfileSub`, `AccountNotProvided`,
-`AccountReachNone`, `AccountGroupsNone`, `AccountProfileNone`. `SignedInAs` and `AccountUuid`
-leave this page (the header shows the address itself, and "your uuid" becomes "Account id").
+#### The body
 
-**Tests:** `the_header_leads_with_the_address` (the first address in `.primary-id`, the
-others as chips, the uuid after them, a stranger's `AccountNoRow` and no uuid);
-`each_section_says_what_it_is_for` (an `h2` and a `p.sub` in each of the four, in order);
-`empty_sections_name_what_is_missing` (the four specific sentences, no bare "None.");
-`the_preferences_are_not_the_main_action` (the prefs form has no `button.primary`). The
-existing section-id and profile tests change only where they match the old "None." text.
+- `h1` `K::AccountTitle`, then one `p.lede`: every address in `code`, and on a second line
+  `K::AccountIdLabel` ("Account id") and the uuid (approved by the user). A stranger's
+  `p.lede` carries the address and `K::AccountNoRow` instead of the uuid.
+- The four sections keep their ids and order (`#reach`, `#groups`, `#keys`, `#profile`): each
+  a `.panel` with `h2` and one `p.lede.sub` saying what it is for (the class the console's
+  sections already use for this): `K::AccountReachSub`, `K::AccountGroupsSub`,
+  `K::AccountKeysSub`, `K::AccountProfileSub` (texts as listed below).
+- Where you reach: `ul.plain` of `code` `app/scope`, the console's own person-page list.
+- Groups: `ul.plain` of `code`. Heading `K::AccountGroups` ("Groups").
+- API keys: §13.16.
+- Profile: `ul.plain`, `code` claim, then the value, or `span.muted` `K::AccountNotProvided`
+  ("not provided") where the deployment configured a claim that was not forwarded. Step 5's
+  edit goes here.
+- Delete my account (step 7) will be a last `.panel.bad`, after Profile.
+- Empty states name what is missing, each a `p.muted`: `K::AccountReachNone` ("Your sign-in
+  opens no application yet."), `K::AccountGroupsNone` ("You are in no group."),
+  `AccountKeysNone`, `K::AccountProfileNone` ("This deployment shares no profile details.").
+- The theme and language form at the foot is gone; it is the header's Preferences.
 
-**Slices.** One slice with 13.16: the keys table, the + row and its errors, the rotate
-confirmation, and the `duration_choice` select on both surfaces, because 4h's tests are being
-written against markup this replaces and changing it twice costs more than once. Then, each
-its own slice: (a) the header and the section sentences and empty states; (b) `dl.facts` for
-reach and profile and chips for groups; (c) the preferences footer. Step 5's profile edit and
-step 7's delete panel take the places named above when they land.
+Sub-line texts: reach "The applications your sign-in opens, and the areas inside each.";
+groups "Groups an administrator has put you in."; keys "A key lets a script or a tool sign in
+as you. It reaches at most what you reach."; profile "What your sign-in tells these
+applications about you." (Italian in the `K` table.)
+
+#### The operator's theme
+
+Every rule above is an existing rule or is written in existing custom properties only; no new
+token is needed, so the token file needs no change. With the token file loaded, light and
+dark, the header, the brand with its logo (painted through `--logo-filter`, which the token
+file inverts on dark), the table, the tags, the `div.err` and the confirmation all take the
+operator's palette and shape: no rule of ours escaped it (`account-*-tok-*.png`). The token
+file's web font was not loaded in the mockups, so the typeface is the one token not seen.
+
+#### What the page adds, and what was tried first
+
+- `@media (max-width:640px){nav.acct .who{display:none}}`: the identity giving way on a phone.
+  Tried first: leaving it, which wraps the account bar onto two lines for a fact the menu and
+  the page body already carry; and putting the identity only in the menu, which misses the
+  user's "user info on the right".
+- `.selfserve-brand{margin:0 0 16px}` becomes `margin:0`: an edit of the existing rule, whose
+  margin spaced the brand from the heading below it and has no job inside the bar. The rule
+  and its `img` and `.name` rules are otherwise reused as they are for the brand slot.
+- `.who` is a class name for the one selector above, not a component: the element is the
+  existing `.muted` text.
+- Removed with their markup: `.selfserve-prefs`, `.selfserve-prefs .fields`,
+  `.selfserve-prefs .fields label`, and `body:has(.selfserve)` if the header's own ground makes
+  the flat-ground fix unnecessary (to check on the real page).
+
+New `K`: `AccountIdLabel`, `AccountGroups`, `AccountReachSub`, `AccountGroupsSub`,
+`AccountKeysSub`, `AccountProfileSub`, `AccountNotProvided`, `AccountReachNone`,
+`AccountGroupsNone`, `AccountProfileNone`. `SignedInAs` moves from the console's footer and
+the account body to the menu's first line; `AccountUuid` is replaced by `AccountIdLabel`.
+
+**Tests:** `both_surfaces_share_one_header` (the same `header.top` structure on `/admin/` and
+`/account/`, the identity in `nav.acct`, Sign out when configured); `the_account_menu_has_no_handler`
+(no `onchange` anywhere under the prefix, an Apply button in the menu, the form a `GET` to the
+page); `the_console_footer_no_longer_names_the_identity`; `each_section_says_what_it_is_for`;
+`empty_sections_name_what_is_missing`. The existing shell tests asserting the footer's "signed
+in as" change.
+
+**Slices.** 8a: §13.16 (the table, the + row, the confirmations through a shared
+`page_confirm`, the `td.pills` fix, the duration select on both surfaces). 8b: the shared
+header on both surfaces, the identity, the footer change, the removal of the foot form. 8c:
+the body's lede, sub-lines, lists and empty states.

@@ -18,9 +18,14 @@ Rules are in `AGENTS.md`. Format of this file: `AGENTS.md`, under "Skills".
 - A mockup: plain HTML under `/tmp` linking `file:///…/src/assets/{theme,base,admin}.css` plus a
   `proposed.css`, shot with `require('<repo>/e2e/node_modules/playwright').chromium.launch({channel:'msedge'})`
   at 1280 light/dark, 360 and 320; log `document.documentElement.scrollWidth` to prove no page scroll.
-- An editable table row with no script: the `form` element sits in one cell and every input names it
-  with the `form` attribute, since a form cannot wrap a `tr`.
+- Start from the console's pieces (`shell`'s header, `page_confirm`, `form_shell`, `text_field`, `url_list`,
+  `expiry_markup`, `act`/`act_rm`, `p.primary`, `.limit`): the user wants reuse first, and each new rule
+  must say in the design what existing piece was tried and why it did not fit.
+- A form row inside a table: one `td colspan` holding a `form.edit` (a form may sit in a cell, not wrap a row).
+- Shoot every mockup twice: built-in palette, and the operator's token file (a copy is under
+  `/tmp/claude-1000/bb-auth-tasks/ext/tokens.css`) linked after our CSS; block network fetches in the shot.
 
 ## Pitfalls
 
 - `autofocus` is ignored when the URL has a fragment (MDN): a link that opens a form must not add `#id`.
+- `td.pills` is `display:flex`, so its border stops short whenever another cell in the row wraps.
