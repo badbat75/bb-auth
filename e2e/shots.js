@@ -24,7 +24,7 @@ const fs = require('fs');
 const path = require('path');
 
 const { E2E_DIR, FIXTURE, SETTINGS_FIXTURE, boot } = require('./lib/server');
-const { submit, formBytes, resubmit, writeDoc, doc } = require('./lib/harness');
+const { submit, formBytes, resubmit, writeDoc, doc, setDuration } = require('./lib/harness');
 
 /** Where a screenshot lands. Under artifacts/, which is gitignored. */
 const OUT = path.join(E2E_DIR, 'artifacts', 'visual');
@@ -48,7 +48,10 @@ const VIEWS = [
     // Only where there is something to read: a form's field measures do not change.
     only: ['dashboard', 'users', 'denied', 'apps', 'app-detail', 'can-authorized',
       'can-denied', 'can-on-a-person', 'user-rm', 'key-minted', 'error-refused', 'conflict',
-      'conflict-mint', 'forbidden', 'settings-menu'],
+      'conflict-mint', 'forbidden', 'settings-menu',
+      // The self-service page is prose a person reads in their own language, so the copy of
+      // the table's headings and the refusal is worth reading in Italian too.
+      'account', 'account-new', 'account-error', 'account-rm'],
   },
   // An explicit theme is only worth photographing against the OPPOSITE `colorScheme`:
   // that is the pair that proves the choice beat the operating system. Under a matching
@@ -82,6 +85,15 @@ const VIEWS = [
 
 /** `go` is a plain GET of a path below the base; most scenes are one of these. */
 const go = (p) => async (page, ctx) => { await page.goto(ctx.base + p); };
+
+/** The self-service page is reached by a person who is **not** on `web.admins`, so a scene
+ *  that walks it swaps the identity header for one of the roster's own and puts the
+ *  administrator back afterwards: every scene of a view shares one browser context, and a
+ *  scene that left `you@example.com` in place would render the next one's console as a 403. */
+const asPerson = (page) => page.setExtraHTTPHeaders({ 'X-Auth-Email': 'you@example.com' });
+const asAdmin = (page) => page.setExtraHTTPHeaders({ 'X-Auth-Email': 'admin@example.com' });
+/** A path under the self-service prefix, which is a sibling of the console's base (§13). */
+const acct = (ctx, p) => `${ctx.origin}/account${p}`;
 
 /**
  * Press Tab until `selector` holds the focus, then stop. Keyboard focus, not
@@ -188,6 +200,40 @@ const SCENES = [
   ['app-rm', go('/apps/app1/rm')],
   ['scope-rm', go('/apps/app1/scopes/admin/rm')],
 
+  // ---- the self-service page (§13.16) ------------------------------------
+  // The keys table, the row that opens below it, the refusal that keeps the row, and the
+  // revoke card. Each mints its own key first: the fixture's caller has none, and an empty
+  // section photographs as a sentence, which is the other shape and is worth one shot too.
+  ['account', async (page, ctx) => {
+    await asPerson(page);
+    await page.goto(acct(ctx, '/keys/new'));
+    await page.fill('input[name=id]', 'demo');
+    await submit(page);
+    await page.goto(acct(ctx, '/'));
+    await asAdmin(page);
+  }],
+  ['account-new', async (page, ctx) => {
+    await asPerson(page);
+    await page.goto(acct(ctx, '/keys/new'));
+    await asAdmin(page);
+  }],
+  ['account-error', async (page, ctx) => {
+    await asPerson(page);
+    await page.goto(acct(ctx, '/keys/new'));
+    await page.fill('input[name=id]', 'My Laptop');
+    await submit(page);
+    await asAdmin(page);
+  }],
+  ['account-rm', async (page, ctx) => {
+    await asPerson(page);
+    await page.goto(acct(ctx, '/keys/new'));
+    await page.fill('input[name=id]', 'demo');
+    await submit(page);
+    await page.goto(acct(ctx, '/'));
+    await page.click('a[href*="/account/keys/remove"]');
+    await asAdmin(page);
+  }],
+
   // ---- the states only a POST reaches ------------------------------------
   // The flash: a save, then the 303 lands on the page carrying ?msg=.
   ['flash-saved', async (page, ctx) => {
@@ -204,7 +250,7 @@ const SCENES = [
   ['key-minted', async (page, ctx) => {
     await page.goto(ctx.base + '/users/bot%40example.com/keys/%2Badd');
     await page.fill('input[name=id]', 'demo');
-    await page.fill('input[name=duration]', '90d');
+    await setDuration(page, '90d');
     await submit(page);
   }],
   // The generic 409: a form rendered against bytes someone else has since replaced.

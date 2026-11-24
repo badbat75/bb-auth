@@ -71,6 +71,43 @@ when there is no tag to check out.
 release logs anybody out.** The settings file goes from version 1 to version 3, which needs an
 edit before the binaries land: see "Upgrading" below.
 
+### Changed: a key's duration is one of five, `/account` is a key table, and an empty `duration` is refused
+
+* **A key's duration is now chosen from five, on both editors.** The console's mint and edit
+  forms and `/account`'s mint offer **1 year, 6 months, 3 months, a number of days, no expiry**,
+  posting `duration` = `365d`, `182d`, `91d`, `custom` (with `days`) or `never`. The presets are
+  the file's own strings, so `bb-auth-adm`, the gate and every existing file see nothing new, and
+  the console's custom box still takes the whole grammar (`40`, `40d`, `12h`). 182 and 91 days are
+  exactly 26 and 13 weeks, so a key minted on a working day expires on a working day.
+* **Breaking, for a client that posts the form itself: an empty `duration` is refused.** It used
+  to mean "no expiry" (`parse_duration("")` is `Dur::Never`), so a form that lost its field minted
+  a key that never dies: the one outcome nobody asked for, and the one a person cannot undo from
+  the page. A `POST` that omits `duration` or sends it empty is now a `400` naming the field, on
+  the console's mint, the console's edit and `/account`'s mint alike. Two refusals stand beside it
+  for the same reason, each a form that contradicts itself: a number in the days box while a
+  preset is picked (`duration=365d&days=40`), on all three, and on `/account` alone, scopes
+  ticked while "all scopes" is picked.
+  Nothing stored changes: the file's grammar is untouched, so `bb-auth-adm key add --duration` and
+  every existing file keep working.
+* **The 365-day self-service bound is lifted: a person may mint their own key that never
+  expires.** The user's decision, 2026-11-24. The one-day floor stays, because a self-service key
+  that dies before anybody has used it is a support ticket and not a credential, and so do the ten
+  keys per account and the `[a-z0-9-]{1,32}` id grammar. An administrator's own pages were never
+  bound.
+* **`/account`'s keys section is the console's key table**, with the console's row actions: a
+  `rotate` pill and a revoke icon (an `×`), each a link to a confirmation page (`GET
+  /account/keys/rotate?id=`, `/account/keys/remove?id=`) whose `POST` is the only thing that
+  writes, so a misclick costs nothing and an id that is not on the caller's row is a `404` naming
+  nothing. "+ New key" opens `GET /account/keys/new`, the same page with one row more holding the
+  form, and a refused mint keeps that row with the values as posted. At ten keys the `+` is the
+  sentence that says why there is none.
+* **The reveal's copy control is an icon**, the estate's shared `pill ico` component, its name
+  carried by text a screen reader reads and no browser shows. It is still revealed only by
+  `COPY_SCRIPT`, and only in a secure context: with scripting off, on plain HTTP, or with no
+  `navigator.clipboard`, no button shows and one click on the key still selects all of it.
+
+No cookie, access-file or settings-file format changes, and nothing here logs anybody out.
+
 ### Changed: the bearer reveal shows only the key, with a copy button
 
 * **The page that reveals a bearer now carries the estate's one script.** A freshly minted or

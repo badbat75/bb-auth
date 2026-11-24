@@ -273,11 +273,11 @@ use bb_auth_core::{
     remove_user_group, rename_application, rename_scope, request_site, request_url, rotate_api_key,
     scope_mut, scope_pos, sha256_hex, shadowing_scope, social_idp_label, stylesheet_link,
     user_group_mut, user_group_refs, user_label, user_pos, user_refs, version_line, Access,
-    AccessFile, AccessWrite, ApiKeyRecord, ApiKeySpec, AppSpec, AuditCredential, AuditEvent,
-    AuditKind, AuditLimit, AuditPolicy, AuditUnit, Decision, Dur, GateSettings, GuardedSetting,
-    RequestSite, ScopeSpec, SealedKey, Settings, SettingsFile, SettingsWrite, SocialButtonSpec,
-    Subject, UiTheme, UserSpec, WiredButton, Written, BASE_CSS, DEFAULT_AUDIT_FILE,
-    IDENTITY_HEADER, PAGE_SECURITY_HEADERS, SOCIAL_IDPS, THEME_CSS,
+    AccessFile, AccessWrite, ApiKeySpec, AppSpec, AuditCredential, AuditEvent, AuditKind,
+    AuditLimit, AuditPolicy, AuditUnit, Decision, Dur, GateSettings, GuardedSetting, RequestSite,
+    ScopeSpec, SealedKey, Settings, SettingsFile, SettingsWrite, SocialButtonSpec, Subject,
+    UiTheme, UserSpec, WiredButton, Written, BASE_CSS, DEFAULT_AUDIT_FILE, IDENTITY_HEADER,
+    PAGE_SECURITY_HEADERS, SOCIAL_IDPS, THEME_CSS,
 };
 use maud::{html, Markup, PreEscaped, DOCTYPE};
 use sha2::{Digest, Sha256};
@@ -374,16 +374,26 @@ const SETTINGS_ONCHANGE: &str = "this.form.submit()";
 /// for it leaves a clicked button saying nothing for a tick, which is exactly what a dead button
 /// looks like, and this is the one control on the estate's most important page. The cost is that
 /// a refused copy shows `data-done` for that same tick before `data-failed` replaces it.
+///
+/// The word goes to the **status span**, never into the button, and the button's own state is an
+/// attribute (§13.15, §13.17): the control is an icon whose only text is its name, so a word
+/// written into it would replace the glyph the person is looking at and take the name away from
+/// the reader that speaks it. `data-state` is what the stylesheet swaps the glyph on, and a
+/// refusal sets `failed`, which keeps the copy glyph and selects the key, since a copy that was
+/// refused is one the person can still do by hand.
 const COPY_SCRIPT: &str = r#"(function () {
   var code = document.getElementById("bearer");
   var btn = document.getElementById("bearer-copy");
-  if (!code || !btn || !window.isSecureContext || !navigator.clipboard) { return; }
+  var status = document.getElementById("bearer-copy-status");
+  if (!code || !btn || !status || !window.isSecureContext || !navigator.clipboard) { return; }
   btn.hidden = false;
   btn.addEventListener("click", function () {
-    btn.textContent = btn.getAttribute("data-done");
+    btn.setAttribute("data-state", "done");
+    status.textContent = btn.getAttribute("data-done");
     navigator.clipboard.writeText(code.textContent).catch(function () {
+      btn.setAttribute("data-state", "failed");
       window.getSelection().selectAllChildren(code);
-      btn.textContent = btn.getAttribute("data-failed");
+      status.textContent = btn.getAttribute("data-failed");
     });
   });
 })();"#;
@@ -1085,17 +1095,9 @@ enum K {
     AccountProfile,
     AccountNone,
     AccountKeysNone,
-    AccountKeyAllScopes,
     AccountKeyAdd,
     AccountKeyCreate,
     AccountKeyIdHint,
-    AccountKeyDurationHint,
-    AccountKeyRestrict,
-    AccountKeyRestrictAll,
-    AccountKeyRestrictSome,
-    AccountKeyScopeGroups,
-    AccountKeyIdLabel,
-    AccountKeyDurationLabel,
     AccountKeyRotate,
     AccountKeyRemove,
     AccountKeyNotYours,
@@ -1103,6 +1105,31 @@ enum K {
     AccountKeyFull,
     AccountKeyDup,
     AccountKeyUnknownScope,
+    // The keys table and its `+ New key` row (§13.16). The two column words are the
+    // table's headings **and** the mint form's field labels: a field and the column
+    // that shows the same value must not answer that value's name from two entries.
+    AccountKeyNew,
+    AccountKeyFullRow,
+    AccountKeyRotateWarn,
+    AccountKeyRemoveWarn,
+    KeyColName,
+    KeyColExpires,
+    KeyScopesAll,
+    KeyScopesOnly,
+    KeyScopeGone,
+    KeyScopesWithoutOnly,
+    // The five duration choices (§13.15), the custom box, and the three refusals
+    // `duration_from_form` answers with.
+    DurOneYear,
+    DurSixMonths,
+    DurThreeMonths,
+    DurCustom,
+    DurNever,
+    DurDaysLabel,
+    DurDaysHint,
+    KeyDurationRequired,
+    KeyDaysWithoutCustom,
+    KeyDaysInvalid,
     AccountVetoTitle,
     AccountVetoBody,
     AccountAmbiguousTitle,
@@ -2214,11 +2241,10 @@ fn t(lang: Lang, key: K) -> &'static str {
         // noun it stands for, and the sections are not the same gender. The keys are *chiavi*
         // (feminine), so the shared "Nessuno." would read as a slip in the page's own language,
         // while it is right for a claim's value (*valore*, masculine) and for a group.
-        K::AccountKeysNone => m(lang, "None.", "Nessuna."),
-        K::AccountKeyAllScopes => m(
+        K::AccountKeysNone => m(
             lang,
-            "every scope you reach",
-            "ogni scope che raggiungi",
+            "No API keys yet.",
+            "Non ci sono ancora chiavi API.",
         ),
         // The mint form. `id` and `duration` are the file's own field names and stay as
         // written in it, exactly as the console's key form leaves them.
@@ -2229,47 +2255,24 @@ fn t(lang: Lang, key: K) -> &'static str {
             "lowercase letters, digits and dashes, up to 32",
             "lettere minuscole, cifre e trattini, fino a 32",
         ),
-        K::AccountKeyDurationHint => m(
-            lang,
-            "between 1 and 365 days, written <n>d",
-            "tra 1 e 365 giorni, scritto <n>d",
-        ),
-        K::AccountKeyRestrict => m(lang, "Restriction", "Restrizione"),
-        K::AccountKeyRestrictAll => m(
-            lang,
-            "every scope you reach",
-            "ogni scope che raggiungi",
-        ),
-        K::AccountKeyRestrictSome => m(
-            lang,
-            "only the scopes you pick",
-            "solo gli scope che scegli",
-        ),
-        K::AccountKeyScopeGroups => m(
-            lang,
-            "the scopes a key of yours can be limited to",
-            "gli scope a cui una tua chiave può essere limitata",
-        ),
         // The mint form's two field labels. The **field names** stay `id` and `duration`,
         // because the handler reads those and the file stores those; the label is the page's
         // word for the thing, and a label is displayed text. The Italian nouns are the ones
         // this page's own refusals already use (`AccountKeyBound` says "l'id di una chiave",
         // "una durata è"), so the form and the refusal name the field alike.
-        K::AccountKeyIdLabel => m(lang, "Key id", "Id della chiave"),
-        K::AccountKeyDurationLabel => m(lang, "Key duration", "Durata della chiave"),
         // The two forms every key of the caller's carries. The verbs are this page's, not the
         // console's (`K::Rotate` / `K::Remove` are an operator's lowercase command words): a
         // person with no administrator in the room is clicking a button that says what it does.
-        K::AccountKeyRotate => m(lang, "Rotate key", "Ruota la chiave"),
+        K::AccountKeyRotate => m(lang, "Rotate key", "Rigenera la chiave"),
         K::AccountKeyRemove => m(lang, "Revoke key", "Revoca la chiave"),
         // The refusals this form answers with. Each names what to write instead, because a
         // person with no administrator at hand has to fix it themselves.
         K::AccountKeyBound => m(
             lang,
-            "a key id is lowercase letters, digits and dashes, up to 32, and a duration is \
-             <n>d between 1d and 365d.",
-            "l'id di una chiave è lettere minuscole, cifre e trattini, fino a 32, e una durata \
-             è <n>d tra 1d e 365d.",
+            "a key id is lowercase letters, digits and dashes, up to 32, and a key lasts at \
+             least a day.",
+            "l'id di una chiave è lettere minuscole, cifre e trattini, fino a 32, e una chiave \
+             dura almeno un giorno.",
         ),
         K::AccountKeyFull => m(
             lang,
@@ -2285,6 +2288,76 @@ fn t(lang: Lang, key: K) -> &'static str {
             lang,
             "a scope you picked is not one a key of yours can reach.",
             "uno degli scope scelti non è uno che una tua chiave può raggiungere.",
+        ),
+        // The keys table and its `+ New key` row (§13.16). The two column words are the
+        // table's headings **and** the mint form's field labels, so a field and the column
+        // that shows the same value answer that value's name from one entry, and an Italian
+        // page cannot carry a label in English.
+        K::AccountKeyNew => m(lang, "+ New key", "+ Nuova chiave"),
+        K::AccountKeyFullRow => m(
+            lang,
+            "An account holds at most 10 keys. Revoke one to add another.",
+            "Un account ha al massimo 10 chiavi. Revocane una per aggiungerne un'altra.",
+        ),
+        // The last clause is the reason it is spelled out: a rotate stamps a new `released`,
+        // so the window starts again, which is not what "rotate the secret" sounds like.
+        K::AccountKeyRotateWarn => m(
+            lang,
+            "A new secret replaces this one. Anything still using the old one stops getting \
+             in within seconds. The name and the scopes stay; the expiry starts again from \
+             today.",
+            "Un nuovo segreto sostituisce questo. Ciò che usa il vecchio smette di entrare in \
+             pochi secondi. Il nome e gli ambiti restano; la scadenza riparte da oggi.",
+        ),
+        K::AccountKeyRemoveWarn => m(
+            lang,
+            "The key stops working within seconds. This cannot be undone: only a new key can \
+             replace it.",
+            "La chiave smette di funzionare in pochi secondi. Non si può annullare: solo una \
+             nuova chiave può sostituirla.",
+        ),
+        K::KeyColName => m(lang, "Name", "Nome"),
+        K::KeyColExpires => m(lang, "Expires", "Scade"),
+        K::KeyScopesAll => m(lang, "all scopes", "tutti gli ambiti"),
+        K::KeyScopesOnly => m(lang, "only these", "solo questi"),
+        K::KeyScopeGone => m(lang, "no longer reached", "non più raggiungibile"),
+        // The twin of the console's refusal for the same contradiction: the ticks say one
+        // thing and the radio says another, and the person has to pick which one they meant.
+        K::KeyScopesWithoutOnly => m(
+            lang,
+            "You ticked scopes; choose 'only these', or untick them.",
+            "Hai spuntato degli ambiti; scegli 'solo questi', o togli la spunta.",
+        ),
+        // The five duration choices (§13.15). The words are the person's; the values the
+        // control posts are the file's (`365d`, `182d`, `91d`, `custom`, `never`), so the
+        // stored string is the spelling `bb-auth-adm show` prints.
+        K::DurOneYear => m(lang, "in 1 year", "tra 1 anno"),
+        K::DurSixMonths => m(lang, "in 6 months", "tra 6 mesi"),
+        K::DurThreeMonths => m(lang, "in 3 months", "tra 3 mesi"),
+        K::DurCustom => m(lang, "after a number of days", "dopo un numero di giorni"),
+        K::DurNever => m(lang, "never", "mai"),
+        K::DurDaysLabel => m(
+            lang,
+            "Custom duration, in days",
+            "Durata personalizzata, in giorni",
+        ),
+        K::DurDaysHint => m(lang, "days", "giorni"),
+        // The three refusals `duration_from_form` answers with, each naming its own fix,
+        // because the person reading them has no administrator in the room.
+        K::KeyDurationRequired => m(
+            lang,
+            "Choose how long the key lasts.",
+            "Scegli per quanto tempo dura la chiave.",
+        ),
+        K::KeyDaysWithoutCustom => m(
+            lang,
+            "you typed a number of days; choose Custom, or clear it",
+            "hai scritto un numero di giorni; scegli Personalizzata, o cancellalo",
+        ),
+        K::KeyDaysInvalid => m(
+            lang,
+            "a whole number of days, at least 1",
+            "un numero intero di giorni, almeno 1",
         ),
         // One sentence for "no such key" and "that key belongs to somebody else", because a
         // page that answered the two differently is an enumeration oracle for anybody with an
@@ -4124,11 +4197,30 @@ fn section_heading(label: &str, key: &str) -> Markup {
 /// expanded**: the file is what an operator edits and what `bb-auth-adm` prints, so a page
 /// that quietly substituted a group's patterns would be showing something nobody wrote.
 fn url_list(lang: Lang, urls: Option<&Vec<String>>, absent: &str) -> Markup {
+    url_list_marked(lang, urls, absent, |_| None)
+}
+
+/// [`url_list`] where a line may carry a warning tag after it: `mark` answers, per line, the
+/// words to put there (or `None`). The words are text beside the line and not a colour, so a
+/// reader that does not see colour hears them too (WCAG 1.4.1).
+fn url_list_marked(
+    lang: Lang,
+    urls: Option<&Vec<String>>,
+    absent: &str,
+    mark: impl Fn(&str) -> Option<&'static str>,
+) -> Markup {
     html! {
         @match urls {
             None => span class="muted" { (absent) },
             Some(l) if l.is_empty() => span class="bad" { "[] — " (t(lang, K::ReachesNothing)) },
-            Some(l) => ul class="plain mono" { @for u in l { li { (u) } } },
+            Some(l) => ul class="plain mono" {
+                @for u in l {
+                    li {
+                        (u)
+                        @if let Some(words) = mark(u) { " " (tag("warn", words)) }
+                    }
+                }
+            },
         }
     }
 }
@@ -4193,17 +4285,43 @@ fn form_shell(
     submit: &str,
     danger: bool,
 ) -> Markup {
+    form_shell_at(
+        &v.href(&v.at),
+        v.rev,
+        &v.href(&v.at.parent()),
+        v.t(K::Cancel),
+        err,
+        fields,
+        submit,
+        danger,
+    )
+}
+
+/// [`form_shell`] with the three things it takes from a console [`View`] given as values: where
+/// the form posts, the `rev` it carries, and where its cancel link goes. The self-service page
+/// has no `View` and renders the same form through this, so the two surfaces cannot drift.
+#[allow(clippy::too_many_arguments)]
+fn form_shell_at(
+    action: &str,
+    rev: &str,
+    cancel: &str,
+    cancel_label: &str,
+    err: Option<&Refusal>,
+    fields: Markup,
+    submit: &str,
+    danger: bool,
+) -> Markup {
     html! {
-        form class="edit" method="post" action=(v.href(&v.at)) {
+        form class="edit" method="post" action=(action) {
             // The library's words, verbatim: the sentence `bb-auth-adm` prints for the same
             // refusal, so an operator who has read one recognises the other. `id` is what
             // an attributed field's `aria-describedby` points at.
             @if let Some(e) = err { div class="err" id=(ERR_ID) { (e.msg) } }
-            input type="hidden" name="rev" value=(v.rev);
+            input type="hidden" name="rev" value=(rev);
             (fields)
             div class="actions" {
                 button type="submit" class=@if danger { "danger" } @else { "" } { (submit) }
-                a class="pill" href=(v.href(&v.at.parent())) { (v.t(K::Cancel)) }
+                a class="pill" href=(cancel) { (cancel_label) }
             }
         }
     }
@@ -4235,6 +4353,58 @@ fn text_field(
                   aria-invalid=[invalid.then_some("true")]
                   aria-describedby=[invalid.then_some(ERR_ID)];
             @if let Some(h) = hint { span class="hint" { (h) } }
+        }
+    }
+}
+
+/// The key's duration, chosen from five: one `select` whose values are the strings the file
+/// stores, and the custom box beside it (§13.15, as §13.16 amended its markup).
+///
+/// One component and not two, because the console's mint, the console's edit and the
+/// self-service page all mint the same field, and a component rendered two ways is two
+/// components that drift one edit at a time. One `select` and not five radios because on
+/// `/account/` it lives in one cell of a table row, where five stacked rows would be the
+/// tallest thing in it.
+///
+/// The box is a **text** field with `inputmode="numeric"`, not a `number` field, because the
+/// console's custom value takes the whole grammar (`40`, `40d`, `12h`): a `number` field
+/// cannot type `12h`, and the keyboard hint is what a numeric box was wanted for. It shares
+/// the row with the choice it belongs to (`form.edit .limit`, the furniture `admin.css`
+/// already has) and has no visible label of its own, so its name is written down as an
+/// `aria-label` (WCAG 3.3.2).
+///
+/// `choice` is one of the five values, `days` what the box shows; [`duration_of_stored`] and
+/// [`duration_of_posted`] are what put a file's bytes, or a person's submission, into that
+/// shape, and they always name one of the five, so exactly one option is picked.
+fn duration_choice(
+    lang: Lang,
+    label: &str,
+    choice: &str,
+    days: &str,
+    hint: &str,
+    invalid: bool,
+) -> Markup {
+    html! {
+        label {
+            span class="lbl" { (label) }
+            span class="limit" {
+                select name="duration" aria-label=(label)
+                      class=[invalid.then_some("invalid")]
+                      aria-invalid=[invalid.then_some("true")]
+                      aria-describedby=[invalid.then_some(ERR_ID)] {
+                    // The longest bounded choice is the one an add form opens on, and `never`
+                    // is never preselected: the widest credential has to be asked for.
+                    option value="365d" selected[choice == "365d"] { (t(lang, K::DurOneYear)) }
+                    option value="182d" selected[choice == "182d"] { (t(lang, K::DurSixMonths)) }
+                    option value="91d" selected[choice == "91d"] { (t(lang, K::DurThreeMonths)) }
+                    option value="custom" selected[choice == "custom"] { (t(lang, K::DurCustom)) }
+                    option value="never" selected[choice == "never"] { (t(lang, K::DurNever)) }
+                }
+                input type="text" inputmode="numeric" name="days" size="6" value=(days)
+                      class="f-days"
+                      aria-label=(t(lang, K::DurDaysLabel));
+            }
+            span class="hint" { (hint) }
         }
     }
 }
@@ -4357,12 +4527,44 @@ fn page_confirm(
     button: &str,
     err: Option<&Refusal>,
 ) -> Markup {
+    page_confirm_at(
+        &v.href(&v.at),
+        v.rev,
+        &v.href(&v.at.parent()),
+        v.t(K::Cancel),
+        heading,
+        what,
+        why,
+        html! {},
+        button,
+        err,
+        true,
+    )
+}
+
+/// [`page_confirm`] on values instead of a [`View`], so the self-service page renders the
+/// console's card. `fields` is what the form carries besides the `rev`: nothing on the console,
+/// whose route names the key, and the key's id on `/account/`, whose two paths do not.
+#[allow(clippy::too_many_arguments)]
+fn page_confirm_at(
+    action: &str,
+    rev: &str,
+    cancel: &str,
+    cancel_label: &str,
+    heading: Markup,
+    what: Markup,
+    why: &str,
+    fields: Markup,
+    button: &str,
+    err: Option<&Refusal>,
+    danger: bool,
+) -> Markup {
     html! {
         h1 { (heading) }
         p class="lede" { (why) }
         div class="panel bad" {
             (what)
-            (form_shell(v, err, html! {}, button, true))
+            (form_shell_at(action, rev, cancel, cancel_label, err, fields, button, danger))
         }
     }
 }
@@ -5990,24 +6192,105 @@ fn page_email_form(v: &View, owner: &str, f: &UserForm, err: Option<&Refusal>) -
 struct KeyForm {
     id: String,
     duration: String,
+    days: String,
     scopes: String,
 }
 
 impl KeyForm {
     fn of(k: &ApiKeySpec) -> KeyForm {
+        let (duration, days) = duration_of_stored(&k.duration);
         KeyForm {
             id: k.id.trim().to_string(),
-            duration: k.duration.trim().to_string(),
+            duration,
+            days,
             scopes: urls_text(k.scopes.as_ref()),
         }
     }
     fn read(f: &Form) -> KeyForm {
+        let (duration, days) = duration_of_posted(f.get("duration"), f.get("days"));
         KeyForm {
             id: f.get("id").to_string(),
-            duration: f.get("duration").to_string(),
+            duration,
+            days,
             scopes: f.get("scopes").to_string(),
         }
     }
+}
+
+/// The stored `duration`, read back into the control that spells it: a preset for a preset,
+/// no expiry for **every** spelling of it (`never`, `0`, `-`, and the empty field
+/// `parse_duration` reads as never), and the custom box filled with the file's own bytes for
+/// anything the five cannot name. That last case is the one a form rewrite loses: `8760h` is
+/// a real value in a real file, and a form that showed nothing picked for it would save
+/// `365d` over it the moment the person pressed the button.
+fn duration_of_stored(stored: &str) -> (String, String) {
+    let stored = stored.trim();
+    match stored {
+        "365d" | "182d" | "91d" => (stored.to_string(), String::new()),
+        _ => match parse_duration(stored) {
+            Some(Dur::Never) => ("never".to_string(), String::new()),
+            _ => ("custom".to_string(), stored.to_string()),
+        },
+    }
+}
+
+/// What a submission names, in the same shape, so the re-render after a refusal shows the
+/// person what they posted. A hand-written client that posts `duration=30d` gets the custom
+/// box filled with it, and a form that arrived with no `duration` at all opens on the add
+/// form's default, which is what keeps the control carrying exactly one `selected`.
+fn duration_of_posted(choice: &str, days: &str) -> (String, String) {
+    let choice = choice.trim();
+    match choice {
+        "365d" | "182d" | "91d" | "custom" | "never" => {
+            (choice.to_string(), days.trim().to_string())
+        }
+        "" => ("365d".to_string(), days.trim().to_string()),
+        other => ("custom".to_string(), other.to_string()),
+    }
+}
+
+/// The five choices, mapped onto the file's duration grammar, in **one** function for both
+/// surfaces (§13.15): the console's mint, the console's edit and the self-service page mint
+/// the same field, and a mapping written twice is two mappings.
+///
+/// The presets come back **verbatim** (`365d`, `182d`, `91d`, `never`), because they are not
+/// codes to translate: they are the exact strings the file stores, so `bb-auth-adm show`, the
+/// gate and every existing file see nothing new. A custom all-digit value gets the `d` the
+/// grammar needs, so the file reads unambiguously; a custom value with a unit (`12h`) passes
+/// through as typed, because the console's box has always taken the whole grammar and twelve
+/// hours is a window a deployment genuinely wants. Anything else is passed through as typed,
+/// so a hand-written `duration=30d` keeps working.
+///
+/// The refusals are the half worth reading. An empty or absent `duration` is refused and not
+/// read as "no expiry": `parse_duration("")` is `Dur::Never`, so a form that lost its control
+/// would mint a key that never dies, which is the one outcome the person did not ask for and
+/// cannot undo from the page. A number typed while a preset is picked is a form that
+/// contradicts itself, and guessing which half was meant is how a key outlives its reason.
+fn duration_from_form(form: &Form) -> Result<String, K> {
+    let choice = form.get("duration").trim();
+    if choice.is_empty() {
+        return Err(K::KeyDurationRequired);
+    }
+    let days = form.get("days").trim();
+    if choice == "custom" {
+        let stored = if days.is_empty() {
+            String::new()
+        } else if days.bytes().all(|b| b.is_ascii_digit()) {
+            format!("{days}d")
+        } else {
+            days.to_string()
+        };
+        // A spelling of never has its own choice, and `parse_duration` reads `0`, `-` and
+        // `never` as `Dur::Never`: taking one here would be a second way to spell one thing.
+        if !matches!(parse_duration(&stored), Some(Dur::Secs(secs)) if secs > 0) {
+            return Err(K::KeyDaysInvalid);
+        }
+        return Ok(stored);
+    }
+    if !days.is_empty() {
+        return Err(K::KeyDaysWithoutCustom);
+    }
+    Ok(choice.to_string())
 }
 
 /// `api_keys · add` / `· edit`. `released` is not editable: on an add it is today, and on an
@@ -6032,8 +6315,14 @@ fn page_key_form(
                 @if !editing {
                     (text_field("id", "id", &f.id, "laptop", None, about("id")))
                 }
-                (text_field("duration", "duration", &f.duration, "365d",
-                            Some("<n>d · <n>h · never"), about("duration")))
+                (duration_choice(
+                    v.lang,
+                    "duration",
+                    &f.duration,
+                    &f.days,
+                    "<n>d · <n>h",
+                    about("duration"),
+                ))
                 label {
                     span class="lbl" { "released" }
                     span class="mono" { (released) }
@@ -6939,9 +7228,21 @@ fn page_deny_form(v: &View, f: &DenyForm, err: Option<&Refusal>) -> Markup {
 /// because that text is what a click selects (`user-select: all` in `admin.css`) and what the
 /// button copies. The button is server-rendered `hidden`: a browser running no code must show no
 /// control that does nothing, and [`COPY_SCRIPT`] is the only thing that shows it, so the script
-/// goes last, after the two elements it looks up exist, and needs no load event. `type="button"`
+/// goes last, after the three elements it looks up exist, and needs no load event. `type="button"`
 /// because this block sits where a form may later be wrapped around it, and a button that submits
 /// one is a mutation on a click.
+///
+/// The button is the estate's shared icon component, `pill ico` (§13.17), so its size, its
+/// 24 by 24 target and the way a glyph is painted all live in `base.css` with every other icon
+/// control, and this block keeps only the rule that is its own: the glyph swap on `data-state`.
+/// Its name is a `span.vh` of translated words inside it, repeated as `title`, and **not** an
+/// `aria-label`: one naming mechanism for every icon in the estate, because the header's
+/// Preferences trigger is a `summary`, which carries no reliable `aria-label` while text content
+/// is read by every reader. The two glyphs are inline geometry, `aria-hidden` and `focusable`
+/// false, so the shape is out of the accessibility tree and out of the tab order, and they name
+/// no colour, which keeps `THEME_CSS` the only place one is defined. The word a click writes goes
+/// to the `role="status"` span beside the icon, empty as served, so the icon stays an icon and
+/// the word is announced to a reader.
 ///
 /// The bearer is in **exactly one place** in the response: the text of this `code`. The script is
 /// a compile-time constant and reads the key from the DOM at click time, and the button's two
@@ -6951,6 +7252,7 @@ fn page_deny_form(v: &View, f: &DenyForm, err: Option<&Refusal>) -> Markup {
 /// the panel. Inside `.secret` a `code` is the key's block chip (`admin.css`), so a second one
 /// there would render as a second box the size of the secret.
 fn bearer_reveal(lang: Lang, bearer: &str) -> Markup {
+    let name = t(lang, K::CopyKey);
     html! {
         div class="secret" {
             div { strong { (t(lang, K::BearerHeading)) } }
@@ -6959,10 +7261,20 @@ fn bearer_reveal(lang: Lang, bearer: &str) -> Markup {
             // `hidden="hidden"`: the serialised form of the boolean attribute, which is what
             // `admin.css`'s `.secret button[hidden]` pins shut against an operator stylesheet
             // that gives `button` a `display` of its own.
-            button type="button" id="bearer-copy" hidden="hidden"
+            button type="button" id="bearer-copy" class="pill ico" hidden="hidden" title=(name)
                 data-done=(t(lang, K::CopyDone)) data-failed=(t(lang, K::CopyFailed)) {
-                (t(lang, K::CopyKey))
+                // Two overlapping rounded squares: the sheet in front, and the one behind it.
+                svg class="i-copy" viewBox="0 0 24 24" aria-hidden="true" focusable="false" {
+                    rect x="9" y="9" width="12" height="12" rx="2" {}
+                    path d="M5 15H4a2 2 0 0 1-2-2V4a2 2 0 0 1 2-2h9a2 2 0 0 1 2 2v1" {}
+                }
+                // The check, shown by the state the click stamps on the button.
+                svg class="i-done" viewBox="0 0 24 24" aria-hidden="true" focusable="false" {
+                    path d="M20 6 9 17l-5-5" {}
+                }
+                span class="vh" { (name) }
             }
+            span id="bearer-copy-status" class="copy-status" role="status" {}
             script { (PreEscaped(COPY_SCRIPT)) }
         }
         // The word is an element, so the sentence is two translated halves around it, and the
@@ -7356,7 +7668,8 @@ fn mutate(v: &View, form: &Form) -> Outcome {
                 if id.is_empty() {
                     return Err(Refusal::on("id", v.t(K::KeyIdRequired)));
                 }
-                let duration = f.duration.trim().to_string();
+                let duration =
+                    duration_from_form(form).map_err(|k| Refusal::on("duration", v.t(k)))?;
                 // Fail before minting: a key the file would reject is a secret handed out
                 // for nothing.
                 if key_expiry(&released, &duration).is_none() {
@@ -7406,8 +7719,10 @@ fn mutate(v: &View, form: &Form) -> Outcome {
                 .map(|k| k.released.trim().to_string())
                 .unwrap_or_default();
             let r = (|| -> Result<(), Refusal> {
+                let duration =
+                    duration_from_form(form).map_err(|e| Refusal::on("duration", v.t(e)))?;
                 let k = key_mut(&mut doc, owner, id)?;
-                k.duration = f.duration.trim().to_string();
+                k.duration = duration;
                 if key_expiry(&k.released, &k.duration).is_none() {
                     return Err(Refusal::on("duration", v.t(K::BadKeyWindow)));
                 }
@@ -8153,8 +8468,8 @@ struct AccountOwn<'a> {
     reached: Vec<(&'a str, Vec<&'a str>)>,
     /// The `user_groups` that list the caller's uuid.
     groups: Vec<&'a str>,
-    /// The keys whose owner is the caller's uuid, sorted by id.
-    keys: Vec<&'a ApiKeyRecord>,
+    /// The keys on the caller's roster row, in the file's order.
+    keys: Vec<&'a ApiKeySpec>,
     /// Each configured `gate.profile_claims` entry, with the value the proxy forwarded.
     claims: Vec<(&'a str, Option<String>)>,
     /// The scopes a key of the caller's may be narrowed to, from
@@ -8166,6 +8481,8 @@ struct AccountOwn<'a> {
     /// the files gave rather than as two more arguments to the page.
     keys_path: &'a str,
     rev: &'a str,
+    /// The page's own URL: where every cancel link goes.
+    page: &'a str,
 }
 
 /// The scopes a signed-in caller reaches, grouped by application in file order.
@@ -8203,23 +8520,52 @@ fn account_groups<'a>(doc: &'a AccessFile, uuid: Option<&str>) -> Vec<&'a str> {
         .collect()
 }
 
-/// The keys whose owner is `uuid`, sorted by id.
+/// The keys on the caller's roster row, in the file's order.
 ///
-/// Sorted because [`Access::by_key_hash`] is a `HashMap`, and a page that reshuffled a person's
-/// keys between two reloads is a page nobody can compare with the file they wrote. The bearer and
-/// its hash are not in an [`ApiKeyRecord`] at all, which is what keeps this list free of the
-/// secret: the file stores only a hash, and the bearer exists nowhere after minting.
-fn account_keys<'a>(access: &'a Access, uuid: Option<&str>) -> Vec<&'a ApiKeyRecord> {
-    let Some(owner) = uuid else {
-        return Vec::new();
-    };
-    let mut keys: Vec<&ApiKeyRecord> = access
-        .by_key_hash
-        .values()
-        .filter(|k| k.uuid == owner)
-        .collect();
-    keys.sort_by(|a, b| a.key_id.cmp(&b.key_id));
-    keys
+/// Read off the **document**, not the compiled table: the table is a `HashMap` and has lost the
+/// order, a page that reshuffled a person's keys between two reloads is a page nobody can compare
+/// with the file they wrote, and the console's own table lists them in the file's order too. It
+/// is also the row the ten-key bound counts, including a key whose hash the gate skipped, since a
+/// person has to be able to see and revoke that one as well. The bearer is not on a roster row at
+/// all, only its hash, and the hash is never shown: this list is free of the secret by the shape
+/// of what the page reads from it.
+fn account_keys<'a>(doc: &'a AccessFile, uuid: Option<&str>) -> Vec<&'a ApiKeySpec> {
+    uuid.and_then(|u| user_pos(doc, u))
+        .map_or_else(Vec::new, |i| doc.users[i].api_keys.iter().collect())
+}
+
+/// Everything the page shows, gathered from the two files this request opened. One function for
+/// the page a `GET` renders and for the page a refused mint answers with, so the refusal cannot
+/// show a different account from the one it refused.
+#[allow(clippy::too_many_arguments)]
+fn account_own<'a>(
+    doc: &'a AccessFile,
+    access: &'a Access,
+    settings: &'a Settings,
+    req: &Request,
+    ids: &[String],
+    uuid: Option<&str>,
+    keys_path: &'a str,
+    rev: &'a str,
+    page: &'a str,
+) -> AccountOwn<'a> {
+    AccountOwn {
+        reached: account_reached(access, &ids[0]),
+        groups: account_groups(doc, uuid),
+        keys: account_keys(doc, uuid),
+        claims: account_claims(settings, req),
+        mintable: match uuid {
+            Some(u) => access
+                .key_scopes_for(u)
+                .iter()
+                .map(|(a, s)| (a.name.as_str(), s.name.as_str()))
+                .collect(),
+            None => Vec::new(),
+        },
+        keys_path,
+        rev,
+        page,
+    }
 }
 
 /// Each configured claim, with the value this request actually carried for its derived header.
@@ -8242,42 +8588,22 @@ fn account_claims<'a>(settings: &'a Settings, req: &Request) -> Vec<(&'a str, Op
         .collect()
 }
 
-/// A key's expiry as the file states it: the date it expires, or the words for "no expiry".
-fn account_key_expiry(lang: Lang, key: &ApiKeyRecord) -> String {
-    match key.expires {
-        Some(e) => format_date(e),
-        None => t(lang, K::NeverExpires).to_string(),
-    }
-}
-
-/// A key's own restriction: the `app/scope` names it carries, sorted, or the words for "the
-/// owner's whole reach". A restriction is a subtraction, so an owner has to be able to see that a
-/// key is narrower than they are.
-fn account_key_restriction(lang: Lang, key: &ApiKeyRecord) -> String {
-    match &key.scopes {
-        None => t(lang, K::AccountKeyAllScopes).to_string(),
-        Some(scopes) => {
-            let mut names: Vec<&str> = scopes.iter().map(String::as_str).collect();
-            names.sort_unstable();
-            names.join(", ")
-        }
-    }
-}
-
 /// The most keys this page mints onto one roster row. The administrator's CLI has no such
 /// bound, and does not need one: an operator typing `bb-auth-adm key add` over SSH is one
 /// person doing a counted thing. This form is reachable by every signed-in identity on the
 /// estate, and a row accumulating keys is a row whose credentials nobody can review.
 const ACCOUNT_MAX_KEYS: usize = 10;
 
-/// The shortest and longest window a self-service mint may ask for, in seconds.
+/// The shortest window a self-service mint may ask for, in seconds.
 ///
-/// `bb-auth-adm` accepts `never`, and the console offers it, because an operator who mints a
-/// machine credential for a build agent knows the agent is retired one day. A person with no
-/// administrator at hand has no such moment, and a key that never expires on a self-service
-/// account is a credential that outlives the reason it was made.
+/// There is no longest. With "no expiry" among the five choices a ceiling protects nothing:
+/// a key of 36500 days and a key that never expires are the same credential, and refusing the
+/// first while offering the second is a rule with no reason, which is what the page's own
+/// ceiling was. The grammar is the only limit, and it is a real one: `parse_duration` and
+/// `key_expiry` use checked arithmetic and answer `None` on overflow. The floor stays, because
+/// a key that expires in seconds is a key that does not work, and an `hours` value a
+/// hand-written `POST` may bring is refused by it.
 const ACCOUNT_KEY_MIN_SECS: u64 = 86_400;
-const ACCOUNT_KEY_MAX_SECS: u64 = 365 * 86_400;
 
 /// Is `id` one this page will file? `[a-z0-9-]{1,32}`, which is the shape that stays readable
 /// in a log line and in a `key rotate`, and is short enough to be the whole name of a thing.
@@ -8289,38 +8615,95 @@ fn account_key_id_ok(id: &str) -> bool {
 }
 
 /// Is `duration` a window this page will file? See [`ACCOUNT_KEY_MIN_SECS`]: the parse is the
-/// library's, so `365d`, `8760h` and a bare `365` are all one year, and the bound is on the
-/// seconds they mean, not on the spelling.
+/// library's, so `365d`, `8760h` and a bare `365` are all one year, and the floor is on the
+/// seconds they mean, not on the spelling. No expiry passes too, because the page offers it.
 fn account_key_window_ok(duration: &str) -> bool {
-    matches!(
-        parse_duration(duration),
-        Some(Dur::Secs(secs)) if (ACCOUNT_KEY_MIN_SECS..=ACCOUNT_KEY_MAX_SECS).contains(&secs)
-    )
+    match parse_duration(duration) {
+        Some(Dur::Never) => true,
+        Some(Dur::Secs(secs)) => secs >= ACCOUNT_KEY_MIN_SECS,
+        None => false,
+    }
 }
 
-/// The mint form, in the keys section.
+/// The values the mint row shows. A fresh row opens on the one-year choice and "all scopes"; a
+/// refused submission puts back exactly what was posted, so the person fixes the one thing wrong
+/// instead of retyping the rest (WCAG 3.3.1 and 3.3.3).
+struct NewKeyRow<'a> {
+    id: &'a str,
+    choice: &'a str,
+    days: &'a str,
+    /// The radio: `true` when "only these" is picked.
+    some: bool,
+    ticked: &'a [String],
+    err: Option<&'a Refusal>,
+}
+
+impl NewKeyRow<'_> {
+    /// The row as `GET <prefix>/keys/new` opens it.
+    const OPEN: NewKeyRow<'static> = NewKeyRow {
+        id: "",
+        choice: "365d",
+        days: "",
+        some: false,
+        ticked: &[],
+        err: None,
+    };
+}
+
+/// The mint row's name field: [`text_field`]'s shape, plus the browser's own constraints.
 ///
-/// Five fields and a submit button, and two of the console's are deliberately absent. There is
-/// no **owner** field: the owner is the person asking, read from the identity header nginx
-/// wrote, and a field that chose the row would let any signed-in person mint a credential on
-/// anybody's account. There is no `released`: a key's issue date is a fact about a secret being
-/// created now, and the handler stamps it.
+/// [`text_field`] is the console's shared field, and the console's key form puts no constraint on
+/// its id: an operator typing `bb-auth-adm key add` over SSH is one person doing a counted thing,
+/// and the library checks the grammar anyway. This form is reachable by every signed-in identity
+/// on the estate, so the grammar goes on the field as well, and `autofocus` puts the person in the
+/// field the `+` asked for. All four are the browser's constraint validation and need no script,
+/// which is what keeps this page inside the estate's no-JavaScript rule; the server checks every
+/// one of them again.
+fn account_key_id_field(lang: Lang, value: &str, invalid: bool) -> Markup {
+    html! {
+        label {
+            span class="lbl" { (t(lang, K::KeyColName)) }
+            input type="text" name="id" value=(value) placeholder="laptop"
+                  class=(format!("f-id{}", if invalid { " invalid" } else { "" }))
+                  autocapitalize="off" spellcheck="false"
+                  autofocus required maxlength="32" pattern="[a-z0-9-]{1,32}"
+                  aria-invalid=[invalid.then_some("true")]
+                  aria-describedby=[invalid.then_some(ERR_ID)];
+            span class="hint" { (t(lang, K::AccountKeyIdHint)) }
+        }
+    }
+}
+
+/// The mint row: the console's `form.edit` inside one cell that spans the table.
 ///
-/// The checkboxes are [`bb_auth_core::Access::key_scopes_for`], so the pairs on offer are
-/// exactly the pairs the handler accepts, and each checkbox's value is the `application/scope`
-/// pair the file stores. A hand-written form can still name a pair that is not on the list, and
-/// the handler answers that with a `400`: a pair the gate would refuse mints a key that fails
-/// on its very first request. That list is **empty** for a caller whose scopes take `login`
-/// only, and then the narrowing radio is absent with it: a choice with nothing to choose is a
-/// control that can only be answered wrong.
+/// §13.16. A `form` may not wrap a table row, but it may sit inside a cell, so the row that mints
+/// is in the table the person is looking at and no `form` attribute is needed anywhere.
 ///
-/// The two labels are the page's words, through [`K`]; the two field **names** are the file's,
-/// because the handler reads `id` and `duration`.
+/// Two of the console's fields are deliberately absent. There is no **owner** field: the owner is
+/// the person asking, read from the identity header nginx wrote, and a field that chose the row
+/// would let any signed-in person mint a credential on anybody's account. There is no `released`:
+/// a key's issue date is a fact about a secret being created now, and the handler stamps it.
 ///
-/// No URL appears. The restriction is named by application and scope, never by the pattern
-/// behind it (§13.6): a URL from the file is information about the estate, and this page is
-/// about the person.
-fn account_mint_form(lang: Lang, keys_path: &str, rev: &str, scopes: &[(&str, &str)]) -> Markup {
+/// The checkboxes are [`bb_auth_core::Access::key_scopes_for`], so the pairs on offer are exactly
+/// the pairs the handler accepts, and each checkbox's value is the `application/scope` pair the
+/// file stores. A hand-written form can still name a pair that is not on the list, and the handler
+/// answers that with a `400`: a pair the gate would refuse mints a key that fails on its very
+/// first request. That list is **empty** for a caller whose scopes take `login` only, and then the
+/// narrowing radio is absent with it: a choice with nothing to choose is a control that can only
+/// be answered wrong, and `restrict=some` with no pair writes a key narrowed to nothing.
+///
+/// No URL appears. The restriction is named by application and scope, never by the pattern behind
+/// it (§13.6): a URL from the file is information about the estate, and this page is about the
+/// person.
+fn account_key_row(
+    lang: Lang,
+    keys_path: &str,
+    rev: &str,
+    cancel: &str,
+    scopes: &[(&str, &str)],
+    row: &NewKeyRow,
+) -> Markup {
+    let about = |name| row.err.is_some_and(|e| e.is(name));
     // Grouped by application, in the order `key_scopes_for` yields them, which is file order.
     let mut apps: Vec<(&str, Vec<&str>)> = Vec::new();
     for (app, scope) in scopes {
@@ -8329,89 +8712,148 @@ fn account_mint_form(lang: Lang, keys_path: &str, rev: &str, scopes: &[(&str, &s
             None => apps.push((*app, vec![*scope])),
         }
     }
-    html! {
-        form method="post" action=(keys_path) class="edit" {
-            input type="hidden" name="rev" value=(rev);
-            h2 { (t(lang, K::AccountKeyAdd)) }
-            (text_field(
-                t(lang, K::AccountKeyIdLabel),
-                "id",
-                "",
-                "laptop",
-                Some(t(lang, K::AccountKeyIdHint)),
-                false,
-            ))
-            (text_field(
-                t(lang, K::AccountKeyDurationLabel),
-                "duration",
-                "",
-                "365d",
-                Some(t(lang, K::AccountKeyDurationHint)),
-                false,
-            ))
-            div {
-                span class="lbl" { (t(lang, K::AccountKeyRestrict)) }
+    let fields = html! {
+        (account_key_id_field(lang, row.id, about("id")))
+        (duration_choice(
+            lang,
+            t(lang, K::KeyColExpires),
+            row.choice,
+            row.days,
+            t(lang, K::DurDaysHint),
+            about("duration"),
+        ))
+        div {
+            span class="lbl" { (t(lang, K::Scopes)) }
+            label class="radio" {
+                input type="radio" name="restrict" value="all" checked[!row.some];
+                span { (t(lang, K::KeyScopesAll)) }
+            }
+            // The narrowing choice, and only when there is something to narrow **to**.
+            @if !apps.is_empty() {
                 label class="radio" {
-                    input type="radio" name="restrict" value="all" checked;
-                    span { (t(lang, K::AccountKeyRestrictAll)) }
+                    input type="radio" name="restrict" value="some" checked[row.some];
+                    span { (t(lang, K::KeyScopesOnly)) ":" }
                 }
-                // The narrowing choice, and only when there is something to narrow **to**.
-                // `key_scopes_for` is empty for a caller whose scopes take `login` only, and a
-                // radio with nothing beside it is a control that can only be answered wrong:
-                // `restrict=some` with no pair writes a key narrowed to nothing, which reaches
-                // no URL at all. The handler refuses that pair too; the form does not offer it.
-                @if !apps.is_empty() {
-                    label class="radio" {
-                        input type="radio" name="restrict" value="some";
-                        span { (t(lang, K::AccountKeyRestrictSome)) }
-                    }
-                    span class="hint" { (t(lang, K::AccountKeyScopeGroups)) }
-                    @for (app, names) in apps {
-                        div {
-                            span class="lbl" { code { (app) } }
-                            @for name in names {
-                                label class="radio" {
-                                    input type="checkbox" name="scope"
-                                          value=(format!("{app}/{name}"));
-                                    span { code { (name) } }
-                                }
+                @for (app, names) in apps {
+                    div {
+                        span class="lbl" { code { (app) } }
+                        @for name in names {
+                            @let pair = format!("{app}/{name}");
+                            label class="radio" {
+                                input type="checkbox" name="scope" value=(pair)
+                                      checked[row.ticked.contains(&pair)];
+                                span { code { (name) } }
                             }
                         }
                     }
                 }
             }
-            button type="submit" class="primary" { (t(lang, K::AccountKeyCreate)) }
+        }
+    };
+    html! {
+        td colspan="4" {
+            (form_shell_at(
+                keys_path,
+                rev,
+                cancel,
+                t(lang, K::Cancel),
+                row.err,
+                fields,
+                t(lang, K::AccountKeyCreate),
+                false,
+            ))
         }
     }
 }
 
-/// The two forms every key of the caller's carries: rotate its secret, revoke it.
+/// A key's restriction cell, and its table row: [`url_list_marked`] and [`expiry_markup`], the
+/// functions the console's person page calls, so the two surfaces answer "what does this key
+/// reach" and "when does it die" from one place.
 ///
-/// Two forms and not one with a hidden verb, because each posts to a path that names the
-/// mutation, exactly as every console route does: a page whose buttons all post to one URL is a
-/// page whose buttons cannot be told apart from the address bar, in a proxy log, or in a
-/// refusal. Each carries the file's fingerprint, so a rotate submitted onto bytes it never saw
-/// is the `409` every other form here answers with, and the key's id, which is the only thing
-/// that says **which** secret this revokes.
+/// A pair the owner no longer reaches is still listed, because the key still carries it, and is
+/// marked in words (WCAG 1.4.1): a key narrowed to a scope its owner was removed from is the case
+/// where the person most needs to know it reaches less than it says.
 ///
-/// No script and no handler, and a real submit button on each: the estate's rule, and this page
-/// has no `<noscript>` behind anything. The id rides in a hidden field because the handler reads
-/// the form; no field names an **identity**, because the caller is the identity header nginx
-/// wrote, and a field that chose the row would let any signed-in person revoke anybody's
-/// credential.
-fn account_key_forms(lang: Lang, keys_path: &str, rev: &str, id: &str) -> Markup {
+/// The two row actions are the console's: [`act`]'s plain pill for a rotate and [`act_rm`]'s
+/// destructive one for a revoke, each a link to a `GET` page that changes nothing, so a crawler
+/// or a prefetch cannot rotate or revoke a credential. They are written out here rather than
+/// called because those two take a console `View`. The name carries the id because ten links all
+/// called "Revoke key" are ten identical entries in a reader's list of links (WCAG 2.4.6).
+fn account_key_line(
+    lang: Lang,
+    k: &ApiKeySpec,
+    mintable: &[(&str, &str)],
+    keys_path: &str,
+    n: u64,
+) -> Markup {
+    let id = k.id.trim();
+    let query: String = form_urlencoded::byte_serialize(id.as_bytes()).collect();
+    let remove = format!("{} {id}", t(lang, K::AccountKeyRemove));
     html! {
-        form method="post" action=(format!("{keys_path}/rotate")) class="keyact" {
-            input type="hidden" name="rev" value=(rev);
-            input type="hidden" name="id" value=(id);
-            button type="submit" { (t(lang, K::AccountKeyRotate)) }
-        }
-        form method="post" action=(format!("{keys_path}/remove")) class="keyact" {
-            input type="hidden" name="rev" value=(rev);
-            input type="hidden" name="id" value=(id);
-            button type="submit" class="danger" { (t(lang, K::AccountKeyRemove)) }
+        tr {
+            td class="mono" data-label=(t(lang, K::KeyColName)) { (id) }
+            td data-label=(t(lang, K::Scopes)) {
+                (url_list_marked(lang, k.scopes.as_ref(), t(lang, K::KeyScopesAll), |u| {
+                    let reached = mintable.iter().any(|(a, s)| format!("{a}/{s}") == u);
+                    (!reached).then(|| t(lang, K::KeyScopeGone))
+                }))
+            }
+            td data-label=(t(lang, K::ColExpiry)) { (expiry_markup(lang, &expiry_of(k, n))) }
+            td class="pills" {
+                span class="pills" {
+                    a class="pill" href=(format!("{keys_path}/rotate?id={query}"))
+                      aria-label=(format!("{} {id}", t(lang, K::AccountKeyRotate))) {
+                        (t(lang, K::Rotate))
+                    }
+                    " "
+                    a class="pill rm ico" href=(format!("{keys_path}/remove?id={query}"))
+                      title=(remove) {
+                        svg viewBox="0 0 24 24" aria-hidden="true" focusable="false" {
+                            path d="M6 6l12 12M18 6L6 18" {}
+                        }
+                        span class="vh" { (remove) }
+                    }
+                }
+            }
         }
     }
+}
+
+/// The confirmation a row's rotate or revoke link opens: the console's [`page_confirm_at`] card
+/// in this page's words, with the key's id in a hidden field because the two paths do not name it.
+///
+/// A rotate is not marked destructive: it keeps the name and the restriction, and a red button on
+/// it would teach the person to read the revoke's red as one more routine thing.
+fn page_account_confirm(
+    lang: Lang,
+    page: &str,
+    keys_path: &str,
+    rev: &str,
+    id: &str,
+    op: AccountKeyOp,
+) -> Markup {
+    let (verb, word, warn, danger) = match op {
+        AccountKeyOp::Rotate => (
+            "rotate",
+            K::AccountKeyRotate,
+            K::AccountKeyRotateWarn,
+            false,
+        ),
+        _ => ("remove", K::AccountKeyRemove, K::AccountKeyRemoveWarn, true),
+    };
+    page_confirm_at(
+        &format!("{keys_path}/{verb}"),
+        rev,
+        page,
+        t(lang, K::Cancel),
+        html! { (t(lang, word)) },
+        html! { p { code { (id) } } },
+        t(lang, warn),
+        html! { input type="hidden" name="id" value=(id); },
+        t(lang, word),
+        None,
+        danger,
+    )
 }
 
 /// The page a mint or a rotate answers with, and the one place this page ever renders a bearer.
@@ -8442,7 +8884,13 @@ fn page_account_minted(lang: Lang, page: &str, bearer: &str) -> Markup {
 /// The sections are siblings and each carries only a heading, the names, and one short "none"
 /// line: the page's contract is about **which fact belongs in which section**, and prose in one is
 /// a word a test about another could match by accident.
-fn page_account(lang: Lang, ids: &[String], uuid: Option<&str>, own: &AccountOwn) -> Markup {
+fn page_account(
+    lang: Lang,
+    ids: &[String],
+    uuid: Option<&str>,
+    own: &AccountOwn,
+    row: Option<&NewKeyRow>,
+) -> Markup {
     html! {
         p {
             (t(lang, K::SignedInAs)) ": "
@@ -8484,30 +8932,45 @@ fn page_account(lang: Lang, ids: &[String], uuid: Option<&str>, own: &AccountOwn
         }
         section id="keys" class="panel" {
             h2 { (t(lang, K::AccountKeys)) }
-            @if own.keys.is_empty() {
+            // Ten keys close the row (§13.16), counting every key on the row. A sentence and not
+            // a disabled control: a disabled control is skipped by the keyboard and says nothing
+            // about why.
+            @let full = own.keys.len() >= ACCOUNT_MAX_KEYS;
+            @let open = if full { None } else { row.filter(|_| uuid.is_some()) };
+            @if own.keys.is_empty() && open.is_none() {
                 p class="muted" { (t(lang, K::AccountKeysNone)) }
             } @else {
-                ul {
-                    @for k in &own.keys {
-                        li {
-                            code { (k.key_id) }
-                            ul {
-                                li { code { (account_key_expiry(lang, k)) } }
-                                li { code { (account_key_restriction(lang, k)) } }
-                            }
-                            // The two forms, one per key, and inside the key's own row: a page
-                            // that offered "rotate a key" as one control listing every id is a
-                            // page where the id is chosen after the dangerous click.
-                            (account_key_forms(lang, own.keys_path, own.rev, &k.key_id))
+                table {
+                    thead { tr {
+                        th { (t(lang, K::KeyColName)) }
+                        th { (t(lang, K::Scopes)) }
+                        th { (t(lang, K::ColExpiry)) }
+                        th {}
+                    } }
+                    tbody {
+                        @for k in &own.keys {
+                            (account_key_line(lang, k, &own.mintable, own.keys_path, now()))
+                        }
+                        @if let Some(r) = open {
+                            tr { (account_key_row(lang, own.keys_path, own.rev, own.page, &own.mintable, r)) }
                         }
                     }
                 }
             }
-            // The mint form, and only for a caller the file has a row for: a key is filed under
-            // a uuid, so a stranger has no account to mint into, and a form that would be
-            // refused before it was read is a promise the page cannot keep.
+            // The mint control, and only for a caller the file has a row for: a key is filed
+            // under a uuid, so a stranger has no account to mint into, and a control that would
+            // be refused before it was read is a promise the page cannot keep.
             @if uuid.is_some() {
-                (account_mint_form(lang, own.keys_path, own.rev, &own.mintable))
+                @if full {
+                    @if let Some(e) = row.and_then(|r| r.err) { div class="err" { (e.msg) } }
+                    p class="muted" { (t(lang, K::AccountKeyFullRow)) }
+                } @else if row.is_none() {
+                    p class="primary" {
+                        a class="pill" href=(format!("{}/new", own.keys_path)) {
+                            (t(lang, K::AccountKeyNew))
+                        }
+                    }
+                }
             }
         }
         section id="profile" class="panel" {
@@ -8589,6 +9052,8 @@ fn handle_account(
     // naming its own verb for the same reason every console route does.
     let rotate = format!("{keys}/rotate");
     let remove = format!("{keys}/remove");
+    // The mint row is a page of its own (§13.16): the keys section with one more row.
+    let new_key = format!("{keys}/new");
     let posting = *req.method() == Method::Post;
     let prefs = AccountPrefs {
         lang,
@@ -8600,7 +9065,12 @@ fn handle_account(
     // is a `404` for every caller alike, administrator included, because a page that answers a
     // stranger `403` and an administrator `404` is a page describing its own layout to whoever
     // asks.
-    if path != cfg.account_path && path != page && path != keys && path != rotate && path != remove
+    if path != cfg.account_path
+        && path != page
+        && path != keys
+        && path != rotate
+        && path != remove
+        && path != new_key
     {
         respond_account(
             req,
@@ -8764,31 +9234,74 @@ fn handle_account(
         } else {
             AccountKeyOp::Mint
         };
-        account_key_post(req, cfg, &prefs, lang, look, uuid, op);
+        account_key_post(
+            req, cfg, &prefs, lang, look, uuid, op, &settings, &ids, &keys,
+        );
         return;
     }
-    let own = AccountOwn {
-        reached: account_reached(&access, &ids[0]),
-        groups: account_groups(&doc, uuid),
-        keys: account_keys(&access, uuid),
-        claims: account_claims(&settings, &req),
-        mintable: match uuid {
-            Some(u) => access
-                .key_scopes_for(u)
-                .iter()
-                .map(|(a, s)| (a.name.as_str(), s.name.as_str()))
-                .collect(),
-            None => Vec::new(),
-        },
-        keys_path: &keys,
-        rev: &rev,
-    };
+    let own = account_own(
+        &doc, &access, &settings, &req, &ids, uuid, &keys, &rev, &page,
+    );
+    // The three pages that are about one key or one row exist for a caller with a row, and a
+    // stranger gets the page's own refusal for them, exactly as the mutations give it.
+    let wants_row = path == new_key || path == rotate || path == remove;
+    if wants_row && uuid.is_none() {
+        respond_account(
+            req,
+            403,
+            &prefs,
+            t(lang, K::AccountNoRowTitle),
+            html! { p { (t(lang, K::AccountNoRowBody)) } },
+            look,
+            false,
+        );
+        return;
+    }
+    if path == rotate || path == remove {
+        // The caller's own row only, and every miss is one `404` that names nothing: an unknown
+        // id, no id at all and a key filed under somebody else are the same answer, so the page
+        // is not an oracle for which ids exist on the estate.
+        let id = query_param(query, "id").unwrap_or_default();
+        if !own.keys.iter().any(|k| k.id.trim() == id) {
+            respond_account(
+                req,
+                404,
+                &prefs,
+                t(lang, K::NotFoundTitle),
+                html! { p { (t(lang, K::NotFoundBody)) } },
+                look,
+                false,
+            );
+            return;
+        }
+        let op = if path == rotate {
+            AccountKeyOp::Rotate
+        } else {
+            AccountKeyOp::Remove
+        };
+        respond_account(
+            req,
+            200,
+            &prefs,
+            t(lang, K::AccountTitle),
+            page_account_confirm(lang, &page, &keys, &rev, &id, op),
+            look,
+            false,
+        );
+        return;
+    }
     respond_account(
         req,
         200,
         &prefs,
         t(lang, K::AccountTitle),
-        page_account(lang, &ids, uuid, &own),
+        page_account(
+            lang,
+            &ids,
+            uuid,
+            &own,
+            (path == new_key).then_some(&NewKeyRow::OPEN),
+        ),
         look,
         false,
     );
@@ -8843,6 +9356,7 @@ impl AccountKeyOp {
 ///
 /// The refusal pages are short: this page's caller has no administrator in the room, so each
 /// message names what to write instead, and the way back is the page they came from.
+#[allow(clippy::too_many_arguments)]
 fn account_key_post(
     mut req: Request,
     cfg: &Config,
@@ -8851,6 +9365,9 @@ fn account_key_post(
     look: AccountLook,
     uuid: Option<&str>,
     op: AccountKeyOp,
+    settings: &Settings,
+    ids: &[String],
+    keys_path: &str,
 ) {
     // (1) The door, and the console's strict policy: `same-origin` and nothing else.
     if !csrf_ok(
@@ -8945,13 +9462,19 @@ fn account_key_post(
     // about the shape of the code: the only `Ok` is the one that has committed. The payload is
     // `Some(bearer)` for the two mutations that mint a secret and `None` for the one that only
     // takes one away.
-    let done = (|| -> Result<Option<String>, String> {
+    let done = (|| -> Result<Option<String>, Refusal> {
         if op == AccountKeyOp::Mint {
-            let duration = form.get("duration").trim().to_string();
+            let duration =
+                duration_from_form(&form).map_err(|k| Refusal::on("duration", t(lang, k)))?;
             let restrict = form.get("restrict").trim().to_string();
             let pairs = form.all("scope");
-            if !account_key_id_ok(&id) || !account_key_window_ok(&duration) {
-                return Err(t(lang, K::AccountKeyBound).to_string());
+            // The bound names the field it is about, because the row it re-renders marks that
+            // field and not the other.
+            if !account_key_id_ok(&id) {
+                return Err(Refusal::on("id", t(lang, K::AccountKeyBound)));
+            }
+            if !account_key_window_ok(&duration) {
+                return Err(Refusal::on("duration", t(lang, K::AccountKeyBound)));
             }
             // The row's keys, read off the **document**, not the compiled table: the bound is on
             // how many credentials one identity carries, and a key whose hash the gate skipped is
@@ -8960,17 +9483,23 @@ fn account_key_post(
             // The bound counts the administrator's keys too: it is a bound on the row, not on
             // how many mints this page handed out.
             if mine.len() >= ACCOUNT_MAX_KEYS {
-                return Err(t(lang, K::AccountKeyFull).to_string());
+                return Err(t(lang, K::AccountKeyFull).to_string().into());
             }
             // An id is how a key is named back (in the journal line, and in `bb-auth-adm key
             // rotate`), so two keys called `laptop` on one row is one name naming two secrets.
             if mine.iter().any(|k| k.id.trim() == id) {
-                return Err(t(lang, K::AccountKeyDup).to_string());
+                return Err(Refusal::on("id", t(lang, K::AccountKeyDup)));
             }
             // `all` writes **no** `scopes` field, which the gate reads as the owner's whole reach.
             // `some` writes the submitted pairs sorted: the submitted order is a browser's, and
             // one canonical spelling is what makes a restriction a comparison, not a string match.
             let scopes = match restrict.as_str() {
+                // Ticks beside "all scopes" are a choice the person thinks they made: dropping
+                // them would file the widest key the person did not ask for. No field is marked,
+                // since the contradiction is between two controls and not inside one.
+                "all" if !pairs.is_empty() => {
+                    return Err(t(lang, K::KeyScopesWithoutOnly).to_string().into());
+                }
                 "all" => None,
                 "some" => {
                     let allowed = access.key_scopes_for(owner);
@@ -8979,7 +9508,7 @@ fn account_key_post(
                             .iter()
                             .any(|(a, s)| format!("{}/{}", a.name, s.name) == *pair)
                         {
-                            return Err(t(lang, K::AccountKeyUnknownScope).to_string());
+                            return Err(t(lang, K::AccountKeyUnknownScope).to_string().into());
                         }
                     }
                     let mut sorted = pairs.clone();
@@ -8989,7 +9518,7 @@ fn account_key_post(
                 // Neither of the two the form can send. Refused rather than read as `all`: a key
                 // with no restriction is the widest credential this page mints, and a request
                 // that did not choose it must not get it by default.
-                _ => return Err(t(lang, K::AccountKeyBound).to_string()),
+                _ => return Err(t(lang, K::AccountKeyBound).to_string().into()),
             };
             let sealed = add_api_key(
                 &mut doc,
@@ -9069,13 +9598,39 @@ fn account_key_post(
         // A revoke mints nothing, so it follows the estate's rule and answers `303` to the page
         // it came from. No `?msg=`: the key is gone from the list, and that is the confirmation.
         Ok(None) => respond_redirect(req, prefs.page),
-        Err(msg) => respond_account(
+        // A refused mint answers with the page and its row still open: the values as posted,
+        // the sentence in the console's error box, and the field it is about marked (§13.16).
+        Err(refusal) if op == AccountKeyOp::Mint => {
+            let rev = sha256_hex(&raw);
+            let own = account_own(
+                &doc, &access, settings, &req, ids, uuid, keys_path, &rev, prefs.page,
+            );
+            let ticked = form.all("scope");
+            let row = NewKeyRow {
+                id: &id,
+                choice: form.get("duration").trim(),
+                days: form.get("days").trim(),
+                some: form.get("restrict").trim() == "some",
+                ticked: &ticked,
+                err: Some(&refusal),
+            };
+            respond_account(
+                req,
+                400,
+                prefs,
+                t(lang, K::AccountTitle),
+                page_account(lang, ids, uuid, &own, Some(&row)),
+                look,
+                false,
+            );
+        }
+        Err(refusal) => respond_account(
             req,
             400,
             prefs,
             t(lang, op.title()),
             html! {
-                div class="err" { (msg) }
+                div class="err" { (refusal.msg) }
                 p { a href=(prefs.page) { "← " (t(lang, K::Back)) } }
             },
             look,
@@ -11821,7 +12376,12 @@ mod tests {
     /// The button is checked here too, because it is the reason the script exists: a real
     /// `type="button"` (the block is in no form, and a button that can submit one is a
     /// mutation on a click) carrying `hidden`, so a browser with scripting off shows no
-    /// control that does nothing.
+    /// control that does nothing. Since §13.15 it is an **icon**, and §13.17 carries its name
+    /// as text inside the control (`span.vh`), so the shape this test has always wanted here is
+    /// the one that survives that: the control's words stay inside the control, adding nothing
+    /// to the block that shows the key, so the one thing a person reads there is the key. What
+    /// the icon needs in exchange, its name and its glyphs, is pinned by
+    /// [`the_copy_control_is_an_icon_with_a_name`].
     #[test]
     fn the_reveal_shows_only_the_key() {
         let (cases, paths) = reveal_cases("reveal-only");
@@ -11874,6 +12434,23 @@ mod tests {
                 "{label}: the button starts hidden, so the scripting-off page shows no dead \
                  control: {tag}"
             );
+            // §13.17 moved the control's name into a `span.vh` **inside** the button, so "the
+            // button's text is empty" is a claim about the old `aria-label` markup and is now
+            // false of a correct control (the green `the_copy_control_is_an_icon_with_a_name`
+            // pins that text as the name). What survives the move is the property this test was
+            // after: the control's words belong to the control, so the block that shows the key
+            // carries none of them outside it, and the one thing a person reads there is the key.
+            let outside = g.body.replace(
+                &element_containing(&g.body, "id=\"bearer-copy\"", "</button>"),
+                "",
+            );
+            for word in ["Copy the key", "Copied", "Copy refused"] {
+                assert!(
+                    !outside.contains(word),
+                    "{label}: the control's name and its status words are inside the control, \
+                     so the reveal's text outside it carries no words of its own: {word}"
+                );
+            }
         }
         for p in paths {
             cleanup(&p);
@@ -11965,8 +12542,11 @@ mod tests {
             "the page that offers the mint form carries no script: {csp}"
         );
 
-        // The `400`: a window this page refuses to mint. The `409`: the same form posted
-        // again, which is what reloading the reveal page does.
+        // The `400`: a duration this page refuses to mint. §13.15 made `never` a choice the page
+        // offers (and `a_self_service_key_may_never_expire` pins it as a `200`), so the refusal
+        // here is the empty field, the one the grammar reads as no expiry and the page refuses
+        // rather than minting a key that never dies. The `409`: the same form posted again,
+        // which is what reloading the reveal page does.
         let mint = format!("{base}keys");
         let rev = sha256_hex(&read(&apath));
         let bad = account_post(
@@ -11975,14 +12555,14 @@ mod tests {
             &[
                 ("rev", rev.as_str()),
                 ("id", "refused"),
-                ("duration", "never"),
+                ("duration", ""),
                 ("restrict", "all"),
             ],
         );
         assert_eq!(
             bad.status,
             400,
-            "a refused window is a 400: {}",
+            "an empty duration is a 400: {}",
             account_readable(&bad.body)
         );
         assert!(
@@ -15557,6 +16137,10 @@ mod tests {
     /// not pinned: `groups` is "gruppi", masculine, so today's "Nessuno." already agrees, and
     /// `reach` is "Dove puoi arrivare", which carries no noun for an adjective to agree with, so
     /// nothing here should force a word the plan says to leave alone.
+    ///
+    /// §13.16 reworded the keys entry to "No API keys yet.", which is the same rule one step
+    /// on: the keys section has its own key, so the empty state says what is missing in its own
+    /// noun, and the shared word is left to the sections that answer for a value.
     #[test]
     fn account_the_italian_keys_empty_state_agrees_with_chiavi() {
         // bob has a roster row, no `api_keys`, and these settings name no `profile_claims`, so
@@ -15583,10 +16167,21 @@ mod tests {
             keys.contains("Chiavi API"),
             "the section under test is the keys section: {keys}"
         );
+        let keys_empty = t(Lang::It, K::AccountKeysNone);
         assert!(
-            keys.contains("Nessuna."),
-            "\"Chiavi API\" is feminine plural, so the keys section's empty state must read \
-             \"Nessuna.\": {keys}"
+            keys.contains(keys_empty),
+            "the keys section answers an empty roster with its own key's words: {keys}"
+        );
+        assert!(
+            keys_empty.to_lowercase().contains("chiavi"),
+            "\"Chiavi API\" is feminine plural, so the keys empty state has to name keys, in \
+             the feminine, rather than borrow a bare pronoun: {keys_empty}"
+        );
+        assert_ne!(
+            keys_empty,
+            t(Lang::It, K::None),
+            "the keys empty state is its own entry, so an edit of the shared word cannot \
+             repaint this section: {keys_empty}"
         );
         assert!(
             profile.contains("Nessuno."),
@@ -15594,9 +16189,9 @@ mod tests {
              \"Nessuno.\": {profile}"
         );
         assert!(
-            !profile.contains("Nessuna."),
-            "the fix is one key per noun, so the profile must not pick up the feminine form: \
-             {profile}"
+            !profile.contains(keys_empty),
+            "the fix is one key per noun, so the profile must not pick up the keys section's \
+             words: {profile}"
         );
 
         let en = account_call_pref(&base, Some("bob@x.com"), Some("lang=en"), None);
@@ -15607,13 +16202,14 @@ mod tests {
             account_readable(&en.body)
         );
         assert!(
-            account_section(&en.body, "keys").contains("None."),
-            "English has no grammatical gender, so the keys section keeps \"None.\": {}",
+            account_section(&en.body, "keys").contains("No API keys yet."),
+            "§13.16 reworded the keys empty state to say what is missing and to read as an \
+             invitation, since the + now sits below it: {}",
             account_section(&en.body, "keys")
         );
         assert!(
             account_section(&en.body, "profile").contains("None."),
-            "and the profile section keeps it too: {}",
+            "and the profile section keeps the bare word: {}",
             account_section(&en.body, "profile")
         );
 
@@ -16352,13 +16948,19 @@ mod tests {
         rest[..end].to_string()
     }
 
-    /// The keys section offers the mint form: a `POST` to `/account/keys`
-    /// carrying the file fingerprint, an id, a duration, the restrict choice,
-    /// and one checkbox per scope `Access::key_scopes_for` returns for the
-    /// caller, valued `application/scope` and grouped under the application.
-    /// A scope the caller's keys cannot reach gets no checkbox, because a key
-    /// narrowed to it fails on its very first request, and no URL from the
-    /// file appears: the restriction is named by scope, never by a URL (§13.6).
+    /// The mint form offers a `POST` to `/account/keys` carrying the file
+    /// fingerprint, an id, a duration, the restrict choice, and one checkbox per
+    /// scope `Access::key_scopes_for` returns for the caller, valued
+    /// `application/scope` and grouped under the application. A scope the caller's
+    /// keys cannot reach gets no checkbox, because a key narrowed to it fails on
+    /// its very first request, and no URL from the file appears: the restriction is
+    /// named by scope, never by a URL (§13.6).
+    ///
+    /// §13.16 moved the form onto a page of its own, `GET <prefix>/keys/new`, so
+    /// the keys section is a table and one link. That is asserted first, because a
+    /// form left in the section is the design's own defect: the row it opens would
+    /// appear above the + that opens it, and the section would carry an input a
+    /// person who came to *read* their keys has to tab past.
     #[test]
     fn account_the_keys_section_offers_a_mint_form_with_one_checkbox_per_narrowable_scope() {
         let path = account_scratch_access("mint-form", &account_access_mint());
@@ -16372,6 +16974,27 @@ mod tests {
             account_readable(&g.body)
         );
         let s = account_section(&g.body, "keys");
+        assert!(
+            !s.contains("action=\"/account/keys\""),
+            "the mint form is a page of its own (§13.16), so the section is a table and a \
+             link: {s}"
+        );
+        assert_eq!(
+            links_to(&g.body, "/account/keys/new").len(),
+            1,
+            "the section opens the form through one link, which is the only way to a mint \
+             with scripting off: {}",
+            account_readable(&g.body)
+        );
+
+        let n = account_call(&format!("{base}keys/new"), Some("bob@x.com"));
+        assert_eq!(
+            n.status,
+            200,
+            "bob reaches the mint page: {}",
+            account_readable(&n.body)
+        );
+        let s = account_section(&n.body, "keys");
         assert!(
             s.contains("method=\"post\"") && s.contains("action=\"/account/keys\""),
             "the mint is a POST to the page's own prefix: {s}"
@@ -16415,6 +17038,11 @@ mod tests {
     /// `403` the console gives a caller the route does not serve. Nothing is
     /// written: a mint is a credential, and a refusal that files one is an
     /// admission.
+    ///
+    /// §13.16 split the form onto `GET <prefix>/keys/new`, so both pages are
+    /// asked: the section, which must carry no form, and the mint page, which
+    /// must not exist as a form for a caller with no row. The `POST` is asked
+    /// of the unchanged endpoint, because moving a form is not moving a door.
     #[test]
     fn account_a_stranger_and_a_vetoed_caller_get_no_form_and_a_posted_mint_writes_nothing() {
         let path = account_scratch_access("mint-no-caller", &account_access_mint());
@@ -16424,13 +17052,16 @@ mod tests {
         let rev = sha256_hex(&before);
 
         for id in ["stranger@elsewhere.com", "admin@x.com", "spammer@x.com"] {
-            let g = account_call(&base, Some(id));
-            if g.status == 200 {
-                let s = account_section(&g.body, "keys");
-                assert!(
-                    !s.contains("method=\"post\"") && !s.contains("/account/keys"),
-                    "{id} has no row to mint into, so the keys section must carry no form: {s}"
-                );
+            for page in ["", "keys/new"] {
+                let g = account_call(&format!("{base}{page}"), Some(id));
+                if g.status == 200 {
+                    let s = account_section(&g.body, "keys");
+                    assert!(
+                        !s.contains("<form"),
+                        "{id} has no row to mint into, so `{page}` must answer the keys \
+                         section with no form at all: {s}"
+                    );
+                }
             }
             let p = account_post(
                 &keys,
@@ -16628,11 +17259,15 @@ mod tests {
     }
 
     /// The abuse bounds are constants (§13.6): `id` from `[a-z0-9-]{1,32}`,
-    /// `duration` required and `1d` to `365d` with no `never`, at most ten
-    /// keys per row counting the administrator's. Each is a `400` that writes
-    /// nothing. The duplicate id rides on the full fixture because bob's two
-    /// fixture keys are what make `laptop` a duplicate, and the tenth-key
-    /// bound counts keys the caller did not make.
+    /// `duration` required and at least a day, at most ten keys per row counting
+    /// the administrator's. Each is a `400` that writes nothing. The duplicate id
+    /// rides on the full fixture because bob's two fixture keys are what make
+    /// `laptop` a duplicate, and the tenth-key bound counts keys the caller did
+    /// not make.
+    ///
+    /// There is no ceiling and no ban on `never` here, and that is §13.15: the
+    /// two cases this test used to carry are now minted successfully by
+    /// [`a_self_service_key_may_never_expire`].
     #[test]
     fn account_every_mint_bound_is_a_400_that_writes_nothing() {
         let long = "x".repeat(33);
@@ -16640,13 +17275,7 @@ mod tests {
             ("Bad ID", "30d", "the id is not [a-z0-9-]{1,32}"),
             (long.as_str(), "30d", "the id is 33 characters"),
             ("phone", "", "the duration is missing"),
-            (
-                "phone",
-                "never",
-                "the self-service form may not mint a key that never expires",
-            ),
             ("phone", "0d", "zero days is not a window"),
-            ("phone", "366d", "a year is the bound"),
         ];
         let path = account_scratch_access("mint-bounds", &account_access_mint());
         let base = account_serve(&path);
@@ -16976,30 +17605,39 @@ mod tests {
     /// form: no `<script>` and no inline handler anywhere. The mint form is
     /// plain fields and a submit button, because a page that needs scripting
     /// to hand out a credential is the thing that must never ship.
+    ///
+    /// Both pages are walked, because §13.16 split them: the page that lists the
+    /// keys and the page that carries the form. A `<script>` added to make the +
+    /// open the row is exactly the regression this test is for, and it would land
+    /// on whichever of the two somebody edited.
     #[test]
     fn account_the_page_with_the_mint_form_still_carries_no_script_and_no_handler() {
         let path = account_scratch_access("mint-noscript", &account_access_mint());
         let base = account_serve(&path);
 
-        let g = account_call(&base, Some("bob@x.com"));
-        assert_eq!(
-            g.status,
-            200,
-            "bob reaches the page: {}",
-            account_readable(&g.body)
-        );
+        for page in ["", "keys/new"] {
+            let g = account_call(&format!("{base}{page}"), Some("bob@x.com"));
+            assert_eq!(
+                g.status,
+                200,
+                "bob reaches `{page}`: {}",
+                account_readable(&g.body)
+            );
+            assert!(
+                !g.body.contains("<script"),
+                "`{page}`: no script tag, the estate rule the form must not break"
+            );
+            assert!(
+                !account_carries_inline_handler(&g.body),
+                "`{page}`: no inline handler of any kind"
+            );
+        }
+
+        let n = account_call(&format!("{base}keys/new"), Some("bob@x.com"));
         assert!(
-            account_section(&g.body, "keys").contains("action=\"/account/keys\""),
+            account_section(&n.body, "keys").contains("action=\"/account/keys\""),
             "the page under test is the one that carries the form: {}",
-            account_section(&g.body, "keys")
-        );
-        assert!(
-            !g.body.contains("<script"),
-            "no script tag: the estate rule the form must not break"
-        );
-        assert!(
-            !account_carries_inline_handler(&g.body),
-            "no inline handler of any kind"
+            account_section(&n.body, "keys")
         );
 
         cleanup(&path);
@@ -17156,11 +17794,18 @@ mod tests {
             .unwrap_or_else(|| panic!("the file has no key `{id}` under users[{row}]: {file}"))
     }
 
-    /// Every key the caller sees gets a rotate form and a remove form, each
-    /// posting to its own path under the prefix and carrying the file's
-    /// fingerprint and **that key's** id. Two forms per key and no script, because
-    /// a page that needs scripting to revoke a credential is the thing that must
-    /// never ship, and a form that names the wrong key revokes the wrong secret.
+    /// Every key the caller sees gets a rotate action and a revoke action, each
+    /// naming **that key**, and each answered by a page that carries the `POST`
+    /// with the file's fingerprint and that key's id.
+    ///
+    /// §13.16 made the row action a **link** and moved the form onto the page it
+    /// opens, which is the console's shape (`Route::KeyRm` is a `GET` page and a
+    /// `POST` endpoint). Two things follow and both are asserted here. The section
+    /// carries no mutation form, so a crawler, a prefetch or a link-following
+    /// bot cannot revoke a credential: a `GET` never mutates. And the form still
+    /// exists, on the page the link opens, with its `rev`, its submit button and
+    /// its key id, because the page works with scripting off and a form that
+    /// names the wrong key revokes the wrong secret.
     #[test]
     fn account_every_key_of_the_caller_gets_a_rotate_form_and_a_remove_form() {
         let path = account_scratch_access("keys-forms", &account_access_keys());
@@ -17175,13 +17820,31 @@ mod tests {
             account_readable(&g.body)
         );
         let s = account_section(&g.body, "keys");
-        let forms = account_forms(&s);
+        assert!(
+            account_forms(&s).is_empty(),
+            "the keys section carries no mutation form: the row actions are links to a \
+             confirmation page, and a page that lists credentials must not be a page that \
+             can delete one: {s}"
+        );
         for id in ["laptop", "ci"] {
-            for action in ["/account/keys/rotate", "/account/keys/remove"] {
-                let f = account_form_for(&forms, action, id);
+            for (path, verb) in [("keys/rotate", "rotate"), ("keys/remove", "revoke")] {
+                assert_eq!(
+                    links_to(&s, &format!("/account/{path}?id={id}")).len(),
+                    1,
+                    "the `{id}` row carries exactly one {verb} link to its own page: {s}"
+                );
+                let page = account_call(&format!("{base}{path}?id={id}"), Some("bob@x.com"));
+                assert_eq!(
+                    page.status,
+                    200,
+                    "the {verb} link opens a page, and opening it changes nothing: {}",
+                    account_readable(&page.body)
+                );
+                let f =
+                    account_form_for(&account_forms(&page.body), &format!("/account/{path}"), id);
                 assert!(
                     f.contains("method=\"post\""),
-                    "a mutation is a POST, so a bookmark, a prefetch or a crawler cannot revoke \
+                    "a mutation is a POST, so a bookmark, a prefetch or a crawler cannot {verb} \
                      a credential: {f}"
                 );
                 assert!(
@@ -17201,17 +17864,94 @@ mod tests {
             }
         }
         assert!(
-            !s.contains("value=\"phone\""),
-            "carol's key is not bob's, so bob's page carries no form that names it: {s}"
+            !s.contains("id=phone"),
+            "carol's key is not bob's, so bob's page carries no action that names it: {s}"
         );
         assert!(
             !g.body.contains("<script"),
-            "no script tag: the estate rule these forms must not break"
+            "no script tag: the estate rule these pages must not break"
         );
         assert!(
             !account_carries_inline_handler(&g.body),
             "no inline handler of any kind"
         );
+
+        cleanup(&path);
+    }
+
+    /// WCAG 2.5.3 *Label in Name*: the accessible name of a control must contain the words a
+    /// sighted person reads on it, because a voice-control user says what they see.
+    ///
+    /// The rotate pill shows `K::Rotate` ("rotate" / "rigenera") and is named
+    /// `K::AccountKeyRotate` plus the id ("Rotate key laptop" / "Rigenera la chiave laptop"),
+    /// which contains that word in both languages. It is pinned because the containment is a
+    /// property of two strings written in two places: renaming the pill's word, or the name,
+    /// to a verb the other does not use ("ruota") breaks the rule with nothing else on the
+    /// page changing.
+    /// The revoke pill is an icon with no visible word, and its name is the `span.vh` text inside
+    /// it, which is the string the `title` carries too, so it satisfies the rule by
+    /// construction. That half is pinned as well: a visible word added to that control later
+    /// cannot arrive without a name that carries it.
+    ///
+    /// Both languages are walked, and the whole anchor (`anchors_to`, not `links_to`) is read,
+    /// because the name of an icon control lives *inside* it and an open tag cannot see it.
+    #[test]
+    fn account_key_row_actions_name_their_own_visible_words() {
+        let path = account_scratch_access("keys-label-in-name", &account_access_keys());
+        let base = account_serve(&path);
+
+        for (cookie, lang) in [(Some("lang=en"), Lang::En), (Some("lang=it"), Lang::It)] {
+            let g = account_call_pref(&base, Some("bob@x.com"), cookie, None);
+            assert_eq!(
+                g.status,
+                200,
+                "bob is a roster user with keys: {}",
+                account_readable(&g.body)
+            );
+            assert!(
+                account_html_tag(&g.body).contains(&format!(r#"lang="{}""#, lang.code())),
+                "the cookie must have chosen {}, or this test asserts on the wrong language: {}",
+                lang.code(),
+                account_html_tag(&g.body)
+            );
+            let s = account_section(&g.body, "keys");
+            for (verb, needle) in [
+                ("rotate", "/account/keys/rotate?id="),
+                ("revoke", "/account/keys/remove?id="),
+            ] {
+                let rows = anchors_to(&s, needle);
+                assert_eq!(
+                    rows.len(),
+                    2,
+                    "bob has two keys, so the section carries two {verb} links to judge: {s}"
+                );
+                for a in rows {
+                    let seen = visible_text(&a);
+                    assert!(
+                        !seen.is_empty(),
+                        "the {verb} link shows a word, so there is something to contain: {a}"
+                    );
+                    let name = attr(&a, "aria-label").or_else(|| {
+                        elements(&a, "<span class=\"vh\"", "</span>")
+                            .into_iter()
+                            .next()
+                            .map(|vh| visible_text(&vh))
+                    });
+                    let name = name.unwrap_or_else(|| {
+                        panic!(
+                            "the {verb} link carries neither an aria-label nor `span.vh` text, \
+                                so it has no accessible name at all: {a}"
+                        )
+                    });
+                    assert!(
+                        name.to_lowercase().contains(&seen.to_lowercase()),
+                        "WCAG 2.5.3: in {lang:?} the {verb} link shows \"{seen}\", so its name \
+                         must contain those words, or a voice user who says what they read gets \
+                         nothing. Name is \"{name}\"."
+                    );
+                }
+            }
+        }
 
         cleanup(&path);
     }
@@ -17533,21 +18273,32 @@ mod tests {
     /// labels are the file's field names, `id` and `duration`, and on the Italian
     /// page that is untranslated text in an otherwise Italian form. The labels are
     /// the page's words, so they go through the table; the field **names** stay the
-    /// file's, because the handler reads those. The Italian words asserted are the
-    /// page's own vocabulary: `AccountKeyBound` already says "l'id di una chiave
-    /// è…" and "una durata è <n>d…", so "Id della chiave" and "Durata della chiave"
-    /// are the same nouns the refusals use. The English page is asserted alongside,
-    /// because the fix is the labels, not one language's strings.
+    /// file's, because the handler reads those.
+    ///
+    /// §13.16 names which entries they are: the name field is labelled `K::KeyColName`
+    /// and the duration `K::KeyColExpires`, the same two entries the table's column
+    /// headers use. That is the stronger form of the 4b fix, and the reason this test
+    /// asserts the table's own entries rather than the words "Id della chiave" and
+    /// "Durata della chiave" it asked for first: a field and the column that shows the
+    /// same value must not answer that value's name from two entries, and one entry
+    /// has one translation, so an Italian page cannot carry a label in English. The
+    /// English page is asserted alongside, because the fix is the labels, not one
+    /// language's strings.
     #[test]
     fn account_the_mint_form_labels_are_translated_on_the_italian_page() {
         let path = account_scratch_access("mint-labels", &account_access_keys());
         let base = account_serve(&path);
 
-        let it = account_call_pref(&base, Some("bob@x.com"), Some("lang=it"), None);
+        let it = account_call_pref(
+            &format!("{base}keys/new"),
+            Some("bob@x.com"),
+            Some("lang=it"),
+            None,
+        );
         assert_eq!(
             it.status,
             200,
-            "bob reaches the page: {}",
+            "bob reaches the mint page: {}",
             account_readable(&it.body)
         );
         assert!(
@@ -17564,16 +18315,25 @@ mod tests {
             s.contains("action=\"/account/keys\""),
             "the page under test is the one that carries the mint form: {s}"
         );
-        for label in ["Id della chiave", "Durata della chiave"] {
+        for key in [K::KeyColName, K::KeyColExpires] {
+            let label = t(Lang::It, key);
             assert!(
                 s.contains(label),
-                "the mint form's label must read \"{label}\", the noun the page's own Italian \
-                 refusals use: {s}"
+                "the mint form's label must read \"{label}\", the translation table's own words \
+                 for that field: {s}"
+            );
+            assert_ne!(
+                label,
+                t(Lang::En, key),
+                "the entry has to carry Italian: an entry whose two sides are the same string \
+                 is an untranslated label wearing a translation table's name"
             );
         }
         for bare in [
             r#"<span class="lbl">id</span>"#,
             r#"<span class="lbl">duration</span>"#,
+            ">id<",
+            ">duration<",
         ] {
             assert!(
                 !s.contains(bare),
@@ -17585,22 +18345,34 @@ mod tests {
             "the field names stay the file's, because the handler reads them: {s}"
         );
 
-        let en = account_call_pref(&base, Some("bob@x.com"), Some("lang=en"), None);
+        let en = account_call_pref(
+            &format!("{base}keys/new"),
+            Some("bob@x.com"),
+            Some("lang=en"),
+            None,
+        );
         assert_eq!(
             en.status,
             200,
-            "bob reaches the page: {}",
+            "bob reaches the mint page: {}",
             account_readable(&en.body)
         );
         let e = account_section(&en.body, "keys");
+        for key in [K::KeyColName, K::KeyColExpires] {
+            assert!(
+                e.contains(t(Lang::En, key)),
+                "the fix is the labels, so the English page carries the same entry's words: {e}"
+            );
+        }
         for bare in [
             r#"<span class="lbl">id</span>"#,
             r#"<span class="lbl">duration</span>"#,
+            ">id<",
+            ">duration<",
         ] {
             assert!(
                 !e.contains(bare),
-                "the fix is the labels, so the English page carries a label and not a field \
-                 name either: {e}"
+                "the English page carries a label and not a field name either: {e}"
             );
         }
 
@@ -17612,6 +18384,12 @@ mod tests {
     /// and nothing beside it is a control that can only be answered wrong, and
     /// `restrict=some` with no pair writes a key narrowed to nothing), and it must
     /// still mint with `restrict=all`, which files no `scopes` field at all.
+    ///
+    /// §13.16 moved the form to `GET <prefix>/keys/new`, so the form is read from
+    /// there. The `POST` is unchanged, and a hand-written `duration=30d` is still
+    /// the grammar's own spelling (§13.15 step 4), which is why the mint below posts
+    /// it rather than the select's `custom` + `days` pair: this test is about the
+    /// restriction, and the mint that proves it must not depend on the field layout.
     #[test]
     fn account_a_caller_with_nothing_to_narrow_gets_no_some_option_and_still_mints() {
         let path = account_scratch_access(
@@ -17620,11 +18398,11 @@ mod tests {
         );
         let base = account_serve(&path);
 
-        let g = account_call(&base, Some("dave@x.com"));
+        let g = account_call(&format!("{base}keys/new"), Some("dave@x.com"));
         assert_eq!(
             g.status,
             200,
-            "dave is a roster user, so he reaches the page: {}",
+            "dave is a roster user, so he reaches the mint page: {}",
             account_readable(&g.body)
         );
         let s = account_section(&g.body, "keys");
@@ -17671,5 +18449,2238 @@ mod tests {
         );
 
         cleanup(&path);
+    }
+
+    // --------------------------------------------------------------- §13.15 ----
+    //
+    // Three things in one slice: the copy control is an icon, the key's duration
+    // is a choice made from five, and revoking a key from the self-service page
+    // asks first. Each test below is named for the item §13.15 gives it, so the
+    // red before the coder lands is a name that does not exist yet, and not a
+    // typo in a fixture.
+
+    /// A [`Form`] out of pairs, for the tests that call a form reader directly.
+    fn form_of(fields: &[(&str, &str)]) -> Form {
+        Form(
+            fields
+                .iter()
+                .map(|(k, v)| (k.to_string(), v.to_string()))
+                .collect(),
+        )
+    }
+
+    /// [`duration_from_form`]'s answer as a shape a test can compare.
+    ///
+    /// `K` carries no `PartialEq` (it is a translation key, not a value anyone
+    /// compares), so a refusal is named by its variant. That is also what a
+    /// failure prints: the key the form answered with, which is the thing the
+    /// person on the other end of the form sees.
+    fn dur_answer(fields: &[(&str, &str)]) -> Result<String, &'static str> {
+        duration_from_form(&form_of(fields)).map_err(|k| match k {
+            K::KeyDurationRequired => "KeyDurationRequired",
+            K::KeyDaysWithoutCustom => "KeyDaysWithoutCustom",
+            K::KeyDaysInvalid => "KeyDaysInvalid",
+            _ => "some other key",
+        })
+    }
+
+    /// The text a block of markup shows a person: everything outside a tag, with
+    /// the markup's own line breaks collapsed. The tests that assert a control
+    /// carries **no** words need this, because "no words" about a list of tags is
+    /// a statement about the text between them.
+    fn visible_text(markup: &str) -> String {
+        let mut out = String::new();
+        let mut in_tag = false;
+        for c in markup.chars() {
+            match c {
+                '<' => in_tag = true,
+                '>' => in_tag = false,
+                _ if !in_tag => out.push(c),
+                _ => {}
+            }
+        }
+        out.split_whitespace().collect::<Vec<_>>().join(" ")
+    }
+
+    /// The one `<tbody>` inside `html`, with a message that says what is missing.
+    ///
+    /// Indexing `[0]` on an empty list is the right failure ("this section has no
+    /// body row group") and prints as `index out of bounds`, which tells the next
+    /// reader nothing about which page they are looking at.
+    fn the_tbody(html: &str, label: &str) -> String {
+        elements(html, "<tbody>", "</tbody>")
+            .into_iter()
+            .next()
+            .unwrap_or_else(|| panic!("{label}: the section carries no <tbody>: {html}"))
+    }
+
+    /// The whole element that opens with the tag containing `needle`, up to and
+    /// including its close. [`tag_containing`] stops at that tag's own `>`, which
+    /// is right for an attribute and useless for "what is inside this button".
+    fn element_containing(html: &str, needle: &str, close: &str) -> String {
+        let tag = tag_containing(html, needle);
+        let start = html.find(&tag).expect("the tag is in the page");
+        let tail = &html[start..];
+        let end = tail
+            .find(close)
+            .unwrap_or_else(|| panic!("no {close} after {tag}"));
+        tail[..end + close.len()].to_string()
+    }
+
+    /// The `option`s of a `select`, as `(value, words, picked)`, in document order.
+    fn duration_options(select: &str) -> Vec<(String, String, bool)> {
+        let mut out = Vec::new();
+        let mut rest = select;
+        while let Some(i) = rest.find("<option") {
+            let tail = &rest[i..];
+            let open_end = tail
+                .find('>')
+                .unwrap_or_else(|| panic!("an option opens and never closes: {tail}"));
+            let open = &tail[..open_end + 1];
+            let close = tail
+                .find("</option>")
+                .unwrap_or_else(|| panic!("an option is never closed: {tail}"));
+            let at = open
+                .find("value=\"")
+                .unwrap_or_else(|| panic!("an option carries the value it posts: {open}"));
+            let v = &open[at + 7..];
+            out.push((
+                v[..v.find('"').expect("a closed value")].to_string(),
+                visible_text(&tail[..close]),
+                open.contains("selected"),
+            ));
+            rest = &tail[close + "</option>".len()..];
+        }
+        out
+    }
+
+    /// Every `<a …>` open tag whose own markup contains `needle` (an `href` substring
+    /// is how a test finds "the links that go to the remove page").
+    fn links_to(html: &str, needle: &str) -> Vec<String> {
+        let mut out = Vec::new();
+        let mut rest = html;
+        while let Some(i) = rest.find("<a ") {
+            let tail = &rest[i..];
+            let end = tail.find('>').unwrap_or(tail.len());
+            let tag = tail[..end + 1].to_string();
+            if tag.contains(needle) {
+                out.push(tag);
+            }
+            rest = &tail[end..];
+        }
+        out
+    }
+
+    /// The same links as **whole elements**, `<a …>…</a>`, for a claim about what is
+    /// *inside* one. [`links_to`] stops at the opening tag's `>`, which is the right
+    /// reach for an attribute and blind to the content: §13.17 names an icon control
+    /// with text inside it, so a test that reads that name from an open tag reads
+    /// nothing and passes on an unnamed icon.
+    fn anchors_to(html: &str, needle: &str) -> Vec<String> {
+        elements(html, "<a ", "</a>")
+            .into_iter()
+            .filter(|a| a.contains(needle))
+            .collect()
+    }
+
+    /// The value of `name="…"` in a tag, if the tag carries one.
+    fn attr(tag: &str, name: &str) -> Option<String> {
+        let at = tag.find(&format!("{name}=\""))?;
+        let rest = &tag[at + name.len() + 2..];
+        let end = rest.find('"')?;
+        Some(rest[..end].to_string())
+    }
+
+    /// The rule §13.15 gives the duration control, as amended by §13.16, checked
+    /// against one rendered form: one `select name="duration"` with five options in
+    /// the file's own order, exactly one of them picked, and the custom box sharing
+    /// the form's existing `.limit` row with it.
+    ///
+    /// One `select` and not five radios is asserted because §13.16 moved the control
+    /// into one cell of a table row on `/account/`, where five stacked rows would be
+    /// the tallest thing in it, and a component rendered two ways on the two
+    /// surfaces is two components that drift. The order is asserted because the five
+    /// are a list a person reads top down, longest to shortest, with no expiry last.
+    /// The single `selected` is asserted because a form with nothing picked is a form
+    /// that mints on the first click with no duration named, and one with two picks
+    /// whichever the browser feels like. The box shares the row because that is the
+    /// furniture `admin.css` already has (`form.edit .limit`), and a number box
+    /// orphaned below the choice it belongs to reads as a field of its own.
+    ///
+    /// `mint` says which form this is, because §13.15 gives the two of them different
+    /// answers for `never`. A **mint** form preselects `365d` and must never preselect
+    /// `never`: the widest credential has to be asked for. An **edit** form reads the
+    /// key back (§13.16: "the edit form marks the stored choice `selected`"), and a key
+    /// stored as `never`, `0` or `-` *is* a key with no expiry, so `never` picked there
+    /// is the form telling the truth about the file.
+    fn assert_duration_choices(body: &str, selected: &str, label: &str, mint: bool) {
+        assert_eq!(
+            body.matches("name=\"duration\"").count(),
+            1,
+            "{label}: exactly one control is named `duration`, so the two surfaces render \
+             one component and a hand-written client has one field to post"
+        );
+        let sel = element_containing(body, "name=\"duration\"", "</select>");
+        assert!(
+            sel.starts_with("<select"),
+            "{label}: the five choices are a select: {sel}"
+        );
+
+        let opts = duration_options(&sel);
+        assert_eq!(opts.len(), 5, "{label}: five choices, no more and no fewer");
+        let values: Vec<String> = opts.iter().map(|o| o.0.clone()).collect();
+        assert_eq!(
+            values,
+            vec!["365d", "182d", "91d", "custom", "never"],
+            "{label}: the five values, longest to shortest, then no expiry, each spelled \
+             as the file spells it"
+        );
+
+        let words: Vec<&str> = opts.iter().map(|o| o.1.as_str()).collect();
+        assert!(
+            words[0].contains("year"),
+            "{label}: the first choice says a year in words: {words:?}"
+        );
+        assert!(
+            words[1].contains('6') && words[1].contains("month"),
+            "{label}: the second says six months in words: {words:?}"
+        );
+        assert!(
+            words[2].contains('3') && words[2].contains("month"),
+            "{label}: the third says three months in words: {words:?}"
+        );
+        assert!(
+            words[3].contains("day"),
+            "{label}: the fourth says the person names a number of days: {words:?}"
+        );
+        assert!(
+            words[4].contains("never") || words[4].contains("expiry"),
+            "{label}: the last says the key does not expire: {words:?}"
+        );
+
+        let picked: Vec<&(String, String, bool)> = opts.iter().filter(|o| o.2).collect();
+        assert_eq!(
+            picked.len(),
+            1,
+            "{label}: exactly one choice is picked, so the first click cannot mint a key \
+             with no duration named"
+        );
+        assert_eq!(
+            picked[0].0, selected,
+            "{label}: the picked choice is `{selected}`"
+        );
+        if mint {
+            assert_ne!(
+                selected, "never",
+                "{label}: no mint form preselects no expiry, because the widest credential \
+                 has to be asked for"
+            );
+        }
+
+        // The field is labelled, in the form's own label class, before the control.
+        let at = body.find("name=\"duration\"").expect("the select is there");
+        let head = &body[..at];
+        let lbl = head.rfind("class=\"lbl\"").unwrap_or_else(|| {
+            panic!("{label}: the duration field carries the form's own label: {head}")
+        });
+        assert!(
+            !visible_text(&body[lbl..at]).is_empty(),
+            "{label}: the label names the field: {}",
+            &body[lbl..at.min(lbl + 120)]
+        );
+
+        // The custom box: a text field that brings up a numeric keyboard, named for
+        // a screen reader because it has no visible label of its own, sitting in the
+        // same `.limit` row as the select and after it.
+        let box_tag = tag_containing(body, "name=\"days\"");
+        assert!(
+            box_tag.starts_with("<input")
+                && box_tag.contains("type=\"text\"")
+                && box_tag.contains("inputmode=\"numeric\""),
+            "{label}: the custom box is a text field that brings up a numeric keyboard: \
+             {box_tag}"
+        );
+        assert!(
+            box_tag.contains("aria-label="),
+            "{label}: the box has no visible label of its own, so its name has to be \
+             written down: {box_tag}"
+        );
+        let days_at = body.find("name=\"days\"").expect("the box is there");
+        assert!(
+            at < days_at,
+            "{label}: the box follows the choice it belongs to"
+        );
+        let limit = body[..days_at].rfind("class=\"limit\"").unwrap_or_else(|| {
+            panic!("{label}: the select and the box share the form's existing .limit row")
+        });
+        let tail = &body[limit..];
+        let row = &tail[..tail.find("</span>").unwrap_or(tail.len())];
+        assert!(
+            row.contains("name=\"duration\""),
+            "{label}: the number box shares the `.limit` row with the choice, so it reads \
+             as that row's companion and not as a field of its own: {row}"
+        );
+    }
+
+    /// Every element that opens with `<tag …>` whose class list contains `class`, as the
+    /// opening tag through its closing tag.
+    ///
+    /// The class is the component's name (§13.17), so this finds every icon control in a
+    /// document without naming which control it is, and a control added later is covered
+    /// without editing the test. None of these controls nests inside another of the same tag,
+    /// so the first close tag is the right one.
+    fn controls_with_class(html: &str, tag: &str, class: &str) -> Vec<String> {
+        let mut out = Vec::new();
+        let open = format!("<{tag} ");
+        let close = format!("</{tag}>");
+        let mut at = 0;
+        while let Some(i) = html[at..].find(&open) {
+            let start = at + i;
+            let gt = match html[start..].find('>') {
+                Some(j) => start + j,
+                None => break,
+            };
+            let end = match html[gt..].find(&close) {
+                Some(j) => gt + j + close.len(),
+                None => {
+                    at = gt + 1;
+                    continue;
+                }
+            };
+            if attr(&html[start..gt], "class")
+                .is_some_and(|c| c.split_whitespace().any(|word| word == class))
+            {
+                out.push(html[start..end].to_string());
+            }
+            at = end;
+        }
+        out
+    }
+
+    /// Every element that opens with `open` through its first `close`, as strings.
+    fn elements(html: &str, open: &str, close: &str) -> Vec<String> {
+        let mut out = Vec::new();
+        let mut rest = html;
+        while let Some(i) = rest.find(open) {
+            let tail = &rest[i..];
+            let end = match tail.find(close) {
+                Some(j) => j + close.len(),
+                None => break,
+            };
+            out.push(tail[..end].to_string());
+            rest = &tail[end..];
+        }
+        out
+    }
+
+    /// The declarations of one rule out of a stylesheet **compiled into the binary**, by its
+    /// exact selector, or `None` when there is no such rule.
+    ///
+    /// [`css_block`] panics on a missing rule, which is right for a rule a test expects and
+    /// wrong for a rule a test expects to be **gone** (the sizing rules §13.17 deletes). The
+    /// walk steps over a `@media` block's own selector, so the phone overrides inside it are
+    /// reachable, and reads the bytes that ship rather than `src/assets/*.css` on disk.
+    fn the_rule(css: &str, selector: &str) -> Option<String> {
+        let mut at = 0;
+        while let Some(i) = css[at..].find('{') {
+            let sel = css[at..at + i].trim();
+            let end = {
+                let j = css[at + i..].find('}')?;
+                at + i + j
+            };
+            if sel.split(',').any(|s| s.trim() == selector) {
+                return Some(css[at + i + 1..end].trim().to_string());
+            }
+            at = end + 1;
+        }
+        None
+    }
+
+    /// The rows of the keys table, as `<tr>` elements, in document order. The console's table
+    /// and the account page's table are the same markup (§13.16), so one reader serves both.
+    fn table_rows(html: &str) -> Vec<String> {
+        elements(html, "<tr", "</tr>")
+    }
+
+    /// The opening tag of an element string, up to and including its `>`.
+    fn open_tag(el: &str) -> &str {
+        &el[..el.find('>').expect("an element opens") + 1]
+    }
+
+    /// The reveal's copy control is an **icon**, and an icon needs a name.
+    ///
+    /// §13.15 replaces the text button with a box carrying two inline SVGs, a
+    /// copy glyph and a done glyph, and no visible words. Everything that made
+    /// the text button usable has to be put back on purpose: a name for the
+    /// assistive technology and a `title` for a sighted pointer, because a box
+    /// with no visible text has no accessible name; `aria-hidden="true"
+    /// focusable="false"` on each glyph, because a decorative shape that takes a
+    /// tab stop is a trap; and a separate `role="status"` span for the word the
+    /// script writes, because a word written **into** the button replaces the
+    /// icon the person is looking at. The glyphs carry no colour of their own:
+    /// the stylesheet paints them, which is what keeps the palette the only
+    /// place a colour is named.
+    ///
+    /// §13.17 says **how** the name is carried: text inside the control in
+    /// `span.vh`, plus a `title` with the same words, and **no `aria-label`**.
+    /// One mechanism, not two, because the header's Preferences trigger is a
+    /// `summary`, which has no implicit ARIA role, so an `aria-label` there is
+    /// not a name every reader exposes while text content is. The box is the
+    /// shared `pill ico` component, so its 24px minimum (WCAG 2.5.8) lives in
+    /// `base.css` with the component and not in a rule of the reveal's: the
+    /// reveal keeps only the glyph swap on `data-state`.
+    ///
+    /// The button is served `hidden` and only the script shows it, which is the
+    /// half that keeps the scripting-off page honest: an icon nobody can press
+    /// is worse than no icon.
+    ///
+    /// All four reveals, through [`reveal_cases`]: the console's mint and rotate
+    /// and the self-service page's two. One of the four missing the name is the
+    /// same bug as all four, and the console is the surface a person with no
+    /// administrator in the room never sees.
+    #[test]
+    fn the_copy_control_is_an_icon_with_a_name() {
+        let (cases, paths) = reveal_cases("copy-icon");
+        for (label, g) in &cases {
+            let btn = element_containing(&g.body, "id=\"bearer-copy\"", "</button>");
+            let open = tag_containing(&btn, "id=\"bearer-copy\"");
+            assert!(
+                open.starts_with("<button") && open.contains("type=\"button\""),
+                "{label}: still a button, and a bare `button` is a submit button: {open}"
+            );
+            assert!(
+                open.contains("hidden=\"hidden\"") || open.contains(" hidden"),
+                "{label}: served hidden, because the script is the only thing that can \
+                 make this icon work: {open}"
+            );
+            assert!(
+                attr(&open, "class").is_some_and(|c| c == "pill ico"),
+                "{label}: the copy control is the shared icon component, not a box of its \
+                 own: {open}"
+            );
+            assert!(
+                !open.contains("aria-label"),
+                "{label}: the name is text inside the control, so no second naming mechanism \
+                 is left to drift out of step with it: {open}"
+            );
+            assert_eq!(
+                visible_text(&btn),
+                "Copy the key",
+                "{label}: the name is written inside the control, hidden visually, which is \
+                 the one naming mechanism every reader exposes: {btn}"
+            );
+            assert!(
+                open.contains("title=\"Copy the key\""),
+                "{label}: and the same words are what a pointer shows, for the person using \
+                 a mouse: {open}"
+            );
+            assert_eq!(
+                controls_with_class(&btn, "span", "vh").len(),
+                1,
+                "{label}: exactly one span of hidden words, so the control has one name and \
+                 not two: {btn}"
+            );
+            assert!(
+                !visible_text(&btn).contains("Copied")
+                    && !visible_text(&btn).contains("Copy refused"),
+                "{label}: the words the click writes belong to the status span, never to the \
+                 control: {btn}"
+            );
+
+            for glyph in ["i-copy", "i-done"] {
+                let svg = element_containing(&btn, &format!("class=\"{glyph}\""), "</svg>");
+                assert!(
+                    svg.starts_with("<svg"),
+                    "{label}: `{glyph}` is an inline SVG, not an image from a host: {svg}"
+                );
+                assert!(
+                    svg.contains("viewBox=\"0 0 24 24\""),
+                    "{label}: `{glyph}` is drawn on the grid the stylesheet sizes it to: \
+                     {svg}"
+                );
+                assert!(
+                    svg.contains("aria-hidden=\"true\"") && svg.contains("focusable=\"false\""),
+                    "{label}: `{glyph}` is decoration, so it is hidden from the \
+                     accessibility tree and takes no tab stop: {svg}"
+                );
+                assert!(
+                    !svg.contains("fill=") && !svg.contains("stroke=") && !svg.contains("style="),
+                    "{label}: `{glyph}` names no colour, so the palette stays the only \
+                     place one is defined: {svg}"
+                );
+            }
+
+            let status = tag_containing(&g.body, "id=\"bearer-copy-status\"");
+            assert!(
+                status.starts_with("<span") && status.contains("role=\"status\""),
+                "{label}: the word the click writes lands in a live region beside the \
+                 icon, not inside it: {status}"
+            );
+            let at = g
+                .body
+                .find("id=\"bearer-copy-status\"")
+                .expect("the status span is served");
+            let rest = &g.body[at..];
+            let inner = &rest[rest.find('>').expect("the span opens") + 1
+                ..rest.find("</span>").expect("the span closes")];
+            assert_eq!(
+                inner.trim(),
+                "",
+                "{label}: the status is empty as served, because it says what the last \
+                 click did and no click has happened"
+            );
+            // The two words the click writes are attributes, because the markup is
+            // rendered server-side and translated, and the script is a constant that
+            // knows no language. A missing attribute is a click that writes nothing.
+            for (attr, word) in [("data-done", "Copied"), ("data-failed", "Copy refused")] {
+                assert!(
+                    open.contains(&format!("{attr}=\"{word}")),
+                    "{label}: the button carries `{attr}` starting with the words the \
+                     click puts in the status span: {open}"
+                );
+            }
+            assert!(
+                g.body.contains(COPY_SCRIPT),
+                "{label}: the script is on the page that shows the icon"
+            );
+        }
+
+        // The component's CSS is a stylesheet fact, and the stylesheet is the only place one
+        // can read it from Rust. §13.17 moves the sizing into the shared `.pill.ico` in
+        // `base.css` (both programs emit it) and deletes the reveal's own `.secret .copy`
+        // rules, so both halves are pinned: the rule that exists, and the ones that must not.
+        let ico = the_rule(BASE_CSS, ".pill.ico").expect("base.css defines the icon component");
+        assert!(
+            ico.contains("min-width:24px") && ico.contains("min-height:24px"),
+            "an icon target is at least 24 by 24 CSS pixels (WCAG 2.5.8), and the minimum is \
+             in the component so no call site can forget it: {ico}"
+        );
+        let glyph = the_rule(BASE_CSS, ".pill.ico svg").expect("base.css sizes the glyph");
+        assert!(
+            glyph.contains("stroke:currentColor") && glyph.contains("fill:none"),
+            "the glyph is painted by the palette, so a token file repaints it and \
+             `THEME_CSS` stays the only place a colour is named: {glyph}"
+        );
+        let vh = the_rule(BASE_CSS, ".vh").expect("base.css defines the hidden-text utility");
+        assert!(
+            !vh.contains("display:none"),
+            "the name is hidden by geometry, not by `display:none`, which would hide it from \
+             the assistive technology the whole mechanism exists to feed: {vh}"
+        );
+        assert!(
+            the_rule(CSS, ".bar .pill.ico").is_some(),
+            "the console's bar sizes its own icons square, in the stylesheet that owns the bar"
+        );
+        for (sheet, name) in [(BASE_CSS, "base.css"), (CSS, "admin.css")] {
+            assert!(
+                the_rule(sheet, ".secret .copy").is_none(),
+                "{name} no longer sizes the copy control: §13.17 gave it to the shared \
+                 component, and a second answer to how big an icon is is the drift this \
+                 repository keeps writing rules about"
+            );
+        }
+        for path in paths {
+            let _ = std::fs::remove_file(path);
+        }
+    }
+
+    /// Every icon control in the estate is named by **hidden text**, in the reader's language.
+    ///
+    /// §13.17 puts every glyph in one component (`pill ico`), and what makes a glyph usable
+    /// is the naming, not the shape: a decorative `svg` must be out of the accessibility tree
+    /// and out of the tab order, and the control's name must be content a reader exposes, not
+    /// an attribute whose support varies by element (the header's Preferences trigger is a
+    /// `summary`, which has no implicit ARIA role at all).
+    ///
+    /// The assertions run over **every** `.pill.ico` in the document rather than over a list
+    /// of controls this test names, for two reasons: the header's icons land in slice 8b and
+    /// are covered the day they exist, and a control added by an edit that forgets its name
+    /// fails here, in Rust, rather than in a screen reader in front of the page. The header is
+    /// deliberately not asserted today: a test that required it would be red for a slice that
+    /// has not been built.
+    ///
+    /// The name is checked **translated**, on the Italian page, because the words are the
+    /// page's and go through the `K` table. An icon whose name stays English on an Italian
+    /// page is the same untranslated text the 4b screenshot caught in a field label, and a
+    /// glyph is worse: it carries no word of its own to translate.
+    #[test]
+    fn icon_controls_are_named_by_hidden_text() {
+        let (cases, mut paths) = reveal_cases("icon-names");
+        let mut docs: Vec<(String, String)> = cases
+            .iter()
+            .map(|(label, g)| (format!("the {label} reveal"), g.body.clone()))
+            .collect();
+
+        // The keys table, with a key in it to revoke, in both languages.
+        let path = account_scratch_access("icon-names", &account_access_keys());
+        paths.push(path.clone());
+        let base = account_serve(&path);
+        for (label, lang) in [("English", "en"), ("Italian", "it")] {
+            let g = account_call_pref(
+                &base,
+                Some("bob@x.com"),
+                Some(&format!("lang={lang}")),
+                None,
+            );
+            assert_eq!(
+                g.status,
+                200,
+                "bob reaches his own keys page, in {label}: {}",
+                account_readable(&g.body)
+            );
+            docs.push((format!("the account keys table in {label}"), g.body));
+        }
+
+        for (where_, body) in &docs {
+            let icons = controls_with_class(body, "button", "ico")
+                .into_iter()
+                .chain(controls_with_class(body, "a", "ico"))
+                .chain(controls_with_class(body, "summary", "ico"))
+                .collect::<Vec<_>>();
+            assert!(
+                !icons.is_empty(),
+                "{where_}: the page under test carries at least one icon control, or this \
+                 test is asserting nothing about it"
+            );
+            for el in &icons {
+                let open = open_tag(el);
+                for glyph in elements(el, "<svg", "</svg>") {
+                    assert!(
+                        glyph.starts_with("<svg")
+                            && glyph.contains("aria-hidden=\"true\"")
+                            && glyph.contains("focusable=\"false\""),
+                        "{where_}: a glyph is decoration, so it is out of the accessibility \
+                         tree and takes no tab stop: {glyph}"
+                    );
+                    assert!(
+                        !glyph.contains("fill=")
+                            && !glyph.contains("stroke=")
+                            && !glyph.contains("style="),
+                        "{where_}: a glyph names no colour, so the palette stays the only \
+                         place one is defined: {glyph}"
+                    );
+                }
+                let names = controls_with_class(el, "span", "vh");
+                assert_eq!(
+                    names.len(),
+                    1,
+                    "{where_}: the control carries exactly one span of hidden words, so it \
+                     has one name and not two: {el}"
+                );
+                let words = visible_text(&names[0]);
+                assert!(
+                    !words.is_empty(),
+                    "{where_}: the hidden words are a name, not an empty span: {el}"
+                );
+                assert_eq!(
+                    attr(open, "title").as_deref(),
+                    Some(words.as_str()),
+                    "{where_}: the pointer tooltip says the same words the reader reads, so \
+                     a sighted person and a screen reader are told the same action"
+                );
+            }
+        }
+
+        // The names themselves, and they are the table's words, not the markup's.
+        for (label, g) in &cases {
+            let btn = element_containing(&g.body, "id=\"bearer-copy\"", "</button>");
+            assert_eq!(
+                visible_text(&btn),
+                t(Lang::En, K::CopyKey),
+                "the {label}: the copy control's name is the translation table's entry, so \
+                 the Italian reveal names it in Italian: {btn}"
+            );
+        }
+        let it = docs
+            .iter()
+            .find(|(w, _)| w.ends_with("Italian"))
+            .expect("built above");
+        let revoke = controls_with_class(&it.1, "a", "ico")
+            .into_iter()
+            .find(|el| el.contains("/keys/remove"))
+            .expect("the keys table's revoke is an icon control (§13.17)");
+        assert_eq!(
+            visible_text(&revoke),
+            format!("{} laptop", t(Lang::It, K::AccountKeyRemove)),
+            "the revoke names the key it is about to remove, in the reader's language: a \
+             glyph alone says \"×\", which is the same word for close, delete and cancel: \
+             {revoke}"
+        );
+        let en = docs
+            .iter()
+            .find(|(w, _)| w.ends_with("English"))
+            .expect("built above");
+        let revoke = controls_with_class(&en.1, "a", "ico")
+            .into_iter()
+            .find(|el| el.contains("/keys/remove"))
+            .expect("the keys table's revoke is an icon control (§13.17)");
+        assert_eq!(
+            visible_text(&revoke),
+            format!("{} laptop", t(Lang::En, K::AccountKeyRemove)),
+            "and the English page says the same thing in English: {revoke}"
+        );
+
+        for path in paths {
+            let _ = std::fs::remove_file(path);
+        }
+    }
+
+    /// The five choices map onto the file's duration grammar, in one function,
+    /// and the refusals are named.
+    ///
+    /// §13.15 puts the mapping in `duration_from_form` because the console and
+    /// the self-service page mint the same field, and a mapping written twice is
+    /// two mappings. The presets are stored **verbatim** (`365d`, `182d`, `91d`)
+    /// so the file keeps the spelling an operator reads in `bb-auth-adm show`; a
+    /// custom number becomes `<n>d`, and the console's box keeps taking a unit,
+    /// because twelve hours is a window a deployment genuinely wants and the
+    /// self-service page is the one that cannot name it.
+    ///
+    /// The refusals are the half worth reading. An **empty** duration is refused
+    /// and not read as "no expiry": `parse_duration("")` is `Dur::Never`, so a
+    /// form that lost its radio would mint a key that never dies, which is the
+    /// one outcome a person did not ask for and cannot undo from the page. A
+    /// number typed while a preset is picked is a form that contradicts itself,
+    /// and an empty custom box is a refusal, not a default.
+    #[test]
+    fn the_duration_choice_maps_onto_the_grammar() {
+        for preset in ["365d", "182d", "91d"] {
+            assert_eq!(
+                dur_answer(&[("duration", preset), ("days", "")]),
+                Ok(preset.to_string()),
+                "a preset is stored as it is spelled, so the file reads the same to \
+                 every program that opens it"
+            );
+        }
+        assert_eq!(
+            dur_answer(&[("duration", "custom"), ("days", "40")]),
+            Ok("40d".to_string()),
+            "a custom number is a number of days, which is the unit the file's grammar \
+             needs"
+        );
+        assert_eq!(
+            dur_answer(&[("duration", "custom"), ("days", "12h")]),
+            Ok("12h".to_string()),
+            "the console's box has always taken a unit, and a key for the length of a \
+             shift is a real request"
+        );
+        assert_eq!(
+            dur_answer(&[("duration", "never"), ("days", "")]),
+            Ok("never".to_string()),
+            "no expiry is the file's own word, stored as the file spells it"
+        );
+
+        // The empty field is not "no expiry", and a field that is not there at
+        // all is the same form, so both are the same refusal.
+        let nothing: &[(&str, &str)] = &[];
+        for fields in [
+            &[("duration", ""), ("days", "")][..],
+            nothing,
+            &[("days", "40")][..],
+        ] {
+            assert_eq!(
+                dur_answer(fields),
+                Err("KeyDurationRequired"),
+                "a mint with no duration named is refused, never defaulted: an empty \
+                 field is what parse_duration reads as `never`"
+            );
+        }
+        assert_eq!(
+            dur_answer(&[("duration", "365d"), ("days", "40")]),
+            Err("KeyDaysWithoutCustom"),
+            "a number typed while a preset is picked is a form that contradicts itself, \
+             and guessing which half the person meant is how a key outlives its reason"
+        );
+
+        // The custom box's refusals. `never` is among them: it is a choice, not a
+        // number, and a box that accepted it would be a second way to spell one
+        // thing, which is the bug this repository keeps writing warnings about.
+        for bad in [
+            "",
+            "0",
+            "-3",
+            "-",
+            "never",
+            "abc",
+            "40x",
+            "999999999999999999999999d",
+        ] {
+            assert_eq!(
+                dur_answer(&[("duration", "custom"), ("days", bad)]),
+                Err("KeyDaysInvalid"),
+                "`{bad}` is not a number of days"
+            );
+        }
+    }
+
+    /// A key minted from the self-service page may **never expire**, and the
+    /// custom box has no upper bound.
+    ///
+    /// §13.15. The page used to refuse `never` and anything past a year, which
+    /// was a rule about what a person may decide and not a rule about what the
+    /// file can hold: `bb-auth-adm` mints a never-expiring key today, so the
+    /// restriction only ever meant the person with no administrator in the room
+    /// was told no. The floor stays, because a key that expires in seconds is a
+    /// key that does not work, and that refusal is this page's own
+    /// `ACCOUNT_KEY_MIN_SECS`.
+    ///
+    /// Every refusal here is checked against the file as well as the status: a
+    /// 400 that wrote a key is a mint that worked.
+    #[test]
+    fn a_self_service_key_may_never_expire() {
+        let path = account_scratch_access("never-expires", &account_access_mint());
+        let base = account_serve(&path);
+
+        // The choice the page offers, minted.
+        let rev = sha256_hex(&read(&path));
+        let g = account_post(
+            &format!("{base}keys"),
+            Some("bob@x.com"),
+            &[
+                ("rev", &rev),
+                ("id", "long"),
+                ("duration", "never"),
+                ("restrict", "all"),
+            ],
+        );
+        assert_eq!(
+            g.status,
+            200,
+            "`never` is a choice the form offers, so the page must accept it: {}",
+            account_readable(&g.body)
+        );
+        let bearer = account_bearer_in(&g.body).to_string();
+        let on_disk = read(&path);
+        let key = account_key_json(&on_disk, 0, "long");
+        assert_eq!(
+            key["duration"].as_str(),
+            Some("never"),
+            "the file carries the word, not a date invented for it: {key}"
+        );
+        assert_eq!(
+            key_expiry(
+                key["released"].as_str().expect("a mint stamps a release"),
+                "never"
+            ),
+            Some(None),
+            "and the gate's own expiry reads it as no expiry: {key}"
+        );
+        assert!(
+            on_disk.contains(&sha256_hex(&bearer)),
+            "and the secret this page handed out is the one that works"
+        );
+
+        // No upper bound: a year and a day is a person's decision, not the page's.
+        let rev = sha256_hex(&read(&path));
+        let g = account_post(
+            &format!("{base}keys"),
+            Some("bob@x.com"),
+            &[
+                ("rev", &rev),
+                ("id", "far"),
+                ("duration", "custom"),
+                ("days", "366"),
+                ("restrict", "all"),
+            ],
+        );
+        assert_eq!(
+            g.status,
+            200,
+            "the custom box has no ceiling: {}",
+            account_readable(&g.body)
+        );
+        let far = account_key_json(&read(&path), 0, "far");
+        assert_eq!(
+            far["duration"].as_str(),
+            Some("366d"),
+            "and it is stored as the grammar spells it: {far}"
+        );
+        let released = far["released"].as_str().expect("a mint stamps a release");
+        // `key_expiry` answers an **absolute instant**, so what a day adds to a year is a
+        // day of seconds, not the instant a one-day key happens to expire at.
+        let year = key_expiry(released, "365d")
+            .and_then(|e| e)
+            .expect("a year has an expiry");
+        assert_eq!(
+            key_expiry(released, "366d").and_then(|e| e),
+            Some(year + 86_400),
+            "366 days is a year and a day, read the way the gate reads it"
+        );
+        let on_disk = read(&path);
+
+        // The refusals, each of which writes nothing.
+        for (case, days) in [
+            ("an empty box", ""),
+            ("zero", "0"),
+            ("a negative", "-3"),
+            ("the word never in the number box", "never"),
+            ("letters", "abc"),
+        ] {
+            let rev = sha256_hex(&read(&path));
+            let g = account_post(
+                &format!("{base}keys"),
+                Some("bob@x.com"),
+                &[
+                    ("rev", &rev),
+                    ("id", "bad"),
+                    ("duration", "custom"),
+                    ("days", days),
+                    ("restrict", "all"),
+                ],
+            );
+            assert_eq!(g.status, 400, "the custom box refuses {case} (`{days}`)");
+            assert_eq!(
+                read(&path),
+                on_disk,
+                "a refused mint writes nothing, so the refusal costs the person nothing"
+            );
+        }
+
+        // An empty duration field is refused, and is not read as "no expiry".
+        let rev = sha256_hex(&read(&path));
+        let g = account_post(
+            &format!("{base}keys"),
+            Some("bob@x.com"),
+            &[
+                ("rev", &rev),
+                ("id", "blank"),
+                ("duration", ""),
+                ("restrict", "all"),
+            ],
+        );
+        assert_eq!(
+            g.status, 400,
+            "an empty duration is not a mint with no expiry: that is the one default \
+             this page must never take"
+        );
+        assert_eq!(read(&path), on_disk, "and it wrote nothing");
+
+        // A rotate of a key with no expiry keeps it that way: the window is the
+        // key's, and changing the secret is not a decision to end it.
+        let rev = sha256_hex(&read(&path));
+        let g = account_post(
+            &format!("{base}keys/rotate"),
+            Some("bob@x.com"),
+            &[("rev", &rev), ("id", "long")],
+        );
+        assert_eq!(
+            g.status,
+            200,
+            "a rotate of a never-expiring key is answered: {}",
+            account_readable(&g.body)
+        );
+        let key = account_key_json(&read(&path), 0, "long");
+        assert_eq!(
+            key["duration"].as_str(),
+            Some("never"),
+            "the rotate changed the secret and left the window alone: {key}"
+        );
+        assert_eq!(
+            key_expiry(
+                key["released"].as_str().expect("a rotate keeps a release"),
+                "never"
+            ),
+            Some(None),
+            "and grew no expiry: {key}"
+        );
+
+        cleanup(&path);
+    }
+
+    /// The key form offers **five** choices, on both surfaces, and reads an
+    /// existing key back into them.
+    ///
+    /// §13.15. The console's mint, the self-service page's mint, and the
+    /// console's edit of a key whose duration is one of the five, one of the
+    /// spellings of "no expiry", and one the five cannot name. The last one is
+    /// the case a form rewrite loses: `8760h` is a real value in a real file, and
+    /// a form that shows nothing picked for it is a form that will save `365d`
+    /// over it the moment the person presses the button.
+    #[test]
+    fn the_key_form_offers_five_choices() {
+        // --- the console, over a socket: the mint form and the read-backs ------
+        let path = scratch("dur-console", SAMPLE);
+        let port = serve(&path, ADMIN_BASE);
+        let get = |at: Route| -> AccountGot {
+            let url = format!("http://127.0.0.1:{port}{ADMIN_BASE}{}", at.path());
+            got_of(
+                get_with_secret(&url)
+                    .header(IDENTITY_HEADER, "admin@x.com")
+                    .call()
+                    .expect("a GET response"),
+            )
+        };
+
+        let g = get(Route::KeyAdd(BOB.to_string()));
+        assert_eq!(
+            g.status,
+            200,
+            "the mint form is a page: {}",
+            account_readable(&g.body)
+        );
+        assert_duration_choices(&g.body, "365d", "the console's mint form", true);
+
+        // A key whose duration is written another way, rendered from a fixture
+        // that says so. The fixture is the sample with one field changed, so the
+        // read-back is about the form and not about a second hand-built file.
+        let edit = |duration: &str| -> AccountGot {
+            let fixture = SAMPLE.replace(
+                "\"duration\": \"1d\"",
+                &format!("\"duration\": \"{duration}\""),
+            );
+            let p = scratch(&format!("dur-edit-{duration}"), &fixture);
+            let port = serve(&p, ADMIN_BASE);
+            let url = format!(
+                "http://127.0.0.1:{port}{ADMIN_BASE}{}",
+                Route::KeyEdit(BOB.to_string(), "laptop".to_string()).path()
+            );
+            let g = got_of(
+                get_with_secret(&url)
+                    .header(IDENTITY_HEADER, "admin@x.com")
+                    .call()
+                    .expect("a GET response"),
+            );
+            cleanup(&p);
+            g
+        };
+
+        let g = edit("91d");
+        assert_eq!(g.status, 200, "a key of three months is editable");
+        assert_duration_choices(&g.body, "91d", "a key of three months", false);
+
+        let g = edit("never");
+        assert_eq!(g.status, 200, "a key that never expires is editable");
+        assert_duration_choices(&g.body, "never", "a key that never expires", false);
+
+        // A duration the five cannot name is the custom box, filled in with the
+        // file's own bytes.
+        let g = edit("8760h");
+        assert_eq!(g.status, 200, "a key of a year in hours is editable");
+        assert_duration_choices(
+            &g.body,
+            "custom",
+            "a duration only the custom box can name",
+            false,
+        );
+        assert!(
+            g.body.contains("value=\"8760h\""),
+            "the box carries the duration it is reading back, so saving the form cannot \
+             quietly move the expiry"
+        );
+
+        // An expired key (`0`, and the `-` a hand-edited file may hold) reads back
+        // as no expiry, not as a nonsense number in the box.
+        for expired in ["0", "-"] {
+            let g = edit(expired);
+            assert_eq!(g.status, 200, "an expired key is editable");
+            assert_duration_choices(
+                &g.body,
+                "never",
+                &format!("an expired key (`{expired}`)"),
+                false,
+            );
+        }
+
+        // --- the self-service page: the same five, on the page the + opens ------
+        //
+        // §13.16 moved the mint form out of the keys section and onto its own page,
+        // because the row it opens is a row of the keys table. The five choices are
+        // the same component on both surfaces, so the read is from `keys/new`.
+        let apath = account_scratch_access("dur-account", &account_access_mint());
+        let base = account_serve(&apath);
+        let g = account_call(&base, Some("bob@x.com"));
+        assert_eq!(
+            g.status,
+            200,
+            "the page renders: {}",
+            account_readable(&g.body)
+        );
+        assert!(
+            g.body.contains("keys/new"),
+            "the page offers the way to the mint form: {}",
+            account_readable(&g.body)
+        );
+        assert!(
+            !g.body.contains("name=\"duration\""),
+            "the plain page carries no mint form, so the table is all a person reads \
+             before they decide to add a key: {}",
+            account_readable(&g.body)
+        );
+        let g = account_call(&format!("{base}keys/new"), Some("bob@x.com"));
+        assert_eq!(
+            g.status,
+            200,
+            "the mint form is a page of its own: {}",
+            account_readable(&g.body)
+        );
+        assert_duration_choices(&g.body, "365d", "the self-service mint form", true);
+        assert!(
+            !g.body.contains("keys/new"),
+            "the page that is the mint form does not offer to open itself again: {}",
+            account_readable(&g.body)
+        );
+
+        cleanup(&path);
+        cleanup(&apath);
+    }
+
+    /// Revoking a key from the self-service page **asks first**.
+    ///
+    /// §13.15. The console already asks, through [`page_confirm`]; the
+    /// self-service page posted the removal straight from the list, which meant
+    /// one stray Enter on a page whose buttons are stacked revoked a working
+    /// credential with no way back. So the removal became two steps: a control
+    /// that opens a confirmation, and the `POST` that removes, which lives only
+    /// on that confirmation. §13.16 made the control the console's row action, an
+    /// `a.pill.rm` link, because that is what `act_rm` is and a browser cannot
+    /// submit a link by accident.
+    ///
+    /// The confirm page is a `GET`, so it writes nothing, and that is asserted on
+    /// the bytes. It names the key it is about to remove, because a card that
+    /// says "revoke a key" is a card that revokes whichever key its form
+    /// carries. The refusals are `404` and **name nothing**: an id the caller does
+    /// not have is answered exactly like an id that does not exist, and a page
+    /// that said "no such key" about an id on somebody else's row would be an
+    /// enumeration oracle over this estate's whole roster.
+    #[test]
+    fn revoking_a_key_asks_first_on_the_account_page() {
+        let path = account_scratch_access("revoke-asks", &account_access_keys());
+        let base = account_serve(&path);
+        let on_disk = read(&path);
+
+        // --- the list: the remove control asks, it does not do ------------------
+        //
+        // §13.16: the control is the console's row action, an `a.pill.rm` link to the
+        // confirmation, not a form. A link is the cheaper promise, because a browser
+        // cannot submit a link by accident, and the confirmation page is still the
+        // only thing that mutates.
+        let g = account_call(&base, Some("bob@x.com"));
+        assert_eq!(g.status, 200, "bob's page: {}", account_readable(&g.body));
+        let removes = anchors_to(&g.body, "keys/remove");
+        assert_eq!(
+            removes.len(),
+            2,
+            "one remove control per key of the caller's"
+        );
+        let mut ids: Vec<String> = Vec::new();
+        for a in &removes {
+            let class = attr(a, "class").unwrap_or_default();
+            let cls: Vec<&str> = class.split_whitespace().collect();
+            assert!(
+                cls.contains(&"pill") && cls.contains(&"rm"),
+                "the control is the destructive member of the row's pills, so it takes \
+                 the styling every destructive action already has: {a}"
+            );
+            let href = attr(a, "href").unwrap_or_default();
+            let id = href.split("id=").last().unwrap_or_default().to_string();
+            assert!(
+                href.contains("keys/remove?id=") && !id.is_empty(),
+                "the link carries **that** key's id in its address, so the card cannot \
+                 name one key and remove another: {a}"
+            );
+            ids.push(id.clone());
+            // WCAG 2.4.6: ten links all called "Revoke key" are ten identical
+            // entries in a screen reader's list of links. §13.17 carries that name
+            // as hidden text inside the link, not as `aria-label`, because the
+            // shared component is also used on a `summary`, which has no implicit
+            // ARIA role for an `aria-label` to name.
+            assert_eq!(
+                visible_text(a),
+                format!("Revoke key {id}"),
+                "the link's name is text inside it, and carries the id: {a}"
+            );
+            assert_eq!(
+                attr(a, "title").as_deref(),
+                Some(format!("Revoke key {id}").as_str()),
+                "and a pointer user sees the same words: {a}"
+            );
+            assert!(
+                !a.contains("aria-label"),
+                "one naming mechanism, so the tooltip and the reader's name cannot drift \
+                 apart: {a}"
+            );
+        }
+        assert_eq!(
+            ids,
+            vec!["laptop".to_string(), "ci".to_string()],
+            "each control carries its own key's id, in the order the keys are listed"
+        );
+        for form in account_forms(&g.body) {
+            assert!(
+                !form.contains("keys/remove"),
+                "nothing on the plain page posts a removal: the mutation lives on the \
+                 confirmation, which is the step that asks: {form}"
+            );
+        }
+
+        // Rotate asks too, and is the same shape with a word on it.
+        let rotates = links_to(&g.body, "keys/rotate");
+        assert_eq!(
+            rotates.len(),
+            2,
+            "one rotate control per key of the caller's"
+        );
+        for a in &rotates {
+            let class = attr(a, "class").unwrap_or_default();
+            let cls: Vec<&str> = class.split_whitespace().collect();
+            assert!(cls.contains(&"pill"), "rotate is a pill: {a}");
+            assert!(
+                attr(a, "aria-label")
+                    .unwrap_or_default()
+                    .starts_with("Rotate key "),
+                "and its name carries the id, as the remove's does: {a}"
+            );
+        }
+
+        // --- the confirm page: it names the key, and it writes nothing ---------
+        let g = account_call(&format!("{base}keys/remove?id=laptop"), Some("bob@x.com"));
+        assert_eq!(
+            g.status,
+            200,
+            "the confirm page is a page: {}",
+            account_readable(&g.body)
+        );
+        assert_eq!(
+            read(&path),
+            on_disk,
+            "a GET writes nothing: the key is still there until the person says so"
+        );
+        assert!(
+            g.body.contains("laptop"),
+            "the card names the key it is about to remove: {}",
+            account_readable(&g.body)
+        );
+        assert!(
+            !g.body.contains("bbk_"),
+            "and it shows no secret, because a confirmation is not a reveal"
+        );
+        let card = account_forms(&g.body)
+            .into_iter()
+            .find(|f| f.contains("method=\"post\""))
+            .expect("the card carries the POST that removes");
+        assert!(
+            card.contains("keys/remove"),
+            "the card posts to the path that removes: {card}"
+        );
+        assert!(
+            card.contains("class=\"danger\""),
+            "the card's own button is marked destructive, so the page that does the \
+             damage looks like damage: {card}"
+        );
+        assert!(
+            card.contains(&format!("value=\"{}\"", sha256_hex(&on_disk))),
+            "the card carries the fingerprint of the file as this page read it, so a key \
+             somebody else removed in the meantime is a 409 and not a clobber"
+        );
+        assert!(
+            card.contains("name=\"id\"") && card.contains("laptop"),
+            "and it carries this key's id: {card}"
+        );
+        let words = account_readable(&g.body).to_lowercase();
+        assert!(
+            words.contains("cancel"),
+            "the card offers the way out, in words: {}",
+            account_readable(&g.body)
+        );
+        assert!(
+            words.contains("revok"),
+            "and it says in words what pressing the button does: {}",
+            account_readable(&g.body)
+        );
+
+        // --- the confirm page's refusals name nothing --------------------------
+        //
+        // "Names nothing **else**": the id the caller asked for may come back, and
+        // does not matter, because the caller already typed it. What must not come
+        // back is any other key's id and any address, which is what would turn a
+        // typo into a way to read the roster.
+        for (case, query, asked) in [
+            ("an id the caller has no such key for", "id=nope", "nope"),
+            ("no id at all", "", ""),
+            ("an id on somebody else's row", "id=phone", "phone"),
+        ] {
+            let g = account_call(&format!("{base}keys/remove?{query}"), Some("bob@x.com"));
+            assert_eq!(g.status, 404, "the confirm page refuses {case} with a 404");
+            // What the **reader** sees. The raw body carries the inline stylesheets, and
+            // their comments say "phone" (the stacking rules) and "ci" (inside "decide",
+            // "specificity"), so a substring test over the bytes fails on a page that
+            // names nothing.
+            let shown = account_readable(&g.body);
+            for name in [
+                "laptop",
+                "ci",
+                "phone",
+                "bob@x.com",
+                "bob@old.com",
+                "carol@x.com",
+                ACCOUNT_BOB,
+                ACCOUNT_CAROL,
+            ] {
+                if name == asked {
+                    continue;
+                }
+                assert!(
+                    !shown.contains(name),
+                    "the refusal for {case} names `{name}`, which tells a caller which \
+                     ids exist and whose they are: {shown}"
+                );
+            }
+        }
+
+        // A stranger and a denied caller get the page's own refusals, unchanged.
+        for (case, who) in [
+            ("a stranger", Some("dave@x.com")),
+            ("a denied address", Some("spammer@x.com")),
+        ] {
+            let g = account_call(&format!("{base}keys/remove?id=laptop"), who);
+            assert_eq!(g.status, 403, "the confirm page is {case}'s 403, not a 404");
+            assert!(!g.body.contains("laptop"), "and it names nothing: {case}");
+        }
+
+        // --- and the POST on the card still removes ----------------------------
+        let rev = sha256_hex(&read(&path));
+        let g = account_post(
+            &format!("{base}keys/remove"),
+            Some("bob@x.com"),
+            &[("rev", &rev), ("id", "laptop")],
+        );
+        assert_eq!(
+            g.status, 303,
+            "the card's own POST is the mutation, answered with a redirect"
+        );
+        let after = read(&path);
+        assert_ne!(after, on_disk, "the file moved");
+        let doc: serde_json::Value = serde_json::from_str(&after).expect("the file parses");
+        let ids: Vec<&str> = doc["users"][0]["api_keys"]
+            .as_array()
+            .expect("bob's row has keys")
+            .iter()
+            .map(|k| k["id"].as_str().expect("every key has an id"))
+            .collect();
+        assert_eq!(
+            ids,
+            vec!["ci"],
+            "the key the card named is gone, and its owner's other key stands"
+        );
+        assert_eq!(
+            account_key_json(&after, 1, "phone")["key_hash"],
+            account_key_json(&on_disk, 1, "phone")["key_hash"],
+            "and nobody else's key is touched"
+        );
+
+        cleanup(&path);
+    }
+
+    /// The keys section is the **console's table**, not a layout of its own.
+    ///
+    /// §13.16. The person's keys became a table with the console's markup: no class
+    /// on the `table`, so the console's table rules, its row hover and its phone
+    /// stacking all apply as they are, and each cell is a function the console
+    /// already calls (`url_list` for the restriction, `expiry_markup` for the
+    /// expiry). The header row reads "Name / Scopes / Expiry" where the console's
+    /// reads the file's field names, because this page is read by somebody who has
+    /// never seen the file.
+    ///
+    /// The claim worth a test is the sharing, not the columns: a second table and a
+    /// second expiry renderer is two answers to "when does this key die", and the
+    /// two surfaces drift one edit at a time, which is the argument that put
+    /// `expiry_markup` in the shared pile in the first place.
+    #[test]
+    fn the_keys_are_the_consoles_table() {
+        let path = account_scratch_access("keys-table", &account_access_keys());
+        let base = account_serve(&path);
+        let g = account_call(&base, Some("bob@x.com"));
+        assert_eq!(
+            g.status,
+            200,
+            "bob reaches his own page: {}",
+            account_readable(&g.body)
+        );
+        let s = account_section(&g.body, "keys");
+
+        // One table, and it carries no class: a class is a second set of table
+        // rules, and the section's whole argument is that the console's apply.
+        assert_eq!(
+            s.matches("<table").count(),
+            1,
+            "the section holds one table: {}",
+            account_readable(&g.body)
+        );
+        assert!(
+            !s.contains("<table class="),
+            "the table is the console's markup, unclassed: {}",
+            open_tag(&s[s.find("<table").expect("the table is there")..])
+        );
+
+        let heads = elements(&s, "<thead>", "</thead>");
+        assert_eq!(heads.len(), 1, "one header row: {s}");
+        let th = elements(&heads[0], "<th>", "</th>");
+        assert_eq!(
+            th.len(),
+            4,
+            "four columns: name, scopes, expiry, actions: {s}"
+        );
+        assert_eq!(
+            visible_text(&th[0]),
+            t(Lang::En, K::KeyColName),
+            "the name column is headed by the word a person uses, not the file's `id`"
+        );
+        assert_eq!(visible_text(&th[1]), t(Lang::En, K::Scopes));
+        assert_eq!(visible_text(&th[2]), t(Lang::En, K::ColExpiry));
+        assert_eq!(
+            visible_text(&th[3]),
+            "",
+            "the actions column is headed by nothing, as the console's is: a heading there \
+             names a column of buttons nobody reads"
+        );
+
+        let bodies = elements(&s, "<tbody>", "</tbody>");
+        assert_eq!(bodies.len(), 1, "one body: {s}");
+        let rows = table_rows(&bodies[0]);
+        let ids: Vec<String> = rows
+            .iter()
+            .map(|r| visible_text(&elements(r, "<td", "</td>")[0]))
+            .collect();
+        assert_eq!(
+            ids,
+            vec!["laptop", "ci"],
+            "one row per key, in the file's order, which is the order the console's table \
+             shows them in too"
+        );
+
+        // The name cell is the console's `td.mono`: an id is a string to be typed,
+        // not prose, and it is the same string on both surfaces.
+        for r in &rows {
+            let cells: Vec<String> = elements(r, "<td", "</td>");
+            let first = open_tag(&cells[0]);
+            assert!(
+                first.contains("class=\"mono\""),
+                "the id cell is monospaced, as the console's is: {first}"
+            );
+        }
+
+        // The restriction cell is `url_list`'s: the pairs, one per line, or the
+        // words for "not narrowed" in the muted span that function already uses.
+        let cells: Vec<String> = rows
+            .iter()
+            .map(|r| elements(r, "<td", "</td>")[1].clone())
+            .collect();
+        assert!(
+            cells[0].contains("mcp/api") && cells[0].contains("<ul"),
+            "the narrowed key lists its pair, one per line: {}",
+            cells[0]
+        );
+        assert_eq!(
+            visible_text(&cells[1]),
+            t(Lang::En, K::KeyScopesAll),
+            "the key with no restriction says so in words, in the muted span `url_list` \
+             writes for an absent list: {}",
+            cells[1]
+        );
+
+        // The expiry cell is `expiry_markup` unchanged, which is the same words and
+        // the same tag the console's person page shows for the same key.
+        let expiry: Vec<String> = rows
+            .iter()
+            .map(|r| visible_text(&elements(r, "<td", "</td>")[2]))
+            .collect();
+        assert_eq!(
+            expiry[0],
+            t(Lang::En, K::NeverExpires),
+            "a key that never expires is the console's `never expires` tag: {}",
+            expiry[0]
+        );
+        // The **shape**: the date the file's window ends on, and a days-left figure.
+        // The stored `365d` is not in the cell, and cannot be: the cell answers "when
+        // does this key die", and the days left are counted from today, so an
+        // assertion on the window is a test that holds on one day a year.
+        let when = key_expiry("2026-01-01", "365d")
+            .and_then(|e| e)
+            .expect("the fixture's ci key has a 365d window");
+        let left = expiry[1]
+            .strip_suffix("d)")
+            .and_then(|s| s.rsplit('(').next())
+            .unwrap_or_default();
+        assert!(
+            expiry[1].starts_with(t(Lang::En, K::Expires))
+                && expiry[1].contains(&format_date(when))
+                && !left.is_empty()
+                && left.chars().all(|c| c.is_ascii_digit()),
+            "a key with an expiry is the date its window ends on and the days left, as the \
+             console spells them: {}",
+            expiry[1]
+        );
+
+        // The section shows no URL. A key's restriction is a pair of names, and the
+        // page's rule is that a person reads where they reach, not what the file
+        // matches: the URL is the estate's, and it is not this page's to leak.
+        assert!(
+            !s.contains("https://"),
+            "the keys section names scopes, never URLs: {s}"
+        );
+
+        // With no keys there is no table, as in the console: a table with a header
+        // and no rows is a shape that says "look, a table" about nothing.
+        let empty = account_scratch_access("keys-table-empty", &account_access_mint());
+        let empty_base = account_serve(&empty);
+        let g = account_call(&empty_base, Some("bob@x.com"));
+        let s = account_section(&g.body, "keys");
+        assert!(
+            !s.contains("<table"),
+            "no keys, no table: {}",
+            account_readable(&g.body)
+        );
+        assert!(
+            s.contains(t(Lang::En, K::AccountKeysNone)),
+            "and the section says so in the words the file's own empty state uses: {s}"
+        );
+        cleanup(&empty);
+
+        // A pair the owner no longer reaches is marked in words inside the line.
+        // Colour alone is not a statement a screen reader hears (WCAG 1.4.1), and a
+        // key narrowed to a scope its owner was removed from is the case where the
+        // person most needs to know the key reaches less than it says.
+        // The uuid, not the fixture's `__BOB__` token: `account_access_keys` hands back
+        // the expanded document, so a replace written against the token changes nothing
+        // and this case would silently test a scope the key still reaches.
+        let gone = account_access_keys().replace(
+            &format!(r#""users": ["{ACCOUNT_BOB}"], "credentials": ["api_key"]"#),
+            r#""credentials": ["api_key"]"#,
+        );
+        assert!(
+            !gone.contains(&format!(
+                r#""users": ["{ACCOUNT_BOB}"], "credentials": ["api_key"]"#
+            )),
+            "the fixture really removed bob from the `api` scope, or this case tests a \
+             scope the key still reaches: {gone}"
+        );
+        let gone_path = account_scratch_access("keys-table-gone", &gone);
+        let gone_base = account_serve(&gone_path);
+        let g = account_call(&gone_base, Some("bob@x.com"));
+        let s = account_section(&g.body, "keys");
+        assert!(
+            s.contains("mcp/api"),
+            "the pair is still listed, because the key still carries it: {}",
+            account_readable(&g.body)
+        );
+        assert!(
+            s.contains(t(Lang::En, K::KeyScopeGone)),
+            "and it is marked as no longer reached, in words beside it: {s}"
+        );
+        cleanup(&gone_path);
+        cleanup(&path);
+    }
+
+    /// Every key row is acted on the way a console row is: two links, no form.
+    ///
+    /// §13.16. A console row is acted on by `act` (an `a.pill`) and `act_rm` (an
+    /// `a.pill.rm`), each a link to a `GET` page that changes nothing. The keys
+    /// table does the same, and two things follow. A crawler, a prefetch and a
+    /// link-following bot cannot revoke a credential, because following a link is a
+    /// `GET` and a `GET` never mutates. And the mutation form exists, on the page
+    /// the link opens, so the page works with scripting off.
+    ///
+    /// The revoke is §13.17's icon component (`pill rm ico`), so its name is hidden
+    /// text; rotate keeps its visible word, and a word that is not the whole name
+    /// carries the rest as `aria-label` (WCAG 2.5.3 asks for the visible label to be
+    /// *inside* the accessible name, which "rotate" is, inside "Rotate key laptop").
+    ///
+    /// The cell is asserted last and is the one CSS fact here: `td.pills` is
+    /// `display:flex` today, and a flex `td` is not a table cell, so its bottom
+    /// border stops short of the row the moment another cell wraps. The cell stays a
+    /// cell and the no-wrap moves to the `span.pills` inside it.
+    #[test]
+    fn each_key_row_acts_like_a_console_row() {
+        let path = account_scratch_access("keys-row-actions", &account_access_keys());
+        let base = account_serve(&path);
+        let g = account_call(&base, Some("bob@x.com"));
+        assert_eq!(g.status, 200, "the page renders");
+        let s = account_section(&g.body, "keys");
+        let rows = table_rows(&the_tbody(&s, "the keys table"));
+        assert_eq!(rows.len(), 2, "one row per key");
+
+        for r in &rows {
+            let id = visible_text(&elements(r, "<td", "</td>")[0]);
+            let cell = elements(r, "<td", "</td>")
+                .into_iter()
+                .find(|c| open_tag(c).contains("class=\"pills\""))
+                .unwrap_or_else(|| panic!("the `{id}` row has no actions cell: {r}"));
+            assert!(
+                cell.contains("<span class=\"pills\">"),
+                "the actions cell holds the `.pills` group, which is what the cell-scoped \
+                 no-wrap rule applies to: {cell}"
+            );
+
+            // Rotate: the console's `act`, a link to a page that changes nothing.
+            let rot = links_to(&cell, "keys/rotate")
+                .into_iter()
+                .next()
+                .unwrap_or_else(|| panic!("the `{id}` row links to a rotate page: {cell}"));
+            assert_eq!(
+                attr(&rot, "class").as_deref(),
+                Some("pill"),
+                "rotate is the console's plain pill: {rot}"
+            );
+            assert_eq!(
+                attr(&rot, "href").as_deref(),
+                // The **path**, not the URL the harness connected to: the document
+                // carries `href` as a path, and the port is the harness's, not the page's.
+                Some(format!("{ACCOUNT_PATH}/keys/rotate?id={id}").as_str()),
+                "the link names the key it is about: {rot}"
+            );
+            assert_eq!(visible_text(&cell), {
+                // The visible words of the whole cell: rotate's word, and nothing
+                // spoken for the icon.
+                format!("{} Revoke key {id}", t(Lang::En, K::Rotate))
+            });
+            assert_eq!(
+                attr(&rot, "aria-label").as_deref(),
+                Some(format!("{} {id}", t(Lang::En, K::AccountKeyRotate)).as_str()),
+                "the visible word is not the whole name, so the rest is written down: {rot}"
+            );
+
+            // Revoke: §13.17's icon, named by hidden text and a `title`. The whole
+            // element, because the name is *inside* it and the glyph is too.
+            let rm = anchors_to(&cell, "keys/remove")
+                .into_iter()
+                .next()
+                .unwrap_or_else(|| panic!("the `{id}` row links to a revoke page: {cell}"));
+            assert_eq!(
+                attr(&rm, "class").as_deref(),
+                Some("pill rm ico"),
+                "the revoke is the destructive icon pill, the shared component: {rm}"
+            );
+            assert_eq!(
+                attr(&rm, "href").as_deref(),
+                Some(format!("{ACCOUNT_PATH}/keys/remove?id={id}").as_str()),
+                "the link names the key it is about: {rm}"
+            );
+            assert_eq!(
+                visible_text(&rm),
+                format!("{} {id}", t(Lang::En, K::AccountKeyRemove)),
+                "the icon's name is text inside it, and carries the id: {rm}"
+            );
+            assert_eq!(
+                attr(&rm, "title").as_deref(),
+                Some(format!("{} {id}", t(Lang::En, K::AccountKeyRemove)).as_str()),
+                "and a pointer user sees the same words: {rm}"
+            );
+            assert!(
+                !rm.contains("aria-label"),
+                "one naming mechanism, so the tooltip and the reader's name cannot drift \
+                 apart: {rm}"
+            );
+            assert_eq!(elements(&rm, "<svg", "</svg>").len(), 1, "one glyph: {rm}");
+        }
+
+        // Nothing on the plain page posts. The only form is the preferences
+        // selector, which is a `GET` by design, so a page that carries a mutation
+        // form here has put a revoke one Enter key away again.
+        for f in account_forms(&g.body) {
+            assert!(
+                f.contains("method=\"get\""),
+                "the plain page's forms are the preferences selector and nothing else, so \
+                 nothing on it can mutate: {}",
+                &f[..f.find('>').map_or(f.len(), |i| i + 1)]
+            );
+        }
+
+        // The cell is a cell. `display:flex` on a `td` removes it from the table
+        // layout, and the row's bottom border then stops short of the row whenever a
+        // cell wraps, which the mockup showed on every wrapped row.
+        let rule = the_rule(CSS, "td.pills").expect("admin.css styles the actions cell");
+        assert!(
+            !rule.contains("display:flex"),
+            "the actions cell stays a table cell: {rule}"
+        );
+        assert!(
+            rule.contains("white-space:nowrap") && rule.contains("text-align:right"),
+            "the no-wrap and the alignment move to the cell, and the group keeps its own \
+             rule: {rule}"
+        );
+        assert!(
+            the_rule(CSS, "td.pills .pills").is_some(),
+            "the group inside the cell is what the cell-scoped rule applies to"
+        );
+
+        cleanup(&path);
+    }
+
+    /// The `+ New key` row is a page of its own.
+    ///
+    /// §13.16. The mint form is not a block above the table (4h) and not a
+    /// permanently open row: it is a row that appears when the `+` is followed, on
+    /// `GET keys/new`, as one `td colspan="4"` holding the console's `form.edit`. A
+    /// `form` may not wrap a table row, but it may sit inside a cell, so no `form`
+    /// attribute is needed and the row is in the table the person is looking at.
+    ///
+    /// The `+` sits **below** the table, which is the one place the console's
+    /// `p.primary` convention is deliberately not followed: the user asked for the
+    /// `+` at the end, and the row it opens appears at the end.
+    ///
+    /// `autofocus`, `required` and `pattern` are the browser's constraint
+    /// validation and need no script, which is what keeps this page inside the
+    /// no-JavaScript rule; the server checks every one of them again.
+    #[test]
+    fn the_new_key_row_is_a_page_of_its_own() {
+        let path = account_scratch_access("keys-new", &account_access_keys());
+        let base = account_serve(&path);
+
+        // --- the plain page: the + below the table, and no form -----------------
+        let g = account_call(&base, Some("bob@x.com"));
+        assert_eq!(g.status, 200, "the page renders");
+        let s = account_section(&g.body, "keys");
+        let plus = anchors_to(&s, "keys/new")
+            .into_iter()
+            .next()
+            .unwrap_or_else(|| panic!("the section offers the way to add a key: {s}"));
+        assert_eq!(
+            attr(&plus, "class").as_deref(),
+            Some("pill"),
+            "the + is the console's pill: {plus}"
+        );
+        assert_eq!(visible_text(&plus), t(Lang::En, K::AccountKeyNew));
+        let at = s
+            .find("p class=\"primary\"")
+            .unwrap_or_else(|| panic!("the + sits in the console's add-control paragraph: {s}"));
+        assert!(
+            s.find("</table>").expect("the table is there") < at,
+            "the + is below the table, because the row it opens appears at the end: {s}"
+        );
+        assert!(
+            !g.body.contains("name=\"id\""),
+            "the plain page carries no mint field: {}",
+            account_readable(&g.body)
+        );
+
+        // --- keys/new: the same page, the + gone, one row more ------------------
+        let g = account_call(&format!("{base}keys/new"), Some("bob@x.com"));
+        assert_eq!(
+            g.status,
+            200,
+            "the mint row is a page: {}",
+            account_readable(&g.body)
+        );
+        assert!(
+            !g.body.contains("keys/new"),
+            "the page that is the mint row does not offer to open itself again: {}",
+            account_readable(&g.body)
+        );
+        let s = account_section(&g.body, "keys");
+        let cells = elements(&s, "<td", "</td>");
+        let wide: Vec<&String> = cells
+            .iter()
+            .filter(|c| open_tag(c).contains("colspan=\"4\""))
+            .collect();
+        assert_eq!(
+            wide.len(),
+            1,
+            "one row spanning every column, so the form is in the table it belongs to: {s}"
+        );
+        let form = element_containing(wide[0], "class=\"edit\"", "</form>");
+        assert!(
+            // The **path**, which is the form the server emits: an `action` is resolved
+            // against the page by the browser, so a document that named the host it was
+            // served on would be a document that knows its own port.
+            form.contains(&format!("action=\"{ACCOUNT_PATH}/keys\""))
+                && form.contains("method=\"post\""),
+            "the row's form posts to the path that mints: {}",
+            open_tag(&form)
+        );
+        assert!(
+            form.contains("name=\"rev\""),
+            "and carries the file's fingerprint, so a stale form is a 409 that writes \
+             nothing: {form}"
+        );
+
+        // The name field, with the browser's own validation on it.
+        let id = tag_containing(&form, "name=\"id\"");
+        assert!(
+            id.contains("autofocus") && id.contains("required"),
+            "the person lands in the field the + asked for: {id}"
+        );
+        assert_eq!(
+            attr(&id, "pattern").as_deref(),
+            Some("[a-z0-9-]{1,32}"),
+            "the format the server enforces is the format the form enforces: {id}"
+        );
+        assert_eq!(attr(&id, "maxlength").as_deref(), Some("32"));
+        assert_eq!(attr(&id, "placeholder").as_deref(), Some("laptop"));
+        assert!(
+            form.contains(t(Lang::En, K::KeyColName)),
+            "the field is labelled with the column's own word: {form}"
+        );
+        assert!(
+            form.contains(t(Lang::En, K::KeyColExpires)),
+            "and the expiry field with its column's: {form}"
+        );
+
+        // The five choices, the same component the console's mint form renders.
+        assert_duration_choices(&form, "365d", "the self-service mint row", true);
+
+        // The box beside "Other" is named. A number field whose only hint is a
+        // placeholder loses the hint the moment it is typed in, and a box that
+        // counts days has to say so out loud (WCAG 3.3.2).
+        let days = tag_containing(&form, "name=\"days\"");
+        assert_eq!(
+            attr(&days, "aria-label").as_deref(),
+            Some(t(Lang::En, K::DurDaysLabel)),
+            "the days box says what it counts: {days}"
+        );
+
+        // The form ends the way every console form ends: the submit and the cancel.
+        assert!(
+            form.contains(&format!(
+                "><button type=\"submit\" class=\"\">{}</button>",
+                t(Lang::En, K::AccountKeyCreate)
+            )),
+            "the submit is the form shell's own button, carrying the words that say what it \
+             does: {form}"
+        );
+        assert!(
+            form.contains(&format!(">{}<", t(Lang::En, K::Cancel))),
+            "and the way out is a link back to the page, not a reset: {form}"
+        );
+
+        // --- a caller with no row has neither ----------------------------------
+        for (case, who) in [
+            ("a stranger", Some("dave@x.com")),
+            ("a denied address", Some("spammer@x.com")),
+        ] {
+            let g = account_call(&base, who);
+            assert!(
+                !g.body.contains("keys/new"),
+                "{case} is offered no way to mint: {}",
+                account_readable(&g.body)
+            );
+            let g = account_call(&format!("{base}keys/new"), who);
+            assert_eq!(g.status, 403, "the mint page is {case}'s 403, not a form");
+            assert!(
+                !g.body.contains("colspan=\"4\""),
+                "and it carries no mint row: {case}"
+            );
+        }
+
+        cleanup(&path);
+    }
+
+    /// A key refused at the mint row **keeps the row open, the value typed, and
+    /// says which field is wrong**.
+    ///
+    /// §13.16. The refusals are `form_shell`'s: the library's sentence at the top of
+    /// the form, the field it is about marked `aria-invalid` and pointed at the
+    /// message, and every value as posted. WCAG 3.3.1 and 3.3.3 ask for the error to
+    /// be identified in text and the fix suggested, and the person who typed
+    /// `My Laptop` should not have to type it again.
+    ///
+    /// The last case is the one that is easy to get wrong: scopes ticked beside
+    /// "all scopes". Today the handler drops the ticks and files the widest key the
+    /// person did not ask for, which is a credential broader than the one that was
+    /// requested. It is refused, and no field is marked, because a radio group has
+    /// no invalid style and marking one radio of a group reads as "this button is
+    /// broken" rather than "your choice is contradictory".
+    #[test]
+    fn a_refused_key_keeps_the_row_and_says_where() {
+        let path = account_scratch_access("keys-refused", &account_access_keys());
+        let base = account_serve(&path);
+        let keys = format!("{base}keys");
+        let before = read(&path);
+
+        // A name the grammar refuses: the row stays, the value stays, the field is
+        // marked, and the file does not move.
+        let rev = sha256_hex(&before);
+        let g = account_post(
+            &keys,
+            Some("bob@x.com"),
+            &[
+                ("rev", rev.as_str()),
+                ("id", "My Laptop"),
+                ("duration", "30d"),
+                ("restrict", "all"),
+            ],
+        );
+        assert_eq!(g.status, 400, "a name with a space is refused");
+        assert!(
+            g.body.contains("colspan=\"4\""),
+            "the answer is the row, open, not a page about the failure: {}",
+            account_readable(&g.body)
+        );
+        assert!(
+            g.body.contains("value=\"My Laptop\""),
+            "the name as typed comes back, so the person fixes it instead of retyping it: {}",
+            account_readable(&g.body)
+        );
+        let err = element_containing(&g.body, "class=\"err\"", "</div>");
+        assert!(
+            !visible_text(&err).is_empty(),
+            "the refusal is a sentence, not a colour: {err}"
+        );
+        let id = tag_containing(&g.body, "name=\"id\"");
+        assert_eq!(
+            attr(&id, "aria-invalid").as_deref(),
+            Some("true"),
+            "and the field it is about says so: {id}"
+        );
+        let described =
+            attr(&id, "aria-describedby").expect("the marked field points at the message");
+        assert!(
+            g.body.contains(&format!("id=\"{described}\"")),
+            "the message is the one this field names: {described}"
+        );
+        assert_eq!(read(&path), before, "the refusal wrote nothing");
+
+        // A name already taken: the library's own words, on the same field.
+        let rev = sha256_hex(&before);
+        let g = account_post(
+            &keys,
+            Some("bob@x.com"),
+            &[
+                ("rev", rev.as_str()),
+                ("id", "laptop"),
+                ("duration", "30d"),
+                ("restrict", "all"),
+            ],
+        );
+        assert_eq!(
+            g.status,
+            400,
+            "a second key named `laptop` is refused: {}",
+            account_readable(&g.body)
+        );
+        assert!(
+            g.body.contains(t(Lang::En, K::AccountKeyDup)),
+            "the refusal is the table's own sentence, in the reader's language: {}",
+            account_readable(&g.body)
+        );
+        assert_eq!(
+            attr(&tag_containing(&g.body, "name=\"id\""), "aria-invalid").as_deref(),
+            Some("true"),
+            "and it is the name field that is wrong"
+        );
+        assert_eq!(read(&path), before, "the duplicate refusal wrote nothing");
+
+        // Ticks beside "all scopes": a choice the person thinks they made.
+        let rev = sha256_hex(&before);
+        let g = account_post(
+            &keys,
+            Some("bob@x.com"),
+            &[
+                ("rev", rev.as_str()),
+                ("id", "phone"),
+                ("duration", "30d"),
+                ("restrict", "all"),
+                ("scope", "mcp/logs"),
+            ],
+        );
+        assert_eq!(
+            g.status,
+            400,
+            "scopes ticked while \"all scopes\" is picked is refused, not quietly widened: {}",
+            account_readable(&g.body)
+        );
+        assert!(
+            g.body.contains(t(Lang::En, K::KeyScopesWithoutOnly)),
+            "and the sentence names the fix, because a person with no administrator at hand \
+             has to choose one of the two: {}",
+            account_readable(&g.body)
+        );
+        assert_eq!(
+            g.body.matches("aria-invalid").count(),
+            0,
+            "a radio group has no invalid style, so no field is marked: the contradiction is \
+             between two controls, not inside one"
+        );
+        assert_eq!(
+            read(&path),
+            before,
+            "the contradictory choice wrote nothing"
+        );
+
+        cleanup(&path);
+    }
+
+    /// At ten keys the `+` row is **gone**, and the sentence says why.
+    ///
+    /// §13.16. Not a disabled control: a disabled control is skipped by the keyboard,
+    /// says nothing, and leaves the person to guess. The bound is ten per row
+    /// counting every key, the administrator's included, so the row's own keys are
+    /// what closed it and revoking one is the fix the sentence names.
+    #[test]
+    fn the_tenth_key_closes_the_row() {
+        let path = account_scratch_access("keys-full", &account_access_ten_keys());
+        let base = account_serve(&path);
+
+        let g = account_call(&base, Some("bob@x.com"));
+        assert_eq!(g.status, 200, "the page renders");
+        let s = account_section(&g.body, "keys");
+        assert_eq!(
+            table_rows(&the_tbody(&s, "the keys table at the bound")).len(),
+            10,
+            "the ten keys are all listed: the bound is about the file, and the person can \
+             see which key to revoke"
+        );
+        assert!(!s.contains("keys/new"), "and the + is not offered: {s}");
+        assert!(
+            s.contains(t(Lang::En, K::AccountKeyFullRow)),
+            "the row is replaced by the sentence that explains it, in the muted paragraph \
+             the empty state uses: {s}"
+        );
+
+        // Following the link anyway is the same page with the same sentence and no
+        // row: the bound is the handler's, and a page that 404s on a link the person
+        // reached by typing it is a worse answer than the one that explains.
+        let g = account_call(&format!("{base}keys/new"), Some("bob@x.com"));
+        assert_eq!(g.status, 200, "the mint page is still reachable");
+        assert!(
+            !g.body.contains("colspan=\"4\""),
+            "and it carries no mint row: {}",
+            account_readable(&g.body)
+        );
+        assert!(
+            g.body.contains(t(Lang::En, K::AccountKeyFullRow)),
+            "with the same sentence on it: {}",
+            account_readable(&g.body)
+        );
+
+        cleanup(&path);
+    }
+
+    /// Rotating a key from the self-service page **asks first**, as revoking does.
+    ///
+    /// §13.16. A rotate replaces a working secret, and anything using the old one
+    /// stops getting in within seconds, so it is the second control on this page
+    /// that cannot be answered by a stray Enter. The confirmation is the console's
+    /// `page_confirm`, and the warning is the sentence that says what is about to
+    /// happen, because a card that says "rotate" is a card that rotates whichever
+    /// key its form carries.
+    ///
+    /// The card's button is **not** marked destructive: a rotate keeps the name,
+    /// the restriction and the person's own copy of nothing, and a red button on it
+    /// would train the person to read the red button on the revoke as one more
+    /// routine thing.
+    #[test]
+    fn rotating_a_key_asks_first_on_the_account_page() {
+        let path = account_scratch_access("rotate-asks", &account_access_keys());
+        let base = account_serve(&path);
+        let on_disk = read(&path);
+
+        // The link opens a page, and the page writes nothing: a `GET` never mutates,
+        // and this one is reached by following a link a crawler may follow.
+        let g = account_call(&format!("{base}keys/rotate?id=laptop"), Some("bob@x.com"));
+        assert_eq!(
+            g.status,
+            200,
+            "the rotate confirmation is a page: {}",
+            account_readable(&g.body)
+        );
+        assert_eq!(read(&path), on_disk, "opening the card wrote nothing");
+
+        // The card is `page_confirm`'s shape, with the rotate's own warning.
+        assert!(
+            g.body.contains("<h1>") && g.body.contains("class=\"lede\""),
+            "what is being done, and what it means: {}",
+            account_readable(&g.body)
+        );
+        let panel = element_containing(&g.body, "class=\"panel bad\"", "</div>");
+        assert!(
+            panel.contains("<code>laptop</code>"),
+            "the card names the key it is about to rotate, because the form carries an id \
+             and a card that does not say which is a card that rotates whichever: {panel}"
+        );
+        assert!(
+            g.body.contains(t(Lang::En, K::AccountKeyRotateWarn)),
+            "and says what a rotate costs, in the reader's language: {}",
+            account_readable(&g.body)
+        );
+        let form = element_containing(&g.body, "class=\"edit\"", "</form>");
+        assert!(
+            form.contains(&format!("action=\"{ACCOUNT_PATH}/keys/rotate\""))
+                && form.contains("method=\"post\""),
+            "the card posts to the path that rotates: {}",
+            open_tag(&form)
+        );
+        assert!(
+            form.contains(&format!("value=\"{}\"", sha256_hex(&on_disk))),
+            "the card carries the fingerprint of the file as this page read it, so a key \
+             somebody else rotated in the meantime is a 409 and not a clobber"
+        );
+        assert!(
+            form.contains("name=\"id\"") && form.contains("laptop"),
+            "and it carries this key's id: {form}"
+        );
+        assert!(
+            !form.contains("class=\"danger\""),
+            "a rotate is not a revoke: the red button belongs to the one control that \
+             cannot be undone: {form}"
+        );
+        let words = account_readable(&g.body).to_lowercase();
+        assert!(
+            words.contains(&t(Lang::En, K::Cancel).to_lowercase()),
+            "the card offers the way out, in words: {}",
+            account_readable(&g.body)
+        );
+
+        // Cancelling is a link, and a person who takes it changes nothing.
+        let g = account_call(&base, Some("bob@x.com"));
+        assert_eq!(
+            g.status,
+            200,
+            "the page is still there to come back to: {}",
+            account_readable(&g.body)
+        );
+        assert_eq!(
+            read(&path),
+            on_disk,
+            "reading the page away again wrote nothing"
+        );
+
+        // The POST on the card rotates, and the narrowing survives byte for byte:
+        // a rotate is the answer to a leak, not a widening.
+        let old = account_key_json(&on_disk, 0, "laptop");
+        let g = account_post(
+            &format!("{base}keys/rotate"),
+            Some("bob@x.com"),
+            &[("rev", &sha256_hex(&on_disk)), ("id", "laptop")],
+        );
+        assert_eq!(
+            g.status,
+            200,
+            "the card's own POST is the mutation: {}",
+            account_readable(&g.body)
+        );
+        let bearer = account_bearer_in(&g.body);
+        assert!(
+            bearer.starts_with("bbk_"),
+            "and shows the new secret: {bearer}"
+        );
+        let after = read(&path);
+        let now = account_key_json(&after, 0, "laptop");
+        assert_eq!(
+            now["scopes"], old["scopes"],
+            "the administrator's narrowing is untouched: {now}"
+        );
+        assert_eq!(
+            account_key_json(&after, 0, "ci"),
+            account_key_json(&on_disk, 0, "ci"),
+            "and the caller's other key is untouched"
+        );
+
+        // A key that is not the caller's is a `404` that names nothing, exactly as
+        // the revoke answers it: a page that said "no such key" about an id on
+        // somebody else's row is an enumeration oracle over the whole roster.
+        for op in ["rotate", "remove"] {
+            let g = account_call(&format!("{base}{op}?id=phone"), Some("bob@x.com"));
+            assert_eq!(
+                g.status, 404,
+                "carol's key is {op}'s 404 for bob, not a form and not a 403 that confirms \
+                 the key exists"
+            );
+            assert!(
+                // The readable body: the inline stylesheet this page carries says
+                // "phone" in its stacking comments, which is not the refusal naming
+                // carol's key.
+                !account_readable(&g.body).contains("phone"),
+                "and the refusal names nothing: {op}"
+            );
+        }
+
+        cleanup(&path);
+    }
+
+    /// The console's revoke confirmation is **byte for byte what it is today**.
+    ///
+    /// §13.16. `page_confirm` and the `form_shell` it calls take a console `View`
+    /// for three things (the form's action, the `rev`, the cancel link), and they
+    /// take those three values instead so that one function renders the
+    /// confirmation on both surfaces. That is a refactor of a function every
+    /// destructive console page goes through, and the only honest check that the
+    /// console came out of it unchanged is the bytes it emits.
+    ///
+    /// The two halves are pinned around the `rev`, which is the file's fingerprint
+    /// and so changes with the fixture: everything before it and everything after it
+    /// is fixed, including the `·` separators, the em dash in the library's own
+    /// sentence, the `danger` class and the cancel link's target.
+    #[test]
+    fn page_confirm_renders_both_surfaces() {
+        const BEFORE: &str = "<h1>bob@x.com · api_keys · remove</h1>\
+             <p class=\"lede\">The bearer stops working the moment the gate reloads. It cannot \
+             be restored — only a new key can be minted.</p>\
+             <div class=\"panel bad\"><p><code>laptop</code></p>\
+             <form class=\"edit\" method=\"post\" \
+             action=\"/admin/users/8f14e45f-ceea-467a-9f79-3b4e5c6d7a8b/keys/laptop/rm\">\
+             <input type=\"hidden\" name=\"rev\" value=\"";
+        const AFTER: &str = "\"><div class=\"actions\"><button type=\"submit\" \
+             class=\"danger\">remove</button><a class=\"pill\" \
+             href=\"/admin/users/8f14e45f-ceea-467a-9f79-3b4e5c6d7a8b\">cancel</a></div></form></div>";
+
+        let path = scratch("confirm-console", SAMPLE);
+        let port = serve(&path, ADMIN_BASE);
+        let url = format!(
+            "http://127.0.0.1:{port}{ADMIN_BASE}{}",
+            Route::KeyRm(BOB.to_string(), "laptop".to_string()).path()
+        );
+        let g = got_of(
+            get_with_secret(&url)
+                .header(IDENTITY_HEADER, "admin@x.com")
+                .call()
+                .expect("a GET response"),
+        );
+        assert_eq!(
+            g.status,
+            200,
+            "the console's revoke confirmation is a page: {}",
+            account_readable(&g.body)
+        );
+        let at = g.body.find(BEFORE).unwrap_or_else(|| {
+            panic!(
+                "the console's revoke confirmation must be the bytes it emits today: {}",
+                account_readable(&g.body)
+            )
+        });
+        let tail = &g.body[at + BEFORE.len()..];
+        let rev = &tail[..64];
+        assert!(
+            rev.bytes().all(|b| b.is_ascii_hexdigit()),
+            "the pinned halves meet at the file's fingerprint, which is the only thing on \
+             this page that moves: {rev}"
+        );
+        assert!(
+            tail[64..].starts_with(AFTER),
+            "and the rest of the card is unchanged: {}",
+            &tail[64..tail[64..].find("<!--").map_or(400, |i| i.min(400))]
+        );
+        cleanup(&path);
+
+        // The self-service card is the same shape, with its own words and its own
+        // target: one function, two surfaces, and the shape is what the person who
+        // has seen one console page already knows.
+        let apath = account_scratch_access("confirm-account", &account_access_keys());
+        let base = account_serve(&apath);
+        let g = account_call(&format!("{base}keys/remove?id=laptop"), Some("bob@x.com"));
+        assert_eq!(g.status, 200, "the account card is a page");
+        for piece in [
+            "<h1>",
+            "class=\"lede\"",
+            "class=\"panel bad\"",
+            "<code>laptop</code>",
+            "class=\"edit\"",
+            "class=\"actions\"",
+            "<button type=\"submit\" class=\"danger\">",
+            "name=\"rev\"",
+        ] {
+            assert!(
+                g.body.contains(piece),
+                "the account's confirmation carries the console's card, piece by piece: \
+                 `{piece}` is missing from {}",
+                account_readable(&g.body)
+            );
+        }
+        assert!(
+            g.body
+                .contains(&format!("action=\"{ACCOUNT_PATH}/keys/remove\"")),
+            "and it posts to the path this surface mints on: {}",
+            account_readable(&g.body)
+        );
+        cleanup(&apath);
     }
 }

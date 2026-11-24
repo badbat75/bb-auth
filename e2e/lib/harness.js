@@ -116,11 +116,29 @@ async function resubmit(page, action, fields) {
   return resp;
 }
 
+/**
+ * Choose a duration in a key form (§13.15 as amended by §13.16): the three presets
+ * are options of `select[name=duration]`, and every other window is `custom` plus
+ * the `days` box beside it. A test that types a window into the text field the form
+ * no longer has fails as a locator timeout, which says nothing about the form.
+ * `value` is the string the file is expected to end up holding, so `'30d'` means
+ * custom, 30 days.
+ */
+async function setDuration(page, value, scope = 'main form') {
+  const sel = `${scope} select[name=duration]`;
+  if (['365d', '182d', '91d', 'never'].includes(value)) {
+    await page.selectOption(sel, value);
+    return;
+  }
+  await page.selectOption(sel, 'custom');
+  await page.fill(`${scope} input[name=days]`, value.replace(/d$/, ''));
+}
+
 /** The exact fields the first form in `main` would post, hidden `rev` included. */
 const formBytes = (page) =>
   page.locator('main form').first().evaluate((f) => Object.fromEntries(new FormData(f).entries()));
 
 module.exports = {
   Checker, doc, bytes, writeDoc, settings, settingsBytes, writeSettings, sha256, newPage, submit,
-  mainText, pageLang, api, resubmit, formBytes,
+  mainText, pageLang, api, resubmit, formBytes, setDuration,
 };

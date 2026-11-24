@@ -111,33 +111,15 @@ e2e flow with scripting off.
 
 Done so far: `Access::key_scopes_for` (4a), minting (4b), rotating and removing (4c) from
 `/account`. Made reliable in parallel (4d); the worker count is
-`BB_AUTH_WEB_WORKERS` (4e). Left: the e2e flow with scripting off; then the install on rpi-01 and the
-browser check below.
+`BB_AUTH_WEB_WORKERS` (4e). The e2e flow with scripting off passes (`nojs.js`).
 
 Installed on rpi-01 on 2026-11-24 (gd49d43a): the user minted and removed a key in a browser
 (journal: `(self): key add test`, `key remove test`); a rotate is still to be seen. The reveal page shows only the key with a copy button (4g, done).
 
-Asked by the user on 2026-11-24 after trying 4g on rpi-01, and decided (4h), on `/account` and on
-the admin console alike:
-
-- the copy control is a small copy **icon** (inline SVG, labelled for screen readers), not a text
-  button;
-- removing a key asks for **confirmation** first, which with no page needing JavaScript means a
-  confirmation step served by the server (a second `POST`), as the Settings guard already does;
-- the key form is simpler: the duration is a choice among **1 year, 6 months, 3 months, custom,
-  no expiry** (custom takes days), and the **365-day self-service bound is lifted**: a person may
-  now mint a key of their own that never expires. Requirement changed by the user; the 10-key
-  limit stays.
-
-Designed in `docs/ARCHITECTURE.md` §13.15: presets stored as `365d`, `182d`, `91d` (26 and 13
-weeks), custom as `<n>d`, no expiry as `never`; an empty duration is refused everywhere (today it
-meant never); the console's revoke already confirms, `/account` gains the same GET confirmation
-page, and its rotate confirms too, as the console's does, since a rotate also throws a key away.
-
-- Done when (4h): `the_copy_control_is_an_icon_with_a_name`, `the_duration_choice_maps_onto_the_grammar`,
-  `a_self_service_key_may_never_expire`, `the_key_form_offers_five_choices` and
-  `revoking_a_key_asks_first_on_the_account_page` failed first and pass; the e2e walk covers the
-  presets, custom, no expiry and a cancelled then confirmed revoke; AGENTS.md says copy icon.
+The user's rework after trying 4g (4h: copy icon, confirmations, five duration choices, the
+365-day bound lifted) is done in 8a, designed in `docs/ARCHITECTURE.md` §13.15 and §13.16. Left: a
+new install on rpi-01 and the browser check below, now including a rotate, the copy icon and the
+two confirmations.
 
 - Done when: a roster user mints, rotates and removes a key of their own in a browser, while a
   stranger and a denied user cannot.
@@ -208,8 +190,7 @@ then asked for a **header** with the person's identity, the settings (theme, lan
 out, the usual pattern, replacing the preferences form at the foot of the page; the designer adds
 it to §13.17.
 
-Slices, in order: (8a) the keys table with the 4h rework (it replaces 4h's form; 4h's parser,
-confirmations, copy icon and lifted bound stay); (8b) the header, with icon controls (one shared
+Slices, in order: (8b) the header, with icon controls (one shared
 `pill ico` component, §13.17, approved by the user on 2026-11-24); (8c) the sections' lists, chips
 and empty states; (8d) the theme itself, which the user finds unsightly (2026-11-24): the designer
 reviews the palette, type and spacing, and says what belongs in our built-in theme and what in the
@@ -217,7 +198,12 @@ operator's `tokens.css`, which this repository does not hold. The user's constra
 the theme contract (the custom properties `THEME_CSS` defines and an operator stylesheet may
 redefine) does not change. If a new token turns out to be needed, it is added with a fallback so an
 existing `tokens.css` still renders correctly, no token is renamed or removed, and any such
-addition ships with a short migration guide for theme authors (CHANGELOG and README). Steps 5 and 7 add their forms into this layout later (Profile, a last panel).
+addition ships with a short migration guide for theme authors (CHANGELOG and README). From the
+designer's review of 8a (2026-11-24): in 8b the confirmation page gets one `h1` (the page name moves
+to the header); in 8c the bad-name refusal stops naming the duration (split `K::AccountKeyBound`
+into an id message and a duration message, each a capitalised sentence), the days field gets a
+placeholder in place of the lone "days" hint, and the scope restriction is left out when the
+caller has nothing to narrow to. Steps 5 and 7 add their forms into this layout later (Profile, a last panel).
 
 - Done when: the user approves screenshots of the page in both themes and both languages, at
   desktop and phone width, with the forms of steps 4, 5 and 7 on it; e2e and the scripting-off

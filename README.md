@@ -693,9 +693,11 @@ themselves from it; `bb-auth-adm settings admin rm` will, over SSH, which is the
 hatch that keeps the guard from being a trap.
 
 One page of this binary is not an administrator's: the **self-service page** at
-`BB_AUTH_WEB_ACCOUNT_PATH` (`/account`), where one signed-in person reads **their own** account:
-where they reach, the groups naming them, their API keys (id, expiry date, restriction; never the
-bearer) and the profile claims the deployment forwards. It is the console's trust model with the
+`BB_AUTH_WEB_ACCOUNT_PATH` (`/account`), where one signed-in person reads **their own**
+account and manages **their own** API keys: where they reach, the groups naming them, the
+keys as the console's table shows them (id, expiry date, restriction; never the bearer;
+rotate and revoke each asked first, on a page of its own) and the profile claims the
+deployment forwards. It is the console's trust model with the
 privilege taken out, and `web.admins` is **not** read there at all, because an administrator there
 is one more person looking at their own account. That is why the prefix is dispatched *ahead of*
 the administrator list, and why the two prefixes must be siblings: a page nested under `/admin`

@@ -8,7 +8,7 @@
 // Includes the refusals that are new in 4.0 and load-bearing: a base that is not
 // literal, two applications claiming one URL, and a scope reaching outside its own area.
 
-const { doc, bytes, newPage, submit, mainText } = require('../lib/harness');
+const { doc, bytes, newPage, submit, mainText, setDuration } = require('../lib/harness');
 
 const BOT = 'b3f1c8a2-4e77-4f1a-9c0d-1e2f3a4b5c6d';
 const app1 = (ctx) => doc(ctx).applications.find((a) => a.name === 'app1');
@@ -113,7 +113,7 @@ async function run(ctx, t) {
     // A duration the library cannot parse mints nothing — and therefore reveals nothing.
     await page.goto(ctx.base + '/users/' + BOT + '/keys/+add');
     await page.fill('input[name=id]', 'badkey');
-    await page.fill('input[name=duration]', 'tomorrow');
+    await setDuration(page, 'tomorrow');
     await refused('bad duration on key mint');
     t.check('bad duration: no key written',
       !userBy(ctx, 'bot@example.com').api_keys.find((k) => k.id === 'badkey'));

@@ -45,6 +45,11 @@ nav.acct{flex:0 0 auto;align-items:center;gap:6px;margin-left:auto}
    them one by one was a rule that could miss one, and did. A descendant selector cannot: put
    anything in the header and it is the same object as everything already there. */
 .bar .pill,p.primary .pill,.actions .pill{font-size:1rem;padding:7px 15px}
+.bar .pill.ico{padding:7px}
+/* An icon in the bar is square at the bar's height. It cannot be excluded from the rule
+   above with `:not` since that would drop the bar's font size too and make the glyph
+   smaller than its neighbours. The note follows its rule for the same reason as in
+   `base.css`: the test reads the rule by its exact selector. */
 
 /* ---------------------------------------------------------------------------
    The page
@@ -80,10 +85,14 @@ tr:last-child td{border-bottom:0}
    invisible on exactly the two pages that have rows (users, api_keys). --bg leaves
    --card-border free for the pill's own hover border. */
 tbody tr:hover{background:var(--bg)}
+td.pills{text-align:right;white-space:nowrap}
+td.pills .pills{flex-wrap:nowrap}
 /* A table cell's action group must not wrap: wrapping is exactly what broke the api_keys
    row's three actions onto two ragged lines inside a narrow right-aligned cell. The panel
-   already scrolls (overflow-x:auto) if a row's actions ever outgrow the column. */
-td.pills{display:flex;flex-wrap:nowrap;justify-content:flex-end}
+   already scrolls (overflow-x:auto) if a row's actions ever outgrow the column. The cell
+   stays a table cell. A flex `td` is taken out of the table and its bottom border then stops
+   short of the row whenever a sibling cell wraps to two lines. So the no-wrap lives on the
+   cell's text and on the group inside it. */
 /* A timestamp is one thing and must read as one: left to itself the audit's first column
    breaks a date at its own hyphens and turns a one-line row into three, while the column that
    should have taken the slack is the sentence explaining the refusal. Auto layout then hands
@@ -246,6 +255,15 @@ details.settings > summary::-webkit-details-marker{display:none}
 /* `hidden` is only a hint, and an operator's stylesheet loads after ours and may give `button`
    a `display` of its own, which would show the copy button to a browser running no code. */
 .secret button[hidden]{display:none}
+/* The two glyphs of the copy icon, swapped by the state the script stamps on the button. This
+   is the reveal's own rule and the only one the icon needs beyond the shared component, since
+   the component is a pill and a pill is drawn by `base.css`. */
+.secret .i-done{display:none}
+.secret [data-state=done] .i-copy{display:none}
+.secret [data-state=done] .i-done{display:inline}
+/* The word a click writes is a span beside the icon, so it needs the gap the icon's own box
+   does not give it. */
+.copy-status{margin-left:8px}
 
 /* ---------------------------------------------------------------------------
    The self-service page
@@ -282,13 +300,6 @@ body:has(.selfserve){background:var(--bg)}
    contract this page has, and a rule scoped to the page is how the same result is had without
    adding an attribute to it. */
 .selfserve .panel h2{margin-top:0}
-/* The mint form lives inside the keys panel, under the list of keys, so its heading is not the
-   first thing in the panel and the rule above would leave it flush against the last key. */
-.selfserve form.edit h2{margin:20px 0 10px}
-/* The two forms every key of the caller's carries. Each posts to a path that names its own
-   mutation, so each has to be a form, and a form is a block: side by side they read as the two
-   things one key can do, rather than as two more panels stacked under the list. */
-.selfserve .keyact{display:inline-block;margin:8px 8px 0 0}
 /* The selector at the foot of the page: two list boxes side by side, and the page's one main
    action under them. `.lbl` is base.css's field label and `button.primary` its main action, so
    both are the objects every form in the estate already paints. */
@@ -315,6 +326,7 @@ body:has(.selfserve){background:var(--bg)}
   .acct{order:2}
   .pill{padding:3px 8px}
   .bar .pill,p.primary .pill,.actions .pill{font-size:var(--fs-sm);padding:4px 9px}
+  .bar .pill.ico{padding:4px}
   /* `:not(.acct)` because the account row is a `nav` too, and everything below is about the
      tabs: the full second line and the horizontal scroll would send it off on its own. */
   nav:not(.acct){order:3;flex:1 1 100%;flex-wrap:nowrap;overflow-x:auto;gap:1px;
@@ -335,5 +347,5 @@ body:has(.selfserve){background:var(--bg)}
   td{border-bottom:0;padding:3px 0}
   td[data-label]::before{content:attr(data-label);display:block;font-weight:600;font-size:.8rem;
     text-transform:uppercase;letter-spacing:.04em;color:var(--muted)}
-  td.pills{justify-content:flex-start;padding-top:6px}
+  td.pills{text-align:left;padding-top:6px}
 }

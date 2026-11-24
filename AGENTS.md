@@ -159,10 +159,11 @@ One crate, four targets, and the split is load-bearing:
   sends them) and, where a row exists, its uuid, then four sections, three of them
   **read-only**: *Where you reach* (the applications and scope names `Access::scopes_reached`
   returns, grouped by application, never a URL), *Groups* (the `user_groups` naming the
-  caller's uuid), *API keys* (each key's id, its expiry date or "never", and its restriction,
-  never the hash or the bearer, plus the mint form and the rotate and revoke button each key
-  carries) and *Profile* (each configured `gate.profile_claims` claim and the value nginx
-  forwarded, percent-decoded, where a configured claim with nothing forwarded shows "None.").
+  caller's uuid), *API keys* (the console's own key table: each key's id, its expiry date or
+  "never", and its restriction, never the hash or the bearer, each row ending in a rotate pill and
+  a revoke icon that lead to a confirmation page) and *Profile* (each configured
+  `gate.profile_claims` claim and the value nginx forwarded, percent-decoded, where a configured
+  claim with nothing forwarded shows "None.").
   The `denied` veto is answered with a `403` ahead of everything the page would otherwise say
   about the caller, and a stranger and an administrator with no roster row see the same page.
   It wears the `ui` section per request as the console does (brand name and logo, the operator's
@@ -175,8 +176,17 @@ One crate, four targets, and the split is load-bearing:
   `POST` to a path under the account prefix (`/account/keys`, `/account/keys/rotate`,
   `/account/keys/remove`), each carrying the file's `rev` so a stale form is a `409` that writes
   nothing, and a mint or a rotate answers directly with the bearer shown once through the
-  console's own reveal, copy button included. The profile edit and the Cognito leg are the next
-  steps. Its design is
+  console's own reveal, copy icon included. The two row actions are asked first, as the console's
+  are: a `GET` (`/account/keys/rotate?id=`, `/account/keys/remove?id=`) renders the console's
+  `page_confirm` card and changes nothing, and only its `POST` writes, so a prefetch or a misclick
+  cannot cost a credential; an id that is not on the caller's row is a `404` naming nothing, which
+  keeps that step no oracle for other people's keys. Minting is a page of its own as well: "+ New
+  key" is a `GET` to `/account/keys/new`, the same page with one table row more, a `td` holding the
+  console's `form.edit`, and a refused mint keeps that row with the values as posted, because a
+  person who typed a name and a restriction is not being asked to type them again. At ten keys the
+  `+` is the sentence that says why there is none, not a disabled control, which the keyboard
+  skips and which says nothing. The profile edit and the Cognito leg are the next steps. Its
+  design is
   [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md) §13.
 
 The defining constraint vs. authorization-code OIDC proxies (oauth2-proxy): those drive the

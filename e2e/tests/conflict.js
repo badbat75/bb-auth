@@ -10,7 +10,7 @@
 //   exists — which is what a reloaded reveal page looks like. There the generic advice
 //   ("make the change again") would mint a second key, so it offers a rotation instead.
 
-const { doc, bytes, writeDoc, newPage, submit, mainText, resubmit, formBytes } = require('../lib/harness');
+const { doc, bytes, writeDoc, newPage, submit, mainText, resubmit, formBytes, setDuration } = require('../lib/harness');
 
 // The out-of-band writer: touch an unrelated note, keep the file valid — exactly what a
 // bb-auth-adm session over SSH does to a form somebody left open.
@@ -74,7 +74,7 @@ async function run(ctx, t) {
     const mintUrl = '/admin/users/b3f1c8a2-4e77-4f1a-9c0d-1e2f3a4b5c6d/keys/+add';
     await page.goto(ctx.base + '/users/b3f1c8a2-4e77-4f1a-9c0d-1e2f3a4b5c6d/keys/+add?lang=en');
     await page.fill('input[name=id]', 'demo');
-    await page.fill('input[name=duration]', '30d');
+    await setDuration(page, '30d');
     const mintFields = await formBytes(page); // the exact bytes a reload would re-POST
     await submit(page);
     t.check('the mint reveals the bearer once', (await mainText(page)).includes('bbk_'));
@@ -99,7 +99,7 @@ async function run(ctx, t) {
     // --- the mint-specific 409, Italian ------------------------------------------
     await page.goto(ctx.base + '/users/b3f1c8a2-4e77-4f1a-9c0d-1e2f3a4b5c6d/keys/+add?lang=it');
     await page.fill('input[name=id]', 'demo-it');
-    await page.fill('input[name=duration]', '30d');
+    await setDuration(page, '30d');
     const mintFieldsIt = await formBytes(page);
     await submit(page);
     t.check('the Italian reveal keeps the reveal-once contract',

@@ -42,8 +42,8 @@ Rules are in `AGENTS.md`. Format of this file: `AGENTS.md`, under "Skills".
   skill and agent files, because MD041 fires on their YAML frontmatter. Judge the run by whether
   your own files appear in the list, not by the exit code, and do not "fix" the frontmatter.
 - The `N: ` prefix `read` prints makes an AGENTS.md bullet continuation look indented **three**
-  spaces; it is **two**. An `edit` oldString copied from `read` fails to match. Check with
-  `sed -n 'A,Bp' AGENTS.md | awk '{printf "[%s]\n", $0}'`.
+  spaces; it is **two** (same in CHANGELOG.md's `*` bullets). An `edit` oldString copied from
+  `read` fails to match. Check with `sed -n 'A,Bp' AGENTS.md | awk '{printf "[%s]\n", $0}'`.
 - CHANGELOG.md has **no `## 1.99.8` heading** on purpose (an untagged candidate gets no section
   of its own): the `## Unreleased` section *is* 1.99.8, and its `###` sections run newest first,
   so a new entry goes directly above the first `###` after the "Nothing here changes the cookie
@@ -52,3 +52,10 @@ Rules are in `AGENTS.md`. Format of this file: `AGENTS.md`, under "Skills".
   moves, so a docs edit belongs in §2/§3 and in the stray counts outside it, not inside §13.
   Grep the line numbers before editing, since a §13 mention of an old name is the architect's
   record of the move, not rot.
+- Inside §13, each `### 13.x` is one plan step's design record. Its "Impact on the … tests",
+  "What is new" and "Tests:" lists are where a shipped slice leaves rot ("unchanged", "dropped
+  `.vh`", a class that shipped under another name), while its header/body prose for a step not
+  built yet is **design, not rot**: tell the two by grepping the symbols and test names it
+  names, in the working tree **and** in `git show HEAD:src/bin/…`, since an uncommitted slice
+  (staged, not committed) has its tests only in the tree. Amend a false sentence with the file's
+  own marker, "(Changed by §13.x …)" / "(Superseded by §13.x …)", so the design stays the record.

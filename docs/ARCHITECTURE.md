@@ -1982,10 +1982,11 @@ instead of the button's text), still looks its elements up by id, still uses
 context or `navigator.clipboard` is missing. Its hash changes with its bytes, and the policy is
 derived from the same `&str`, so nothing else moves.
 
-**CSS, in `admin.css`.** The reveal exists only in `bb-auth-web` (both of its surfaces emit
-`admin.css`, and the gate has no reveal), so the icon is arrangement of a thing only one
-program draws, beside the `.secret` rules it already has; it moves to `base.css` the day the
-gate needs an icon button. The rules, in words:
+**CSS, in `admin.css`.** **Amended by §13.17 (icons):** the geometry is now the shared
+`.pill.ico` component in `base.css`, and `admin.css` keeps only what the reveal's own state
+needs, the glyph swap (`.secret .i-done`, `.secret [data-state=done] .i-copy`,
+`.secret [data-state=done] .i-done`) and `.copy-status`. The rules as 4h decided them, in
+words:
 
 - `.secret .copy`: `display:inline-flex`, centred, `min-width:32px; min-height:32px`, a small
   padding, `background:transparent`, `border-color:var(--card-border)`, `color:var(--text)`;
@@ -2011,10 +2012,12 @@ glyph painted under the real policy).
 
 **Target size.** WCAG 2.2 2.5.8 (AA): "The size of the target for pointer inputs is at least 24
 by 24 CSS pixels", with a spacing exception
-(<https://www.w3.org/WAI/WCAG22/Understanding/target-size-minimum.html>). The box is 32 by 32
-CSS px, so it passes on size alone, without leaning on the exception. The bounds are in `px`
-on purpose: the criterion is stated in CSS pixels, and a box in `em` would shrink under a
-smaller font size.
+(<https://www.w3.org/WAI/WCAG22/Understanding/target-size-minimum.html>). Amended by §13.17:
+the shared component's floor is `min-width:24px;min-height:24px`, the criterion's own minimum,
+so it passes on size alone, without leaning on the exception, and `nojs.js` measures the
+reveal's box in a browser at 1280 and 390 px and requires that floor. The floor is in `px` on
+purpose: the criterion is stated in CSS pixels, and a floor in `em` would shrink under a
+smaller font size. The glyph itself is in `em`, so it follows the pill's own text size.
 
 #### Revoking asks first
 
@@ -2116,8 +2119,9 @@ user named it, and it is a fact about the grammar the file already uses.
 
 1. `duration` trimmed; **empty or absent is refused** (`K::KeyDurationRequired`). This is the
    trap in the grammar: `parse_duration("")` is `Dur::Never`, so a field that went missing
-   would otherwise mint a key that never expires. Today's console form has that hole (an
-   emptied text field files a non-expiring key); this closes it on both surfaces.
+   would otherwise mint a key that never expires. The form this replaced had exactly that hole
+   (an emptied text field filed a non-expiring key); both surfaces now refuse it, which is the
+   one break a hand-written client of these forms sees.
 2. `days` non-empty while `duration` is not `custom` is refused (`K::KeyDaysWithoutCustom`:
    "you typed a number of days; choose Custom, or clear it"). The field is always visible, so
    a number typed beside the default 1 year is a choice the person thinks they made, and
@@ -2177,20 +2181,24 @@ invalid marking the other fields do.
 Unit tests in `bb-auth-web.rs`:
 
 - `the_copy_control_is_an_icon_with_a_name` (with `the_reveal_shows_only_the_key` updated): on
-  the four reveal responses the button has no text node, an `aria-label` equal to
-  `K::CopyKey` in the page's language, is still `hidden` and `type="button"`, holds two `svg`
-  each `aria-hidden="true"` and `focusable="false"`; a `span role="status"` follows it, empty;
-  no `style=` attribute appears in the block; the bearer still occurs once.
+  the four reveal responses the button is the shared `pill ico` component (§13.17), is still
+  `hidden` and `type="button"`, carries **no** `aria-label`, and its name is one `span.vh`
+  inside it with the same words in `title`; it holds two `svg` each `aria-hidden="true"` and
+  `focusable="false"` and naming no colour; a `span role="status"` follows it, empty; the words
+  the click writes are `data-done` / `data-failed` attributes, never the control's text; no
+  `style=` attribute appears in the block; the bearer still occurs once.
 - `no_page_but_the_reveal_carries_a_script` unchanged, and still green with the new script's
   hash.
 - `the_duration_choice_maps_onto_the_grammar`, on `duration_from_form` alone: the four presets
   come back verbatim; `custom`+`40` is `40d`, `custom`+`12h` is `12h`; empty or absent
-  `duration` is `KeyDurationRequired`; `custom` with empty, `0`, `-`, `never`, `abc`, `-3` and
-  an overflowing number is `KeyDaysInvalid`; `365d`+`days=40` is `KeyDaysWithoutCustom`.
-- `a_self_service_key_may_never_expire`: `/account/` mints with `never` (stored `never`), with
-  `custom`+`400` (stored `400d`) and with `182d`; refuses `12h`, empty `duration` and
-  `custom` with no days with `400` and the file's bytes unchanged. This replaces the case that
-  refused `never` and `366d`.
+  `duration` is `KeyDurationRequired`; `custom` with empty, `0`, `-`, `never`, `abc`, `40x`,
+  `-3` and an overflowing number is `KeyDaysInvalid`; `365d`+`days=40` is
+  `KeyDaysWithoutCustom`.
+- `a_self_service_key_may_never_expire`: `/account/` mints with `never` (stored `never`, and
+  `key_expiry` reads it as no expiry) and with `custom`+`366` (stored `366d`, a year and a day,
+  read as one); refuses `custom` with `""`, `0`, `-3`, `never` and `abc`, and an empty
+  `duration`, each with `400` and the file's bytes unchanged; a rotate of the never-expiring key
+  leaves it without expiry. This replaces the case that refused `never` and `366d`.
 - `the_key_form_offers_five_choices`: the `/account/` form and the console's add form carry one
   `fieldset` with a `legend`, five `name="duration"` radios with the values in the order above,
   `365d` checked, and a `days` input with an `aria-label`; the console's edit form for keys
@@ -2204,8 +2212,9 @@ Unit tests in `bb-auth-web.rs`:
   `rev` and the id, and leaves the file's bytes unchanged; an id on another row, an unknown id
   and no id are `404` naming nothing; a stranger is `403`, a denied caller `403`; the `POST`
   from that form removes the key. (Changed by §13.16 in its first clause only: the revoke
-  control is a link `a.pill.rm` to `<prefix>/keys/remove?id=laptop` with the `aria-label`
-  "Revoke key `laptop`", not a `GET` form; the rest stands.)
+  control is a link to `<prefix>/keys/remove?id=laptop` among the row's destructive pills,
+  named "Revoke key `laptop`" (as hidden text since §13.17, not an `aria-label`), not a `GET`
+  form; the rest stands.)
 
 E2E: `account.js` (scripting off) mints with 6 months and sees the expiry 182 days out, with
 custom 40, and with no expiry and sees "never"; revokes through the confirmation, first
@@ -2271,9 +2280,11 @@ nothing. `/account/` does the same:
   "`K::AccountKeyRemove` `<id>`" ("Revoke key laptop"). (Superseded by §13.17's icon
   component: the × becomes `a.pill.rm.ico` with an SVG glyph and the name as hidden text.)
 
-The × is the user's word for the control, as a text glyph inside the existing pill, so it
-takes the pill's muted colour and its red hover from `base.css` and its colour and shape from
-whatever token file is loaded; no SVG and no icon-button class are needed. The name carries
+The × is the user's word for the control. As 4h decided it, the control was a text glyph
+inside the existing pill, taking the pill's muted colour and its red hover from `base.css` and
+its colour and shape from whatever token file is loaded, and needing no SVG and no icon-button
+class; §13.17 swapped the glyph for that component's SVG and the visible word for hidden text,
+and the colour argument stands untouched, since the component is a pill. The name carries
 the id because ten links all called "Revoke key" are ten identical entries in a screen
 reader's list of links (WCAG 2.4.6, <https://www.w3.org/WAI/WCAG22/Understanding/headings-and-labels.html>);
 "rotate" keeps its visible word, which the longer name contains (WCAG 2.5.3,
@@ -2292,9 +2303,10 @@ byte, which removing and re-adding would make the person re-tick from memory.
 `p.lede` (what that means), a `div.panel.bad` holding the object and a `form.edit` with
 `div.actions`: a submit (`button.danger` for a revoke) and a `cancel` pill. Both
 `GET <prefix>/keys/remove?id=` (4h) and `GET <prefix>/keys/rotate?id=` render exactly that,
-inside `account_shell`. Today `page_confirm` and the `form_shell` it calls take a console
-`View` for three things (the form's action, `rev`, the cancel link); they take those three
-values instead, so one function renders both surfaces' confirmations. Texts:
+inside `account_shell`. The pair used to take a console `View` for three things (the form's
+action, `rev`, the cancel link); `page_confirm_at` and `form_shell_at` take those three values
+instead, and `page_confirm` and `form_shell` are the console's one-line calls of them, so one
+function renders both surfaces' confirmations. Texts:
 `K::AccountKeyRemoveWarn` (4h) and `K::AccountKeyRotateWarn` ("A new secret replaces this one.
 Anything still using the old one stops getting in within seconds. The name and the scopes
 stay; the expiry starts again from today."), the last clause because `rotate_api_key` stamps a
@@ -2390,9 +2402,12 @@ and stacked cards need no exception.
   rule has `justify-content:flex-start`. The markup gains a `span.pills` inside the cell,
   which is the existing group component. Tried first: leaving the rule (the defect stays) and
   `span.pills` alone in a plain `td` (the pills then wrap onto two lines in a narrow column).
-- Nothing else in this section. Dropped from the earlier version: `.vh`, `table.keys`,
-  `.icon-btn` and its SVGs, `tfoot` styling, `tr.new`, `.field-error`, `.keys-full`, and the
-  three phone rules, each replaced by the existing piece named above.
+- Nothing else in this section. Dropped from the earlier version: `table.keys`, `tfoot`
+  styling, `tr.new`, `.field-error`, `.keys-full`, and the three phone rules, each replaced by
+  the existing piece named above. `.icon-btn` is gone as a class, and its glyph and its hidden
+  name stayed: the slice shipped them as the shared `.pill.ico` component and `.vh` in
+  `base.css`, which is what §13.17 asks for, since the × is an icon whose name a reader speaks
+  and no browser shows.
 
 Removed with the markup that needed them: `.selfserve .keyact`, `.selfserve form.edit h2`.
 
@@ -2415,9 +2430,10 @@ stays as the refusal pages' title.
   or the pairs, `expiry_markup`'s words; no URL in the section; with no keys, no `table` and
   the `AccountKeysNone` line.
 - `each_key_row_acts_like_a_console_row`: per key, a `td.pills` holding an `a.pill` to
-  `keys/rotate?id=<id>` and an `a.pill.rm` reading "×" to `keys/remove?id=<id>`, each with
-  the verb-plus-id `aria-label`; no `form` of any method on the plain page except the
-  header's preferences.
+  `keys/rotate?id=<id>` with the verb-plus-id `aria-label`, and an `a.pill.rm.ico` (the shared
+  icon component, §13.17) to `keys/remove?id=<id>` named by text inside it and a `title`, with
+  no `aria-label` so the two names cannot drift; no `form` on the plain page that is not a
+  `GET`.
 - `the_new_key_row_is_a_page_of_its_own`: the plain page has the `+ New key` link and no input
   named `id`; `GET keys/new` is `200`, has no such link, and has one `td colspan="4"` holding
   a `form.edit` posting to `keys` with `rev`, the `id` input carrying `autofocus`, `required`,
@@ -2439,11 +2455,13 @@ confirmations (cancelling once first). `shots.js` gains `account`, `account-new`
 #### Impact on the 4h tests
 
 - `the_copy_control_is_an_icon_with_a_name`, `the_duration_choice_maps_onto_the_grammar`,
-  `a_self_service_key_may_never_expire`: unchanged (the posted values are the same).
+  `a_self_service_key_may_never_expire`: this section left them alone, and the shipped slice
+  moved the first with the icon component: the copy control's name is hidden text and it
+  carries no `aria-label` (§13.17). The other two post the values §13.15 states.
 - `the_key_form_offers_five_choices`: one `select` with five options, `365d` selected, plus
   the `days` input; on `/account/` read from `GET keys/new`.
-- `revoking_a_key_asks_first_on_the_account_page`: the control is an `a.pill.rm` link, not a
-  `GET` form; the confirmation and the `POST` are unchanged.
+- `revoking_a_key_asks_first_on_the_account_page`: the control is the row's icon link
+  (`pill rm ico`, §13.17), not a `GET` form; the confirmation and the `POST` are unchanged.
 - `e2e/tests/account.js`: the mint opens `keys/new` first and uses `selectOption` for the
   duration; the `form[action="/account/keys"]` selector still finds the inputs.
 
@@ -2634,7 +2652,9 @@ as on `/account/`, and with the same safety net, since each leads to a confirmat
 e2e walk (bounding boxes in the bar, a table row and the reveal, at desktop and phone width).
 `the_copy_control_is_an_icon_with_a_name` changes from an `aria-label` to the `.vh` text, and
 `each_key_row_acts_like_a_console_row` expects the × as an icon with "Revoke key `<id>`" as
-its text.
+its text. Shipped with 8a: the first test over the reveal and the account's table, and the
+e2e walk in `nojs.js` (a table row and the reveal, at 1280 and 390 px; the bar is measured
+only once it carries an icon, which is 8b).
 
 #### The operator's theme
 

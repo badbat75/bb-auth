@@ -169,6 +169,30 @@ button.danger:hover{background:var(--error);border-color:var(--error);filter:bri
    selected pill always outranks a hovered one. */
 .pill.on,.pill.on:hover{background:var(--accent);border-color:var(--accent);
   color:var(--on-accent);font-weight:600}
+.pill.ico{justify-content:center;padding:4px;min-width:24px;min-height:24px}
+.pill.ico svg{width:1.45em;height:1.45em;fill:none;stroke:currentColor;stroke-width:2;
+  stroke-linecap:round;stroke-linejoin:round}
+.vh{position:absolute;width:1px;height:1px;overflow:hidden;clip:rect(0 0 0 0);
+  white-space:nowrap;border:0}
+/* The three rules above are written back to back, with their notes after them, because
+   `the_copy_control_is_an_icon_with_a_name` reads each one out of the compiled stylesheet by
+   its exact selector, and a comment between a rule's preceding `}` and its own `{` is part of
+   that selector to that reader. Each note names the selector it is about.
+
+   .pill.ico: a pill whose content is a glyph and not a word (§13.17). It is the same component
+   with its content swapped so it inherits every state above, and the two things a word brings
+   with it are added here. The box is square, since a word's padding is tuned to text while a
+   glyph needs equal measure on all four sides. The target is at least 24 by 24 CSS pixels,
+   which WCAG 2.5.8 asks of a pointer target and which no call site may be left to remember.
+
+   .pill.ico svg: the glyph is the pill's line height, sized in `em` so it follows the pill's
+   own text size. No colour is named: the glyph is an outline in `currentColor` so it takes the
+   palette's resting and hover colour exactly as the pill's border does, and `THEME_CSS` stays
+   the only file that names one.
+
+   .vh: the name of an icon control. Spoken by a reader. Shown by no browser. Clipped by
+   geometry rather than by hiding the element, which would remove it from the accessibility tree
+   and take the name away from exactly the technology the whole mechanism exists to feed. */
 
 /* ---------------------------------------------------------------------------
    Tags, and the one thing that is a pill shape

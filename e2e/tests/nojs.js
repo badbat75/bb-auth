@@ -17,12 +17,24 @@ const { doc, bytes, newPage, submit, mainText } = require('../lib/harness');
 /** The CSP source expression that names a script whose bytes are `s`. */
 const cspHashOf = (s) => 'sha256-' + crypto.createHash('sha256').update(s, 'utf8').digest('base64');
 
-/** The mint's reveal page, reached by filling the key form of `user` and submitting it. */
+/** The mint's reveal page, reached by filling the key form of `user` and submitting it. The
+ *  duration is chosen from the five, which is the one component both surfaces render (§13.15
+ *  as amended by §13.16), so this walk picks a choice rather than typing a window. */
 async function revealKey(page, base, user, id) {
   await page.goto(`${base}/users/${encodeURIComponent(user)}/keys/+add`);
   await page.fill('input[name=id]', id);
-  await page.fill('input[name=duration]', '365d');
+  await page.selectOption('select[name=duration]', '365d');
   return submit(page, 'main form button[type=submit]');
+}
+
+/** Every `.pill.ico` on the page, as the browser laid it out, with the name it carries.
+ *  A control the person has to hit is a box, and the only honest measurement of a box is
+ *  the one the layout engine made. */
+async function iconBoxes(page) {
+  return page.$$eval('.pill.ico', (els) => els.map((el) => {
+    const r = el.getBoundingClientRect();
+    return { w: Math.round(r.width), h: Math.round(r.height), name: (el.textContent || '').trim() };
+  }));
 }
 
 async function run(ctx, t) {
@@ -64,13 +76,40 @@ async function run(ctx, t) {
     t.eq('the reveal carries the shell\'s two handlers and no third: the copy button is wired '
       + 'with addEventListener', revealHandlers.sort().join(' '), 'onchange onchange');
     const copy = page.locator('#bearer-copy');
-    t.eq('the copy button is visible with scripting on', await copy.isVisible(), true);
+    t.eq('the copy control is visible with scripting on', await copy.isVisible(), true);
     t.eq('and it is a button that cannot submit a form', await copy.getAttribute('type'), 'button');
+    t.eq('it is the shared icon component, not a box of its own',
+      await copy.getAttribute('class'), 'pill ico');
+    // §13.17: the name is text inside the control, hidden visually, and the `title` says
+    // the same words. One mechanism for every icon, because a `summary` carries no
+    // reliable `aria-label`, and a tooltip that reads differently from the name a reader
+    // speaks is two names for one control.
+    t.check('the name is hidden text, and the tooltip repeats it',
+      (await copy.locator('span.vh').innerText()) === 'Copy the key'
+        && (await copy.getAttribute('title')) === 'Copy the key',
+      await copy.evaluate((el) => el.outerHTML.slice(0, 220)));
+    t.eq('and there is no second naming mechanism for it to drift from',
+      await copy.getAttribute('aria-label'), null);
+    // §13.17: the control carries **two** glyphs that swap on `data-state`, so "the glyph" is
+    // not one element and a check aimed at it is a check aimed at both. The markup names each
+    // by class, which is also what the stylesheet swaps on.
+    t.eq('both glyphs are out of the reader\'s way, and the name is the only text',
+      [await copy.locator('svg.i-copy').getAttribute('aria-hidden'),
+        await copy.locator('svg.i-done').getAttribute('aria-hidden'),
+        (await copy.evaluate((el) => el.textContent.trim()))],
+      ['true', 'true', 'Copy the key']);
+    t.eq('the copy glyph is painted, and the check is waiting for a click',
+      [await page.locator('#bearer-copy .i-copy').isVisible(),
+        await page.locator('#bearer-copy .i-done').isVisible()], [true, false]);
+    t.eq('the status span is empty as served, because no click has happened',
+      (await page.locator('#bearer-copy-status').innerText()).trim(), '');
     const done = await copy.getAttribute('data-done');
-    t.check('it carries the text a successful copy shows', !!done, String(done));
+    t.check('it carries the text a successful copy shows', done === 'Copied', String(done));
+    const failed = await copy.getAttribute('data-failed');
+    t.check('and the text a refusal shows', !!failed && failed.startsWith('Copy refused'), String(failed));
     // The clipboard is a permission, and headless gives it to a loopback origin on request.
     // Where the browser will not grant it, the click still has to answer with the failure
-    // text, so the check below is about the button's word, not the clipboard's bytes.
+    // text, so the checks below are about the page's word, not the clipboard's bytes.
     let granted = true;
     try {
       await context.grantPermissions(['clipboard-read', 'clipboard-write'], { origin: ctx.origin });
@@ -78,8 +117,16 @@ async function run(ctx, t) {
       granted = false;
     }
     await copy.click();
-    t.check('a click shows the copied text', (await copy.innerText()).trim() === done,
-      `${await copy.innerText()} vs ${done}`);
+    t.eq('a click marks the button done, which is what swaps the glyph',
+      await copy.getAttribute('data-state'), 'done');
+    t.eq('the check glyph replaces the copy glyph',
+      [await page.locator('#bearer-copy .i-copy').isVisible(),
+        await page.locator('#bearer-copy .i-done').isVisible()], [false, true]);
+    t.check('a click shows the copied word beside the icon',
+      (await page.locator('#bearer-copy-status').innerText()).trim() === done,
+      `${await page.locator('#bearer-copy-status').innerText()} vs ${done}`);
+    t.eq('and the icon is still an icon: the word went to the status span, not the button',
+      (await copy.evaluate((el) => el.textContent.trim())), 'Copy the key');
     if (granted) {
       const onClipboard = await page.evaluate(() => navigator.clipboard.readText());
       t.eq('and the clipboard holds exactly the key', onClipboard, key);
@@ -87,6 +134,51 @@ async function run(ctx, t) {
       t.check('clipboard contents not verifiable: this browser granted no permission', true,
         'grantPermissions failed');
     }
+
+    // §13.17's target size, measured by the browser rather than read out of a stylesheet.
+    // The reveal's copy icon is this slice's, so not finding one is a failure. The console's
+    // own icons arrive with the shared header (step 8b), so those pages are measured only
+    // when they carry one: a size rule cannot be asserted of a control that does not exist.
+    for (const width of [1280, 390]) {
+      const at = width === 1280 ? 'desktop' : 'phone';
+      await page.setViewportSize({ width, height: 900 });
+      for (const p of ['/', '/users/b3f1c8a2-4e77-4f1a-9c0d-1e2f3a4b5c6d']) {
+        await page.goto(ctx.base + p);
+        for (const b of await iconBoxes(page)) {
+          t.check(`the ${at} icon "${b.name}" on ${p} is at least 24 by 24 CSS pixels`,
+            b.w >= 24 && b.h >= 24, JSON.stringify(b));
+        }
+      }
+      // The keys row of the self-service page is the table row this slice builds, so its
+      // icon is measured here too: a person who is not an administrator, one key minted
+      // through the page's own form, and the row read at the same width as everything else.
+      const person = await ctx.browser.newContext({
+        viewport: { width, height: 900 },
+        extraHTTPHeaders: { 'X-Auth-Email': 'you@example.com' },
+      });
+      const pPage = await person.newPage();
+      await pPage.goto(`${ctx.origin}/account/keys/new`);
+      await pPage.fill('input[name=id]', `nojs-size-${width}`);
+      await pPage.selectOption('select[name=duration]', '365d');
+      await submit(pPage, 'main form button[type=submit]');
+      await pPage.goto(`${ctx.origin}/account/`);
+      const rowBoxes = await iconBoxes(pPage);
+      t.check(`the account keys row carries its revoke icon at ${at} width`,
+        rowBoxes.length >= 1, JSON.stringify(rowBoxes));
+      for (const b of rowBoxes) {
+        t.check(`the ${at} account row icon "${b.name}" is at least 24 by 24 CSS pixels`,
+          b.w >= 24 && b.h >= 24, JSON.stringify(b));
+      }
+      await person.close();
+      await revealKey(page, ctx.base, 'b3f1c8a2-4e77-4f1a-9c0d-1e2f3a4b5c6d', `nojs-size-${width}`);
+      const boxes = await iconBoxes(page);
+      t.check(`the reveal carries its copy icon at ${at} width`, boxes.length >= 1, JSON.stringify(boxes));
+      for (const b of boxes) {
+        t.check(`the ${at} reveal icon "${b.name}" is at least 24 by 24 CSS pixels`,
+          b.w >= 24 && b.h >= 24, JSON.stringify(b));
+      }
+    }
+    await page.setViewportSize({ width: 1280, height: 900 });
 
     // PRG: save, land on the msg page, reload it — a GET, so nothing can repeat.
     await page.goto(ctx.base + '/groups/admins/edit');
@@ -212,17 +304,23 @@ async function run(ctx, t) {
     t.check('the file has the new row',
       doc(ctx).denied.includes('noscript@example.com'), JSON.stringify(doc(ctx).denied));
 
-    // The reveal with scripting off (§13.14). The rule is that no page *needs* a script, and
-    // this is the one page that carries one, so the scripting-off walk has to reach it: the
-    // key is shown in `#bearer`, the copy button is not shown at all, and the script the
-    // server emitted runs nothing.
+    // The reveal with scripting off (§13.14, §13.15). The rule is that no page *needs* a
+    // script, and this is the one page that carries one, so the scripting-off walk has to
+    // reach it: the key is shown in `#bearer`, the copy icon is not shown at all (a server
+    // that showed it would be showing a dead control), and the script the server emitted
+    // runs nothing.
     const rOff = await revealKey(page, ctx.base, 'b3f1c8a2-4e77-4f1a-9c0d-1e2f3a4b5c6d', 'nojs-off');
     t.eq('the mint is answered 200 with scripting off', rOff.status(), 200);
     const offKey = (await page.locator('#bearer').innerText()).trim();
     t.check('the key is shown, in #bearer', offKey.startsWith('bbk_'), offKey);
     t.check('and the page shows the key alone, with no Authorization line',
       !(await mainText(page)).includes('Authorization'), (await mainText(page)).slice(0, 400));
-    t.eq('the copy button is not shown', await page.locator('#bearer-copy').isVisible(), false);
+    t.eq('the copy icon is not shown', await page.locator('#bearer-copy').isVisible(), false);
+    t.eq('and neither glyph is',
+      [await page.locator('#bearer-copy .i-copy').isVisible(),
+        await page.locator('#bearer-copy .i-done').isVisible()], [false, false]);
+    t.eq('the status span says nothing, because nothing happened',
+      (await page.locator('#bearer-copy-status').innerText()).trim(), '');
     t.eq('the response carries the one script this browser ignores',
       await page.locator('script').count(), 1);
 

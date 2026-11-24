@@ -4,7 +4,7 @@
 // contract's visible half (a 303 to `?msg=<key>` with a flash) and its one deliberate
 // exception, the mint/rotate reveal page.
 
-const { doc, bytes, sha256, newPage, submit, mainText } = require('../lib/harness');
+const { doc, bytes, sha256, newPage, submit, mainText, setDuration } = require('../lib/harness');
 
 // The fixture's identities. Every reference in the file is a uuid, and the forms take an
 // email and resolve it, so both spellings appear below on purpose.
@@ -207,7 +207,7 @@ async function run(ctx, t) {
     // place the bearer ever exists, so the URL stays the mint form's own.
     await page.goto(ctx.base + '/users/' + BOT + '/keys/+add');
     await page.fill('input[name=id]', 'e2e-key');
-    await page.fill('input[name=duration]', '30d');
+    await setDuration(page, '30d');
     await submit(page);
     t.check('the reveal is the direct POST response (no redirect)',
       page.url().endsWith('/users/' + BOT + '/keys/+add'), page.url());
@@ -229,7 +229,7 @@ async function run(ctx, t) {
     t.check('the bearer appears on no later page', !(await mainText(page)).includes('bbk_'));
 
     await page.goto(ctx.base + '/users/' + BOT + '/keys/e2e-key/edit');
-    await page.fill('input[name=duration]', '90d');
+    await setDuration(page, '90d');
     await page.fill('textarea[name=scopes]', 'mcp/api');
     await submit(page);
     t.check('key edit redirects with msg=key-saved', page.url().endsWith('?msg=key-saved'), page.url());

@@ -85,3 +85,15 @@ Rules are in `AGENTS.md`. Format of this file: `AGENTS.md`, under "Skills".
   tests intermittently fail at `.expect("a POST response")` with a timeout when the machine is busy
   (a full `cargo test` compiling the other three targets). Re-run before believing it, and prove it
   with `--test-threads=1`: the fix is never to shorten the handler's lock.
+- A source file that changes under you (mtime moves, `git diff` grows with code you did not write) has
+  a second writer, such as a local-model session still running. Work in an rsynced copy (copy `target/`
+  too for a warm build), copy the finished file back in one step, and `cmp` it after a minute.
+- The test helper `links_to` returns only the opening `<a ...>` tag, so a test that runs `visible_text`
+  or `elements(.., "<svg", ..)` on its result sees nothing. `the_rule` fails on a selector with a
+  comment right before it (in **either** sheet), so a rule a test reads by selector takes no comment
+  between its preceding `}` and its `{`: the note trails the rule, and when several such rules sit
+  back to back each note names the selector it is about.
+- A slice that lifts a bound invalidates an **older** test's fixture that relied on the old refusal
+  (`only_the_reveal_policy_names_the_copy_script` posts `duration=never` to the self-service mint and
+  expects a `400`, which §13.15 made a legal window). Grep the suite for the value the slice made
+  legal before writing code; the fix is the fixture's, never the production code's.
