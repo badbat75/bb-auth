@@ -671,6 +671,44 @@ impl Access {
             .collect()
     }
 
+    /// Every scope a key owned by `uuid` may be narrowed to: the checkboxes the self-service
+    /// key form (`bb-auth-web`'s `/account`) offers.
+    ///
+    /// This is [`decide`]'s rule for a key restated as a set, so it asks the very fields
+    /// [`decide`] asks for a [`Subject::Key`] ([`Access::denied_users`],
+    /// [`ScopeRecord::credentials`], [`ScopeRecord::members`],
+    /// [`ScopeRecord::excluded_users`]): the form's list and the gate's answer are one grant
+    /// rule written twice, and a form that offers a scope the gate refuses mints a key that
+    /// fails on its very first request. It is the **owner's** reach and never one existing
+    /// key's, because a key's own `scopes` is a restriction: a form that offered only what
+    /// that key already carries could never widen it back.
+    ///
+    /// An [`AccessKind::Anonymous`] scope is left out even though [`decide`] grants a key
+    /// there: it grants with no credential at all, so narrowing a key to it restricts
+    /// nothing, and a checkbox that changes nothing is worse than no checkbox. An
+    /// [`AccessKind::Authenticated`] scope is out for the opposite reason: [`decide`] refuses
+    /// a key there, because Cognito vouches for no static key of ours.
+    ///
+    /// A uuid the file denies is offered nothing, ahead of every scope: `denied` outranks
+    /// every grant on every credential, and a key is one of them. Membership, not a promise
+    /// about every URL: scopes are first match wins inside an application, so a listed scope
+    /// answers only what shadows do not.
+    pub fn key_scopes_for(&self, uuid: &str) -> Vec<(&AppRecord, &ScopeRecord)> {
+        if self.denied_users.contains(uuid) {
+            return Vec::new();
+        }
+        self.apps
+            .iter()
+            .flat_map(|a| a.scopes.iter().map(move |s| (a, s)))
+            .filter(|(_, s)| {
+                s.access == AccessKind::Restricted
+                    && s.credentials.api_key
+                    && s.members.contains(uuid)
+                    && !s.excluded_users.contains(uuid)
+            })
+            .collect()
+    }
+
     /// The uuid this identifier resolves to, matched as the file stores it.
     pub fn uuid_of(&self, identifier: &str) -> Option<&str> {
         self.by_identifier
@@ -7776,6 +7814,332 @@ mod tests {
                 );
             }
         }
+    }
+
+    // --- what a key reaches -------------------------------------------------
+
+    const DAVE: &str = "33333333-3333-4333-8333-333333333333";
+    const NOBODY: &str = "99999999-9999-4999-8999-999999999999";
+    const BOB_BEARER: &str = "bbk_keytestbob000000000000000000000";
+    const CAROL_BEARER: &str = "bbk_keytestcarol00000000000000000000";
+    const DAVE_BEARER: &str = "bbk_keytestdave00000000000000000000";
+
+    /// The estate of [`fixture`] arranged for the key rule, so every arm that rule has is in
+    /// one file: bob's key carries **no** `scopes` restriction, which is the spelling the
+    /// binding rule is stated for ("at most what the owner reaches"), so nothing has
+    /// subtracted from the answer. `mpa/reports` names bob directly and spells out both
+    /// credential classes; `mpa/admin` admits a login only, so a key is refused there even
+    /// though `@admins` names him; `mcp/logs` names bob and excludes him by uuid; `mcp/keys`
+    /// reaches him through `@machines`; `mcp/other` is carol's alone and leaves `credentials`
+    /// unset, which means both classes; `mcp/api` names bob and dave and admits a key only.
+    /// dave is `denied` by uuid, and `mpa/reports` sits first in the file so the expected
+    /// order is the reverse of the alphabetical one.
+    fn key_fixture() -> String {
+        r#"{
+          "version": 1,
+          "applications": [
+            { "name": "mpa",
+              "base": ["https://app.x.com/mpa"],
+              "scopes": [
+                { "name": "reports", "urls": ["https://app.x.com/mpa/reports/*"],
+                  "access": "restricted", "users": ["BOBUUID"],
+                  "credentials": ["login", "api_key"] },
+                { "name": "healthz", "urls": ["https://app.x.com/mpa/healthz"],
+                  "access": "anonymous" },
+                { "name": "admin", "urls": ["https://app.x.com/mpa/admin/*"],
+                  "access": "restricted", "groups": ["@admins"],
+                  "credentials": ["login"] },
+                { "name": "onboarding", "urls": ["https://app.x.com/mpa/*"],
+                  "access": "authenticated" } ] },
+            { "name": "mcp",
+              "base": ["https://ai.x.com/mcp"],
+              "scopes": [
+                { "name": "logs", "urls": ["https://ai.x.com/mcp/logs/*"],
+                  "access": "restricted", "users": ["BOBUUID"],
+                  "excluded": ["BOBUUID"] },
+                { "name": "keys", "urls": ["https://ai.x.com/mcp/keys/*"],
+                  "access": "restricted", "groups": ["@machines"],
+                  "credentials": ["login", "api_key"] },
+                { "name": "other", "urls": ["https://ai.x.com/mcp/other/*"],
+                  "access": "restricted", "users": ["CAROLUUID"] },
+                { "name": "api", "urls": ["https://ai.x.com/mcp/*"],
+                  "access": "restricted", "users": ["BOBUUID", "DAVEUUID"],
+                  "credentials": ["api_key"] } ] } ],
+          "user_groups": { "admins": ["BOBUUID"], "machines": ["BOBUUID", "DAVEUUID"] },
+          "denied": ["spammer@x.com", "DAVEUUID"],
+          "users": [
+            { "uuid": "BOBUUID", "emails": ["bob@x.com"],
+              "api_keys": [ { "id": "laptop", "key_hash": "BOBHASH",
+                              "released": "2026-01-01", "duration": "never" } ] },
+            { "uuid": "CAROLUUID", "emails": ["carol@x.com"],
+              "api_keys": [ { "id": "desk", "key_hash": "CAROLHASH",
+                              "released": "2026-01-01", "duration": "never" } ] },
+            { "uuid": "DAVEUUID", "emails": ["dave@x.com"],
+              "api_keys": [ { "id": "old", "key_hash": "DAVEHASH",
+                              "released": "2026-01-01", "duration": "never" } ] } ] }"#
+            .replace("BOBUUID", BOB)
+            .replace("CAROLUUID", CAROL)
+            .replace("DAVEUUID", DAVE)
+            .replace("BOBHASH", &sha256_hex(BOB_BEARER))
+            .replace("CAROLHASH", &sha256_hex(CAROL_BEARER))
+            .replace("DAVEHASH", &sha256_hex(DAVE_BEARER))
+    }
+
+    /// The pairs as `app/scope` strings, in the order the function returns them, so each
+    /// assertion below reads as the list the key form will show and pins file order too.
+    fn key_scopes(a: &Access, uuid: &str) -> Vec<String> {
+        a.key_scopes_for(uuid)
+            .iter()
+            .map(|(app, s)| format!("{}/{}", app.name, s.name))
+            .collect()
+    }
+
+    /// The key, resolved the way the gate resolves a bearer: by its hash, through
+    /// [`decide_api_key`]. A denied owner's key does not get through that door, so the test
+    /// that needs one takes the record from [`Access::by_key_hash`] instead.
+    fn owner_key<'a>(a: &'a Access, bearer: &str) -> &'a ApiKeyRecord {
+        match decide_api_key(a, &sha256_hex(bearer), 1_000) {
+            KeyDecision::Granted(r) => r,
+            KeyDecision::Unknown => panic!("the fixture key is not in the file"),
+            KeyDecision::OwnerDenied(_) => panic!("the fixture key's owner is denied"),
+            KeyDecision::Expired(_) => panic!("the fixture key is expired"),
+        }
+    }
+
+    /// One URL per non-anonymous scope of [`key_fixture`], chosen so that **that** scope
+    /// answers it: scopes are first match wins, so `mpa/onboarding` answers `/mpa/welcome` and
+    /// never `/mpa/reports/q1`, and `mcp/api` answers `/mcp/plain` and never
+    /// `/mcp/keys/report`. The agreement test checks this table against `resolve` before
+    /// trusting it.
+    const KEY_PROBES: &[(&str, &str)] = &[
+        ("mpa/reports", "https://app.x.com/mpa/reports/q1"),
+        ("mpa/admin", "https://app.x.com/mpa/admin/panel"),
+        ("mpa/onboarding", "https://app.x.com/mpa/welcome"),
+        ("mcp/logs", "https://ai.x.com/mcp/logs/today"),
+        ("mcp/keys", "https://ai.x.com/mcp/keys/report"),
+        ("mcp/other", "https://ai.x.com/mcp/other/today"),
+        ("mcp/api", "https://ai.x.com/mcp/plain"),
+    ];
+
+    /// The list is the set of scopes a key of this owner may be narrowed to, so it has to be
+    /// exactly what such a key reaches: `mpa/reports` (named directly, both classes),
+    /// `mcp/keys` (through `@machines`, both classes) and `mcp/api` (named directly, key
+    /// only). Everything else is out for a reason the tests below take one each: `mpa/admin`
+    /// refuses the credential class, `mpa/onboarding` is `authenticated`, `mcp/logs` excludes
+    /// him, `mcp/other` does not name him, `mpa/healthz` is anonymous.
+    #[test]
+    fn key_scopes_for_lists_the_scopes_an_unrestricted_key_of_the_owner_reaches() {
+        let a = access_of("key-scopes-bob", &key_fixture());
+        assert_eq!(
+            key_scopes(&a, BOB),
+            vec!["mpa/reports", "mcp/keys", "mcp/api"]
+        );
+    }
+
+    /// A key acts as its owner and not as anybody else, so carol's list is her own scopes and
+    /// none of bob's: `mcp/other` names her and leaves `credentials` unset, which restricts
+    /// nothing, so a key of hers reaches it.
+    #[test]
+    fn key_scopes_for_lists_only_what_a_key_of_that_owner_reaches() {
+        let a = access_of("key-scopes-carol", &key_fixture());
+        assert_eq!(key_scopes(&a, CAROL), vec!["mcp/other"]);
+    }
+
+    /// The list is what the **owner** reaches, never what one existing key of theirs is
+    /// narrowed to: [`fixture`]'s `laptop` key names only `mcp/api`, and a form that offered
+    /// only that could never widen the key back, which is the whole point of showing the
+    /// owner's reach.
+    #[test]
+    fn key_scopes_for_answers_for_the_owner_and_not_for_one_narrowed_key() {
+        let a = access_of("key-scopes-owner", &fixture());
+        assert_eq!(
+            fixture_key(&a).scopes.as_ref().map(|s| s.len()),
+            Some(1),
+            "the fixture key must be narrowed to one scope for this to mean anything"
+        );
+        assert_eq!(key_scopes(&a, BOB), vec!["mcp/logs", "mcp/api"]);
+    }
+
+    /// A scope whose `credentials` admit a login only refuses a key, and bob is a member of
+    /// one, through `@admins`: membership alone must not put `mpa/admin` in the form, because
+    /// the form would then mint a key the gate refuses on its very first request.
+    #[test]
+    fn key_scopes_for_skips_a_scope_whose_credentials_admit_only_a_login() {
+        let a = access_of("key-scopes-login-only", &key_fixture());
+        assert!(
+            a.scopes_for(BOB).iter().any(|(_, s)| s.name == "admin"),
+            "bob must be a member of mpa/admin for the refusal to be about the class"
+        );
+        assert!(!key_scopes(&a, BOB).iter().any(|s| s == "mpa/admin"));
+    }
+
+    /// Groups are expanded at load and `credentials` is a statement about the place, so a
+    /// scope that reaches bob through `@machines` and spells out both classes is in his list
+    /// exactly as one that names him.
+    #[test]
+    fn key_scopes_for_lists_a_scope_reached_through_a_group_that_admits_both_classes() {
+        let a = access_of("key-scopes-group", &key_fixture());
+        assert!(key_scopes(&a, BOB).iter().any(|s| s == "mcp/keys"));
+    }
+
+    /// The scope's own veto is a key's veto too: `mcp/logs` names bob and excludes him, so
+    /// the form must not offer a scope the gate answers with `excluded`.
+    #[test]
+    fn key_scopes_for_drops_a_scope_that_excludes_the_uuid() {
+        let a = access_of("key-scopes-excluded", &key_fixture());
+        let logs = a
+            .resolve(Some("https://ai.x.com/mcp/logs/today"))
+            .expect("the probe url resolves")
+            .1;
+        assert!(logs.members.contains(BOB), "the fixture excludes a member");
+        assert!(logs.excluded_users.contains(BOB));
+        assert!(!key_scopes(&a, BOB).iter().any(|s| s == "mcp/logs"));
+    }
+
+    /// `denied` outranks every grant on every credential and a key is one of them, so a
+    /// vetoed owner is offered nothing at all: the page that would offer it is a 403. The
+    /// scopes are there to be reached, which is what makes the emptiness the veto's doing
+    /// rather than the file's.
+    #[test]
+    fn key_scopes_for_is_empty_for_a_uuid_the_file_denies() {
+        let a = access_of("key-scopes-denied", &key_fixture());
+        assert!(a.denied_users.iter().any(|u| u == DAVE));
+        assert!(
+            a.scopes_for(DAVE).iter().any(|(_, s)| s.name == "api"),
+            "dave is named by mcp/api, so only the veto can empty his list"
+        );
+        assert!(key_scopes(&a, DAVE).is_empty());
+    }
+
+    /// A uuid the file has never heard of has no key, no membership and no grant, so the page
+    /// for it must offer no checkbox. This one asserts only absence, so it is green against
+    /// anything that returns an empty list and must be re-read once the code exists.
+    #[test]
+    fn key_scopes_for_is_empty_for_a_uuid_the_file_has_never_heard_of() {
+        let a = access_of("key-scopes-unknown", &key_fixture());
+        assert!(!a.by_uuid.contains_key(NOBODY));
+        assert!(key_scopes(&a, NOBODY).is_empty());
+    }
+
+    /// `decide` answers an [`AccessKind::Anonymous`] scope **before** it looks at the
+    /// credential, so a key is granted there, and a denied owner's key is granted there too.
+    /// That is why the agreement test compares only non-anonymous scopes, and it is why the
+    /// design's word "restricted" is the right contract for this list: an anonymous scope says
+    /// nothing about whose key it is, so offering it as a restriction would be a checkbox that
+    /// changes nothing.
+    #[test]
+    fn key_scopes_for_omits_the_anonymous_scope_that_decide_grants_to_a_key_anyway() {
+        let a = access_of("key-scopes-anon", &key_fixture());
+        let url = "https://app.x.com/mpa/healthz";
+        assert_eq!(
+            decide(&a, &Subject::Key(owner_key(&a, BOB_BEARER)), Some(url)),
+            Decision::Anonymous {
+                app: "mpa".into(),
+                scope: "healthz".into()
+            }
+        );
+        let dead = a
+            .by_key_hash
+            .get(&sha256_hex(DAVE_BEARER))
+            .expect("the fixture key is in the file");
+        assert!(
+            decide(&a, &Subject::Key(dead), Some(url)).granted(),
+            "the veto sits after an anonymous grant, which is the reason for the exception"
+        );
+        assert!(!key_scopes(&a, BOB).iter().any(|s| s == "mpa/healthz"));
+        assert!(!key_scopes(&a, DAVE).iter().any(|s| s == "mpa/healthz"));
+    }
+
+    /// The list the key form offers and the gate's answer are the same rule written twice, and
+    /// two copies of a grant rule drift. So for every owner of an unrestricted key, every
+    /// non-anonymous scope of the fixture must be listed exactly when `decide` grants that key
+    /// on a URL that scope itself answers: the whole set, both directions, on one fixture.
+    #[test]
+    fn key_scopes_for_agrees_with_decide_for_a_key_with_no_restriction() {
+        let a = access_of("key-scopes-agree", &key_fixture());
+
+        // The probe table is the whole file: a scope added to the fixture has to be probed.
+        let probed: Vec<String> = KEY_PROBES
+            .iter()
+            .map(|(name, _)| name.to_string())
+            .collect();
+        let non_anonymous: Vec<String> = a
+            .apps
+            .iter()
+            .flat_map(|app| {
+                app.scopes
+                    .iter()
+                    .filter(|s| s.access != AccessKind::Anonymous)
+                    .map(|s| format!("{}/{}", app.name, s.name))
+            })
+            .collect();
+        assert_eq!(
+            probed, non_anonymous,
+            "the probe table must cover every non-anonymous scope"
+        );
+
+        for (uuid, bearer) in [(BOB, BOB_BEARER), (CAROL, CAROL_BEARER)] {
+            let key = owner_key(&a, bearer);
+            assert_eq!(key.uuid, uuid, "the fixture key must belong to {uuid}");
+            assert!(
+                key.scopes.is_none(),
+                "the agreement is stated for a key with no restriction"
+            );
+            let listed = key_scopes(&a, uuid);
+            for (name, url) in KEY_PROBES {
+                let (app, scope) = a.resolve(Some(url)).expect("every probe url resolves");
+                assert_eq!(
+                    (app.name.as_str(), scope.name.as_str()),
+                    name.split_once('/').unwrap(),
+                    "{url} must be answered by {name}, not by a scope that shadows it"
+                );
+                let granted = decide(&a, &Subject::Key(key), Some(url)).granted();
+                let shows = listed.iter().any(|s| s == name);
+                assert_eq!(
+                    granted, shows,
+                    "{uuid} at {url}: decide granted {granted}, key_scopes_for listed {shows} \
+                     (list: {listed:?})"
+                );
+            }
+        }
+
+        // The vetoed owner: `decide_api_key` refuses the bearer at the first door, so the
+        // record comes from the hash index, and `decide` vetoes it on every scope. The list
+        // has to be empty for the same reason the gate refuses.
+        let dead = a
+            .by_key_hash
+            .get(&sha256_hex(DAVE_BEARER))
+            .expect("the fixture key is in the file");
+        assert!(a.denied_users.iter().any(|u| u == &dead.uuid));
+        let listed = key_scopes(&a, &dead.uuid);
+        assert!(
+            listed.is_empty(),
+            "a denied owner is offered nothing: {listed:?}"
+        );
+        for (name, url) in KEY_PROBES {
+            assert!(
+                !decide(&a, &Subject::Key(dead), Some(url)).granted(),
+                "{name} must not grant a denied owner's key"
+            );
+        }
+    }
+
+    /// The list is the file's order, not an alphabetical one: the form groups its checkboxes
+    /// under their application in the order the operator reads the file, and a list sorted by
+    /// name moves a scope the operator has just read. In this fixture the file's order starts
+    /// with `mpa/reports`, which is the exact reverse of the alphabetical one, so the
+    /// assertion below cannot be satisfied by a sort.
+    #[test]
+    fn key_scopes_for_returns_the_scopes_in_file_order() {
+        let a = access_of("key-scopes-order", &key_fixture());
+        let listed = key_scopes(&a, BOB);
+        assert_eq!(listed, vec!["mpa/reports", "mcp/keys", "mcp/api"]);
+        let mut sorted = listed.clone();
+        sorted.sort();
+        assert_ne!(
+            listed, sorted,
+            "the order pinned above is the file's, which is not alphabetical: {sorted:?}"
+        );
     }
 
     // --- the settings file ---------------------------------------------------

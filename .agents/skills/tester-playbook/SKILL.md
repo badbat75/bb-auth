@@ -11,6 +11,15 @@ Rules are in `AGENTS.md`. Format of this file: `AGENTS.md`, under "Skills".
 - Check why each new test is red, and why any is already green. Tests that pass before the code exists
   (a check that something is absent or unchanged, or a validation of a field not there yet): list them
   and run them again once the code exists.
+- A new library API makes the **whole lib test target** fail to compile, so no test can run and nothing
+  else in the file is checked. Verify the parts that do not need the API from outside the test target:
+  a new access-file fixture with `cargo run --bin bb-auth -- --check-access <file>`, and the expected
+  `decide` answers with `cargo run --bin bb-auth-adm -- -f <file> can WHO URL --as api_key` (exit 0 =
+  granted, and the verdict line names the scope that answered, which is how a probe table gets checked).
+- To type-check tests for a missing API without touching production code: `rsync -a --exclude target
+  --exclude .git` the tree to `/tmp/opencode/<name>`, add the stub **there**, run `cargo test --lib`
+  there, then mutate the stub (drop a filter, sort the result) and confirm the new tests go red. A
+  mutation that leaves them green is a test that asserts nothing.
 - Use one fixture per test.
 - Fill fixtures with real names and values captured from the real system.
 - In `bb-auth-web`, test a request end to end over a real socket: copy

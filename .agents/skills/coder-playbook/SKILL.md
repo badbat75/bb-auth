@@ -7,8 +7,11 @@ Rules are in `AGENTS.md`. Format of this file: `AGENTS.md`, under "Skills".
 
 ## How to
 
-- A library function that restates `decide` as a set must call the helpers `decide` calls
-  (`vetoes_identifier`, `excludes_identifier`, `uuid_of`), never a copy of their logic.
+- A library function that restates `decide` as a set must ask what `decide` asks, never a copy of
+  its logic. For an identifier that means the helpers (`vetoes_identifier`, `excludes_identifier`,
+  `uuid_of`); for a uuid (a key's owner, as `key_scopes_for` takes) it means the raw fields the
+  `Subject::Key` arm asks (`denied_users`, `excluded_users`, `credentials.api_key`, `members`),
+  because the identifier helpers resolve an email and a uuid resolves to nothing.
 - Run `cargo fmt` before `cargo fmt --check`: rustfmt splits long method chains.
 - The tester's uncommitted test is already in the tree. It may be **staged**, where plain `git diff` is
   empty and says nothing: read `git diff --cached` (and `git status --porcelain`, where `MM` means both).
@@ -39,3 +42,6 @@ Rules are in `AGENTS.md`. Format of this file: `AGENTS.md`, under "Skills".
 - maud emits attributes in the order written, and the tests here string-match markup like
   `<section id="keys"`. Put the `id` first, and keep headings bare (`<h2>`, no class), when a test
   extracts them; scope the styling rule to a parent class instead of adding an attribute.
+- A clippy warning can land in the tester's test module (its `map.get(x).is_none()` assertion trips
+  `unnecessary_get_then_check`), where a task's edit limit forbids touching it. Clippy exits 0 on a
+  warning, so report the line and leave the test alone.
