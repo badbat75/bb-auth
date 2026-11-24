@@ -43,3 +43,5 @@ Rules are in `AGENTS.md`. Format of this file: `AGENTS.md`, under "Skills".
   nginx. A design that adds a local caller must say what that caller could ask for.
 - Group `bb-auth` reads `bb-auth.env` (the HMAC key) and the audit: a new unit in that group needs
   `InaccessiblePaths=` for what it must not read.
+- The operator's `ui.stylesheet_url` loads after ours and can override a `hidden` attribute with a
+  `display` rule: anything hidden for scripting-off browsers needs a `[hidden]` rule in our CSS too.

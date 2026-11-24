@@ -1423,7 +1423,8 @@ keyed by the caller's uuid, never by a form field.
   `released`, and the self-service rotate offers no field that could change `scopes`.
 - **Reveal once.** `SealedKey::reveal` needs the `Written` receipt; the bearer is rendered once,
   in the `200` answering the `POST` (never behind a redirect or in a URL, with
-  `Cache-Control: no-store`), and is in no log line.
+  `Cache-Control: no-store`), and is in no log line. The page shows the key alone, with a copy
+  button that only a script reveals (13.14).
 - **`rev`.** A mismatch is a `409` and nothing is written.
 - **Abuse bound, as constants** (not settings: no second program has an opinion): at most 10 keys
   per row, counting keys an administrator made; `duration` required, `1d` to `365d`, no `never`;
@@ -1602,7 +1603,7 @@ hand-back between two editor packages; and a fourth `.deb` in the build and depl
 | No URLs on screen | Unit (moved from `bb-auth-me`): no rendered `/account/` page contains a URL pattern or base from the fixture |
 | `key_scopes_for` | Library unit: `decide` grants a key on a URL inside every returned scope, and refuses on a scope excluded or not admitting a key |
 | Keys: narrowing, bounds, rotate, reveal once, `rev` | Unit: a pair outside the set is `400` with the file bytes unchanged; the file gets exactly the submitted pairs; the eleventh key, `never` and `366d` refused; rotate leaves `scopes` bytes identical; the bearer appears in one response only, with `no-store`; a stale `rev` is `409` |
-| No JavaScript | `the_page_carries_one_handler_and_no_script` keeps passing with the `/account/` pages included, and the `nojs.js` e2e walk covers them |
+| No page needs JavaScript (13.14) | `no_page_but_the_reveal_carries_a_script` (replacing `the_page_carries_one_handler_and_no_script`): every page but the two reveals carries no script, each reveal exactly one, allowed by its own policy's hash; the `nojs.js` and `account.js` walks run the reveal with scripting off |
 | Cognito re-auth | Unit against a fake endpoint: a wrong code changes nothing; an email not among the caller's and a non-editable attribute are refused before Cognito is called; tokens appear in no response or log. Real pool once, with the user's go-ahead |
 | Egress | Real, on rpi-01 after the profile step: the unit has no `IPAddress*` line, a profile edit reaches Cognito, and a non-loopback `BB_AUTH_WEB_LISTEN` without the opt-in still refuses to start |
 | Deletion order | Unit with the fake endpoint: `DeleteUser` failing leaves the row gone and says so; the write failing never calls `DeleteUser` |
@@ -1774,3 +1775,141 @@ Cognito calls (a semaphore below the worker count, so admin pages always keep a 
 the timeout, a Cognito outage costs each attempt at most 10 s of one worker, the callers are
 signed-in people, and a scripted one could still hold workers only for as long as they keep
 sending; revisit if `$upstream_response_time` ever shows it happening.
+
+### 13.14 The bearer reveal: only the key, and a copy button (plan step 4g)
+
+What was read: `src/bin/bb-auth-web.rs` (`page_minted`, `page_account_minted`, the
+`K::Bearer*` texts, `respond_page`, `admin_csp`, `respond_account`, `account_csp`,
+`SETTINGS_ONCHANGE`, `the_page_carries_one_handler_and_no_script`, `handlers_in`),
+`src/lib.rs` (`page_csp`, `csp_hash`, `PAGE_SECURITY_HEADERS`), `src/bin/bb-auth.rs`
+(`csp_nonce`), `src/assets/base.css` and `admin.css` (`.secret code`), `e2e/tests/nojs.js`
+and `e2e/tests/account.js`.
+
+**The user's decision, 2026-11-24.** The page that reveals a freshly minted or rotated bearer,
+in the console and on `/account/` alike, shows **only the key** (`bbk_…`), not the
+`Authorization: Bearer` line, and carries a **copy button**. Copying to the clipboard needs
+JavaScript, and the user accepted that: the rule "no page carries a script" becomes "no page
+**needs** one". Scripting off, the page is exactly today's minus the header prefix: one click
+on the key still selects all of it (`user-select: all`), and no button is shown.
+
+**One rendering, two callers.** A single function, `bearer_reveal(lang, bearer) -> Markup`,
+renders the `div.secret` block, and both `page_minted` and `page_account_minted` call it, so
+the key, the button and the script cannot drift between the console and `/account/` (the
+texts were already shared; now the markup is too). Its markup, in order:
+
+- `strong` with `K::BearerHeading`, `p` with `K::BearerOnce` (unchanged);
+- `code id="bearer"` whose text is the bearer and nothing else: no prefix, no whitespace
+  around it, because what a click selects and what the button copies is that text;
+- `button type="button" id="bearer-copy" hidden data-done=… data-failed=…` labelled
+  `K::CopyKey`, the two data attributes carrying `K::CopyDone` and `K::CopyFailed` in the
+  page's language. `type="button"` because the block is in no form and a button must never
+  be able to submit one; `hidden` because a browser with scripting off must show no button
+  that does nothing. The script is the only thing that removes it;
+- `p class="hint"` with `K::BearerClickHint`, reworded to "the key" since there is no longer a
+  header line to select;
+- the `script` element, last, so the two elements it looks up already exist when it runs and
+  it needs no load event.
+
+`hidden` is a presentational hint that author CSS overrides: "changing the value of the CSS
+`display` property on a hidden element will override the hidden state"
+(<https://developer.mozilla.org/en-US/docs/Web/HTML/Reference/Global_attributes/hidden>).
+Nothing in `base.css` gives `button` a `display` today, but the operator's stylesheet loads
+after ours and may. So `admin.css` (the `CSS` both the console and `/account/` emit) gets
+`.secret button[hidden]{display:none}`, whose specificity beats a plain `button` rule, so a
+scripting-off page stays buttonless under an ordinary token file.
+
+**The script: inline, a compile-time constant, allowed by its hash.** `COPY_SCRIPT: &str`, in
+`bb-auth-web.rs`, and only there (the gate has no reveal page). What it does:
+
+1. Look up `#bearer` and `#bearer-copy`; if either is missing, or the page is not a secure
+   context, or `navigator.clipboard` is absent, **stop and leave the button hidden**. The page
+   is then the scripting-off page, which already works.
+2. Otherwise set `hidden = false` and attach a click listener with `addEventListener` (no
+   `on…` attribute, so `handlers_in`'s allowlist is unchanged).
+3. On click, `navigator.clipboard.writeText(code.textContent)`. Resolved: the button's text
+   becomes `data-done`. Rejected (`NotAllowedError`, for example a denied permission): select
+   the key's text (`getSelection().selectAllChildren(code)`) and set the button's text to
+   `data-failed`, which says the key is selected and to copy it with the keyboard.
+
+Facts relied on, read in a source: `Navigator.clipboard` and `Clipboard.writeText` are
+"available only in secure contexts (HTTPS), in some or all supporting browsers", and
+`writeText` fails with `NotAllowedError` "if writing to the clipboard is not allowed"
+(<https://developer.mozilla.org/en-US/docs/Web/API/Navigator/clipboard>,
+<https://developer.mozilla.org/en-US/docs/Web/API/Clipboard/writeText>); "some or all" is why
+step 1 checks both `isSecureContext` and the property rather than either. The GUI is served
+over HTTPS through nginx, so a real deployment is a secure context; the check is there for a
+plain-HTTP setup somebody might build, where the honest behaviour is no button at all. No
+`document.execCommand("copy")` fallback: MDN marks it deprecated and "not implemented
+consistently or fully by user agents"
+(<https://developer.mozilla.org/en-US/docs/Web/API/Document/execCommand>), and the fallback
+this page needs already exists, which is the selection.
+
+**The bearer is in exactly one place in the response: the text of `code#bearer`.** The script
+is a constant and reads the key from the DOM at click time; the button's attributes carry only
+translated texts. So the bearer is in no script, no attribute, no URL and no header, and the
+existing reveal-once properties (rendered directly in the `200` answering the `POST`,
+`Cache-Control: no-store` from `PAGE_SECURITY_HEADERS`, in no log line) are untouched.
+
+**The policy, for exactly that response.** A hash source allows the inline block whose bytes
+hash to it, and only that block: "you can create hashes from your inline scripts", and hashes
+"allow scripts and styles by their hash, but not event handlers" without `'unsafe-hashes'`
+(<https://developer.mozilla.org/en-US/docs/Web/HTTP/Reference/Headers/Content-Security-Policy/script-src>).
+
+- Console reveal: `script-src 'unsafe-hashes' <hash(SETTINGS_ONCHANGE)> <hash(COPY_SCRIPT)>`.
+  The first two are today's, because the console's shell carries the Settings list boxes on
+  every page, this one included. `'unsafe-hashes'` then also lets an *attribute* whose body is
+  exactly `COPY_SCRIPT` run; that is our own constant, so it grants nothing new.
+- `/account/` reveal: `script-src <hash(COPY_SCRIPT)>`, and nothing else.
+- **Every other response keeps the policy it has**: the console's `'unsafe-hashes'` plus the
+  one handler, `/account/`'s `'none'`.
+
+The widening is a distinct response path rather than a flag every page passes: `admin_csp`
+and `account_csp` each take a `reveal: bool`, and the only callers that pass `true` are the
+two reveal responses (in the console, an `Outcome` variant for a reveal, so the mint and
+rotate arms are the only code that can produce it). A forgotten `true` elsewhere would allow
+one known constant on a page that does not carry it, which is harmless; a forgotten one on the
+reveal is a button that never appears, which the e2e walk below catches.
+
+**Rejected:**
+
+- *A per-response nonce* (what the gate's sign-in page uses, and the wording of the plan). A
+  nonce is for content assembled per render, which is why the gate needs one: its script is
+  built out of the configuration. This script is a constant, and this program already argues,
+  on `admin_csp`, that a hash is the better source for a constant: nothing to generate per
+  response, nothing to thread through two renderers, and the policy and the page derived from
+  the same `&str` so they cannot disagree. The property the user asked for (a script allowed
+  only on the reveal page, by that page's own policy, with no `'unsafe-inline'`) is the same
+  either way, and the browser sees no difference. If the user wants the nonce literally, it is
+  a swap of the source expression and of where the value comes from (`csp_nonce` moves to the
+  library); nothing else in this design changes.
+- *A static `.js` asset with its hash or `'self'`*: a new route, served through nginx's
+  `auth_request` like every other path, with its own cache headers, for a dozen lines; and
+  `'self'` would allow any script this origin ever serves, which is wider than one hash.
+- *Building the button in script* (`createElement`) instead of `hidden`: no CSS can ever show a
+  dead button that way, but the label has to reach the script some other way and a server-side
+  test can no longer see the button. `hidden` plus the one CSS rule keeps the markup testable.
+- *`'unsafe-inline'`*: allows every inline script anybody ever adds.
+
+**How it is shown to hold.** Unit tests in `bb-auth-web.rs`:
+
+- `no_page_but_the_reveal_carries_a_script` replaces `the_page_carries_one_handler_and_no_script`:
+  every route of `every_route()` still has no `<script` and only the two Settings handlers; the
+  console's mint and rotate `POST` responses and `/account/`'s mint and rotate responses each
+  carry **exactly one** `<script>`, whose content's `csp_hash` is in that response's
+  `Content-Security-Policy`, and no `on…` attribute beyond the console's two.
+- `the_reveal_shows_only_the_key`: on all four reveal responses, the text of `code id="bearer"`
+  equals the bearer exactly, the body contains no `Authorization`, the bearer occurs once in the
+  body and that occurrence is inside the `code` element, and the button is `type="button"` and
+  carries `hidden`.
+- `only_the_reveal_policy_names_the_copy_script`: `admin_csp(_, false)` and `account_csp(_, false)`
+  do not contain `csp_hash(COPY_SCRIPT)`, and `account_csp(_, false)` still says
+  `script-src 'none'`; the `true` variants contain it. A failed mint (the `400` key form) and the
+  `409` carry no script.
+
+E2E: `nojs.js` keeps its zero-script list and adds the console reveal twice, with scripting on
+(one `script`, the button visible, a click shows `K::CopyDone`, and in Chromium with
+`clipboard-read` granted, `navigator.clipboard.readText()` equals the code's text) and with
+scripting off (the button not visible, the key selectable). `account.js`, which runs with
+scripting off, reads the bearer from `#bearer` instead of the `Bearer bbk_…` regex, asserts no
+`Authorization` text, the button hidden, and one `<script` on the reveal response while every
+other page in the area still has none.
