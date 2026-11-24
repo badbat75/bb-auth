@@ -27,6 +27,9 @@ The user chooses at every cold start (see the coordinator role): local subagents
   designer and architect as Claude subagents.
 - Claude Code: every role runs as a Claude subagent, and the OpenCode command below is not used.
 
+The designer exists since 2026-11-24 (user's request); brief it before tester for any slice that
+changes what a person sees or does, with `subagent_type: "designer"`.
+
 Every Claude Code subagent runs on Opus, whatever its role: pass
 `model: "opus"` on each Agent tool call (for example `subagent_type: "architect"`, `model: "opus"`).
 The coordinator itself is not bound to Opus: it runs on whatever model the session uses. The role

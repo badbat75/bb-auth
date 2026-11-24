@@ -1387,10 +1387,13 @@ OpenCode and Claude Code read the same files. Keep the frontmatter to the fields
   in `.claude/settings.json` and `.opencode/opencode.json`.
 - `architect`: designs the software and infrastructure architecture, in `docs/ARCHITECTURE.md`. Writes no
   code.
+- `designer`: designs the pages' interface (layout, interaction, wording, accessibility), in
+  `docs/ARCHITECTURE.md`. Writes no code.
 - `tester`: writes the failing tests.
 - `coder`: makes them pass.
 - `docs`: keeps the documentation true.
 
-Cycle: coordinator takes the next step from `PLAN.md` and picks one small slice, architect designs it
-when it changes the architecture, tester writes tests and shows them red, coder turns them green,
-coordinator reruns everything, docs updates what changed.
+Cycle: coordinator takes the next step from `PLAN.md` and picks one small slice, architect designs
+it when it changes the architecture, designer designs it when it changes what a person sees or does,
+tester writes tests and shows them red, coder turns them green, coordinator reruns everything, docs
+updates what changed.
