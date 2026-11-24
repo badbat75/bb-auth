@@ -113,6 +113,15 @@ Done so far: `Access::key_scopes_for` (4a), minting (4b), rotating and removing 
 `BB_AUTH_WEB_WORKERS` (4e). Left: the e2e flow with scripting off; then the install on rpi-01 and the
 browser check below.
 
+Installed on rpi-01 on 2026-11-24 (gd49d43a): the user minted and removed a key in a browser
+(journal: `(self): key add test`, `key remove test`); a rotate is still to be seen. Asked by the
+user then, and decided (4g): the page that reveals a bearer shows **only the key**, not the
+`Authorization: Bearer` line, and carries a **copy button**, on `/account` and on the admin
+console alike. Copying needs JavaScript, so the rule "no page carries a script" becomes "no page
+needs one": a small script on the reveal page only, allowed by its CSP with a nonce, the button
+hidden without scripting, where one click still selects the whole key. The architect states the
+amended invariant before any code.
+
 - Done when: a roster user mints, rotates and removes a key of their own in a browser, while a
   stranger and a denied user cannot.
 
