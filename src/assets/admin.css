@@ -254,6 +254,17 @@ details.settings > summary::-webkit-details-marker{display:none}
 /* Narrower than the console's `main`, which needs width for tables: this page is a list of
    names, and a list of names reads as a column, not as a sheet. */
 .selfserve{max-width:620px;margin:0 auto;padding:28px 16px 48px}
+/* The ground on this page is flat. `--bg-grad` is a decorative glow painted over `--bg` that
+   reaches its outer stop at 60% of a 1200x600 ellipse, so it goes flat about a quarter of the
+   way down the viewport: on the console, a wide sheet, that is a ground, but this page is one
+   narrow column of facts about one person, and the boundary crossing the ground above the
+   first panel reads as a band of a second shade laid under the content. A flat ground is a
+   state the palette already sanctions (a deployment sets `--bg-grad: none` to get it estate
+   wide), so this asks for it for the one page that shows the seam, and `:has` is what keeps
+   the ask scoped to it: the selector matches nothing that is not this page.
+   `:has` is the only way to reach the body from here, because the page's own element is the
+   `main` inside it, and the ground is painted on the body. */
+body:has(.selfserve){background:var(--bg)}
 /* The deployment's mark and name, above the page's own heading. `filter:var(--logo-filter)` is
    the palette's logo arm, so a mark the operator set for a light ground stays legible on the
    dark arm. */

@@ -10,7 +10,18 @@ Rules are in `AGENTS.md`. Format of this file: `AGENTS.md`, under "Skills".
 - A library function that restates `decide` as a set must call the helpers `decide` calls
   (`vetoes_identifier`, `excludes_identifier`, `uuid_of`), never a copy of their logic.
 - Run `cargo fmt` before `cargo fmt --check`: rustfmt splits long method chains.
-- The tester's uncommitted test is already in the tree, so read `git diff` hunk by hunk to see your own change.
+- The tester's uncommitted test is already in the tree. It may be **staged**, where plain `git diff` is
+  empty and says nothing: read `git diff --cached` (and `git status --porcelain`, where `MM` means both).
+- To see a page the way an operator does, drive the real binary through `e2e/lib/server.js`'s `boot()`
+  (it builds, starts and kills its own server) with `require('<repo>/e2e/node_modules/playwright')` and
+  `chromium.launch({ channel: 'msedge' })`: Playwright's own browsers are not installed on this host.
+  Sample the screenshot with PIL (`Image.getpixel` down a column) before editing CSS; a band you cannot
+  measure is a band you will "fix" by guessing.
+- The estate's ground is a glow: `--bg-grad` is a `radial-gradient(1200px 600px at 50% -10%, …)` that
+  reaches its outer stop at 60% of the ellipse, so it goes flat about 240px down. A page that reads as a
+  lit band over a flat field wants a flat ground, and the one rule for that is
+  `body:has(.selfserve){background:var(--bg)}` in `admin.css` (`:has` because the ground is painted on
+  the body and the page's own element is the `main` inside it).
 - To insert a large block at a known line, use the `shell` tool with a `python3` heredoc. Code Mode
   (`execute`) has no `fs` and no `shell` tool, so it cannot edit this repo at all.
 - A check piped through `grep -c '^warning'` exits 1 when the count is 0, so read the number, not the
@@ -20,6 +31,9 @@ Rules are in `AGENTS.md`. Format of this file: `AGENTS.md`, under "Skills".
 
 - `pkill -f PATTERN` also matches the shell running it, and killed that shell. Use the task's own stop
   control, or a pattern that cannot match itself.
+- A shade seam on a page is not the palette's doing: the two dark arms of `theme.css` are token-for-token
+  identical, and an operator token file that defines only `:root` is outranked by
+  `:root[data-theme=light|dark]`, so it changes nothing on a themed page. Look at `--bg-grad` first.
 - `X-Auth-Email` holds every email of a roster row joined by a space: split it before comparing.
 - A blank screenshot proves nothing about a GUI. Check that it really shows the window.
 - maud emits attributes in the order written, and the tests here string-match markup like

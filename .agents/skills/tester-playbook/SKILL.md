@@ -27,6 +27,10 @@ Rules are in `AGENTS.md`. Format of this file: `AGENTS.md`, under "Skills".
   `compile_account_path` accepts the suite as it stands. Its administrator is `admin@example.com`
   (the Rust fixture's is `admin@x.com`); a roster row that is **not** an administrator is
   `you@example.com`, which is the identity for the `/account` page.
+- For the `/account` page's **empty states**, `account_scratch(name, ACCOUNT_SETTINGS)` is the
+  fixture: bob has a roster row, no `api_keys`, and those settings name no `profile_claims`, so
+  `keys` and `profile` both render their "none" line. `account_section(body, "keys")` cuts one
+  section out, so a wording assertion cannot be satisfied by a neighbour section's word.
 - A scratch screenshot script can live outside the repo and `require()` `e2e/lib/server.js` by
   absolute path: `boot()` then gives the same server the suite starts, proxy secret included, with
   the working tree untouched.

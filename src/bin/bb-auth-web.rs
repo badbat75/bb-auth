@@ -1006,6 +1006,7 @@ enum K {
     AccountKeys,
     AccountProfile,
     AccountNone,
+    AccountKeysNone,
     AccountKeyAllScopes,
     AccountVetoTitle,
     AccountVetoBody,
@@ -2090,6 +2091,11 @@ fn t(lang: Lang, key: K) -> &'static str {
         K::AccountKeys => m(lang, "API keys", "Chiavi API"),
         K::AccountProfile => m(lang, "Profile", "Profilo"),
         K::AccountNone => m(lang, "None.", "Nessuno."),
+        // The keys need their own spelling of the same word: Italian agrees a pronoun with the
+        // noun it stands for, and the sections are not the same gender. The keys are *chiavi*
+        // (feminine), so the shared "Nessuno." would read as a slip in the page's own language,
+        // while it is right for a claim's value (*valore*, masculine) and for a group.
+        K::AccountKeysNone => m(lang, "None.", "Nessuna."),
         K::AccountKeyAllScopes => m(
             lang,
             "every scope you reach",
@@ -7970,7 +7976,7 @@ fn page_account(lang: Lang, ids: &[String], uuid: Option<&str>, own: &AccountOwn
         section id="keys" class="panel" {
             h2 { (t(lang, K::AccountKeys)) }
             @if own.keys.is_empty() {
-                p class="muted" { (t(lang, K::AccountNone)) }
+                p class="muted" { (t(lang, K::AccountKeysNone)) }
             } @else {
                 ul {
                     @for k in &own.keys {
@@ -13986,6 +13992,81 @@ mod tests {
             account_heading(&en.body, "h1"),
             account_heading(&it.body, "h1"),
             "the page's own title must be translated too"
+        );
+
+        cleanup(&path);
+    }
+
+    /// WHY: one key (`AccountNone`) answers "none" for all four sections, so a single Italian
+    /// string has to agree with four nouns at once and can only agree with one. The keys section
+    /// sits under "Chiavi API", feminine plural, and today answers "Nessuno.", which agrees with
+    /// nothing a reader can see; the profile's empty state answers for a claim's *value*
+    /// ("valore", masculine), so "Nessuno." is right there and must stay. The two assertions
+    /// together pin the sections **apart**, because the fix is a key per noun: a fix that just
+    /// edits the shared string to the feminine would repaint the profile too, and pass a test
+    /// that only looked at keys. The English page is asserted alongside, since the fix must not
+    /// reach the language that has no grammatical gender. `reach` and `groups` are deliberately
+    /// not pinned: `groups` is "gruppi", masculine, so today's "Nessuno." already agrees, and
+    /// `reach` is "Dove puoi arrivare", which carries no noun for an adjective to agree with, so
+    /// nothing here should force a word the plan says to leave alone.
+    #[test]
+    fn account_the_italian_keys_empty_state_agrees_with_chiavi() {
+        // bob has a roster row, no `api_keys`, and these settings name no `profile_claims`, so
+        // both sections answer with their empty state rather than with content.
+        let path = account_scratch("keys-none-it", ACCOUNT_SETTINGS);
+        let base = account_serve(&path);
+
+        let it = account_call_pref(&base, Some("bob@x.com"), Some("lang=it"), None);
+        assert_eq!(
+            it.status,
+            200,
+            "bob reaches the page: {}",
+            account_readable(&it.body)
+        );
+        assert!(
+            account_html_tag(&it.body).contains(r#"lang="it""#),
+            "the cookie must have chosen Italian, or the test asserts on English: {}",
+            account_html_tag(&it.body)
+        );
+
+        let keys = account_section(&it.body, "keys");
+        let profile = account_section(&it.body, "profile");
+        assert!(
+            keys.contains("Chiavi API"),
+            "the section under test is the keys section: {keys}"
+        );
+        assert!(
+            keys.contains("Nessuna."),
+            "\"Chiavi API\" is feminine plural, so the keys section's empty state must read \
+             \"Nessuna.\": {keys}"
+        );
+        assert!(
+            profile.contains("Nessuno."),
+            "the profile's empty state answers for a claim's value, masculine, and stays \
+             \"Nessuno.\": {profile}"
+        );
+        assert!(
+            !profile.contains("Nessuna."),
+            "the fix is one key per noun, so the profile must not pick up the feminine form: \
+             {profile}"
+        );
+
+        let en = account_call_pref(&base, Some("bob@x.com"), Some("lang=en"), None);
+        assert_eq!(
+            en.status,
+            200,
+            "bob reaches the page: {}",
+            account_readable(&en.body)
+        );
+        assert!(
+            account_section(&en.body, "keys").contains("None."),
+            "English has no grammatical gender, so the keys section keeps \"None.\": {}",
+            account_section(&en.body, "keys")
+        );
+        assert!(
+            account_section(&en.body, "profile").contains("None."),
+            "and the profile section keeps it too: {}",
+            account_section(&en.body, "profile")
         );
 
         cleanup(&path);
