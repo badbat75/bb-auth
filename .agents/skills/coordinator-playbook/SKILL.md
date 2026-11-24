@@ -78,3 +78,6 @@ files outside the repo.
 - A local agent that exits 1 with no report may be the model server, not the agent: grep its
   output for `out of memory` (strata, the engine behind the local model, out of GPU memory when
   llama.cpp-framework work loads the cards) before rerunning the same brief.
+- On rpi-01, root cannot overwrite a file a normal user created in /tmp (fs.protected_regular),
+  so a `sudo` step must write its output to a root-owned `mktemp`, never to a path a dry run
+  already created as you.
