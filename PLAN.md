@@ -97,9 +97,10 @@ Hard requirements (invariants this feature touches):
   after the write lands, with `Cache-Control: no-store`, and is never stored, re-rendered or logged.
 - **Write path unchanged.** `add_api_key`, `rotate_api_key`, `remove_api_key` through
   `AccessWrite`, the `rev` 409 check and `bb-auth-web`'s write lock.
-- **No JavaScript.** GET never mutates; POST carries the proxy secret, the strict same-origin
+- **No page needs JavaScript** (4g allows one copy script on the reveal). GET never mutates; POST carries the proxy secret, the strict same-origin
   check and `rev`.
-- **Bound**: at most 10 keys per row, `duration` from `1d` to `365d`, `id` matching `[a-z0-9-]{1,32}`.
+- **Bound**: at most 10 keys per row, `duration` at least `1d` or `never` (the 365-day bound was
+  lifted by the user in 4h), `id` matching `[a-z0-9-]{1,32}`.
 - **Journal**: `[bb-auth-web] <uuid> (self): key add|rotate|remove <id>`, nothing else.
 
 Tests: authorization (administrator, roster user, stranger, denied); `key_scopes_for` agrees
@@ -127,6 +128,16 @@ the admin console alike:
   no expiry** (custom takes days), and the **365-day self-service bound is lifted**: a person may
   now mint a key of their own that never expires. Requirement changed by the user; the 10-key
   limit stays.
+
+Designed in `docs/ARCHITECTURE.md` §13.15: presets stored as `365d`, `182d`, `91d` (26 and 13
+weeks), custom as `<n>d`, no expiry as `never`; an empty duration is refused everywhere (today it
+meant never); the console's revoke already confirms, `/account` gains the same GET confirmation
+page, and its rotate confirms too, as the console's does, since a rotate also throws a key away.
+
+- Done when (4h): `the_copy_control_is_an_icon_with_a_name`, `the_duration_choice_maps_onto_the_grammar`,
+  `a_self_service_key_may_never_expire`, `the_key_form_offers_five_choices` and
+  `revoking_a_key_asks_first_on_the_account_page` failed first and pass; the e2e walk covers the
+  presets, custom, no expiry and a cancelled then confirmed revoke; AGENTS.md says copy icon.
 
 - Done when: a roster user mints, rotates and removes a key of their own in a browser, while a
   stranger and a denied user cannot.

@@ -1424,11 +1424,15 @@ keyed by the caller's uuid, never by a form field.
 - **Reveal once.** `SealedKey::reveal` needs the `Written` receipt; the bearer is rendered once,
   in the `200` answering the `POST` (never behind a redirect or in a URL, with
   `Cache-Control: no-store`), and is in no log line. The page shows the key alone, with a copy
-  button that only a script reveals (13.14).
+  icon that only a script reveals (13.14, 13.15).
 - **`rev`.** A mismatch is a `409` and nothing is written.
 - **Abuse bound, as constants** (not settings: no second program has an opinion): at most 10 keys
-  per row, counting keys an administrator made; `duration` required, `1d` to `365d`, no `never`;
-  `id` from `[a-z0-9-]{1,32}`. An administrator's own pages are not bound by these.
+  per row, counting keys an administrator made; `duration` chosen from 1 year, 6 months,
+  3 months, custom days or no expiry, so at least `1d` or `never` (the 365-day ceiling was
+  lifted by the user on 2026-11-24, 13.15); `id` from `[a-z0-9-]{1,32}`. An administrator's
+  own pages are not bound by these.
+- **Revoke asks first.** A `GET` renders a confirmation naming the key, and only its `POST`
+  revokes, the console's own shape (13.15).
 - **Journal, not the audit file.** The audit has one writer, the gate, and records
   authentication. Mutations go to the journal in the GUI's shape, marked as self-service:
   `[bb-auth-web] <uuid> (self): key add <id>`, `key rotate <id>`, `key remove <id>`,
@@ -1602,8 +1606,9 @@ hand-back between two editor packages; and a fourth `.deb` in the build and depl
 | The callers of 13.5 | Unit: denied `403` even for a mutation `POST`; a stranger sees no key form and a key `POST` is refused; an administrator with no row is a stranger |
 | No URLs on screen | Unit (moved from `bb-auth-me`): no rendered `/account/` page contains a URL pattern or base from the fixture |
 | `key_scopes_for` | Library unit: `decide` grants a key on a URL inside every returned scope, and refuses on a scope excluded or not admitting a key |
-| Keys: narrowing, bounds, rotate, reveal once, `rev` | Unit: a pair outside the set is `400` with the file bytes unchanged; the file gets exactly the submitted pairs; the eleventh key, `never` and `366d` refused; rotate leaves `scopes` bytes identical; the bearer appears in one response only, with `no-store`; a stale `rev` is `409` |
+| Keys: narrowing, bounds, rotate, reveal once, `rev` | Unit: a pair outside the set is `400` with the file bytes unchanged; the file gets exactly the submitted pairs; the eleventh key, `12h` and an empty `duration` refused, `never` and `400d` accepted (13.15); rotate leaves `scopes` bytes identical; the bearer appears in one response only, with `no-store`; a stale `rev` is `409` |
 | No page needs JavaScript (13.14) | `no_page_but_the_reveal_carries_a_script` (replacing `the_page_carries_one_handler_and_no_script`): every page but the two reveals carries no script, each reveal exactly one, allowed by its own policy's hash; the `nojs.js` and `account.js` walks run the reveal with scripting off |
+| Copy icon, confirmed revoke, duration choice (13.15) | Unit: `the_copy_control_is_an_icon_with_a_name`, `revoking_a_key_asks_first_on_the_account_page`, `the_duration_choice_maps_onto_the_grammar`, `a_self_service_key_may_never_expire`, `the_key_form_offers_five_choices`. E2E: `account.js` and `nojs.js` as listed in 13.15 |
 | Cognito re-auth | Unit against a fake endpoint: a wrong code changes nothing; an email not among the caller's and a non-editable attribute are refused before Cognito is called; tokens appear in no response or log. Real pool once, with the user's go-ahead |
 | Egress | Real, on rpi-01 after the profile step: the unit has no `IPAddress*` line, a profile edit reaches Cognito, and a non-loopback `BB_AUTH_WEB_LISTEN` without the opt-in still refuses to start |
 | Deletion order | Unit with the fake endpoint: `DeleteUser` failing leaves the row gone and says so; the write failing never calls `DeleteUser` |
@@ -1787,7 +1792,9 @@ and `e2e/tests/account.js`.
 
 **The user's decision, 2026-11-24.** The page that reveals a freshly minted or rotated bearer,
 in the console and on `/account/` alike, shows **only the key** (`bbk_…`), not the
-`Authorization: Bearer` line, and carries a **copy button**. Copying to the clipboard needs
+`Authorization: Bearer` line, and carries a **copy button** (an icon since 4h: its markup,
+CSS and feedback are revised in 13.15, and what follows about the script, the policy and the
+bearer's single place still holds). Copying to the clipboard needs
 JavaScript, and the user accepted that: the rule "no page carries a script" becomes "no page
 **needs** one". Scripting off, the page is exactly today's minus the header prefix: one click
 on the key still selects all of it (`user-select: all`), and no button is shown.
@@ -1913,3 +1920,277 @@ scripting off (the button not visible, the key selectable). `account.js`, which 
 scripting off, reads the bearer from `#bearer` instead of the `Bearer bbk_…` regex, asserts no
 `Authorization` text, the button hidden, and one `<script` on the reveal response while every
 other page in the area still has none.
+
+### 13.15 A copy icon, a confirmed revoke, and a duration chosen from five (plan step 4h)
+
+What was read: `PLAN.md` step 4 (the 4h paragraph), `src/bin/bb-auth-web.rs` (`bearer_reveal`,
+`COPY_SCRIPT`, `admin_csp`, `account_csp`, `account_mint_form`, `account_key_forms`,
+`account_key_post`, `AccountKeyOp`, `ACCOUNT_KEY_MIN_SECS` / `ACCOUNT_KEY_MAX_SECS`,
+`account_key_window_ok`, the account dispatch, `KeyForm`, `page_key_form`, the console's
+`Route::KeyAdd` / `KeyEdit` / `KeyRotate` / `KeyRm` handlers, `act_rm`, `page_confirm`, the
+Settings guard's `page_settings` confirmation), `src/lib.rs` (`parse_duration`, `key_expiry`,
+`format_date`, `civil_from_days`, `only_the_palette_names_a_colour`), `src/assets/base.css`,
+`admin.css` and `theme.css`.
+
+**The user's decision, 2026-11-24**, on `/account/` and in the console alike: the copy control
+is a small icon; removing a key asks first; the duration is one of **1 year, 6 months,
+3 months, custom (in days), no expiry**; and the 365-day self-service bound is lifted, so a
+person may mint a key of their own that never expires. The 10-key bound and the id grammar
+stay.
+
+#### The copy icon
+
+Still the one control `COPY_SCRIPT` reveals, still server-rendered `hidden`, still in
+`bearer_reveal` and therefore identical on both surfaces. The markup becomes:
+
+- `button type="button" id="bearer-copy" class="copy" hidden="hidden"
+  aria-label=K::CopyKey title=K::CopyKey data-done=… data-failed=…`, with **no text**;
+- inside it two inline SVGs, `svg class="i-copy"` (two overlapping rounded squares) and
+  `svg class="i-done"` (a check mark), each `viewBox="0 0 24 24" aria-hidden="true"
+  focusable="false"` and carrying only geometry (`rect`, `path d=…`): no `fill`, `stroke` or
+  `style` attribute, so everything about how they look is the stylesheet's;
+- after the button, `span id="bearer-copy-status" class="copy-status" role="status"`, empty
+  as served.
+
+The accessible name is the `aria-label`, the icon is hidden from the accessibility tree, which
+is MDN's own pattern for "a button containing an SVG icon without any text"
+(<https://developer.mozilla.org/en-US/docs/Web/Accessibility/ARIA/Reference/Attributes/aria-label>;
+`aria-hidden="true"` "removes that element and all of its children from the accessibility
+tree", <https://developer.mozilla.org/en-US/docs/Web/Accessibility/ARIA/Reference/Attributes/aria-hidden>).
+`title` is the same translated text, so a pointer user who does not know the glyph gets a
+tooltip; it adds nothing to the name, since `aria-label` takes precedence.
+
+The feedback is two things at once, because each serves a different reader. The script sets
+`data-state="done"` on the button, and the CSS swaps the copy glyph for the check; and it
+writes `data-done` (`K::CopyDone`, "Copied") into the status span, which is visible beside the
+icon and is announced: `role="status"` has an implicit `aria-live` of `polite` and an implicit
+`aria-atomic` of `true`
+(<https://developer.mozilla.org/en-US/docs/Web/Accessibility/ARIA/Reference/Roles/status_role>).
+Changing the button's own `aria-label` instead was rejected: a name change on a focused control
+is not an announcement anybody can rely on, and the status region is the mechanism made for
+it. A refusal sets `data-state="failed"`, keeps the copy glyph, selects the key as today and
+writes `data-failed` into the status span. The state is not reset on a timer: the word stays
+true for as long as the page is open, and a timer is one more thing in a script that should
+stay a dozen lines.
+
+`COPY_SCRIPT` changes in exactly those two lines (the attribute and the status span's text
+instead of the button's text), still looks its elements up by id, still uses
+`addEventListener`, and still stops with the button hidden when either element, a secure
+context or `navigator.clipboard` is missing. Its hash changes with its bytes, and the policy is
+derived from the same `&str`, so nothing else moves.
+
+**CSS, in `admin.css`.** The reveal exists only in `bb-auth-web` (both of its surfaces emit
+`admin.css`, and the gate has no reveal), so the icon is arrangement of a thing only one
+program draws, beside the `.secret` rules it already has; it moves to `base.css` the day the
+gate needs an icon button. The rules, in words:
+
+- `.secret .copy`: `display:inline-flex`, centred, `min-width:32px; min-height:32px`, a small
+  padding, `background:transparent`, `border-color:var(--card-border)`, `color:var(--text)`;
+  hover `background:var(--chip)` rather than `base.css`'s filled accent, so the icon stays
+  legible on hover.
+- `.secret .copy svg`: `width:18px; height:18px; fill:none; stroke:currentColor;
+  stroke-width:2`, round caps and joins. `currentColor` is what lets the palette paint it:
+  `only_the_palette_names_a_colour` deliberately admits it, since it is not a colour a token
+  file could supply.
+- `.secret .copy .i-done{display:none}`, `.secret .copy[data-state=done] .i-copy{display:none}`,
+  `.secret .copy[data-state=done] .i-done{display:block}`.
+- `.copy-status{margin-left:8px}` and the existing `.secret button[hidden]{display:none}`, which
+  already covers the new button.
+- The focus ring is `base.css`'s global `:focus-visible` (2px `--accent` outline, offset 2px),
+  unchanged and not restated.
+
+The geometry goes in CSS and not in SVG attributes because the GUI's `style-src` is a hash of
+its stylesheet with no `'unsafe-inline'`, so a `style=` attribute would not apply; presentation
+attributes are a different mechanism, but keeping all of it in the stylesheet means there is
+nothing to argue. Inline `<svg>` is markup in the document, not a fetched resource, so no
+`img-src` is needed (assumed from how CSP fetch directives work; the e2e walk below shows the
+glyph painted under the real policy).
+
+**Target size.** WCAG 2.2 2.5.8 (AA): "The size of the target for pointer inputs is at least 24
+by 24 CSS pixels", with a spacing exception
+(<https://www.w3.org/WAI/WCAG22/Understanding/target-size-minimum.html>). The box is 32 by 32
+CSS px, so it passes on size alone, without leaning on the exception. The bounds are in `px`
+on purpose: the criterion is stated in CSS pixels, and a box in `em` would shrink under a
+smaller font size.
+
+#### Revoking asks first
+
+**The console already does.** `remove` on a key is `act_rm`, a link to
+`GET /users/<u>/keys/<id>/rm`, which renders `page_confirm` (the key's id, `K::ConfirmKeyRm`, a
+`POST` form carrying `rev`) and changes nothing; the `POST` to the same path removes. So the
+console needs no change for this requirement, and `/account/` takes the **same shape**:
+
+- the list's revoke control becomes `form method="get" action="<prefix>/keys/remove"` with a
+  hidden `id` and the same `button.danger` (`K::AccountKeyRemove`): it still looks and reads as
+  today's button, and it navigates rather than mutates;
+- `GET <prefix>/keys/remove?id=<id>` passes the doors every `/account/` request meets (proxy
+  secret, identity header, veto `403`, row resolution, a stranger's `403`), looks the id up on
+  **the caller's row only**, and renders a confirmation card: heading `K::AccountKeyRemove`,
+  the key's id and expiry as the list shows them, `K::AccountKeyRemoveWarn` (new: anything
+  using this key stops getting in within seconds, and it cannot be brought back; a new key can
+  be made instead), a `POST` form to `<prefix>/keys/remove` carrying `rev` (the fingerprint of
+  the file as **this** `GET` read it) and `id`, with `button.danger` `K::AccountKeyRemove`, and
+  a link `K::Cancel` back to the page;
+- an id not on the caller's row is a `404` that names nothing else, so the step is no oracle
+  for other people's keys; no `id` is a `404` too;
+- the `POST` is today's `account_key_post` with `AccountKeyOp::Remove`, unchanged: the
+  same-origin door, the write lock, the `rev` check, `remove_api_key`, the journal line.
+
+No confirm field on the `POST`, as there is none on the console's: a confirmation is there for
+a misclick, while forgery is answered by the same-origin door and a lost update by `rev`, and a
+field a forger can add as easily as anybody else protects against neither. A direct `POST` from
+a hand-written client keeps working, which is what the console's `POST` already allows.
+
+**Rejected:**
+
+- *The Settings guard's shape* (the first `POST` renders a panel, a second `POST` carrying a
+  token commits). That guard exists because the change is a whole form's worth of typed values
+  that must not be lost between the two steps; a revoke carries one id, so the confirmation
+  can be a plain `GET`, which is also what the console already does for the same object. One
+  URL meaning two things depending on a hidden field is harder to read in a log, and a `POST`
+  confirmation page answers a reload with the browser's resubmission prompt.
+- *Reusing the Settings guard's or the console's `K` strings.* `K::ConfirmKeyRm` speaks of "the
+  gate reloads", which is operator vocabulary; the self-service page speaks to the person.
+  `K::Cancel` is reused, being one word with one meaning.
+- *A shared confirmation renderer.* The two surfaces share the shape (a `GET` that renders, a
+  `POST` that does it) and the rule, not the arrangement: the console's page is `form_shell`
+  inside its shell, the account's is a card. The thing worth sharing byte for byte, the
+  bearer, already is.
+
+#### The duration, chosen from five
+
+One component, `duration_choice`, rendered by both `account_mint_form` and `page_key_form`:
+
+- `fieldset class="dur"` with `legend class="lbl"` (`K::AccountKeyDurationLabel` on
+  `/account/`, `duration` in the console, which labels by the file's field names);
+- five `label class="radio"` rows, in the user's order, each `input type="radio"
+  name="duration"`: `value="365d"` (`K::DurOneYear`), `value="182d"` (`K::DurSixMonths`),
+  `value="91d"` (`K::DurThreeMonths`), `value="custom"` (`K::DurCustom`), `value="never"`
+  (`K::DurNever`);
+- right after the custom row, **not inside its label**, `input type="text" inputmode="numeric"
+  name="days" size="6"` with `aria-label` `K::DurDaysLabel` ("Custom duration, in days"), and
+  a hint: `K::DurDaysHint` ("days") on `/account/`, and in the console `<n>d · <n>h`, because
+  the console's custom field takes the whole grammar (below). Not inside the label because a
+  click on a text field inside a label does not activate the label's radio, so nesting buys
+  nothing and makes the label's text the field's too.
+- on an add form `365d` is checked, which was the old field's suggestion and is the longest
+  bounded choice; `never` is never preselected, since the widest credential must be asked for.
+
+**The field keeps its name, and the radio's values are the stored strings.** `duration` is
+the file's own field name and the one every existing test and hand-written client posts; the
+four presets are therefore not codes to translate but the exact strings that land in the file,
+and `bb-auth-adm`, the gate and existing files see nothing new.
+
+| Choice | Posted | Stored `duration` |
+|---|---|---|
+| 1 year | `duration=365d` | `365d` |
+| 6 months | `duration=182d` | `182d` |
+| 3 months | `duration=91d` | `91d` |
+| custom, 40 | `duration=custom&days=40` | `40d` (a bare number gets its `d`, so the file reads unambiguously) |
+| custom, `30d` / `12h` (console) | `duration=custom&days=12h` | as typed, trimmed |
+| no expiry | `duration=never` | `never` |
+
+**182 and 91, not 183 and 90.** Six calendar months are 181 to 184 days and three are 89 to 92,
+depending on where they start, so any fixed number is a day or two off some calendar span, and
+no choice is wrong by more than that. 182 and 91 are exactly 26 and 13 weeks, so a key minted
+on a working day expires on the same weekday, a working day, rather than drifting onto a
+weekend when nobody is there to notice the integration that stopped. 365 stays 365 because the
+user named it, and it is a fact about the grammar the file already uses.
+
+**The server, one function for both:** `duration_from_form(form) -> Result<String, K>`, in
+`bb-auth-web.rs` (only this program renders the choice; the library's grammar is unchanged):
+
+1. `duration` trimmed; **empty or absent is refused** (`K::KeyDurationRequired`). This is the
+   trap in the grammar: `parse_duration("")` is `Dur::Never`, so a field that went missing
+   would otherwise mint a key that never expires. Today's console form has that hole (an
+   emptied text field files a non-expiring key); this closes it on both surfaces.
+2. `days` non-empty while `duration` is not `custom` is refused (`K::KeyDaysWithoutCustom`:
+   "you typed a number of days; choose Custom, or clear it"). The field is always visible, so
+   a number typed beside the default 1 year is a choice the person thinks they made, and
+   filing a year instead would be a silent substitution.
+3. `custom`: `days` must parse with `parse_duration` to `Dur::Secs(n)` with `n > 0`, and must
+   not be a spelling of never (`0`, `-`, `never`, which have their own radio). An all-digit
+   value is stored with a `d`. Otherwise `K::KeyDaysInvalid` ("a whole number of days, at
+   least 1").
+4. Anything else is passed through as typed, so a hand-written `duration=30d` keeps working.
+5. Then each surface's own check, unchanged in kind: the console's `key_expiry(released, d)`
+   (`K::BadKeyWindow`); `/account/`'s `account_key_window_ok`, now **`Dur::Never`, or
+   `Dur::Secs(s)` with `s >= ACCOUNT_KEY_MIN_SECS`** (one day). `ACCOUNT_KEY_MAX_SECS` is
+   removed with its comment, which argued the opposite of the user's decision.
+
+**No upper bound on custom days.** With "no expiry" on offer, a ceiling protects nothing: a
+key of 36500 days and a key that never expires are the same credential, and refusing the first
+while offering the second would be a rule with no reason. The grammar is the only limit:
+`parse_duration` and `key_expiry` use checked arithmetic and answer `None` on overflow, which
+step 3 or 5 refuses, and `format_date` of a far year prints a far year rather than failing
+(`civil_from_days` is plain `i64` arithmetic, well inside range for any `u64` the grammar
+yields; read, not measured). The "hours" a hand-written `/account/` `POST` might send stay
+refused by the one-day floor, which keeps a self-service key from being a credential that dies
+before anybody has used it.
+
+**The console's free text survives as the custom field.** The console's custom field takes the
+whole grammar (`40`, `40d`, `12h`), so nothing an administrator could express before is lost
+except the empty-means-never accident; `never` is its own radio. On the edit form the choice is
+read back from the stored string: exactly `365d`, `182d` or `91d` checks that preset, a never
+spelling (`never`, `0`, `-`) checks no expiry, and anything else (`30d`, `365`, `8760h`) checks
+custom with the stored string in the field, so the form shows what the file says rather than
+the preset it happens to equal. Saving a key stored as `0` with no expiry checked writes
+`never`, which `key_expiry` reads identically.
+
+**`K` changes.** New: `DurOneYear`, `DurSixMonths`, `DurThreeMonths`, `DurCustom`, `DurNever`,
+`DurDaysLabel`, `DurDaysHint`, `KeyDurationRequired`, `KeyDaysWithoutCustom`, `KeyDaysInvalid`,
+`AccountKeyRemoveWarn`. Removed: `AccountKeyDurationHint` ("between 1 and 365 days"). Reworded:
+`AccountKeyBound`, which loses its duration half (the id grammar is all it still has to say;
+the duration errors are now their own keys, each naming its own fix). Refusals attach to the
+`duration` field (`Refusal::on("duration", …)` in the console), so the fieldset carries the
+invalid marking the other fields do.
+
+**Rejected:**
+
+- *A select instead of radios.* Five options fit on screen, a radio group shows them all
+  without opening anything, and the custom field reads as belonging to the row before it.
+- *Hiding the days field with `:has()` until custom is checked.* It degrades to visible where
+  `:has()` is not supported, but where it is, a number typed and then hidden by a change of
+  mind is still submitted, and step 2 would then refuse a value the person cannot see. An
+  always-visible field plus step 2 has no invisible state.
+- *Radio values as codes (`1y`, `6m`) translated server-side.* A second vocabulary for the same
+  four strings, and every existing client posting `duration=30d` would need one more branch.
+
+#### How it is shown to hold
+
+Unit tests in `bb-auth-web.rs`:
+
+- `the_copy_control_is_an_icon_with_a_name` (with `the_reveal_shows_only_the_key` updated): on
+  the four reveal responses the button has no text node, an `aria-label` equal to
+  `K::CopyKey` in the page's language, is still `hidden` and `type="button"`, holds two `svg`
+  each `aria-hidden="true"` and `focusable="false"`; a `span role="status"` follows it, empty;
+  no `style=` attribute appears in the block; the bearer still occurs once.
+- `no_page_but_the_reveal_carries_a_script` unchanged, and still green with the new script's
+  hash.
+- `the_duration_choice_maps_onto_the_grammar`, on `duration_from_form` alone: the four presets
+  come back verbatim; `custom`+`40` is `40d`, `custom`+`12h` is `12h`; empty or absent
+  `duration` is `KeyDurationRequired`; `custom` with empty, `0`, `-`, `never`, `abc`, `-3` and
+  an overflowing number is `KeyDaysInvalid`; `365d`+`days=40` is `KeyDaysWithoutCustom`.
+- `a_self_service_key_may_never_expire`: `/account/` mints with `never` (stored `never`), with
+  `custom`+`400` (stored `400d`) and with `182d`; refuses `12h`, empty `duration` and
+  `custom` with no days with `400` and the file's bytes unchanged. This replaces the case that
+  refused `never` and `366d`.
+- `the_key_form_offers_five_choices`: the `/account/` form and the console's add form carry one
+  `fieldset` with a `legend`, five `name="duration"` radios with the values in the order above,
+  `365d` checked, and a `days` input with an `aria-label`; the console's edit form for keys
+  stored as `91d`, `0` and `8760h` checks 3 months, no expiry, and custom with `8760h` filled
+  in.
+- `revoking_a_key_asks_first_on_the_account_page`: the page's revoke control is a `GET` form
+  and no `POST` form to `<prefix>/keys/remove` remains on it; `GET <prefix>/keys/remove?id=laptop`
+  is `200`, names `laptop`, carries a `POST` form to the same path with the file's current
+  `rev` and the id, and leaves the file's bytes unchanged; an id on another row, an unknown id
+  and no id are `404` naming nothing; a stranger is `403`, a denied caller `403`; the `POST`
+  from that form removes the key.
+
+E2E: `account.js` (scripting off) mints with 6 months and sees the expiry 182 days out, with
+custom 40, and with no expiry and sees "never"; revokes through the confirmation, first
+cancelling (the key is still listed) and then confirming (it is gone). `nojs.js`, on the
+console reveal with scripting on: the icon is visible, its bounding box is at least 24 by 24,
+a click shows the check glyph and the status text `K::CopyDone`, and the clipboard read equals
+the key; with scripting off the icon is not visible. `shots.js` gains the reveal and the key
+form, in both themes, which is the look no assertion can give.

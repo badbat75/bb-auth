@@ -45,3 +45,7 @@ Rules are in `AGENTS.md`. Format of this file: `AGENTS.md`, under "Skills".
   `InaccessiblePaths=` for what it must not read.
 - The operator's `ui.stylesheet_url` loads after ours and can override a `hidden` attribute with a
   `display` rule: anything hidden for scripting-off browsers needs a `[hidden]` rule in our CSS too.
+- `parse_duration("")` is `Dur::Never`: a form whose duration field goes missing mints a key that
+  never expires unless the handler refuses empty first.
+- The console already confirms a key removal (`act_rm` links to a `GET` `page_confirm`): read the
+  console's flow before designing a "new" confirmation.
