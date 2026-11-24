@@ -44,7 +44,7 @@ files carry no model, to stay readable by both harnesses.
 Command, from the repo root (flags checked against `opencode run --help` on OpenCode 2.4.0; the roles
 are the files in `.opencode/agents/`):
 
-    opencode run --agent <tester|coder|docs> -m llama.cpp/Swift-Qwen3.8-Flash-Next \
+    opencode run --standalone --agent <tester|coder|docs> -m llama.cpp/Swift-Qwen3.8-Flash-Next \
       --auto --archived --title <task-name> "$(cat <prompt-file>)" > <task-name>.out 2>&1
 
 Run it as a background command and read `<task-name>.out` when it ends. Keep the prompt and `.out`
@@ -98,4 +98,5 @@ files outside the repo.
   `opencode serve --service` and keeps editing the tree (s8a-coder went on for 3 hours after its
   client was killed, and clobbered another agent's work). Check `opencode session export <id>`
   (`info.time.updated`) after stopping one. The HTTP routes need auth; stopping the service stops
-  every project's agents, so ask the user and tell the llama.cpp-framework coordinator.
+  every project's agents, so ask the user and tell the llama.cpp-framework coordinator. Always pass `--standalone`
+  (a private server per run, `opencode run --help`), so a `kill` of the run stops its session.
