@@ -34,6 +34,11 @@ Rules are in `AGENTS.md`. Format of this file: `AGENTS.md`, under "Skills".
   directly; the console's reveal page is then a re-submittable `POST`, which is the only reason
   `mutate` special-cases a stale `rev` there ("the key already exists"). A page whose way back is a
   `GET` link needs none of that.
+- `rotate_api_key` mints a **new** secret on every call, so a rotate is exactly one call: keep the
+  `SealedKey` it returns, commit, then `reveal(&written)`. A "check it exists, then rotate" pair
+  mints two secrets and shows the second. The ownership check comes free: `key_mut` resolves the
+  row from the caller's uuid first, so a key filed under another person is simply not found, and
+  the self-service page answers every miss with one sentence so it is not an id-enumeration oracle.
 
 ## Pitfalls
 

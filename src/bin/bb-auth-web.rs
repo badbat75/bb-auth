@@ -1021,6 +1021,11 @@ enum K {
     AccountKeyRestrictAll,
     AccountKeyRestrictSome,
     AccountKeyScopeGroups,
+    AccountKeyIdLabel,
+    AccountKeyDurationLabel,
+    AccountKeyRotate,
+    AccountKeyRemove,
+    AccountKeyNotYours,
     AccountKeyBound,
     AccountKeyFull,
     AccountKeyDup,
@@ -2163,6 +2168,18 @@ fn t(lang: Lang, key: K) -> &'static str {
             "the scopes a key of yours can be limited to",
             "gli scope a cui una tua chiave può essere limitata",
         ),
+        // The mint form's two field labels. The **field names** stay `id` and `duration`,
+        // because the handler reads those and the file stores those; the label is the page's
+        // word for the thing, and a label is displayed text. The Italian nouns are the ones
+        // this page's own refusals already use (`AccountKeyBound` says "l'id di una chiave",
+        // "una durata è"), so the form and the refusal name the field alike.
+        K::AccountKeyIdLabel => m(lang, "Key id", "Id della chiave"),
+        K::AccountKeyDurationLabel => m(lang, "Key duration", "Durata della chiave"),
+        // The two forms every key of the caller's carries. The verbs are this page's, not the
+        // console's (`K::Rotate` / `K::Remove` are an operator's lowercase command words): a
+        // person with no administrator in the room is clicking a button that says what it does.
+        K::AccountKeyRotate => m(lang, "Rotate key", "Ruota la chiave"),
+        K::AccountKeyRemove => m(lang, "Revoke key", "Revoca la chiave"),
         // The refusals this form answers with. Each names what to write instead, because a
         // person with no administrator at hand has to fix it themselves.
         K::AccountKeyBound => m(
@@ -2186,6 +2203,15 @@ fn t(lang: Lang, key: K) -> &'static str {
             lang,
             "a scope you picked is not one a key of yours can reach.",
             "uno degli scope scelti non è uno che una tua chiave può raggiungere.",
+        ),
+        // One sentence for "no such key" and "that key belongs to somebody else", because a
+        // page that answered the two differently is an enumeration oracle for anybody with an
+        // account: it would say which ids exist on the estate.
+        K::AccountKeyNotYours => m(
+            lang,
+            "that key is not one of yours, so this page cannot rotate it or revoke it.",
+            "quella chiave non è una delle tue, quindi questa pagina non può ruotarla né \
+             revocarla.",
         ),
         K::AccountVetoTitle => m(lang, "You are refused", "Sei escluso"),
         K::AccountVetoBody => m(
@@ -8075,7 +8101,12 @@ fn account_key_window_ok(duration: &str) -> bool {
 /// exactly the pairs the handler accepts, and each checkbox's value is the `application/scope`
 /// pair the file stores. A hand-written form can still name a pair that is not on the list, and
 /// the handler answers that with a `400`: a pair the gate would refuse mints a key that fails
-/// on its very first request.
+/// on its very first request. That list is **empty** for a caller whose scopes take `login`
+/// only, and then the narrowing radio is absent with it: a choice with nothing to choose is a
+/// control that can only be answered wrong.
+///
+/// The two labels are the page's words, through [`K`]; the two field **names** are the file's,
+/// because the handler reads `id` and `duration`.
 ///
 /// No URL appears. The restriction is named by application and scope, never by the pattern
 /// behind it (§13.6): a URL from the file is information about the estate, and this page is
@@ -8094,7 +8125,7 @@ fn account_mint_form(lang: Lang, keys_path: &str, rev: &str, scopes: &[(&str, &s
             input type="hidden" name="rev" value=(rev);
             h2 { (t(lang, K::AccountKeyAdd)) }
             (text_field(
-                "id",
+                t(lang, K::AccountKeyIdLabel),
                 "id",
                 "",
                 "laptop",
@@ -8102,7 +8133,7 @@ fn account_mint_form(lang: Lang, keys_path: &str, rev: &str, scopes: &[(&str, &s
                 false,
             ))
             (text_field(
-                "duration",
+                t(lang, K::AccountKeyDurationLabel),
                 "duration",
                 "",
                 "365d",
@@ -8115,19 +8146,26 @@ fn account_mint_form(lang: Lang, keys_path: &str, rev: &str, scopes: &[(&str, &s
                     input type="radio" name="restrict" value="all" checked;
                     span { (t(lang, K::AccountKeyRestrictAll)) }
                 }
-                label class="radio" {
-                    input type="radio" name="restrict" value="some";
-                    span { (t(lang, K::AccountKeyRestrictSome)) }
-                }
-                span class="hint" { (t(lang, K::AccountKeyScopeGroups)) }
-                @for (app, names) in apps {
-                    div {
-                        span class="lbl" { code { (app) } }
-                        @for name in names {
-                            label class="radio" {
-                                input type="checkbox" name="scope"
-                                      value=(format!("{app}/{name}"));
-                                span { code { (name) } }
+                // The narrowing choice, and only when there is something to narrow **to**.
+                // `key_scopes_for` is empty for a caller whose scopes take `login` only, and a
+                // radio with nothing beside it is a control that can only be answered wrong:
+                // `restrict=some` with no pair writes a key narrowed to nothing, which reaches
+                // no URL at all. The handler refuses that pair too; the form does not offer it.
+                @if !apps.is_empty() {
+                    label class="radio" {
+                        input type="radio" name="restrict" value="some";
+                        span { (t(lang, K::AccountKeyRestrictSome)) }
+                    }
+                    span class="hint" { (t(lang, K::AccountKeyScopeGroups)) }
+                    @for (app, names) in apps {
+                        div {
+                            span class="lbl" { code { (app) } }
+                            @for name in names {
+                                label class="radio" {
+                                    input type="checkbox" name="scope"
+                                          value=(format!("{app}/{name}"));
+                                    span { code { (name) } }
+                                }
                             }
                         }
                     }
@@ -8138,12 +8176,43 @@ fn account_mint_form(lang: Lang, keys_path: &str, rev: &str, scopes: &[(&str, &s
     }
 }
 
-/// The page a mint answers with, and the one place this page ever renders a bearer.
+/// The two forms every key of the caller's carries: rotate its secret, revoke it.
+///
+/// Two forms and not one with a hidden verb, because each posts to a path that names the
+/// mutation, exactly as every console route does: a page whose buttons all post to one URL is a
+/// page whose buttons cannot be told apart from the address bar, in a proxy log, or in a
+/// refusal. Each carries the file's fingerprint, so a rotate submitted onto bytes it never saw
+/// is the `409` every other form here answers with, and the key's id, which is the only thing
+/// that says **which** secret this revokes.
+///
+/// No script and no handler, and a real submit button on each: the estate's rule, and this page
+/// has no `<noscript>` behind anything. The id rides in a hidden field because the handler reads
+/// the form; no field names an **identity**, because the caller is the identity header nginx
+/// wrote, and a field that chose the row would let any signed-in person revoke anybody's
+/// credential.
+fn account_key_forms(lang: Lang, keys_path: &str, rev: &str, id: &str) -> Markup {
+    html! {
+        form method="post" action=(format!("{keys_path}/rotate")) class="keyact" {
+            input type="hidden" name="rev" value=(rev);
+            input type="hidden" name="id" value=(id);
+            button type="submit" { (t(lang, K::AccountKeyRotate)) }
+        }
+        form method="post" action=(format!("{keys_path}/remove")) class="keyact" {
+            input type="hidden" name="rev" value=(rev);
+            input type="hidden" name="id" value=(id);
+            button type="submit" class="danger" { (t(lang, K::AccountKeyRemove)) }
+        }
+    }
+}
+
+/// The page a mint or a rotate answers with, and the one place this page ever renders a bearer.
 ///
 /// Rendered **directly**, for the console's reason ([`page_minted`]): a redirect would put the
 /// result behind a `GET` that has no bearer to show, and the bearer exists nowhere else. The
 /// words are the console's three, because "shown once, copy it now" is one fact with one
 /// spelling in this program, and a person who sees it in two places must not read two claims.
+/// A rotate lands on the same page for the same reason: it mints a secret, and the old one is
+/// already dead at the next reload.
 fn page_account_minted(lang: Lang, page: &str, bearer: &str) -> Markup {
     html! {
         div class="secret" {
@@ -8220,6 +8289,10 @@ fn page_account(lang: Lang, ids: &[String], uuid: Option<&str>, own: &AccountOwn
                                 li { code { (account_key_expiry(lang, k)) } }
                                 li { code { (account_key_restriction(lang, k)) } }
                             }
+                            // The two forms, one per key, and inside the key's own row: a page
+                            // that offered "rotate a key" as one control listing every id is a
+                            // page where the id is chosen after the dangerous click.
+                            (account_key_forms(lang, own.keys_path, own.rev, &k.key_id))
                         }
                     }
                 }
@@ -8302,10 +8375,14 @@ fn handle_account(
     // preference redirect are both this, and the bare prefix is answered as the page too, so
     // `/account` and `/account/` are one page rather than a page and a redirect.
     let page = format!("{}/", cfg.account_path);
-    // The mint's `POST` target, one path below the page. It is a path and not a query flag
-    // because a mutation is a `POST` to a URL that names the mutation, exactly as every console
-    // route does, and because the keys section's form has to name it in its `action`.
+    // The keys prefix, and the mint's `POST` target. A path and not a query flag because a
+    // mutation is a `POST` to a URL that names the mutation, exactly as every console route does,
+    // and because the keys section's form has to name it in its `action`.
     let keys = format!("{}/keys", cfg.account_path);
+    // The two mutations every key of the caller's carries, one path below the mint's, each
+    // naming its own verb for the same reason every console route does.
+    let rotate = format!("{keys}/rotate");
+    let remove = format!("{keys}/remove");
     let posting = *req.method() == Method::Post;
     let prefs = AccountPrefs {
         lang,
@@ -8313,10 +8390,12 @@ fn handle_account(
         theme,
         page: &page,
     };
-    // Below the prefix, only the page and the mint exist. A path that is nothing is a `404` for
-    // every caller alike, administrator included, because a page that answers a stranger `403`
-    // and an administrator `404` is a page describing its own layout to whoever asks.
-    if path != cfg.account_path && path != page && path != keys {
+    // Below the prefix, only the page and the three key mutations exist. A path that is nothing
+    // is a `404` for every caller alike, administrator included, because a page that answers a
+    // stranger `403` and an administrator `404` is a page describing its own layout to whoever
+    // asks.
+    if path != cfg.account_path && path != page && path != keys && path != rotate && path != remove
+    {
         respond_account(
             req,
             404,
@@ -8460,11 +8539,18 @@ fn handle_account(
         }
     };
     let rev = sha256_hex(&bytes);
-    // A `POST` to the mint path is answered here, after the identity, the veto and the row
-    // resolution, because each of those is a refusal this submission has to meet on the same
-    // terms as the `GET` that rendered its form.
+    // A `POST` to one of the three key paths is answered here, after the identity, the veto and
+    // the row resolution, because each of those is a refusal this submission has to meet on the
+    // same terms as the `GET` that rendered its form.
     if posting {
-        account_mint(req, cfg, &prefs, lang, look, uuid);
+        let op = if path == rotate {
+            AccountKeyOp::Rotate
+        } else if path == remove {
+            AccountKeyOp::Remove
+        } else {
+            AccountKeyOp::Mint
+        };
+        account_key_post(req, cfg, &prefs, lang, look, uuid, op);
         return;
     }
     let own = AccountOwn {
@@ -8493,31 +8579,59 @@ fn handle_account(
     );
 }
 
-/// Answer the mint: `POST <prefix>/keys`.
+/// Which key mutation a `POST` under the keys prefix is asking for.
+///
+/// A closed set, because all three stand behind the **same** doors (the same-origin check, the
+/// row the identity header resolves to, the write lock, the file's fingerprint) and differ only
+/// in what the library is asked to do once those doors are open. Three handlers that each
+/// re-checked the doors are three chances for one of them to be missing from one of them, and a
+/// `remove` that skipped the fingerprint is a silent clobber of somebody else's edit.
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum AccountKeyOp {
+    Mint,
+    Rotate,
+    Remove,
+}
+
+impl AccountKeyOp {
+    /// The heading the refusal page carries: the verb the form's own button used, so the page
+    /// a refusal lands on is headed by the word the reader just clicked.
+    fn title(self) -> K {
+        match self {
+            AccountKeyOp::Mint => K::AccountKeyAdd,
+            AccountKeyOp::Rotate => K::AccountKeyRotate,
+            AccountKeyOp::Remove => K::AccountKeyRemove,
+        }
+    }
+}
+
+/// Answer a key mutation: `POST <prefix>/keys`, `…/keys/rotate` or `…/keys/remove`.
 ///
 /// The order is the console's, for the console's reasons ([`mutate`]), and it is the order that
 /// makes "nothing was written" a fact on every refusal path rather than a hope:
 ///
-/// 1. the same-origin door, before the body is read, because a mint hands out a credential and
-///    a form on somebody else's page minting onto a signed-in person's account is the exact
-///    attack this door exists for;
+/// 1. the same-origin door, before the body is read, because a mint hands out a credential, a
+///    rotate hands out a new one and a revoke destroys one, and a form on somebody else's page
+///    doing any of those to a signed-in person is the exact attack this door exists for;
 /// 2. the row, which the identity header resolves to and no form field may choose;
 /// 3. [`WRITE_LOCK`], then the file's current bytes against the form's `rev`, then
 ///    [`open_access_file`], which refuses to start editing from bytes the gate would reject;
-/// 4. the abuse bounds, before anything is minted, because a secret created for a refusal is a
-///    secret handed out for nothing;
-/// 5. [`add_api_key`] and [`AccessWrite`], the library's own door, and the bearer opened against
-///    the receipt of the completed write.
+/// 4. the mutation's own checks, before anything is written, because a secret created for a
+///    refusal is a secret handed out for nothing;
+/// 5. [`add_api_key`] / [`rotate_api_key`] / [`remove_api_key`] through [`AccessWrite`], the
+///    library's own door, and for the two that mint, the bearer opened against the receipt of
+///    the completed write.
 ///
 /// The refusal pages are short: this page's caller has no administrator in the room, so each
 /// message names what to write instead, and the way back is the page they came from.
-fn account_mint(
+fn account_key_post(
     mut req: Request,
     cfg: &Config,
     prefs: &AccountPrefs,
     lang: Lang,
     look: AccountLook,
     uuid: Option<&str>,
+    op: AccountKeyOp,
 ) {
     // (1) The door, and the console's strict policy: `same-origin` and nothing else.
     if !csrf_ok(
@@ -8601,77 +8715,116 @@ fn account_mint(
         }
     };
     let id = form.get("id").trim().to_string();
-    let duration = form.get("duration").trim().to_string();
-    let restrict = form.get("restrict").trim().to_string();
-    let pairs = form.all("scope");
     // (4) then (5), in one closure so that "every path out of here wrote nothing" is a fact
-    // about the shape of the code: the only `Ok` is the one that has committed.
-    let done = (|| -> Result<String, String> {
-        if !account_key_id_ok(&id) || !account_key_window_ok(&duration) {
-            return Err(t(lang, K::AccountKeyBound).to_string());
-        }
-        // The row's keys, read off the **document**, not the compiled table: the bound is on how
-        // many credentials one identity carries, and a key whose hash the gate skipped is still a
-        // row a person has to review.
-        let mine = user_pos(&doc, owner).map_or(&[][..], |i| &doc.users[i].api_keys);
-        // The bound counts the administrator's keys too: it is a bound on the row, not on how
-        // many mints this page handed out.
-        if mine.len() >= ACCOUNT_MAX_KEYS {
-            return Err(t(lang, K::AccountKeyFull).to_string());
-        }
-        // An id is how a key is named back (in the journal line, and in `bb-auth-adm key
-        // rotate`), so two keys called `laptop` on one row is one name naming two secrets.
-        if mine.iter().any(|k| k.id.trim() == id) {
-            return Err(t(lang, K::AccountKeyDup).to_string());
-        }
-        // `all` writes **no** `scopes` field, which the gate reads as the owner's whole reach.
-        // `some` writes the submitted pairs sorted: the submitted order is a browser's, and one
-        // canonical spelling is what makes a restriction a comparison rather than a string match.
-        let scopes = match restrict.as_str() {
-            "all" => None,
-            "some" => {
-                let allowed = access.key_scopes_for(owner);
-                for pair in &pairs {
-                    if !allowed
-                        .iter()
-                        .any(|(a, s)| format!("{}/{}", a.name, s.name) == *pair)
-                    {
-                        return Err(t(lang, K::AccountKeyUnknownScope).to_string());
-                    }
-                }
-                let mut sorted = pairs.clone();
-                sorted.sort();
-                Some(sorted)
+    // about the shape of the code: the only `Ok` is the one that has committed. The payload is
+    // `Some(bearer)` for the two mutations that mint a secret and `None` for the one that only
+    // takes one away.
+    let done = (|| -> Result<Option<String>, String> {
+        if op == AccountKeyOp::Mint {
+            let duration = form.get("duration").trim().to_string();
+            let restrict = form.get("restrict").trim().to_string();
+            let pairs = form.all("scope");
+            if !account_key_id_ok(&id) || !account_key_window_ok(&duration) {
+                return Err(t(lang, K::AccountKeyBound).to_string());
             }
-            // Neither of the two the form can send. Refused rather than read as `all`: a key
-            // with no restriction is the widest credential this page mints, and a request that
-            // did not choose it must not get it by default.
-            _ => return Err(t(lang, K::AccountKeyBound).to_string()),
-        };
-        let sealed = add_api_key(
-            &mut doc,
-            owner,
-            ApiKeySpec {
-                id: id.clone(),
-                // Today, and not a field: a key's issue date is a fact about a secret that is
-                // being created right now.
-                released: format_date(now()),
-                duration: duration.clone(),
-                scopes,
-                ..Default::default()
-            },
-        )?;
-        let written = AccessWrite::prepare(&doc)?.commit(&cfg.access_path)?;
-        // The acting identity, marked as acting for itself, and the key's id. No bearer and no
-        // hash: the line says which credential exists, and the file is what says anything more.
-        audit(&format!("{owner} (self)"), "key add", &id);
-        Ok(sealed.reveal(&written))
+            // The row's keys, read off the **document**, not the compiled table: the bound is on
+            // how many credentials one identity carries, and a key whose hash the gate skipped is
+            // still a row a person has to review.
+            let mine = user_pos(&doc, owner).map_or(&[][..], |i| &doc.users[i].api_keys);
+            // The bound counts the administrator's keys too: it is a bound on the row, not on
+            // how many mints this page handed out.
+            if mine.len() >= ACCOUNT_MAX_KEYS {
+                return Err(t(lang, K::AccountKeyFull).to_string());
+            }
+            // An id is how a key is named back (in the journal line, and in `bb-auth-adm key
+            // rotate`), so two keys called `laptop` on one row is one name naming two secrets.
+            if mine.iter().any(|k| k.id.trim() == id) {
+                return Err(t(lang, K::AccountKeyDup).to_string());
+            }
+            // `all` writes **no** `scopes` field, which the gate reads as the owner's whole reach.
+            // `some` writes the submitted pairs sorted: the submitted order is a browser's, and
+            // one canonical spelling is what makes a restriction a comparison, not a string match.
+            let scopes = match restrict.as_str() {
+                "all" => None,
+                "some" => {
+                    let allowed = access.key_scopes_for(owner);
+                    for pair in &pairs {
+                        if !allowed
+                            .iter()
+                            .any(|(a, s)| format!("{}/{}", a.name, s.name) == *pair)
+                        {
+                            return Err(t(lang, K::AccountKeyUnknownScope).to_string());
+                        }
+                    }
+                    let mut sorted = pairs.clone();
+                    sorted.sort();
+                    Some(sorted)
+                }
+                // Neither of the two the form can send. Refused rather than read as `all`: a key
+                // with no restriction is the widest credential this page mints, and a request
+                // that did not choose it must not get it by default.
+                _ => return Err(t(lang, K::AccountKeyBound).to_string()),
+            };
+            let sealed = add_api_key(
+                &mut doc,
+                owner,
+                ApiKeySpec {
+                    id: id.clone(),
+                    // Today, and not a field: a key's issue date is a fact about a secret that is
+                    // being created right now.
+                    released: format_date(now()),
+                    duration: duration.clone(),
+                    scopes,
+                    ..Default::default()
+                },
+            )?;
+            let written = AccessWrite::prepare(&doc)?.commit(&cfg.access_path)?;
+            // The acting identity, marked as acting for itself, and the key's id. No bearer and
+            // no hash: the line says which credential exists, and the file says anything more.
+            audit(&format!("{owner} (self)"), "key add", &id);
+            Ok(Some(sealed.reveal(&written)))
+        } else {
+            // The two mutations that act on a key the caller already has. The id is **not**
+            // validated against the mint's grammar: a rotate naming an id this row does not carry
+            // is refused by the library's own lookup, and the page answers every miss with the
+            // same sentence, so a probe for which ids exist on the estate gets one answer for all
+            // of them. The library resolves the row from the caller's uuid, so a key filed under
+            // another person is not found at all: that is the ownership check, and it is the
+            // library's, so the console and this page cannot answer it differently.
+            let sealed = match op {
+                AccountKeyOp::Rotate => rotate_api_key(&mut doc, owner, &id)
+                    .map(Some)
+                    .map_err(|_| t(lang, K::AccountKeyNotYours).to_string())?,
+                AccountKeyOp::Remove => remove_api_key(&mut doc, owner, &id)
+                    .map(|_| None)
+                    .map_err(|_| t(lang, K::AccountKeyNotYours).to_string())?,
+                AccountKeyOp::Mint => None,
+            };
+            let written = AccessWrite::prepare(&doc)?.commit(&cfg.access_path)?;
+            audit(
+                &format!("{owner} (self)"),
+                if op == AccountKeyOp::Rotate {
+                    "key rotate"
+                } else {
+                    "key remove"
+                },
+                &id,
+            );
+            // A rotate mints a new secret, so it comes back sealed like a mint does and is opened
+            // against this write's receipt; a revoke mints nothing, so there is nothing to reveal.
+            Ok(sealed.map(|sealed| sealed.reveal(&written)))
+        }
     })();
     // The key's id rides in the title, because the shell renders the title as the page's one
     // heading: "API keys · phone" says which secret this is, which is the fact a person with two
     // browser tabs open needs in front of them.
     match done {
-        Ok(bearer) => respond_account(
+        // A mint and a rotate answer `200` directly, and that is why they are the two mutations
+        // here that are not POST-redirect-GET: the bearer cannot ride a redirect, because a
+        // `Location:` is a URL and a URL is a credential in a proxy log. The page that shows it
+        // once has to be the response to the `POST`, and a reload of that page re-sends the
+        // `POST`: the same price the console's mint page pays, for the same reason.
+        Ok(Some(bearer)) => respond_account(
             req,
             200,
             prefs,
@@ -8679,11 +8832,14 @@ fn account_mint(
             page_account_minted(lang, prefs.page, &bearer),
             look,
         ),
+        // A revoke mints nothing, so it follows the estate's rule and answers `303` to the page
+        // it came from. No `?msg=`: the key is gone from the list, and that is the confirmation.
+        Ok(None) => respond_redirect(req, prefs.page),
         Err(msg) => respond_account(
             req,
             400,
             prefs,
-            t(lang, K::AccountKeyAdd),
+            t(lang, op.title()),
             html! {
                 div class="err" { (msg) }
                 p { a href=(prefs.page) { "← " (t(lang, K::Back)) } }
@@ -15820,6 +15976,674 @@ mod tests {
         assert!(
             !account_carries_inline_handler(&g.body),
             "no inline handler of any kind"
+        );
+
+        cleanup(&path);
+    }
+
+    // =====================================================================
+    // Self-service key rotation and removal (docs/ARCHITECTURE.md §13.6, PLAN.md
+    // step 4c): every key the caller owns gets two more forms, `POST
+    // <prefix>/keys/rotate` and `POST <prefix>/keys/remove`, each carrying the
+    // file fingerprint and that key's id, and both go through the library's
+    // `rotate_api_key` / `remove_api_key` and the same `AccessWrite` door as the
+    // mint.
+    //
+    // The statuses are the console's, because the same machinery answers both
+    // surfaces: a key the caller does not own is the `400` the console's
+    // `Route::KeyRotate` / `Route::KeyRm` answer every `key_mut` and
+    // `remove_api_key` refusal with (not a `404`: the console has no `404` for a
+    // mutation, and a page that answers "no such key" and "not your key"
+    // differently is an enumeration oracle for anybody with an account); a
+    // caller with no row is the `403` the mint already gives; a stale `rev` is
+    // the `409`; a cross-site `POST` is the CSRF `403`.
+    //
+    // The journal line (`[bb-auth-web] <uuid> (self): key rotate <id>`, and
+    // `key remove <id>`) is on stderr, as every mutation line here is, so no
+    // over-the-socket test can read it: the same limit 4b's mint tests have, and
+    // the reason the assertions below are about the bytes the request leaves
+    // behind.
+    // =====================================================================
+
+    /// The mint fixture with keys on **both** rows: bob's two, one narrowed to
+    /// `mcp/api` by an administrator and one unrestricted with a window, and
+    /// carol's one. The narrowed key is the one a rotate is asserted on, because
+    /// `rotate_api_key` changes only `key_hash` and `released` and a
+    /// implementation that rebuilt the row would drop the restriction; its
+    /// `duration` is `never`, which this page refuses to *mint*, so a rotate
+    /// that rewrote the window cannot hide behind a fixture value the page
+    /// itself would never have written. Carol's key is what makes "an id the
+    /// caller does not own" a real id in a real row rather than a typo.
+    const ACCOUNT_ACCESS_KEYS: &str = r#"{ "version": 1,
+  "applications": [
+    { "name": "mpa", "base": ["https://app.x.com/mpa"],
+      "scopes": [
+        { "name": "admin", "urls": ["https://app.x.com/mpa/admin/*"], "access": "restricted",
+          "groups": ["@admins"], "credentials": ["login"] },
+        { "name": "onboarding", "urls": ["https://app.x.com/mpa/*"], "access": "authenticated" } ] },
+    { "name": "mcp", "base": ["https://ai.x.com/mcp"],
+      "scopes": [
+        { "name": "logs", "urls": ["https://ai.x.com/mcp/logs/*"], "access": "restricted",
+          "users": ["__BOB__"] },
+        { "name": "api", "urls": ["https://ai.x.com/mcp/*"], "access": "restricted",
+          "users": ["__BOB__"], "credentials": ["api_key"] },
+        { "name": "vault", "urls": ["https://ai.x.com/mcp/vault/*"], "access": "restricted",
+          "users": ["__CAROL__"] } ] } ],
+  "user_groups": { "admins": ["__BOB__"] },
+  "denied": ["spammer@x.com"],
+  "users": [
+    { "uuid": "__BOB__", "emails": ["bob@x.com", "bob@old.com"],
+      "api_keys": [
+        { "id": "laptop", "key_hash": "__LAPTOP_HASH__", "released": "2026-01-01",
+          "duration": "never", "scopes": ["mcp/api"] },
+        { "id": "ci", "key_hash": "__CI_HASH__", "released": "2026-01-01", "duration": "365d" } ] },
+    { "uuid": "__CAROL__", "emails": ["carol@x.com"],
+      "api_keys": [ { "id": "phone", "key_hash": "__PHONE_HASH__", "released": "2026-01-01",
+                      "duration": "30d" } ] } ] }"#;
+
+    /// The third raw bearer, the one whose hash sits on carol's key: a test that
+    /// rotates bob's key must leave carol's secret working, and "working" is a
+    /// fact about the hash the file carries.
+    const ACCOUNT_BEARER_PHONE: &str = "bbk_thirdkeythirdkey0000";
+
+    fn account_access_keys() -> String {
+        ACCOUNT_ACCESS_KEYS
+            .replace("__BOB__", ACCOUNT_BOB)
+            .replace("__CAROL__", ACCOUNT_CAROL)
+            .replace("__LAPTOP_HASH__", &sha256_hex(ACCOUNT_BEARER_LAPTOP))
+            .replace("__CI_HASH__", &sha256_hex(ACCOUNT_BEARER_CI))
+            .replace("__PHONE_HASH__", &sha256_hex(ACCOUNT_BEARER_PHONE))
+    }
+
+    /// A roster user whose keys can be narrowed to **no** scope at all: dave is a
+    /// member of a `restricted` scope whose credentials are `login` only, and the
+    /// only other scope is `authenticated`, which a static key never reaches
+    /// (`Access::key_scopes_for` returns the empty vector for exactly that pair).
+    /// He has a row, so the mint form renders, and the form must not offer the
+    /// narrowing option, because a form offering a choice with nothing to choose
+    /// is a control that can only be answered wrong.
+    const ACCOUNT_DAVE: &str = "33333333-3333-4333-8333-333333333333";
+    const ACCOUNT_ACCESS_NO_NARROW: &str = r#"{ "version": 1,
+  "applications": [
+    { "name": "mpa", "base": ["https://app.x.com/mpa"],
+      "scopes": [
+        { "name": "admin", "urls": ["https://app.x.com/mpa/admin/*"], "access": "restricted",
+          "users": ["__DAVE__"], "credentials": ["login"] },
+        { "name": "onboarding", "urls": ["https://app.x.com/mpa/*"], "access": "authenticated" } ] } ],
+  "users": [ { "uuid": "__DAVE__", "emails": ["dave@x.com"] } ] }"#;
+
+    /// The `<form …>` blocks inside `haystack`, in document order. The keys
+    /// section carries several forms with nothing between them, and an assertion
+    /// about **this** key's rotate form must not be satisfied by that key's
+    /// remove form, so each block is cut out and judged on its own.
+    fn account_forms(haystack: &str) -> Vec<String> {
+        let mut out = Vec::new();
+        let mut rest = haystack;
+        while let Some(i) = rest.find("<form") {
+            let tail = &rest[i..];
+            let end = tail.find("</form>").unwrap_or_else(|| {
+                panic!(
+                    "a form is opened and never closed: {}",
+                    account_readable(haystack)
+                )
+            });
+            out.push(tail[..end].to_string());
+            rest = &tail[end + "</form>".len()..];
+        }
+        out
+    }
+
+    /// The one form that posts to `action` for the key `id`, and the failure that
+    /// names what the page offered instead, because "there is no rotate form for
+    /// `ci`" is only useful if the test can say which forms it saw.
+    fn account_form_for(forms: &[String], action: &str, id: &str) -> String {
+        forms
+            .iter()
+            .find(|f| {
+                f.contains(&format!("action=\"{action}\""))
+                    && f.contains(&format!("value=\"{id}\""))
+            })
+            .cloned()
+            .unwrap_or_else(|| {
+                let seen: Vec<&str> = forms
+                    .iter()
+                    .map(|f| {
+                        let a = f.find("action=\"").map_or("", |i| &f[i + 8..]);
+                        a.split('"').next().unwrap_or("")
+                    })
+                    .collect();
+                panic!(
+                    "the page must carry a form posting to {action} for the key `{id}`; it \
+                     posts to {seen:?}"
+                )
+            })
+    }
+
+    /// One key as the file wrote it: `row` is the user row's index, `id` the key's
+    /// id. A `serde_json::Value`, because the writer rewrites the whole document,
+    /// so "unchanged" is a fact about the value the file carries, not about the
+    /// bytes around it.
+    fn account_key_json(file: &str, row: usize, id: &str) -> serde_json::Value {
+        let doc: serde_json::Value = serde_json::from_str(file).expect("the written file parses");
+        doc["users"][row]["api_keys"]
+            .as_array()
+            .and_then(|ks| ks.iter().find(|k| k["id"] == id))
+            .cloned()
+            .unwrap_or_else(|| panic!("the file has no key `{id}` under users[{row}]: {file}"))
+    }
+
+    /// Every key the caller sees gets a rotate form and a remove form, each
+    /// posting to its own path under the prefix and carrying the file's
+    /// fingerprint and **that key's** id. Two forms per key and no script, because
+    /// a page that needs scripting to revoke a credential is the thing that must
+    /// never ship, and a form that names the wrong key revokes the wrong secret.
+    #[test]
+    fn account_every_key_of_the_caller_gets_a_rotate_form_and_a_remove_form() {
+        let path = account_scratch_access("keys-forms", &account_access_keys());
+        let base = account_serve(&path);
+        let rev = sha256_hex(&read(&path));
+
+        let g = account_call(&base, Some("bob@x.com"));
+        assert_eq!(
+            g.status,
+            200,
+            "bob is a roster user with keys: {}",
+            account_readable(&g.body)
+        );
+        let s = account_section(&g.body, "keys");
+        let forms = account_forms(&s);
+        for id in ["laptop", "ci"] {
+            for action in ["/account/keys/rotate", "/account/keys/remove"] {
+                let f = account_form_for(&forms, action, id);
+                assert!(
+                    f.contains("method=\"post\""),
+                    "a mutation is a POST, so a bookmark, a prefetch or a crawler cannot revoke \
+                     a credential: {f}"
+                );
+                assert!(
+                    f.contains("name=\"rev\"") && f.contains(&rev),
+                    "the form carries the fingerprint of the file as it was rendered, the same \
+                     lost-update guard every console form carries: {f}"
+                );
+                assert!(
+                    f.contains("name=\"id\"") && f.contains(&format!("value=\"{id}\"")),
+                    "the form names the key it acts on, and only that one: {f}"
+                );
+                assert!(
+                    f.contains("type=\"submit\""),
+                    "the page works with scripting off, so each form ends in its own submit \
+                     button: {f}"
+                );
+            }
+        }
+        assert!(
+            !s.contains("value=\"phone\""),
+            "carol's key is not bob's, so bob's page carries no form that names it: {s}"
+        );
+        assert!(
+            !g.body.contains("<script"),
+            "no script tag: the estate rule these forms must not break"
+        );
+        assert!(
+            !account_carries_inline_handler(&g.body),
+            "no inline handler of any kind"
+        );
+
+        cleanup(&path);
+    }
+
+    /// The rotate, in full: a `200` that shows the new bearer exactly once (never
+    /// behind a redirect, because a bearer cannot survive one), `Cache-Control:
+    /// no-store`, the file carrying the hash of that bearer in place of the old
+    /// one, `released` today, and **everything else of the row identical**: the
+    /// administrator's `scopes` narrowing and the `duration`, byte for byte, and
+    /// every other key of every row untouched. The old bearer's hash is gone, so
+    /// the leaked secret stops working the moment the gate reloads.
+    #[test]
+    fn account_a_rotate_shows_a_new_bearer_once_and_changes_only_the_secret_and_the_date() {
+        let path = account_scratch_access("rotate-all", &account_access_keys());
+        let base = account_serve(&path);
+        let rotate = format!("{base}keys/rotate");
+        let before = read(&path);
+        let rev = sha256_hex(&before);
+        let old = account_key_json(&before, 0, "laptop");
+
+        let g = account_post(
+            &rotate,
+            Some("bob@x.com"),
+            &[("rev", &rev), ("id", "laptop")],
+        );
+        assert_eq!(
+            g.status,
+            200,
+            "a rotate of one's own key is answered by a page, not a redirect: {}",
+            account_readable(&g.body)
+        );
+        assert_eq!(
+            g.header("Cache-Control"),
+            Some("no-store"),
+            "the page carries a credential: no cache may keep it"
+        );
+        let bearer = account_bearer_in(&g.body);
+        assert!(
+            bearer.starts_with("bbk_"),
+            "the new bearer is a bbk_ credential: {bearer}"
+        );
+        assert_ne!(
+            bearer, ACCOUNT_BEARER_LAPTOP,
+            "the rotate minted a new secret, not the one it replaced: {bearer}"
+        );
+        assert_eq!(
+            g.body.matches(bearer.as_str()).count(),
+            1,
+            "the bearer is shown exactly once, and the page carries it {} times: {bearer}",
+            g.body.matches(bearer.as_str()).count()
+        );
+
+        let after = read(&path);
+        let now_key = account_key_json(&after, 0, "laptop");
+        assert_eq!(
+            now_key["key_hash"],
+            serde_json::json!(sha256_hex(&bearer)),
+            "the filed credential is sha256 of the bearer the page just showed: {after}"
+        );
+        assert!(
+            !after.contains(&sha256_hex(ACCOUNT_BEARER_LAPTOP)),
+            "the old bearer's hash is gone, so the leaked secret stops working on the next \
+             reload: {after}"
+        );
+        assert!(
+            !after.contains(&bearer),
+            "the file keeps the hash, never the bearer"
+        );
+        assert_eq!(
+            now_key["released"],
+            serde_json::json!(format_date(now())),
+            "a key's issue date is a fact about the secret being created now: {now_key}"
+        );
+        assert_eq!(
+            now_key["duration"], old["duration"],
+            "the window is untouched, and the fixture's is `never`, which this page would \
+             refuse to mint, so a rotate that rewrote it cannot pass: {now_key}"
+        );
+        assert_eq!(
+            now_key["scopes"], old["scopes"],
+            "the administrator's narrowing survives a rotate byte for byte: a rotate is the \
+             answer to a leak, not a widening: {now_key}"
+        );
+        assert_eq!(
+            account_key_json(&after, 0, "ci"),
+            account_key_json(&before, 0, "ci"),
+            "the caller's other key is untouched by a rotate of this one"
+        );
+        assert_eq!(
+            account_key_json(&after, 1, "phone"),
+            account_key_json(&before, 1, "phone"),
+            "carol's key is untouched, and its hash still names her working secret"
+        );
+
+        let g = account_call(&base, Some("bob@x.com"));
+        assert!(
+            !g.body.contains(&bearer),
+            "the bearer is shown once: the next GET of the page does not carry it"
+        );
+
+        cleanup(&path);
+    }
+
+    /// The remove: a `303` back to the page, because a `GET` never mutates and the
+    /// answer to a mutation is a redirect the browser can reload without revoking
+    /// the key twice. The redirect carries nothing secret, so the key is simply
+    /// gone, and every other key of every row is byte for byte what it was.
+    #[test]
+    fn account_a_remove_is_a_303_to_the_page_and_leaves_the_other_keys_alone() {
+        let path = account_scratch_access("remove-one", &account_access_keys());
+        let base = account_serve(&path);
+        let remove = format!("{base}keys/remove");
+        let before = read(&path);
+        let rev = sha256_hex(&before);
+
+        let g = account_post(&remove, Some("bob@x.com"), &[("rev", &rev), ("id", "ci")]);
+        assert_eq!(
+            g.status,
+            303,
+            "a mutation answers with a redirect, so a reload cannot repeat it: {}",
+            account_readable(&g.body)
+        );
+        assert_eq!(
+            g.header("Location"),
+            Some(ACCOUNT_PAGE),
+            "the redirect lands back on the page the form was on"
+        );
+        assert!(
+            !g.body.contains("bbk_"),
+            "a redirect carries nothing secret, and this one has no reason to: {}",
+            account_readable(&g.body)
+        );
+
+        let after = read(&path);
+        let doc: serde_json::Value = serde_json::from_str(&after).expect("the written file parses");
+        assert!(
+            doc["users"][0]["api_keys"]
+                .as_array()
+                .is_some_and(|ks| !ks.iter().any(|k| k["id"] == "ci")),
+            "the key is gone from the caller's row: {after}"
+        );
+        assert_eq!(
+            account_key_json(&after, 0, "laptop"),
+            account_key_json(&before, 0, "laptop"),
+            "the caller's other key is untouched, narrowing and window included"
+        );
+        assert_eq!(
+            account_key_json(&after, 1, "phone"),
+            account_key_json(&before, 1, "phone"),
+            "carol's key is untouched"
+        );
+
+        let g = account_call(&base, Some("bob@x.com"));
+        let s = account_section(&g.body, "keys");
+        assert!(
+            !s.contains("value=\"ci\""),
+            "the page no longer offers a form for a key that does not exist: {s}"
+        );
+
+        cleanup(&path);
+    }
+
+    /// A key the caller does not own is refused on both endpoints, with the file
+    /// unchanged: carol's real id, and an id nobody has. The status is the
+    /// console's `400`, because the console answers every `key_mut` and
+    /// `remove_api_key` refusal with the `400` refusal page and this page is the
+    /// same machinery. A form field naming another identity changes nothing: the
+    /// caller is the identity header, and a field that chose the row would let any
+    /// signed-in person revoke anybody's credential.
+    #[test]
+    fn account_a_key_the_caller_does_not_own_is_a_400_on_both_endpoints_and_writes_nothing() {
+        let path = account_scratch_access("keys-foreign", &account_access_keys());
+        let base = account_serve(&path);
+        let before = read(&path);
+        let rev = sha256_hex(&before);
+
+        for endpoint in ["rotate", "remove"] {
+            for id in ["phone", "nope"] {
+                let g = account_post(
+                    &format!("{base}keys/{endpoint}"),
+                    Some("bob@x.com"),
+                    &[("rev", &rev), ("id", id)],
+                );
+                assert_eq!(
+                    g.status,
+                    400,
+                    "`{id}` is not bob's key ({endpoint}), so the request is refused: {}",
+                    account_readable(&g.body)
+                );
+                assert_eq!(
+                    read(&path),
+                    before,
+                    "the refusal of `{id}` on {endpoint} wrote nothing: the file is byte for \
+                     byte what it was"
+                );
+            }
+            // A field naming another identity is ignored, exactly as the mint's is:
+            // it cannot make carol's key bob's.
+            let g = account_post(
+                &format!("{base}keys/{endpoint}"),
+                Some("bob@x.com"),
+                &[
+                    ("rev", &rev),
+                    ("id", "phone"),
+                    ("email", "carol@x.com"),
+                    ("uuid", ACCOUNT_CAROL),
+                ],
+            );
+            assert_eq!(
+                g.status,
+                400,
+                "the form named carol on {endpoint}, and a form field is not an identity: {}",
+                account_readable(&g.body)
+            );
+            assert_eq!(
+                read(&path),
+                before,
+                "the {endpoint} that named carol in a field wrote nothing"
+            );
+        }
+        assert_eq!(
+            account_key_json(&before, 1, "phone"),
+            account_key_json(&read(&path), 1, "phone"),
+            "carol's secret is standing, hash included"
+        );
+
+        cleanup(&path);
+    }
+
+    /// A stranger, an administrator with no row, and a vetoed identity are refused
+    /// the `403` the mint already gives them, on both endpoints, and nothing is
+    /// written: a rotate hands out a credential and a remove destroys one, so a
+    /// refusal that did either is an admission.
+    #[test]
+    fn account_a_stranger_and_a_denied_caller_are_refused_a_403_on_rotate_and_remove() {
+        let path = account_scratch_access("keys-no-caller", &account_access_keys());
+        let base = account_serve(&path);
+        let before = read(&path);
+        let rev = sha256_hex(&before);
+
+        for who in ["stranger@elsewhere.com", "admin@x.com", "spammer@x.com"] {
+            for endpoint in ["rotate", "remove"] {
+                let g = account_post(
+                    &format!("{base}keys/{endpoint}"),
+                    Some(who),
+                    &[("rev", &rev), ("id", "laptop")],
+                );
+                assert_eq!(
+                    g.status,
+                    403,
+                    "a {endpoint} POST from {who} is refused: {}",
+                    account_readable(&g.body)
+                );
+            }
+        }
+        assert_eq!(
+            read(&path),
+            before,
+            "a refusal may not write: no key rotated, no key revoked"
+        );
+
+        cleanup(&path);
+    }
+
+    /// The two doors in front of every mutation, on both endpoints: a `rev` that
+    /// is not the file's current fingerprint is the console's `409` (the file
+    /// moved under the form, and revoking onto bytes nobody saw would clobber that
+    /// edit), and a `POST` the browser says came from another site is the CSRF
+    /// `403`. Both write nothing.
+    #[test]
+    fn account_a_rotate_or_remove_on_a_stale_rev_or_from_another_site_writes_nothing() {
+        let path = account_scratch_access("keys-doors", &account_access_keys());
+        let base = account_serve(&path);
+        let before = read(&path);
+        let rev = sha256_hex(&before);
+        let stale = "0000000000000000000000000000000000000000000000000000000000000000";
+
+        for endpoint in ["rotate", "remove"] {
+            let url = format!("{base}keys/{endpoint}");
+            let g = account_post(&url, Some("bob@x.com"), &[("rev", stale), ("id", "laptop")]);
+            assert_eq!(
+                g.status,
+                409,
+                "a {endpoint} form submitted onto bytes it never saw is a conflict: {}",
+                account_readable(&g.body)
+            );
+            assert_eq!(
+                read(&path),
+                before,
+                "the {endpoint} conflict wrote nothing: the access file is byte for byte what \
+                 it was"
+            );
+
+            let g = account_post_as(
+                &url,
+                Some("bob@x.com"),
+                &[("rev", &rev), ("id", "laptop")],
+                "cross-site",
+                true,
+            );
+            assert_eq!(
+                g.status,
+                403,
+                "a cross-site {endpoint} is a form on somebody else's page revoking a \
+                 signed-in person's credential: {}",
+                account_readable(&g.body)
+            );
+            assert_eq!(
+                read(&path),
+                before,
+                "the cross-site {endpoint} refusal wrote nothing"
+            );
+        }
+
+        cleanup(&path);
+    }
+
+    /// The first 4b fix, seen in the 4b screenshot: the mint form's two field
+    /// labels are the file's field names, `id` and `duration`, and on the Italian
+    /// page that is untranslated text in an otherwise Italian form. The labels are
+    /// the page's words, so they go through the table; the field **names** stay the
+    /// file's, because the handler reads those. The Italian words asserted are the
+    /// page's own vocabulary: `AccountKeyBound` already says "l'id di una chiave
+    /// è…" and "una durata è <n>d…", so "Id della chiave" and "Durata della chiave"
+    /// are the same nouns the refusals use. The English page is asserted alongside,
+    /// because the fix is the labels, not one language's strings.
+    #[test]
+    fn account_the_mint_form_labels_are_translated_on_the_italian_page() {
+        let path = account_scratch_access("mint-labels", &account_access_keys());
+        let base = account_serve(&path);
+
+        let it = account_call_pref(&base, Some("bob@x.com"), Some("lang=it"), None);
+        assert_eq!(
+            it.status,
+            200,
+            "bob reaches the page: {}",
+            account_readable(&it.body)
+        );
+        assert!(
+            account_html_tag(&it.body).contains(r#"lang="it""#),
+            "the cookie must have chosen Italian, or the test asserts on English: {}",
+            account_html_tag(&it.body)
+        );
+        let s = account_section(&it.body, "keys");
+        assert!(
+            s.contains("Chiavi API"),
+            "the section under test is the keys section: {s}"
+        );
+        assert!(
+            s.contains("action=\"/account/keys\""),
+            "the page under test is the one that carries the mint form: {s}"
+        );
+        for label in ["Id della chiave", "Durata della chiave"] {
+            assert!(
+                s.contains(label),
+                "the mint form's label must read \"{label}\", the noun the page's own Italian \
+                 refusals use: {s}"
+            );
+        }
+        for bare in [
+            r#"<span class="lbl">id</span>"#,
+            r#"<span class="lbl">duration</span>"#,
+        ] {
+            assert!(
+                !s.contains(bare),
+                "a bare field name is not a label in the reader's language: {s}"
+            );
+        }
+        assert!(
+            s.contains("name=\"id\"") && s.contains("name=\"duration\""),
+            "the field names stay the file's, because the handler reads them: {s}"
+        );
+
+        let en = account_call_pref(&base, Some("bob@x.com"), Some("lang=en"), None);
+        assert_eq!(
+            en.status,
+            200,
+            "bob reaches the page: {}",
+            account_readable(&en.body)
+        );
+        let e = account_section(&en.body, "keys");
+        for bare in [
+            r#"<span class="lbl">id</span>"#,
+            r#"<span class="lbl">duration</span>"#,
+        ] {
+            assert!(
+                !e.contains(bare),
+                "the fix is the labels, so the English page carries a label and not a field \
+                 name either: {e}"
+            );
+        }
+
+        cleanup(&path);
+    }
+
+    /// The second 4b fix: dave's keys can be narrowed to no scope at all, so the
+    /// form must not offer "only the scopes you pick" (a radio with `value="some"`
+    /// and nothing beside it is a control that can only be answered wrong, and
+    /// `restrict=some` with no pair writes a key narrowed to nothing), and it must
+    /// still mint with `restrict=all`, which files no `scopes` field at all.
+    #[test]
+    fn account_a_caller_with_nothing_to_narrow_gets_no_some_option_and_still_mints() {
+        let path = account_scratch_access(
+            "mint-no-narrow",
+            &ACCOUNT_ACCESS_NO_NARROW.replace("__DAVE__", ACCOUNT_DAVE),
+        );
+        let base = account_serve(&path);
+
+        let g = account_call(&base, Some("dave@x.com"));
+        assert_eq!(
+            g.status,
+            200,
+            "dave is a roster user, so he reaches the page: {}",
+            account_readable(&g.body)
+        );
+        let s = account_section(&g.body, "keys");
+        assert!(
+            s.contains("action=\"/account/keys\""),
+            "dave has a row, so the mint form is his: {s}"
+        );
+        assert!(
+            !s.contains(r#"value="some""#),
+            "key_scopes_for is empty for dave, so the form must not offer the narrowing \
+             choice at all: {s}"
+        );
+        assert!(
+            !s.contains("type=\"checkbox\""),
+            "there is no scope to check, so the form carries no checkbox: {s}"
+        );
+        assert!(
+            s.contains(r#"value="all""#),
+            "the unrestricted mint is the only choice the page can honestly offer, so it stays: {s}"
+        );
+
+        let rev = sha256_hex(&read(&path));
+        let g = account_post(
+            &format!("{base}keys"),
+            Some("dave@x.com"),
+            &[
+                ("rev", &rev),
+                ("id", "phone"),
+                ("duration", "30d"),
+                ("restrict", "all"),
+            ],
+        );
+        assert_eq!(
+            g.status,
+            200,
+            "the mint the form offers is the mint that stands: {}",
+            account_readable(&g.body)
+        );
+        let after = read(&path);
+        let key = account_key_json(&after, 0, "phone");
+        assert!(
+            key.get("scopes").is_none(),
+            "restrict=all files no restriction, which the gate reads as the owner's reach: {key}"
         );
 
         cleanup(&path);

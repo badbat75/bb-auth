@@ -40,6 +40,22 @@ Rules are in `AGENTS.md`. Format of this file: `AGENTS.md`, under "Skills".
   fixture: bob has a roster row, no `api_keys`, and those settings name no `profile_claims`, so
   `keys` and `profile` both render their "none" line. `account_section(body, "keys")` cuts one
   section out, so a wording assertion cannot be satisfied by a neighbour section's word.
+- To assert on **one** form among several in a section (the keys section carries a mint, a
+  rotate and a remove per key), cut the `<form …>…</form>` blocks out (`account_forms`) and pick
+  the one whose `action` and hidden `id` match (`account_form_for`), so an assertion about key A's
+  rotate cannot be satisfied by key B's remove.
+- A fixture key with `duration: "never"` is the right probe for "rotate leaves the window alone":
+  the self-service page refuses to *mint* `never`, so a rotate that rewrote the window cannot hide
+  behind a value the page would never have written.
+- The `bb-auth-web` socket suite is **flaky under full-target parallelism**: every account test
+  starts its own server and the client has a 5s global timeout, so a full `cargo test --bin
+  bb-auth-web` can show `Timeout(Global)` on tests that pass alone. Run
+  `cargo test --bin bb-auth-web -- --test-threads=1` before blaming an edit for a failure, and
+  report a parallel-only failure as flakiness, not as a regression.
+- `/account` dispatches a fixed allowlist of paths (the prefix, the page, `<prefix>/keys`), so a
+  new mutation path is a `404` for every caller until the code lands. The console answers a
+  mutation refusal (unknown id, not your row) with the `400` refusal page and has no `404` for a
+  `POST`, so the account side's "not your key" is a `400` too.
 - A scratch screenshot script can live outside the repo and `require()` `e2e/lib/server.js` by
   absolute path: `boot()` then gives the same server the suite starts, proxy secret included, with
   the working tree untouched.
@@ -52,6 +68,10 @@ Rules are in `AGENTS.md`. Format of this file: `AGENTS.md`, under "Skills".
 ## Pitfalls
 
 - A test polling a stub in another thread hung forever.
+- The mutation journal (`audit()`, `[bb-auth-web] <who>: <verb> <target>`) is `eprintln!` on the
+  server's stderr, so no over-the-socket test can read it: a PLAN requirement that says "journal
+  `<uuid> (self): key rotate <id>`" is not assertable from this suite, and has to be stated as the
+  untested half rather than quietly dropped.
 - An id taken from one temporary fixture does not match another, and the test fails with the wrong error.
 - A fake holds whatever you write, while the real system can answer differently. A test passing on a
   fake proves nothing about the real thing.

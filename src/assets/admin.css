@@ -280,6 +280,10 @@ body:has(.selfserve){background:var(--bg)}
 /* The mint form lives inside the keys panel, under the list of keys, so its heading is not the
    first thing in the panel and the rule above would leave it flush against the last key. */
 .selfserve form.edit h2{margin:20px 0 10px}
+/* The two forms every key of the caller's carries. Each posts to a path that names its own
+   mutation, so each has to be a form, and a form is a block: side by side they read as the two
+   things one key can do, rather than as two more panels stacked under the list. */
+.selfserve .keyact{display:inline-block;margin:8px 8px 0 0}
 /* The selector at the foot of the page: two list boxes side by side, and the page's one main
    action under them. `.lbl` is base.css's field label and `button.primary` its main action, so
    both are the objects every form in the estate already paints. */
