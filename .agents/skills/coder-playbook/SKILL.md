@@ -42,6 +42,10 @@ Rules are in `AGENTS.md`. Format of this file: `AGENTS.md`, under "Skills".
 
 ## Pitfalls
 
+- A new `Config` field breaks the test module's `cfg_for` struct literal (the only one), and the
+  tester's staged tests never add it. When the task forbids editing the test module, that one
+  line (`workers: DEFAULT_WORKERS,`) is a blocker to report, not a licence to edit: production
+  code is still checkable with `cargo check --bin bb-auth-web` and `cargo clippy --lib --bins`.
 - `pkill -f PATTERN` also matches the shell running it, and killed that shell. Use the task's own stop
   control, or a pattern that cannot match itself.
 - A shade seam on a page is not the palette's doing: the two dark arms of `theme.css` are token-for-token

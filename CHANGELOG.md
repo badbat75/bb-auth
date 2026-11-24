@@ -644,6 +644,12 @@ then the endpoint beside it is too.
   `gate.authorized_hosts`, and when it is listening on a non-loopback address.
 * `session_ttl_secs` has a ceiling as well as a floor, and the cookie's expiry is computed
   with a saturating add.
+* `bb-auth-web`'s worker count is now `BB_AUTH_WEB_WORKERS` (default 8, accepted 1 to 64,
+  anything else a **fatal startup** naming the variable). It was a constant 2, sized for the
+  handful of people on `web.admins`, and the self-service page put every signed-in person on that
+  pool. It bounds how many handlers run at once, not how many connections are open, so too few
+  shows as latency for everybody, and it is read once at startup, so a change needs a restart
+  (docs/ARCHITECTURE.md §13.13).
 
 ### Release and operations
 

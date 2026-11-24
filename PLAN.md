@@ -109,33 +109,12 @@ rotate leaves its `scopes` bytes identical; the bounds, reveal-once, the `rev` c
 e2e flow with scripting off.
 
 Done so far: `Access::key_scopes_for` (4a), minting (4b), rotating and removing (4c) from
-`/account`. Made reliable in parallel (4d). Left: the
-worker count (4e, below); the e2e flow with scripting off; then the install on rpi-01 and the
+`/account`. Made reliable in parallel (4d); the worker count is
+`BB_AUTH_WEB_WORKERS` (4e). Left: the e2e flow with scripting off; then the install on rpi-01 and the
 browser check below.
 
 - Done when: a roster user mints, rotates and removes a key of their own in a browser, while a
   stranger and a denied user cannot.
-
-### 4e. bb-auth-web's worker count is configurable, with a default sized for everybody
-
-Covers: R3. Requested by the user on 2026-11-24, after the 4d measurement: `/account` opened
-`bb-auth-web` to every signed-in person, but it still serves them on `WORKERS = 2`, a constant
-whose own comment says it was sized for "the handful of people on `web.admins`". Two slow
-handlers stop the GUI for everyone, and step 5 adds a network call to Cognito inside a handler.
-
-`BB_AUTH_WEB_WORKERS` (env, like the gate's `BB_AUTH_WORKERS`: a worker count is fixed at
-startup) sets the maximum number of request threads. Designed in `docs/ARCHITECTURE.md` §13.13:
-default 8, a general default argued from the workload and not from one host (no handler is
-CPU-bound, so the ruler is how many slow handlers may be in flight while page views still get
-through), accepted 1 to 64, and anything else (0, 65, negative, empty, padded, non-numeric) a fatal
-startup naming the variable, unlike the gate's silent fallback. The startup line prints
-`workers=N`. Also: `account_key_post` holds `WRITE_LOCK` until the response is sent; its guard
-ends right after the commit, as `mutate`'s does.
-
-- Done when: a test that failed first shows unset is 8, 1 and 64 are accepted, and 0, 65, -1, empty,
-  a leading space, `8x` and `eight` are refused naming the variable; the lock change is in the diff
-  and the concurrent one-success-one-`409` test still passes; `deploy/bb-auth-web.env.example`, the
-  README env table and AGENTS.md name the variable; the slice's checks are clean.
 
 ### 5. Editable Cognito profile
 

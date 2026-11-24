@@ -344,9 +344,21 @@ const SETTINGS_ONCHANGE: &str = "this.form.submit()";
 /// be able to collide with this one.
 const PROXY_SECRET_HEADER: &str = "X-BB-Web-Secret";
 
-/// Blocking request threads. Fixed, and deliberately not an env var: this serves the
-/// handful of people on `web.admins`, not the public.
-const WORKERS: usize = 2;
+/// The default for `BB_AUTH_WEB_WORKERS`, the blocking request threads ([`compile_workers`],
+/// [`Config::workers`], docs/ARCHITECTURE.md §13.13).
+///
+/// It is 8 and not the 2 this replaces, whose own comment says it was sized for the handful of
+/// people on `web.admins`: `/account` opened the same process to every signed-in person. A
+/// handler here **waits rather than computes** (a write queues on [`WRITE_LOCK`] and two
+/// fsyncs, and from plan step 5 a Cognito call queues on the network), so the ruler is how many
+/// slow handlers may be in flight while page views still get through, not the core count.
+const DEFAULT_WORKERS: usize = 8;
+
+/// The ceiling for `BB_AUTH_WEB_WORKERS` (docs/ARCHITECTURE.md §13.13). It is there to turn a
+/// typo (`800`) into a refusal and not to forbid anything a real deployment needs: past this
+/// many threads there is nothing left to do in parallel, since writes serialise on one lock and
+/// a read is milliseconds.
+const MAX_WORKERS: usize = 64;
 
 /// One writer at a time inside this process. See [`mutate`], which is its only user.
 static WRITE_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
@@ -2439,6 +2451,15 @@ struct Config {
     /// [`compile_account_path`], so a deployment where the two prefixes overlap is a refusal
     /// to start and not a page that answers the wrong half of its own URLs.
     account_path: String,
+    /// `BB_AUTH_WEB_WORKERS`: the blocking request threads `main` spawns, validated at startup
+    /// by [`compile_workers`] (docs/ARCHITECTURE.md §13.13).
+    ///
+    /// It bounds how many **handlers run at once**, not how many connections are open:
+    /// `tiny_http` runs its own accept pool and pushes every parsed request onto one unbounded
+    /// queue, so a request that finds every worker busy waits, it is not refused. Too few
+    /// workers therefore shows up as latency for everybody, which is why the count is a
+    /// deployment's to state and not a constant.
+    workers: usize,
 }
 
 /// Read an env var, falling back to `default` when unset.
@@ -2597,6 +2618,48 @@ fn compile_account_path(account: &str, base: &str) -> Result<String, String> {
     Ok(account)
 }
 
+/// Validate `BB_AUTH_WEB_WORKERS` (docs/ARCHITECTURE.md §13.13, plan step 4e): unset is
+/// [`DEFAULT_WORKERS`], an exact decimal from 1 to [`MAX_WORKERS`] is accepted, and anything
+/// else is a refusal naming the variable and the accepted range.
+///
+/// **Fatal, and not the gate's silent `unwrap_or`**: a fallback turns `BB_AUTH_WEB_WORKERS=800`
+/// into 8 with nothing anywhere saying so, which is the operator's intent lost without a trace,
+/// and every other value this binary reads from its env is already fatal on a bad one. The
+/// boot-loop argument that makes the gate careful does not carry over here: a GUI that refuses
+/// to start locks nobody out of any application, and `bb-auth-adm` over SSH is untouched.
+///
+/// **Digits only**, so ` 8` and `+8` are refusals rather than numbers with decoration: this
+/// number is how many threads `main` spawns, and a parser that accepted one spelling's noise
+/// would be a second answer to what the env file says. Empty is refused rather than defaulted,
+/// because an empty assignment is somebody meaning to say something ([`compile_account_path`]
+/// reads it the same way), and `0` is refused rather than raised to one, because a service that
+/// binds its port and never answers is the worst of both. A refusal is **returned**, never a
+/// panic: a panic in a startup parser is a `Restart=on-failure` boot loop.
+fn compile_workers(raw: Option<&str>) -> Result<usize, String> {
+    let Some(raw) = raw else {
+        return Ok(DEFAULT_WORKERS);
+    };
+    let n = if raw.bytes().all(|b| b.is_ascii_digit()) {
+        raw.parse::<usize>().ok()
+    } else {
+        None
+    };
+    match n {
+        Some(n) if (1..=MAX_WORKERS).contains(&n) => Ok(n),
+        Some(n) => Err(format!(
+            "BB_AUTH_WEB_WORKERS is {n}: the accepted range is 1 to {MAX_WORKERS}. Zero would \
+             bind the port and never answer, and a count above {MAX_WORKERS} has nothing to do \
+             in parallel (writes serialise on one lock and a read is milliseconds), so it reads \
+             as a typo. Unset is {DEFAULT_WORKERS}."
+        )),
+        None => Err(format!(
+            "BB_AUTH_WEB_WORKERS is {raw:?}: it must be a plain decimal number of request \
+             threads from 1 to {MAX_WORKERS}, with no spaces, sign or trailing text. Unset is \
+             {DEFAULT_WORKERS}."
+        )),
+    }
+}
+
 /// Does the secret this request carries match the one this process was started with
 /// (docs/ARCHITECTURE.md §13.3)?
 ///
@@ -2670,12 +2733,21 @@ impl Config {
                     eprintln!("[bb-auth-web] FATAL: {e}");
                     std::process::exit(1);
                 });
+        // The worker count, fatal on a bad value like every other value read here. Read with
+        // `var` and not `env_or` so an **unset** variable reaches `compile_workers` as `None`
+        // (the default) while `BB_AUTH_WEB_WORKERS=` arrives as an empty value and is refused.
+        let workers = compile_workers(std::env::var("BB_AUTH_WEB_WORKERS").ok().as_deref())
+            .unwrap_or_else(|e| {
+                eprintln!("[bb-auth-web] FATAL: {e}");
+                std::process::exit(1);
+            });
         Config {
             listen: env_or("BB_AUTH_WEB_LISTEN", "127.0.0.1:8091"),
             access_path,
             settings_path,
             base_path,
             account_path,
+            workers,
             default_lang,
             logout_url,
             proxy_secret,
@@ -8615,7 +8687,11 @@ impl AccountKeyOp {
 ///    doing any of those to a signed-in person is the exact attack this door exists for;
 /// 2. the row, which the identity header resolves to and no form field may choose;
 /// 3. [`WRITE_LOCK`], then the file's current bytes against the form's `rev`, then
-///    [`open_access_file`], which refuses to start editing from bytes the gate would reject;
+///    [`open_access_file`], which refuses to start editing from bytes the gate would reject.
+///    The guard **ends at the commit**, before anything is rendered or sent, as `mutate`'s does
+///    (docs/ARCHITECTURE.md §13.13): what the lock owes is that no other writer in this process
+///    renames between this one's `rev` check and this one's rename, and a response's send is
+///    none of that;
 /// 4. the mutation's own checks, before anything is written, because a secret created for a
 ///    refusal is a secret handed out for nothing;
 /// 5. [`add_api_key`] / [`rotate_api_key`] / [`remove_api_key`] through [`AccessWrite`], the
@@ -8666,8 +8742,10 @@ fn account_key_post(
     let form = Form::parse(&read_body(&mut req));
     // (3) Serialized against every other write in this process, exactly as the console's
     // `mutate` is: two workers, one person with two tabs, and a loser whose mint vanishes
-    // behind a success page is the silent clobber the `rev` cannot see.
-    let _writing = WRITE_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+    // behind a success page is the silent clobber the `rev` cannot see. The guard is named so
+    // it can be **released at the commit** below, and every refusal path that returns from here
+    // drops it on the way out, so the lock is never held across a response.
+    let writing = WRITE_LOCK.lock().unwrap_or_else(|e| e.into_inner());
     let raw = match std::fs::read_to_string(&cfg.access_path) {
         Ok(bytes) => bytes,
         Err(e) => {
@@ -8815,6 +8893,11 @@ fn account_key_post(
             Ok(sealed.map(|sealed| sealed.reveal(&written)))
         }
     })();
+    // The lock ends here, at the commit, and not at the response (§13.13): what it owes is that
+    // no other writer renames between this one's `rev` check and this one's rename, and the
+    // reveal page's send is nothing to that. Holding it across the write to the socket couples
+    // every other writer's wait to one response.
+    drop(writing);
     // The key's id rides in the title, because the shell renders the title as the page's one
     // heading: "API keys · phone" says which secret this is, which is the fact a person with two
     // browser tabs open needs in front of them.
@@ -9709,12 +9792,13 @@ fn main() {
         }
     };
     eprintln!(
-        "[bb-auth-web] {} listening on {} | file={} | settings={} | admins={admins} | base={base}          | lang={}",
+        "[bb-auth-web] {} listening on {} | file={} | settings={} | admins={admins} | base={base}          | lang={} | workers={}",
         version_line("bb-auth-web"),
         cfg.listen,
         cfg.access_path,
         cfg.settings_path,
-        cfg.default_lang.code()
+        cfg.default_lang.code(),
+        cfg.workers
     );
     eprintln!(
         "[bb-auth-web] identity comes from the {IDENTITY_HEADER} header — this port must be \
@@ -9736,7 +9820,7 @@ fn main() {
     let server = std::sync::Arc::new(server);
     let cfg = std::sync::Arc::new(cfg);
     let mut handles = Vec::new();
-    for _ in 0..WORKERS {
+    for _ in 0..cfg.workers {
         let server = std::sync::Arc::clone(&server);
         let cfg = std::sync::Arc::clone(&cfg);
         handles.push(std::thread::spawn(move || loop {
@@ -9844,6 +9928,10 @@ mod tests {
             // [`get_with_secret`] / [`post_with_secret`] is a request the proxy would have
             // made, and the refusals below are about the secret and nothing else.
             proxy_secret: TEST_SECRET.to_string(),
+            // The startup default, because no fixture here is about the worker count: the
+            // handlers a test drives are reached over a socket, and the one test that needs
+            // more than one thread builds its own server (`account_serve_with_workers`).
+            workers: DEFAULT_WORKERS,
         }
     }
 
@@ -10721,6 +10809,68 @@ mod tests {
             compile_proxy_secret(TEST_SECRET).expect("accepted"),
             TEST_SECRET
         );
+    }
+
+    /// The startup rule for `BB_AUTH_WEB_WORKERS` (docs/ARCHITECTURE.md §13.13, plan step 4e):
+    /// unset is 8, the accepted range is 1 to 64, and every other value is a refusal naming the
+    /// variable. Tested on the parser alone and never by setting the environment: `std::env` is
+    /// process-global and this suite's tests run in parallel, so a test that wrote
+    /// `BB_AUTH_WEB_WORKERS` would race every other test in the binary, and the value `main`
+    /// reads is read once at startup anyway.
+    ///
+    /// The default is 8 because a handler here waits rather than computes (a write queues on
+    /// [`WRITE_LOCK`] and two fsyncs, and from plan step 5 a Cognito call queues on the
+    /// network), so the ruler is how many slow handlers may be in flight while page views still
+    /// get through, not the core count. It is not 2, which is the constant this replaces and
+    /// whose own comment says it was sized for the handful of people on `web.admins`, before
+    /// `/account` opened the same process to every signed-in person.
+    #[test]
+    fn workers_unset_is_the_default_of_eight() {
+        assert_eq!(
+            compile_workers(None),
+            Ok(8),
+            "an unset variable is the default and not a refusal, because a package creates the \
+             env file and cannot know this value"
+        );
+    }
+
+    /// Both ends of the accepted range are accepted as the numbers they spell: `1` is a
+    /// deployment that wants the old fixed count, and 64 is the ceiling, accepted rather than
+    /// refused, so the ceiling refuses a typo (`800`) and not a deployment.
+    #[test]
+    fn workers_one_and_the_ceiling_are_accepted() {
+        assert_eq!(
+            compile_workers(Some("1")),
+            Ok(1),
+            "one worker is a legal deployment"
+        );
+        assert_eq!(
+            compile_workers(Some("64")),
+            Ok(64),
+            "the ceiling is inside the range"
+        );
+    }
+
+    /// Every value outside 1 to 64 is refused, and every refusal names `BB_AUTH_WEB_WORKERS`.
+    /// Fatal and not the gate's silent `unwrap_or`: a fallback turns `BB_AUTH_WEB_WORKERS=800`
+    /// into 8 with nothing anywhere saying so, which is the operator's intent lost without a
+    /// trace, and every other value this binary reads from its env is already fatal on a bad
+    /// one. Empty is refused rather than defaulted, because an empty assignment is somebody
+    /// meaning to say something (`BB_AUTH_WEB_ACCOUNT_PATH` reads it the same way), and `0` is
+    /// refused rather than raised to one, because a service that binds its port and never
+    /// answers is the worst of both. A refusal is **returned**, never a panic: a panic in a
+    /// startup parser is a `Restart=on-failure` boot loop, and this loop is what shows each of
+    /// these values comes back as an `Err` rather than taking the process down.
+    #[test]
+    fn workers_every_value_outside_one_to_sixty_four_is_refused_naming_the_variable() {
+        for raw in ["0", "65", "-1", "", " 8", "8x", "eight"] {
+            let e = compile_workers(Some(raw)).unwrap_err();
+            assert!(
+                e.contains("BB_AUTH_WEB_WORKERS"),
+                "the refusal of {raw:?} must name the variable, since that is the only thing \
+                 an operator can go and edit: {e}"
+            );
+        }
     }
 
     // --- routing ------------------------------------------------------------
@@ -15895,6 +16045,117 @@ mod tests {
             read(&path),
             before,
             "the conflict wrote nothing: the access file is byte for byte what it was"
+        );
+
+        cleanup(&path);
+    }
+
+    /// The GUI served on `workers` **request threads**, the shape of `main`'s worker loop, so
+    /// two handlers really can be in flight at once. The shared [`serve`] helper answers
+    /// requests one at a time from a single thread, which would serialize any pair of writers
+    /// by itself and leave a concurrency test measuring the harness instead of the lock.
+    fn account_serve_with_workers(path: &str, workers: usize) -> String {
+        let cfg = std::sync::Arc::new(cfg_for(path, ADMIN_BASE));
+        let server =
+            std::sync::Arc::new(Server::http("127.0.0.1:0").expect("bind an ephemeral port"));
+        let port = server.server_addr().to_ip().expect("an ip address").port();
+        for _ in 0..workers {
+            let server = std::sync::Arc::clone(&server);
+            let cfg = std::sync::Arc::clone(&cfg);
+            std::thread::spawn(move || loop {
+                match server.recv() {
+                    Ok(req) => handle(req, &cfg),
+                    Err(e) => eprintln!("[bb-auth-web test] recv error: {e}"),
+                }
+            });
+        }
+        format!("http://127.0.0.1:{port}{ACCOUNT_PATH}/")
+    }
+
+    /// One mint `POST` **without** the harness's [`WRITE_PERMIT`], for the one test that needs
+    /// two writers in flight at once. Every other account writer takes that permit because the
+    /// suite's wall time is the fsync queue behind the production [`WRITE_LOCK`]; a race test
+    /// that took it would serialize its own racers and measure the queue, not the lock.
+    fn account_race_post(url: &str, rev: &str, id: &str) -> u16 {
+        let fields = [
+            ("rev", rev),
+            ("id", id),
+            ("duration", "30d"),
+            ("restrict", "all"),
+        ];
+        let req = account_client()
+            .post(url)
+            .header("Sec-Fetch-Site", "same-origin")
+            .header(SECRET_HEADER, TEST_SECRET)
+            .header(IDENTITY_HEADER, "bob@x.com");
+        let r = req
+            .send_form(fields.iter().copied())
+            .expect("a POST response");
+        r.status().as_u16()
+    }
+
+    /// Two mints that arrive at the same moment, each carrying the `rev` of the bytes it was
+    /// rendered from, come to **one success and one `409`**, never two successes
+    /// (docs/ARCHITECTURE.md §13.13). The `rev` is compared against the file's current bytes
+    /// inside [`WRITE_LOCK`], so the writer that loses the race is told the file moved rather
+    /// than clobbering the winner: two mints that both passed the check would write two files,
+    /// and the second rename would drop the first mint's key, leaving a bearer that was shown
+    /// in a browser and authorizes nothing.
+    ///
+    /// This is the regression guard for the narrower lock scope in `account_key_post`, where
+    /// the guard ends at the commit instead of after the response is sent. What must not move
+    /// with it is the `rev` check, and this is the assertion that says so. The fixture is
+    /// served on two worker threads for the same reason: on the single-threaded [`serve`]
+    /// helper the two requests never overlap and the test proves nothing.
+    #[test]
+    fn account_two_concurrent_mints_against_one_rev_give_one_success_and_one_409() {
+        let path = account_scratch_access("mint-race", &account_access_mint());
+        let base = account_serve_with_workers(&path, 2);
+        let keys = format!("{base}keys");
+        let rev = sha256_hex(&read(&path));
+
+        // Both clients fire the moment the barrier opens, so both handlers are in flight and
+        // neither can be answered before the other has read the same bytes.
+        let gate = std::sync::Arc::new(std::sync::Barrier::new(3));
+        let mint = |id: &'static str| {
+            let keys = keys.clone();
+            let rev = rev.clone();
+            let gate = std::sync::Arc::clone(&gate);
+            std::thread::spawn(move || {
+                gate.wait();
+                account_race_post(&keys, &rev, id)
+            })
+        };
+        let phone = mint("phone");
+        let laptop = mint("laptop");
+        gate.wait();
+        let mut both = [
+            phone.join().expect("the first mint answered"),
+            laptop.join().expect("the second mint answered"),
+        ];
+        both.sort_unstable();
+        assert_eq!(
+            both,
+            [200, 409],
+            "one mint lands and the other is told the file moved under it"
+        );
+
+        // And the file carries exactly one new key, so the loser wrote nothing and the winner's
+        // key is the one still standing. Which of the two won is the race's business.
+        let file = read(&path);
+        let doc: serde_json::Value = serde_json::from_str(&file).expect("the written file parses");
+        let ids: Vec<String> = doc["users"][0]["api_keys"]
+            .as_array()
+            .map(|ks| {
+                ks.iter()
+                    .filter_map(|k| k["id"].as_str().map(str::to_string))
+                    .collect()
+            })
+            .unwrap_or_default();
+        assert_eq!(ids.len(), 1, "exactly one key was filed, not two: {file}");
+        assert!(
+            ids[0] == "phone" || ids[0] == "laptop",
+            "the filed key is one of the two mints that raced: {file}"
         );
 
         cleanup(&path);

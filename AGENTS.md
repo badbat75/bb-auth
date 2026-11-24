@@ -1288,7 +1288,12 @@ What is left below is configuration, which is a reference rather than a rule.
   deliberately not counted again here: the two copies had already drifted to "ten" and
   "six". The only secret of the gate is `BB_AUTH_HMAC_KEY` (≥32 bytes), and it is in the env
   file; the GUI's env file holds one of its own, `BB_AUTH_WEB_PROXY_SECRET`, which the install
-  generates and never prints (docs/ARCHITECTURE.md §13.3). Full reference:
+  generates and never prints (docs/ARCHITECTURE.md §13.3). That file also carries the
+  restart-only `BB_AUTH_WEB_WORKERS` (default 8, accepted 1 to 64, anything else a fatal startup
+  naming the variable): it bounds concurrent request handlers, not connections, so too few shows
+  as latency for everybody, and the ruler for sizing it is how many slow handlers may be in
+  flight while page views still get through, not the core count (docs/ARCHITECTURE.md §13.13).
+  Full reference:
   [deploy/bb-auth.env.example](deploy/bb-auth.env.example),
   [deploy/bb-auth-web.env.example](deploy/bb-auth-web.env.example),
   [deploy/settings.example.json](deploy/settings.example.json) and `docs/ARCHITECTURE.md` §8/§8a.

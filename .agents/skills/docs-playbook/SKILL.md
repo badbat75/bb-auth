@@ -22,6 +22,13 @@ Rules are in `AGENTS.md`. Format of this file: `AGENTS.md`, under "Skills".
   `can WHO URL` for the verdict the docs claim). Every write leaves an `access.json.bak` beside
   the file it wrote, so never point it at a tracked file such as `deploy/access.example.json`.
   `cargo build --bin bb-auth-adm` is instant when the tree is current.
+- To check a startup rule before documenting an env var, **run the binary** on scratch files
+  under `/tmp/opencode` and read its banner, which prints the value the process took
+  (`workers=8`). `bb-auth-web` starts with a `{"version":1,…}` access file, a
+  `{"version":3,"web":{"admins":[…]}}` settings file, `BB_AUTH_WEB_BASE_PATH=/admin` and a
+  40-character `BB_AUTH_WEB_PROXY_SECRET`; run it with `timeout 3` and a spare
+  `BB_AUTH_WEB_LISTEN=127.0.0.1:18091`. A unit test proves the parser; only the run proves the
+  fatal path (exit 1, message naming the variable) and what the banner says.
 
 ## Pitfalls
 

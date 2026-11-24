@@ -25,6 +25,12 @@ Rules are in `AGENTS.md`. Format of this file: `AGENTS.md`, under "Skills".
 - In `bb-auth-web`, test a request end to end over a real socket: copy
   `serving_enforces_the_identity_header_and_the_admin_allowlist` (`scratch` with a unique name,
   `cfg_for`, `client()`, `IDENTITY_HEADER`, `cleanup`). The fixture's administrator is `admin@x.com`.
+- A **concurrency** test in `bb-auth-web` needs its own server: the shared `serve` helper answers
+  requests one at a time from one thread, and `account_post` holds `WRITE_PERMIT` across the request,
+  so a pair of writers through those helpers is serialized by the harness and proves nothing. Bind a
+  `Server`, wrap it in `Arc`, spawn N threads running `server.recv()` in a loop (the shape of `main`),
+  post from N threads released by a `std::sync::Barrier`, and skip the permit.
+  `account_two_concurrent_mints_against_one_rev_give_one_success_and_one_409` is that test.
 - Whole board: save each command's output to a file and give each one a `timeout`. On a Linux host
   the cfg(unix) tests run inside plain `cargo test`, with no WSL. `node e2e/run.js` builds and starts its
   own server and uses the system `microsoft-edge`; its `TOTAL` line is the verdict. For `cargo doc`,
@@ -69,6 +75,10 @@ Rules are in `AGENTS.md`. Format of this file: `AGENTS.md`, under "Skills".
   Calling `account_port` again on the same path starts a **second** server on a second port.
   ureq 3's `send_form` takes an `IntoIterator` of tuples, so a `&[(&str, &str)]` field list needs
   `.iter().copied()`.
+- When a field is added to `Config`, the whole `bb-auth-web` test target is red with E0063 from
+  **one** place: `cfg_for` is the only `Config` literal in the test module (the other is production
+  `from_env`). Fill it with the field's startup default (`DEFAULT_WORKERS`), not a test-specific
+  value: a test that needs a different count builds its own server (`account_serve_with_workers`).
 
 ## Pitfalls
 
