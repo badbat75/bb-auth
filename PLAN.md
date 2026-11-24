@@ -117,6 +117,23 @@ scripting off; then the install on rpi-01 and the browser check below.
 - Done when: a roster user mints, rotates and removes a key of their own in a browser, while a
   stranger and a denied user cannot.
 
+### 4e. bb-auth-web's worker count is configurable, with a default sized for everybody
+
+Covers: R3. Requested by the user on 2026-11-24, after the 4d measurement: `/account` opened
+`bb-auth-web` to every signed-in person, but it still serves them on `WORKERS = 2`, a constant
+whose own comment says it was sized for "the handful of people on `web.admins`". Two slow
+handlers stop the GUI for everyone, and step 5 adds a network call to Cognito inside a handler.
+
+`BB_AUTH_WEB_WORKERS` (env, like the gate's `BB_AUTH_WORKERS`: a worker count is fixed at
+startup) sets the maximum number of request threads, with a reasonable default chosen and argued
+by the architect (§13), validated at startup (a number of at least 1 and a sane upper bound, fatal
+otherwise, naming the variable). The architect also says whether `WRITE_LOCK` is held across more
+than it must (the fsync, the reparse), since every write occupies a worker for that long.
+
+- Done when: the design is in `docs/ARCHITECTURE.md` §13; a test that failed first shows the
+  value is read, defaulted and refused out of range; `deploy/bb-auth-web.env.example`, the README
+  env table and AGENTS.md name it; the slice's checks are clean.
+
 ### 5. Editable Cognito profile
 
 Covers: R2.
