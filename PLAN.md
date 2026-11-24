@@ -200,13 +200,17 @@ final page links to `/auth/logout`.
 
 ### 8. The account page's look
 
-Covers: R3. Decided by the user on 2026-11-24: the page stays basic until steps 4, 5 and 7 have
-put their forms on it, and is then designed once, around what it actually holds.
+Covers: R3. First decided to wait for steps 4, 5 and 7; brought forward by the user on 2026-11-24
+after trying 4g, with the designer (the UX/UI role created that day). Designed in
+`docs/ARCHITECTURE.md` §13.16 (the keys table) and §13.17 (the page), approved by the user on
+2026-11-24: rotate as ↻ beside × in each row, "+ New key", the uuid kept as "Account id". The user
+then asked for a **header** with the person's identity, the settings (theme, language) and sign
+out, the usual pattern, replacing the preferences form at the foot of the page; the designer adds
+it to §13.17.
 
-The architect proposes a layout for `/account` (a header with the brand and the person's name,
-the sections arranged as the admin console arranges its own, each action beside the item it acts
-on), built only from `BASE_CSS` components and `admin.css` arrangement, with no script, then the
-page is restyled to it.
+Slices, in order: (8a) the keys table with the 4h rework (it replaces 4h's form; 4h's parser,
+confirmations, copy icon and lifted bound stay); (8b) the header; (8c) the sections' lists, chips
+and empty states. Steps 5 and 7 add their forms into this layout later (Profile, a last panel).
 
 - Done when: the user approves screenshots of the page in both themes and both languages, at
   desktop and phone width, with the forms of steps 4, 5 and 7 on it; e2e and the scripting-off

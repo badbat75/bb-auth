@@ -1411,13 +1411,13 @@ keyed by the caller's uuid, never by a form field.
 
 - **Narrow only, by scope** (decided, 13.12). The form offers "everything I reach" (no `scopes`
   field, which the gate reads as "at most what the owner reaches") or any subset of the scopes
-  the owner's keys reach (`Access::key_scopes_for`, 13.8), as checkboxes grouped under their
-  application. It submits `application/scope` pairs, each checked against that set: a pair
-  outside it is a `400` and nothing is written, never dropped silently. What is written is the
+  the owner's keys reach (`Access::key_scopes_for`, 13.8), as checkboxes (since 13.16 in the
+  keys table's new row, each spelled `app/scope` as the table's Scopes column spells it). It
+  submits `application/scope` pairs, each checked against that set: a pair outside it is a `400` and nothing is written, never dropped silently. What is written is the
   submitted pairs, sorted. The restriction is a restriction either way, so this check keeps the
   file honest rather than keeping anybody out.
 - **Shown with scope names, never URLs.** Each key's id, expiry, and either "everything you
-  reach" or its entries grouped by application. An entry the owner no longer reaches is shown
+  reach" or its entries (as `app/scope` chips since 13.16). An entry the owner no longer reaches is shown
   and marked, not hidden.
 - **Rotate keeps the restriction byte for byte.** `rotate_api_key` changes only `key_hash` and
   `released`, and the self-service rotate offers no field that could change `scopes`.
@@ -2022,7 +2022,9 @@ console needs no change for this requirement, and `/account/` takes the **same s
 
 - the list's revoke control becomes `form method="get" action="<prefix>/keys/remove"` with a
   hidden `id` and the same `button.danger` (`K::AccountKeyRemove`): it still looks and reads as
-  today's button, and it navigates rather than mutates;
+  today's button, and it navigates rather than mutates (amended by §13.16: still this `GET`
+  form with its hidden `id`, but the button is the keys table's × icon, named
+  "Revoke key `<id>`", and a sibling ↻ icon reaches the same kind of page for a rotate);
 - `GET <prefix>/keys/remove?id=<id>` passes the doors every `/account/` request meets (proxy
   secret, identity header, veto `403`, row resolution, a stranger's `403`), looks the id up on
   **the caller's row only**, and renders a confirmation card: heading `K::AccountKeyRemove`,
@@ -2058,6 +2060,13 @@ a hand-written client keeps working, which is what the console's `POST` already 
   bearer, already is.
 
 #### The duration, chosen from five
+
+**Amended by §13.16 (2026-11-24).** The five choices, their order, the posted values, the
+`days` field, the default and `duration_from_form` all stand. What changes is the markup: the
+component is one `select name="duration"` with five `option`s instead of five radios, on both
+surfaces, because on `/account/` it now lives in one cell of a table row, and one component
+rendered two ways would be two components. The radio markup below is kept as the record of
+what 4h decided.
 
 One component, `duration_choice`, rendered by both `account_mint_form` and `page_key_form`:
 
@@ -2149,6 +2158,8 @@ invalid marking the other fields do.
 
 - *A select instead of radios.* Five options fit on screen, a radio group shows them all
   without opening anything, and the custom field reads as belonging to the row before it.
+  (Reversed by §13.16: in one table cell five radio rows are the tallest thing in the row,
+  and the space argument goes the other way.)
 - *Hiding the days field with `:has()` until custom is checked.* It degrades to visible where
   `:has()` is not supported, but where it is, a number typed and then hidden by a change of
   mind is still submitted, and step 2 would then refuse a value the person cannot see. An
@@ -2179,13 +2190,16 @@ Unit tests in `bb-auth-web.rs`:
   `fieldset` with a `legend`, five `name="duration"` radios with the values in the order above,
   `365d` checked, and a `days` input with an `aria-label`; the console's edit form for keys
   stored as `91d`, `0` and `8760h` checks 3 months, no expiry, and custom with `8760h` filled
-  in.
+  in. (Changed by §13.16: one `select name="duration"` with the five `option`s in that order and
+  `365d` `selected`; the edit form marks the stored choice `selected`; on `/account/` the form
+  is only on `GET <prefix>/keys/new`, not on the plain page.)
 - `revoking_a_key_asks_first_on_the_account_page`: the page's revoke control is a `GET` form
   and no `POST` form to `<prefix>/keys/remove` remains on it; `GET <prefix>/keys/remove?id=laptop`
   is `200`, names `laptop`, carries a `POST` form to the same path with the file's current
   `rev` and the id, and leaves the file's bytes unchanged; an id on another row, an unknown id
   and no id are `404` naming nothing; a stranger is `403`, a denied caller `403`; the `POST`
-  from that form removes the key.
+  from that form removes the key. (Survives §13.16 as written, except that the control's
+  button has no text: what it asserts on is the `aria-label`, "Revoke key `laptop`".)
 
 E2E: `account.js` (scripting off) mints with 6 months and sees the expiry 182 days out, with
 custom 40, and with no expiry and sees "never"; revokes through the confirmation, first
@@ -2194,3 +2208,366 @@ console reveal with scripting on: the icon is visible, its bounding box is at le
 a click shows the check glyph and the status text `K::CopyDone`, and the clipboard read equals
 the key; with scripting off the icon is not visible. `shots.js` gains the reveal and the key
 form, in both themes, which is the look no assertion can give.
+
+### 13.16 The keys as a table, with a + row (plan step 4, asked 2026-11-24)
+
+What was read: `PLAN.md` steps 4 (the 4h paragraph) and 8, §13.6, §13.14 and §13.15,
+`src/bin/bb-auth-web.rs` (`page_account`, `account_mint_form`, `account_key_forms`,
+`handle_account`, `account_key_post`, `account_key_expiry`, `account_key_restriction`,
+`ACCOUNT_MAX_KEYS`, the console's `page_user` keys table, `page_key_form`, `expiry_markup`),
+`src/assets/base.css` and `admin.css` (`.selfserve`, the tables, the phone block). What was
+looked at: the current `/account/` for a person with no keys and for one with two, and the
+console's person page, light, dark and at phone width; then a mockup built on the real
+`theme.css`, `base.css` and `admin.css` plus the rules proposed below, screenshotted at 1280 px
+in both themes and at 360 and 320 px (throwaway, under `/tmp/keysdesign/mock/`: `page-*`,
+`new-*`, `error-*`, `full-*`, `confirm-*`). No page-level horizontal scroll at 320 px in any
+of them (measured: `scrollWidth` never exceeded the viewport).
+
+**The user's request, 2026-11-24:** a table of key name, scopes and expiry, an × on each row
+that removes the key, and a + at the end of the table that adds a row and so a key; interfaces
+simple enough to read at a glance.
+
+#### The table
+
+`section#keys` holds one `table class="keys"`, always, with these columns:
+
+| Column | Header (`K`) | Cell |
+|---|---|---|
+| name | `KeyColName` "Name" | the id, `td.mono.name`, never broken (`white-space:nowrap`) |
+| scopes | `KeyColScopes` "Scopes" | `K::AccountKeyAllScopes` in muted text, or one `code.tag` chip per `app/scope`, sorted; a pair the owner no longer reaches is a `tag warn` chip followed by the visible words `K::KeyScopeGone` ("no longer reached"), never colour alone (§13.6: shown and marked, not hidden) |
+| expires | `KeyColExpires` "Expires" | the date, or a `tag` "never" (`K::KeyNever`); within `SOON_DAYS` a `tag warn` `K::ExpiresSoon` before the date; past it a `tag bad` `K::Expired` before the date, muted |
+| actions | `KeyColActions` "Actions", visually hidden (`.vh`) | ↻ then ×, two icon buttons |
+
+The expires cell drops the console's leading word "expires" and its "(225d)": under a column
+headed "Expires" the word is the header said twice, and the tag is what carries urgency. The
+three states differ by a word as well as a colour, so nothing is said by colour alone (WCAG
+1.4.1, <https://www.w3.org/WAI/WCAG22/Understanding/use-of-color.html>).
+
+**× revokes, through 4h's confirmation.** Each row's last cell holds two `form method="get"`,
+the shape §13.15 chose, now with an icon instead of a word:
+
+- `form method="get" action="<prefix>/keys/rotate"` with hidden `id`, holding
+  `button class="icon-btn" aria-label="<K::AccountKeyRotate> <id>" title=<same>` and an inline
+  `svg` (circular arrow);
+- `form method="get" action="<prefix>/keys/remove"` with hidden `id`, holding
+  `button class="icon-btn rm" aria-label="<K::AccountKeyRemove> <id>" title=<same>` and an
+  inline `svg` (×).
+
+Both SVGs are geometry only, `aria-hidden="true" focusable="false"`, painted by `currentColor`
+exactly as the copy icon is (§13.15), and the name is the `aria-label`, MDN's pattern for an
+icon-only button
+(<https://developer.mozilla.org/en-US/docs/Web/Accessibility/ARIA/Reference/Attributes/aria-label>).
+The name carries the id because ten rows of buttons all called "Revoke key" are ten identical
+entries in a screen reader's list of controls (WCAG 2.4.6,
+<https://www.w3.org/WAI/WCAG22/Understanding/headings-and-labels.html>). The words are the
+existing `K::AccountKeyRotate` / `K::AccountKeyRemove` followed by the id, which reads in both
+languages ("Revoke key laptop", "Revoca la chiave laptop") and needs no format string in `K`.
+`title` is the same text, as a tooltip for a pointer user who does not know the glyph. The
+box is 32 by 32 CSS px, above the 24 by 24 of WCAG 2.5.8
+(<https://www.w3.org/WAI/WCAG22/Understanding/target-size-minimum.html>), with 6 px between the
+two. At rest the glyph is `--muted` on a `--card-border` outline; on hover the × turns
+`--error` and the ↻ `--text`, so the destructive one parts company before the click.
+
+A `GET` form rather than a link because 4h's test already pins it, and because a real
+`button` is what a person expects an × to be; it navigates either way, and the confirmation is
+the page that mutates.
+
+**Rotate stays, as the ↻ beside the ×** (the user did not mention it). It must stay possible,
+and confirmed, for two reasons: plan step 4 is not done until a person has rotated a key in a
+browser, and a rotate is the one way to replace a leaked secret while keeping the key's name,
+its restriction byte for byte and therefore every configuration that names it. Folding it into
+the × (remove, then add a key of the same name) loses the restriction unless the person
+re-ticks it, which is recall where recognition was possible. The cost is one more glyph that
+is less universal than ×, which the tooltip and the confirmation page pay for: a wrong guess
+costs a page that says what will happen and a Cancel.
+
+`GET <prefix>/keys/rotate?id=<id>` is the twin of 4h's revoke confirmation, behind the same
+doors and with the same `404` for an id not on the caller's row: heading `K::AccountKeyRotate`
+and the id, the key's own row of the table (name, scopes, expires) so the person sees what
+they are about to touch, `K::AccountKeyRotateWarn` ("A new secret replaces this one. Anything
+still using the old one stops getting in within seconds. The name and the scopes stay; the
+expiry starts again from today."), a `POST` form to the same path carrying `rev` and `id` with
+`button` `K::AccountKeyRotate`, and a `K::Cancel` pill back to the page. The revoke page is
+the same card with `K::AccountKeyRemoveWarn` and `button.danger`. Screenshot:
+`confirm-light.png`. The expiry sentence is there because `rotate_api_key` stamps a new
+`released`, so a rotate also extends a key, which a person would otherwise discover later.
+
+**Empty state.** A row with no keys still gets the table, so the + is where it will always
+be: one `tbody` row, `td colspan="4" class="muted"`, `K::AccountKeysNone` reworded to "No API
+keys yet." (Italian "Ancora nessuna chiave API."). A stranger (no roster row) gets the same
+empty row and **no** + row, since a key is filed under a uuid; the page's header already says
+why (§13.17).
+
+#### The + row
+
+The `tfoot` holds one row, `td colspan="4"`, with `a class="pill" href="<prefix>/keys/new"`
+reading "+ New key" (`K::AccountKeyNew`). Text and not a bare "+": a lone glyph says "add" but
+not what, and the visible words are what a voice-control user says to press it (WCAG 2.5.3,
+<https://www.w3.org/WAI/WCAG22/Understanding/label-in-name.html>). It is a link because it
+only renders a page.
+
+**`GET <prefix>/keys/new`** is the same account page, behind the same doors, with one
+difference: the `tfoot` is gone and the `tbody` ends with an editable row, then a row of its
+actions. A path rather than a query flag because the page's query string already belongs to
+the theme and language preferences, and because "the new-key form" is a thing with a name,
+like every console `+add` route. No fragment in the link: the name field carries `autofocus`,
+which focuses and scrolls to it, and MDN states that a fragment in the URL takes precedence
+over `autofocus` (<https://developer.mozilla.org/en-US/docs/Web/HTML/Reference/Global_attributes/autofocus>).
+MDN's warning about `autofocus` (a screen reader "teleports" without notice) does not bite
+here: the person just pressed "New key", and landing in its first field is what that press
+asked for.
+
+The editable row, `tr.new#key-new`:
+
+- **Name:** `input type="text" name="id" form="key-new-form" aria-label=K::KeyColName
+  placeholder="laptop" required maxlength="32" pattern="[a-z0-9-]{1,32}" autocapitalize="off"
+  spellcheck="false" autocomplete="off" autofocus`, then `span.hint` `K::AccountKeyIdHint`
+  shortened to "a-z, 0-9 and -". `pattern` and `required` are constraint validation, done by
+  the browser with or without scripting, so a capital letter is caught before the round trip;
+  MDN asks for the format to be explained in visible text beside it, which the hint is
+  (<https://developer.mozilla.org/en-US/docs/Web/HTML/Reference/Elements/input>). The server
+  still checks everything, since a form is a suggestion.
+- **Scopes:** a `fieldset` with a visually hidden `legend` (`K::KeyColScopes`) holding two
+  radios `name="restrict"`: `all` checked (`K::KeyScopesAll`, "All scopes") and `some`
+  (`K::KeyScopesOnly`, "Only:"), with the `key_scopes_for` pairs as checkboxes `name="scope"`
+  indented under "Only:", each labelled by its `app/scope` in `code`. Absent entirely when
+  `key_scopes_for` is empty, as today. Kept as two radios plus checkboxes, not one list of
+  checkboxes where none ticked means all: "nothing ticked" granting the widest key is the
+  default the current handler deliberately refuses.
+- **Expires:** `duration_choice`, now `select name="duration" aria-label=K::KeyColExpires`
+  with five options reading as the end of the column's sentence: "in 1 year" (`365d`,
+  `selected`), "in 6 months" (`182d`), "in 3 months" (`91d`), "after a number of days"
+  (`custom`), "never" (`never`); under it `label.days` holding `input name="days"
+  inputmode="numeric" size="5" aria-label=K::DurDaysLabel` and the word "days". The `K::Dur*`
+  texts of §13.15 are reworded to those phrases, so the console's form reads the same.
+- **Actions** (the next row, `tr.new-actions`, `td colspan="4"`): `form id="key-new-form"
+  method="post" action="<prefix>/keys" class="actions"` holding hidden `rev`, `button
+  type="submit"` `K::AccountKeyCreate` and a `K::Cancel` pill linking to the page.
+
+**Why the `form` attribute.** A `form` element cannot wrap a table row: the HTML parser does
+not allow it there, and the rows above already hold their own `GET` forms, which cannot nest
+inside another form. So the `form` element sits in the actions row and every input names it:
+MDN, "The `form` attribute lets you place an input anywhere in the document but have it
+included with a form elsewhere in the document" (same URL as above). This is plain HTML; no
+script is involved and the page keeps working with scripting off.
+
+**Why a second row for Save and Cancel.** At the page's 620 px the four cells hold a field,
+a radio group, a select and the actions column, and two buttons in that last column squeeze
+the other three into wrapping. Below the fields, the buttons sit where the eye ends up after
+the last field, and the 32 px actions column stays the width it is in the rows above.
+
+**Errors (`400`).** A refused `POST <prefix>/keys` renders this same page with the row still
+open: every value as posted (the id, the radio, the ticked scopes, the chosen option, the
+days), and the message under the field it is about, as `span.field-error id="key-new-<field>-err"`,
+with that input getting `class="invalid" aria-invalid="true"
+aria-describedby="key-new-<field>-err" autofocus`. Which field: `AccountKeyBound`'s id half
+and `AccountKeyDup` on `id`; `KeyDurationRequired`, `KeyDaysWithoutCustom`, `KeyDaysInvalid`
+and the one-day floor on `duration` (the message under the days field when the choice is
+custom); `AccountKeyUnknownScope` and the new `KeyScopesWithoutOnly` on the scopes cell. A
+message about no single field (`AccountKeyFull`, a file error) is a `msg error` above the
+table. The `409`, the `403`s and the `500`s keep their own pages: there is nothing to fix in
+the row. WCAG 3.3.1 asks that the item in error be identified and described in text, and 3.3.3
+that a known fix be suggested (<https://www.w3.org/WAI/WCAG22/Understanding/error-identification.html>,
+<https://www.w3.org/WAI/WCAG22/Understanding/error-suggestion.html>); every message above
+names its own fix. Screenshot: `error-light.png`, `error-dark.png`, `error-phone.png`.
+
+`KeyScopesWithoutOnly` ("You ticked scopes; choose Only, or untick them.") is the scopes twin
+of §13.15's `KeyDaysWithoutCustom`, for the same reason: ticks beside "All scopes" are a
+choice the person thinks they made, and quietly filing the widest key instead is a silent
+substitution. Today the handler ignores them, which is that substitution.
+
+**The 10-key bound.** At ten keys the `tfoot` row holds no link but `p.keys-full`,
+`K::AccountKeyFullRow` ("An account holds at most 10 keys. Revoke one to add another."), in
+muted text. Not a disabled button: a disabled control is skipped by the keyboard and says
+nothing about why, while a sentence is read by everybody and names the way out.
+`GET <prefix>/keys/new` at ten keys renders the page with that sentence instead of the row,
+`200`; the `POST` still refuses with `AccountKeyFull`. Screenshot: `full-dark.png`.
+
+**JavaScript: none.** Everything above is a link, a `GET` form or a `POST` form. Nothing was
+found that a script would make clearly better: hiding the days field until "after a number of
+days" is chosen was rejected in §13.15, and opening the row in place would save one page load
+at the price of a second way for the page to work.
+
+#### One component, two surfaces
+
+What the console and `/account/` share, byte for byte, are the **parts**: `duration_choice`
+(the select and the days field), the expires cell (which the console's `expiry_markup` becomes,
+minus the "expires" word under a column that says it, keeping its "(225d)" for operators),
+the scopes chips, and the `icon-btn` with its two glyphs. The **arrangement** is each
+surface's own, as §13.15 already decided for the confirmation: the console keeps its columns
+(released and duration matter to an operator), its row of `edit` / `rotate` / `remove` pills,
+which is how every console table acts on a row, and its separate add page, which carries
+fields the person never sees (released, free-text pairs). Making the console's key table the
+account's would make it the one console table whose actions are icons, trading the console's
+own consistency for a cross-surface one nobody sees side by side. The icon button moves to
+`base.css` if the gate ever needs one.
+
+#### Phone width
+
+The existing phone block already turns every table into stacked cards with `data-label`
+headings, and that is kept. Three rules are added, scoped to `table.keys`: the name cell
+drops its label and becomes the card's title in bold; the actions cell is placed at the top
+right of the card (`position:absolute` inside a `position:relative` row), so the × sits next
+to the name it removes; and `tfoot` joins the `display:block` list. The editable row stacks
+the same way, each field under its column's label at full width, with the actions row under
+it. Screenshot: `page-phone.png`, `error-phone.png`, and at 320 px the `*-p320.png` set. WCAG
+1.4.10 asks for no two-dimensional scrolling at 320 CSS px, with data tables named as content
+that may need it (<https://www.w3.org/WAI/WCAG22/Understanding/reflow.html>); stacked cards
+mean the exception is not needed.
+
+#### CSS, in `admin.css` (arrangement only, every colour a token)
+
+`.vh` (visually hidden), `table.keys` (`min-width:0`, cells `vertical-align:middle`, ids and
+dates `nowrap`), `th.act` / `td.act` (`width:1%`, `nowrap`, right-aligned), `.icon-btn` and its
+`svg` as above, `.icon-btn.rm:hover`, `table.keys tfoot td`, `tr.new` / `tr.new-actions` on
+`--bg`, `.field-error` (`--error`, `--fs-sm`), `.keys-full`, and the three phone rules.
+`.selfserve .keyact` and `.selfserve form.edit h2` go, with the markup that needed them.
+
+#### `K` changes
+
+New: `KeyColName`, `KeyColScopes`, `KeyColExpires`, `KeyColActions`, `KeyNever` ("never",
+"mai"), `KeyScopeGone`, `KeyScopesAll`, `KeyScopesOnly`, `KeyScopesWithoutOnly`,
+`AccountKeyNew` ("+ New key", "+ Nuova chiave"), `AccountKeyFullRow`, `AccountKeyRotateWarn`.
+Reworded: `AccountKeysNone` ("No API keys yet."), `AccountKeyIdHint` (short form),
+`DurOneYear` / `DurSixMonths` / `DurThreeMonths` / `DurCustom` / `DurNever` (the "in 1 year"
+phrasing). Removed, because the column headers and the two new radio labels replace them:
+`AccountKeyIdLabel`, `AccountKeyDurationLabel`, `AccountKeyRestrict`, `AccountKeyScopeGroups`,
+`AccountKeyRestrictAll` and `AccountKeyRestrictSome`. `AccountKeyAdd` stays, as the title of
+the refusal pages.
+
+#### How the table is shown to hold
+
+Unit tests, `bb-auth-web.rs`:
+
+- `the_keys_are_a_table`: for a row with keys, `section#keys` has one `table.keys` whose
+  `thead` has four `th` in the order above, the last carrying `.vh` text; one `tbody tr` per
+  key, the id in the first cell, `AccountKeyAllScopes` or one chip per pair, a never-expiring
+  key showing `KeyNever`, an expired one `K::Expired`; no URL anywhere in the section.
+- `each_key_row_carries_two_named_icon_controls`: per key, a `GET` form to `keys/rotate` and
+  one to `keys/remove`, each with a hidden `id` equal to the row's id and a `button` with no
+  text, an `aria-label` of the verb plus the id, and an `svg aria-hidden="true"`; no `POST`
+  form on the plain page at all.
+- `the_new_key_row_is_a_page_of_its_own`: the plain page has the `+ New key` link to
+  `keys/new` and no input named `id`; `GET keys/new` is `200`, has no such link, has a
+  `form#key-new-form` posting to `keys` with `rev`, and every `id`, `restrict`, `scope`,
+  `duration`, `days` input carries `form="key-new-form"`; the `id` input has `autofocus`,
+  `required`, `pattern`; a stranger's page has neither link nor row.
+- `a_refused_key_keeps_the_row_and_says_where`: posting `id=My Laptop` answers `400` with
+  the row open, `value="My Laptop"`, the input `aria-invalid="true"` and an
+  `aria-describedby` naming a `.field-error` that carries the message; the chosen duration
+  option is still `selected` and ticked scopes still `checked`; the file is unchanged.
+  Likewise ticks with `restrict=all` give `KeyScopesWithoutOnly` on the scopes cell.
+- `the_tenth_key_closes_the_row`: at ten keys the page and `keys/new` show
+  `AccountKeyFullRow` and no link and no row.
+- `rotating_a_key_asks_first_on_the_account_page`: the twin of 4h's revoke test for
+  `GET keys/rotate?id=`, including that the `POST` keeps `scopes` byte for byte.
+
+E2E (`account.js`, scripting off): open `+ New key`, submit a bad id and see the message by the
+field with the value kept, fix it, mint with "in 6 months" and see the reveal; Back shows the
+key as a row; rotate through its confirmation; revoke through its confirmation, cancelling
+once first. `shots.js` gains `account`, `account-new`, `account-error` and `account-rm`
+scenes, which also give the user the screenshots step 8 asks for.
+
+#### Impact on the 4h tests being written now
+
+- `the_copy_control_is_an_icon_with_a_name`, `the_duration_choice_maps_onto_the_grammar`,
+  `a_self_service_key_may_never_expire`: **unchanged**; the posted values are the same.
+- `the_key_form_offers_five_choices`: **changes**. One `select name="duration"` with five
+  `option`s (`365d`, `182d`, `91d`, `custom`, `never`), `365d` `selected`, plus the `days`
+  input with an `aria-label`; on `/account/` it is read from `GET keys/new`; the console's
+  edit form marks the stored choice `selected`.
+- `revoking_a_key_asks_first_on_the_account_page`: **survives**; only an assertion on the
+  button's text becomes one on its `aria-label`.
+- `e2e/tests/account.js`: its `MINT` selector (`form[action="/account/keys"] input[name=id]`)
+  no longer finds the inputs, which sit outside the `form` element; use
+  `input[form="key-new-form"][name=id]` after opening `keys/new`, and `selectOption` for the
+  duration.
+
+#### Rejected
+
+- *Inline editing of an existing row* (rename, change scopes). Nobody asked, and an edit of a
+  live credential's restriction is the console's job.
+- *A disabled + at ten keys.* See above: unreadable reason, unreachable by keyboard.
+- *A `details` disclosure for "Only:".* Its summary cannot change from "All scopes" when a box
+  is ticked without a script, so it would state the wrong thing.
+- *One list of checkboxes, none ticked meaning all.* The widest key by omission.
+- *Opening the row with a script and falling back to the link.* Two ways for one control to
+  work, to save one page load on an action taken a few times a year.
+
+### 13.17 The account page as a whole (plan step 8, brought forward 2026-11-24)
+
+The user asked, alongside 13.16, for the whole page to be better as a page. Read and looked
+at as for 13.16; the mockups are the same files, which show the whole page.
+
+**What a person comes for, in order.** Who am I signed in as; what does that open; then the
+things they can do (keys today; profile edits in step 5; deleting the account in step 7);
+then how the page looks. The page today gives each section the same weight and puts the
+preferences, the least important thing on it, behind the biggest button on it.
+
+**Header.** The brand row stays first and keeps wearing the `ui` section (name, logo, the
+operator's stylesheet, `ui.theme` as `data-theme`). Under it `div.who`: `h1`
+`K::AccountTitle`; the **first address** in `div.primary-id`, a size up and bold, because it
+is the one fact every person checks; the other addresses as `code.tag` chips in
+`ul.ids.chips` (`aria-label` `K::AccountOtherAddresses`), absent when there is only one; then
+the uuid, demoted to a muted small line `K::AccountIdLabel` ("Account id") plus the uuid. It
+stays on the page, since support asks for it, but it is the least read fact in the header.
+A stranger sees the address and, in place of the uuid line, `K::AccountNoRow` as a muted
+panel saying what that means for them (they can read what they reach; keys need an account).
+
+**Sections.** The four keep their ids and their order (`#reach`, `#groups`, `#keys`,
+`#profile`), which keeps every existing test's anchor; groups stay beside reach because they
+are the "why" of it. Each panel is an `h2` plus one muted `p.sub` sentence saying what the
+section is for, so a person who has never heard "scope" reads the page anyway:
+`K::AccountReachSub` ("The applications your sign-in opens, and the areas inside each."),
+`K::AccountGroupsSub` ("Groups an administrator has put you in."), `K::AccountKeysSub` ("A key
+lets a script or a tool sign in as you. It reaches at most what you reach."),
+`K::AccountProfileSub` ("What your sign-in tells these applications about you."). The heading
+"User groups" becomes "Groups" on this page (`K::AccountGroups`): the page is about one user.
+
+- **Where you reach** becomes `dl.facts`: the application as `dt`, its scopes as chips in the
+  `dd`, so each application is one line rather than a heading and a bulleted list.
+- **Groups**: chips in one line.
+- **API keys**: §13.16.
+- **Profile**: `dl.facts`, claim name as `dt`, value as `dd`; a configured claim with nothing
+  forwarded reads `K::AccountNotProvided` ("not provided") in muted text rather than "None.",
+  which read as if the value were the word None. Step 5's edit goes in this panel.
+- **Delete my account** (step 7) is a last panel of its own, `panel bad`, after Profile and
+  before the preferences, so the one irreversible action is never between two safe ones.
+
+**Empty states** name what is missing instead of "None.": `K::AccountReachNone` ("Your
+sign-in opens no application yet."), `K::AccountGroupsNone` ("You are in no group."),
+`AccountKeysNone` as in 13.16, `K::AccountProfileNone` ("This deployment shares no profile
+details."). A generic "None." under four headings made a person read the heading again to
+learn what was absent (Nielsen's "match between system and the real world").
+
+**Preferences** move to a footer row, `form.selfserve-prefs.compact` after a hairline: the two
+selects at their natural width side by side and Apply as a `pill`, not a full-width
+`button.primary`. It is still one `GET` form with a real submit button and no handler. The
+page's filled buttons are then only the ones that create or destroy something, so the
+strongest colour on the page always means an action with a consequence.
+
+**Spacing and type.** Panels keep `base.css`'s `.panel` and its 16 px gap; inside, `h2` sits
+flush with a 2 px gap to its sentence and 12 px under it. No new colours, no new components in
+`base.css`: chips are `.tag`, the outline button is `.pill`, the danger panel is `.panel.bad`.
+
+**Phone.** One column already; `dl.facts` becomes one column (term over value), the chips
+wrap, the preferences stack. Measured in the mockup: no horizontal scroll at 360 or 320 px.
+
+**New `K`:** `AccountOtherAddresses`, `AccountIdLabel`, `AccountGroups`, `AccountReachSub`,
+`AccountGroupsSub`, `AccountKeysSub`, `AccountProfileSub`, `AccountNotProvided`,
+`AccountReachNone`, `AccountGroupsNone`, `AccountProfileNone`. `SignedInAs` and `AccountUuid`
+leave this page (the header shows the address itself, and "your uuid" becomes "Account id").
+
+**Tests:** `the_header_leads_with_the_address` (the first address in `.primary-id`, the
+others as chips, the uuid after them, a stranger's `AccountNoRow` and no uuid);
+`each_section_says_what_it_is_for` (an `h2` and a `p.sub` in each of the four, in order);
+`empty_sections_name_what_is_missing` (the four specific sentences, no bare "None.");
+`the_preferences_are_not_the_main_action` (the prefs form has no `button.primary`). The
+existing section-id and profile tests change only where they match the old "None." text.
+
+**Slices.** One slice with 13.16: the keys table, the + row and its errors, the rotate
+confirmation, and the `duration_choice` select on both surfaces, because 4h's tests are being
+written against markup this replaces and changing it twice costs more than once. Then, each
+its own slice: (a) the header and the section sentences and empty states; (b) `dl.facts` for
+reach and profile and chips for groups; (c) the preferences footer. Step 5's profile edit and
+step 7's delete panel take the places named above when they land.
