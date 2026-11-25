@@ -171,7 +171,8 @@ comes before 5e: **5f**, the gate forwards `X-Auth-Native-Username` (the token's
 `cognito:username`, only for a native sign-in; a new key in the cookie's JSON claims, no
 `COOKIE_VERSION` bump; an older cookie fails closed); **5g**, `bb-auth-web` offers the edit only
 with that header, asks Cognito for that username, and requires the same username after the code
-(`the_rpi01_twin_is_never_written`); 5f and 5g ship together; **5h**, the nginx change on rpi-01
+(`the_rpi01_twin_is_never_written`), and with it the page's sections reordered as the user asked on
+2026-11-25: Profile first, then API keys, then Groups, then Where you reach; 5f and 5g ship together; **5h**, the nginx change on rpi-01
 first (the user's go-ahead), then the deploy and the real run. From the designer's review of
 5b-5d (no WCAG failure): the code page's change list should read "Given name: Augusta (was Ada)"
 (the Italian `AccountProfileWas` becomes "prima") and the code field wants `max-width:14ch`;
