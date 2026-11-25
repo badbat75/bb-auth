@@ -53,7 +53,7 @@ nginx error_page 401 → 302  <login-page>/?rd=<original>
 | GET, HEAD | `/auth/login`    | browser    | the sign-in page: runs the Cognito flow and POSTs the `id_token` to `/auth/session`. Self-contained (no external stylesheet, script or font), IT/EN, with the social buttons `gate.social_buttons` enables (and none at all when it enables none, or when this deployment has no usable social app client). Lands on `?rd=`, else on the `Referer` the browser sent |
 | GET, HEAD | `/auth/callback` | browser    | finishes a social sign-in (OAuth code + PKCE). `404` unless this deployment has a social sign-in at all: `gate.oauth_domain` and `gate.social_callback_url` in the settings file |
 | GET, HEAD | `/auth/denied`   | browser    | the refusal page a `403` lands on, in the same palette as the sign-in page. `302` to your own page instead when the area's `denied_url`, or `gate.denied_url`, names one |
-| POST   | `/auth/session`  | browser    | validate posted `id_token`, set cookie, 302 → `rd` |
+| POST   | `/auth/session`  | browser    | validate posted `id_token`, set cookie, 302 → `rd`, else `gate.landing_url`, else the caller's root |
 | GET    | `/auth/logout`   | browser    | clear cookie, 302 → `rd` (guarded), else `Referer` (same guard), else the login page |
 | GET    | `/auth/healthz`  | local      | liveness                                           |
 
@@ -1085,8 +1085,9 @@ shared storage.
 **[`deploy/settings.example.json`](deploy/settings.example.json)**: everything that is read
 per request, cannot lock anybody out irreversibly, and holds no secret: the profile claims,
 the identity attributes, the social relaxation and its providers, **the whole Cognito wiring
-(the user pool, the app clients, where people sign in, where a refusal lands and which social
-buttons the page offers) and the estate (the session cookie's domain and the hosts a login may land on)**, the
+(the user pool, the app clients, where people sign in, where a sign-in with no `rd` lands,
+where a refusal lands and which social buttons the page offers) and the estate (the session
+cookie's domain and the hosts a login may land on)**, the
 session lifetime, who may use `bb-auth-web`, and the `ui` section — how every page either
 program serves looks. All of it is there because all three programs have an opinion about it
 and an env var is readable only by the process that was started with it: the admin GUI could
@@ -1116,6 +1117,7 @@ is a button people learn to click without reading.
 ```bash
 bb-auth-adm settings show                              # what the two services read
 bb-auth-adm settings set --claims given_name,family_name
+bb-auth-adm settings set --landing-url https://auth.example.com/account/   # where a sign-in with no rd lands; '' unsets
 bb-auth-adm settings admin add you@example.com         # who may use the GUI
 bb-auth-adm settings set --brand 'Acme' --theme dark   # the look of every page
 bb-auth --check-settings /opt/bb-auth/var/lib/settings.json
@@ -1538,10 +1540,15 @@ authority on where `?rd=…` may send a freshly-logged-in browser:
 - a relative `rd` (`/preferences`) resolves against the **caller's** host, taken from
   `X-Original-URL` on `/auth/session`;
 - an absolute `rd` must be `https://` on a host matching one of the patterns;
-- with no `rd` at all, `/auth/session` lands on the caller's root. The two browser
-  endpoints read the browser's `Referer` in its place first, through this same gate; and
-  where that says nothing either, `/auth/logout` goes to the **login page** rather than to
-  the caller's root, which would be the area the person was just signed out of;
+- with no `rd` at all, `/auth/session` lands on `gate.landing_url` when one is set, and on the
+  **caller's root** when it is empty (the default). The caller is the host that served the
+  sign-in page, so on a host whose root redirects to `/auth/login` an empty landing is the loop
+  a logout ends in: name a landing page and the sign-in ends there instead. A landing URL is
+  checked on the way to disk, like every other value here: absolute `https://` on a host one of
+  the patterns covers, because `safe_rd` refuses one outside them at every login. The two
+  browser endpoints read the browser's `Referer` in its place first, through this same gate; and
+  where that says nothing either, `/auth/logout` goes to the **login page** rather than to the
+  caller's root, which would be the area the person was just signed out of;
 - anything rejected — an off-host URL, a control byte, `//evil`, `/\evil`, userinfo
   (`https://app.example.com@evil.com/`), a lookalike (`evilexample.com`) — falls back
   to `gate.login_url`.

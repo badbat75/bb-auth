@@ -77,38 +77,19 @@ process that writes both files, so two gaps found the same day are closed **firs
 GUI is opened to anyone who is not an administrator: `bb-auth-web` can read the HMAC key, and it
 believes `X-Auth-Email` from any local process. The design is `docs/ARCHITECTURE.md` §13.
 
-### 9. The Preferences menu closes on a click outside it (first, by the user's order)
-
-Asked by the user on 2026-11-25. Today the menu (a `details`) closes only from its own trigger.
-A click anywhere outside it must close it, on `/account` and in the console (one `top_bar`).
-JavaScript is now allowed sparingly (the user's rule, 2026-11-25), so the designer chooses
-between a CSS-only way (an open `details`' summary covering the page behind the menu) and a
-small script, and specifies its accessibility.
-
-- Done when: a test that failed first pins the rule, an e2e check clicks outside the open menu
-  on both surfaces and finds it closed (scripting on and off), the menu's own controls still
-  work, and the designer passes the screenshots.
-
-### 10. A default landing, so a logout never ends on the sign-in page in a loop
-
-Asked by the user on 2026-11-25: the account page is the default `rd`. Today a Sign out on
-`/account` reaches `/auth/logout` with no `rd`, the browser lands on the sign-in page with none,
-and after signing in `safe_rd` lands on the caller's root, which can be the sign-in page again.
-The architect designs it (a setting, or not) in `docs/ARCHITECTURE.md`; rpi-01 is configured
-afterwards with the user's go-ahead.
-
-- Done when: tests that failed first show a login and a logout with no `rd` landing on the
-  default, still behind `rd_url_allowed`; a sign-out from `/account` on rpi-01 followed by a
-  sign-in lands on `/account`.
-
 ### 11. Release v1.99.8
 
 The user's decision, 2026-11-25: after steps 9 and 10, `CHANGELOG.md`'s "Unreleased" becomes
 `## 1.99.8`, the tag `v1.99.8` is created, `main` is pushed to GitHub with the tag, and the
 packages are installed on rpi-01. The tester runs the whole board on `main` first.
 
+Then, on rpi-01 (step 10's last check, moved here because it needs the release installed):
+`gate.landing_url` set to `https://auth.badbat75.com/account/` with `bb-auth-adm settings set
+--landing-url`, after the packages are in (an older binary refuses the key).
+
 - Done when: the tag is on GitHub at the commit that was tested and installed, rpi-01 reports
-  `v1.99.8-g<that commit>`, and `verify.sh` is green.
+  `v1.99.8-g<that commit>`, `verify.sh` is green, `--check-settings` names the landing page, and a
+  sign-out from `/account` followed by a sign-in lands on `/account` (the user, in a browser).
 
 ### 4. Self-service API keys
 
@@ -219,7 +200,10 @@ Slices 8a to 8d are done (8d, the theme, within the same token contract: §13.18
 table row rules stopping short of the column of buttons (`td.pills`, older than 8d), three sizes of
 secondary control in one section, and radios and checkboxes in the browser's blue rather than
 `accent-color`. The logo in the console's brand is its own later step, since it widens the
-console's CSP `img-src`. Steps 5 and 7 add their forms into this layout later (Profile, a last panel).
+console's CSP `img-src`. From the designer's review of steps 9 and 10 (2026-11-25): a
+`config-landing-refused` screenshot scene; library refusals on the Settings tab (the landing URL's
+among them) are in the file's English words rather than the page's labels and language; and one
+look by hand at the native "Preferences" tooltip while the open menu's cover is up. Steps 5 and 7 add their forms into this layout later (Profile, a last panel).
 
 - Done when: the user approves screenshots of the page in both themes and both languages, at
   desktop and phone width, with the forms of steps 4, 5 and 7 on it; e2e and the scripting-off

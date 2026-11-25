@@ -299,6 +299,7 @@ through the same parser, so an edit made by one is one the others would accept.
 | `gate.client_id` | `""` → no login can complete | The Cognito **app client the email flow uses**: what `/auth/login` runs `USER_AUTH` against, and the first accepted audience. Empty is tolerated, because a package creates this file and cannot know the value, and reported loudly at startup. |
 | `gate.login_url` | `""` → the gate's own `/auth/login` | Where a `401` sends people, and where a rejected redirect target lands. Absolute https when set; an application's own `login_url` in the access file overrides it for that area. |
 | `gate.denied_url` | `""` → the gate's own `/auth/denied` | Where a `403` lands. Absolute https when set, and `/auth/denied` then answers `302` to it; an application's own `denied_url` in the access file overrides it for that area, which is what makes a refusal page per host. The one URL here that can close nothing: it is read after somebody has already been refused. |
+| `gate.landing_url` | `""` → the caller's root | Where a sign-in lands when nothing named a place: `/auth/session` arriving with no `rd` (and no `Referer`). Absolute https when set, **and its host must be one `gate.authorized_hosts` covers**, or the file is refused: `safe_rd` refuses a landing page outside them at every login, so such a value is the loop this setting exists to end, with a setting beside it saying it is fixed. A present `rd` still wins, a rejected one still falls back to the sign-in page, and a logout with nothing said still ends at the sign-in page (§8b). Not a guarded change, for the `gate.denied_url` reason: it is read after the cookie is built. An empty value is **never written**, because `GateSettings` refuses unknown keys and an older binary therefore refuses a file that carries the key: deploy, then set; unset before a rollback (§13.19). |
 | `gate.oauth_domain` | `""` → no social sign-in | Cognito's hosted UI, as a bare host with no scheme and no path. The authorize and token URLs are derived from it. |
 | `gate.social_callback_url` | `""` → no social sign-in | The `redirect_uri`, which Cognito compares **byte for byte** with the one registered on every app client in `social_buttons`. |
 | `gate.social_buttons` | `[]` → none | Which social buttons `/auth/login` offers, in the order given, and **the app client each runs through**: `{ "idp": "Google", "audience": "<app client id>" }`. The app client is per button because Cognito federates per app client. Empty offers none, which is the same page a deployment with no `oauth_domain` serves. The admin GUI renders it as a table, a row per way in (the email row first, then `SOCIAL_IDPS`, then any name already in the file), with the tick the only writable column besides the app clients. Not to be confused with `social_providers` above: that one decides whose unverified email is accepted, this one what a visitor is shown. |
@@ -332,7 +333,7 @@ already trusted — is retired by version 3 rather than quietly untrue, and what
 that this file is trusted as much as the gate: whoever can write it can already write the
 access file beside it and the admin list inside it.
 
-Three of the twenty-three do not pass the three-part rule cleanly, which is stated rather than
+Three of the twenty-four do not pass the three-part rule cleanly, which is stated rather than
 glossed. `gate.issuer` is not read per request but once, to fetch a JWKS, so a reload
 re-fetches and swaps keys and settings **together or neither**. `gate.cookie_domain` cannot
 log anybody out but does something worse: every cookie already issued keeps the old `Domain`,
@@ -357,14 +358,15 @@ is one; unknown keys at the top level are preserved, which is where `_comment` l
 ### 8b. Where the post-login redirect may land (`safe_rd`)
 
 There is no canonical service base URL: one gate fronts several hosts, and which one is
-in play is decided by the caller. `safe_rd` therefore takes two inputs beyond the `rd`
+in play is decided by the caller. `safe_rd` therefore takes three inputs beyond the `rd`
 itself — the **caller origin** (`scheme://host` of the `/auth/session` request, from
 `BB_AUTH_ORIGINAL_URL_HEADER`) and **`gate.authorized_hosts`**, the only authority on
-where a redirect may land.
+where a redirect may land, plus **`gate.landing_url`**, the answer when there is no `rd`
+at all.
 
 | `rd` | resolves to |
 |---|---|
-| absent / empty | the caller's root, `https://<caller-host>/` |
+| absent / empty | `gate.landing_url` when set, else the caller's root, `https://<caller-host>/` |
 | `/preferences` (absolute path) | `https://<caller-host>/preferences` |
 | `https://sibling.example.com/x` | itself, if the host matches a pattern |
 | anything else, or a rejected host | `gate.login_url`, else the gate's own `/auth/login` |
@@ -911,8 +913,8 @@ happens at `/auth/logout`, which is inside no application's area: nothing resolv
 `logout_url` field would be unreachable in practice. The party that knows which area you are
 leaving is whoever wrote the logout link, so `handle_logout` reads `?rd=` and puts it through
 the same `safe_rd` guard as `/auth/session`. With no `rd` the browser lands on the login
-page, not on the caller's root, which is what `safe_rd` defaults to and is the wrong end for
-a logout.
+page, not on `safe_rd`'s no-`rd` default (the landing page, or the caller's root when none is
+set), which is the wrong end for a logout.
 
 A link that says nothing is the common case, though, and there the only party left who
 knows anything is the browser: `Referer` (`REFERER_HEADER`) is read in the `rd`'s place,
@@ -3152,7 +3154,7 @@ New, by part (each a tester and coder pass):
 The slice closes on the user's look at the `shots.js` walk in both themes and both languages,
 at desktop and phone width, with and without the operator's token file.
 
-### 13.19 Where a login lands when nothing named a place (`gate.landing_url`, asked 2026-11-25)
+### 13.19 Where a login lands when nothing named a place (`gate.landing_url`, plan step 10, asked and built 2026-11-25)
 
 The user's words: "configure the account page as the default rd, so that after a logout it at
 least doesn't loop on the login page".
@@ -3296,7 +3298,8 @@ consequences, both cheap:
 
 #### How each part is shown to hold, and the work
 
-Three parts, each a tester and coder pass:
+**Built** (plan step 10, in commits `c5867c2`, `03398aa`, `90590ec`), in three parts: the
+commits name them 10-1 to 10-3, this section names them 19-1 to 19-3.
 
 - **19-1, library** (`src/lib.rs`): `GateSettings::landing_url`, `Settings::landing_url`,
   `rd_url_allowed` moved in. Tests: `a_landing_url_is_absolute_https_on_an_authorized_host`
@@ -3327,9 +3330,10 @@ The real run that closes it, after the deploy and the operator's `settings set` 
 to approve): Sign out on `https://auth.badbat75.com/account/`, sign in, land on `/account/`.
 
 When it lands, `docs` updates §8b's first row, the settings invariant's count and list, §8a, and
-`deploy/settings.example.json`.
+`deploy/settings.example.json`. (Done 2026-11-25 for the first three; the example file is **not**
+updated, so it still has no `landing_url` key and no `_comment` block for one.)
 
-### 13.20 The Preferences menu closes on a click outside it (plan step 9, asked 2026-11-25)
+### 13.20 The Preferences menu closes on a click outside it (plan step 9, asked and built 2026-11-25)
 
 The menu is `details.settings` in `top_bar`'s account end, one markup on both surfaces (the
 console's `shell_as` and the account page). Today it closes only from its own trigger, so a
@@ -3417,7 +3421,9 @@ needs a script.
   open-state rule, that `.menu`'s `z-index` is greater than the cover's, and that none of
   `header.top`, `.bar`, `nav.acct`, `details.settings` carries `transform`, `filter`,
   `perspective` or `will-change`. `no_page_but_the_reveal_carries_a_script` stays as it is: it
-  is what says no script came with this.
+  is what says no script came with this. (Built: the test parses the rules out of `admin.css`
+  and checks each declaration, so it is not the literal string above, and pins the same three
+  things.)
 - **9-2, the walk** (`e2e/tests/settings.js` for the console, `e2e/tests/account.js` for the
   page, and the same two checks in `nojs.js`'s scripting-off pass): open the menu, click a
   point outside the panel (bottom-left of the viewport), `details.settings` is not `open`;

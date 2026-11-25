@@ -298,6 +298,10 @@ cargo run --bin bb-auth-adm -- -f .\deploy\access.json can bob@x.com https://app
 cargo run --bin bb-auth-adm -- -s .\deploy\settings.json settings show
 cargo run --bin bb-auth-adm -- -s .\deploy\settings.json settings set --claims given_name,family_name
 cargo run --bin bb-auth-adm -- -s .\deploy\settings.json settings admin add bob@x.com
+# Where a sign-in lands when nothing named a place (no rd, no Referer). An empty value unsets it,
+# which is the default and lands on the caller's root. The value must sit on a host
+# gate.authorized_hosts covers, because safe_rd refuses a landing page outside them at every login.
+cargo run --bin bb-auth-adm -- -s .\deploy\settings.json settings set --landing-url 'https://auth.x.com/account/'
 # The `ui` four: the look of every page EVERY program serves, so one stylesheet restyles the
 # sign-in page, the admin GUI and the self-service page together. Pass an empty value to unset
 # any of them.
@@ -595,9 +599,9 @@ section under-read itself by a fifth, and two of the seven are lockout-class.
 
 - **The settings file is what must change without a restart, and the rule for what goes in it
   is three-part.** A setting belongs there iff it is (1) read **per request**, (2) unable to
-  lock the operator out **irreversibly**, and (3) not a secret. Twenty-three pass, in four
+  lock the operator out **irreversibly**, and (3) not a secret. Twenty-four pass, in four
   sections: `gate.issuer`, `gate.client_id`, `gate.login_url`, `gate.denied_url`,
-  `gate.cookie_domain`,
+  `gate.landing_url`, `gate.cookie_domain`,
   `gate.authorized_hosts`, `gate.profile_claims`, `gate.identity_attrs`,
   `gate.allow_unverified_social`, `gate.social_providers`, `gate.oauth_domain`,
   `gate.social_callback_url`, `gate.social_buttons`, `gate.session_ttl_secs`; the whole
@@ -616,6 +620,21 @@ section under-read itself by a fifth, and two of the seven are lockout-class.
   never getting in sees a broken link instead of a page. That is also why it is not a
   sixth guarded change, and why an application may override it in the access file
   (`denied_url_for`), which is what makes a refusal page per host.
+
+  **The twenty-fourth is `gate.landing_url`, and it passes the middle part the same way, one
+  page along.** It is read per request, on `/auth/session`; it is no secret, since it is a
+  `Location:` a browser follows; and it is read **after** the token is verified and the cookie
+  built, deciding only where a browser that is already signed in is sent. The worst a wrong
+  value achieves is a landing on a `403` or a `404`, the cookie is set either way, and the
+  editor still holds a session to undo it with, so it is not a sixth guarded change either. It
+  carries one load-time cross-check: `compile_settings` refuses a value whose host
+  `gate.authorized_hosts` does not cover, because `safe_rd` refuses it at every login and the
+  sign-in falls back onto the sign-in page, which is the loop this setting exists to end with a
+  setting standing beside it saying it is fixed. Empty, the default, is the caller's root
+  exactly as before it existed, and an empty one is **never written**: `GateSettings` refuses
+  unknown keys, so an older binary refuses a file that carries the key, and an editor that
+  never set one leaves a rollback nothing to trip on. Where one is set, the order is deploy
+  then set, and `settings set --landing-url ''` before any rollback.
 
   **The last four are the `audit` section, and they pass all three parts cleanly.** They are
   read whenever an event is recorded or the audit is maintained, which is per request or hourly
@@ -699,7 +718,7 @@ section under-read itself by a fifth, and two of the seven are lockout-class.
 
   It is a *file* for one mechanical reason, and not for tidiness: **a process cannot re-read
   its own environment** (systemd loads `EnvironmentFile=` once, at `ExecStart`), so an env var
-  can never be hot. Do not add a twenty-fourth setting because it would be convenient there;
+  can never be hot. Do not add a twenty-fifth setting because it would be convenient there;
   check it against the three parts first, and say the argument out loud the way the ones above
   are, including the part it fails.
   It is held in `RwLock<Settings>`, reloaded by the same SIGHUP as the access file and
@@ -1174,8 +1193,11 @@ the unit creates through `LogsDirectory` precisely so that the gate's own prefix
 
 - **`safe_rd` guards the post-login redirect** against open-redirect + response-splitting. **Every**
   candidate — relative, absolute, or the no-`rd` default — goes through the same `rd_url_allowed`
-  gate, so a spoofed caller origin still can't escape. Rejected ⇒ fall back to
-  `gate.login_url` (or the gate's own page, which is what empty means).
+  gate, so a spoofed caller origin still can't escape. The no-`rd` default is `gate.landing_url`
+  when one is set, else the caller's root, and `compile_settings` refuses a landing page whose
+  host `gate.authorized_hosts` does not cover, so the load-time check and this one cannot
+  disagree. Rejected ⇒ fall back to `gate.login_url` (or the gate's own page, which is what
+  empty means).
   The gate is https-only and rejects `//`, `/\`, control bytes incl. CR/LF, userinfo `@`,
   backslashes, and lookalikes like `evilbadbat75.com` / `badbat75.com.evil.com` (a pattern's literal
   dot is what rules those out; `*.x.com` also does not match the apex `x.com`). Any new use of

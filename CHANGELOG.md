@@ -25,10 +25,11 @@ Versions are the crate's (`Cargo.toml`); packages add a Debian revision
 **Due out as the next release, and every build until then says 1.99.8.** A deploy no longer
 bumps the version (plan W11, changed on 2026-11-25): what tells two deploys apart is the build
 string, `v1.99.8-g<commit>`. 1.99.9 was a package installed on rpi-01 on 2026-11-25 from
-`gb9d7100`, before that rule, which carried everything below, and was replaced the same morning
-by a 1.99.8 package of the same code (`g75f788a`), a downgrade by number only. Before that, 1.99.8 was installed by a deploy on
-2026-11-24 from `gc1a9fd8`, which carried everything below except the first five sections, from
-removing a user down to a key's duration being one of five. 1.99.7 was spent by a deploy on
+`gb9d7100`, before that rule, which carried everything below except the two sections at the top
+of this list, and was replaced the same morning by a 1.99.8 package of the same code
+(`g75f788a`), a downgrade by number only. Before that, 1.99.8 was installed by a deploy on
+2026-11-24 from `gc1a9fd8`, which carried everything below except the first seven sections, from
+`gate.landing_url` down to a key's duration being one of five. 1.99.7 was spent by a deploy on
 2026-10-17 from `g4041845`, which carried everything below except the two sections above the
 audit's. 1.99.6 was spent by a deploy on 2026-09-11 from `gb855ed2`, which carried everything
 below except those two and the section named after 1.99.7. 1.99.5 was spent by a deploy
@@ -74,6 +75,51 @@ when there is no tag to check out.
 **Nothing here changes the cookie format or the access-file format, so no upgrade in this
 release logs anybody out.** The settings file goes from version 1 to version 3, which needs an
 edit before the binaries land: see "Upgrading" below.
+
+### New: `gate.landing_url`, where a sign-in lands when nothing named a place
+
+* **One new settings-file value, `gate.landing_url`**: where a sign-in with no `rd` lands.
+  Empty, the default, keeps the old behaviour, which is the **caller's root**: the host that
+  served the sign-in page. On a deployment whose sign-in host redirects its own root to
+  `/auth/login`, that is a loop after every logout, and it is also where a bookmark to the
+  sign-in page lands. A present `rd` still wins, so every `401` round trip ("sign in, and be
+  where you were") is untouched; a **rejected** `rd` still falls back to the sign-in page; and
+  a logout with nothing said still ends at the sign-in page, because the sign-in it leads to is
+  what lands on the landing page.
+* **It is refused off the estate.** Absolute `https://`, printable ASCII, no userinfo `@`, no
+  backslash, and its host must be one `gate.authorized_hosts` covers, or `compile_settings`
+  refuses the file. The host check is the one that matters: `safe_rd` refuses a landing page
+  outside the authorized hosts at every login, so such a value is today's loop with a setting
+  standing beside it saying it is fixed. Refusing it on the way to disk is what both editors can
+  still say out loud.
+* **Not a guarded change**, and the five stay five: it is read after the token is verified and
+  the cookie is built, deciding only where a browser that is already signed in is sent, so the
+  worst a wrong value costs is a `403` landing and the editor keeps the session they would undo
+  it with.
+* **Both editors, and the checks**: `bb-auth-adm settings set --landing-url URL` (an empty value
+  unsets it) and `settings show`, which prints `(caller's root)` when empty; the console's
+  Settings tab has a "Landing page" field beside the refusal page; `bb-auth --check-settings`
+  prints a `landing page:` line naming the value or what an empty one is.
+* **Deploy first, then set it; unset it before rolling back.** There is no settings-file version
+  bump, and an empty value is **never written**, so a host that never set one is untouched and
+  rolls back with no step at all. `GateSettings` refuses unknown keys, so an **older binary
+  refuses a file that carries the key**: on a SIGHUP it keeps the live values, at a restart it
+  does not start. So on a host that does set one, install all three packages before setting it,
+  and run `bb-auth-adm settings set --landing-url ''` before any rollback to an older binary.
+
+### Changed: the Preferences menu closes on a click outside it
+
+* **The menu closes on a click anywhere outside it**, on the console and on `/account` alike, in
+  CSS and with no script: while the menu is open its trigger draws a transparent box over the
+  whole viewport, so a click outside the panel lands on the `summary` itself and the browser
+  closes the disclosure the way it always closes one. Nothing is added to any page's script, so
+  it works with scripting off and `/account` keeps its "no handler at all". The open trigger
+  wears the accent border for as long as it is open, which is what keeps its hover look from
+  flickering as the pointer crosses the panel's edge.
+* **Escape does not close it, deliberately.** The control is a disclosure, whose keyboard
+  contract is Enter and Space, and Escape would cost a script on a page that carries none. The
+  click that closes the menu does nothing else, so a click meant to dismiss never navigates by
+  accident: a second click follows the link.
 
 ### Changed: removing a user keeps them out of the scopes that excluded them
 

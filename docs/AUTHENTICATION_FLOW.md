@@ -173,7 +173,8 @@ Inside bb-auth (`handle_session`):
 5. **`safe_rd(rd)`:** the redirect target must resolve to an `https://` URL whose host
    matches `gate.authorized_hosts`. An absolute path (no `//`, no `/\`) resolves
    against the caller's own host, which nginx supplies via `X-Original-URL` on this
-   very request; with no `rd` at all the browser lands on that host's root. Any
+   very request; with no `rd` at all the browser lands on `gate.landing_url`, or on that
+   host's root when no landing page is set. Any
    control byte (incl. CR/LF) is rejected. Anything else falls back to the login page.
    This blocks open-redirect abuse and response splitting.
 6. Respond `302` to `rd` with `Set-Cookie: <cookie>=…; HttpOnly; Secure;
