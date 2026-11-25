@@ -140,12 +140,12 @@ use tiny_http::{Header, Request, Response, ResponseBox, Server, StatusCode};
 // contract — stays here, in one file, read top to bottom.
 use bb_auth_core::{
     claim_name_ok, decide, decide_api_key, decision_reason, default_settings_path, denied_url_for,
-    estate_form_action, header_safe_email, html_escape, login_url_for, now, page_csp, read_access,
-    read_settings, request_site, request_url, sha256_hex, social_idp_label, stylesheet_link,
-    version_line, Access, AccessKind, ApiKeyRecord, AuditClient, AuditCredential, AuditEvent,
-    AuditKind, AuditPolicy, AuditWriter, Decision, IdentityAttr, KeyDecision, ProfileClaim,
-    RequestSite, Settings, SocialButton, Subject, UrlPattern, API_KEY_PREFIX, BASE_CSS,
-    DEFAULT_AUDIT_FILE, PAGE_SECURITY_HEADERS, THEME_CSS,
+    estate_form_action, header_safe_email, html_escape, login_url_for, now, page_csp,
+    rd_url_allowed, read_access, read_settings, request_site, request_url, sha256_hex,
+    social_idp_label, stylesheet_link, version_line, Access, AccessKind, ApiKeyRecord, AuditClient,
+    AuditCredential, AuditEvent, AuditKind, AuditPolicy, AuditWriter, Decision, IdentityAttr,
+    KeyDecision, ProfileClaim, RequestSite, Settings, SocialButton, Subject, UrlPattern,
+    API_KEY_PREFIX, BASE_CSS, DEFAULT_AUDIT_FILE, PAGE_SECURITY_HEADERS, THEME_CSS,
 };
 
 type HmacSha256 = Hmac<Sha256>;
@@ -1848,45 +1848,6 @@ fn safe_rd(
     } else {
         fallback()
     }
-}
-
-/// True iff `url` is an absolute `https://` URL whose host matches one of `hosts`.
-/// Rejects any other scheme, control bytes, userinfo (`@`) and backslashes. A `:port` suffix is
-/// tolerated on the candidate and stripped before matching (patterns are bare hosts).
-///
-/// Matching is the same [`bb_auth_core::glob_match`] a scope's URL patterns use, so
-/// `*.badbat75.com` accepts `mcp.badbat75.com` but neither `evilbadbat75.com` nor
-/// `badbat75.com.evil.com` — the literal dot in the pattern is what rules those out. It does
-/// *not* accept the bare apex `badbat75.com`; list it explicitly if you want it.
-fn rd_url_allowed(url: &str, hosts: &[UrlPattern]) -> bool {
-    // Control bytes are rejected HERE and not only in `safe_rd`, so that the gate is one
-    // gate however it is entered. `login_rd` calls this one directly, so the check used to
-    // depend on which endpoint the candidate arrived at: a CR/LF in a `?rd=` reached the
-    // sign-in page's `data-rd` attribute (escaped, and re-checked before it could become a
-    // `Location:`, so it was never exploitable) and the same bytes were refused a few
-    // functions away. A guard two callers describe as the same guard has to be the same
-    // guard.
-    if url.bytes().any(|b| b < 0x20 || b == 0x7f) {
-        return false;
-    }
-    let rest = match url.strip_prefix("https://") {
-        Some(r) => r,
-        None => return false,
-    };
-    // Authority is everything up to the first '/', '?' or '#'.
-    let authority_end = rest.find(['/', '?', '#']).unwrap_or(rest.len());
-    let authority = &rest[..authority_end];
-    if authority.is_empty() || authority.contains('@') || authority.contains('\\') {
-        return false;
-    }
-    // Strip an optional ":port" (only when the part after ':' is all digits, so we
-    // don't mistake something else for a port).
-    let host = match authority.rsplit_once(':') {
-        Some((h, p)) if !p.is_empty() && p.bytes().all(|b| b.is_ascii_digit()) => h,
-        _ => authority,
-    };
-    let host = host.to_ascii_lowercase();
-    hosts.iter().any(|p| p.matches(&host))
 }
 
 /// Respond with a bare status code and no body — what `auth_request` consumes.

@@ -194,7 +194,7 @@ pub fn compile_pattern(raw: &str) -> Result<UrlPattern, String> {
 /// spaces.
 ///
 /// https-only, and no userinfo `@` or backslash in the authority — the same lookalike
-/// tricks the gate's `rd_url_allowed` rejects, since a login page is where a rejected
+/// tricks [`rd_url_allowed`] rejects, since a login page is where a rejected
 /// `rd` lands.
 ///
 /// It is **not** checked against `BB_AUTH_AUTHORIZED_HOSTS`, and cannot be: [`read_access`]
@@ -240,7 +240,7 @@ pub fn compile_page_url(field: &str, raw: &str) -> Result<String, String> {
 
 /// Validate and normalise one `BB_AUTH_AUTHORIZED_HOSTS` entry: a host-only glob
 /// (`badbat75.com`, `*.badbat75.com`, `v&.badbat75.com`). No scheme, no path, no port
-/// — the gate's `rd_url_allowed` strips those from the candidate before matching.
+/// — [`rd_url_allowed`] strips those from the candidate before matching.
 ///
 /// Env, not access file — but it compiles to the same [`UrlPattern`] and is matched by the
 /// same [`glob_match`], which is the point: one wildcard grammar, one implementation.
@@ -262,6 +262,53 @@ pub fn compile_host_pattern(raw: &str) -> Result<UrlPattern, String> {
     Ok(UrlPattern {
         pat: h.into_bytes(),
     })
+}
+
+/// True iff `url` is an absolute `https://` URL whose host matches one of `hosts`.
+/// Rejects any other scheme, control bytes, userinfo (`@`) and backslashes. A `:port` suffix is
+/// tolerated on the candidate and stripped before matching (patterns are bare hosts).
+///
+/// Matching is the same [`glob_match`] a scope's URL patterns use, so `*.badbat75.com` accepts
+/// `mcp.badbat75.com` but neither `evilbadbat75.com` nor `badbat75.com.evil.com` — the literal
+/// dot in the pattern is what rules those out. It does *not* accept the bare apex
+/// `badbat75.com`; list it explicitly if you want it.
+///
+/// It lives here, and not beside the `safe_rd` that calls it from the gate, because
+/// [`compile_settings`] needs it: a `gate.landing_url` whose host `gate.authorized_hosts` does
+/// not cover would be refused by this function at every login and fall back to the sign-in
+/// page, so the editor has to be able to ask the same question on the way to disk. By the
+/// library's own membership rule, the moment an editor must refuse to *write* a bad value the
+/// rule that decides one is shared. `safe_rd` stays in the gate, because that half is HTTP, and
+/// it calls this, so the load-time check and the use-time gate cannot drift apart.
+pub fn rd_url_allowed(url: &str, hosts: &[UrlPattern]) -> bool {
+    // Control bytes are rejected HERE and not only in `safe_rd`, so that the gate is one
+    // gate however it is entered. `login_rd` calls this one directly, so the check used to
+    // depend on which endpoint the candidate arrived at: a CR/LF in a `?rd=` reached the
+    // sign-in page's `data-rd` attribute (escaped, and re-checked before it could become a
+    // `Location:`, so it was never exploitable) and the same bytes were refused a few
+    // functions away. A guard two callers describe as the same guard has to be the same
+    // guard.
+    if url.bytes().any(|b| b < 0x20 || b == 0x7f) {
+        return false;
+    }
+    let rest = match url.strip_prefix("https://") {
+        Some(r) => r,
+        None => return false,
+    };
+    // Authority is everything up to the first '/', '?' or '#'.
+    let authority_end = rest.find(['/', '?', '#']).unwrap_or(rest.len());
+    let authority = &rest[..authority_end];
+    if authority.is_empty() || authority.contains('@') || authority.contains('\\') {
+        return false;
+    }
+    // Strip an optional ":port" (only when the part after ':' is all digits, so we
+    // don't mistake something else for a port).
+    let host = match authority.rsplit_once(':') {
+        Some((h, p)) if !p.is_empty() && p.bytes().all(|b| b.is_ascii_digit()) => h,
+        _ => authority,
+    };
+    let host = host.to_ascii_lowercase();
+    hosts.iter().any(|p| p.matches(&host))
 }
 
 /// The user group a scope's `groups` entry references (`"@admins"` ⇒ `Some("admins")`),
@@ -3586,6 +3633,31 @@ pub struct GateSettings {
     /// settings file names without a resolver and a rewrite of the recipe.
     #[serde(default)]
     pub denied_url: String,
+    /// **Where a sign-in lands when nobody named a place**: what `safe_rd` answers when
+    /// `/auth/session` arrives with no `rd`. Absolute https, validated by [`compile_page_url`],
+    /// and its host must be one `gate.authorized_hosts` covers, or [`compile_settings`] refuses
+    /// the file.
+    ///
+    /// Empty, the default, is the **caller's root**, exactly as before this setting existed: the
+    /// host the sign-in page was served from, which on a host that serves only the sign-in page
+    /// is a page nobody chose, and often the sign-in page again. Naming one is how an operator
+    /// says where a login ends when the visitor, the `401` round trip and the `Referer` all said
+    /// nothing. A present `rd` still wins, and a *rejected* `rd` still falls back to the sign-in
+    /// page, so the one path this touches is the one that had no answer.
+    ///
+    /// It passes the settings file's three-part rule cleanly, and that is why it is **not** a
+    /// guarded change: it is read per request, after the token is verified and the cookie built;
+    /// it decides only where a browser that is already signed in is sent, so the worst a wrong
+    /// value achieves is a `403` or a `404` landing, the cookie is set either way, and whoever
+    /// made the edit still holds a session to undo it with; and it is a `Location:` a browser
+    /// follows, not a secret.
+    ///
+    /// It is the one value in this section written **only when set**, because `GateSettings`
+    /// refuses unknown keys and an older binary therefore refuses a file that carries it: an
+    /// editor that never touched it never writes the key, so a host that does not use this
+    /// setting can roll back to an older binary with no step at all.
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    pub landing_url: String,
     /// The Cognito **hosted-UI domain**, as a bare host with no scheme and no path, e.g.
     /// `pool.auth.eu-central-1.amazoncognito.com`. Empty means this deployment offers no
     /// social sign-in at all.
@@ -3698,6 +3770,7 @@ impl Default for GateSettings {
             client_id: String::new(),
             login_url: String::new(),
             denied_url: String::new(),
+            landing_url: String::new(),
             oauth_domain: String::new(),
             social_callback_url: String::new(),
             social_buttons: Vec::new(),
@@ -5326,6 +5399,9 @@ pub struct Settings {
     /// See [`GateSettings::denied_url`]. Empty = the gate's own `/auth/denied`, and the gate
     /// applies that default too, for the same reason.
     pub denied_url: String,
+    /// See [`GateSettings::landing_url`]. Empty = the caller's root, and the gate is where that
+    /// default is applied, because only it knows the origin of the request that logged in.
+    pub landing_url: String,
     /// See [`GateSettings::oauth_domain`]. `None` = no social sign-in.
     pub oauth_domain: Option<String>,
     /// See [`GateSettings::social_callback_url`]. `None` = no social sign-in.
@@ -5907,6 +5983,10 @@ pub fn compile_settings(file: &SettingsFile) -> Result<Settings, String> {
         "" => String::new(),
         raw => compile_page_url("denied_url", raw)?,
     };
+    let landing_url = match file.gate.landing_url.trim() {
+        "" => String::new(),
+        raw => compile_page_url("landing_url", raw)?,
+    };
     let issuer = compile_issuer(&file.gate.issuer)?;
     let cookie_domain = compile_cookie_domain(&file.gate.cookie_domain)?;
     let mut authorized_hosts: Vec<UrlPattern> =
@@ -5940,6 +6020,20 @@ pub fn compile_settings(file: &SettingsFile) -> Result<Settings, String> {
                 cookie_domain
             ));
         }
+    }
+    // The same reflex one field along, and the reason `rd_url_allowed` lives in this library:
+    // a landing page outside the redirect scope is refused by it at every login, so the login
+    // falls back to the sign-in page, which is the loop this setting was added to end with a
+    // setting standing beside it saying it is fixed. Silent is the half that costs an afternoon,
+    // so the file refuses it on the way to disk, where both editors can still say so.
+    if !landing_url.is_empty()
+        && (authorized_hosts.is_empty() || !rd_url_allowed(&landing_url, &authorized_hosts))
+    {
+        return Err(
+            "landing_url: its host is not covered by authorized_hosts, so every sign-in with \
+             no rd would fall back to the sign-in page"
+                .to_string(),
+        );
     }
     let oauth_domain = compile_oauth_domain(&file.gate.oauth_domain)?;
     let social_callback_url =
@@ -6033,6 +6127,7 @@ pub fn compile_settings(file: &SettingsFile) -> Result<Settings, String> {
         audiences,
         login_url,
         denied_url,
+        landing_url,
         oauth_domain: (!oauth_domain.is_empty()).then_some(oauth_domain),
         social_callback_url,
         social_buttons,
@@ -8568,6 +8663,129 @@ mod tests {
             e.contains("denied_url") && e.contains("absolute https"),
             "{e}"
         );
+    }
+
+    fn landing_settings(landing: &str, hosts: &str) -> Result<Settings, String> {
+        settings(&format!(
+            r#"{{ "version": 3, "gate": {{ "landing_url": "{landing}", "authorized_hosts": [{hosts}] }} }}"#
+        ))
+    }
+
+    #[test]
+    fn a_landing_url_is_absolute_https_on_an_authorized_host() {
+        // Unset is the caller's root, which is what the gate did before the setting existed.
+        assert!(settings(r#"{ "version": 3 }"#)
+            .unwrap()
+            .landing_url
+            .is_empty());
+        let s = landing_settings("https://auth.x.com/account/", r#""auth.x.com""#).unwrap();
+        assert_eq!(s.landing_url, "https://auth.x.com/account/");
+        // A wildcard pattern covers it too, through the same matcher `safe_rd` uses.
+        assert!(landing_settings("https://auth.x.com/account/", r#""*.x.com""#).is_ok());
+
+        // Each refusal names the field the operator typed.
+        for bad in [
+            "http://auth.x.com/account/",
+            "/account/",
+            "https://bob@auth.x.com/account/",
+            r"https://auth.x.com\account",
+        ] {
+            let e = refusal(landing_settings(
+                bad.replace('\\', "\\\\").as_str(),
+                r#""auth.x.com""#,
+            ));
+            assert!(e.contains("landing_url"), "{bad}: {e}");
+        }
+        // A host the patterns do not cover would be refused by `safe_rd` at every login and
+        // fall back to the login page, so the file refuses it on the way to disk.
+        let e = refusal(landing_settings(
+            "https://evil.com/account/",
+            r#""auth.x.com""#,
+        ));
+        assert!(
+            e.contains("landing_url") && e.contains("authorized_hosts"),
+            "{e}"
+        );
+        // No hosts at all covers nothing.
+        let e = refusal(landing_settings("https://auth.x.com/account/", ""));
+        assert!(e.contains("landing_url"), "{e}");
+    }
+
+    #[test]
+    fn an_unset_landing_url_is_never_written() {
+        // A host that never used the setting must be able to roll back to an older binary,
+        // which refuses an unknown key in this section.
+        let doc: SettingsFile = serde_json::from_str(
+            r#"{ "version": 3, "gate": { "authorized_hosts": ["auth.x.com"] } }"#,
+        )
+        .unwrap();
+        let out = render_settings_file(&doc).unwrap();
+        assert!(!out.contains("landing_url"), "{out}");
+        let back: SettingsFile = serde_json::from_str(&out).unwrap();
+        assert_eq!(back.gate, doc.gate);
+
+        // Set, it is written and survives the round trip.
+        let mut doc = doc;
+        doc.gate.landing_url = "https://auth.x.com/account/".to_string();
+        let out = render_settings_file(&doc).unwrap();
+        assert!(
+            out.contains(r#""landing_url": "https://auth.x.com/account/""#),
+            "{out}"
+        );
+        let back: SettingsFile = serde_json::from_str(&out).unwrap();
+        assert_eq!(back.gate, doc.gate);
+    }
+
+    #[test]
+    fn removing_the_host_a_landing_url_needs_is_refused() {
+        let mut doc: SettingsFile = serde_json::from_str(
+            r#"{ "version": 3, "gate": { "authorized_hosts": ["auth.x.com", "app.x.com"],
+                 "landing_url": "https://auth.x.com/account/" } }"#,
+        )
+        .unwrap();
+        assert!(SettingsWrite::prepare(&doc).is_ok());
+        // Removing an unrelated host is fine.
+        doc.gate.authorized_hosts = vec!["auth.x.com".to_string()];
+        assert!(SettingsWrite::prepare(&doc).is_ok());
+        // Removing the one the landing page is on is the silent loop, refused with the
+        // landing_url sentence, and nothing becomes bytes.
+        doc.gate.authorized_hosts = vec!["app.x.com".to_string()];
+        let e = refusal(SettingsWrite::prepare(&doc));
+        assert!(e.contains("landing_url"), "{e}");
+    }
+
+    #[test]
+    fn the_landing_url_is_not_a_guarded_change() {
+        let live = GateSettings {
+            authorized_hosts: vec!["auth.x.com".to_string()],
+            landing_url: "https://auth.x.com/account/".to_string(),
+            ..Default::default()
+        };
+        for new in ["https://auth.x.com/other/", ""] {
+            let changed = GateSettings {
+                landing_url: new.to_string(),
+                ..live.clone()
+            };
+            assert!(guarded_changes(&live, &changed).is_empty(), "{new:?}");
+        }
+        let fresh = GateSettings {
+            landing_url: String::new(),
+            ..live.clone()
+        };
+        assert!(guarded_changes(&fresh, &live).is_empty());
+    }
+
+    #[test]
+    fn rd_url_allowed_lives_in_the_library_and_judges_host_only() {
+        let h = vec![compile_host_pattern("*.x.com").unwrap()];
+        assert!(rd_url_allowed("https://a.x.com/p?q=1", &h));
+        assert!(rd_url_allowed("https://A.X.com:8443/p", &h));
+        assert!(!rd_url_allowed("https://x.com/", &h)); // the apex is not implied
+        assert!(!rd_url_allowed("http://a.x.com/", &h));
+        assert!(!rd_url_allowed("https://evil.com/a.x.com", &h));
+        assert!(!rd_url_allowed("https://a.x.com.evil.com/", &h));
+        assert!(!rd_url_allowed("https://u@a.x.com/", &h));
+        assert!(!rd_url_allowed("https://a.x.com/\r\nSet-Cookie: x=1", &h));
     }
 
     #[test]
