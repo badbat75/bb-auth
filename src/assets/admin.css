@@ -355,7 +355,7 @@ body:has(.selfserve){background:var(--bg)}
      saving the row was introduced for. */
   .acct{order:2}
   .pill{padding:3px 8px}
-  .bar .pill,p.primary .pill,.actions .pill{font-size:var(--fs-sm);padding:4px 9px}
+  .bar .pill{font-size:var(--fs-sm);padding:4px 9px}
   .bar .pill.ico{padding:4px}
   nav.acct .who{display:none}
   /* The identity goes on a phone and the menu keeps it. The bar's first line holds the brand,

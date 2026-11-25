@@ -146,3 +146,10 @@ Rules are in `AGENTS.md`. Format of this file: `AGENTS.md`, under "Skills".
   `checked`. The staged Rust test demands the hidden input, so the pair is mutually exclusive and
   the e2e is the tester's to update. Grep `e2e/tests` for the control's name before shipping the
   swap, and report the label (`restrict=all is on offer and checked`).
+- Two Rust tests (`every_small_control_is_a_pill_of_the_same_family`, `sign_out_is_in_the_bar_when_configured_and_absent_when_not`)
+  assert `CSS.contains(".bar .pill,")` **with the trailing comma**: their comments describe the
+  desktop bar rule (`.bar .pill{`, admin.css:59), but the comma is satisfied only by the phone
+  selector list, so shrinking that list to `.bar .pill{` turns both red. The pair is mutually
+  exclusive with any edit to that rule; the tester's fix is the one character (`.bar .pill{`
+  matches the desktop rule and the intent). Grep the Rust suite for the selector string before
+  editing a rule a test reads by `CSS.contains`.

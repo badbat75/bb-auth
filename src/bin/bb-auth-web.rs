@@ -12400,7 +12400,7 @@ mod tests {
         // click area. The size rule therefore selects the CONTAINER and not the three
         // structures: a list of them is a list that can miss one, which is what it did.
         assert!(
-            CSS.contains(".bar .pill,"),
+            the_rule(CSS, ".bar .pill").is_some(),
             "every pill in the header shares one size rule, named by the bar and not one by one"
         );
         assert!(
@@ -12452,7 +12452,7 @@ mod tests {
             "Sign out must come after the menu: {html}"
         );
         assert!(
-            CSS.contains(".bar .pill,"),
+            the_rule(CSS, ".bar .pill").is_some(),
             "and share the header's size step, which reaches it for being IN the bar"
         );
 
@@ -19480,6 +19480,16 @@ mod tests {
     /// walk steps over a `@media` block's own selector, so the phone overrides inside it are
     /// reachable, and reads the bytes that ship rather than `src/assets/*.css` on disk.
     fn the_rule(css: &str, selector: &str) -> Option<String> {
+        // A comment sits between two rules and would otherwise be read as part of the next
+        // selector; its commas alone are enough to hide an exact match.
+        let mut bare = String::new();
+        let mut rest = css;
+        while let Some(i) = rest.find("/*") {
+            bare.push_str(&rest[..i]);
+            rest = rest[i..].find("*/").map_or("", |j| &rest[i + j + 2..]);
+        }
+        bare.push_str(rest);
+        let css = bare.as_str();
         let mut at = 0;
         while let Some(i) = css[at..].find('{') {
             let sel = css[at..at + i].trim();

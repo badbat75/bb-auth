@@ -42,3 +42,4 @@ Rules are in `AGENTS.md`. Format of this file: `AGENTS.md`, under "Skills".
 - `you@example.com` in the fixture has no scope a key can reach, so `account-new` never shows the scope radios: review that block from a scratch shot or a fixture caller who has one.
 - The ground is one viewport tall (`html{height:100%}`), so a background without `no-repeat` restarts one viewport down: a band of a second shade on any long page.
 - `nav .pill` also matches the header icons, because `nav.acct` is a `nav` too.
+- A desktop rule that sizes `.pill` is undone on a phone by the `@media` block in `admin.css` (line `.bar .pill,p.primary .pill,.actions .pill`): check every size change in the `phone` view too.

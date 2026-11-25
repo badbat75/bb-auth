@@ -100,3 +100,6 @@ files outside the repo.
   (`info.time.updated`) after stopping one. The HTTP routes need auth; stopping the service stops
   every project's agents, so ask the user and tell the llama.cpp-framework coordinator. Always pass `--standalone`
   (a private server per run, `opencode run --help`), so a `kill` of the run stops its session.
+- cargo can keep a stale test binary after an agent's edit (a tester saw 191 green while the repo
+  build kept failing on the old assertion). When an agent's green run and yours disagree on
+  unchanged files, `touch` the edited source and rerun before sending the work back.

@@ -222,14 +222,17 @@ async function run(ctx, t) {
     t.check('the account page has no horizontal scroll at 320px', uid !== null && uid.scroll <= 0,
       JSON.stringify(uid));
     await person8d.close();
+    for (const width of [1280, 360]) {
+      await page.setViewportSize({ width, height: 900 });
+      await page.goto(ctx.base + '/groups/admins/edit');
+      const heights = await page.evaluate(() => ({
+        pill: document.querySelector('.actions .pill').getBoundingClientRect().height,
+        button: document.querySelector('.actions button').getBoundingClientRect().height,
+      }));
+      t.check(`a pill beside a button is as tall as the button (within 1px) at ${width}`,
+        Math.abs(heights.pill - heights.button) <= 1, JSON.stringify(heights));
+    }
     await page.setViewportSize({ width: 1280, height: 900 });
-    await page.goto(ctx.base + '/groups/admins/edit');
-    const heights = await page.evaluate(() => ({
-      pill: document.querySelector('.actions .pill').getBoundingClientRect().height,
-      button: document.querySelector('.actions button').getBoundingClientRect().height,
-    }));
-    t.check('a pill beside a button is as tall as the button (within 1px)',
-      Math.abs(heights.pill - heights.button) <= 1, JSON.stringify(heights));
     await page.goto(ctx.base + '/');
     const tops = await page.$$eval('.cards .card', (els) => els.map((el) => Math.round(el.getBoundingClientRect().top)));
     t.check('the dashboard has six tiles', tops.length === 6, JSON.stringify(tops));
