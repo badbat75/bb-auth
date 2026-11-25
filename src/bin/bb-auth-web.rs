@@ -2911,14 +2911,18 @@ struct Config {
     /// workers therefore shows up as latency for everybody, which is why the count is a
     /// deployment's to state and not a constant.
     workers: usize,
-    /// The address the Cognito API calls go to, and **never set from the environment**.
+    /// The address the Cognito API calls go to, and set from the environment by nothing a
+    /// deployment builds.
     ///
     /// `None` means "derive it from the settings file", which is what every real deployment does
     /// ([`Settings::cognito_endpoint`]). The field exists for the tests alone: `compile_issuer`
     /// is https-only, so a plain-HTTP fake pool cannot be named through `gate.issuer`, and a TLS
     /// fake would need a certificate authority the bundled Mozilla roots do not trust (the design
     /// of docs/ARCHITECTURE.md §13.22). No env var and no file sets it, so a host never points
-    /// the sign-in flow at an address an operator wrote in a config.
+    /// the sign-in flow at an address an operator wrote in a config. The one reader is the
+    /// browser suite's harness, behind the `e2e-fake-cognito` feature and loopback only, through
+    /// [`e2e_cognito_endpoint`]: a release that carries the feature does not compile
+    /// (docs/ARCHITECTURE.md §13.24).
     cognito_endpoint: Option<String>,
     /// How long one Cognito call may take before this gives up and says so.
     ///
@@ -2937,6 +2941,65 @@ struct Config {
 /// worst case is a slow page and not a wedged service. There is no retry: a start is one call and
 /// the code step is two, so the most a request can spend is twice this.
 const COGNITO_TIMEOUT: Duration = Duration::from_secs(5);
+
+/// The Cognito address the browser suite's harness points this process at, and the reason no
+/// release build has one (docs/ARCHITECTURE.md §13.24).
+///
+/// One function with two bodies, so the default build has a rule to test: without the
+/// `e2e-fake-cognito` feature this answers `Ok(None)` for whatever `lookup` answers, and the
+/// variable's name appears in no source that is compiled. With the feature,
+/// `BB_AUTH_WEB_E2E_COGNITO_ENDPOINT` names the address and the address must be
+/// `http://127.0.0.1:<port>`, optionally with a trailing `/`: the harness's fake is a plain-HTTP
+/// server on loopback, and `compile_issuer` is https-only, so no real endpoint is ever spelled
+/// like this. Anything else is an `Err` naming the variable, because a switch that accepted
+/// `https://cognito-idp.eu-central-1.amazonaws.com/` is a switch a host can be pointed at an
+/// upstream of the caller's choosing with, which is the §13.22 rule this feature exists to keep
+/// unreachable outside a test.
+///
+/// A value that is read is announced on stderr in a line containing `E2E BUILD`, and
+/// `e2e/lib/server.js` refuses to run against a process that did not print it: a walk that
+/// silently reached no fake would read as a scene full of refusals.
+#[cfg(feature = "e2e-fake-cognito")]
+fn e2e_cognito_endpoint(lookup: impl Fn(&str) -> Option<String>) -> Result<Option<String>, String> {
+    const VAR: &str = "BB_AUTH_WEB_E2E_COGNITO_ENDPOINT";
+    let Some(raw) = lookup(VAR) else {
+        return Ok(None);
+    };
+    let refuse = || {
+        format!(
+            "{VAR} must be http://127.0.0.1:<port> (the e2e harness's fake Cognito); got '{raw}'"
+        )
+    };
+    let Some(rest) = raw.strip_prefix("http://127.0.0.1:") else {
+        return Err(refuse());
+    };
+    let port = rest.strip_suffix('/').unwrap_or(rest);
+    if port.is_empty() || !port.bytes().all(|b| b.is_ascii_digit()) {
+        return Err(refuse());
+    }
+    eprintln!("E2E BUILD: Cognito calls go to {raw}");
+    Ok(Some(raw))
+}
+
+/// The same function with no switch: a build that does not carry `e2e-fake-cognito` reads
+/// nothing, so the variable is inert on every host and its name is not in the binary. The
+/// feature body above is the rule, and docs/ARCHITECTURE.md §13.24 is why it is behind one.
+#[cfg(not(feature = "e2e-fake-cognito"))]
+fn e2e_cognito_endpoint(
+    _lookup: impl Fn(&str) -> Option<String>,
+) -> Result<Option<String>, String> {
+    Ok(None)
+}
+
+// The second lock of §13.24, on the source: the harness builds debug, so a release build that
+// carries the feature does not compile at all, and the switch cannot meet a `.deb` (always
+// `--release`) whatever flags somebody passes. The other two locks are the artifact check in
+// scripts/package.sh and the harness's own `--target-dir target/e2e`, which keeps
+// target/debug/bb-auth-web, the binary a developer copies by hand, free of the feature.
+// (A `//` comment and not a doc comment: rustdoc documents no macro invocation, so `///` here
+// is an unused-doc-comment warning.)
+#[cfg(all(feature = "e2e-fake-cognito", not(debug_assertions)))]
+compile_error!("e2e-fake-cognito is for the e2e harness's debug build only");
 
 /// Read an env var, falling back to `default` when unset.
 fn env_or(key: &str, default: &str) -> String {
@@ -3235,9 +3298,16 @@ impl Config {
             audit_path: env_or("BB_AUTH_AUDIT_FILE", DEFAULT_AUDIT_FILE)
                 .trim()
                 .to_string(),
-            // Never read from the environment: see the field's own doc. A host always derives the
-            // endpoint from `gate.issuer`, and the production bound is the constant.
-            cognito_endpoint: None,
+            // The e2e switch (§13.24): `None` in every build that does not carry the feature,
+            // which is every build a host runs. The feature build reads a loopback-only address
+            // and says so on stderr; a bad value is fatal here, like every other value read
+            // above, because a process that thinks it is talking to a fake and is not would
+            // spend its whole request budget on the real pool.
+            cognito_endpoint: e2e_cognito_endpoint(|k| std::env::var(k).ok()).unwrap_or_else(|e| {
+                eprintln!("[bb-auth-web] FATAL: {e}");
+                std::process::exit(1);
+            }),
+            // The production bound is the constant; only the tests shorten it.
             cognito_timeout: COGNITO_TIMEOUT,
         }
     }
@@ -26770,6 +26840,69 @@ mod tests {
                 f.fake.actions()
             );
             cleanup(&f.path);
+        }
+    }
+
+    // ---------------------------------------------------------------------
+    // The e2e switch (docs/ARCHITECTURE.md §13.24): the one way a process is pointed at a
+    // Cognito that is not the pool. Default builds must never read the variable.
+    // ---------------------------------------------------------------------
+
+    #[cfg(feature = "e2e-fake-cognito")]
+    const E2E_ENDPOINT_VAR: &str = "BB_AUTH_WEB_E2E_COGNITO_ENDPOINT";
+
+    #[cfg(not(feature = "e2e-fake-cognito"))]
+    #[test]
+    fn the_e2e_endpoint_is_not_read_without_the_feature() {
+        // The lookup answers a perfectly good loopback URL for every name: a default build must
+        // still say nothing, because a binary that honours it is a binary a host can be pointed
+        // at a Cognito of somebody's choosing with.
+        let answers = |_: &str| Some("http://127.0.0.1:9/".to_string());
+        assert_eq!(e2e_cognito_endpoint(answers), Ok(None));
+        let hostile = |_: &str| Some("https://evil.example.org/".to_string());
+        assert_eq!(e2e_cognito_endpoint(hostile), Ok(None));
+    }
+
+    #[cfg(feature = "e2e-fake-cognito")]
+    #[test]
+    fn the_e2e_endpoint_reads_only_its_own_variable() {
+        let seen = std::cell::RefCell::new(Vec::new());
+        let lookup = |k: &str| {
+            seen.borrow_mut().push(k.to_string());
+            None
+        };
+        assert_eq!(e2e_cognito_endpoint(lookup), Ok(None));
+        assert_eq!(seen.into_inner(), vec![E2E_ENDPOINT_VAR.to_string()]);
+    }
+
+    #[cfg(feature = "e2e-fake-cognito")]
+    #[test]
+    fn a_loopback_e2e_endpoint_is_read() {
+        let lookup =
+            |k: &str| (k == E2E_ENDPOINT_VAR).then(|| "http://127.0.0.1:43210/".to_string());
+        assert_eq!(
+            e2e_cognito_endpoint(lookup),
+            Ok(Some("http://127.0.0.1:43210/".to_string()))
+        );
+    }
+
+    #[cfg(feature = "e2e-fake-cognito")]
+    #[test]
+    fn a_non_loopback_or_lookalike_e2e_endpoint_is_a_fatal_naming_the_variable() {
+        for bad in [
+            "https://cognito-idp.eu-central-1.amazonaws.com/",
+            "http://10.0.0.1:80/",
+            "http://127.0.0.1.evil.com:9/",
+            "http://127.0.0.1.evil.com/",
+            "http://localhost:9/",
+            "https://127.0.0.1:9/",
+        ] {
+            let lookup = |k: &str| (k == E2E_ENDPOINT_VAR).then(|| bad.to_string());
+            let got = e2e_cognito_endpoint(lookup);
+            match got {
+                Err(m) => assert!(m.contains(E2E_ENDPOINT_VAR), "{bad:?}: {m}"),
+                other => panic!("{bad:?} must be refused, got {other:?}"),
+            }
         }
     }
 }

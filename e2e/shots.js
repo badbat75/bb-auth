@@ -25,6 +25,7 @@ const path = require('path');
 
 const { E2E_DIR, FIXTURE, SETTINGS_FIXTURE, boot } = require('./lib/server');
 const { submit, formBytes, resubmit, writeDoc, doc, setDuration } = require('./lib/harness');
+const { profileSettingsBytes, PROFILE_HEADERS } = require('./lib/cognito');
 
 /** Where a screenshot lands. Under artifacts/, which is gitignored. */
 const OUT = path.join(E2E_DIR, 'artifacts', 'visual');
@@ -51,7 +52,12 @@ const VIEWS = [
       'conflict-mint', 'forbidden', 'settings-menu', 'config-landing-refused',
       // The self-service page is prose a person reads in their own language, so the copy of
       // the table's headings and the refusal is worth reading in Italian too.
-      'account', 'account-new', 'account-new-scopes', 'account-error', 'account-rm', 'account-menu'],
+      'account', 'account-new', 'account-new-scopes', 'account-error', 'account-rm', 'account-menu',
+      // The profile edit is all prose (section 13.23): every shape of it is read in Italian too.
+      'account-profile', 'account-profile-edit', 'account-profile-edit-one', 'account-profile-nothing',
+      'account-profile-code', 'account-profile-code-wrong', 'account-profile-saved',
+      'account-profile-expired', 'account-profile-social', 'account-profile-noanswer',
+      'account-profile-unsure'],
   },
   // An explicit theme is only worth photographing against the OPPOSITE `colorScheme`:
   // that is the pair that proves the choice beat the operating system. Under a matching
@@ -111,6 +117,36 @@ async function tabTo(page, selector, max = 30) {
   }
   throw new Error(`tabTo: ${selector} never took focus in ${max} presses`);
 }
+
+/**
+ * A profile scene (docs/ARCHITECTURE.md section 13.23). The settings that offer the edit are
+ * written, the fake Cognito is emptied and the browser carries the identity nginx would send
+ * plus the profile claims it would forward; `who` is the identity header's value, which is two
+ * addresses, space-joined as the gate sends them, for the scene that shows the choice. The
+ * administrator is put back afterwards, because a view's scenes share one browser context.
+ */
+const profileScene = (steps, who = 'you@example.com') => async (page, ctx) => {
+  fs.writeFileSync(ctx.settingsFile, profileSettingsBytes());
+  ctx.cognito.reset();
+  await page.setExtraHTTPHeaders({ ...PROFILE_HEADERS, 'X-Auth-Email': who });
+  try {
+    await steps(page, ctx);
+  } finally {
+    await asAdmin(page);
+  }
+};
+/** Change the given name, empty the family name, and send the code: the code page follows. */
+const sendChanges = async (page, ctx) => {
+  await page.goto(acct(ctx, '/profile'));
+  await page.fill('input[name=given_name]', 'Augusta');
+  await page.fill('input[name=family_name]', '');
+  await submit(page, 'form[action="/account/profile"] button[type=submit]');
+};
+/** The code page, then a code typed and saved. */
+const sendCode = async (page) => {
+  await page.fill('form[action="/account/profile/code"] input[name=code]', '123456');
+  await submit(page, 'form[action="/account/profile/code"] button[type=submit]');
+};
 
 const SCENES = [
   // ---- the read-only inventory -------------------------------------------
@@ -262,6 +298,50 @@ const SCENES = [
     await page.click('a[href*="/account/keys/remove"]');
     await asAdmin(page);
   }],
+
+  // ---- the profile edit (section 13.23): eleven shapes --------------------------------
+  ['account-profile', profileScene(async (page, ctx) => { await page.goto(acct(ctx, '/')); })],
+  ['account-profile-edit', profileScene(async (page, ctx) => {
+    await page.goto(acct(ctx, '/profile'));
+  }, 'bot@example.com bot@old.example.com')],
+  ['account-profile-edit-one', profileScene(async (page, ctx) => {
+    await page.goto(acct(ctx, '/profile'));
+  })],
+  ['account-profile-nothing', profileScene(async (page, ctx) => {
+    await page.goto(acct(ctx, '/profile'));
+    await submit(page, 'form[action="/account/profile"] button[type=submit]');
+  })],
+  ['account-profile-code', profileScene(sendChanges)],
+  ['account-profile-code-wrong', profileScene(async (page, ctx) => {
+    await sendChanges(page, ctx);
+    ctx.cognito.script([['RespondToAuthChallenge', {
+      status: 400, body: { __type: 'CodeMismatchException', Session: 'fake-session-2' },
+    }]]);
+    await sendCode(page);
+  })],
+  ['account-profile-saved', profileScene(async (page, ctx) => {
+    await sendChanges(page, ctx);
+    await sendCode(page);
+  })],
+  ['account-profile-expired', profileScene(async (page, ctx) => {
+    await sendChanges(page, ctx);
+    ctx.cognito.script([['RespondToAuthChallenge', { status: 400, body: { __type: 'ExpiredCodeException' } }]]);
+    await sendCode(page);
+  })],
+  ['account-profile-social', profileScene(async (page, ctx) => {
+    ctx.cognito.script([['InitiateAuth', { status: 400, body: { __type: 'UserNotFoundException' } }]]);
+    await sendChanges(page, ctx);
+  })],
+  // The two silences each cost the binary's whole five-second bound.
+  ['account-profile-noanswer', profileScene(async (page, ctx) => {
+    ctx.cognito.script([['InitiateAuth', 'silent']]);
+    await sendChanges(page, ctx);
+  })],
+  ['account-profile-unsure', profileScene(async (page, ctx) => {
+    await sendChanges(page, ctx);
+    ctx.cognito.script([['UpdateUserAttributes', 'silent']]);
+    await sendCode(page);
+  })],
 
   // ---- the states only a POST reaches ------------------------------------
   // The flash: a save, then the 303 lands on the page carrying ?msg=.
@@ -435,6 +515,7 @@ async function main() {
         fs.copyFileSync(FIXTURE, ctx.accessFile);
         fs.writeFileSync(ctx.settingsFile, SETTINGS_FIXTURE);
         fs.rmSync(ctx.auditFile, { force: true });
+        ctx.cognito.reset();
         // One scene that cannot reach its state (a selector the markup no longer has,
         // typically) must not cost the other hundred their screenshot: this is evidence
         // for a human, not an assertion, so it degrades instead of aborting. The exit

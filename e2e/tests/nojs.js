@@ -12,7 +12,9 @@
 // off to prove nothing else does.
 
 const crypto = require('crypto');
+const fs = require('fs');
 const { doc, bytes, newPage, submit, mainText } = require('../lib/harness');
+const { profileSettingsBytes, PROFILE_HEADERS } = require('../lib/cognito');
 
 /** The CSP source expression that names a script whose bytes are `s`. */
 const cspHashOf = (s) => 'sha256-' + crypto.createHash('sha256').update(s, 'utf8').digest('base64');
@@ -501,6 +503,55 @@ async function run(ctx, t) {
       (await page.locator('h2:has-text("user_groups")').count()) === 1);
   } finally {
     await noJs.close();
+  }
+
+  // --- the profile edit with scripting off (§13.23: every step is a link or a form) -------
+  // Nothing in the flow may carry a script or a handler, and the whole walk has to work with
+  // none: the form, the code page, the saved page and an outcome page. With scripting off
+  // `page.evaluate` is unavailable, so the checks read the served bytes and the fake's log.
+  const before = fs.readFileSync(ctx.settingsFile, 'utf8');
+  fs.writeFileSync(ctx.settingsFile, profileSettingsBytes());
+  ctx.cognito.reset();
+  const person = await ctx.browser.newContext({
+    viewport: { width: 1280, height: 900 },
+    extraHTTPHeaders: { 'X-Auth-Email': 'you@example.com', ...PROFILE_HEADERS },
+    javaScriptEnabled: false,
+  });
+  try {
+    const page = await person.newPage();
+    const bare = async (what) => {
+      const html = await page.content();
+      t.eq(`profile, scripting off: ${what} carries no <script>`, (html.match(/<script/gi) || []).length, 0);
+      t.eq(`and no handler attribute`, (html.match(/<[^>]*\son[a-z]+\s*=/gi) || []).length, 0);
+    };
+    await page.goto(ctx.origin + '/account/');
+    await Promise.all([page.waitForNavigation(), page.click('#profile a[href="/account/profile"]')]);
+    await bare('the form');
+    await page.fill('input[name=given_name]', 'Augusta');
+    await page.fill('input[name=family_name]', '');
+    const sent = await submit(page, 'form[action="/account/profile"] button[type=submit]');
+    t.eq('profile, scripting off: Send code is answered with the code page', sent.status(), 200);
+    t.eq('and the page is headed by its act', (await page.locator('h1').first().innerText()).trim(), 'Enter the code');
+    await bare('the code page');
+    await page.fill('form[action="/account/profile/code"] input[name=code]', '123456');
+    const saved = await submit(page, 'form[action="/account/profile/code"] button[type=submit]');
+    t.eq('the code saves, with no script anywhere', saved.status(), 200);
+    t.eq('and the result is the saved page', (await page.locator('h1').first().innerText()).trim(), 'Profile saved');
+    await bare('the saved page');
+    t.eq('the whole walk is the same conversation as with scripting on (start, code, update)',
+      ctx.cognito.calls.map((c) => c.target),
+      ['InitiateAuth', 'RespondToAuthChallenge', 'UpdateUserAttributes']);
+
+    // An outcome page: a pool that refuses the person's address.
+    ctx.cognito.script([['InitiateAuth', { status: 400, body: { __type: 'UserNotFoundException' } }]]);
+    await page.goto(ctx.origin + '/account/profile');
+    await page.fill('input[name=given_name]', 'Again');
+    const refused = await submit(page, 'form[action="/account/profile"] button[type=submit]');
+    t.eq('an outcome page is a plain 400 with scripting off', refused.status(), 400);
+    await bare('an outcome page');
+  } finally {
+    await person.close();
+    fs.writeFileSync(ctx.settingsFile, before);
   }
 }
 

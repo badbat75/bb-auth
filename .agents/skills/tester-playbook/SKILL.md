@@ -130,6 +130,12 @@ Rules are in `AGENTS.md`. Format of this file: `AGENTS.md`, under "Skills".
   **one** place: `cfg_for` is the only `Config` literal in the test module (the other is production
   `from_env`). Fill it with the field's startup default (`DEFAULT_WORKERS`), not a test-specific
   value: a test that needs a different count builds its own server (`account_serve_with_workers`).
+- The e2e fake Cognito (`e2e/lib/cognito.js`, §13.24) is reset per area by `run.js` and per scene by
+  `shots.js` (`ctx.cognito.reset()` clears calls and queued replies); a walk that scripts `'silent'`
+  costs the binary's whole 5 s bound. A feature-gated cargo test (`#[cfg(feature = ...)]`) is not
+  run by plain `cargo test`: add `--features e2e-fake-cognito`. To prove a feature-dependent harness,
+  stub the production half in an rsync copy (`/tmp/opencode/...`) with `target/` left out is fine
+  (first build ~1 min) and run `node e2e/run.js` there.
 
 ## Pitfalls
 

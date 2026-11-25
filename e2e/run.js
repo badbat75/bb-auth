@@ -21,7 +21,7 @@ const path = require('path');
 
 const { E2E_DIR, FIXTURE, SETTINGS_FIXTURE, boot } = require('./lib/server');
 
-const AREAS = ['auth', 'crud', 'settings', 'validation', 'conflict', 'i18n', 'audit', 'nojs', 'account'];
+const AREAS = ['auth', 'crud', 'settings', 'validation', 'conflict', 'i18n', 'audit', 'nojs', 'account', 'profile'];
 
 async function main() {
   const shotsDir = process.env.E2E_SHOTS === '1' ? path.join(E2E_DIR, 'artifacts') : null;
@@ -39,6 +39,8 @@ async function main() {
       fs.copyFileSync(FIXTURE, ctx.accessFile);
       fs.writeFileSync(ctx.settingsFile, SETTINGS_FIXTURE);
       fs.rmSync(ctx.auditFile, { force: true });
+      // The fake forgets what the last area asked of it and what it was told to answer.
+      ctx.cognito.reset();
       const t = new Checker(area, shotsDir);
       try {
         await require(`./tests/${area}`).run(ctx, t);

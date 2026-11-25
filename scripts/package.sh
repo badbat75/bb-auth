@@ -52,6 +52,10 @@
 #     silently: apt on the target would refuse a package that used to install.
 #   * It rewrites the `bb-auth (= <version>)` dependency of the two admin packages from
 #     the crate version and the revision in play, so the pin cannot drift.
+#   * It refuses a dist/ binary that carries the e2e Cognito switch
+#     (BB_AUTH_WEB_E2E_COGNITO_ENDPOINT in its bytes), the artifact lock of docs/ARCHITECTURE.md
+#     §13.24: a binary that reads it can be pointed at a Cognito of the caller's choosing, and
+#     no package may be able to. It checks the bytes, so --no-build is covered too.
 #
 # Target and the objdump used for the two checks are overridable, as in build.sh:
 #   BB_AUTH_TARGET   (derived from --arch when unset)
@@ -263,6 +267,21 @@ for b in bb-auth bb-auth-adm bb-auth-web; do
     echo "[pkg] FATAL: $OUT_DIR/$b is not a $ARCH binary (ELF machine $got, expected $WANT_MACHINE)." >&2
     echo "[pkg]        dist/ holds a build for another target. Re-run without --no-build." >&2
     exit 1; }
+  # The e2e switch (docs/ARCHITECTURE.md §13.24): a binary that reads
+  # BB_AUTH_WEB_E2E_COGNITO_ENDPOINT can be pointed at a Cognito of the caller's choosing, and
+  # no package may carry one. The source has two locks on that (the cargo feature, and the
+  # compile_error! that stops a release build carrying it); this is the lock on the ARTIFACT,
+  # the one that catches a future edit reading the variable outside the feature. A name the
+  # code reads survives strip and LTO, so the bytes are searchable, and the check runs on
+  # dist/ as it stands, which is what covers --no-build too.
+  if grep -aq 'BB_AUTH_WEB_E2E_COGNITO_ENDPOINT' "$OUT_DIR/$b"; then
+    echo "[pkg] FATAL: $OUT_DIR/$b carries the e2e Cognito switch" >&2
+    echo "[pkg]        (the bytes BB_AUTH_WEB_E2E_COGNITO_ENDPOINT), so it was built with" >&2
+    echo "[pkg]        --features e2e-fake-cognito. Nothing may ship that: a host running it" >&2
+    echo "[pkg]        can be pointed at a Cognito of the caller's choosing. scripts/build.sh" >&2
+    echo "[pkg]        builds no such binary, so dist/ holds one copied from somewhere else." >&2
+    exit 1
+  fi
 done
 echo "[pkg] binaries : dist/{bb-auth,bb-auth-adm,bb-auth-web} are $ARCH"
 

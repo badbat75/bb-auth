@@ -19,6 +19,7 @@ const E2E_DIR = path.resolve(__dirname, '..');
 const REPO = path.resolve(E2E_DIR, '..');
 const FIXTURE = path.join(REPO, 'deploy', 'access.example.json');
 const CHANNEL = process.env.E2E_BROWSER_CHANNEL || 'msedge';
+const { startFakeCognito } = require('./cognito');
 
 /**
  * The proxy secret this suite starts the GUI with, and the value the harness puts on every
@@ -46,11 +47,18 @@ function ensureDeps() {
   return require('playwright');
 }
 
-/** Build the binary under test and return its path. Debug profile is fine here. */
+/**
+ * Build the binary under test and return its path.
+ *
+ * It is built with the `e2e-fake-cognito` feature into its OWN target directory
+ * (docs/ARCHITECTURE.md §13.24): the feature is what lets the process be pointed at the fake
+ * Cognito, so the binary that carries it must never be `target/debug/bb-auth-web`, the one a
+ * developer would copy by hand, and `cargo test` and this harness stop rebuilding over each other.
+ */
 function buildBin() {
-  console.log('== cargo build --bin bb-auth-web ==');
-  sh('cargo build --bin bb-auth-web', REPO);
-  return path.join(REPO, 'target', 'debug', process.platform === 'win32' ? 'bb-auth-web.exe' : 'bb-auth-web');
+  console.log('== cargo build --bin bb-auth-web --features e2e-fake-cognito ==');
+  sh('cargo build --bin bb-auth-web --features e2e-fake-cognito --target-dir target/e2e', REPO);
+  return path.join(REPO, 'target', 'e2e', 'debug', process.platform === 'win32' ? 'bb-auth-web.exe' : 'bb-auth-web');
 }
 
 /**
@@ -84,7 +92,7 @@ function freePort() {
 }
 
 /** Start bb-auth-web and resolve once it says it is listening. */
-function startServer(bin, accessFile, auditFile, port) {
+function startServer(bin, accessFile, auditFile, port, cognitoUrl) {
   return new Promise((resolve, reject) => {
     const child = spawn(bin, [], {
       cwd: REPO,
@@ -106,6 +114,9 @@ function startServer(bin, accessFile, auditFile, port) {
         // every screenshot: unset it and the control is absent by design, which is a state
         // its own unit test covers rather than this suite.
         BB_AUTH_WEB_LOGOUT_URL: '/auth/logout',
+        // Where the profile edit's Cognito calls go: the fake of lib/cognito.js. Read only by a
+        // build with the `e2e-fake-cognito` feature, which says so on stderr (checked below).
+        BB_AUTH_WEB_E2E_COGNITO_ENDPOINT: cognitoUrl,
       },
       stdio: ['ignore', 'pipe', 'pipe'],
     });
@@ -114,10 +125,26 @@ function startServer(bin, accessFile, auditFile, port) {
       child.kill();
       reject(new Error(`server did not report listening within 30s. stderr:\n${log}`));
     }, 30_000);
+    // Both lines are required. "listening on" says the server is up; "E2E BUILD" says this
+    // process really is the feature build that will reach the fake. Without the second, every
+    // profile page would be a 502 "refused", which looks exactly like a scene, so the run is
+    // aborted instead. The marker may print just after the listening line, so it gets a moment.
+    let up = false;
+    let grace;
     const watch = (chunk) => {
       log += chunk.toString();
-      if (log.includes('listening on')) {
+      if (!up && log.includes('listening on')) {
+        up = true;
         clearTimeout(timer);
+        if (log.includes('E2E BUILD')) return resolve(child);
+        grace = setTimeout(() => {
+          child.kill();
+          reject(new Error(`the server never printed its \`E2E BUILD\` line: this is not the e2e-fake-cognito build, so no Cognito call would reach the fake. stderr:\n${log}`));
+        }, 2_000);
+      }
+      if (up && grace && log.includes('E2E BUILD')) {
+        clearTimeout(grace);
+        grace = undefined;
         resolve(child);
       }
     };
@@ -125,6 +152,7 @@ function startServer(bin, accessFile, auditFile, port) {
     child.stdout.on('data', watch);
     child.once('exit', (code) => {
       clearTimeout(timer);
+      clearTimeout(grace);
       reject(new Error(`server exited early (${code}). stderr:\n${log}`));
     });
   });
@@ -201,15 +229,17 @@ async function boot() {
   const port = await freePort();
   const proxyPort = await freePort();
 
-  let server, proxy, browser;
+  let server, proxy, browser, cognito;
   const stop = async () => {
     if (browser) await browser.close().catch(() => {});
     if (proxy) proxy.close();
     if (server) server.kill();
+    if (cognito) await cognito.close();
     fs.rmSync(dir, { recursive: true, force: true });
   };
   try {
-    server = await startServer(bin, accessFile, auditFile, port);
+    cognito = await startFakeCognito();
+    server = await startServer(bin, accessFile, auditFile, port, cognito.url);
     proxy = await startProxy(port, proxyPort);
     browser = await chromium.launch({ channel: CHANNEL, headless: true });
   } catch (e) {
@@ -223,6 +253,7 @@ async function boot() {
     accessFile,
     settingsFile,
     auditFile,
+    cognito,
   };
   console.log(`== server on ${ctx.origin} via the proxy secret (file: ${accessFile}) | browser: ${CHANNEL} ==\n`);
   return { ctx, stop };

@@ -32,6 +32,15 @@ path = "src/bin/bb-auth-adm.rs"
 name = "bb-auth-web"
 path = "src/bin/bb-auth-web.rs"
 
+# The one opt-in: the browser suite's harness (e2e/lib/server.js) builds bb-auth-web with this
+# so the process can be pointed at the fake Cognito of e2e/lib/cognito.js, which is a plain-HTTP
+# server on loopback and cannot be named through `gate.issuer` (§13.22). Deliberately NOT in
+# `default`: the switch is read by nothing a deployment builds, `bb-auth-web.rs` refuses to
+# compile it in a release, and scripts/package.sh refuses an artifact that carries the variable's
+# bytes. docs/ARCHITECTURE.md §13.24.
+[features]
+e2e-fake-cognito = []
+
 [dependencies]
 # Tiny blocking, threaded HTTP server — pure Rust, no async runtime (low resident memory).
 tiny_http = "0.12"
