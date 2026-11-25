@@ -22,7 +22,7 @@ Versions are the crate's (`Cargo.toml`); packages add a Debian revision
 
 ## Unreleased
 
-Nothing yet. Builds say 1.99.8 and their commit until the next release (plan W11).
+Nothing yet. Builds say 1.99.9 and their commit until the next release (plan W11).
 
 ## 1.99.8 (2026-11-25, pre-release)
 

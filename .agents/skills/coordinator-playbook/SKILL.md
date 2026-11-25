@@ -13,8 +13,10 @@ Rules are in `AGENTS.md` and `PLAN.md`. Format of this file: `AGENTS.md`, under 
   why: an unexpected result is often the most useful finding of the run.
 - Do not ask the user whether to go on to the next step or slice: go on, and ask only what the rules
   require (ambiguity, real effects, a requirement change).
-- The version stays 1.99.8 until the release (W11): never bump it for a deploy. Two deploys
-  differ by the build string (`v1.99.8-g<commit>`).
+- The version changes only at a release (W11): never bump it for a deploy. Two deploys differ
+  by the build string (`v<version>-g<commit>`). At a release: tag the tested commit, push main
+  and the tag, `gh release create` (with `--prerelease` for a 1.99.x) with the CHANGELOG section
+  and the three .debs, install, then bump `Cargo.toml` and `cargo update -p bb-auth --offline`.
 - Ask the user for real runs one at a time, with the exact command and the expected result.
 
 ### Who runs each role

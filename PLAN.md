@@ -33,7 +33,7 @@ as the column says. A requirement still open must be covered by a step.
 | W8 | Everything in English; only the conversation with the user may be in their language | Applies to every step |
 | W9 | Displayed text in the `K` translation table or the page templates, ready for more languages | Applies to every step |
 | W10 | Agents run only the tests of the part they work on, plus linter and format check; the tester runs the full suite once, on main after the merge, before installing | Applies to every step |
-| W11 | The version stays 1.99.8 until the release, tagged `v1.99.8` (step 11, the user's choice on 2026-11-25); a deploy does not bump it, and the build string (`v1.99.8-g<commit>`) is what tells two deploys apart (the user's decision, 2026-11-25, replacing "the last deployed version plus one") | Applies to every step |
+| W11 | The version stays the same between releases; a deploy does not bump it, and the build string (`v<version>-g<commit>`) is what tells two deploys apart (the user's decision, 2026-11-25, replacing "the last deployed version plus one"). `v1.99.8` was tagged on 2026-11-25 as a pre-release of 2.0.0; the work after it is 1.99.9 (the user, 2026-11-25) | Applies to every step |
 | W12 | JavaScript sparingly: HTML and CSS first, a small inline script only where it clearly improves an interaction, allowed by the page's CSP, never from another host (the user's rule, 2026-11-25, replacing "no page may need JavaScript"; stated in `AGENTS.md`) | Applies to every step |
 
 ## Definition of Done
@@ -63,7 +63,8 @@ as not checked, and the step stays open.
 The gate, the CLI (`bb-auth-adm`) and the admin GUI (`bb-auth-web`) are built and deployed; `README.md`,
 `AGENTS.md` and `CHANGELOG.md` say what they do. The agent structure (roles, skills, this plan) was added
 on 2026-11-23; the work before it is in `git log`. The self-service page is the `/account` section of `bb-auth-web`, live on rpi-01 since
-2026-11-24, with its key writes, header and theme since 2026-11-25 (1.99.8, g75f788a); self-service account deletion is missing there until step 7.
+2026-11-24, with its key writes, header and theme since 2026-11-25. `v1.99.8` (g978eca8) is tagged, on GitHub as a
+pre-release, and installed on rpi-01 with `gate.landing_url` set to its `/account/` page; self-service account deletion is missing there until step 7.
 
 ## Next steps
 
@@ -76,20 +77,6 @@ reversal's cost, stated in `docs/ARCHITECTURE.md` §13.12, is that strangers now
 process that writes both files, so two gaps found the same day are closed **first**, before the
 GUI is opened to anyone who is not an administrator: `bb-auth-web` can read the HMAC key, and it
 believes `X-Auth-Email` from any local process. The design is `docs/ARCHITECTURE.md` §13.
-
-### 11. Release v1.99.8
-
-The user's decision, 2026-11-25: after steps 9 and 10, `CHANGELOG.md`'s "Unreleased" becomes
-`## 1.99.8`, the tag `v1.99.8` is created, `main` is pushed to GitHub with the tag, and the
-packages are installed on rpi-01. The tester runs the whole board on `main` first.
-
-Then, on rpi-01 (step 10's last check, moved here because it needs the release installed):
-`gate.landing_url` set to `https://auth.badbat75.com/account/` with `bb-auth-adm settings set
---landing-url`, after the packages are in (an older binary refuses the key).
-
-- Done when: the tag is on GitHub at the commit that was tested and installed, rpi-01 reports
-  `v1.99.8-g<that commit>`, `verify.sh` is green, `--check-settings` names the landing page, and a
-  sign-out from `/account` followed by a sign-in lands on `/account` (the user, in a browser).
 
 ### 4. Self-service API keys
 
@@ -130,7 +117,8 @@ Done so far: `Access::key_scopes_for` (4a), minting (4b), rotating and removing 
 
 8a to 8e installed on rpi-01 on 2026-11-25 (as 1.99.9, gb9d7100, then the same code as 1.99.8,
 g75f788a), verify.sh green; still to see
-in a browser: a rotate, the copy icon, the confirmations, the header and the theme. Earlier,
+in a browser: a rotate, the copy icon, the confirmations, the header and the theme; and, since
+v1.99.8, that a sign-out from `/account` followed by a sign-in lands back on `/account`. Earlier,
 installed on 2026-11-24 (gd49d43a): the user minted and removed a key in a browser
 (journal: `(self): key add test`, `key remove test`); a rotate is still to be seen. The reveal page shows only the key with a copy button (4g, done).
 
