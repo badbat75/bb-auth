@@ -243,7 +243,14 @@ shared front end (W13), designed in §13.26 §6 as small slices after 5g: **P** 
 `prefs_menu` for both shells; **D** one `page_document` skeleton; **T** `text_field` with
 `FieldOpts`, absorbing `account_key_id_field` and the profile inputs; **F** the account page's flat
 ground goes, so it wears the console's ground and cards (the user, 2026-11-25); **L** the brand's
-logo in the console's bar too, widening the console's CSP `img-src` (the user, 2026-11-25). Kept
+logo in the console's bar too, widening the console's CSP `img-src` (the user, 2026-11-25); **H**
+one **account menu** in the shared header (the user, 2026-11-25, to slim the header): the bar shows
+the person's name (`given_name`, else the email) as a `details/summary` that opens a panel with the
+full email, the Preferences (theme, language) expanding inside it, and Sign out at the foot. On
+desktop the console's tabs stay visible in the bar, because they are the primary navigation; at
+phone width they move into that panel too. The user agreed to this compromise over "tabs always in
+the menu". It works with scripting off, replaces the separate Preferences menu (so it absorbs M),
+and the designer designs it before any test. Kept
 apart on purpose, with reasons in §13.26: the section pattern and the mint row's missing owner
 field. Left,
 as later items: base.css's accent-color rule sits above a note whose "above" meant the field
