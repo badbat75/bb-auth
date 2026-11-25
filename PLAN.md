@@ -225,13 +225,14 @@ shared front end (W13), designed in §13.26 §6 as small slices after 5g: **P** 
 `pill_link_rm` / `back_link` with the console's `act`/`act_rm`/`back` as wrappers; **M** one
 `prefs_menu` for both shells; **D** one `page_document` skeleton; **T** `text_field` with
 `FieldOpts`, absorbing `account_key_id_field` and the profile inputs; **F** the account page's flat
-ground (the user decides whether it goes). Kept apart on purpose, with reasons in §13.26: the
-section pattern, the brand slot, `account_csp`, the mint row's missing owner field. Left,
+ground goes, so it wears the console's ground and cards (the user, 2026-11-25); **L** the brand's
+logo in the console's bar too, widening the console's CSP `img-src` (the user, 2026-11-25). Kept
+apart on purpose, with reasons in §13.26: the section pattern and the mint row's missing owner
+field. Left,
 as later items: base.css's accent-color rule sits above a note whose "above" meant the field
 rule (move it below); library refusals on the Settings tab are in the file's English words rather
 than the page's labels and language (its own slice, sketched in §13.21); one look by hand at the
-native "Preferences" tooltip while the open menu's cover is up; and the logo in the console's
-brand, its own step since it widens the console's CSP `img-src`. Steps 5 and 7 add their forms into this layout later (Profile, a last panel).
+native "Preferences" tooltip while the open menu's cover is up. Steps 5 and 7 add their forms into this layout later (Profile now first: §13.26).
 
 - Done when: the user approves screenshots of the page in both themes and both languages, at
   desktop and phone width, with the forms of steps 4, 5 and 7 on it; e2e and the scripting-off
