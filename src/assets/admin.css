@@ -27,9 +27,11 @@ header.top{background:var(--card);border-bottom:1px solid var(--card-border);pad
    padded column as `main` (same max-width, same 16px), so the brand starts exactly where the
    page's `h1` starts instead of 16px to the left of it. A person scanning down meets one
    left edge, which is what a column is. */
-/* Two lines: the name, and the version under it. Beside it the version read as part of the
-   name, and it is not: it is what this binary happens to be, which matters when a deploy has
-   just happened and matters not at all the rest of the time. */
+/* Two lines: the deployment's name, and under it what this surface is. Beside the name the
+   second line reads as part of the name, and it is not: it is the label that tells an
+   administrator's bar from a person's page. The version used to sit here, and it is what this
+   binary happens to be, which matters when a deploy has just happened and not at all the rest
+   of the time; the footer says it, where a person reading a deploy looks. */
 .brand{display:inline-block;font-weight:600;letter-spacing:.02em;line-height:1.2}
 a.brand{color:inherit;text-decoration:none}
 a.brand:hover{text-decoration:underline}
@@ -329,6 +331,11 @@ body:has(.selfserve){background:var(--bg)}
    contract this page has, and a rule scoped to the page is how the same result is had without
    adding an attribute to it. */
 .selfserve .panel h2{margin-top:0}
+/* The account id is one token, so the stylesheet can keep it whole: `white-space:nowrap` stops a
+   36-character uuid breaking at a hyphen, and it moves to its own line under the addresses
+   instead of ending in the middle of an id. The addresses beside it are deliberately not given
+   this, since a long one has to be allowed to wrap. */
+.uid{white-space:nowrap}
 
 /* ---------------------------------------------------------------------------
    Phone layout
@@ -365,6 +372,10 @@ body:has(.selfserve){background:var(--bg)}
   /* The bar's side padding goes with the column's, by the same rule and for the same reason:
      the brand has to start where the page's `h1` starts, and on a phone that is 12px. */
   body:has(.selfserve) .bar{padding:0 12px}
+  /* The id keeps its `nowrap` here, so this is where it pays for it: at .85em the 36 characters
+     fit the 296px a 320px screen leaves once the column's 12px padding is gone, which is what
+     makes it move whole to a line of its own instead of pushing the page sideways. */
+  .uid{font-size:.85em}
   table{min-width:0}
   table,thead,tbody,tr,td{display:block}
   /* The audit's two column shares are about a table competing for width, and there is no

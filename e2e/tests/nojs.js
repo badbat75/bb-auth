@@ -202,6 +202,25 @@ async function run(ctx, t) {
         Math.abs((await left(acct8d, 'header .brand')) - (await left(acct8d, 'main h1'))) <= 1,
         `${await left(acct8d, 'header .brand')} vs ${await left(acct8d, 'main h1')}`);
     }
+    // §13.18 (8d-3): the account id is one token. At 320px the page does not scroll sideways
+    // and the id sits on one line (a hyphen break would make it two lines tall).
+    await acct8d.setViewportSize({ width: 320, height: 800 });
+    await acct8d.goto(`${ctx.origin}/account/`);
+    const uid = await acct8d.evaluate(() => {
+      const el = document.querySelector('code.uid');
+      if (!el) return null;
+      const lh = parseFloat(getComputedStyle(el).lineHeight) || el.getBoundingClientRect().height;
+      return {
+        text: el.textContent,
+        lines: Math.round(el.getBoundingClientRect().height / lh),
+        scroll: document.documentElement.scrollWidth - document.documentElement.clientWidth,
+      };
+    });
+    t.check('the account id is a code.uid', uid !== null, 'no code.uid on /account/');
+    t.check('the account id is one line tall at 320px', uid !== null && uid.lines === 1,
+      JSON.stringify(uid));
+    t.check('the account page has no horizontal scroll at 320px', uid !== null && uid.scroll <= 0,
+      JSON.stringify(uid));
     await person8d.close();
     await page.setViewportSize({ width: 1280, height: 900 });
     await page.goto(ctx.base + '/groups/admins/edit');

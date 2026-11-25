@@ -51,7 +51,7 @@ const VIEWS = [
       'conflict-mint', 'forbidden', 'settings-menu',
       // The self-service page is prose a person reads in their own language, so the copy of
       // the table's headings and the refusal is worth reading in Italian too.
-      'account', 'account-new', 'account-error', 'account-rm', 'account-menu'],
+      'account', 'account-new', 'account-new-scopes', 'account-error', 'account-rm', 'account-menu'],
   },
   // An explicit theme is only worth photographing against the OPPOSITE `colorScheme`:
   // that is the pair that proves the choice beat the operating system. Under a matching
@@ -223,6 +223,23 @@ const SCENES = [
     await asPerson(page);
     await page.goto(acct(ctx, '/keys/new'));
     await asAdmin(page);
+  }],
+  // A caller who has a scope to narrow to (bot@example.com reaches `mcp/api` and more), so the
+  // scope radios and the ticks beneath them get photographed. The fixture's `you@example.com`
+  // has none, and its form carries a hidden `restrict=all` instead. The scene throws when
+  // there is nothing to photograph, so a fixture that loses the scopes is SKIPPED, not green.
+  ['account-new-scopes', async (page, ctx) => {
+    await page.setExtraHTTPHeaders({ 'X-Auth-Email': 'bot@example.com' });
+    try {
+      await page.goto(acct(ctx, '/keys/new'));
+      const radios = await page.locator('input[name=restrict][type=radio]').count();
+      const ticks = await page.locator('input[name=scope]').count();
+      if (radios !== 2 || ticks < 1) {
+        throw new Error(`no scope radios to photograph (radios=${radios}, scopes=${ticks})`);
+      }
+    } finally {
+      await asAdmin(page);
+    }
   }],
   ['account-error', async (page, ctx) => {
     await asPerson(page);

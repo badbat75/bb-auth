@@ -18,6 +18,13 @@ Rules are in `AGENTS.md`. Format of this file: `AGENTS.md`, under "Skills".
   none of the `(expr)` sites move.
 - A page's one primary action needs no CSS: `p.primary` and `p.primary .pill` are already rules in
   `admin.css`, so the markup is the whole change.
+- A hot `ui` value the console's **shell** needs (the bar's brand, 8d-3): read it at the shell,
+  fail-soft, from `cfg.settings_path` (`bar_brand`). Do not add a field to `Look` or `View` for
+  one: the test module has exhaustive struct literals for both (`view()`'s `View { .. }` and
+  `v.look = Look { .. }`), and a new field is an `E0063` that turns the whole suite red, which a
+  task that forbids editing the test module cannot answer. The shell is the right place on the
+  merits too: the `401` and the settings-file `500` render above the per-request read and pass
+  `Look::default()`, so a value carried in would be missing on exactly the pages that need it.
 - The tester's uncommitted test is already in the tree. It may be **staged**, where plain `git diff` is
   empty and says nothing: read `git diff --cached` (and `git status --porcelain`, where `MM` means both).
 - To see a page the way an operator does, drive the real binary through `e2e/lib/server.js`'s `boot()`

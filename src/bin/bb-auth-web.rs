@@ -856,6 +856,12 @@ enum K {
     NotFoundBody,
     FileErrorTitle,
     FileErrorHint,
+    // The second line of the bar's brand. It used to be the version, which says what this
+    // binary happens to be; the footer says that, where a person reading a deploy looks. What
+    // the bar has to say is what this surface *is*, because the deployment's name is now the
+    // first line on both surfaces and the name alone would not tell an administrator's bar
+    // from a person's page.
+    ConsoleTag,
     SignOut,
     // --- the settings menu ---
     Settings,
@@ -1835,6 +1841,7 @@ fn t(lang: Lang, key: K) -> &'static str {
             "Ogni pagina qui rilegge il file a ogni richiesta, quindi correggerlo ha effetto \
              subito — senza riavvio né reload.",
         ),
+        K::ConsoleTag => m(lang, "Administration", "Amministrazione"),
         K::SignOut => m(lang, "Sign out", "Esci"),
         K::Settings => m(lang, "Preferences", "Preferenze"),
         K::SettingLanguage => m(lang, "Language", "Lingua"),
@@ -3890,6 +3897,9 @@ struct Look<'a> {
     theme: UiTheme,
     /// `ui.stylesheet_url`: an operator's own stylesheet, loaded after the built-in one.
     stylesheet: Option<&'a str>,
+    /// `ui.brand_name`: the deployment's name in the bar, so one settings read per request
+    /// feeds every part of the look.
+    brand: Option<&'a str>,
 }
 
 /// Everything the page shell needs that is not the page.
@@ -4117,17 +4127,25 @@ fn shell_named(v: &View, who: Option<String>, title: &str, content: Markup) -> M
     let settings_name = v.t(K::Settings);
     let sign_out = v.t(K::SignOut);
     // The brand is the way home, but only when there is a home to go to: the 403 page has no
-    // nav for the same reason, so there the brand is a plain inert span.
+    // nav for the same reason, so there the brand is a plain inert span. The two lines are the
+    // deployment's name over what this surface is (`K::ConsoleTag`), which is what makes the
+    // console's bar and `/account/` name the same deployment in the same shape (§13.18).
+    let name = v
+        .look
+        .brand
+        .map(str::to_string)
+        .unwrap_or_else(|| DEFAULT_ACCOUNT_BRAND.to_string());
+    let tag = v.t(K::ConsoleTag);
     let brand = html! {
         @if v.admin.is_some() {
             a class="brand" href=(v.href(&Route::Dashboard)) {
-                "bb-auth-web"
-                span class="v" { "v" (env!("CARGO_PKG_VERSION")) }
+                (name)
+                span class="v" { (tag) }
             }
         } @else {
             span class="brand" {
-                "bb-auth-web"
-                span class="v" { "v" (env!("CARGO_PKG_VERSION")) }
+                (name)
+                span class="v" { (tag) }
             }
         }
     };
@@ -8512,9 +8530,10 @@ fn parse_group_members(doc: &AccessFile, text: &str) -> Result<Vec<String>, Stri
 
 /// The self-service page's look: the four `ui` values, all four of which it paints.
 ///
-/// [`Look`] is the console's, and carries only what that shell shows: a theme and a stylesheet,
-/// because its header bar names no brand and shows no logo. This page shows both, and widening
-/// `Look` by two fields the console ignores is how a struct starts lying about what it means.
+/// [`Look`] is the console's, and carries only what that shell paints out of it: a theme, a
+/// stylesheet and the name its bar shows, because its header bar shows no logo. This page shows
+/// a logo, and widening `Look` by a field the console paints nothing for is how a struct starts
+/// lying about what it means.
 ///
 /// `AccountLook::default()` is "nothing configured", and it is the honest answer on every page
 /// rendered **before** the settings file has been read: the `401` happens above that read, and a
@@ -8538,8 +8557,10 @@ struct AccountLook<'a> {
     brand: Option<&'a str>,
 }
 
-/// The name the page calls this deployment when `ui.brand_name` is empty. A package creates the
-/// settings file with that field empty, so this is what a first install shows.
+/// The name a page calls this deployment when `ui.brand_name` is empty: the self-service page's
+/// brand slot and the console's bar both fall back to it, so a deployment nobody has branded
+/// names itself the same on both. A package creates the settings file with that field empty, so
+/// this is what a first install shows.
 const DEFAULT_ACCOUNT_BRAND: &str = "bb-auth";
 
 /// What the chrome needs that is not the page: this browser's two preferences, the language they
@@ -8994,6 +9015,11 @@ impl NewKeyRow<'_> {
 /// field the `+` asked for. All four are the browser's constraint validation and need no script,
 /// which is what keeps this page inside the estate's no-JavaScript rule; the server checks every
 /// one of them again.
+///
+/// The hint is the shape, spelled out, and it is shown on the open row. It is **omitted the
+/// moment the field carries the refusal**: the refusal is a sentence that already says what is
+/// allowed, in the reader's language, so the hint under it is one rule in two registers, and the
+/// one that is not the reason for the refusal is the one to drop.
 fn account_key_id_field(lang: Lang, value: &str, invalid: bool) -> Markup {
     html! {
         label {
@@ -9004,7 +9030,9 @@ fn account_key_id_field(lang: Lang, value: &str, invalid: bool) -> Markup {
                   autofocus required maxlength="32" pattern="[a-z0-9-]{1,32}"
                   aria-invalid=[invalid.then_some("true")]
                   aria-describedby=[invalid.then_some(ERR_ID)];
-            span class="hint" { (t(lang, K::AccountKeyIdHint)) }
+            @if !invalid {
+                span class="hint" { (t(lang, K::AccountKeyIdHint)) }
+            }
         }
     }
 }
@@ -9249,7 +9277,7 @@ fn page_account(
             }
             br;
             @if let Some(u) = uuid {
-                (t(lang, K::AccountIdLabel)) ": " code { (u) }
+                (t(lang, K::AccountIdLabel)) ": " code class="uid" { (u) }
             } @else {
                 (t(lang, K::AccountNoRow))
             }
@@ -10205,6 +10233,7 @@ fn handle(mut req: Request, cfg: &Config) {
     let look = Look {
         theme: settings.theme,
         stylesheet: settings.stylesheet_url.as_deref(),
+        brand: settings.brand_name.as_deref(),
     };
     // The given name the header shows, and it exists only where the deployment configures the
     // claim: the settings say which header the proxy was told to fill, so a deployment that
@@ -11442,6 +11471,7 @@ mod tests {
         v.look = Look {
             theme: UiTheme::Dark,
             stylesheet: Some("https://assets.badbat75.com/css/theme.css"),
+            brand: None,
         };
         let html = shell(&v, "t", page_dashboard(&v, &doc, &access)).into_string();
 
@@ -16845,7 +16875,9 @@ mod tests {
             "both addresses of the row are in code: {zone}"
         );
         assert!(
-            zone.contains(&format!("<br>Account id: <code>{ACCOUNT_BOB}</code>")),
+            zone.contains(&format!(
+                "<br>Account id: <code class=\"uid\">{ACCOUNT_BOB}</code>"
+            )),
             "after a line break, the label and the uuid in code: {zone}"
         );
         assert!(
@@ -16869,7 +16901,9 @@ mod tests {
         let it = account_call_pref(&base, Some("bob@x.com"), Some("lang=it"), None);
         let zone = account_lede_zone(&it.body);
         assert!(
-            zone.contains(&format!("<br>Id dell'account: <code>{ACCOUNT_BOB}</code>")),
+            zone.contains(&format!(
+                "<br>Id dell'account: <code class=\"uid\">{ACCOUNT_BOB}</code>"
+            )),
             "the label is translated: {zone}"
         );
 
@@ -22377,6 +22411,145 @@ mod tests {
             );
             assert!(page.contains("laptop"), "{route}: still names the key");
         }
+        cleanup(&path);
+    }
+
+    /// 8d-3 (§13.18, "The two brands agree"): the console's bar and the account's name the
+    /// deployment alike, `ui.brand_name` else `bb-auth`. The console's second line is
+    /// `K::ConsoleTag`, and the version lives in the footer only.
+    ///
+    /// Red until the coder adds `K::ConsoleTag` (E0599, the module does not compile), then until
+    /// the console brand reads the settings.
+    #[test]
+    fn both_bars_name_the_deployment() {
+        assert_eq!(t(Lang::En, K::ConsoleTag), "Administration");
+        assert_eq!(t(Lang::It, K::ConsoleTag), "Amministrazione");
+
+        for (name, settings, want, other) in [
+            (
+                "brands-default",
+                ACCOUNT_SETTINGS,
+                DEFAULT_ACCOUNT_BRAND,
+                "BadBat75",
+            ),
+            (
+                "brands-set",
+                ACCOUNT_SETTINGS_BRAND,
+                "BadBat75",
+                DEFAULT_ACCOUNT_BRAND,
+            ),
+        ] {
+            let path = account_scratch(name, settings);
+            let port = account_port(&path);
+            let base = format!("http://127.0.0.1:{port}{ACCOUNT_PATH}/");
+            for (lang, cookie) in [(Lang::En, "lang=en"), (Lang::It, "lang=it")] {
+                let c = console_get(port, "admin@x.com", &[("Cookie", cookie)]);
+                assert_eq!(c.status, 200, "{}", account_readable(&c.body));
+                let top = the_header_bar(&c.body, "console");
+                let brands = controls_with_class(&top, "a", "brand");
+                assert_eq!(brands.len(), 1, "{name}/{cookie}: one a.brand: {top}");
+                let text = visible_text(&brands[0]);
+                assert!(
+                    text.contains(want) && !text.contains("bb-auth-web"),
+                    "{name}/{cookie}: the console brand is the deployment's name, not the \
+                     tool's: {}",
+                    brands[0]
+                );
+                if name == "brands-set" {
+                    assert!(!text.contains(other), "{name}/{cookie}: {text}");
+                }
+                assert!(
+                    text.contains(t(lang, K::ConsoleTag)),
+                    "{name}/{cookie}: the second line is the tag: {}",
+                    brands[0]
+                );
+                assert!(
+                    !text.contains(env!("CARGO_PKG_VERSION")),
+                    "{name}/{cookie}: the version is no longer in the brand: {}",
+                    brands[0]
+                );
+                let footer = elements(&c.body, "<footer", "</footer>");
+                assert_eq!(footer.len(), 1);
+                assert!(
+                    footer[0].contains(&version_line("bb-auth-web")),
+                    "{name}/{cookie}: the version stays in the footer: {}",
+                    footer[0]
+                );
+            }
+            let a = account_call_with(&base, Some("bob@x.com"), &[]);
+            assert_eq!(a.status, 200, "{}", account_readable(&a.body));
+            let top = the_header_bar(&a.body, "account");
+            let brands = controls_with_class(&top, "span", "brand");
+            assert_eq!(brands.len(), 1, "{name}: {top}");
+            let text = visible_text(&brands[0]);
+            assert!(text.contains(want), "{name}: account brand: {}", brands[0]);
+            if name == "brands-set" {
+                assert!(!text.contains(other), "{name}: {text}");
+            }
+            cleanup(&path);
+        }
+    }
+
+    /// 8d-3 (§13.18, "The account id on a phone"): the id is `code.uid`, a single token the
+    /// stylesheet can keep whole (`.uid{white-space:nowrap}`). Red until the markup has the
+    /// class. The 320px layout half is in `e2e/tests/nojs.js`.
+    #[test]
+    fn the_account_id_is_one_token() {
+        let path = account_scratch_full("uid-token");
+        let base = account_serve(&path);
+        let g = account_call_with(&base, Some("bob@x.com"), &[]);
+        assert_eq!(g.status, 200, "{}", account_readable(&g.body));
+        let ids = controls_with_class(&g.body, "code", "uid");
+        assert_eq!(ids.len(), 1, "one code.uid: {}", account_readable(&g.body));
+        let id = visible_text(&ids[0]);
+        assert!(
+            id.len() == 36 && id.matches('-').count() == 4,
+            "the code holds the uuid and nothing else: {id:?}"
+        );
+        cleanup(&path);
+    }
+
+    /// 8d-3 (§13.18, "The Name hint while a refusal shows"): the id field's hint is shown on
+    /// the open row and omitted when that field carries the refusal, since the refusal already
+    /// says what is allowed. Other fields' hints are untouched. Red until `account_key_row`
+    /// drops the hint under `about("id")`.
+    #[test]
+    fn a_refused_field_shows_the_refusal_not_the_hint() {
+        let path = account_scratch_access("refused-hint", &account_access_keys());
+        let base = account_serve(&path);
+        let name_label = |body: &str| {
+            elements(body, "<label>", "</label>")
+                .into_iter()
+                .find(|l| l.contains("name=\"id\""))
+                .unwrap_or_else(|| panic!("no name label: {}", account_readable(body)))
+        };
+        let open = account_call_with(&format!("{base}keys/new"), Some("bob@x.com"), &[]);
+        assert_eq!(open.status, 200, "{}", account_readable(&open.body));
+        let label = name_label(&open.body);
+        assert!(
+            label.contains("class=\"hint\"") && label.contains(t(Lang::En, K::AccountKeyIdHint)),
+            "an open row keeps the hint: {label}"
+        );
+
+        let rev = sha256_hex(&read(&path));
+        let g = account_post(
+            &format!("{base}keys"),
+            Some("bob@x.com"),
+            &[
+                ("rev", rev.as_str()),
+                ("id", "My Laptop"),
+                ("duration", "30d"),
+                ("restrict", "all"),
+            ],
+        );
+        assert_eq!(g.status, 400, "{}", account_readable(&g.body));
+        let err = visible_text(&element_containing(&g.body, "class=\"err\"", "</div>"));
+        assert_eq!(err, t(Lang::En, K::AccountKeyIdBad));
+        let label = name_label(&g.body);
+        assert!(
+            !label.contains("class=\"hint\"") && !label.contains(t(Lang::En, K::AccountKeyIdHint)),
+            "the refused field shows the refusal, not the hint: {label}"
+        );
         cleanup(&path);
     }
 }
