@@ -32,6 +32,9 @@ Rules are in `AGENTS.md`. Format of this file: `AGENTS.md`, under "Skills".
   the `ureq` agent with `http_status_as_error(false)` or a `400`'s body is lost.
 - A plain-HTTP fake cannot be named through the settings file (`compile_issuer` is https-only):
   give `bb-auth-web`'s `Config` a field `from_env` never sets, as §13.22 does.
+- A switch only a test harness may flip is a cargo feature plus `compile_error!` under
+  `not(debug_assertions)`, plus a `grep -aq` of the env var name over `dist/` in `package.sh`:
+  env var names survive `strip` and LTO in the release binary (measured, §13.24).
 - The real pool's facts are in `PLAN.md` step 5 (read 2026-11-25); its changes go through the
   OpenTofu repository named there, never the AWS CLI.
 

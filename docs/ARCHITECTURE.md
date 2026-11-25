@@ -4275,3 +4275,132 @@ contains the field).
 `account-profile-code-wrong`, `account-profile-saved`, `account-profile-expired`,
 `account-profile-social`, `account-profile-noanswer`, `account-profile-unsure`. The designer's
 review of 5b and 5c looks at these eleven.
+
+### 13.24 A fake Cognito for the browser suites, and why no package can carry it (plan step 5, designed 2026-11-25)
+
+`node e2e/run.js` and `node e2e/shots.js` start the real `bb-auth-web` (`e2e/lib/server.js`),
+and `Config::cognito_endpoint` (§13.22) is set by nothing but the Rust tests, so the profile walks
+of §13.23 and its eleven `account-profile*` scenes have no pool to talk to. This section gives the
+harness one, and keeps the §13.22 property that a deployed binary cannot be pointed at one.
+
+What was read to write it: §13.22 and §13.23, `e2e/README.md`, `e2e/lib/server.js` (`buildBin`,
+`startServer`, `SETTINGS_FIXTURE`), `e2e/run.js`, `e2e/shots.js`, `src/bin/bb-auth-web.rs`
+(`Config::cognito_endpoint`, `from_env`, `cognito_endpoint_of`, `cognito_post`, `cognito_call`,
+`cognito_answer`, `cognito_update`, `id_token_email`, `COGNITO_TIMEOUT`, the test `FakeCognito`),
+`Cargo.toml` (no `[features]` table today; the deb assets are `target/release/*`),
+`scripts/build.sh` and `scripts/package.sh` (the `--no-build` check of `dist/`).
+
+**Measured**: the stripped aarch64 release `dist/bb-auth-web` of 2026-11-25 contains the
+literal `BB_AUTH_WEB_PROXY_SECRET` (`grep -ac` finds 3), so an env var name read by the code
+survives `strip` and LTO and a byte search of the artifact can see it. **Read in a source**:
+`compile_error!` in a `#[cfg]`'d item stops the build (the Rust reference, "Conditional compilation" and `std::compile_error`); the `release`
+profile has `debug-assertions = false` by default (the Cargo book, "Profiles"), and this
+`[profile.release]` does not override it. **Assumed**: nothing else.
+
+#### The decision: a cargo feature, locked to debug builds, and a fake in the Node harness
+
+1. **A cargo feature, `e2e-fake-cognito`**, empty and not in `default`. Only with it does
+   `from_env` read **`BB_AUTH_WEB_E2E_COGNITO_ENDPOINT`** into `Config::cognito_endpoint`. The
+   value must start with `http://127.0.0.1:`; anything else is a fatal startup naming the
+   variable. When it is set the binary says so on stderr at startup, in a line containing
+   `E2E BUILD: Cognito calls go to <url>`, so nobody mistakes the process for a real one.
+2. **The read is one function with two bodies**, so the default build has a body to test:
+   `fn e2e_cognito_endpoint(lookup: impl Fn(&str) -> Option<String>) -> Result<Option<String>, String>`.
+   Without the feature it is `Ok(None)` whatever `lookup` answers, and the variable's name does
+   not appear in the source that is compiled. With it, it is the rule in point 1. `from_env`
+   calls it with `|k| std::env::var(k).ok()` in place of today's `cognito_endpoint: None`.
+3. **The fake is the harness's own**, `e2e/lib/cognito.js`, an `http` server on
+   `127.0.0.1:0` in the Node process that drives the browser, so a scene scripts it directly
+   the way the Rust tests script `FakeCognito`. `lib/server.js` starts it before the binary,
+   builds with the feature into its own target directory, and passes the variable.
+
+#### The guard: three locks, each on a different thing
+
+- **The source**: `#[cfg(all(feature = "e2e-fake-cognito", not(debug_assertions)))]
+  compile_error!("e2e-fake-cognito is for the e2e harness's debug build only");` in
+  `bb-auth-web.rs`. A release build with the feature does not compile, so the switch and a
+  `.deb` (always `--release`, `build.sh`) cannot meet whatever flags somebody passes.
+- **The artifact**: `scripts/package.sh` refuses to package when any of
+  `dist/{bb-auth,bb-auth-adm,bb-auth-web}` contains the bytes `BB_AUTH_WEB_E2E_COGNITO_ENDPOINT`
+  (`grep -aq`), beside its existing check of `dist/`, so it runs with and without `--no-build`.
+  This is the check on what ships rather than on what the source says, and it is what catches a
+  future edit that reads the variable outside the `cfg` or drops the `compile_error!`. Every
+  `.deb` comes out of `package.sh`, and `deploy.ps1` always goes through it.
+- **The build directory**: the harness builds with `--target-dir target/e2e`, so
+  `target/debug/bb-auth-web`, the binary a developer would copy by hand, never carries the
+  feature, and `cargo test` and the harness stop rebuilding over each other.
+
+How each is shown to hold:
+
+- `the_e2e_endpoint_is_not_read_without_the_feature` (default `cargo test`, so `package.sh`
+  runs it before every release): `e2e_cognito_endpoint` with a `lookup` that answers
+  `http://127.0.0.1:9/` for every name is `Ok(None)`.
+- Under `cargo test --bin bb-auth-web --features e2e-fake-cognito` (`#[cfg(feature)]` tests,
+  run by whoever changes the harness): the loopback URL is `Ok(Some(..))`, unset is `Ok(None)`,
+  and `https://cognito-idp.eu-central-1.amazonaws.com/`, `http://10.0.0.1:80/` and
+  `http://127.0.0.1.evil.com/` are each `Err` naming the variable.
+- The artifact check is shown to see something by its positive control, run once by the coder
+  and recorded in the commit: `grep -ac BB_AUTH_WEB_E2E_COGNITO_ENDPOINT
+  target/e2e/debug/bb-auth-web` is non-zero, and on a `package.sh` build's `dist/bb-auth-web` it
+  is 0. The `compile_error!` is shown once by `cargo build --release --features
+  e2e-fake-cognito --bin bb-auth-web` failing with its message (also in the commit, not a test:
+  a test cannot assert a build failure without a second cargo run).
+- `lib/server.js` refuses to go on unless it saw the `E2E BUILD` line, so a walk that silently
+  reached no fake (every page a `502` "refused", which looks like a scene) fails the run.
+
+#### The interface the tester and the coder need
+
+Rust: feature `e2e-fake-cognito` (`[features] e2e-fake-cognito = []`), env var
+`BB_AUTH_WEB_E2E_COGNITO_ENDPOINT`, function `e2e_cognito_endpoint` as above, the stderr line
+above, and the `compile_error!` above. Nothing else changes in `cognito_post`: it already posts
+to the endpoint as given.
+
+Harness: `buildBin` runs `cargo build --bin bb-auth-web --features e2e-fake-cognito
+--target-dir target/e2e` and returns `target/e2e/debug/bb-auth-web[.exe]`. `e2e/lib/cognito.js`
+exports `startFakeCognito()` resolving to `{ url, script(list), calls, close() }`:
+
+- It answers `POST /` only. It records each request as `{ target, body }`, where `target` is the
+  part of `X-Amz-Target` after `AWSCognitoIdentityProviderService.`, and it requires
+  `Content-Type: application/x-amz-json-1.1` (anything else is a `400`, so a regression in the
+  envelope fails a walk).
+- `script([[target, reply], ...])` queues replies; a request takes the first queued reply for
+  its target, else the default. A reply is `{ status, body }` (sent as JSON with
+  `Content-Type: application/x-amz-json-1.1`) or `'silent'`, which reads the request and never
+  answers until `close()`, so `cognito_post` times out at `COGNITO_TIMEOUT` (5 s).
+- Defaults, the happy path:
+  - `InitiateAuth`: `200 {"ChallengeName":"EMAIL_OTP","Session":"fake-session-1","ChallengeParameters":{"USERNAME":<AuthParameters.USERNAME>}}`.
+  - `RespondToAuthChallenge`: `200 {"AuthenticationResult":{"IdToken":<jwt>,"AccessToken":"fake-access","RefreshToken":"fake-refresh"}}`,
+    where `<jwt>` is three base64url parts, the signature any bytes (`id_token_email` decodes,
+    it does not verify), with payload `token_use:"id"`, `iss` = `SETTINGS_FIXTURE`'s
+    `gate.issuer`, `aud` = its `gate.client_id`, `exp` = now + 3600, `email_verified: true`,
+    `email` = `ChallengeResponses.USERNAME`.
+  - `UpdateUserAttributes`: `200 {}`.
+- The scenes' scripts: `code-wrong` is `RespondToAuthChallenge` `400
+  {"__type":"CodeMismatchException","Session":"fake-session-2"}`; `expired` is
+  `RespondToAuthChallenge` `400 {"__type":"ExpiredCodeException"}`; `social` is `InitiateAuth`
+  `400 {"__type":"UserNotFoundException"}`; `noanswer` is `InitiateAuth` `'silent'`; `unsure` is
+  `UpdateUserAttributes` `'silent'`.
+
+#### What was rejected for the fake
+
+- **An env var read in every build**: it is exactly what §13.22 refused, a value a deployment
+  can point at a host of its choosing.
+- **An env var behind `debug_assertions` alone**: no opt-in, so every `cargo build` binary on a
+  developer's disk honours it, and one `debug-assertions = true` in `[profile.release]` would
+  ship it silently. It is kept as the second lock (the `compile_error!`), not as the only one.
+- **A key in the settings file, or a TLS fake named through `gate.issuer`**: `compile_issuer` is
+  https-only and the bundled Mozilla roots trust no local CA, and a settings key would be
+  editable from the GUI, which is worse than an env var.
+- **A fake written in Rust as a second binary**: a new `src/bin/` file is a binary `build.sh`
+  copies and compiles for the target, and a scene would script it across a process boundary.
+  The Node fake lives where the scenes are.
+- **Magic inputs instead of a script** (code `000000` means wrong): it would work for the code,
+  but `social` and the two silences depend on the account, not on what is typed, and a queue
+  is what the Rust `FakeCognito` already does, so the two suites read alike.
+- **A shorter timeout for the e2e build** (a second variable): `noanswer` and `unsure` cost 5 s
+  each per view, under a minute over the shots' four views, which is not worth a second switch.
+
+#### What the fake costs
+
+About 15 lines of Rust behind the feature, one `grep` in `package.sh`, about 80 lines of Node.
+The harness's first build compiles the crate once more into `target/e2e`. No new dependency.

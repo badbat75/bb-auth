@@ -157,6 +157,13 @@ unconfirmed (moot while `email` stays read-only, which it does); and the pool an
 are managed in OpenTofu (the itadmin repository, `infra/tofu/stacks/aws/production/cognito.tf`),
 so any change to them goes through that repository's plan and apply, never the AWS CLI.
 
+Slices (§13.22-§13.24): 5a, 5b and 5c are done (the library move, the form up to the emailed
+code, the code step and the save). Left: **5d**, the e2e fake Cognito (§13.24: a cargo feature
+`e2e-fake-cognito` that release builds cannot carry, a fake in the Node harness), then the
+profile's e2e walks and the designer's 11 `account-profile*` scenes and their review; **5e**, the
+deploy and a real edit on rpi-01 (the user's go-ahead: it opens `bb-auth-web`'s outbound traffic),
+including a Google-only account's case, and the docs.
+
 Inherited from §13.13: every Cognito call carries `timeout_global` of 5 s (assumed, not measured),
 no retry, at most two calls per request, so a slow Cognito cannot pin the workers; a test with a
 fake endpoint that never answers shows the handler answering within the bound and the worker
