@@ -163,7 +163,7 @@ async function run(ctx, t) {
     !admins.includes(WHO) && admins.includes('admin@example.com'), JSON.stringify(admins));
   const text = await mainText(page);
   t.check('the caller is named with the address the header carried',
-    text.includes('signed in as') && text.includes(WHO), text.slice(0, 200));
+    text.includes('Account id') && text.includes(WHO), text.slice(0, 200));
   t.check('and the page names their uuid', text.includes(UUID), text.slice(0, 200));
 
   // --- 2. the mint page: five choices, one picked --------------------------------------

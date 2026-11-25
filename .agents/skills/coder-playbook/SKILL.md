@@ -110,3 +110,11 @@ Rules are in `AGENTS.md`. Format of this file: `AGENTS.md`, under "Skills".
   (`only_the_reveal_policy_names_the_copy_script` posts `duration=never` to the self-service mint and
   expects a `400`, which §13.15 made a legal window). Grep the suite for the value the slice made
   legal before writing code; the fix is the fixture's, never the production code's.
+- maud 0.27 escapes only `&`, `<`, `>`, `"` (`maud-0.27.0/src/escape.rs`): a `'` in a `K` string
+  reaches the page **raw**, which is valid HTML. A test that expects `&#39;` rests on a false
+  premise; the only way to satisfy it is `PreEscaped(html_escape(…))`, a double-escape, so report
+  the test. `html_escape` (the library) does escape `'`.
+- Retiring a page's words can leave a `K` variant with no **production** caller while tests still
+  name it as the string to assert the absence **of** (the footer's `SignedInAs`): that is a
+  `dead_code` warning in the bin, and the repo has no `#[allow(dead_code)]` to borrow. Report it
+  for the tester to remove the key and its assertions together; do not silence it.

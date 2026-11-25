@@ -855,7 +855,6 @@ enum K {
     NotFoundBody,
     FileErrorTitle,
     FileErrorHint,
-    SignedInAs,
     SignOut,
     // --- the settings menu ---
     Settings,
@@ -1086,15 +1085,23 @@ enum K {
     // reason a submission was refused: the person reading them has no administrator in the room,
     // so each has to say what to write instead.
     AccountTitle,
-    AccountUuid,
+    AccountIdLabel,
     AccountNoRow,
     AccountNoRowTitle,
     AccountNoRowBody,
     AccountReach,
+    AccountReachSub,
+    AccountReachNone,
+    AccountGroups,
+    AccountGroupsSub,
+    AccountGroupsNone,
     AccountKeys,
-    AccountProfile,
-    AccountNone,
+    AccountKeysSub,
     AccountKeysNone,
+    AccountProfile,
+    AccountProfileSub,
+    AccountProfileNone,
+    AccountNotProvided,
     AccountKeyAdd,
     AccountKeyCreate,
     AccountKeyIdHint,
@@ -1822,7 +1829,6 @@ fn t(lang: Lang, key: K) -> &'static str {
             "Ogni pagina qui rilegge il file a ogni richiesta, quindi correggerlo ha effetto \
              subito — senza riavvio né reload.",
         ),
-        K::SignedInAs => m(lang, "signed in as", "accesso come"),
         K::SignOut => m(lang, "Sign out", "Esci"),
         K::Settings => m(lang, "Preferences", "Preferenze"),
         K::SettingLanguage => m(lang, "Language", "Lingua"),
@@ -2212,7 +2218,7 @@ fn t(lang: Lang, key: K) -> &'static str {
         // The headings are the prose, and the only prose: the names in each section are the
         // access file's vocabulary, which is never translated.
         K::AccountTitle => m(lang, "Your account", "Il tuo account"),
-        K::AccountUuid => m(lang, "your uuid", "il tuo uuid"),
+        K::AccountIdLabel => m(lang, "Account id", "Id dell'account"),
         K::AccountNoRow => m(
             lang,
             "bb-auth has no roster row for you.",
@@ -2234,13 +2240,50 @@ fn t(lang: Lang, key: K) -> &'static str {
              a cui una tua chiave possa appartenere.",
         ),
         K::AccountReach => m(lang, "Where you reach", "Dove puoi arrivare"),
+        K::AccountReachSub => m(
+            lang,
+            "The applications your sign-in opens, and the areas inside each.",
+            "Le applicazioni a cui il tuo accesso apre la porta, e le aree dentro ciascuna.",
+        ),
+        K::AccountReachNone => m(
+            lang,
+            "Your sign-in opens no application yet.",
+            "Il tuo accesso non apre ancora nessuna applicazione.",
+        ),
+        // The page's own word for the file's `user_groups` section, not the console's `K::Groups`
+        // ("User groups"), which names the file section an administrator edits.
+        K::AccountGroups => m(lang, "Groups", "Gruppi"),
+        K::AccountGroupsSub => m(
+            lang,
+            "Groups an administrator has put you in.",
+            "I gruppi in cui ti ha messo un amministratore.",
+        ),
+        K::AccountGroupsNone => m(lang, "You are in no group.", "Non sei in nessun gruppo."),
         K::AccountKeys => m(lang, "API keys", "Chiavi API"),
+        K::AccountKeysSub => m(
+            lang,
+            "A key lets a script or a tool sign in as you. It reaches at most what you reach.",
+            "Una chiave permette a uno script o a uno strumento di accedere come te. Arriva al \
+             massimo dove arrivi tu.",
+        ),
         K::AccountProfile => m(lang, "Profile", "Profilo"),
-        K::AccountNone => m(lang, "None.", "Nessuno."),
-        // The keys need their own spelling of the same word: Italian agrees a pronoun with the
-        // noun it stands for, and the sections are not the same gender. The keys are *chiavi*
-        // (feminine), so the shared "Nessuno." would read as a slip in the page's own language,
-        // while it is right for a claim's value (*valore*, masculine) and for a group.
+        K::AccountProfileSub => m(
+            lang,
+            "What your sign-in tells these applications about you.",
+            "Cosa il tuo accesso dice di te a queste applicazioni.",
+        ),
+        K::AccountProfileNone => m(
+            lang,
+            "This deployment shares no profile details.",
+            "Questa installazione non condivide dettagli del profilo.",
+        ),
+        // A claim the deployment configured and the proxy did not forward. Lowercase, because it
+        // reads as the tail of the row's sentence, after the claim's name, not as a heading.
+        K::AccountNotProvided => m(lang, "not provided", "non fornito"),
+        // The keys' empty state names keys, in the feminine (*chiavi*): Italian agrees an
+        // adjective with the noun it stands for, and the section's heading is the noun a reader
+        // sees beside the sentence, so a borrowed pronoun reads as a slip in the page's own
+        // language.
         K::AccountKeysNone => m(
             lang,
             "No API keys yet.",
@@ -9119,9 +9162,11 @@ fn page_account_minted(lang: Lang, page: &str, bearer: &str) -> Markup {
 /// page a real caller reaches, not a defensive one. A stranger and an administrator with no roster
 /// row get the same page, because `web.admins` is not read here.
 ///
-/// The sections are siblings and each carries only a heading, the names, and one short "none"
-/// line: the page's contract is about **which fact belongs in which section**, and prose in one is
-/// a word a test about another could match by accident.
+/// The sections are siblings, each a `.panel` whose `h2` is followed by one `p.lede.sub` saying
+/// what that section is for, and whose empty state is a `p.muted` naming what is missing. The
+/// page's contract is the one that made this page few keys: **which fact belongs in which
+/// section**, so a sub-line says what a section is for and never states a fact that belongs to
+/// another one.
 fn page_account(
     lang: Lang,
     ids: &[String],
@@ -9130,38 +9175,45 @@ fn page_account(
     row: Option<&NewKeyRow>,
 ) -> Markup {
     html! {
-        p {
-            (t(lang, K::SignedInAs)) ": "
+        // One paragraph says who this page is about: every address of the row (as the gate sends
+        // them), and on the line below the account these addresses resolve to. The bar already
+        // says who is signed in, so the body does not say it twice.
+        p class="lede" {
             @for id in ids {
                 code { (id) } " "
             }
-        }
-        @if let Some(u) = uuid {
-            p { (t(lang, K::AccountUuid)) ": " code { (u) } }
-        } @else {
-            p class="muted" { (t(lang, K::AccountNoRow)) }
+            br;
+            @if let Some(u) = uuid {
+                (t(lang, K::AccountIdLabel)) ": " code { (u) }
+            } @else {
+                (t(lang, K::AccountNoRow))
+            }
         }
         section id="reach" class="panel" {
             h2 { (t(lang, K::AccountReach)) }
+            p class="lede sub" { (t(lang, K::AccountReachSub)) }
             @if own.reached.is_empty() {
-                p class="muted" { (t(lang, K::AccountNone)) }
+                p class="muted" { (t(lang, K::AccountReachNone)) }
             } @else {
-                @for (app, scopes) in &own.reached {
-                    p { code { (app) } }
-                    ul {
+                // One flat list of `app/scope` pairs, in the file's order: the question is "where
+                // can I go", and each answer is one place. The console's person page lists them
+                // the same way.
+                ul class="plain" {
+                    @for (app, scopes) in &own.reached {
                         @for scope in scopes {
-                            li { code { (scope) } }
+                            li { code { (app) "/" (scope) } }
                         }
                     }
                 }
             }
         }
         section id="groups" class="panel" {
-            h2 { (t(lang, K::Groups)) }
+            h2 { (t(lang, K::AccountGroups)) }
+            p class="lede sub" { (t(lang, K::AccountGroupsSub)) }
             @if own.groups.is_empty() {
-                p class="muted" { (t(lang, K::AccountNone)) }
+                p class="muted" { (t(lang, K::AccountGroupsNone)) }
             } @else {
-                ul {
+                ul class="plain" {
                     @for g in &own.groups {
                         li { code { (g) } }
                     }
@@ -9170,6 +9222,7 @@ fn page_account(
         }
         section id="keys" class="panel" {
             h2 { (t(lang, K::AccountKeys)) }
+            p class="lede sub" { (t(lang, K::AccountKeysSub)) }
             // Ten keys close the row (§13.16), counting every key on the row. A sentence and not
             // a disabled control: a disabled control is skipped by the keyboard and says nothing
             // about why.
@@ -9213,21 +9266,23 @@ fn page_account(
         }
         section id="profile" class="panel" {
             h2 { (t(lang, K::AccountProfile)) }
+            p class="lede sub" { (t(lang, K::AccountProfileSub)) }
             @if own.claims.is_empty() {
-                p class="muted" { (t(lang, K::AccountNone)) }
+                p class="muted" { (t(lang, K::AccountProfileNone)) }
             } @else {
-                ul {
+                ul class="plain" {
                     @for (claim, value) in &own.claims {
                         li {
-                            code { (claim) }
-                            // The word for none, not an empty value: a claim the deployment
-                            // configured and nginx did not forward is a fact about the wiring, and
-                            // a person has to be able to see it is missing rather than squint at a
-                            // blank after a colon.
+                            code { (claim) } ": "
+                            // The claim's name is the file's vocabulary, so it is code; the value
+                            // is the person's name or department, which is prose. A claim the
+                            // deployment configured and the proxy did not forward is a fact about
+                            // the wiring, and says so in words: a bare colon after a name reads as
+                            // "your name is empty", a statement nobody made.
                             @if let Some(v) = value {
-                                ": " code { (v) }
+                                (v)
                             } @else {
-                                " " code { (t(lang, K::AccountNone)) }
+                                span class="muted" { (t(lang, K::AccountNotProvided)) }
                             }
                         }
                     }
@@ -15815,20 +15870,16 @@ mod tests {
             account_readable(&g.body)
         );
         let s = account_section(&g.body, "reach");
-        for name in ["mpa", "admin", "onboarding", "mcp", "logs"] {
+        for pair in ["mpa/admin", "mpa/onboarding", "mcp/logs"] {
             assert!(
-                s.contains(name),
-                "bob reaches {name}, so the reach section must list it: {s}"
+                s.contains(&format!("<li><code>{pair}</code></li>")),
+                "bob reaches {pair}, so the reach section must list it as one flat item: {s}"
             );
         }
         let at = |n: &str| s.find(n).unwrap_or_default();
         assert!(
-            at("mpa") < at("admin") && at("admin") < at("onboarding"),
-            "an application must be named before its own scopes, and its scopes in file order: {s}"
-        );
-        assert!(
-            at("onboarding") < at("mcp") && at("mcp") < at("logs"),
-            "the applications are listed in file order, each before the scopes it owns: {s}"
+            at("mpa/admin") < at("mpa/onboarding") && at("mpa/onboarding") < at("mcp/logs"),
+            "the pairs are listed in file order, an application's scopes together: {s}"
         );
         assert!(
             !s.contains("healthz"),
@@ -15860,8 +15911,13 @@ mod tests {
         );
         let s = account_section(&g.body, "groups");
         assert!(
-            s.contains("admins"),
-            "bob is a member of the admins group, so the page must name it: {s}"
+            s.contains("<li><code>admins</code></li>"),
+            "bob is a member of the admins group, so the page must name it, one item in code: {s}"
+        );
+        assert_eq!(
+            account_heading(&s, "h2"),
+            "Groups",
+            "the heading says Groups, not the console's \"User groups\" for the file section: {s}"
         );
 
         cleanup(&path);
@@ -15948,8 +16004,9 @@ mod tests {
              configured: {s}"
         );
         assert!(
-            s.contains("Bob Smith"),
-            "the forwarded value is percent-encoded on the wire and must reach the page decoded: {s}"
+            s.contains("<li><code>given_name</code>: Bob Smith</li>"),
+            "the forwarded value is percent-encoded on the wire and must reach the page decoded, \
+             as plain text after the claim's name, because a name is prose and not code: {s}"
         );
 
         // Nothing forwarded, nothing shown: a page that invented a value would be showing a
@@ -15983,9 +16040,9 @@ mod tests {
         );
         let s = account_section(&g.body, "reach");
         assert!(
-            s.contains("mpa") && s.contains("onboarding"),
+            s.contains("<li><code>mpa/onboarding</code></li>"),
             "the authenticated scope is reached by everyone signed in, so the page must list \
-             it under its application: {s}"
+             it as an app/scope pair: {s}"
         );
         for name in ["admin", "logs", "mcp", "healthz", "api"] {
             assert!(
@@ -16486,9 +16543,8 @@ mod tests {
              repaint this section: {keys_empty}"
         );
         assert!(
-            profile.contains("Nessuno."),
-            "the profile's empty state answers for a claim's value, masculine, and stays \
-             \"Nessuno.\": {profile}"
+            profile.contains("Questa installazione non condivide dettagli del profilo."),
+            "the profile has its own empty sentence, which names what is missing: {profile}"
         );
         assert!(
             !profile.contains(keys_empty),
@@ -16510,8 +16566,9 @@ mod tests {
             account_section(&en.body, "keys")
         );
         assert!(
-            account_section(&en.body, "profile").contains("None."),
-            "and the profile section keeps the bare word: {}",
+            account_section(&en.body, "profile")
+                .contains("This deployment shares no profile details."),
+            "and the profile section says what is missing in its own sentence: {}",
             account_section(&en.body, "profile")
         );
 
@@ -16656,12 +16713,226 @@ mod tests {
             "the page must still name the claim it has nothing to show: {s}"
         );
         assert!(
-            s.contains("None."),
-            "a claim with no forwarded value shows the word for none, never an empty value: {s}"
+            s.contains("<span class=\"muted\">not provided</span>"),
+            "a claim with no forwarded value says so in a muted span, never an empty value: {s}"
         );
         assert!(
-            !s.contains("given_name</code>:"),
-            "the word for none replaces a value, it does not follow a bare colon: {s}"
+            !s.contains("None."),
+            "the bare word for none has no caller left on this page: {s}"
+        );
+        assert!(
+            !s.contains("<code>not provided</code>") && !s.contains("given_name</code>:</li>"),
+            "the muted word is not wrapped in code, and a bare colon never ends the item: {s}"
+        );
+
+        cleanup(&path);
+    }
+
+    /// What the page says between its `h1` and its first section: the lede, and nothing the
+    /// header bar already says.
+    fn account_lede_zone(body: &str) -> String {
+        let after = body
+            .split_once("</h1>")
+            .unwrap_or_else(|| panic!("no h1: {}", account_readable(body)))
+            .1;
+        let end = after
+            .find("<section id=\"reach\"")
+            .unwrap_or_else(|| panic!("no reach section: {}", account_readable(body)));
+        after[..end].to_string()
+    }
+
+    /// The lede says which addresses and which account, in one paragraph: every address in
+    /// `code`, a line break, then the label and the uuid. The bar already says "signed in as",
+    /// so the body must not.
+    #[test]
+    fn the_lede_names_the_addresses_and_the_account_id() {
+        let path = account_scratch_full("lede");
+        let base = account_serve(&path);
+
+        let g = account_call(&base, Some("BOB@old.com bob@x.com"));
+        assert_eq!(g.status, 200, "{}", account_readable(&g.body));
+        let zone = account_lede_zone(&g.body);
+        assert_eq!(
+            zone.matches("<p class=\"lede\">").count(),
+            1,
+            "exactly one lede before the first section: {zone}"
+        );
+        assert!(
+            zone.contains("<code>bob@old.com</code>") && zone.contains("<code>bob@x.com</code>"),
+            "both addresses of the row are in code: {zone}"
+        );
+        assert!(
+            zone.contains(&format!("<br>Account id: <code>{ACCOUNT_BOB}</code>")),
+            "after a line break, the label and the uuid in code: {zone}"
+        );
+        assert!(
+            !zone.contains("signed in as") && !zone.contains("your uuid"),
+            "the old paragraphs are gone, the bar says who is signed in: {zone}"
+        );
+
+        let g = account_call(&base, Some("stranger@elsewhere.com"));
+        assert_eq!(g.status, 200, "{}", account_readable(&g.body));
+        let zone = account_lede_zone(&g.body);
+        assert!(
+            zone.contains("<code>stranger@elsewhere.com</code>")
+                && zone.contains("<br>bb-auth has no roster row for you."),
+            "a stranger's lede carries the address and the no-row sentence: {zone}"
+        );
+        assert!(
+            !zone.contains("Account id") && !zone.contains("<code>1111"),
+            "a stranger has no account id to show: {zone}"
+        );
+
+        let it = account_call_pref(&base, Some("bob@x.com"), Some("lang=it"), None);
+        let zone = account_lede_zone(&it.body);
+        assert!(
+            zone.contains(&format!("<br>Id dell'account: <code>{ACCOUNT_BOB}</code>")),
+            "the label is translated: {zone}"
+        );
+
+        cleanup(&path);
+    }
+
+    /// Each section opens with one sub-line saying what it is for, right after its heading.
+    #[test]
+    fn each_section_says_what_it_is_for() {
+        let path = account_scratch_full("subs");
+        let base = account_serve(&path);
+        let subs = [
+            (
+                "reach",
+                "The applications your sign-in opens, and the areas inside each.",
+                "Le applicazioni a cui il tuo accesso apre la porta, e le aree dentro ciascuna.",
+            ),
+            (
+                "groups",
+                "Groups an administrator has put you in.",
+                "I gruppi in cui ti ha messo un amministratore.",
+            ),
+            (
+                "keys",
+                "A key lets a script or a tool sign in as you. It reaches at most what you reach.",
+                "Una chiave permette a uno script o a uno strumento di accedere come te. \
+                 Arriva al massimo dove arrivi tu.",
+            ),
+            (
+                "profile",
+                "What your sign-in tells these applications about you.",
+                "Cosa il tuo accesso dice di te a queste applicazioni.",
+            ),
+        ];
+        for (cookie, pick) in [("lang=en", 1), ("lang=it", 2)] {
+            let g = account_call_pref(&base, Some("bob@x.com"), Some(cookie), None);
+            assert_eq!(g.status, 200, "{}", account_readable(&g.body));
+            for (id, en, it) in subs {
+                let want = if pick == 1 { en } else { it };
+                let s = account_section(&g.body, id);
+                assert_eq!(
+                    s.matches("class=\"lede sub\"").count(),
+                    1,
+                    "{id} ({cookie}) has exactly one sub-line: {s}"
+                );
+                assert!(
+                    s.contains(&format!("</h2><p class=\"lede sub\">{want}</p>")),
+                    "{id} ({cookie}) says what it is for, right after its heading: {s}"
+                );
+            }
+        }
+
+        cleanup(&path);
+    }
+
+    /// An empty section says what is missing, in a muted paragraph with its own sentence, and
+    /// the bare "None." has no caller left.
+    #[test]
+    fn empty_sections_name_what_is_missing() {
+        // A stranger with no groups and no keys, settings with no claims, and an access file
+        // in which nothing is reachable by identity alone.
+        let path = account_scratch("empties", ACCOUNT_SETTINGS);
+        std::fs::write(
+            &path,
+            r#"{ "version": 1,
+              "applications": [ { "name": "mpa", "base": ["https://app.x.com/mpa"],
+                "scopes": [ { "name": "admin", "urls": ["https://app.x.com/mpa/admin/*"],
+                              "access": "restricted" } ] } ],
+              "users": [] }"#,
+        )
+        .expect("write the access fixture");
+        let base = account_serve(&path);
+        let sentences = [
+            (
+                "reach",
+                "Your sign-in opens no application yet.",
+                "Il tuo accesso non apre ancora nessuna applicazione.",
+            ),
+            (
+                "groups",
+                "You are in no group.",
+                "Non sei in nessun gruppo.",
+            ),
+            (
+                "profile",
+                "This deployment shares no profile details.",
+                "Questa installazione non condivide dettagli del profilo.",
+            ),
+        ];
+        for (cookie, pick) in [("lang=en", 1), ("lang=it", 2)] {
+            let g = account_call_pref(&base, Some("stranger@elsewhere.com"), Some(cookie), None);
+            assert_eq!(g.status, 200, "{}", account_readable(&g.body));
+            for (id, en, it) in sentences {
+                let want = if pick == 1 { en } else { it };
+                let s = account_section(&g.body, id);
+                assert!(
+                    s.contains(&format!("<p class=\"muted\">{want}</p>")),
+                    "{id} ({cookie}) names what is missing in a muted paragraph: {s}"
+                );
+            }
+            let page = account_readable(&g.body);
+            assert!(
+                !page.contains("None.") && !page.contains("Nessuno."),
+                "the bare word for none is gone ({cookie}): {page}"
+            );
+        }
+
+        cleanup(&path);
+    }
+
+    /// Reach, groups and profile are flat lists in the console's own `ul.plain`, one item each.
+    #[test]
+    fn the_sections_are_plain_lists() {
+        let path = account_scratch_full("plain-lists");
+        let base = account_serve(&path);
+
+        let g = account_call(&base, Some("bob@x.com"));
+        assert_eq!(g.status, 200, "{}", account_readable(&g.body));
+        for id in ["reach", "groups", "profile"] {
+            let s = account_section(&g.body, id);
+            assert_eq!(
+                s.matches("<ul").count(),
+                1,
+                "{id} is one list, with no nested one: {s}"
+            );
+            assert!(
+                s.contains("<ul class=\"plain\">"),
+                "{id} is a ul.plain: {s}"
+            );
+        }
+        let reach = account_section(&g.body, "reach");
+        assert_eq!(
+            reach.matches("<li>").count(),
+            3,
+            "one item per app/scope pair bob reaches: {reach}"
+        );
+        assert!(
+            !reach.contains("<p><code>mpa</code></p>"),
+            "the per-application paragraph is gone: {reach}"
+        );
+        assert!(
+            account_section(&g.body, "profile").contains(
+                "<li><code>given_name</code>: <span class=\"muted\">not provided</span></li>"
+            ),
+            "a configured but unforwarded claim says not provided: {}",
+            account_section(&g.body, "profile")
         );
 
         cleanup(&path);
@@ -19616,7 +19887,7 @@ mod tests {
             footer[0]
         );
         assert!(
-            !footer[0].contains("admin@x.com") && !footer[0].contains(t(Lang::En, K::SignedInAs)),
+            !footer[0].contains("admin@x.com") && !footer[0].contains("signed in as"),
             "the footer no longer says who is signed in: {}",
             footer[0]
         );
@@ -19627,7 +19898,7 @@ mod tests {
         let footer = elements(&g.body, "<footer", "</footer>");
         assert_eq!(footer.len(), 1);
         assert!(
-            !footer[0].contains("admin@x.com") && !footer[0].contains(t(Lang::It, K::SignedInAs)),
+            !footer[0].contains("admin@x.com") && !footer[0].contains("accesso come"),
             "{}",
             footer[0]
         );
