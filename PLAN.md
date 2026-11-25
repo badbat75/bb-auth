@@ -157,12 +157,16 @@ unconfirmed (moot while `email` stays read-only, which it does); and the pool an
 are managed in OpenTofu (the itadmin repository, `infra/tofu/stacks/aws/production/cognito.tf`),
 so any change to them goes through that repository's plan and apply, never the AWS CLI.
 
-Slices (§13.22-§13.24): 5a, 5b and 5c are done (the library move, the form up to the emailed
-code, the code step and the save). Left: **5d**, the e2e fake Cognito (§13.24: a cargo feature
-`e2e-fake-cognito` that release builds cannot carry, a fake in the Node harness), then the
-profile's e2e walks and the designer's 11 `account-profile*` scenes and their review; **5e**, the
-deploy and a real edit on rpi-01 (the user's go-ahead: it opens `bb-auth-web`'s outbound traffic),
-including a Google-only account's case, and the docs.
+Slices (§13.22-§13.24): 5a to 5d are done (the library move, the form up to the emailed code,
+the code step and the save, the e2e fake Cognito with the profile's walks and 11 scenes, cf9109b).
+Installed on rpi-01 on 2026-11-25 as `v1.99.9-gcf9109b`, verify green, the unit's IP filter gone
+and the listener still on 127.0.0.1. Left: **5e**, a real edit in a browser against the real pool
+(the user's), including a Google-only account's case, then the docs. From the designer's review of
+5b-5d (no WCAG failure): the code page's change list should read "Given name: Augusta (was Ada)"
+(the Italian `AccountProfileWas` becomes "prima") and the code field wants `max-width:14ch`;
+later, the date hint order, a gap under the read-only phone line, browser defaults for
+autocapitalize on names, autofocus on the refused field, and §13.23 to say the edit page's h1 is
+"Edit profile".
 
 Inherited from §13.13: every Cognito call carries `timeout_global` of 5 s (assumed, not measured),
 no retry, at most two calls per request, so a slow Cognito cannot pin the workers; a test with a
