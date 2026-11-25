@@ -1135,7 +1135,7 @@ the social callback, the error page and the refusal page the gate serves, and ev
 |---|---|
 | `stylesheet_url` | a stylesheet loaded **after** the built-in one, so it wins by source order. Absolute `https://`, or a path starting with `/` on this host |
 | `logo_url` | shown on the sign-in page above the name. Same two shapes. Empty = the name alone |
-| `brand_name` | what the sign-in page calls this deployment. Empty = each page's own name |
+| `brand_name` | what the estate calls this deployment: the sign-in page, and the bar of both `bb-auth-web` surfaces (the console's and `/account`'s). Empty = `bb-auth` |
 | `theme` | `system` (default), `light` or `dark`: which palette a page starts in. In `bb-auth-web` it is only the default, and each administrator's own Settings menu overrides it |
 
 Both binaries already carry a **complete** stylesheet, so an unset `stylesheet_url` is a fully
@@ -1144,6 +1144,10 @@ deliberate: a sign-in page must never *need* a second host to be up. Which is al
 override is expected to redefine the theme's custom properties (`--bg`, `--card`, `--text`,
 `--accent`, `--r-box`, `--font-ui`, …) and nothing else — it is a *token* file, and knowing
 nothing about either layout is what lets it restyle both.
+
+Three of those defaults moved in the current build, all three on the field and its border, and
+no token was added, renamed or removed. The values, and what to set in a token file that pins the
+old ones, are in [CHANGELOG.md](CHANGELOG.md) under "For theme authors".
 
 ```css
 /* the shape of one: four arms, because a page follows the OS unless told otherwise.

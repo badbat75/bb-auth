@@ -2493,7 +2493,7 @@ enough, for both surfaces at once, then required that the operator's theme keep 
 
 | Slot | Console | `/account/` |
 |---|---|---|
-| brand | `a.brand` "bb-auth-web" plus version, links home | `span.brand.selfserve-brand`: the `ui.logo_url` image (when set) and `ui.brand_name`, where the page shows them today; not a link, since the page is the only one |
+| brand | `a.brand` "bb-auth-web" plus version, links home. (Changed by §13.18: `ui.brand_name`, else `bb-auth`, over `K::ConsoleTag` ("Administration" / "Amministrazione"), still a link; the version is the footer's alone) | `span.brand.selfserve-brand`: the `ui.logo_url` image (when set) and `ui.brand_name`, where the page shows them today; not a link, since the page is the only one |
 | tabs | the five `nav` pills | an empty `nav`, which is what the console's own `403` page already renders |
 | identity | **new**: `span.who.muted` in `nav.acct`, the address | the same: the given name and the first address ("Bot · `bot@example.com`"), or the address alone |
 | Preferences | `details.settings` "Preferences" (`K::Settings`), Language then Theme, `onchange` applies, `noscript` Apply | the same `details` and `.menu` and order, **no `onchange`**, and the Apply `button` in `div.actions` always present |
@@ -2506,7 +2506,9 @@ the account's menu is the console's menu as a browser with scripting off sees it
 write stays as today: one submit, one `302` that sets the `theme` and `lang` cookies, the same
 names the console writes. The form's `action` is the account page. The brand slot shows the
 operator's brand because this page is the operator's estate seen by a person, while the
-console names the tool to its administrators.
+console names the tool to its administrators. (Changed by §13.18: the console's bar names the
+deployment the same way, over a line saying what that surface is, so the sentence's second half
+no longer holds; the reason for the first half stands.)
 
 **The identity, added to the console too.** Today the console says who is signed in only in
 its footer, below the fold on a long page; Nielsen's first heuristic (visibility of system

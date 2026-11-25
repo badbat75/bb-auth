@@ -71,6 +71,60 @@ when there is no tag to check out.
 release logs anybody out.** The settings file goes from version 1 to version 3, which needs an
 edit before the binaries land: see "Upgrading" below.
 
+### Changed: the theme, reviewed: fields carry a border, and only what floats casts a shadow
+
+* **A field's border carries the field.** Three *values* in the built-in `theme.css` move, and no
+  token is added, renamed or removed: light `--input-border` `#d8d9e4` to `#8a8c9e`, light
+  `--input-bg` `#f6f7fb` to `#ffffff`, and `--input-border` `#3a3a48` to `#6e6e86` in both dark
+  arms. The border is what says a box is a field, and the old one measured 1.40:1 against the card
+  it sits on (1.44:1 in dark), under the 3:1 WCAG 2.2 SC 1.4.11 asks of that boundary; a pale field
+  on a pale card read as disabled. The new ones measure 3.32:1 on `--card` and on their own fill
+  and 3.10:1 on `--bg` in light, and 3.26:1, 3.49:1 and 3.64:1 in dark, and the fill is the card's
+  own white so the border carries the field alone. `fields_have_a_three_to_one_border_in_every_arm`
+  reads the values out of the file and computes the ratio, so a value that drifts back under 3:1 is
+  a red test, not a design note.
+* **Only what floats casts a shadow.** The six resting surfaces (`.card`, `.panel`, `.msg`,
+  `.flash`, `.err`, `.secret`) lose their drop shadow, and the sign-in card and the Preferences
+  menu keep theirs from their own layout. A shadow says "this floats above the page", which those
+  two do and a column of sections does not: stacked down a page, six shadows added a grey haze
+  between panels and made a column of sections read as a pile of cards.
+* **The ground is painted once.** `body`'s gradient is `no-repeat`, so the glow sits at the top and
+  the flat `--bg` it fades into carries the rest of the page. It repeated: `html{height:100%}`
+  makes the positioning area one viewport tall, so any page longer than the window showed a hard
+  band of a second shade one screen down.
+* **A pill is no longer a loud blue box.** A secondary pill reads `--text` on the same 3:1
+  `--input-border` border a field has, so it still reads as a control on every surface, and shows
+  the accent only on hover; `.pill.on`, the selected tab, is the only accent fill, as it was. A
+  pill in a `nav` loses its box and reads as a tab, which is what the five tabs are. Links in a
+  table cell or a list item are underlined on hover only: a roster of emails was a column of blue
+  rules, and an underline is what says a word is a link when there are sentences around it.
+* **The header meets the content.** The bar's content edge is `main`'s, where the bar had no inner
+  padding and its brand started 16px left of every heading under it, and on `/account` the bar is
+  that page's own 620px column, so the brand sits over its column instead of far to its left. The
+  header's pills are smaller, a pill beside a button takes the button's height (on a phone too,
+  where the phone rule was shrinking it back), and the dashboard's six count tiles sit on one row
+  at desktop width and wrap evenly on a phone.
+* **Both bars name the deployment.** The console's brand was the binary's name over the version. It
+  is now `ui.brand_name`, falling back to `bb-auth`, the same name `/account` already showed, over
+  a second line saying what this surface is: "Administration" ("Amministrazione" in Italian). The
+  version stays in the footer, where the full build string was already printed and where a person
+  reading a deploy looks.
+* **Two small things on `/account`.** The account id is one unbroken token (`code.uid`,
+  `white-space:nowrap`, a smaller size under 640px), so on a phone it moves to its own line whole
+  instead of breaking in the middle at a hyphen. And a key field that carries a refusal stops
+  showing its hint, because the refusal says in a sentence what the hint said in a fragment, and
+  the two side by side read as two complaints.
+* **For theme authors**: no token is added, renamed or removed, so a token file written for the
+  last release renders as it did, and nothing in it needs removing. Three *defaults* moved, and a
+  file that pins them keeps the old look, so to follow: in `:root`, `--input-bg:#ffffff` and
+  `--input-border:#8a8c9e`, and in both dark arms `--input-border:#6e6e86`. Nothing else here needs
+  a line in a token file, because the rest of this section is rules that read existing tokens, and
+  they reach an operator's file untouched.
+
+No cookie, access-file or settings-file format changes, and nothing here logs anybody out. The
+three stylesheets are emitted by both HTML programs, so the gate's four pages, the console and
+`/account` repaint together.
+
 ### Changed: the account page says what each section is for, and the console's 403 points at it
 
 * **`/account` opens with one lede**: every address of the caller's roster row, and on the line
