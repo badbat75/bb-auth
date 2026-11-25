@@ -181,8 +181,10 @@ later, the date hint order, a gap under the read-only phone line, browser defaul
 autocapitalize on names, autofocus on the refused field, and §13.23 to say the edit page's h1 is
 "Edit profile".
 
-5f and 5g are committed (98bb8ff, 13d0dc0); the designer passed 5g for the deploy, with the code
-field's `max-width:14ch` still to add. On 2026-11-25, at the user's request, the IT-Admin session
+5f and 5g are committed (98bb8ff, 13d0dc0, the code field's `max-width:14ch` in d90cf10) and
+**5h is done**: the nginx lines are in rpi-01's `location /account/` (backup `.bak-5h`), and
+`v1.99.9-gd90cf10` is installed there with verify green, on 2026-11-25 with the user's go-ahead. The
+IT-Admin session was told, to carry the nginx change into its own record of the host. On 2026-11-25, at the user's request, the IT-Admin session
 deleted the native twin (`a3144842-…`), so that email now matches only the MicrosoftPersonal
 user. A real 5e run therefore needs an account that signs in by email code.
 
