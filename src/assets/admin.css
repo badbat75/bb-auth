@@ -103,8 +103,14 @@ tr:last-child td{border-bottom:0}
    invisible on exactly the two pages that have rows (users, api_keys). --bg leaves
    --card-border free for the pill's own hover border. */
 tbody tr:hover{background:var(--bg)}
-td.pills{text-align:right;white-space:nowrap}
+td.pills{display:table-cell;text-align:right;white-space:nowrap}
 td.pills .pills{flex-wrap:nowrap}
+/* `display:table-cell` is not decoration: the cell's class is `pills`, and base.css's group rule
+   `.pills{display:inline-flex}` matches the `td` as well as the `span.pills` inside it. An
+   inline-flex box in a row is wrapped in an anonymous cell sized to its content
+   (CSS 2.2 §17.2.1), so the row's rule stopped short of the table's edge, the actions sat
+   mid-column, and `text-align:right` never applied. This rule's specificity (0,1,1) beats
+   `.pills` (0,1,0), which is what makes the cell a cell again. */
 /* A table cell's action group must not wrap: wrapping is exactly what broke the api_keys
    row's three actions onto two ragged lines inside a narrow right-aligned cell. The panel
    already scrolls (overflow-x:auto) if a row's actions ever outgrow the column. The cell
@@ -207,18 +213,24 @@ p.primary{margin:16px 0 20px}
    One flex row above the panel it belongs to, so the pager drops under the search box on a
    narrow screen instead of squeezing it. The box is base.css's field, one step down in size
    and freed from its full-width default, because here it is one item in a row and not a line
-   in a form.
+   in a form. Every field here carries `min-height:calc(1.45em + 10px)`, which is the compact
+   pill's own box (line-height 1.45 at the same `--fs-sm`, 4px padding and 1px border on each
+   side), so a filter field is its Apply button's height and the row shows two sizes of control
+   rather than three (§13.21, 2). A `min-height` and not a line-height or a padding, because
+   Edge ignores `line-height` on a `select` (measured: still 27px with `line-height:1.45`) and
+   only a fractional 5.5px padding would hit the height there.
    --------------------------------------------------------------------------- */
 
 .listctl{display:flex;flex-wrap:wrap;gap:10px;align-items:center;margin:0 0 10px}
 .listctl form{display:flex;flex-wrap:wrap;gap:6px;align-items:center;margin:0}
 .listctl input[type=search]{width:auto;font-size:var(--fs-sm);padding:5px 11px;
-  min-width:min(16rem,60vw)}
+  min-height:calc(1.45em + 10px);min-width:min(16rem,60vw)}
 /* The audit's three list boxes, which is the one form here with fields in front of the filter
    box. They wrap rather than shrink, and the reason is what shrinking did: a `select` whose
    whole label is inside it collapses to its arrow on a phone, and three unlabelled arrows in a
    row are three controls nobody can tell apart. */
-.listctl select{width:auto;flex:0 0 auto;font-size:var(--fs-sm);padding:5px 11px}
+.listctl select{width:auto;flex:0 0 auto;font-size:var(--fs-sm);padding:5px 11px;
+  min-height:calc(1.45em + 10px)}
 .listctl .pager{display:inline-flex;gap:6px;align-items:center}
 /* The audit's clock: a list box and, for a zone of the operator's own, a text box beside it.
    The box is shown only while `Custom` is the choice, and the stylesheet decides that because
@@ -226,7 +238,8 @@ p.primary{margin:16px 0 20px}
    drops the rule and shows the box all the time, which costs a field and nothing else. */
 .listctl .tzpick{display:inline-flex;flex-wrap:wrap;gap:6px;align-items:center}
 .listctl .tzpick:not(:has(option[value=custom]:checked)) .tzc{display:none}
-.listctl input.tzc{width:auto;font-size:var(--fs-sm);padding:5px 11px;max-width:14rem}
+.listctl input.tzc{width:auto;font-size:var(--fs-sm);padding:5px 11px;
+  min-height:calc(1.45em + 10px);max-width:14rem}
 
 /* ---------------------------------------------------------------------------
    The Settings menu
@@ -365,7 +378,12 @@ body:has(.selfserve){background:var(--bg)}
      one rule on the row that holds them, rather than one rule per control: that is the same
      saving the row was introduced for. */
   .acct{order:2}
-  .pill{padding:3px 8px}
+  /* No phone size for a row pill, deliberately (§13.21, 2): the old `padding:3px 8px` shrank a
+     text pill to 28px while `.pill.ico` (0,2,0, so it outranked the bare `.pill`) stayed 30px,
+     which put three heights in the keys section once `cancel` at 43px was counted. A row pill is
+     now the desktop pill at every width, the same height as the icon beside it, and 6px wider,
+     which the stacked cards have room for and which only helps WCAG 2.5.8's 24px target. The
+     bar's pills keep their own phone size below. */
   .bar .pill{font-size:var(--fs-sm);padding:4px 9px}
   .bar .pill.ico{padding:4px}
   nav.acct .who{display:none}
@@ -400,5 +418,8 @@ body:has(.selfserve){background:var(--bg)}
   td{border-bottom:0;padding:3px 0}
   td[data-label]::before{content:attr(data-label);display:block;font-weight:600;font-size:.8rem;
     text-transform:uppercase;letter-spacing:.04em;color:var(--muted)}
-  td.pills{text-align:left;padding-top:6px}
+  td.pills{display:block;text-align:left;padding-top:6px}
+  /* `display:block` is the phone half of the desktop rule above: the stacking rule
+     `td{display:block}` (0,0,1) would otherwise lose to that rule's `table-cell` (0,1,1) and the
+     actions cell would stay a cell in a row of blocks. */
 }

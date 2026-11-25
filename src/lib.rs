@@ -9630,6 +9630,23 @@ mod tests {
         }
     }
 
+    /// §13.21 (3): a ticked radio or checkbox wears the palette's accent, not the engine's
+    /// own blue.
+    #[test]
+    fn ticks_wear_the_accent() {
+        // `rules_named` matches one selector of a list at a time, so each kind is looked up
+        // on its own and must find the same single rule.
+        for kind in ["input[type=radio]", "input[type=checkbox]"] {
+            let rules = rules_named(BASE_CSS, kind);
+            assert_eq!(rules.len(), 1, "one rule tints `{kind}`");
+            assert!(
+                rules[0].contains("accent-color:var(--accent)"),
+                "the tint of `{kind}` is the accent token: {}",
+                rules[0]
+            );
+        }
+    }
+
     #[test]
     fn only_the_palette_names_a_colour() {
         // The contract that makes `ui.stylesheet_url` a TOKEN file: a deployment restyles both

@@ -48,7 +48,7 @@ const VIEWS = [
     // Only where there is something to read: a form's field measures do not change.
     only: ['dashboard', 'users', 'denied', 'apps', 'app-detail', 'can-authorized',
       'can-denied', 'can-on-a-person', 'user-rm', 'key-minted', 'error-refused', 'conflict',
-      'conflict-mint', 'forbidden', 'settings-menu',
+      'conflict-mint', 'forbidden', 'settings-menu', 'config-landing-refused',
       // The self-service page is prose a person reads in their own language, so the copy of
       // the table's headings and the refusal is worth reading in Italian too.
       'account', 'account-new', 'account-new-scopes', 'account-error', 'account-rm', 'account-menu'],
@@ -182,6 +182,11 @@ const SCENES = [
     // Opened first: the page starts folded, and a refusal is photographed next to its field.
     await page.goto(ctx.base + '/config?groups=open');
     await page.fill('textarea[name=admins]', 'somebody@else.example.com');
+    await submit(page);
+  }],
+  ['config-landing-refused', async (page, ctx) => {
+    await page.goto(ctx.base + '/config?groups=open');
+    await page.fill('input[name=landing_url]', 'https://evil.example.org/account/');
     await submit(page);
   }],
 

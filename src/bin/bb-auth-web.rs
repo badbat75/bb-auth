@@ -21666,6 +21666,89 @@ mod tests {
         cleanup(&path);
     }
 
+    /// The rules of `admin.css`'s phone block as `(selector, declarations)`, whitespace
+    /// removed. [`the_rule`] cannot serve here: it swallows the first rule inside an at-rule
+    /// and returns the first match in file order, which for `td.pills` is the desktop rule.
+    fn phone_rules() -> Vec<(String, String)> {
+        let mut bare = String::new();
+        let mut rest = CSS;
+        while let Some(i) = rest.find("/*") {
+            bare.push_str(&rest[..i]);
+            rest = rest[i..].find("*/").map_or("", |j| &rest[i + j + 2..]);
+        }
+        bare.push_str(rest);
+        let flat: String = bare.chars().filter(|c| !c.is_whitespace()).collect();
+        let at = flat
+            .find("@media(max-width:640px){")
+            .expect("admin.css has its phone block");
+        let block = &flat[at + "@media(max-width:640px){".len()..];
+        block
+            .split('}')
+            .filter_map(|c| c.split_once('{'))
+            .map(|(s, d)| (s.to_string(), d.to_string()))
+            .collect()
+    }
+
+    /// `td.pills` is a table cell (§13.21, 1). `BASE_CSS`'s `.pills{display:inline-flex}`
+    /// matches the `td` as well as the `span.pills` inside it, so the cell computes
+    /// `inline-flex` and is wrapped in an anonymous cell: the row's rule stops short of the
+    /// table's edge. The old "no `display:flex`" assertion passed while the defect stood, so
+    /// the cell must say `table-cell` itself, and `block` again on a phone, where the
+    /// stacking rule `td{display:block}` (0,0,1) would otherwise lose to it.
+    #[test]
+    fn the_actions_cell_is_a_table_cell() {
+        let rule = the_rule(CSS, "td.pills").expect("admin.css styles the actions cell");
+        assert!(
+            rule.replace(' ', "").contains("display:table-cell"),
+            "the cell must beat `.pills{{display:inline-flex}}` from base.css: {rule}"
+        );
+        let phone = phone_rules()
+            .into_iter()
+            .find(|(s, _)| s == "td.pills")
+            .expect("the phone block restyles the actions cell");
+        assert!(
+            phone.1.contains("display:block"),
+            "on a phone the cell stacks like its siblings: {}",
+            phone.1
+        );
+    }
+
+    /// A row pill is one size at every width (§13.21, 2): the phone block must not carry a
+    /// bare `.pill` rule, which shrank `rotate` to 28px while `.pill.ico` (more specific)
+    /// stayed 30px.
+    #[test]
+    fn a_row_pill_is_one_size_at_every_width() {
+        let bare: Vec<_> = phone_rules()
+            .into_iter()
+            .filter(|(s, _)| s.split(',').any(|p| p == ".pill"))
+            .collect();
+        assert!(bare.is_empty(), "no bare `.pill` rule on a phone: {bare:?}");
+    }
+
+    /// A filter's field is as tall as its Apply (§13.21, 2). `min-height` is the compact
+    /// pill's own box, and the pill must still be that box for the formula to hold.
+    #[test]
+    fn a_filter_field_is_its_buttons_height() {
+        for sel in [
+            ".listctl input[type=search]",
+            ".listctl select",
+            ".listctl input.tzc",
+        ] {
+            let rule = the_rule(CSS, sel).unwrap_or_else(|| panic!("admin.css styles `{sel}`"));
+            assert!(
+                rule.replace([' ', '\n'], "")
+                    .contains("min-height:calc(1.45em+10px)"),
+                "`{sel}` needs min-height:calc(1.45em + 10px): {rule}"
+            );
+        }
+        let pill = the_rule(BASE_CSS, ".pill").expect("base.css defines the pill");
+        let pill: String = pill.chars().filter(|c| !c.is_whitespace()).collect();
+        assert!(
+            pill.contains("line-height:1.45") && pill.contains("padding:4px11px"),
+            "the formula is the pill's box: {pill}"
+        );
+    }
+
     /// The `+ New key` row is a page of its own.
     ///
     /// §13.16. The mint form is not a block above the table (4h) and not a

@@ -255,6 +255,78 @@ async function run(ctx, t) {
       t.check(`a pill beside a button is as tall as the button (within 1px) at ${width}`,
         Math.abs(heights.pill - heights.button) <= 1, JSON.stringify(heights));
     }
+    // §13.21: the row's cells, the row pills, the filter fields and the ticks, as laid out.
+    // The measurement of one table: for each keyed row (one with an actions cell), the cells'
+    // bottoms and the actions cell's right edge against the table's, and the row pills' heights.
+    const rowGeometry = (p) => p.$$eval('table', (tables) => tables.flatMap((tb) => {
+      const tr = tb.getBoundingClientRect();
+      return [...tb.querySelectorAll('tbody tr')].filter((r) => r.querySelector('td.pills')).map((r) => {
+        const cells = [...r.children].map((c) => c.getBoundingClientRect());
+        const act = r.querySelector('td.pills');
+        const rr = r.getBoundingClientRect();
+        return {
+          bottoms: cells.map((c) => Math.round(c.bottom)),
+          actRight: act.getBoundingClientRect().right,
+          tableRight: tr.right,
+          rowRight: rr.right,
+          display: getComputedStyle(act).display,
+          pills: [...r.querySelectorAll('.pill')].map((a) => Math.round(a.getBoundingClientRect().height * 10) / 10),
+        };
+      });
+    }));
+    const person21 = await ctx.browser.newContext({
+      viewport: { width: 1280, height: 900 },
+      extraHTTPHeaders: { 'X-Auth-Email': 'you@example.com' },
+    });
+    const acct21 = await person21.newPage();
+    for (const width of [1280, 390]) {
+      await page.setViewportSize({ width, height: 900 });
+      await acct21.setViewportSize({ width, height: 900 });
+      await acct21.goto(`${ctx.origin}/account/`);
+      const surfaces = [['/account/', acct21, await rowGeometry(acct21)]];
+      for (const path of ['/users', '/users/b3f1c8a2-4e77-4f1a-9c0d-1e2f3a4b5c6d']) {
+        await page.goto(ctx.base + path);
+        surfaces.push([path, page, await rowGeometry(page)]);
+      }
+      for (const [path, , rows] of surfaces) {
+        t.check(`${path} has rows with an actions cell at ${width}`, rows.length >= 1, JSON.stringify(rows));
+        for (const r of rows) {
+          if (width === 1280) {
+            t.check(`${path}: every cell of a row shares one bottom at ${width}`,
+              new Set(r.bottoms).size === 1, JSON.stringify(r));
+            t.check(`${path}: the actions cell reaches the table's right edge at ${width}`,
+              Math.abs(r.actRight - r.tableRight) <= 1, JSON.stringify(r));
+          } else {
+            t.check(`${path}: the actions cell is a block, as wide as its row, at ${width}`,
+              r.display === 'block' && Math.abs(r.actRight - r.rowRight) <= 1, JSON.stringify(r));
+          }
+          t.check(`${path}: row pills share one height at ${width}`,
+            r.pills.length >= 1 && Math.max(...r.pills) - Math.min(...r.pills) <= 0.5, JSON.stringify(r));
+        }
+      }
+      for (const path of ['/users', '/audit']) {
+        await page.goto(ctx.base + path);
+        const hs = await page.evaluate(() => {
+          const f = document.querySelector('.listctl form');
+          const h = (el) => el.getBoundingClientRect().height;
+          return {
+            apply: h(f.querySelector('button[type=submit]')),
+            fields: [...f.querySelectorAll('input[type=search], select')]
+              .filter((e) => e.getBoundingClientRect().height > 0).map(h),
+          };
+        });
+        t.check(`${path}: a filter field equals its Apply's height at ${width}`,
+          hs.fields.length >= 1 && hs.fields.every((x) => Math.abs(x - hs.apply) <= 0.5), JSON.stringify(hs));
+      }
+    }
+    await person21.close();
+    await page.goto(ctx.base + '/apps/app1/scopes/admin/edit');
+    const accents = await page.$$eval('input[type=radio], input[type=checkbox]',
+      (els) => els.map((e) => getComputedStyle(e).accentColor));
+    t.check('the scope form has radios and ticks', accents.length >= 1, JSON.stringify(accents));
+    t.check("a radio's or tick's accent-color is not auto",
+      accents.length >= 1 && accents.every((a) => a !== 'auto'), JSON.stringify(accents));
+
     await page.setViewportSize({ width: 1280, height: 900 });
     await page.goto(ctx.base + '/');
     const tops = await page.$$eval('.cards .card', (els) => els.map((el) => Math.round(el.getBoundingClientRect().top)));

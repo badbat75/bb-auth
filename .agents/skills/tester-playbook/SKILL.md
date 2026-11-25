@@ -223,3 +223,7 @@ Rules are in `AGENTS.md`. Format of this file: `AGENTS.md`, under "Skills".
   names nobody" check on `response.text()` fails on `ci`, because every page inlines the three
   stylesheets and their comments say `decide`, `specificity`, `opacity`. Strip the `<style>` and
   `<script>` bodies, then the tags.
+- `rules_named(css, sel)` (lib.rs) matches **one** comma-part of a selector list, so passing a whole
+  list (`"a,b"`) finds nothing: look each part up on its own. `the_rule` (bb-auth-web) swallows the
+  first rule inside an `@media` block and returns the first match in file order, so a phone-block
+  rule needs its own reader (`phone_rules`).
