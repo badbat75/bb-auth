@@ -86,6 +86,17 @@ Rules are in `AGENTS.md`. Format of this file: `AGENTS.md`, under "Skills".
 - `e2e/shots.js` runs every scene of a view in **one** browser context, so a scene that swaps
   `X-Auth-Email` (a `/account` scene needs a roster row who is not an administrator) must put
   `admin@example.com` back before it ends, or the next scene renders the console as a 403.
+- The gate's sign-in page: each step id (`register-form`, `code-form`, `given_name`) appears in the
+  markup **and** in the inline script's `getElementById` calls, and the markup is first, so
+  `page.find(r#"id="X""#)` is the markup and one step's region is `find(id=FROM)..find(id=TO)`. Assert
+  an element through its **opening tag** (back up to `<`, forward to `>`): the `I18N` table carries
+  every translated word and sentence on every deployment, so a string search cannot show an element's
+  absence, and the page's one `<style>` carries the word `content` too.
+- A golden of `social_block`'s bytes: build it from an array of lines joined with `\n` (the provider
+  with no icon leaves a whitespace-only line, and trailing whitespace inside a source literal is
+  fragile), and use the **same provider order** as the page fixture, because file order is display
+  order. The login page carries exactly one `<script>` and one `<style>`; a handler scan must require
+  a space before `on…=`, since the template's `content="` matches `on[a-z]*=` without one.
 - Use one fixture per test.
 - Fill fixtures with real names and values captured from the real system.
 - In `bb-auth-web`, test a request end to end over a real socket: copy
@@ -169,6 +180,10 @@ Rules are in `AGENTS.md`. Format of this file: `AGENTS.md`, under "Skills".
 
 ## Pitfalls
 
+- A mutation harness that greps only `test tests::` lines reports a **compile failure as ALL GREEN**:
+  print the compile status too. And prefer a statement-form mutation:
+  `&f({ let mut v = two_buttons(); v.reverse(); &v })` compiled and left the assert green, while the
+  same reversal as two statements went red.
 - `links_to` returns the **opening tag only**, so `visible_text` of it is always `""` and `elements(x,
   "<svg", "</svg>")` of it finds nothing: a test that reads a control's **name** from it passes on an
   unnamed icon. Use `anchors_to` (whole `<a …>…</a>`) for anything about what is *inside* a link, and

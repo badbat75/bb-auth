@@ -37,10 +37,11 @@ __BB_SOCIAL_BUTTONS__
     <!-- Step 2: registration (only the missing fields; the email is already known) -->
     <form id="register-form" class="step" novalidate>
       <p class="hint" id="register-intro"></p>
+__BB_SOCIAL_REGISTER__
       <div class="row">
         <div class="field">
           <label class="fld" for="given_name" data-i18n="label_given">First name</label>
-          <input id="given_name" name="given_name" type="text" autocomplete="given-name" required>
+          <input id="given_name" name="given_name" type="text" autocomplete="given-name" aria-describedby="register-intro dup-note" required>
         </div>
         <div class="field">
           <label class="fld" for="family_name" data-i18n="label_family">Last name</label>
@@ -159,6 +160,7 @@ __BB_SOCIAL_BUTTONS__
         or: "oppure",
         btn_social: "Continua con {name}",
         register_intro: "Non hai ancora un account con {email}. Completa la registrazione.",
+        dup_note: "Di solito accedi con uno dei pulsanti qui sotto? Usa quello: registrarti con un codice crea un secondo account, separato.",
         label_given: "Nome",
         label_family: "Cognome",
         label_phone: "Telefono (opzionale)",
@@ -202,6 +204,7 @@ __BB_SOCIAL_BUTTONS__
         or: "or",
         btn_social: "Continue with {name}",
         register_intro: "No account yet for {email}. Finish signing up.",
+        dup_note: "Do you usually sign in with one of the buttons below? Use it instead: signing up with a code creates a second, separate account.",
         label_given: "First name",
         label_family: "Last name",
         label_phone: "Phone (optional)",

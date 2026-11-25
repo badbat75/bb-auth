@@ -2458,18 +2458,20 @@ fn social_state(settings: &Settings) -> String {
     format!("{} via {callback}", wired.join(", "))
 }
 
-/// The social block of the sign-in page: a divider and one button per configured provider, or
-/// nothing at all.
+/// The registration step's duplicate-account notice, in the template's static language.
 ///
-/// Nothing at all is the important half. With no `BB_AUTH_SOCIAL_*` configured the divider
-/// goes too, and the page's own script finds no `[data-idp]` to bind, so there is no branch
-/// anywhere saying "if social is off" — the markup simply is not there.
-fn social_block(buttons: &[SocialButton]) -> String {
-    // An empty list is the same page as no social configuration at all, which is deliberate:
-    // there is one way for the section to be absent, not two that look different.
-    if buttons.is_empty() {
-        return String::new();
-    }
+/// The panel carries the English as its text so the step reads correctly before the page's
+/// script runs at all, and `applyLang` replaces it with the reader's language as it does every
+/// other `data-i18n` element; both sentences live in the page's `I18N` table. The words are
+/// pinned in `docs/ARCHITECTURE.md` §13.27 and in a test, because a paraphrase is a different
+/// thing to say to the person reading it.
+const DUP_NOTE_EN: &str = "Do you usually sign in with one of the buttons below? Use it instead: signing up with a code creates a second, separate account.";
+
+/// One button per configured provider, at the indentation the social column uses.
+///
+/// Shared by the two places the page offers social sign-in, so a button cannot be added to one
+/// and missed by the other.
+fn social_buttons_html(buttons: &[SocialButton]) -> String {
     let mut out = String::new();
     for b in buttons {
         // The label is the library's, so a person reads the same word here and in the row of
@@ -2494,9 +2496,54 @@ fn social_block(buttons: &[SocialButton]) -> String {
             label = html_escape(label),
         ));
     }
+    out
+}
+
+/// The social block of the sign-in page: a divider and one button per configured provider, or
+/// nothing at all.
+///
+/// Nothing at all is the important half. With no `BB_AUTH_SOCIAL_*` configured the divider
+/// goes too, and the page's own script finds no `[data-idp]` to bind, so there is no branch
+/// anywhere saying "if social is off" — the markup simply is not there.
+fn social_block(buttons: &[SocialButton]) -> String {
+    // An empty list is the same page as no social configuration at all, which is deliberate:
+    // there is one way for the section to be absent, not two that look different.
+    if buttons.is_empty() {
+        return String::new();
+    }
     format!(
         "      <div class=\"divider\"><span data-i18n=\"or\">or</span></div>\n\
-         \x20     <div class=\"social\">\n{out}      </div>"
+         \x20     <div class=\"social\">\n{out}      </div>",
+        out = social_buttons_html(buttons)
+    )
+}
+
+/// The same buttons on the **registration** step, under the notice that says to use them: the
+/// notice, the buttons, then the divider, or nothing at all.
+///
+/// Why the buttons appear twice on one page (docs §13.27): a person who normally signs in
+/// through a provider types the same address into the email-code form, Cognito has no native
+/// user with it and answers `UserNotFoundException`, and the page lands here, where "Create
+/// account" would make a native user beside the federated one, a second and separate account
+/// under an address that already signs in another way. The notice says so, and the buttons are
+/// repeated under it because the email step's are hidden on this step (`.step{display:none}`):
+/// a notice that says "use your provider" while the only way to do it is two clicks back is
+/// recall over recognition. Repeating them costs no script, because the page binds every
+/// `[data-idp]` it finds, and a screen reader meets one set at a time, since a `display:none`
+/// step is out of the accessibility tree.
+///
+/// The empty list is the empty string for the same reason [`social_block`] gives: a notice
+/// about "the buttons below" above no buttons is worse than no notice.
+fn register_social_block(buttons: &[SocialButton]) -> String {
+    if buttons.is_empty() {
+        return String::new();
+    }
+    format!(
+        "      <p class=\"panel warn\" id=\"dup-note\" data-i18n=\"dup_note\">{note}</p>\n\
+         \x20     <div class=\"social\">\n{out}      </div>\n\
+         \x20     <div class=\"divider\"><span data-i18n=\"or\">or</span></div>",
+        note = DUP_NOTE_EN,
+        out = social_buttons_html(buttons)
     )
 }
 
@@ -2601,6 +2648,13 @@ fn login_page(settings: &Settings, rd: &str, nonce: &str) -> String {
     subs.push((
         "__BB_SOCIAL_BUTTONS__",
         social_block(&settings.social_buttons),
+    ));
+    // The registration step's copy of the same section, notice included: it is the gate that
+    // knows whether this deployment has buttons to point at, and a static template cannot be
+    // absent on one deployment and present on another.
+    subs.push((
+        "__BB_SOCIAL_REGISTER__",
+        register_social_block(&settings.social_buttons),
     ));
     render_page(LOGIN_HTML, &subs)
 }
@@ -5395,6 +5449,366 @@ mod tests {
         assert!(!page.contains(r#"class="divider""#), "{page}");
         assert!(page.contains(r#"var AUTHORIZE_URL = "";"#), "{page}");
         assert!(page.contains(r#"var CALLBACK_URL = "";"#), "{page}");
+    }
+
+    // --- the registration step's duplicate-account notice (docs §13.27) ------
+
+    /// The notice's two sentences, spelled exactly as `docs/ARCHITECTURE.md` §13.27 spells
+    /// them. Pinned verbatim rather than paraphrased: a paraphrase is red after the words
+    /// land and reads like a broken implementation, and the Italian is the half a stub gets
+    /// away with paraphrasing when only the English is asserted.
+    const DUP_EN: &str = "Do you usually sign in with one of the buttons below? Use it instead: signing up with a code creates a second, separate account.";
+    const DUP_IT: &str = "Di solito accedi con uno dei pulsanti qui sotto? Usa quello: registrarti con un codice crea un secondo account, separato.";
+
+    /// The two providers the design's fixture names, built as the compiled type, for the
+    /// tests that call `social_block` directly rather than through a page. Same order as
+    /// `login_with_buttons`, so a page assertion can compare against this block's bytes.
+    fn two_buttons() -> Vec<bb_auth_core::SocialButton> {
+        vec![
+            bb_auth_core::SocialButton {
+                idp: "Google".to_string(),
+                audience: "google-client".to_string(),
+            },
+            bb_auth_core::SocialButton {
+                idp: "Okta".to_string(),
+                audience: "okta-client".to_string(),
+            },
+        ]
+    }
+
+    /// The markup of one sign-in step: the region from the element carrying `id="FROM"` up to
+    /// the element carrying `id="TO"`. The three steps are siblings in file order and the
+    /// script's `getElementById` calls sit after all three forms, so the first match of each
+    /// id is the markup and the region is the step.
+    fn step_of<'a>(page: &'a str, from: &str, to: &str) -> &'a str {
+        let at = page
+            .find(&format!("id=\"{from}\""))
+            .unwrap_or_else(|| panic!("no element with id={from}"));
+        let open = page[..at].rfind('<').expect("an opening tag");
+        let next = at
+            + page[at..]
+                .find(&format!("id=\"{to}\""))
+                .expect("the next step");
+        let close = open + page[open..next].rfind('<').expect("an opening tag");
+        &page[open..close]
+    }
+
+    /// The opening tag of the element carrying `id="ID"`, `None` when there is none.
+    ///
+    /// Read as a tag, not as a string search, because the notice is an element: the `I18N`
+    /// table carries the word `dup_note` and the English sentence on **every** deployment,
+    /// including the one with no buttons, so a string search cannot tell a panel from a
+    /// dictionary entry and an absence test written with one proves nothing.
+    fn open_tag(page: &str, id: &str) -> Option<String> {
+        let at = page.find(&format!("id=\"{id}\""))?;
+        let open = page[..at].rfind('<')?;
+        let close = at + page[at..].find('>')? + 1;
+        Some(page[open..close].to_string())
+    }
+
+    /// The text between the opening tag of `id="ID"` and the next `close`, trimmed.
+    fn element_text(page: &str, id: &str, close: &str) -> String {
+        let tag = open_tag(page, id).expect("the element");
+        let at = page.find(&tag).expect("the element");
+        let rest = &page[at + tag.len()..];
+        rest[..rest.find(close).expect("the closing tag")]
+            .trim()
+            .to_string()
+    }
+
+    /// Every `<button …>…</button>` inside the region's `div.social`, byte for byte. The
+    /// buttons are what the two steps must share; the wrapper's indentation is each block's
+    /// own, so the comparison is of the buttons and not of the markup around them.
+    fn social_buttons(region: &str) -> Vec<String> {
+        let Some(at) = region.find("<div class=\"social\">") else {
+            return Vec::new();
+        };
+        let end = at + region[at..].find("</div>").expect("the social div closes") + "</div>".len();
+        region[at..end]
+            .split("<button")
+            .skip(1)
+            .map(|b| {
+                let close = b.find("</button>").expect("a closed button") + "</button>".len();
+                format!("<button{}", &b[..close])
+            })
+            .collect()
+    }
+
+    /// The document with every `<script …>…</script>` and `<style …>…</style>` element
+    /// removed, so a scan of the markup sees attributes and not the page's own source: the
+    /// script's body is full of `on…` sequences (`addEventListener`) that are not handlers.
+    fn markup_only(page: &str) -> String {
+        let mut out = page.to_string();
+        for tag in ["script", "style"] {
+            let open = format!("<{tag}");
+            let close = format!("</{tag}>");
+            while let Some(at) = out.find(&open) {
+                match out[at..].find(&close) {
+                    Some(j) => out.replace_range(at..at + j + close.len(), ""),
+                    None => out.replace_range(at.., ""),
+                }
+            }
+        }
+        out
+    }
+
+    /// The event handler attributes in a document, with the script and style bodies out of it.
+    fn handler_attributes(page: &str) -> Vec<String> {
+        let markup = markup_only(page);
+        let mut found = Vec::new();
+        let mut at = 0;
+        while let Some(off) = markup[at..].find(" on") {
+            let name = at + off + 3;
+            let mut end = name;
+            while end < markup.len() && markup.as_bytes()[end].is_ascii_alphabetic() {
+                end += 1;
+            }
+            if end < markup.len() && markup.as_bytes()[end] == b'=' {
+                found.push(markup[name..end].to_string());
+            }
+            at = name;
+        }
+        found
+    }
+
+    /// The sign-in page of a deployment with the design's two buttons.
+    fn login_with_buttons() -> String {
+        login_page(
+            &settings_with_buttons(&[("Google", "google-client"), ("Okta", "okta-client")]),
+            "",
+            "n0nce",
+        )
+    }
+
+    #[test]
+    fn the_registration_step_warns_before_a_duplicate_account() {
+        let page = login_with_buttons();
+        let tag = open_tag(&page, "dup-note").expect("the notice panel");
+        // `.panel` and `.warn` are BASE_CSS's surface and state: no new class, no CSS change.
+        assert!(tag.contains(r#"class="panel warn""#), "a warn panel: {tag}");
+        // The script translates it, so it needs the attribute every translated element has.
+        assert!(tag.contains(r#"data-i18n="dup_note""#), "{tag}");
+        // Its static text is the English sentence, so the step reads correctly before the
+        // script runs at all.
+        assert_eq!(element_text(&page, "dup-note", "</p>"), DUP_EN);
+        // The step's order: intro, notice, buttons, divider, fields. The notice sits between
+        // the intro and the fields, and the buttons follow the panel in the same column, so
+        // "the buttons below" is true at every width.
+        let reg = step_of(&page, "register-form", "code-form");
+        let note = reg
+            .find(r#"id="dup-note""#)
+            .expect("the notice is on the registration step");
+        let social = reg
+            .find("<div class=\"social\">")
+            .expect("the buttons are on the registration step");
+        let divider = social
+            + reg[social..]
+                .find(r#"class="divider""#)
+                .expect("a divider follows");
+        let given = reg.find(r#"id="given_name""#).expect("the name fields");
+        assert!(
+            note < social && social < divider && divider < given,
+            "intro, notice, buttons, divider, fields: {reg}"
+        );
+    }
+
+    #[test]
+    fn the_registration_step_repeats_the_email_step_buttons() {
+        let page = login_with_buttons();
+        let email = step_of(&page, "email-form", "register-form");
+        let reg = step_of(&page, "register-form", "code-form");
+        // The email step's buttons are hidden on this step (`.step{display:none}`), so the
+        // notice's "use your provider" needs a way to do it on the step that says it.
+        assert_eq!(
+            page.matches(r#"data-idp="Google""#).count(),
+            2,
+            "one per step, no more: {page}"
+        );
+        assert!(!social_buttons(email).is_empty(), "step 1 has buttons");
+        assert_eq!(
+            social_buttons(reg),
+            social_buttons(email),
+            "the same buttons, not a second copy that drifted"
+        );
+        // The divider is the existing one, carrying its own translated word.
+        assert!(reg.contains(r#"class="divider""#), "{reg}");
+        assert!(reg.contains(r#"data-i18n="or""#), "{reg}");
+    }
+
+    #[test]
+    fn the_notice_words_are_pinned_in_both_languages() {
+        // Both dictionaries carry the sentence on **every** deployment: the words are data in
+        // the page's script, and the panel is what comes and goes.
+        for page in [
+            login_with_buttons(),
+            login_page(&social_settings("", &[]), "", "n0nce"),
+        ] {
+            assert!(
+                page.contains(&format!("dup_note: \"{DUP_EN}\"")),
+                "the English dictionary: {page}"
+            );
+            assert!(
+                page.contains(&format!("dup_note: \"{DUP_IT}\"")),
+                "the Italian dictionary: {page}"
+            );
+        }
+        assert_eq!(
+            login_with_buttons().matches("dup_note:").count(),
+            2,
+            "one entry per dictionary"
+        );
+    }
+
+    #[test]
+    fn the_notice_is_absent_where_there_are_no_social_buttons() {
+        // Two shapes of "no buttons": no social wiring at all, and a hosted UI with an empty
+        // button list. Both must produce the plain registration step, because a notice that
+        // says "use one of the buttons below" above no buttons is worse than no notice.
+        for settings in [
+            social_settings("", &[]),
+            social_settings("pool.auth.eu-central-1.amazoncognito.com", &[]),
+        ] {
+            let page = login_page(&settings, "", "n0nce");
+            assert!(open_tag(&page, "dup-note").is_none(), "{page}");
+            assert!(!page.contains(r#"data-i18n="dup_note""#), "{page}");
+            assert!(!page.contains("data-idp="), "{page}");
+            assert!(
+                !page.contains(r#"class="divider""#),
+                "no stray divider: {page}"
+            );
+            // The template's new placeholder is answered even when there is nothing to put
+            // in it: an unfilled one is visible on the page.
+            assert!(!page.contains("__BB_"), "unfilled placeholder: {page}");
+        }
+    }
+
+    #[test]
+    fn the_name_field_is_described_by_the_intro_and_the_notice() {
+        // The script moves focus to `#given_name` when the step opens, so a screen-reader
+        // user lands after the notice and never hears it unless the field points at it. On a
+        // deployment with no buttons `dup-note` is no element, and an IDREF that matches
+        // nothing is ignored when the description is computed, so one template serves both.
+        for page in [
+            login_with_buttons(),
+            login_page(&social_settings("", &[]), "", "n0nce"),
+        ] {
+            let tag = open_tag(&page, "given_name").expect("the name field");
+            assert!(
+                tag.contains(r#"aria-describedby="register-intro dup-note""#),
+                "{tag}"
+            );
+        }
+    }
+
+    #[test]
+    fn the_email_step_is_unchanged_by_the_notice() {
+        let page = login_with_buttons();
+        let email = step_of(&page, "email-form", "register-form");
+        let divider = email
+            .find(r#"class="divider""#)
+            .expect("the email step's divider");
+        let first_button = email
+            .find("data-idp=")
+            .expect("the email step's first button");
+        assert!(
+            divider < first_button,
+            "the divider precedes the buttons: {email}"
+        );
+        // File order is still display order, on the step that has always shown them.
+        let both = login_page(
+            &settings_with_buttons(&[("Okta", "okta-client"), ("Google", "google-client")]),
+            "",
+            "n0nce",
+        );
+        assert!(
+            both.find(r#"data-idp="Okta""#) < both.find(r#"data-idp="Google""#),
+            "{both}"
+        );
+        // The step is built by `social_block`, whose output the factoring must leave alone.
+        assert!(
+            page.contains(&social_block(&two_buttons())),
+            "the email step carries social_block's bytes: {page}"
+        );
+    }
+
+    #[test]
+    fn social_blocks_bytes_are_unchanged_by_the_factoring() {
+        // §13.27 factors the per-button loop out of `social_block` and promises its output
+        // stays byte for byte the same. This is that promise: the exact bytes for two
+        // providers, one with an icon and one without, including the whitespace the empty
+        // icon leaves behind. A moved byte here is a diff in the page the script binds.
+        let icon = IDP_ICONS
+            .iter()
+            .find(|(name, _)| *name == "Google")
+            .map(|(_, svg)| *svg)
+            .expect("the fixture provider has an icon");
+        let want = [
+            r#"      <div class="divider"><span data-i18n="or">or</span></div>"#,
+            r#"      <div class="social">"#,
+            r#"        <button type="button" class="social-btn" data-idp="Google" data-client-id="google-client">"#,
+            &format!("          {icon}"),
+            r#"          <span data-i18n="btn_social" data-i18n-arg="Google">Continue with Google</span>"#,
+            "        </button>",
+            r#"        <button type="button" class="social-btn" data-idp="Okta" data-client-id="okta-client">"#,
+            // The provider with no icon still gets its line: the empty icon is an empty
+            // string, and the indentation around it is part of the bytes.
+            r#"          "#,
+            r#"          <span data-i18n="btn_social" data-i18n-arg="Okta">Continue with Okta</span>"#,
+            "        </button>",
+            "      </div>",
+        ]
+        .join("\n");
+        assert_eq!(social_block(&two_buttons()), want);
+        // And the empty list is still the empty string: one way for the section to be absent.
+        assert_eq!(social_block(&[]), "");
+    }
+
+    #[test]
+    fn the_notice_adds_no_script_and_the_policy_still_names_one() {
+        // The notice is markup and two dictionary strings. No new script element, no handler,
+        // and the nonce policy that covers the page's one inline script is unchanged: a
+        // second script, or a source added to `script-src` to make one run, is the widening
+        // this pins out.
+        let base = serve(token_state(gate_settings(&format!(
+            r#"{{ "oauth_domain": "pool.auth.eu-central-1.amazoncognito.com",
+                  "social_callback_url": "{CALLBACK_URL}",
+                  "social_buttons": [{{ "idp": "Google", "audience": "social-client" }}] }}"#
+        ))));
+        let mut r = agent().get(format!("{base}/auth/login")).call().unwrap();
+        assert_eq!(r.status(), 200);
+        let csp = r
+            .headers()
+            .get("Content-Security-Policy")
+            .unwrap()
+            .to_str()
+            .unwrap()
+            .to_string();
+        let body = r.body_mut().read_to_string().unwrap();
+        // The page under test is the one carrying the notice.
+        assert!(body.contains(r#"id="dup-note""#), "{body}");
+        assert_eq!(body.matches("<script").count(), 1, "one script element");
+        assert_eq!(body.matches("<style").count(), 1, "one style element");
+        assert!(handler_attributes(&body).is_empty(), "no handler attribute");
+        let nonce = csp
+            .split("'nonce-")
+            .nth(1)
+            .and_then(|t| t.split('\'').next())
+            .expect("a nonce in the policy")
+            .to_string();
+        assert!(
+            body.contains(&format!("<script nonce=\"{nonce}\">")),
+            "the script carries the policy's nonce"
+        );
+        assert!(
+            body.contains(&format!("<style nonce=\"{nonce}\">")),
+            "the stylesheet carries the policy's nonce"
+        );
+        // The semicolon is part of the assertion: it says nothing was added beside the nonce.
+        assert!(
+            csp.contains(&format!("script-src 'nonce-{nonce}';")),
+            "{csp}"
+        );
+        assert!(!csp.contains("unsafe-inline"), "{csp}");
     }
 
     #[test]
