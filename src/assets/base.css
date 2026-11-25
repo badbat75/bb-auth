@@ -31,8 +31,12 @@
 /* Full height on both, because the ground is a gradient: sized to the content instead, a
    short page would show its top few hundred pixels and stop. */
 html{height:100%}
-body{min-height:100%;margin:0;background:var(--bg-grad),var(--bg);color:var(--text);
+body{min-height:100%;margin:0;background:var(--bg-grad) no-repeat,var(--bg);color:var(--text);
   font:15px/1.55 var(--font-ui);-webkit-font-smoothing:antialiased}
+/* `no-repeat` on the gradient: `html{height:100%}` makes the positioning area one viewport
+   tall, so a repeating gradient starts again one viewport down and any page longer than the
+   window carries a hard band of a second shade across its content. Painted once, the glow
+   sits at the top and the flat --bg it fades into carries the rest of the page. */
 a{color:var(--accent)}
 :focus-visible{outline:2px solid var(--accent);outline-offset:2px}
 code,.mono{font-family:var(--font-mono);font-size:.92em}
@@ -64,13 +68,30 @@ p.lede{color:var(--muted);margin:0 0 18px}
    --------------------------------------------------------------------------- */
 
 .card,.panel,.msg,.flash,.err,.secret{background:var(--card);
-  border:1px solid var(--card-border);border-radius:var(--r-box);box-shadow:var(--shadow-md);
+  border:1px solid var(--card-border);border-radius:var(--r-box);box-shadow:none;
   padding:14px 16px}
+/* No shadow on a surface in normal flow. A shadow says "this floats above the page", and
+   these are stacked down a page, so a shadow on each of them reads as a pile of floating
+   cards with a grey haze in the gaps. The two surfaces that really do float say so in their
+   own layout: `auth.css`'s `.card` (the sign-in card, `--shadow-lg`) and `admin.css`'s
+   `.menu` (the preferences menu, `--shadow-md`). Both shadow tokens stay in use for them.
+   A deployment's own stylesheet loads after this file, so a surface it wants lifted can be
+   lifted there, and that is the arrangement this rule deliberately leaves open. */
 /* `.card` carries no flow margin on purpose: it is also the admin's dashboard tile, which
    lives in a grid where a bottom margin would fight the gap. Everything else here is a block
    in normal flow and spaces itself. */
 .panel{margin:0 0 16px;overflow-x:auto}
 .msg,.flash,.err,.secret{margin:0 0 16px}
+.card>:first-child,.panel>:first-child,.msg>:first-child,.flash>:first-child,
+.err>:first-child,.secret>:first-child{margin-top:0}
+.card>:last-child,.panel>:last-child,.msg>:last-child,.flash>:last-child,
+.err>:last-child,.secret>:last-child{margin-bottom:0}
+/* A surface owns its padding. A heading at the top of a panel, or the actions row at the
+   foot of one, adds its own margin *inside* the box, so the surface opens with an empty band
+   the padding was meant to be (the revoke confirmation, the foot of the Profile panel). The
+   two rules above zero the ends, so the padding is the only space inside a surface, with no
+   markup change. They outrank the element rules that set those margins, and a layout that
+   needs a gap at one end sets it on the surface's own padding, not on a child's margin. */
 
 /* A state is a modifier on the surface, never a surface of its own: the state's tint over the
    card's fill, and a 4px bar down the left edge in the state's own colour. `color` stays

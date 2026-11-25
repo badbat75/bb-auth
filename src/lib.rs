@@ -8939,6 +8939,254 @@ mod tests {
         out
     }
 
+    /// Every rule of a stylesheet as `(selector, declarations)`, comments and all whitespace
+    /// removed. A rule inside an at-rule reports its own selector. Good enough for this
+    /// project's flat stylesheets, which is all it is used on.
+    #[cfg(test)]
+    fn flat_rules(css: &str) -> Vec<(String, String)> {
+        let code: String = without_comments(css)
+            .chars()
+            .filter(|c| !c.is_whitespace())
+            .collect();
+        let mut rules = Vec::new();
+        for chunk in code.split('}') {
+            let parts: Vec<&str> = chunk.split('{').collect();
+            if parts.len() >= 2 {
+                rules.push((
+                    parts[parts.len() - 2].to_string(),
+                    parts[parts.len() - 1].to_string(),
+                ));
+            }
+        }
+        rules
+    }
+
+    /// The four arms of `THEME_CSS`, each as the declarations between its braces:
+    /// light (`:root`), the dark media arm, and the explicit `data-theme` dark arm.
+    /// The explicit light arm only sets `color-scheme` and is not an arm of values.
+    #[cfg(test)]
+    fn theme_arms() -> Vec<(&'static str, String)> {
+        let code = without_comments(THEME_CSS);
+        let light_start = code.find(":root{").expect("light arm");
+        let light_end = code[light_start..].find("\n}").expect("light end") + light_start;
+        let media = code
+            .find("@media (prefers-color-scheme:dark)")
+            .expect("media arm");
+        let media_end = code[media..].find("}}").expect("media end") + media;
+        let dark = code.find(":root[data-theme=dark]{").expect("dark arm");
+        let dark_end = code[dark..].find("\n}").expect("dark end") + dark;
+        vec![
+            ("light", code[light_start..light_end].to_string()),
+            ("dark (media)", code[media..media_end].to_string()),
+            ("dark (explicit)", code[dark..dark_end].to_string()),
+        ]
+    }
+
+    /// The value a custom property takes inside one arm's text.
+    #[cfg(test)]
+    fn arm_value(arm: &str, token: &str) -> String {
+        let needle = format!("{token}:");
+        let at = arm
+            .find(&needle)
+            .unwrap_or_else(|| panic!("{token} missing in arm"));
+        let rest = &arm[at + needle.len()..];
+        rest[..rest.find(';').unwrap()].trim().to_string()
+    }
+
+    #[cfg(test)]
+    fn hex_luminance(hex: &str) -> f64 {
+        let h = hex.trim().trim_start_matches('#');
+        assert_eq!(h.len(), 6, "expected #rrggbb, got {hex}");
+        let ch = |i: usize| {
+            let v = f64::from(u8::from_str_radix(&h[i..i + 2], 16).unwrap()) / 255.0;
+            if v <= 0.03928 {
+                v / 12.92
+            } else {
+                ((v + 0.055) / 1.055).powf(2.4)
+            }
+        };
+        0.2126 * ch(0) + 0.7152 * ch(2) + 0.0722 * ch(4)
+    }
+
+    #[cfg(test)]
+    fn contrast(a: &str, b: &str) -> f64 {
+        let (la, lb) = (hex_luminance(a), hex_luminance(b));
+        (la.max(lb) + 0.05) / (la.min(lb) + 0.05)
+    }
+
+    /// The theme contract of slice 8d: the set of custom properties `THEME_CSS` defines is
+    /// fixed, so an operator's token file written against today's names keeps working. A
+    /// rename or a removal is red; so is a new name, which would be a contract change that
+    /// needs the design's say-so first. Green today and meant to stay green.
+    #[test]
+    fn the_token_set_is_the_contract() {
+        let code = without_comments(THEME_CSS);
+        let mut found: std::collections::BTreeSet<String> = Default::default();
+        let bytes = code.as_bytes();
+        let mut i = 0;
+        while i + 2 < bytes.len() {
+            if &bytes[i..i + 2] == b"--" && (i == 0 || !bytes[i - 1].is_ascii_alphanumeric()) {
+                let rest = &code[i..];
+                let end = rest
+                    .find(|c: char| !(c.is_ascii_alphanumeric() || c == '-'))
+                    .unwrap();
+                if rest[end..].starts_with(':') {
+                    found.insert(rest[..end].to_string());
+                }
+                i += end.max(2);
+            } else {
+                i += 1;
+            }
+        }
+        let expected: std::collections::BTreeSet<String> = [
+            "--bg",
+            "--bg-grad",
+            "--card",
+            "--card-border",
+            "--text",
+            "--muted",
+            "--input-bg",
+            "--input-border",
+            "--accent",
+            "--accent-hover",
+            "--accent-weak",
+            "--on-accent",
+            "--ok",
+            "--ok-bg",
+            "--warn",
+            "--warn-bg",
+            "--error",
+            "--error-bg",
+            "--on-state",
+            "--chip",
+            "--logo-filter",
+            "--shadow-lg",
+            "--shadow-md",
+            "--r-box",
+            "--r-ctl",
+            "--r-pill",
+            "--fs-sm",
+            "--font-ui",
+            "--font-mono",
+        ]
+        .iter()
+        .map(|s| s.to_string())
+        .collect();
+        assert_eq!(expected.len(), 29);
+        assert_eq!(
+            found, expected,
+            "THEME_CSS must define exactly the 29 contract tokens"
+        );
+    }
+
+    /// WCAG 2.2 SC 1.4.11: the boundary of a field must be 3:1 against what it sits on, which
+    /// is the card (or the page) around it and its own fill. All four arms are read, because
+    /// the dark list is written twice and an edit to one copy is easy to miss.
+    #[test]
+    fn fields_have_a_three_to_one_border_in_every_arm() {
+        let arms = theme_arms();
+        assert_eq!(
+            arms.len(),
+            3,
+            "light, dark media, dark explicit (the 4th sets no values)"
+        );
+        for (name, arm) in &arms {
+            let border = arm_value(arm, "--input-border");
+            for neighbour in ["--card", "--input-bg", "--bg"] {
+                let other = arm_value(arm, neighbour);
+                let ratio = contrast(&border, &other);
+                // The page behind a light field is only the outer neighbour, so it is
+                // held to the same bar as the card the field normally sits on.
+                assert!(
+                    ratio >= 3.0,
+                    "{name}: --input-border {border} on {neighbour} {other} is {ratio:.2}:1, needs 3:1"
+                );
+            }
+        }
+    }
+
+    /// The glow behind a page is painted once at the top. Without `no-repeat` it starts again
+    /// one viewport down, a hard band across any page longer than the window.
+    #[test]
+    fn the_ground_is_painted_once() {
+        let body = flat_rules(BASE_CSS)
+            .into_iter()
+            .find(|(sel, _)| sel == "body")
+            .expect("base.css has a body rule");
+        assert!(
+            body.1
+                .contains("background:var(--bg-grad)no-repeat,var(--bg)"),
+            "body background must read `var(--bg-grad) no-repeat,var(--bg)`, got {}",
+            body.1
+        );
+    }
+
+    /// A shadow says "this floats above the page". The surfaces in normal flow carry none; the
+    /// sign-in card and the preferences menu, which do float, name theirs.
+    #[test]
+    fn only_floating_surfaces_cast_a_shadow() {
+        let surface = ".card,.panel,.msg,.flash,.err,.secret";
+        let base = flat_rules(BASE_CSS);
+        let rule = base
+            .iter()
+            .find(|(sel, _)| sel == surface)
+            .expect("the shared surface rule");
+        assert!(
+            rule.1.contains("box-shadow:none"),
+            "surface rule: {}",
+            rule.1
+        );
+
+        let auth = include_str!("assets/auth.css");
+        let admin = include_str!("assets/admin.css");
+        for (file, css) in [
+            ("base.css", BASE_CSS),
+            ("auth.css", auth),
+            ("admin.css", admin),
+        ] {
+            for (sel, decls) in flat_rules(css) {
+                for token in ["var(--shadow-lg)", "var(--shadow-md)"] {
+                    if decls.contains(token) {
+                        let allowed =
+                            (file == "auth.css" && sel == ".card" && token == "var(--shadow-lg)")
+                                || (file == "admin.css"
+                                    && sel == ".menu"
+                                    && token == "var(--shadow-md)");
+                        assert!(allowed, "{file}: `{sel}` casts {token}; only auth .card (lg) and admin .menu (md) may");
+                    }
+                }
+            }
+        }
+        assert!(flat_rules(auth)
+            .iter()
+            .any(|(s, d)| s == ".card" && d.contains("box-shadow:var(--shadow-lg)")));
+        assert!(flat_rules(admin)
+            .iter()
+            .any(|(s, d)| s == ".menu" && d.contains("box-shadow:var(--shadow-md)")));
+    }
+
+    /// A surface owns its padding, so its first child's top margin and its last child's bottom
+    /// margin do not add an empty band inside it.
+    #[test]
+    fn a_surface_owns_its_padding() {
+        let rules = flat_rules(BASE_CSS);
+        for (child, decl) in [
+            (":first-child", "margin-top:0"),
+            (":last-child", "margin-bottom:0"),
+        ] {
+            let found = rules.iter().any(|(sel, decls)| {
+                [".card", ".panel", ".msg", ".flash", ".err", ".secret"]
+                    .iter()
+                    .all(|s| sel.split(',').any(|part| part == format!("{s}>{child}")))
+                    && decls.contains(decl)
+            });
+            assert!(
+                found,
+                "base.css needs one rule over all six surfaces: `>{child}{{{decl}}}`"
+            );
+        }
+    }
+
     #[test]
     fn only_the_palette_names_a_colour() {
         // The contract that makes `ui.stylesheet_url` a TOKEN file: a deployment restyles both

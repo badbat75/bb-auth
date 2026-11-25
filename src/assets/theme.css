@@ -76,9 +76,18 @@
 
   /* Form controls. Their own tokens rather than a reuse of --bg/--card-border, because a
      dark theme usually wants a field *recessed* below its panel while a light one wants it
-     level with the page, and one token cannot say both. */
-  --input-bg:#f6f7fb;
-  --input-border:#d8d9e4;
+     level with the card, and one token cannot say both.
+
+     THE BORDER CARRIES THE FIELD, not the fill, and that is a measured requirement: WCAG 2.2
+     SC 1.4.11 asks 3:1 of the boundary that tells a person a box is a field, against the card
+     it sits on, its own fill and the page behind it. #8a8c9e measures 3.32:1 on --card and on
+     --input-bg and 3.10:1 on --bg; the #d8d9e4 it replaced measured 1.4:1 on the card, which
+     is why a field read as disabled. The fill is the card's own white for the same reason: a
+     field level with its panel has no shading to lean on, so the border has to carry it
+     alone. Both dark arms carry the same rule at #6e6e86: 3.26:1 on --card, 3.49:1 on
+     --input-bg, 3.64:1 on --bg. */
+  --input-bg:#ffffff;
+  --input-border:#8a8c9e;
 
   /* The accent, and what is legible on top of it. --on-accent is the text colour for a
      filled accent surface, never a background of its own.
@@ -168,7 +177,7 @@
   --text:#e8e8ee;
   --muted:#9a9aa8;
   --input-bg:#1a1a22;
-  --input-border:#3a3a48;
+  --input-border:#6e6e86;
   --accent:#6a85ff;
   --accent-hover:#5b78ff;
   --accent-weak:rgba(106,133,255,.15);
@@ -197,7 +206,7 @@
   --text:#e8e8ee;
   --muted:#9a9aa8;
   --input-bg:#1a1a22;
-  --input-border:#3a3a48;
+  --input-border:#6e6e86;
   --accent:#6a85ff;
   --accent-hover:#5b78ff;
   --accent-weak:rgba(106,133,255,.15);

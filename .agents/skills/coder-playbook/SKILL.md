@@ -111,6 +111,11 @@ Rules are in `AGENTS.md`. Format of this file: `AGENTS.md`, under "Skills".
   comment right before it (in **either** sheet), so a rule a test reads by selector takes no comment
   between its preceding `}` and its `{`: the note trails the rule, and when several such rules sit
   back to back each note names the selector it is about.
+- A `theme.css` comment that spells a token **with its colon** (`--input-bg:`) is counted as a
+  definition: `the_theme_defines_every_token_in_all_four_arms` asserts each name occurs exactly 3
+  times and `the_token_set_is_the_contract` scans every `--name:` in the file, comments included.
+  A note about a token writes the name bare. The 8d-1 readers (`flat_rules`, `arm_value`,
+  `theme_arms`) strip comments first, so a note beside a rule is safe for those.
 - A slice that lifts a bound invalidates an **older** test's fixture that relied on the old refusal
   (`only_the_reveal_policy_names_the_copy_script` posts `duration=never` to the self-service mint and
   expects a `400`, which §13.15 made a legal window). Grep the suite for the value the slice made
