@@ -5131,38 +5131,81 @@ the rendered page in a browser with the registration step active, light and dark
    {email} yet"?
 2. The email step's own hint promises "No account yet? We'll create one on the fly." Leave it?
 
-### 13.28 One account menu in the shared header (plan step 8, slice H, designed 2026-11-25)
+### 13.28 One account menu in the shared header, on one row, with the logo (plan step 8, slices H and L, designed 2026-11-25)
 
-The user asked on 2026-11-25 to slim the header: the bar shows only the person's name or only the
-email, and a click on it opens one panel holding the page menu, the settings (expanding) and Sign
-out. Accepted compromise: on desktop the console's tabs stay in the bar, as the primary
-navigation, and at phone width they move into the panel; `/account/` has no tabs. Added the same
-day: the panel also holds "Delete account and all its data", the entry to step 7. This replaces
-the header's identity span, the sliders trigger and the Sign out icon of §13.17 and the
-Preferences menu of §13.20 (whose light-dismiss cover is kept), and it absorbs slice M of §13.26
-§6.
+The user's requests of 2026-11-25, in the order they came:
+
+1. Slim the header. The bar shows only the person's name or only the email, and a click on it
+   opens one panel holding the page menu, the settings (expanding) and Sign out. On desktop the
+   console's tabs stay in the bar as the primary navigation; at narrow widths they move into the
+   panel (accepted compromise). `/account/` has no tabs.
+2. The panel also holds "Delete account and all its data", the entry to step 7.
+3. On the live console the header wraps, with the user, settings and logout on a second row. The
+   header must be on **one row, always, at every width**.
+4. Slice L folds in: `ui.logo_url` in the console's bar too, which widens the console's
+   `img-src`.
+5. The console's Settings tab moves into the panel too. The bar keeps four tabs: Dashboard,
+   Applications, Users, Audit.
+
+This replaces the header's identity span, the sliders trigger and the Sign out icon of §13.17
+and the Preferences menu of §13.20 (whose light-dismiss cover is kept). It absorbs slice M of
+§13.26 §6 and slice L of `PLAN.md` step 8. The user offered a collapsible side menu of icons as
+another way out ("vedi tu"); §11 says why it is not taken.
 
 What was looked at: §13.17, §13.20, §13.26 §6, `PLAN.md` steps 7 and 8; in
 `src/bin/bb-auth-web.rs` `identity_label`, `top_bar`, `prefs_trigger`, `sign_out_pill`,
-`shell_as`, `shell_named`, `account_shell`, `AccountPrefs` (`who`, `page_lede`), `account_csp`,
-`admin_csp`, `SETTINGS_ONCHANGE`, and the two places the given name is read (the console's
+`shell_as`, `shell_named`, `account_shell`, `AccountPrefs` (`who`, `page_lede`), `Look`,
+`AccountLook`, `account_csp`, `admin_csp`, `SETTINGS_ONCHANGE`, `K::Config` (the tab, the
+Settings page's `h1` and its title), and the two places the given name is read (the console's
 dispatcher and `handle_account`, both `settings.profile_claims` → the `given_name` claim's header
-→ `pct_decode`); `src/assets/admin.css` (the header block, `details.settings`, `.menu`, the phone
-block at `@media (max-width:640px)`, the only `@media` in the file) and `base.css` (`.pill`,
-`.pill.rm`, `.pill.on`, `nav .pill`, `.vh`). Rendered today: `node e2e/shots.js settings-menu`
-and `account-menu`, copied to `/tmp/d8h/before/{light,dark,phone,it,noscript}/`. At 360 the
+→ `pct_decode`); `page_csp` in `src/lib.rs` (its `img-src`); `src/assets/admin.css` (the header
+block, `details.settings`, `.menu`, `.selfserve-brand img`, the phone block at
+`@media (max-width:640px)`, the only `@media` in the file) and `base.css` (`.pill`, `.pill.rm`,
+`.pill.on`, `nav .pill`, `.vh`). Rendered today: `node e2e/shots.js settings-menu` and
+`account-menu`, copied to `/tmp/d8h/before/{light,dark,phone,it,noscript}/`. At 360 the
 console's bar is two lines, the tabs strip scrolls sideways with the fifth tab clipped, and the
 open menu covers the strip.
 
-Measured on a static mockup over the real `theme.css`, `base.css` and `admin.css` plus a delta
-(`/tmp/d8h/proposed.css`; pages `/tmp/d8h/{console,account}-{light,dark}.html`, shot by
-`/tmp/d8h/shot.js` in Edge; screenshots `/tmp/d8h/{console,account}-{light,dark}-{1280,360}.png`):
-no sideways scroll at 1280 or 360; the panel spans x=84 to 344 at 360 (inside the 16px gutters)
-and 864 to 1124 at 1280 (right-aligned with the content column); the trigger is 36px tall at
-1280 and 30px at 360; a 33-character address truncates to 256px at 1280 and 176px at 360. The
-console's panel at 360 with all five tabs, two addresses and the Preferences open is 592px tall.
-Found while measuring: the phone rule `nav.acct .who{display:none}` hides the new trigger
-outright, so it must go (below). Read in a source: each browser and WCAG fact, cited where used.
+#### 0. Measurements (slice H)
+
+All on the **real console** from the current tree (`/admin/users` booted with `e2e/lib/server.js`,
+Edge), with the H changes injected into the live DOM and CSS (`/tmp/d8h/wrap/m.js`, `v.js`,
+`v4.js`); "fits" means every displayed child of `.bar` shares one vertical centre and
+`scrollWidth` equals the viewport. The name pill is capped at 16rem (256px); "long name" is
+"Bartholomew-Alexander Montgomery", "long brand" is "BadBat75 Estate Services", the logo a
+120x35 image drawn at 28px high.
+
+Narrowest viewport at which the bar is one row, wrapping allowed as today:
+
+| Bar | EN | IT |
+|---|---|---|
+| today (default brand, five tabs, address, sliders, sign-out) | 821 | 856 |
+| today, long brand | 927 | 948 |
+| H, five tabs, name pill "Ada" | 666 | 700 |
+| H, five tabs, long name | 847 | 882 |
+| H, five tabs, long brand and long name | 954 | 975 |
+
+So H alone does not stop the wrap above 640px, and the bar's content column is at most 968px
+(`.bar` is 1000px with 16px padding), so the five-tab worst case cannot fit at any width.
+
+Natural width of each part with **four** tabs (the Settings tab moved): tabs 349px EN, 340px IT;
+brand 85 (EN) or 99 (IT) without a logo, 191 to 224 with one or with the long brand (capped at
+14rem); name pill 74 for "Ada", 256 when long. With the bar's 16px padding and two 20px gaps, the
+widest case that keeps the brand whole and leaves the name at least 128px is **773px** (EN, long
+brand, logo, long name); every other combination needs between 580 and 764.
+
+With the rules of §4 (no wrapping by construction, the tabs at 800px and below in the panel)
+every combination was walked from 320 to 1400 in 4px steps: **one row and no sideways scroll at
+every width**, in both languages, with and without the logo, the long brand and the long name.
+With the tabs moving only at the existing 640px the bar also stays one row, but between 641 and
+about 770 the brand text is cut to one letter and a short name to "A…" (screenshot of the IT
+worst case at 1280, 761, 760, 641, 360 and 320: `/tmp/d8h/wrap/strip.png`), so 640 is rejected.
+
+Static mockup of the panel (not of the four-tab bar) over the real CSS plus a delta
+(`/tmp/d8h/proposed.css`, pages `/tmp/d8h/{console,account}-{light,dark}.html`,
+`/tmp/d8h/shot.js`): `/tmp/d8h/{console,account}-{light,dark}-{1280,360}.png`; the panel spans
+x=84 to 344 at 360 and 864 to 1124 at 1280. Found while measuring: the phone rule
+`nav.acct .who{display:none}` hides the new trigger outright, so it must go.
 
 #### 1. The label
 
@@ -5183,8 +5226,9 @@ every address of the header split on ASCII whitespace, in order. Both shells tak
 where they take `Option<String>` today; the `403` builds one the same way.
 
 **Truncation.** `span.who-name` inside the trigger: `overflow:hidden; text-overflow:ellipsis;
-white-space:nowrap; min-width:0`, and the trigger `max-width:16rem` (256px) above 640px and
-`11rem` (176px) at or below it. `text-overflow` needs exactly those three companions
+white-space:nowrap; min-width:0`; the trigger `max-width:16rem` (256px) above 640px and `11rem`
+(176px) at or below it, and `min-width:0` so it is the bar's first give when room is short.
+`text-overflow` needs exactly those companions
 (<https://developer.mozilla.org/en-US/docs/Web/CSS/text-overflow>). Nothing is lost: the full
 text stays in the DOM (a reader hears all of it), the trigger's `title` carries the full label,
 and the panel's first block prints every address whole, wrapping with `overflow-wrap:anywhere`.
@@ -5194,29 +5238,44 @@ available without two-dimensional scrolling, not that every string be shown in f
 
 #### 2. The panel's content and order
 
-Top to bottom, each block present only where it applies:
+Top to bottom, in groups divided by a rule (`div.sep`), each block present only where it applies:
 
-1. **The tabs, at phone width, console only** (`div.menu-tabs`): the five tab links as full-width
-   rows, the current one `.pill.on` with `aria-current="page"`, then a rule (`div.sep`).
-2. **Who** (`p.who-full`): the name in `strong` when there is one, then every address on its own
-   line, muted and small. All addresses and not the first, because this is the one place a
-   person with several addresses or several accounts checks which identity they are acting as.
-   **The uuid is not here**: it is a machine id, the account page's lede already shows it as
-   "Account id" (one home for one fact), and on the console nobody asked for it.
+1. **Who** (`p.who-full`): the name in `strong` when there is one, then every address on its own
+   line, muted and small. It heads the panel because the panel was opened by clicking that name,
+   and this is the one place a person with several addresses or accounts checks which identity
+   they are acting as. **The uuid is not here**: it is a machine id, the account page's lede
+   already shows it as "Account id" (one home for one fact), and on the console nobody asked for
+   it.
+2. **The console's places**, console administrators only (`div.menu-places`): at 800px and below
+   the four tabs (`div.menu-tabs`, full-width rows, the current one `.pill.on` with
+   `aria-current="page"`), then, at every width, **System settings** as an `a.pill` row to the
+   Settings page (`Route::Config`, URL unchanged), with a gear glyph and `aria-current="page"` and
+   `.on` on any Settings page. It sits with the tabs because it is a page of the console, as they
+   are; the rule below it is what tells it apart from the person's own preferences.
 3. **Preferences**, as a **nested `details.prefs`**: a full-width row `summary.pill` with the
    sliders glyph, the word `K::Settings` ("Preferences") and a caret that turns when open; inside
    it the existing form (Language, then Theme, the two `select`s), closed by default.
-4. A rule, then **Sign out**: `a.pill` row with the existing out glyph **and** the visible word
-   `K::SignOut`. In a panel there is room for the word, so the icon stops being the only label.
-5. A rule, then **Delete account and all its data** (§5 below), last, **added by step 7**.
+4. **Sign out**: `a.pill` row with the existing out glyph **and** the visible word `K::SignOut`.
+   In a panel there is room for the word, so the icon stops being the only label.
+5. **Delete account and all its data** (§5 below), last, `/account/` only, **added by step 7**.
+
+**The wording "System settings".** Two rows a rule apart would still both say "settings" if the
+console's page kept its tab word, and "Preferences" next to "Settings" is exactly the pair people
+confuse. The page's own content is four sections (the gate, the audit, the administrators, the
+look), so "Gate settings" names one of four; "System settings" names the whole file and reads as
+the opposite of "my preferences". The glyphs follow the reason §13.17 gave for choosing the
+sliders: the gear now goes on the system's configuration and the sliders stay on the display
+preferences. **One name per place**: `K::Config`'s text changes to "System settings" /
+"Impostazioni di sistema", so the panel row, the page's `h1` and its `<title>` agree (Nielsen 4);
+the Settings tab was the key's only other use, and it is gone.
 
 **Why a nested group and not inline radios.** The user's own word was "the settings
 (expanding)". The common case is opening the panel to check who you are or to sign out, and
-preferences are set once; a closed group keeps the panel at five rows on `/account/` instead of
-eleven (progressive disclosure, Nielsen 8). It also reuses the existing two `select`s, their
-option lists, the console's `onchange` and its tests unchanged, where six radios would need a new
-fieldset markup, a new test set and the handler attribute moved onto six inputs. The trade-off:
-one more click to reach a preference (Nielsen 7, efficiency), accepted because it is rare.
+preferences are set once; a closed group keeps the panel short (progressive disclosure,
+Nielsen 8). It also reuses the existing two `select`s, their option lists, the console's
+`onchange` and its tests unchanged, where six radios would need new fieldset markup, a new test
+set and the handler attribute moved onto six inputs. The trade-off: one more click to reach a
+preference (Nielsen 7, efficiency), accepted because it is rare.
 
 `p.who-full` is **not** a `p.lede`, so the panel adds no lede to a page and the one-lede rule of
 §13.23 holds by construction: `AccountPrefs::page_lede` and the branch on it are deleted. A closed
@@ -5239,50 +5298,71 @@ one more click to reach a preference (Nielsen 7, efficiency), accepted because i
 - **Closing.** The §13.20 cover stays as is: `details.settings[open]>summary::before` covers the
   viewport while open, so a click outside closes. Its selector is a child combinator, so the
   nested `details.prefs` gets no cover of its own and toggles only from its own row. Submitting
-  the form reloads the page, which closes both. Escape does not close, as in §13.20.
+  the form, or following a row's link, loads a page, which closes both. Escape does not close, as
+  in §13.20.
 - **Keyboard.** Tab reaches the trigger (after the tabs on desktop); Enter or Space opens it;
-  focus stays on the trigger; the next Tab enters the panel in DOM order (phone tabs, then the
-  Preferences row, its fields when open, Sign out, Delete). Tab past the last item leaves the
-  panel open, as today. Both `summary` rows show the existing focus ring.
+  focus stays on the trigger; the next Tab enters the panel in DOM order (the tab rows when
+  shown, System settings, the Preferences row and its fields when open, Sign out, Delete). Tab
+  past the last item leaves the panel open, as today. Both `summary` rows show the existing focus
+  ring.
 - **Scripting off.** Everything is HTML: both disclosures open, the links navigate, and the
   Preferences form submits with its button. The console keeps its one handler as it is
   (`onchange=SETTINGS_ONCHANGE` on both `select`s, `noscript` Apply); `/account/` has no handler
   and its Apply is always shown in `div.actions`. The form is the same `GET` to the page and the
   same `302` that sets `theme` and `lang`.
-- **No CSP change.** No script and no new handler: the console's `'unsafe-hashes'` hash is of
-  the same handler text, and `account_csp` keeps `script-src 'none'`. The new rules live in
-  `admin.css`, whose bytes are already inside both style hashes, so the hash moves with the file
-  and nothing is listed by hand. `img-src` is untouched (the caret and glyphs are inline `svg`).
 - **Size.** The panel gets `max-height:calc(100dvh - 80px); overflow-y:auto`, so a short phone in
-  landscape can still reach Delete (`dvh`:
+  landscape can still reach the last row (`dvh`:
   <https://developer.mozilla.org/en-US/docs/Web/CSS/length#dynamic_viewport_units>), and
   `max-width:calc(100vw - 32px)`. Rows are `.bar .pill`, so at least 30px tall at phone width,
   above WCAG 2.5.8's 24px (<https://www.w3.org/WAI/WCAG22/Understanding/target-size-minimum.html>).
 - **Look of the rows.** The panel sits inside `nav.acct`, so `nav .pill` already gives every row
-  the quiet tab look (muted text, chip on hover) and `.pill.on` the current tab's fill: no new
+  the quiet tab look (muted text, chip on hover) and `.pill.on` the current page's fill: no new
   colour, and the rows read as the same objects as the bar's tabs.
 
-#### 4. The phone breakpoint, and the tabs
+#### 4. One row at every width, and one breakpoint for the tabs
 
-The existing `@media (max-width:640px)` block, nothing new. At or below it: the bar's tab `nav`
-gets `display:none` (replacing today's sideways-scrolling strip, which ends the clipped fifth tab
-§13.17 named), `div.menu-tabs` gets `display:flex; flex-direction:column`, and the trigger keeps
-showing (delete `nav.acct .who{display:none}` and its comment; the name **is** the trigger now).
-Above it, `div.menu-tabs{display:none}`. The bar becomes one line: brand left, trigger right.
+**One row by construction, not by arithmetic.** `.bar{flex-wrap:nowrap}` (replacing `wrap`), so
+the bar cannot make a second row whatever an operator's font, brand or a person's name does. What
+gives instead, in this order: the name pill shrinks with its ellipsis (`min-width:0`), then the
+brand's text with its ellipsis (`.brand{min-width:0; max-width:14rem}`, the text in a `span.t`
+with `overflow:hidden; text-overflow:ellipsis; white-space:nowrap`). The tabs never shrink
+(`flex:none` on the tab `nav`'s content, `min-width:max-content`), because a cut tab is a
+navigation item nobody can read, and the logo never shrinks (`flex:none`). The `.bar` keeps its
+20px gap; `.bar{gap:6px 8px}` in the phone block stays.
+
+**The tabs move into the panel at `max-width:800px`.** One new `@media (max-width:800px)` block in
+`admin.css`, holding only the header: the bar's tab `nav` gets `display:none` and
+`div.menu-tabs` `display:flex; flex-direction:column`; above it `div.menu-tabs{display:none}`.
+800 because the measured worst case with four tabs needs 773px (§0) and the margin absorbs an
+operator's slightly wider font; the existing 640 is not enough (§0: brand text cut to a letter up
+to about 770). It means a tablet in portrait (768) gets the tabs in the panel, which is the
+compromise the user accepted for narrow widths. Today's sideways-scrolling tab strip in the phone
+block goes (`nav:not(.acct){order:3;…overflow-x:auto…}`), and with it the clipped fifth tab §13.17
+named.
+
+**The phone block (640) keeps two header rules of its own**: delete `nav.acct .who{display:none}`
+and its comment (the name **is** the trigger now) and cap the trigger at `11rem`; and with a logo,
+hide the brand's text visually (`.brand:has(img) .t` gets the `.vh` declarations), leaving the
+logo alone, since below 640 a logo plus two lines of text plus a name does not fit a 320px
+screen. The text stays in the accessibility tree, which is why the image keeps `alt=""`. Without
+a logo the text stays and truncates.
 
 **The tab links are emitted twice, from one loop.** Moving one element between the bar and the
 inside of a closed `details` cannot be done in CSS: a closed `details` does not render its
 content, and positioning the bar's `nav` over the panel would put it before the trigger in the
 tab order and fight the cover's stacking. So one helper, `tab_links(v) -> Markup` (the `@for`
-`shell_named` has today, plus `aria-current="page"` on the current one), is called in the bar's
-`nav` and in `div.menu-tabs`. Acceptable because the source has one copy; at any width exactly
-one copy is displayed and `display:none` removes the other from the accessibility tree, so no
-reader hears five links twice; and the cost is five anchors per page. `aria-current="page"` is
-the attribute for "the current item in a set of links"
+`shell_named` has today, minus Settings, plus `aria-current="page"` on the current one), is called
+in the bar's `nav` and in `div.menu-tabs`. Acceptable because the source has one copy; at any
+width exactly one copy is displayed and `display:none` removes the other from the accessibility
+tree, so no reader hears the links twice; and the cost is four anchors per page.
+`aria-current="page"` is the attribute for "the current item in a set of links"
 (<https://www.w3.org/TR/wai-aria-1.2/#aria-current>), and it is added in the bar's copy as well,
 which today says "current" only by colour (WCAG 1.3.1). `div` and not `nav` for the panel copy:
-it is already inside `nav.acct`, and a second `nav` would also be caught by the phone rule
-`nav:not(.acct)`.
+it is already inside `nav.acct`.
+
+On a Settings page no bar tab is current, so no tab is highlighted while the bar shows the tabs;
+the `h1` "System settings" says where the person is, and the panel's Settings row is marked. The
+trigger is not marked, because a marked trigger would look open.
 
 #### 5. Delete account and all its data
 
@@ -5312,7 +5392,29 @@ it is already inside `nav.acct`, and a second `nav` would also be caught by the 
 |---|---|---|
 | `AccountDelete` (step 7) | Delete account and all its data | Elimina l'account e tutti i suoi dati |
 
-#### 6. What slice M becomes
+#### 6. The logo in the console's bar (slice L), and the one CSP change
+
+- **Markup.** The console's brand becomes `a.brand` > `img` (when `ui.logo_url` is set, `alt=""`)
+  and `span.t` (the brand name, then `span.v` with `K::ConsoleTag`); the `403`'s `span.brand` the
+  same. `/account/`'s `span.brand.selfserve-brand` keeps its markup and gains the `span.t`
+  wrapper around its name, so both surfaces have one shape. `alt=""` because the name beside it
+  says what the picture is; where the text is visually hidden (§4) it is still read.
+- **Size.** One rule for both surfaces replaces `.selfserve-brand img`: `.brand img{height:30px;
+  width:auto; max-width:96px; flex:none; filter:var(--logo-filter)}`, the height the account page
+  already uses, which sits inside the 36px pill row; `max-width` keeps a wide wordmark from
+  eating the tabs' room (the measurements used a 96px-wide image). `.brand` becomes
+  `display:flex; align-items:center; gap:10px`: the logo left, the two text lines right of it,
+  vertically centred.
+- **Data.** `Look` gains `logo: Option<&str>` from `settings.logo_url`, read where `Look` is
+  built today, exactly as `AccountLook::logo` is.
+- **CSP, console only.** `admin_csp` passes `look.logo` to `page_csp` where it passes `None`
+  today, so `img-src` goes from `data:` to `<the logo's source> data:` when a logo is set, and is
+  unchanged when it is not. That is the account page's `img-src` exactly, from the same
+  `csp_asset_source`. Nothing else in either policy changes. The rustdoc on `admin_csp` that says
+  `img-src` is `'none'` is already stale (`page_csp` always emits `data:`) and is rewritten with
+  this change.
+
+#### 7. What slice M becomes
 
 M (one `prefs_menu` for both shells) is done inside H, one level up: one `account_menu` built by
 both shells, so no menu markup is written twice.
@@ -5321,25 +5423,30 @@ both shells, so no menu markup is written twice.
   Markup`: the `form.edit` with the two `select`s; `scripted` adds the `onchange` and wraps
   Apply in `noscript`, else Apply is plain in `div.actions`. Deletes the second copy in
   `account_shell`.
-- `account_menu(lang, who: Option<&Who>, tabs: Option<Markup>, prefs: Markup, logout:
+- `account_menu(lang, who: Option<&Who>, places: Option<Markup>, prefs: Markup, logout:
   Option<&str>) -> Markup`: the `details.settings` with the trigger and the panel in §2's order.
-  Step 7 adds a `delete: Option<&str>` argument. `shell_named` passes `Some(tab_links(v))` when
-  `v.admin` is set, `Config::logout_url`, `scripted: true`; `account_shell` passes `None`,
-  `Config::account_logout_url`, `scripted: false`.
+  Step 7 adds a `delete: Option<&str>` argument. `shell_named` passes `Some(div.menu-tabs from
+  tab_links(v) + the System settings row)` when `v.admin` is set, `Config::logout_url`,
+  `scripted: true`; `account_shell` passes `None`, `Config::account_logout_url`,
+  `scripted: false`.
+- `brand_block(name, tag: Option<&str>, logo: Option<&str>, href: Option<&str>) -> Markup` for
+  the brand slot of both shells (link or `span`, the logo, `span.t`), so slice L is not written
+  twice either.
 - `prefs_trigger` and `sign_out_pill` are replaced by the two rows (the glyphs move with them);
   `identity_label` by `who`; `span.who` in `nav.acct` and `AccountPrefs::page_lede` go.
   `nav.acct` keeps only `account_menu`.
 
-#### 7. `K` keys (H)
+#### 8. `K` keys (H)
 
 | Key | English | Italian | Use |
 |---|---|---|---|
 | `AccountMenu` | account menu | menu dell'account | hidden suffix of the trigger's name |
+| `Config` (text changed) | System settings | Impostazioni di sistema | the panel row, the Settings page's `h1` and title |
 
 Reused unchanged: `K::Settings` (the Preferences row), `K::SignOut` (now also visible text),
-`K::SettingLanguage`, `K::SettingTheme`, `K::Apply`, the tab keys.
+`K::SettingLanguage`, `K::SettingTheme`, `K::Apply`, the four tab keys, `K::ConsoleTag`.
 
-#### 8. Tests and scenes (slice H)
+#### 9. Tests and scenes (slice H)
 
 Unit and socket tests in `src/bin/bb-auth-web.rs`:
 
@@ -5349,57 +5456,78 @@ Unit and socket tests in `src/bin/bb-auth-web.rs`:
   `given_name` header configured and forwarded, `details.settings > summary` text starts with the
   label, carries `span.vh` with `K::AccountMenu` in both languages, a `title` equal to the full
   label, and no `span.who` is left in `nav.acct`.
-- `the_panel_is_in_order`: inside `.menu`, in this order: `div.menu-tabs` (console only), one
-  `p.who-full` listing every address, one `details.prefs` holding the one `form`, one
-  `a.pill` Sign out whose text is `K::SignOut` (only when the logout URL is set); no `p.lede` in
-  `.menu` on any page, including the profile code page.
-- `the_tabs_are_written_twice_and_marked`: on a console page, the bar's `nav` and
-  `div.menu-tabs` hold the same hrefs in the same order, and each holds exactly one
-  `aria-current="page"`, on the current tab; `/account/` and the console's `403` have no
-  `div.menu-tabs`.
+- `the_bar_has_four_tabs`: the bar's `nav` holds exactly Dashboard, Applications, Users, Audit;
+  no bar link to `Route::Config`.
+- `the_panel_is_in_order`: inside `.menu`, in this order: one `p.who-full` listing every address;
+  on the console `div.menu-tabs` (the four tab links, same hrefs and order as the bar's) then one
+  `a` to the Settings route reading `K::Config`; one `details.prefs` holding the one `form`; one
+  Sign out `a.pill` whose text is `K::SignOut` (only when the logout URL is set). No `p.lede` in
+  `.menu` on any page, including the profile code page. `/account/` and the console's `403`
+  have no `div.menu-tabs` and no Settings row.
+- `aria_current_names_the_page`: on `/admin/users` exactly one `aria-current="page"` in the bar
+  (Users) and one in `div.menu-tabs`; on `/admin/config` none in the bar or `div.menu-tabs` and
+  one on the Settings row, which is `.on`; the Settings page's `h1` and title read `K::Config`'s
+  new text in both languages.
 - The preference handlers: the console's two `select`s carry `onchange="this.form.submit()"` and
   Apply is inside `noscript`; the account's carry no `on…` attribute and Apply is in
-  `div.actions`. `admin_csp` and `account_csp` produce the same directives as before apart from
-  the style hash; `no_page_but_the_reveal_carries_a_script` unchanged.
-- CSS, parsed as `an_open_menu_closes_on_a_click_outside_it` does: outside the phone block
-  `.menu-tabs{display:none}` and the trigger's `max-width:16rem`, `.who-name` with
-  `text-overflow:ellipsis`, `overflow:hidden`, `white-space:nowrap`; inside it
-  `nav:not(.acct){display:none}`, `.menu-tabs` `display:flex`, the `11rem` cap, and **no**
-  `nav.acct .who` rule; the cover test extended so `details.prefs` has no `::before` cover.
+  `div.actions`. `no_page_but_the_reveal_carries_a_script` unchanged.
+- `the_console_shows_the_logo_and_permits_it`: with `ui.logo_url` set, the console's `a.brand`
+  holds `img[alt=""]` with that `src` before `span.t`, and `admin_csp`'s `img-src` is that
+  source followed by `data:`; without it, no `img` and `img-src data:` exactly as today. The
+  account page's policy is byte for byte what it was.
+- CSS, parsed as `an_open_menu_closes_on_a_click_outside_it` does: `.bar` has
+  `flex-wrap:nowrap`; outside the media blocks `.menu-tabs{display:none}`, the trigger's
+  `max-width:16rem` and `min-width:0`, `.who-name` and `.brand .t` with
+  `text-overflow:ellipsis`, `overflow:hidden`, `white-space:nowrap`, `.brand img` with `height`,
+  `max-width` and `flex:none`; a `@media (max-width:800px)` block with the tab `nav`
+  `display:none` and `.menu-tabs` `display:flex`; the 640 block with the `11rem` cap,
+  `.brand:has(img) .t` hidden, and **no** `nav.acct .who` rule and no `overflow-x` on the tab
+  `nav`; the cover test extended so `details.prefs` has no `::before` cover.
 - Existing tests to rewrite: those on `span.who` and the menu's `p.lede` (the `who_span` and
-  `account_lede_zone` assertions), the icon trigger and the Sign out pill.
+  `account_lede_zone` assertions), the icon trigger, the Sign out pill and the five tabs.
 
 e2e:
 
-- `e2e/tests/settings.js`: open `details.settings > summary`, open `details.prefs > summary`, pick
-  a theme, `data-theme` changes (the handler); click bottom-left, the menu is closed. At 360x760:
-  the bar's tab `nav` is not visible, the panel shows five tab links with `aria-current` on the
-  current one, clicking "Applications" navigates; `scrollWidth` is 360.
-- `e2e/tests/account.js`: the trigger reads the email (fixture without `given_name`) and the name
-  when `PROFILE_HEADERS` forward one; open, open Preferences, Apply changes `data-theme`; the Sign
-  out `href` has no `rd`; no `div.menu-tabs`.
-- `e2e/tests/nojs.js`: the same open, nested open and Apply on both surfaces with scripting off,
-  and at 360 a tab reached from the panel navigates.
+- A new one-row check in `e2e/tests/settings.js` and `account.js`: for widths 320, 360, 640,
+  641, 800, 801, 1024 and 1280, every displayed child of `.bar` has the same vertical centre and
+  `scrollWidth` equals the width, with the fixture's settings plus a long `ui.brand_name` and a
+  `data:` `ui.logo_url` (the CSP permits `data:`, so no network).
+- `settings.js`: open `details.settings > summary`, open `details.prefs > summary`, pick a theme,
+  `data-theme` changes (the handler); click bottom-left, the menu is closed; the System settings
+  row reaches `/admin/config`. At 360x760 and at 800: the bar's tab `nav` is not visible, the
+  panel shows four tab links with `aria-current` on the current one, clicking "Applications"
+  navigates.
+- `account.js`: the trigger reads the email (fixture without `given_name`) and the name when
+  `PROFILE_HEADERS` forward one; open, open Preferences, Apply changes `data-theme`; the Sign out
+  `href` has no `rd`; no `div.menu-tabs` and no Settings row.
+- `nojs.js`: the same open, nested open and Apply on both surfaces with scripting off, and at 360
+  a tab and the System settings row reached from the panel navigate.
 - `e2e/shots.js`: `settings-menu` and `account-menu` now open the account menu (closed
-  Preferences); add `settings-menu-prefs` and `account-menu-prefs` (Preferences open) and
-  `forbidden-menu` (the `403`'s panel: who and Sign out only). The phone view of `settings-menu`
-  is the one that shows the tabs in the panel; the designer reviews all of them light, dark,
-  phone and `it` before the slice closes.
+  Preferences); add `settings-menu-prefs` and `account-menu-prefs` (Preferences open),
+  `config-menu` (the panel open on `/config`, Settings row current), `forbidden-menu` (the
+  `403`'s panel: who and Sign out only) and `header-logo` (a long brand and a `data:` logo, the
+  bar closed). The designer reviews all of them light, dark, phone and `it` before the slice
+  closes.
 
 For the coder: `src/bin/bb-auth-web.rs` (`who`, `tab_links`, `prefs_form`, `account_menu`,
-`shell_named`, `account_shell`, `AccountPrefs`, the dispatcher's and `handle_account`'s label
-building, the `K` table); `src/assets/admin.css` (the trigger, `.who-name`, `.menu` as a flex
-column with `max-height`, `.menu .pill` full-width rows and their glyph size, `.menu .sep`,
-`p.who-full`, `details.prefs` marker removal and caret turn, `.menu-tabs`, the phone block's
-three changes). The delta in `/tmp/d8h/proposed.css` is a starting point, not the rules to copy:
-it overrides where the real change edits.
+`brand_block`, `shell_named`, `account_shell`, `AccountPrefs`, `Look`, `admin_csp`, the
+dispatcher's and `handle_account`'s label building, the `K` table); `src/assets/admin.css` (the
+`.bar` nowrap, `.brand` as a flex row with `span.t`, `.brand img` replacing `.selfserve-brand
+img`, the trigger, `.who-name`, `.menu` as a flex column with `max-height`, `.menu .pill`
+full-width rows and their glyph size, `.menu .sep`, `p.who-full`, `details.prefs` marker removal
+and caret turn, `.menu-tabs`, the new 800 block and the 640 block's changes). The deltas in
+`/tmp/d8h/proposed.css` and `/tmp/d8h/wrap/v4.js` are starting points, not rules to copy.
 
-#### 9. Alternatives rejected (slice H)
+#### 10. Alternatives rejected (slice H)
 
 - **Tabs always in the panel, on desktop too**: the user's first idea; hides the primary
   navigation behind a click on every page (recognition over recall). The user accepted the
   compromise.
+- **The tabs moving at the existing 640px**: §0, the brand cut to a letter up to about 770.
+- **A wrapping bar with the tabs moving only when they would wrap**: CSS cannot ask "would this
+  wrap"; a fixed breakpoint plus `nowrap` is the only one-row guarantee without a script.
 - **Inline radios for the preferences**: §2.
+- **"Gate settings"**: names one of the page's four sections (§2).
 - **`popover` or `role="menu"`**: §13.20's reasons, plus a form inside a menu role.
 - **The sliders icon as a second trigger beside the name**: two controls where the user asked
   for one.
@@ -5409,8 +5537,18 @@ it overrides where the real change edits.
   rest would be the loudest row of a panel opened mostly to sign out, and the console's removes
   are quiet until hovered.
 
-#### 10. Open questions for the user (slice H)
+#### 11. Why not a collapsible side menu of icons (slice H)
+
+The user offered it as an option. Not taken: after H the bar holds a brand, four tabs and one
+pill, which §0 shows fits on one row down to 800px and, with the tabs in the panel, down to 320;
+a rail would add a second layout for every page, an icon for each of four tabs that people must
+learn (recognition over recall: an icon rail is the opposite of a labelled tab), a collapsed and
+an expanded state that need either a script or a second disclosure, and it would take a column
+from every table on a phone. The problem it would solve is solved.
+
+#### 12. Open questions for the user (slice H)
 
 1. Delete on the console's panel: recommended no (§5). Agree?
 2. If not there, should the console's panel carry "Go to your account" (a link to `/account/`)?
    Recommended yes, one row above Sign out; it is a new item nobody has asked for yet.
+3. "System settings" / "Impostazioni di sistema" as the page's new name everywhere (§2)?

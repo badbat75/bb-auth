@@ -55,7 +55,7 @@ Rules are in `AGENTS.md`. Format of this file: `AGENTS.md`, under "Skills".
   `settings.json` beside the access file with an empty `gate.issuer`, so no JWKS fetch), then answers the
   page's Cognito `fetch` with `page.route` on the `X-Amz-Target` header (`UserNotFoundException` opens
   the registration step). An empty issuer leaves `connect-src` empty, so the context needs `bypassCSP: true`.
-- A mockup of the shared header and its account menu (§13.28): `/tmp/d8h/{console,account}-{light,dark}.html` over the real CSS plus `/tmp/d8h/proposed.css`, shot by `/tmp/d8h/shot.js` (logs `scrollWidth`, the panel's box and the trigger's size).
+- A mockup of the shared header and its account menu (§13.28): `/tmp/d8h/{console,account}-{light,dark}.html` over the real CSS plus `/tmp/d8h/proposed.css`, shot by `/tmp/d8h/shot.js` (logs `scrollWidth`, the panel's box and the trigger's size). Whether the real console's bar stays one row across widths: `/tmp/d8h/wrap/v4.js <breakpoint>` (boots the e2e server, injects the header rules, walks 320 to 1400).
 
 ## Pitfalls
 
