@@ -17,7 +17,8 @@ as the column says. A requirement still open must be covered by a step.
 | R1 | Self-service API keys: a user mints, rotates and removes their own `bbk_` tokens, without an administrator | Step 4 |
 | R2 | Self-service profile: a user sees what bb-auth knows about them and edits their own Cognito profile attributes | Step 5 |
 | R3 | The self-service surface is a section of the admin GUI (`bb-auth-web`), served at its own prefix `/account/` (`BB_AUTH_WEB_ACCOUNT_PATH`) beside the admin pages at `/admin/`, open to any signed-in identity, never reading `web.admins` and acting only on the caller's own account, so further user-facing features have a home. Changed by the user on 2026-11-23 from "a fourth binary of its own", and that evening from `<base>/me/` to `/account/` so the administrators' URLs do not move | Design revised (`docs/ARCHITECTURE.md` §13); Read-only page live on rpi-01 at `/account/` since 2026-11-24; the writes are steps 4, 5 and 7 |
-| R4 | Self-service deletion: a user deletes their own account and its related data, at once, after a confirmation: the roster row, keys, references in scopes and groups, and the Cognito user. The audit is not edited: their lines expire with `audit.retention`, and the page says so | Steps 6, 7. For a social-only user the Cognito half is left to an administrator and the page says so: accepted by the user on 2026-11-23 |
+| R4 | Self-service deletion: a user deletes their own account and its related data, at once, after a confirmation: the roster row, keys, references in scopes and groups, and the Cognito user. The audit is not edited: their lines expire with `audit.retention`, and the page says so | Step 7 (the step 6 it once named is done). For a social-only user the Cognito half is left to an administrator and the page says so: accepted by the user on 2026-11-23 |
+| R5 | The sign-in page warns, where it offers registration, that registering by email code creates an account separate from a Google or Microsoft one with the same address, and points such a person at their provider's button (the user's choice on 2026-11-25, option 1 of three: no Cognito change; a pre-sign-up Lambda or linking accounts stay for later) | Step 6 |
 
 ### How we work
 
@@ -207,6 +208,23 @@ serving the next request.
   or a log; a non-loopback `BB_AUTH_WEB_LISTEN` without the opt-in still refuses to start; and a
   user changes an editable attribute in a browser against the real pool (with the user's
   go-ahead), and it shows in their next token's profile claims.
+
+### 6. The sign-in page warns before a duplicate account
+
+Covers: R5.
+
+Found on rpi-01 on 2026-11-25: an email that exists in the pool only as a federated user
+(MicrosoftPersonal, Google) answers `UserNotFoundException` to `USER_AUTH`, so `/auth/login` offers
+registration and a native user with the same email is created beside the federated one. That twin
+is what the profile bug of step 5 reached. The user chose the cheapest of three answers: say so on
+the page. The designer picks the place and the words (both languages, in `src/assets/login.html`),
+the tester pins them in the gate's page tests, the coder writes them. No script, no Cognito change,
+no new setting; the notice is shown only where the page offers registration, and only when the
+deployment has social buttons, since without them there is nothing to confuse.
+
+- Done when: a gate test shows the notice in both languages on the registration step of a
+  deployment with social buttons and its absence on one without; the designer has seen it in a
+  browser in both themes and at phone width; and it is installed on rpi-01 with the user's go-ahead.
 
 ### 7. Delete my account
 
