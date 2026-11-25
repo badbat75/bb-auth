@@ -1586,8 +1586,8 @@ once, exactly as the upgrade did.
 What is on the host to roll back **to**: `scripts/deploy.sh` writes
 `/opt/bb-auth/share/previous/versions.txt` before it installs anything, and copies the
 previous `.deb` files there when apt's cache still has them. That is best effort, so the
-authoritative answer is to rebuild from the tag, or, for a build that has none (a release
-candidate is deployed untagged), from the commit `bb-auth --version` prints:
+authoritative answer is to rebuild from the tag, or, for a build that has none (the builds
+between two releases are untagged), from the commit `bb-auth --version` prints:
 
 ```bash
 # on the host: what was installed before this deploy
@@ -1602,7 +1602,7 @@ sudo bash verify.sh
 
 ```powershell
 # or from the repository, if the files are gone: check out what was running and deploy it.
-# A tag for a release; for an untagged candidate, the commit its `--version` named.
+# A tag for a release; for an untagged build, the commit its `--version` named.
 git checkout v<previous-version>       # or: git checkout <commit from --version>
 ./scripts/deploy.ps1 user@host
 ```

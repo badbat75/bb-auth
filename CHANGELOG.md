@@ -22,46 +22,33 @@ Versions are the crate's (`Cargo.toml`); packages add a Debian revision
 
 ## Unreleased
 
-**Due out as the next release, and every build until then says 1.99.8.** A deploy no longer
-bumps the version (plan W11, changed on 2026-11-25): what tells two deploys apart is the build
-string, `v1.99.8-g<commit>`. 1.99.9 was a package installed on rpi-01 on 2026-11-25 from
-`gb9d7100`, before that rule, which carried everything below except the two sections at the top
-of this list, and was replaced the same morning by a 1.99.8 package of the same code
-(`g75f788a`), a downgrade by number only. Before that, 1.99.8 was installed by a deploy on
-2026-11-24 from `gc1a9fd8`, which carried everything below except the first seven sections, from
-`gate.landing_url` down to a key's duration being one of five. 1.99.7 was spent by a deploy on
-2026-10-17 from `g4041845`, which carried everything below except the two sections above the
-audit's. 1.99.6 was spent by a deploy on 2026-09-11 from `gb855ed2`, which carried everything
-below except those two and the section named after 1.99.7. 1.99.5 was spent by a deploy
-on 2026-09-11 from `g15ae13e`, which carried everything in the section named after it except
-the Settings page opening folded. 1.99.4 was spent by a deploy
-on 2026-09-10 from `gfd77f1f`, which carried the audit and nothing of what the section below
-calls new after it. 1.99.2 was spent by a
-deploy: a build carrying it went to a host on 2026-08-20 from `g3b40e77`, which had the
-`form-action` fix below and nothing of the `403` work. 1.99.3 is left behind one step along,
-and without the same claim being made about it, because the claim is not the point: the
-refusal page's sign-out link changed after that number was written, so the bytes under it are
-not the bytes under this one, whether or not any host ever ran them. Reusing either would put
-two different sets of bytes behind one version string, which is the failure the commit in the
-version string exists to catch rather than to cause.
+Nothing yet. Builds say 1.99.8 and their commit until the next release (plan W11).
 
-**A release candidate for 2.0.0**, and the version number says so: the
-configuration surface moved far enough in one window that calling it 1.2.0 would have
-undersold what an upgrade has to do. The findings of an architecture and process review,
-addressed; the gate's whole Cognito wiring and the estate it serves moved out of the
-environment and into the settings file; and a confirmation step in front of the five settings
-that can stop people getting in.
+## 1.99.8 (2026-11-25)
 
-**A version gets a section of its own here only once it is tagged and released, and a
-release candidate is neither.** 1.99.8 is a version number, not a release: it names bytes to be
-built, and it is **not tagged**, because a tag is what says "this is a thing you can install
-and go back to" and a candidate is not that. So this section stays under this
-heading through however many 1.99.x there are, and becomes `## 2.0.0` on the day 2.0.0 is
-tagged. That rule is also what took 1.1.0 out of this file: it was built, deployed and never
-released, with no tag and no artefact anybody could have installed from, and the single host
-that ran it was running a working tree. It had a section here as though it had shipped, which
-is a version number somebody could have gone looking for. What it contained is the first
-section below, because this is the release that actually ships it.
+**Released on 2026-11-25 as `v1.99.8`**, the first release since 1.0.0. The user's decision of
+that day: the tag `v1.99.8` names the tree it was cut from, is pushed to GitHub, and its
+packages are installed on rpi-01. It was developed as a candidate for 2.0.0 and keeps that
+content: the findings of an architecture and process review, addressed; the gate's whole
+Cognito wiring and the estate it serves moved out of the environment and into the settings
+file; and a confirmation step in front of the five settings that can stop people getting in.
+The number says what shipped, not what comes next: the configuration surface moved far enough
+in one window that calling it 1.2.0 would have undersold what an upgrade has to do.
+
+**A deploy no longer bumps the version (plan W11, changed on 2026-11-25).** `Cargo.toml` stays
+1.99.8 after the release, so every build between this tag and the next says
+`v1.99.8-g<commit>`: what tells two deploys apart is the commit in the build string, not the
+number.
+
+**A version gets a section of its own here once it is tagged and released.** That is what this
+section is, and it reverses the rule this file carried while the release was still a candidate,
+which said a candidate is not tagged and that this section would become `## 2.0.0` on the day
+2.0.0 was tagged: the user tagged the candidate instead of waiting for it. The same rule is
+what took 1.1.0 out of this file: it was built, deployed and never released, with no tag and no
+artefact anybody could have installed from, and the single host that ran it was running a
+working tree. It had a section here as though it had shipped, which is a version number
+somebody could have gone looking for. What it contained is the first section below, because
+this is the release that actually ships it.
 
 The practical consequence is worth knowing before you need it: **an untagged build's handle is
 its commit**, which every binary bakes in and `--version` prints. That string changed shape in
@@ -71,6 +58,28 @@ this release for exactly this reason: it used to be the crate version followed b
 one minor number and eighteen commits out of date. It now reads `bb-auth v1.99.1-g0a8d129`:
 cargo's version, which cannot be wrong, and the commit, which is what a rollback checks out
 when there is no tag to check out.
+
+**The 1.99.x numbers before this tag name packages that were installed on hosts, and none of
+them was tagged**, which is why they have no section of their own. Newest first: 1.99.9 went to
+rpi-01 on 2026-11-25 from `gb9d7100`, carrying everything below except the two sections at the
+top of this list, and was replaced the same morning by a 1.99.8 package of the same code
+(`g75f788a`), a downgrade by number only. 1.99.8 was installed on 2026-11-24 from `gc1a9fd8`,
+carrying everything below except the first seven sections, from `gate.landing_url` down to a
+key's duration being one of five; that package is not the bytes this tag names, and the commit
+in the build string is what tells them apart. 1.99.7 was spent by a deploy on 2026-10-17 from
+`g4041845`, carrying everything below except the two sections above the audit's. 1.99.6 was
+spent by a deploy on 2026-09-11 from `gb855ed2`, carrying everything below except those two and
+the section named after 1.99.7. 1.99.5 was spent by a deploy on 2026-09-11 from `g15ae13e`,
+carrying everything in the section named after it except the Settings page opening folded.
+1.99.4 was spent by a deploy on 2026-09-10 from `gfd77f1f`, carrying the audit and nothing of
+what the section below calls new after it. 1.99.2 was spent by a deploy: a build carrying it
+went to a host on 2026-08-20 from `g3b40e77`, which had the `form-action` fix below and nothing
+of the `403` work. 1.99.3 is left behind one step along, and without the same claim being made
+about it, because the claim is not the point: the refusal page's sign-out link changed after
+that number was written, so the bytes under it are not the bytes under this one, whether or not
+any host ever ran them. Reusing one of these numbers for bytes nobody installed would put two
+different sets of bytes behind one version string, which is the failure the commit in the
+version string exists to catch rather than to cause.
 
 **Nothing here changes the cookie format or the access-file format, so no upgrade in this
 release logs anybody out.** The settings file goes from version 1 to version 3, which needs an

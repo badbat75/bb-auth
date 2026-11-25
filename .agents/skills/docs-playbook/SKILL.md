@@ -44,10 +44,9 @@ Rules are in `AGENTS.md`. Format of this file: `AGENTS.md`, under "Skills".
 - The line-number prefix (`N:` and a space) that `read` prints makes an AGENTS.md bullet continuation look indented **three**
   spaces; it is **two** (same in CHANGELOG.md's `*` bullets). An `edit` oldString copied from
   `read` fails to match. Check with `sed -n 'A,Bp' AGENTS.md | awk '{printf "[%s]\n", $0}'`.
-- CHANGELOG.md has **no `## 1.99.8` heading** on purpose (an untagged candidate gets no section
-  of its own): the `## Unreleased` section *is* 1.99.8, and its `###` sections run newest first,
-  so a new entry goes directly above the first `###` after the "Nothing here changes the cookie
-  format" paragraph.
+- CHANGELOG.md: `## 1.99.8 (2026-11-25)` is the release tagged `v1.99.8`; new work goes under
+  `## Unreleased` above it, as `###` sections newest first. When a section is inserted, renumber
+  any "except the first N sections" clause in a lead paragraph: those clauses are a ledger.
 - `docs/ARCHITECTURE.md` §13 is the architect's section: it is rewritten whole when the design
   moves, so a docs edit belongs in §2/§3 and in the stray counts outside it, not inside §13.
   Grep the line numbers before editing, since a §13 mention of an old name is the architect's
