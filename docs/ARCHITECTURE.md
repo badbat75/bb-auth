@@ -3431,3 +3431,184 @@ needs a script.
   console, Apply on the page, Apply in the console with scripting off), `data-theme` changed.
   The designer then looks at `node e2e/shots.js settings-menu` and `account-menu` for the open
   state, light and dark.
+
+### 13.21 Three nits from the review of 8d, and a scene for the landing refusal (plan step 8)
+
+Three small faults the designer found reviewing 8d (2026-11-25), each fixed by the smallest rule
+that removes it, plus one `shots.js` scene from the review of steps 9 and 10. No token is added
+and no value in `theme.css` moves, so the 29-token contract (`the_token_set_is_the_contract`)
+holds and no operator's token file needs a change.
+
+What was looked at: `base.css`, `admin.css`, `auth.css`, `login.html`; `node e2e/shots.js users
+user-detail account scope-edit config app-detail key-edit` (copied to `/tmp/d8f/before/`); and
+computed geometry measured in Edge through `boot()` (`/tmp/d8f/measure.js`, `/tmp/d8f/m2.js`).
+Each fix was tried on the real pages by injecting `/tmp/d8f/proposed.css` before `</head>` with
+the CSP removed (`/tmp/d8f/shoot.js`). Before and after: `/tmp/d8f/shots/{before,after}/<page>-
+{light,dark,phone,p320}.png` for `account-new`, `account`, `users`, `user-detail`, `scope-edit` and
+`audit`. Side-by-side crops: `/tmp/d8f/shots/crop-{keys-light,keys-dark,keys-phone,users-light,
+audit-light}.png`. No page scrolls sideways at 390 or 320, before or after.
+
+#### 1. The row rules stop short of the actions column: `td.pills` is not a table cell
+
+**The cause is not the one 8a removed.** 8a took `display:flex` out of the `td.pills` rule, and
+the existing test checks exactly that. But the cell's class is `pills`, and `base.css`'s group
+rule `.pills{display:inline-flex}` matches the `td` as well as the `span.pills` inside it. So the
+cell still computes `display:inline-flex` (measured: every `td.pills` on `/account/keys/new`,
+`/admin/users` and a person page). An inline-flex box in a row is wrapped in an anonymous cell
+and sized to its content (CSS 2.2 §17.2.1,
+<https://www.w3.org/TR/CSS22/tables.html#anonymous-boxes>), so on `/account/` the row's rule ends
+19px short of the table's edge, on `/admin/users` 131px short, the actions sit mid-column
+instead of at the right edge (`text-align:right` never applied), and the cell's top is a pixel
+lower than its siblings'.
+
+**The fix** (`src/assets/admin.css`, two declarations):
+
+- the existing `td.pills{text-align:right;white-space:nowrap}` gains `display:table-cell`
+  (specificity 0,1,1 beats `.pills` at 0,1,0,
+  <https://developer.mozilla.org/en-US/docs/Web/CSS/CSS_cascade/Specificity>);
+- the existing phone `td.pills{text-align:left;padding-top:6px}` gains `display:block`, because
+  the phone block stacks every cell with `td{display:block}` (0,0,1), which the new
+  `table-cell` would otherwise outrank.
+
+After: every cell of a row shares one bottom and the last cell ends at the table's right edge
+(measured at 1280 on the three pages), the actions sit right-aligned against that edge, and the
+phone stack is unchanged.
+
+**Repaints:** every console table with a row action (users, groups, denied, applications,
+scopes, a person's keys) and the `/account/` keys table. Nothing on the gate's pages.
+
+**Rejected:** renaming the cell's class (`td.acts`): touches every table's markup and several
+Rust tests that read `class="pills"` for one declaration's worth of effect. Scoping `base.css`'s
+group to `.pills:not(td)`: puts a table's concern in the shared component file.
+
+#### 2. Three sizes of secondary control in one section
+
+Measured, not just seen. Two heights are designed (§13.18): the **compact** pill, 29.7px, for row
+actions and filters, and the **full** pill, 43px, which takes a button's measure beside a button
+or as the page's create action (`p.primary`, `.actions`). Two more crept in:
+
+- **On a phone, a text pill and an icon pill in the same row differ.** The phone block's
+  `.pill{padding:3px 8px}` shrinks `rotate` to 28px, while `×` (`.pill.ico`, 0,2,0, which
+  outranks it) stays 30px. With `cancel` at 43px below, the keys section shows three heights.
+- **A filter's field is shorter than its own Apply.** `.listctl input[type=search]` and
+  `.listctl select` measure 27px beside a 29.7px Apply, and the users section therefore shows 43
+  (`+ add`), 27 (the field) and 29.7 (Apply and the row actions). The audit's four list boxes are
+  27px too.
+
+**The fix:**
+
+- `src/assets/admin.css`, phone block: **delete** `.pill{padding:3px 8px}`. A row pill on a phone
+  is then the desktop pill, the same height as the icon beside it. It is 6px wider and 2px taller
+  than today, which the stacked cards have room for (no sideways scroll at 320) and which only
+  helps WCAG 2.5.8's 24px target size
+  (<https://www.w3.org/WAI/WCAG22/Understanding/target-size-minimum.html>). `.bar .pill` keeps its
+  own phone size.
+- `src/assets/admin.css`: `.listctl input[type=search]`, `.listctl select` and
+  `.listctl input.tzc` each gain `min-height:calc(1.45em + 10px)`. That is the compact pill's own
+  box (line-height 1.45 at the same `--fs-sm`, 4px padding and 1px border on each side), so field
+  and button are one height whatever the font. A `min-height` and not a line-height or padding
+  change because Edge ignores `line-height` on a `select` (measured: still 27px with
+  `line-height:1.45`) and only a fractional padding (5.5px) would hit the height there.
+
+After: 29.72px field, 29.70px Apply, 30px for `rotate` and `×` at every width, 43px for the
+full pills. Two heights in every section.
+
+**Repaints:** every list's filter row in the console (users, groups, denied, applications,
+audit) and the row actions of every table on a phone, console and `/account/`. Nothing on the
+gate's pages.
+
+**Not done:** bringing `cancel` and `+ New key` down to the compact size. They sit beside or in
+place of a button, and §13.18 made them its height on purpose (Nielsen 4, a peer reads as a
+peer).
+
+#### 3. Radios and checkboxes in the browser's blue
+
+`accent-color` is `auto` on every radio and checkbox, so a ticked one is the engine's own blue
+(a mid blue in light, a pale blue in dark), the one colour on the page not from the palette.
+
+**The fix** (`src/assets/base.css`, one rule in the Fields section, after the field rule, since
+it says what a control looks like and both programs emit it):
+
+```css
+input[type=radio],input[type=checkbox]{accent-color:var(--accent)}
+```
+
+`accent-color` tints the checked state and leaves the rest native, and the browser picks the
+tick's own colour for contrast against it
+(<https://developer.mozilla.org/en-US/docs/Web/CSS/accent-color>; Baseline since 2022). The
+section's comment ("a checkbox [draws] its own box, which is the browser's job") stays true:
+the box is still the browser's, only its tint is ours. SC 1.4.11 asks 3:1 of the checked
+indicator (<https://www.w3.org/WAI/WCAG22/Understanding/non-text-contrast.html>): `--accent`
+measures 4.96:1 on the light card and 4.93:1 on the dark one (the figures `theme.css` records),
+so both arms pass, and an operator's accent is held to the same 4.5:1 as link text by the
+contract already. No new token: `--accent` is the control colour by the file's own definition.
+
+**Repaints:** the scope form (access radios, credential checkboxes), the Settings tab's social
+checkboxes, the console's key form and `/account/`'s key form (scope radios and ticks). On the
+gate's pages it paints nothing: `login.html`, `callback.html`, `denied.html` and `error.html`
+carry no radio or checkbox (checked by grep), so a look at `/auth/login` must show no change.
+
+#### 4. A scene for the landing URL's refusal
+
+`e2e/shots.js`, after `config-refused`:
+
+```js
+['config-landing-refused', async (page, ctx) => {
+  await page.goto(ctx.base + '/config?groups=open');
+  await page.fill('input[name=landing_url]', 'https://evil.example.org/account/');
+  await submit(page);
+}],
+```
+
+and `'config-landing-refused'` added to the `it` view's `only` list. The fixture's
+`authorized_hosts` (`example.com`, `*.example.com`) does not cover the host, so the page answers
+400 with the field marked `invalid`. A scratch run is at
+`/tmp/d8f/shots/config-landing-refused-{en,it}.png`: in both languages the sentence reads
+"refusing to write: landing_url: its host is not covered by authorized_hosts, …", which is the
+next item.
+
+#### Not in this slice: library refusals in the page's words and language
+
+The Settings tab shows `compile_settings`' error string as it comes from the library, so it names
+the file's keys (`landing_url`, `authorized_hosts`) in English on an Italian page, against the
+rule that a refusal names the field by its visible label. Fixing it means the library returning
+a **code with arguments** for each settings refusal (an enum beside the string, as the audit's
+`reason` already is: `decision_reason`) instead of a sentence, `bb-auth-web` mapping each code to
+a `K` key in English and Italian that names the visible labels ("Landing page", "Authorized
+hosts"), and `bb-auth-adm` keeping today's English sentence through the same enum's `Display`. It
+reaches every settings refusal, not just this one, so it is a slice of its own, with a test that
+every code has both translations and a Settings-tab test per code that the page shows the label
+and not the key.
+
+#### Tests for the three nits and the scene
+
+Rule-level, in the style of §13.18's (each first red against today's CSS):
+
+- **`the_actions_cell_is_a_table_cell`** (bb-auth-web, beside
+  `each_key_row_acts_like_a_console_row`): `the_rule(CSS, "td.pills")` contains
+  `display:table-cell`; the `td.pills` rule inside the `@media (max-width:640px)` block contains
+  `display:block` (`the_rule` returns the first match, so read the phone block's own text). The
+  reason belongs in the doc comment: `.pills` in `BASE_CSS` also matches the cell, which is why
+  the old "no `display:flex`" assertion passed while the defect stayed.
+- **`a_row_pill_is_one_size_at_every_width`** (bb-auth-web): no rule whose selector is exactly
+  `.pill` exists inside the phone block of `CSS`.
+- **`a_filter_field_is_its_buttons_height`** (bb-auth-web): each of `.listctl input[type=search]`,
+  `.listctl select`, `.listctl input.tzc` contains `min-height:calc(1.45em+10px)` (whitespace
+  stripped, as `flat_rules` does), and `BASE_CSS`'s `.pill` still says `line-height:1.45` and
+  `padding:4px11px`, since the formula is that box.
+- **`ticks_wear_the_accent`** (lib.rs): `rules_named(BASE_CSS, "input[type=radio],input[type=checkbox]")`
+  is one rule reading `accent-color:var(--accent)`. `only_the_palette_names_a_colour` and
+  `the_token_set_is_the_contract` stay green unchanged.
+
+In the e2e walk (`e2e/run.js`, at 1280 and 390, on `/admin/users` and `/account/` as
+`bot@example.com`): in every `tbody tr`, every `td` has the same `getBoundingClientRect().bottom`
+and the last `td`'s `right` equals the table's (within 0.5px); `getComputedStyle(td.pills).display`
+is `table-cell` at 1280 and `block` at 390; every `.pill` that is not in `p.primary`, `.actions` or
+`.bar` is the same height (within 0.5px) at both widths; every `.listctl` field's height equals its
+Apply's (within 0.5px). On `/account/keys/new` as `bot@example.com`, `accent-color` of
+`input[type=radio]` is not `auto`.
+
+The scene renders in `light`, `dark`, `phone` and `it` (`node e2e/shots.js config-landing`).
+The slice closes on the designer's look at `node e2e/shots.js users account audit scope-edit
+config-landing` against `/tmp/d8f/shots/before/`, and a look at `/auth/login` in both themes,
+which must be unchanged.

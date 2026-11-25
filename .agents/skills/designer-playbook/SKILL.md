@@ -33,11 +33,15 @@ Rules are in `AGENTS.md`. Format of this file: `AGENTS.md`, under "Skills".
 - To try a CSS rule on the real pages (scripting on and off): `boot()`, then `page.route` the page's own
   path, `fetch()` it, insert a `<style>` before `</head>` and fulfil with the `content-security-policy`
   header deleted (the hash-only CSP drops any added style). Example: `/tmp/menu9/proto.js`.
+- To find a size or alignment fault, measure it: `page.evaluate` over `getBoundingClientRect()` and
+  `getComputedStyle()` of every control in `main` at 1280 and 390 (example: `/tmp/d8f/m2.js`), before
+  and after the injected rule.
 
 ## Pitfalls
 
 - `autofocus` is ignored when the URL has a fragment (MDN): a link that opens a form must not add `#id`.
-- `td.pills` is `display:flex`, so its border stops short whenever another cell in the row wraps.
+- A cell's class can collide with a component's: `td.pills` also matches `base.css`'s `.pills{display:inline-flex}`, so it stopped being a table cell after its own rule lost `display:flex`. Check computed values, not the rule text.
+- Edge ignores `line-height` on a `select`: to match a field's height to a pill's, use `min-height`, measured.
 - `aspect-ratio` on a padded, border-box `.pill` squeezes its vertical padding to nothing: give an icon pill equal padding instead.
 - A `summary` has no ARIA role (MDN), so name an icon-only one with hidden text (`.vh`), not `aria-label`.
 - A verb-plus-id `aria-label` passes WCAG 2.5.3 in English and fails in Italian when the two `K` keys are worded apart (`Rotate` "rigenera" vs `AccountKeyRotate` "Ruota la chiave"): review the `it` view's names, not only its look.
