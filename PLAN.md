@@ -220,7 +220,13 @@ then asked for a **header** with the person's identity, the settings (theme, lan
 out, the usual pattern, replacing the preferences form at the foot of the page; the designer adds
 it to §13.17.
 
-Slices 8a to 8f are done (8f, §13.21: row rules, one control size, ticks in the accent). Left,
+Slices 8a to 8f are done (8f, §13.21: row rules, one control size, ticks in the accent). Then the
+shared front end (W13), designed in §13.26 §6 as small slices after 5g: **P** one `pill_link` /
+`pill_link_rm` / `back_link` with the console's `act`/`act_rm`/`back` as wrappers; **M** one
+`prefs_menu` for both shells; **D** one `page_document` skeleton; **T** `text_field` with
+`FieldOpts`, absorbing `account_key_id_field` and the profile inputs; **F** the account page's flat
+ground (the user decides whether it goes). Kept apart on purpose, with reasons in §13.26: the
+section pattern, the brand slot, `account_csp`, the mint row's missing owner field. Left,
 as later items: base.css's accent-color rule sits above a note whose "above" meant the field
 rule (move it below); library refusals on the Settings tab are in the file's English words rather
 than the page's labels and language (its own slice, sketched in §13.21); one look by hand at the

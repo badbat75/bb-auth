@@ -2616,7 +2616,9 @@ text is the action word, and the `<title>` ends with it).
 - `h1` `K::AccountTitle`, then one `p.lede`: every address in `code`, and on a second line
   `K::AccountIdLabel` ("Account id") and the uuid (approved by the user). A stranger's
   `p.lede` carries the address and `K::AccountNoRow` instead of the uuid.
-- The four sections keep their ids and order (`#reach`, `#groups`, `#keys`, `#profile`): each
+- (Changed by §13.26: the order is now `#profile`, `#keys`, `#groups`, `#reach`, the user's
+  decision of 2026-11-25, and the profile sub-line is reworded.) The four sections keep their
+  ids and order (`#reach`, `#groups`, `#keys`, `#profile`): each
   a `.panel` with `h2` and one `p.lede.sub` saying what it is for (the class the console's
   sections already use for this): `K::AccountReachSub`, `K::AccountGroupsSub`,
   `K::AccountKeysSub`, `K::AccountProfileSub` (texts as listed below).
@@ -2626,7 +2628,8 @@ text is the action word, and the `<title>` ends with it).
 - Profile: `ul.plain`, `code` claim, then the value, or `span.muted` `K::AccountNotProvided`
   ("not provided") where the deployment configured a claim that was not forwarded. Step 5's
   edit goes here.
-- Delete my account (step 7) will be a last `.panel.bad`, after Profile.
+- Delete my account (step 7) will be a last `.panel.bad`, after Profile (changed by §13.26:
+  after Where you reach, which is now the last section).
 - Empty states name what is missing, each a `p.muted`: `K::AccountReachNone` ("Your sign-in
   opens no application yet."), `K::AccountGroupsNone` ("You are in no group."),
   `AccountKeysNone`, `K::AccountProfileNone` ("This deployment shares no profile details.").
@@ -4034,7 +4037,9 @@ one `form.edit` posting to `<prefix>/profile`:
   allowlist): a `ul.plain` of `code` claim `": "` value, as the read-only
   panel shows them, after the fields. No hint per line: §13.22's allowlist is the reason, and a
   person needs to know only that these are not fields.
-- **Where the code goes.** `K::AccountProfileSendTo` ("Send the code to") as the label of a `select`
+- (Changed by §13.26: there is no choice and no address on the form any more; the code goes to
+  the session's own Cognito user, and `AccountProfileEmailFixed` is a `p.muted` after the
+  fields.) **Where the code goes.** `K::AccountProfileSendTo` ("Send the code to") as the label of a `select`
   over the identity header's emails, header order, the first selected, when there are two or more.
   With **one** email no choice is shown: a `div` with `span.lbl` "Send the code to", the address in
   `code`, and the hidden `email` input (no `label` element, since there is no control to label). In
@@ -4042,7 +4047,8 @@ one `form.edit` posting to `<prefix>/profile`:
   read-onlyness is said: the person reads their address at the moment they need it, and is told once
   why it is not a field. There is no separate read-only email line: it would be the same address a
   second time.
-- `p.muted` `K::AccountProfileSocialNote`, before the buttons: a person who signs in only through a
+- (Removed by §13.26: the form is offered only to a native sign-in, so the note is never true
+  of its reader.) `p.muted` `K::AccountProfileSocialNote`, before the buttons: a person who signs in only through a
   social provider learns it before an email is promised (§13.22, "told twice").
 - `div.actions`: `button` `K::AccountProfileSendCode` ("Send code"), `a.pill` `K::Cancel` to the
   account page. The shape of `form_shell_at` without `rev` (this form changes no file).
@@ -4065,7 +4071,8 @@ The two that only a crafted request reaches are a sentence and no field: `K::Acc
 Its own page in `account_shell`, the `h1` `K::AccountProfileCodeTitle` ("Enter the code"), as the
 confirmations wear their act as the `h1` (§13.17).
 
-- `p.lede`: `K::AccountProfileCodeSent` + `code` email + "." + " " + `K::AccountProfileCodeLasts`
+- (Changed by §13.26: the address is Cognito's masked `CODE_DELIVERY_DESTINATION`, or the whole
+  sentence `AccountProfileCodeSentNoDest` when there is none.) `p.lede`: `K::AccountProfileCodeSent` + `code` email + "." + " " + `K::AccountProfileCodeLasts`
   ("It works for 3 minutes."). **The number is said**: the person must know they are racing a clock
   (Nielsen 1), and "a few minutes" is not something one can plan by. It lives in exactly one key,
   so a change of the pool's `AuthSessionValidity` is a one-line edit of the `K` table (open
@@ -4118,11 +4125,11 @@ three words whether anything happened (Nielsen 1, 9).
 | saved | `AccountProfileSavedTitle` | `AccountProfileSavedLead` + the changed labels, comma-joined + "." + `AccountProfileSavedBody` | `a.pill` "← " `K::Back` | `200` |
 | no answer, at `InitiateAuth` or `RespondToAuthChallenge` | `AccountProfileNotSavedTitle` | `AccountProfileNoAnswer` | Send a new code, back | `504` |
 | no answer, at `UpdateUserAttributes` | `AccountProfileUnsureTitle` | `AccountProfileNoAnswerUnsure` | back | `504` |
-| `UserNotFoundException` | `AccountProfileNotSavedTitle` | `AccountProfileNoEmailSignIn` | back | `400` |
+| `UserNotFoundException` (changed by §13.26: lede `AccountProfileNoUser`) | `AccountProfileNotSavedTitle` | `AccountProfileNoEmailSignIn` | back | `400` |
 | expired or `NotAuthorizedException` at the code step | `AccountProfileNotSavedTitle` | `AccountProfileExpired` | Send a new code, back | `400` |
 | `TooManyRequestsException` | `AccountProfileNotSavedTitle` | `AccountProfileTooMany` | back | `502` |
 | update refused / `InvalidParameterException` | `AccountProfileNotSavedTitle` | `AccountProfileRefused` / `AccountProfileBadValue` | back | `502` / `400` |
-| a token for another account | `AccountProfileNotSavedTitle` | `AccountProfileNotYours` | back | `403` |
+| a token for another account, or a challenge naming another username (§13.26, reworded there) | `AccountProfileNotSavedTitle` | `AccountProfileNotYours` | back | `403` |
 | any other refusal | `AccountProfileNotSavedTitle` | `AccountProfileRefused` | back | `502` |
 
 "Send a new code, back" is one `form.edit` re-posting the values to `<prefix>/profile`, with
@@ -4143,6 +4150,9 @@ The journal names it (§13.22).
 
 #### 5. The `K` keys, English and Italian
 
+(Changed by §13.26: `AccountProfileSendTo`, `AccountProfileSocialNote`,
+`AccountProfileNotYourEmail` and `AccountProfileNoEmailSignIn` go; `AccountProfileNoCode` and
+`AccountProfileNotYours` are reworded; three keys are added. The table below is the 5b-5d state.)
 New keys (no logic reads any; the sentences around a value are split, as `BearerHintLead`/`Tail`
 are, because the table has no placeholders). This replaces §13.22's provisional list: kept
 `AccountProfileEdit`, `EditSub`, `EmailFixed`, `ClearDeletes`, `SocialNote`, `SendTo`, `SendCode`,
@@ -4214,7 +4224,8 @@ the three never disagree (WCAG 2.5.3 holds by construction: the accessible name 
   change list before the save, no browser field type that could blank a stored value. Recognition
   (6): the code page restates what is about to change. Minimalism (8): one email shows no choice;
   no hint on non-editable lines. Recovery (9): each refusal says what to do next.
-- **Trade 1**: the social note is on the form for everybody, because the page cannot tell a
+- (Resolved by §13.26: the note is gone, because the page can now tell a native sign-in.)
+  **Trade 1**: the social note is on the form for everybody, because the page cannot tell a
   social-only person apart (nginx forwards no `identities`). It costs one muted line for the
   majority to spare the minority an email that never comes.
 - **Trade 2**: no live "will be removed" warning while typing (no script), traded for a certain one
@@ -4245,7 +4256,7 @@ Unit and socket tests (bb-auth-web), in addition to §13.22's:
   `K::AccountProfileClearDeletes` as its `span.hint`, an empty one does not; posting the form with
   `family_name` emptied yields a code page whose `ul.changes` has an `li` with `.tag.warn`
   `K::AccountProfileRemoved` and the old value after `K::AccountProfileWas`.
-- `one_email_shows_no_choice`: one email renders no `select`, the address in `code` and a hidden
+- (Replaced by §13.26's `the_form_names_no_address`.) `one_email_shows_no_choice`: one email renders no `select`, the address in `code` and a hidden
   `email`; two render a `select` named `email` with the first selected; both carry
   `K::AccountProfileEmailFixed`.
 - `an_unchanged_form_sends_no_code` also asserts `200`, the form again, `div.msg.warn` with
@@ -4279,7 +4290,8 @@ with scripting off in `nojs.js`. Keyboard only: Tab from the pill's page lands i
 Enter in the code field submits Save, not Send a new code (Save's form is first in source order and
 contains the field).
 
-`shots.js` scenes (light, dark, phone, and `it` for all, since every one is prose):
+`shots.js` scenes (changed by §13.26: `-edit-one` goes, `-social` becomes `-gone`, `-provider`
+and `-notyours` are added) (light, dark, phone, and `it` for all, since every one is prose):
 `account-profile` (the read-only panel with the pill, a fixture with `given_name` and
 `family_name` configured and forwarded), `account-profile-edit` (two emails, the `select`),
 `account-profile-edit-one` (one email), `account-profile-nothing`, `account-profile-code`,
@@ -4686,3 +4698,262 @@ IT-Admin session).
   session can read what they were, from the pool, and only the user can say to restore them);
 - whether the duplicate native user should stay, be linked to the federated one, or be deleted:
   a pool change through the OpenTofu repository or an administrator action, outside this step.
+
+### 13.26 The account page after §13.25: section order, the page width, the native-only edit, and what it still does its own way (plan step 5, slice 5g, designed 2026-11-25)
+
+The interface of §13.25's fix, plus three user decisions of 2026-11-25: the sections in a new
+order, the account page at the console's width, and "factor out most of the front-end code and
+parameters shared by the admin console and the account page; don't reinvent the wheel". It
+changes §13.17 and §13.23, which carry "(Changed by §13.26 ...)" where they do.
+
+What was looked at: §13.17, §13.23, §13.25; `PLAN.md` step 5; in `src/bin/bb-auth-web.rs`
+`page_account`, `account_shell`, `shell_named`, `top_bar`, `prefs_trigger`, `sign_out_pill`,
+`act`, `act_rm`, `back`, `text_field`, `account_key_id_field`, `account_key_line`,
+`profile_form`, `page_profile_code`, `page_user` and the `K` keys `Account*`, `SignOut`, `Back`;
+`src/assets/admin.css` (`main`, `p.lede.sub`, `form.edit`, the `.selfserve` block, the phone
+block) and `base.css` (`p.lede`, inputs); `e2e/shots.js` (the account and profile scenes,
+`profileScene`), `e2e/tests/{account,profile,nojs}.js`, `e2e/lib/cognito.js`
+(`PROFILE_HEADERS`); `the_header_shares_the_content_column` in `src/lib.rs` and
+`account_lede_zone` in the web tests.
+
+Measured: a mockup over the real `theme.css`, `base.css` and `admin.css` (`/tmp/d5g/m.js`, Edge)
+with the account column on the console's `main` rules: no sideways scroll at 320, 360 or 1280;
+at 320 the uuid ends at x=292 of the 304 the 16px padding leaves, so it still fits whole; at 1280
+a sub-line runs 934px wide (about 140 characters), which is the reason for the measure below.
+Read in a source: each WCAG fact, cited where used. Assumed: that screen readers read the
+asterisks of a masked address as symbols or skip them, which leaves the domain readable either
+way.
+
+#### 1. The section order: Profile, API keys, Groups, Where you reach
+
+`page_account` renders `section#profile`, `section#keys`, `section#groups`, `section#reach`, in
+that order, on every path that draws the page (`/account/`, `/account/profile`,
+`/account/keys/new`, and a refused mint or profile post). The ids do not change, so no link and
+no selector changes. The lede (addresses and account id) stays above all four. Delete my account
+(step 7) goes after Where you reach, last.
+
+The reason the order is right and not only asked for: the two sections a person acts in come
+first and the two read-only lists last (the common case first, Nielsen 8), and `/account/profile`
+now opens with the form at the top instead of three panels down.
+
+Wording that changes because of the order: only the profile sub-line. "What your sign-in tells
+**these** applications about you" pointed back at the list above it, which is now below it, so it
+becomes `AccountProfileSub` "What your sign-in tells your applications about you." / "Cosa il tuo
+accesso dice di te alle tue applicazioni." (the saved page already says "Your applications"). The
+keys sub-line ("It reaches at most what you reach.") names no position and stays; no heading
+changes.
+
+#### 2. The account page at the console's width
+
+The account column is the console's `main`, not a narrower copy of it: the `.selfserve` width
+rules are **deleted** rather than set to 1000px, because `main{max-width:1000px;margin:0
+auto;padding:18px 16px 40px}` and `.bar{max-width:1000px}` already say it, and a second rule
+naming the same number is the drift this decision is about.
+
+Delete from `admin.css`:
+
+```css
+.selfserve{max-width:620px;margin:0 auto;padding:28px 16px 48px}
+body:has(.selfserve) .bar{max-width:620px}
+.selfserve .panel h2{margin-top:0}
+/* in @media (max-width:640px) */
+  .selfserve{padding:16px 12px 32px}
+  body:has(.selfserve) .bar{padding:0 12px}
+```
+
+Add, after `main{...}`:
+
+```css
+/* Prose keeps a reading measure on a 1000px column: a lede or a muted sentence 140 characters
+   wide is hard to track back to the next line. 75ch stays under WCAG 1.4.8's 80 characters. */
+main p.lede,main p.muted{max-width:75ch}
+```
+
+and extend the existing 40ch list so a profile field is not 930px wide for a given name:
+
+```css
+input.f-email,input.f-name,input.f-login_url,input.f-aud,input.f-profile{max-width:40ch}
+```
+
+Markup: each account `h2` gains `class="tight"` (the console's class for a heading that opens a
+panel, replacing the deleted `.selfserve .panel h2`); each profile `input` gains `class="f-profile"`
+(tried first: `f-name`, which is the right width but a class named for another field, the same
+reasoning as `f-code` in §13.23). `main class="selfserve"` keeps its class only for the flat
+ground until slice F of section 6.
+
+The measure is WCAG 1.4.8 (AAA, not required at AA, applied because it costs one rule):
+<https://www.w3.org/WAI/WCAG22/Understanding/visual-presentation.html>. It applies to the
+console's ledes too, which is the point of one rule for both surfaces; no console lede carries
+anything wider than prose (the access check's verdict is a `.panel`, not a `p.lede`).
+
+On a phone: the column's side padding goes from 12px to the console's 16px, and nothing else
+changes (the uuid still fits at 320, measured above). The table cards, the bar and the menu are
+the console's already.
+
+#### 3. The Profile panel when the edit is not offered to this session
+
+When the deployment wires the edit (issuer, client id, at least one editable claim) and the
+request carries **no** `X-Auth-Native-Username`, the read-only panel shows its claims as today
+and, where the "Edit profile" pill would be, one `p.muted` `K::AccountProfileNotNative`. No pill,
+no disabled control (a disabled control says nothing and the keyboard skips it). A deployment
+that does not wire the edit says nothing about editing, as today.
+
+The page cannot tell a federated session from a native one whose cookie predates 5f: both arrive
+with no header (§13.25). So the sentence is one key with two conditional sentences, each naming
+how the person signs in, and the second gives the one action that helps (sign out and in, the
+same verb as the bar's `K::SignOut`, "Esci" in Italian). Its first sentence keeps the wording of
+the existing social note and outcome page ("comes from that provider", "cannot be changed here").
+
+`GET <prefix>/profile` with no header: `200`, the same page as `/account/` (no form, the
+sentence). Either `POST` with no header: `400`, the same page, no Cognito call. Not `.err`: the
+person did nothing wrong.
+
+Rejected: **two sentences shown by case** (`account-profile-signin-again` as its own state). It
+needs the gate to mark a federated session as well, which §13.25 does not; if the architect adds
+such a marker, the key splits into its two sentences and nothing else changes.
+
+#### 4. The form and the code page without the address choice
+
+- The form loses the "Send the code to" block (the `select`, the `div.fixed`, the hidden `email`)
+  and `AccountProfileSocialNote`. `AccountProfileEmailFixed` stays, moved to a `p.muted` after
+  the fields (and after the non-editable list), before the actions: the email is still not a
+  field and the reason is still worth one line. A posted `email` is refused as a non-editable
+  name, "email: cannot be changed here." (`AccountProfileCannotEdit`), before Cognito.
+- The code page lede: `AccountProfileCodeSent` + `code` the masked destination +
+  `"." " "` + `AccountProfileCodeLasts`, e.g. "We emailed a code to `e***@o***.com`. It works for
+  3 minutes." The destination is shown only when it is 1 to 254 printable ASCII characters with
+  no space (escaped as every value is); otherwise the lede is the whole sentence
+  `AccountProfileCodeSentNoDest` + `" "` + `AccountProfileCodeLasts`. A masked address is still
+  the address (Nielsen 1): it is enough to recognise which mailbox to open.
+- `AccountProfileNoCode` drops its social sentence, which is now never true of its reader.
+- The resend form posts the changed values only (no `email`).
+- `UserNotFoundException` now means the session's own user is gone from the pool (the request
+  names it by username): the outcome row's lede becomes `AccountProfileNoUser`, status `400`.
+- A `ChallengeParameters.USERNAME` for another user and a returned token for another username
+  are one outcome: `AccountProfileNotSavedTitle`, `AccountProfileNotYours` reworded so it is true
+  of both, back, `403`.
+
+#### 5. The `K` keys
+
+Removed: `AccountProfileSendTo`, `AccountProfileSocialNote`, `AccountProfileNotYourEmail`,
+`AccountProfileNoEmailSignIn`. Kept as is: `AccountProfileEmailFixed` (moved), `CannotEdit`,
+`CodeSent`, `CodeLasts`.
+
+| Key | English | Italian |
+|---|---|---|
+| `AccountProfileSub` (changed) | What your sign-in tells your applications about you. | Cosa il tuo accesso dice di te alle tue applicazioni. |
+| `AccountProfileNotNative` (new) | If you sign in with a social account such as Google, your profile comes from that provider and cannot be changed here. If you sign in with your email address, sign out and sign in again to edit it. | Se accedi con un account social come Google, il tuo profilo viene da quel fornitore e non si può cambiare qui. Se accedi con il tuo indirizzo email, esci e accedi di nuovo per modificarlo. |
+| `AccountProfileCodeSentNoDest` (new) | We emailed a code to the address you sign in with. | Abbiamo inviato un codice all'indirizzo con cui accedi. |
+| `AccountProfileNoCode` (changed) | No email after a minute? Look in your spam folder, or send a new code. | Nessuna email dopo un minuto? Guarda nello spam, o invia un nuovo codice. |
+| `AccountProfileNoUser` (new) | The sign-in service no longer has the account you signed in with, so no code was sent. Sign out and sign in again. | Il servizio di accesso non ha più l'account con cui hai effettuato l'accesso, quindi non è stato inviato alcun codice. Esci e accedi di nuovo. |
+| `AccountProfileNotYours` (changed) | The sign-in service answered for a different account, so nothing was changed. | Il servizio di accesso ha risposto per un altro account, quindi non è cambiato nulla. |
+
+#### 6. What the account page still does its own way, and the slices that end it
+
+With one width, the two surfaces differ only where a reason says so. Already shared and left
+alone: `top_bar`, `prefs_trigger`, `sign_out_pill`, `form_shell_at`, `confirm_card`,
+`bearer_reveal`, `expiry_markup`, `url_list_marked`, the duration field, `table` with
+`data-label`, `p.lede`, `p.primary > a.pill`, `.actions`, `.err`/`.msg.warn`. The slices, each
+small enough for one red-green pass, in order (W comes with 5g):
+
+- **W (5g). Width and section order.** Sections 1 and 2 above: the CSS deleted and added, `h2.tight`,
+  `f-profile`, the order.
+- **P. Pill links without a `View`.** New `pill_link(href, label)`, `pill_link_rm(href, label)`
+  and `back_link(lang, href)` (the `"\u{2190} "` + `K::Back` pill); `act`, `act_rm` and `back`
+  become one-line wrappers over them; `account_key_line`'s written-out `a.pill` / `a.pill.rm`,
+  `page_account_minted`'s and the profile outcome pages' back pills call them. Nothing visible
+  changes; the reason is that "how a pill looks" is said once (the comment on `back` already
+  claims that, and the account page breaks it).
+- **M. One Preferences menu.** New `prefs_menu(lang, lang_pref, theme, who: Option<&str>,
+  action, hidden: &[(k, v)], scripted: bool)`, called by `shell_named` (`scripted: true`:
+  `onchange` and the `noscript` Apply) and `account_shell` (`scripted: false`: no handler, Apply
+  always shown, `who` omitted when the page has its own lede). Deletes the second copy of the
+  two `select`s and their option lists in `account_shell`. The `scripted` flag is the one real
+  difference (the account page carries no script, §13.17).
+- **D. One document skeleton.** New `page_document(lang, theme_attr, title, stylesheet,
+  body)`: `DOCTYPE`, `html lang data-theme`, the `head` with the three raw styles and
+  `stylesheet_link`; both shells pass their own title string ("bb-auth-web · ..." versus
+  "(brand) · ...") and body. Deletes the duplicated head in `account_shell`.
+- **T. One text field.** `text_field` takes a `FieldOpts { autofocus, required, maxlength,
+  pattern, autocomplete, inputmode, class, prose }` with `Default`; `prose: true` leaves
+  `autocapitalize` and `spellcheck` at the browser's default (the review nit for names in
+  `PLAN.md`). `account_key_id_field` becomes a call with `pattern`, `maxlength`, `autofocus`,
+  `required` and the hint rule; `profile_form`'s hand-written `input` becomes a call with
+  `class: "f-profile"`, `autocomplete`, `maxlength`, `prose: true`. Deletes the two hand copies of
+  the label + input + hint + `aria-invalid` + `aria-describedby` markup.
+- **F. The flat ground.** Delete `body:has(.selfserve){background:var(--bg)}` and the class on
+  `main`: its reason was "one narrow column", which is gone, and the console's ground is the
+  estate's. Review `account` and `account-profile` shots for the band §13.18 saw; if it is there,
+  it is there on the console's long pages too, and the fix belongs to both (the skill's
+  `no-repeat` pitfall). Open question 2.
+
+Kept different, with the reason:
+
+- **The sections.** The console writes `h2` then `div.panel`, with "None." for empty; the account
+  page writes `section.panel > h2 + p.lede.sub` with a sentence per empty state. The console is
+  the file's wiring view named by file sections; the account page is prose for a person who does
+  not know the file (§13.17). One helper would force sub-lines onto twenty console sections, which
+  nobody asked for.
+- **The brand slot.** The console's is a link home with `K::ConsoleTag`; the account's is an
+  inert `span` with the operator's logo, because it is the only page its visitor came for
+  (§13.17). Whether the console should show the logo too is open question 1.
+- **`account_csp`.** The account page shows the logo, so its `img-src` is not the console's
+  `'none'`.
+- **The keys' mint row.** No owner field and no `released` (the owner is the caller): that is a
+  rule, not a style.
+
+#### 7. Tests and scenes
+
+Unit and socket tests (`bb-auth-web`):
+
+- `the_sections_come_in_the_users_order`: on `/account/`, `/account/profile` and
+  `/account/keys/new`, the byte offsets of `id="profile"`, `id="keys"`, `id="groups"`,
+  `id="reach"` increase; `account_lede_zone` ends at the **first** `<section`, not at
+  `id="reach"` (it would otherwise swallow three sections).
+- `each_section_says_what_it_is_for` asserts the new `AccountProfileSub` in both languages.
+- `a_session_with_no_native_username_gets_no_form_and_no_code` (§13.25) also asserts: no
+  `a[href=<prefix>/profile]`, one `p.muted` with `AccountProfileNotNative` inside `#profile`, `200`
+  on `GET` and `400` on both `POST`s with the same sentence; and the sentence absent where the
+  deployment does not wire the edit.
+- `the_form_names_no_address` (replaces `one_email_shows_no_choice`): no `select`, no
+  `name="email"`, no `AccountProfileSendTo`/`SocialNote` text; `AccountProfileEmailFixed` in a
+  `p.muted` after the fields; the resend form carries no `email`.
+- `the_code_page_names_cognitos_masked_destination`: `e***@o***.com` in `code`; `<b>` escaped;
+  absent, empty, over 254 or with a space: `AccountProfileCodeSentNoDest` and no `code` in the lede.
+- `each_outcome_states_its_result_in_the_h1`: the `UserNotFound` row reads `AccountProfileNoUser`,
+  and a challenge for another username reads `AccountProfileNotYours` with `403`.
+- Removed keys are not rendered anywhere (`AccountProfileNoEmailSignIn`, `NotYourEmail`).
+
+`src/lib.rs` `the_header_shares_the_content_column`: the two lines asserting
+`body:has(.selfserve).bar` `max-width:620px` and `padding:012px` go; it asserts instead that no
+rule is named `.selfserve`, `body:has(.selfserve).bar` or `.selfserve.panelh2`, that `main p.lede`
+carries `max-width:75ch`, and that the 40ch list includes `input.f-profile`.
+
+e2e:
+
+- `account.js`: `$$eval('main section', s => s.map(x => x.id))` equals
+  `['profile','keys','groups','reach']`; at 1280 the account `main`'s left edge and width equal the
+  console's (`getBoundingClientRect`).
+- `nojs.js`: the brand-versus-`h1` checks stay (they now hold at 16px on a phone too); the
+  comment naming "the account's 620px column" is updated; the 320px no-scroll check stays.
+- `profile.js`: the native walks send `X-Auth-Native-Username`; one walk without it sees the
+  sentence, no pill, and records zero Cognito calls.
+- `e2e/lib/cognito.js`: `PROFILE_HEADERS` gains `X-Auth-Native-Username` (a fixed UUID); the
+  fake's `EMAIL_OTP` answer carries `ChallengeParameters` `USERNAME` equal to it and
+  `CODE_DELIVERY_DESTINATION` `y***@e***.com`, and its `IdToken` carries the same
+  `cognito:username`.
+- No selector in `shots.js` depends on section order; the `account*` screenshots change
+  (full-page) and are reviewed, not asserted.
+
+`shots.js` scenes: `account-profile-edit` (one identity, the native header) replaces both
+`-edit` and `-edit-one`; `account-profile-social` is renamed `account-profile-gone`;
+new `account-profile-provider` (`/account/` with the profile settings and no native header) and
+`account-profile-notyours` (the fake's challenge names another username). No
+`account-profile-signin-again`: it would be the same pixels as `-provider` (section 3).
+
+#### 8. Open questions for the user
+
+1. Should the console's brand show the operator's logo too, as the account page's does? Today
+   only the account page does, and it is the one visible difference left in the bar.
+2. Slice F drops the account page's flat ground, which §13.18 chose for a narrow column. Drop it
+   (one ground for the estate), or keep it on the account page alone?

@@ -40,6 +40,12 @@ Rules are in `AGENTS.md`. Format of this file: `AGENTS.md`, under "Skills".
 - The profile flow against the fake Cognito, outside `shots.js`: `/tmp/d5r/check.js` (boot, write
   `profileSettingsBytes()` to `ctx.settingsFile`, send `PROFILE_HEADERS` plus `X-Auth-Email`), which
   reads `scrollWidth`, the `#err` wiring and the change list's text at 320.
+- To measure a CSS change without a server: `setContent` a minimal page with the three asset files
+  inlined plus the delta, at 320/360/1280, and read `scrollWidth` and `getBoundingClientRect()`
+  (example: `/tmp/d5g/m.js`).
+- Before proposing a new helper or rule, grep `bb-auth-web.rs` for a console one with a `View`
+  argument: the account page copies those because it has no `View`, so the fix is a `View`-free
+  core (`form_shell_at`, `page_confirm_at` are the precedent), not a third copy.
 - A mockup of a whole account flow with no server: `/tmp/d5b/gen.js` writes pages from the real CSS and a
   copied bar, `/tmp/d5b/shot.js <names>` shoots them light/dark/360 and reports any sideways scroll.
 
@@ -60,3 +66,4 @@ Rules are in `AGENTS.md`. Format of this file: `AGENTS.md`, under "Skills".
 - A prefilled field must not use `type="date"` or `type="url"`: the browser blanks or refuses a stored value it cannot parse, and on the profile form a blank posts as a deletion.
 - The `K` table has no placeholders: a sentence around a value is two keys (`…Lead`/`…Tail`), so plan copy that way.
 - A review by screenshot misses small markup the design named (the change list's `(was …)` parentheses and `span.muted`, the one-rule `input.f-code` width): read the rendered `textContent` and computed widths too.
+- The gate cannot tell a federated session from a pre-5f native cookie (both send no `X-Auth-Native-Username`): copy for that state must cover both cases.
