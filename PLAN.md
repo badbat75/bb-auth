@@ -215,6 +215,9 @@ caller has nothing to narrow to. Steps 5 and 7 add their forms into this layout 
   - 8b: on `/account` the Sign out link is `BB_AUTH_WEB_LOGOUT_URL` with its `rd` removed
     (`logout_without_rd`), so a person who is not an administrator lands on the sign-in page
     instead of a `403` on the console; no new setting (§13.17).
+  - 8b-1: the tester's part went to a Claude tester on Sonnet after two local runs failed (an
+    opencode error, then a run that lost its task after compaction), by extending the user's
+    Sonnet fallback rule from the coder to the tester.
 
 - Before step 5: a read-only check of the real pool (`aws cognito-idp describe-user-pool` and
   `describe-user-pool-client`): email sign-in, `ALLOW_USER_AUTH`, `WriteAttributes`,

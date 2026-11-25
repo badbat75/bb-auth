@@ -69,6 +69,11 @@ Rules are in `AGENTS.md`. Format of this file: `AGENTS.md`, under "Skills".
   variant or a field without breaking it. When a task forbids editing tests, derive the fact at the
   one call site instead (the bearer reveal is `status == 200 && matches!(v.at, Route::KeyAdd(_) |
   Route::KeyRotate(..))`), and report the deviation from the design doc's suggested shape.
+- A slice that changes markup breaks an **older** test that string-matches the old bytes
+  (`<summary class="pill">`, `<a class="pill" href="/auth/logout">Sign out</a>`), and the new staged
+  test demands the opposite (`a` with class `ico`, name in a `span.vh`). The pair is mutually
+  exclusive, so no production code turns both green: the old test is the tester's to update. Report
+  it by name; editing it is out of a task that forbids touching the test module.
 - A clippy warning can land in the tester's test module (its `map.get(x).is_none()` assertion trips
   `unnecessary_get_then_check`), where a task's edit limit forbids touching it. Clippy exits 0 on a
   warning, so report the line and leave the test alone.

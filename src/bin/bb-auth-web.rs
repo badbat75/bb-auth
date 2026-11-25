@@ -3859,7 +3859,66 @@ impl View<'_> {
 /// Labels are translated, descriptive prose about a section ([`K::Groups`] and
 /// friends), not the section's own name in the file; that name still appears, untranslated,
 /// beside the heading each tab leads to.
+/// Who the header says is signed in: the given name the proxy forwarded, then the **first**
+/// address of the identity header.
+///
+/// The header is a list and not one address: the gate puts **every** email of the roster row
+/// into it, joined by a single space (see `handle`), and a row with three addresses is one
+/// person. Naming all three in a bar that has a few characters of room would be a second
+/// sentence about the same person, so the bar names the one the person signs in as and the
+/// roster page names the rest.
+///
+/// The given name is decoration from a profile claim, and a deployment that does not configure
+/// `given_name` forwards no header at all. The address alone is then the whole label, which is
+/// why this takes an `Option` and answers the address alone for a name that is empty: a bar
+/// reading `· bot@example.com` is a bar with a hole in it.
+fn identity_label(given_name: Option<&str>, email_header: &str) -> String {
+    let address = email_header
+        .split_ascii_whitespace()
+        .next()
+        .unwrap_or_default();
+    match given_name.map(str::trim).filter(|n| !n.is_empty()) {
+        Some(name) => format!("{name} \u{b7} {address}"),
+        None => address.to_string(),
+    }
+}
+
+/// The bar every page of this program wears, as three slots: the brand, the tabs, and the
+/// account end.
+///
+/// Factored out of [`shell`] because the self-service page wears the same bar (§13.17), and
+/// two copies of one bar is how two surfaces drift a pixel at a time, each editor changing the
+/// file in front of them. The slots are markup and not a type because that is all the two
+/// surfaces differ on: the account page has no tabs to pass and names the operator's brand
+/// where the console names the tool. Every class is `admin.css`'s already, so a slot that
+/// arrives with one of its own is the thing to fix.
+fn top_bar(brand: Markup, tabs: Markup, acct: Markup) -> Markup {
+    html! {
+        header class="top" {
+            div class="bar" {
+                (brand)
+                (tabs)
+                (acct)
+            }
+        }
+    }
+}
+
+/// The chrome around every page: the tabs, the Settings menu, the footer.
+///
+/// [`shell_as`] with no given name to show, which is the honest answer for a page built from a
+/// [`View`] nobody made from a request: there is no forwarded claim on one, and the bar says
+/// the address alone.
 fn shell(v: &View, title: &str, content: Markup) -> Markup {
+    shell_as(v, None, title, content)
+}
+
+/// [`shell`] for a page rendered out of a request, which is the only place a given name
+/// exists: the value the proxy forwarded for the `given_name` claim, `None` when the
+/// deployment does not configure it. It goes in the bar beside the session controls and at the
+/// top of the Preferences menu, and nowhere else: the footer used to say it too, and one fact
+/// in two places is one fact that starts disagreeing with itself.
+fn shell_as(v: &View, given_name: Option<&str>, title: &str, content: Markup) -> Markup {
     let tabs = [
         (Route::Dashboard, v.t(K::Dashboard)),
         (Route::Apps, v.t(K::Apps)),
@@ -3877,6 +3936,146 @@ fn shell(v: &View, title: &str, content: Markup) -> Markup {
         LangPref::Fixed(Lang::It),
     ];
     let themes = [UiTheme::System, UiTheme::Light, UiTheme::Dark];
+    // Who the bar says is signed in, computed once: the bar and the first line of the
+    // Preferences menu render the same string, and on a phone the menu is the only one of the
+    // two left standing, because the bar would wrap to a second line to hold it.
+    let who = v.admin.map(|a| identity_label(given_name, a));
+    // The words of the two icon controls, each used twice: once as the hidden name inside the
+    // control, once as the pointer tooltip. One binding is what keeps a sighted person and a
+    // reader from being told two different things about one control.
+    let settings_name = v.t(K::Settings);
+    let sign_out = v.t(K::SignOut);
+    // The brand is the way home, but only when there is a home to go to: the 403 page has no
+    // nav for the same reason, so there the brand is a plain inert span.
+    let brand = html! {
+        @if v.admin.is_some() {
+            a class="brand" href=(v.href(&Route::Dashboard)) {
+                "bb-auth-web"
+                span class="v" { "v" (env!("CARGO_PKG_VERSION")) }
+            }
+        } @else {
+            span class="brand" {
+                "bb-auth-web"
+                span class="v" { "v" (env!("CARGO_PKG_VERSION")) }
+            }
+        }
+    };
+    let tab_nav = html! {
+        @if v.admin.is_some() {
+            nav {
+                @for (r, label) in &tabs {
+                    a class=@if *r == current { "pill on" } @else { "pill" }
+                      href=(v.href(r)) { (label) }
+                }
+            }
+        } @else {
+            nav {}
+        }
+    };
+    // The account end of the bar, and it is a `nav` for the same reason the tabs are: it makes
+    // these controls flex items of a flex row, exactly as the five tabs are. Before this they
+    // were a `details` and a bare link sitting directly in the bar, which is three different
+    // structures for one object, and an object whose box depends on which structure it happens
+    // to be in is not one object.
+    let acct = html! {
+        nav class="acct" {
+            // "Who am I acting as" sits where the session controls are, not below the fold in
+            // a footer. It is text and not a control, and muted because it answers a question
+            // rather than asking one.
+            @if let Some(who) = &who {
+                span class="who muted" { (who) }
+            }
+            // The Settings menu: `details` is the disclosure widget HTML has had all along, so
+            // the menu opens with no script, and closes by itself on submit, because
+            // submitting reloads the page. The form is a plain `GET` back to this same route,
+            // which is exactly the URL the old switch links built by hand; the handler below
+            // turns each parameter into a cookie and redirects it back out.
+            details class="settings" {
+                // The sliders, and not a gear: this menu sets two display preferences, and a
+                // gear beside a "Settings" tab would promise the access settings. The name is
+                // words inside the control, hidden visually, with the tooltip repeating them,
+                // because a `summary` carries no reliable `aria-label` while text content is
+                // read by every reader (§13.17).
+                summary class="pill ico" title=(settings_name) {
+                    // Three lines and three knobs, drawn here on the 24 by 24 grid the
+                    // stylesheet sizes, naming no colour so the palette stays the only place
+                    // one is defined.
+                    svg class="i-sliders" viewBox="0 0 24 24" aria-hidden="true" focusable="false" {
+                        path d="M3 6h12" {}
+                        circle cx="18" cy="6" r="2.5" {}
+                        path d="M9 12h12" {}
+                        circle cx="6" cy="12" r="2.5" {}
+                        path d="M3 18h8" {}
+                        circle cx="14" cy="18" r="2.5" {}
+                    }
+                    span class="vh" { (settings_name) }
+                }
+                div class="menu" {
+                    // The identity's second home, and the one that survives a phone: the bar
+                    // hides it there and the menu opens with the answer.
+                    @if let Some(who) = &who {
+                        p class="lede" { (who) }
+                    }
+                    // class=edit is not decoration here: it is the form furniture every other
+                    // field in this GUI is dressed in, and a settings field that invented its
+                    // own would be one more thing on the page that looks like nothing else.
+                    form class="edit" method="get" action=(v.href(&v.at)) {
+                        @for (k, val) in preserved_query(v.query) {
+                            input type="hidden" name=(k) value=(val);
+                        }
+                        label {
+                            span class="lbl" { (v.t(K::SettingLanguage)) }
+                            select name=(LANG_COOKIE) onchange=(SETTINGS_ONCHANGE) {
+                                @for p in langs {
+                                    option value=(p.code()) selected[p == v.lang_pref] {
+                                        (p.label(v.lang))
+                                    }
+                                }
+                            }
+                        }
+                        label {
+                            span class="lbl" { (v.t(K::SettingTheme)) }
+                            select name=(THEME_COOKIE) onchange=(SETTINGS_ONCHANGE) {
+                                @for th in themes {
+                                    option value=(th.code()) selected[th == v.theme] {
+                                        (v.t(theme_label(th)))
+                                    }
+                                }
+                            }
+                        }
+                        // The way in for a browser with scripting off, and the only path that
+                        // sets both preferences at once. With scripting on the browser parses
+                        // this as text, so the button is not in the DOM at all and picking an
+                        // option is the whole interaction.
+                        noscript { div class="actions" { button { (v.t(K::Apply)) } } }
+                    }
+                }
+            }
+            // Sign out, when the operator has said where to: last in the bar, to the right of
+            // the preferences menu, which is where a session control is looked for. It is the
+            // same pill as every other control up here and at the same size, and it gets that
+            // for being INSIDE the bar (`CSS` selects `.bar .pill`) rather than for being
+            // named.
+            //
+            // Rendered even without an administrator, unlike the tabs: the `403` page is
+            // exactly where this is most useful, because the way out of "you are signed in as
+            // somebody who may not use this" is to end that session and start another. It is a
+            // plain link and not a form: the gate's `/auth/logout` is a `GET` that clears the
+            // cookie and redirects, guarded there against cross-site navigation.
+            @if let Some(u) = &v.cfg.logout_url {
+                // The open bracket and the arrow leaving it, on the same grid and with the
+                // same name-inside-the-control as the sliders.
+                a class="pill ico" href=(u) title=(sign_out) {
+                    svg class="i-out" viewBox="0 0 24 24" aria-hidden="true" focusable="false" {
+                        path d="M9 21H5a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h4" {}
+                        path d="M16 17l5-5-5-5" {}
+                        path d="M21 12H9" {}
+                    }
+                    span class="vh" { (sign_out) }
+                }
+            }
+        }
+    };
     html! {
         (DOCTYPE)
         // The theme, resolved here and in one expression, because the fallback order is the
@@ -3902,103 +4101,7 @@ fn shell(v: &View, title: &str, content: Markup) -> Markup {
                 (PreEscaped(stylesheet_link(v.look.stylesheet)))
             }
             body {
-                header class="top" {
-                    div class="bar" {
-                        // The brand is the way home, but only when there is a home to go
-                        // to: the 403 page has no nav for the same reason, so there the
-                        // brand is a plain inert span.
-                        @if v.admin.is_some() {
-                            a class="brand" href=(v.href(&Route::Dashboard)) {
-                                "bb-auth-web"
-                                span class="v" { "v" (env!("CARGO_PKG_VERSION")) }
-                            }
-                        } @else {
-                            span class="brand" {
-                                "bb-auth-web"
-                                span class="v" { "v" (env!("CARGO_PKG_VERSION")) }
-                            }
-                        }
-                        @if v.admin.is_some() {
-                            nav {
-                                @for (r, label) in &tabs {
-                                    a class=@if *r == current { "pill on" } @else { "pill" }
-                                      href=(v.href(r)) { (label) }
-                                }
-                            }
-                        } @else {
-                            nav {}
-                        }
-                        // The account end of the bar, and it is a `nav` for the same reason
-                        // the tabs are: it makes these two controls flex items of a flex row,
-                        // exactly as the four tabs are. Before this they were a `details` and
-                        // a bare link sitting directly in the bar, which is three different
-                        // structures for one object, and an object whose box depends on which
-                        // structure it happens to be in is not one object.
-                        nav class="acct" {
-                        // The Settings menu: `details` is the disclosure widget HTML has had
-                        // all along, so the menu opens with no script, and closes by itself
-                        // on submit, because submitting reloads the page. The form is a
-                        // plain `GET` back to this same route, which is exactly the URL the
-                        // old switch links built by hand; the handler below turns each
-                        // parameter into a cookie and redirects it back out.
-                        details class="settings" {
-                            summary class="pill" { (v.t(K::Settings)) }
-                            div class="menu" {
-                                // class=edit is not decoration here: it is the form
-                                // furniture every other field in this GUI is dressed in, and
-                                // a settings field that invented its own would be one more
-                                // thing on the page that looks like nothing else.
-                                form class="edit" method="get" action=(v.href(&v.at)) {
-                                    @for (k, val) in preserved_query(v.query) {
-                                        input type="hidden" name=(k) value=(val);
-                                    }
-                                    label {
-                                        span class="lbl" { (v.t(K::SettingLanguage)) }
-                                        select name=(LANG_COOKIE) onchange=(SETTINGS_ONCHANGE) {
-                                            @for p in langs {
-                                                option value=(p.code()) selected[p == v.lang_pref] {
-                                                    (p.label(v.lang))
-                                                }
-                                            }
-                                        }
-                                    }
-                                    label {
-                                        span class="lbl" { (v.t(K::SettingTheme)) }
-                                        select name=(THEME_COOKIE) onchange=(SETTINGS_ONCHANGE) {
-                                            @for th in themes {
-                                                option value=(th.code()) selected[th == v.theme] {
-                                                    (v.t(theme_label(th)))
-                                                }
-                                            }
-                                        }
-                                    }
-                                    // The way in for a browser with scripting off, and the
-                                    // only path that sets both preferences at once. With
-                                    // scripting on the browser parses this as text, so the
-                                    // button is not in the DOM at all and picking an option
-                                    // is the whole interaction.
-                                    noscript { div class="actions" { button { (v.t(K::Apply)) } } }
-                                }
-                            }
-                        }
-                        // Sign out, when the operator has said where to: last in the bar, to
-                        // the right of the preferences menu, which is where a session control
-                        // is looked for. It is the same pill as every other control up here
-                        // and at the same size, and it gets that for being INSIDE the bar
-                        // (`CSS` selects `.bar .pill`) rather than for being named.
-                        //
-                        // Rendered even without an administrator, unlike the tabs: the `403`
-                        // page is exactly where this is most useful, because the way out of
-                        // "you are signed in as somebody who may not use this" is to end that
-                        // session and start another. It is a plain link and not a form: the
-                        // gate's `/auth/logout` is a `GET` that clears the cookie and
-                        // redirects, guarded there against cross-site navigation.
-                        @if let Some(u) = &v.cfg.logout_url {
-                            a class="pill" href=(u) { (v.t(K::SignOut)) }
-                        }
-                        }
-                    }
-                }
+                (top_bar(brand, tab_nav, acct))
                 main {
                     // The one thing a redirect is allowed to say, from a closed set.
                     @if let Some(msg) = v.msg {
@@ -4010,9 +4113,10 @@ fn shell(v: &View, title: &str, content: Markup) -> Markup {
                     // No reload hint: `bb-auth-reload.path` watches the file and reloads the
                     // gate on every save, so telling an administrator to run
                     // `systemctl reload bb-auth` would describe work nobody has to do.
-                    @if let Some(a) = v.admin {
-                        span { (v.t(K::SignedInAs)) " " code { (a) } }
-                    }
+                    //
+                    // And no "signed in as": the bar above says it, where the session controls
+                    // are, and a fact kept in two places is a fact that starts disagreeing
+                    // with itself one edit at a time.
                     // What these bytes were built from, which the version in the bar cannot
                     // say: a `.deb` reads 1.99.1-1 for a clean release and for a working tree
                     // somebody built by hand, and this is the one place a person can see
@@ -9825,6 +9929,17 @@ fn handle(mut req: Request, cfg: &Config) {
         theme: settings.theme,
         stylesheet: settings.stylesheet_url.as_deref(),
     };
+    // The given name the header shows, and it exists only where the deployment configures the
+    // claim: the settings say which header the proxy was told to fill, so a deployment that
+    // does not name `given_name` forwards nothing and the bar says the address alone. Decoded
+    // because the gate sends a profile value percent-encoded, and a bar reading
+    // `Ada%20Admin · ada@x.com` is a bar showing an encoding nobody asked to see.
+    let given = settings
+        .profile_claims
+        .iter()
+        .find(|c| c.claim == "given_name")
+        .and_then(|c| header_value(&req, &c.header))
+        .map(pct_decode);
     if settings.admins.is_empty() {
         let v = anon_view(cfg, lang, lang_pref, theme, look);
         let e = format!("{}: {}", cfg.settings_path, v.t(K::AdminsNeverEmpty));
@@ -9902,7 +10017,7 @@ fn handle(mut req: Request, cfg: &Config) {
             respond_page(
                 req,
                 404,
-                shell(&v, v.t(K::NotFoundTitle), page),
+                shell_as(&v, given.as_deref(), v.t(K::NotFoundTitle), page),
                 &v.look,
                 false,
             );
@@ -9944,7 +10059,13 @@ fn handle(mut req: Request, cfg: &Config) {
         };
         if !allowed {
             let page = notice("bad", v.t(K::CsrfTitle), html! { p { (v.t(K::CsrfBody)) } });
-            respond_page(req, 403, shell(&v, v.t(K::CsrfTitle), page), &v.look, false);
+            respond_page(
+                req,
+                403,
+                shell_as(&v, given.as_deref(), v.t(K::CsrfTitle), page),
+                &v.look,
+                false,
+            );
             return;
         }
         let form = Form::parse(&read_body(&mut req));
@@ -9960,7 +10081,13 @@ fn handle(mut req: Request, cfg: &Config) {
                 // route that mints nothing is not one of these two.
                 let reveal =
                     status == 200 && matches!(v.at, Route::KeyAdd(_) | Route::KeyRotate(..));
-                respond_page(req, status, shell(&v, title, content), &v.look, reveal)
+                respond_page(
+                    req,
+                    status,
+                    shell_as(&v, given.as_deref(), title, content),
+                    &v.look,
+                    reveal,
+                )
             }
         }
         return;
@@ -10056,7 +10183,13 @@ fn handle(mut req: Request, cfg: &Config) {
             Ok((doc, _)) => page_config(&v, &ConfigForm::of(&doc), None, None),
             Err(e) => page_file_error(&v, &e),
         };
-        respond_page(req, 200, shell(&v, v.t(K::Config), content), &v.look, false);
+        respond_page(
+            req,
+            200,
+            shell_as(&v, given.as_deref(), v.t(K::Config), content),
+            &v.look,
+            false,
+        );
         return;
     }
 
@@ -10066,7 +10199,12 @@ fn handle(mut req: Request, cfg: &Config) {
             respond_page(
                 req,
                 500,
-                shell(&v, v.t(K::FileErrorTitle), page_file_error(&v, &e)),
+                shell_as(
+                    &v,
+                    given.as_deref(),
+                    v.t(K::FileErrorTitle),
+                    page_file_error(&v, &e),
+                ),
                 &v.look,
                 false,
             );
@@ -10445,7 +10583,13 @@ fn handle(mut req: Request, cfg: &Config) {
             }
         }
     };
-    respond_page(req, status, shell(&v, title, content), &v.look, false);
+    respond_page(
+        req,
+        status,
+        shell_as(&v, given.as_deref(), title, content),
+        &v.look,
+        false,
+    );
 }
 
 /// One user's key, by owner (uuid or email) and id — what a key form and its two
@@ -11954,7 +12098,7 @@ mod tests {
             "and the Settings trigger is blockified by its own details"
         );
         assert!(
-            app.contains(r#"<summary class="pill">"#),
+            app.contains(r#"<summary class="pill ico""#),
             "and carry the class that rule selects: {app}"
         );
         // The footer never tells anybody to reload: `bb-auth-reload.path` does it.
@@ -11965,7 +12109,8 @@ mod tests {
     fn sign_out_is_in_the_bar_when_configured_and_absent_when_not() {
         let html = render("signout", Route::Dashboard);
         assert!(
-            html.contains(r#"<a class="pill" href="/auth/logout">Sign out</a>"#),
+            html.contains(r#"<a class="pill ico" href="/auth/logout" title="Sign out">"#)
+                && html.contains(r#"<span class="vh">Sign out</span>"#),
             "{html}"
         );
         // To the RIGHT of the preferences menu, and the same object as everything else in
@@ -11975,7 +12120,7 @@ mod tests {
         let (settings_at, signout_at) = (
             html.find("details class=\"settings\"")
                 .or(html.find("<details class=\"settings\"")),
-            html.find(r#"<a class="pill" href="/auth/logout">"#),
+            html.find(r#"<a class="pill ico" href="/auth/logout""#),
         );
         assert!(
             settings_at < signout_at,
@@ -19031,6 +19176,52 @@ mod tests {
             docs.push((format!("the account keys table in {label}"), g.body));
         }
 
+        // The console's header (8b-1): Preferences and Sign out are icons too, so both are
+        // covered by the loop below the day they are built, and named in each language.
+        let path = account_scratch_full("icon-names-console");
+        paths.push(path.clone());
+        let port = account_port(&path);
+        for (label, lang, code) in [("English", Lang::En, "en"), ("Italian", Lang::It, "it")] {
+            let g = console_get(port, "admin@x.com", &[("Cookie", &format!("lang={code}"))]);
+            assert_eq!(
+                g.status,
+                200,
+                "the console answers the admin: {}",
+                account_readable(&g.body)
+            );
+            let summaries = controls_with_class(&g.body, "summary", "ico");
+            assert_eq!(
+                summaries.len(),
+                1,
+                "the console header's Preferences trigger is one `summary.pill.ico`: {}",
+                account_readable(&g.body)
+            );
+            assert_eq!(
+                visible_text(&summaries[0]),
+                t(lang, K::Settings),
+                "{label}: {}",
+                summaries[0]
+            );
+            let outs: Vec<String> = controls_with_class(&g.body, "a", "ico")
+                .into_iter()
+                .filter(|el| el.contains("/auth/logout"))
+                .collect();
+            assert_eq!(
+                outs.len(),
+                1,
+                "the console header's Sign out is one `a.pill.ico` (the fixture sets \
+                 BB_AUTH_WEB_LOGOUT_URL): {}",
+                account_readable(&g.body)
+            );
+            assert_eq!(
+                visible_text(&outs[0]),
+                t(lang, K::SignOut),
+                "{label}: {}",
+                outs[0]
+            );
+            docs.push((format!("the console header in {label}"), g.body));
+        }
+
         for (where_, body) in &docs {
             let icons = controls_with_class(body, "button", "ico")
                 .into_iter()
@@ -19123,6 +19314,133 @@ mod tests {
         for path in paths {
             let _ = std::fs::remove_file(path);
         }
+    }
+
+    /// A console `GET` over the socket, as the proxy sends one: the secret, the identity
+    /// header, and whatever extra headers the test wants on the wire.
+    fn console_get(port: u16, identity: &str, extra: &[(&str, &str)]) -> AccountGot {
+        let url = format!(
+            "http://127.0.0.1:{port}{ADMIN_BASE}{}",
+            Route::Dashboard.path()
+        );
+        let mut req = account_client()
+            .get(&url)
+            .header(SECRET_HEADER, TEST_SECRET)
+            .header("Sec-Fetch-Site", "same-origin")
+            .header(IDENTITY_HEADER, identity);
+        for &(k, v) in extra {
+            req = req.header(k, v);
+        }
+        got_of(req.call().expect("a response"))
+    }
+
+    /// 8b-1 (§13.17, "The identity, added to the console too"): who is signed in is said where
+    /// the session controls are. `identity_label` is pure: the forwarded `given_name` (when the
+    /// deployment configures that claim) and the FIRST address of `X-Auth-Email`, which may
+    /// hold several joined by a space; else the address alone.
+    ///
+    /// Red until the coder adds `identity_label`: it does not exist, so the test module does
+    /// not compile (E0425), which is the expected red for this slice.
+    #[test]
+    fn the_identity_is_the_given_name_and_the_first_address() {
+        assert_eq!(
+            identity_label(Some("Bot"), "bot@example.com"),
+            "Bot \u{b7} bot@example.com"
+        );
+        assert_eq!(
+            identity_label(Some("Bot"), "bot@example.com alt@example.com"),
+            "Bot \u{b7} bot@example.com",
+            "of several addresses only the first is shown"
+        );
+        assert_eq!(identity_label(None, "bot@example.com"), "bot@example.com");
+        assert_eq!(
+            identity_label(None, "bot@example.com alt@example.com"),
+            "bot@example.com"
+        );
+        assert_eq!(
+            identity_label(Some("  "), "bot@example.com"),
+            "bot@example.com",
+            "a blank given name is no given name"
+        );
+        assert_eq!(
+            identity_label(Some(""), "bot@example.com"),
+            "bot@example.com"
+        );
+
+        // On a rendered console page: `span.who` in `nav.acct`, and the menu's first `p.lede`.
+        let path = account_scratch_full("identity-label-console");
+        let port = account_port(&path);
+        for (extra, label) in [
+            (
+                vec![("X-Auth-Given-Name", "Ada%20Admin")],
+                "Ada Admin \u{b7} admin@x.com",
+            ),
+            (vec![], "admin@x.com"),
+        ] {
+            let g = console_get(port, "admin@x.com", &extra);
+            assert_eq!(g.status, 200, "{}", account_readable(&g.body));
+            let acct = elements(&g.body, "<nav class=\"acct\"", "</nav>");
+            assert_eq!(acct.len(), 1, "{}", account_readable(&g.body));
+            let who = controls_with_class(&acct[0], "span", "who");
+            assert_eq!(who.len(), 1, "one span.who in nav.acct: {}", acct[0]);
+            assert_eq!(visible_text(&who[0]), label, "{}", who[0]);
+            assert!(
+                attr(open_tag(&who[0]), "class")
+                    .is_some_and(|c| c.split_whitespace().any(|w| w == "muted")),
+                "the identity is muted text, not a control: {}",
+                who[0]
+            );
+            assert!(
+                acct[0].find("class=\"who").unwrap() < acct[0].find("<details").unwrap(),
+                "the identity comes before Preferences: {}",
+                acct[0]
+            );
+            let menu = elements(&acct[0], "<details", "</details>");
+            let lede = controls_with_class(&menu[0], "p", "lede");
+            assert!(
+                !lede.is_empty(),
+                "the menu opens with a p.lede: {}",
+                menu[0]
+            );
+            assert_eq!(visible_text(&lede[0]), label, "{}", lede[0]);
+            assert!(
+                menu[0].find("class=\"lede\"").unwrap() < menu[0].find("<form").unwrap(),
+                "the lede is the menu's first line, above the form: {}",
+                menu[0]
+            );
+        }
+        let _ = std::fs::remove_file(&path);
+    }
+
+    /// 8b-1: the footer keeps the version and no longer says who is signed in (one home for
+    /// the fact).
+    #[test]
+    fn the_console_footer_no_longer_names_the_identity() {
+        let html = render("footer-identity", Route::Dashboard);
+        let footer = elements(&html, "<footer", "</footer>");
+        assert_eq!(footer.len(), 1, "{}", account_readable(&html));
+        assert!(
+            footer[0].contains(&version_line("bb-auth-web")),
+            "the footer keeps the version: {}",
+            footer[0]
+        );
+        assert!(
+            !footer[0].contains("admin@x.com") && !footer[0].contains(t(Lang::En, K::SignedInAs)),
+            "the footer no longer says who is signed in: {}",
+            footer[0]
+        );
+        // The Italian page too: the words are the table's, not the markup's.
+        let path = account_scratch_full("footer-identity-it");
+        let port = account_port(&path);
+        let g = console_get(port, "admin@x.com", &[("Cookie", "lang=it")]);
+        let footer = elements(&g.body, "<footer", "</footer>");
+        assert_eq!(footer.len(), 1);
+        assert!(
+            !footer[0].contains("admin@x.com") && !footer[0].contains(t(Lang::It, K::SignedInAs)),
+            "{}",
+            footer[0]
+        );
+        let _ = std::fs::remove_file(&path);
     }
 
     /// The five choices map onto the file's duration grammar, in one function,

@@ -327,6 +327,11 @@ body:has(.selfserve){background:var(--bg)}
   .pill{padding:3px 8px}
   .bar .pill,p.primary .pill,.actions .pill{font-size:var(--fs-sm);padding:4px 9px}
   .bar .pill.ico{padding:4px}
+  nav.acct .who{display:none}
+  /* The identity goes on a phone and the menu keeps it. The bar's first line holds the brand,
+     the trigger and the sign-out, and a name plus an address is what wraps it to a second
+     line, so the bar gives the words up rather than the row. The Preferences menu opens with
+     the same string, so the answer is one tap away and not gone. */
   /* `:not(.acct)` because the account row is a `nav` too, and everything below is about the
      tabs: the full second line and the horizontal scroll would send it off on its own. */
   nav:not(.acct){order:3;flex:1 1 100%;flex-wrap:nowrap;overflow-x:auto;gap:1px;
