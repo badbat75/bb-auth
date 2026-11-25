@@ -868,6 +868,9 @@ enum K {
     SignOut,
     // --- the settings menu ---
     Settings,
+    // The word that turns the bar's name into a control's name: "Ada, account menu"
+    // (§13.28 §1).
+    AccountMenu,
     SettingLanguage,
     SettingTheme,
     LangAuto,
@@ -999,6 +1002,10 @@ enum K {
     MsgDeniedRemoved,
     MsgSettingsSaved,
     // --- the settings page ---
+    // The word for that page, and for the panel's row to it (§13.28 §2, §8). It says "system"
+    // because the page edits the deployment's settings, and the panel's own rows are a
+    // person's preferences: two words for two places, since one row in a menu that holds both
+    // is read as the menu's whole subject.
     Config,
     ConfigIntro,
     ConfigAccess,
@@ -1228,7 +1235,7 @@ fn m(lang: Lang, en: &'static str, it: &'static str) -> &'static str {
 fn t(lang: Lang, key: K) -> &'static str {
     match key {
         K::Dashboard => m(lang, "Dashboard", "Cruscotto"),
-        K::Config => m(lang, "Settings", "Impostazioni"),
+        K::Config => m(lang, "System settings", "Impostazioni di sistema"),
         K::ConfigIntro => m(
             lang,
             "The settings that take effect with no restart. Everything else bb-auth is configured with stays in its env file, on the host.",
@@ -1909,6 +1916,7 @@ fn t(lang: Lang, key: K) -> &'static str {
         K::ConsoleTag => m(lang, "Administration", "Amministrazione"),
         K::SignOut => m(lang, "Sign out", "Esci"),
         K::Settings => m(lang, "Preferences", "Preferenze"),
+        K::AccountMenu => m(lang, "account menu", "menu dell'account"),
         K::SettingLanguage => m(lang, "Language", "Lingua"),
         K::SettingTheme => m(lang, "Theme", "Tema"),
         // Named after what decides when nobody has: the browser. "Auto" alone would leave an
@@ -1918,7 +1926,7 @@ fn t(lang: Lang, key: K) -> &'static str {
         K::Apply => m(lang, "Apply", "Applica"),
         K::ThemeLight => m(lang, "Light", "Chiaro"),
         K::ThemeDark => m(lang, "Dark", "Scuro"),
-        K::ThemeSystem => m(lang, "System", "Sistema"),
+        K::ThemeSystem => m(lang, "Auto (system)", "Auto (sistema)"),
 
         K::Add => m(lang, "add", "aggiungi"),
         K::Edit => m(lang, "edit", "modifica"),
@@ -3836,11 +3844,30 @@ impl Form {
 /// because a page is a snapshot of a file that changes under it, `nosniff` because a browser
 /// guessing at a content type is a browser deciding something we already know, and the
 /// charset because the roster is full of names that are not ASCII.
-fn respond_page(req: Request, status: u16, page: Markup, look: &Look, reveal: bool) {
+///
+/// `logo` is the deployment's `ui.logo_url`, handed to the policy beside the [`Look`] that
+/// builds the page: the bar's `<img>` and the policy's `img-src` are one value read once, and
+/// a page that shows a mark its policy does not name is a broken image. The policy is built
+/// from that same `Option`, so the widening is exactly as wide as the setting.
+fn respond_page(
+    req: Request,
+    status: u16,
+    page: Markup,
+    look: &Look,
+    logo: Option<&str>,
+    reveal: bool,
+) {
+    // The mark is named in `img-src` on the page that shows it and on no other. Every page
+    // rendered above the settings read has no logo to name, and so has a deployment that never
+    // set one, and those take `admin_csp`, which is that policy.
+    let csp = match logo {
+        Some(src) => admin_csp_logo(look, Some(src), reveal),
+        None => admin_csp(look, reveal),
+    };
     let mut resp = Response::from_data(page.into_string().into_bytes())
         .with_status_code(StatusCode(status))
         .with_header(h("Content-Type", "text/html; charset=utf-8"))
-        .with_header(h("Content-Security-Policy", &admin_csp(look, reveal)));
+        .with_header(h("Content-Security-Policy", &csp));
     for (k, v) in PAGE_SECURITY_HEADERS {
         resp.add_header(h(k, v));
     }
@@ -3861,8 +3888,11 @@ fn respond_page(req: Request, status: u16, page: Markup, look: &Look, reveal: bo
 /// a browser that refuses the handler still works, which makes this the rare case where the
 /// strict policy has a fallback already built.
 ///
-/// `img-src` is `'none'`: this interface shows no image at all, not even the deployment's
-/// logo, so the honest policy says so.
+/// `img-src` is `data:` and nothing else: this is the policy of a page that shows **no** image,
+/// which is every page rendered above the settings read (the file that would name a logo is the
+/// file those pages exist to report on) and every page of a deployment that never set
+/// `ui.logo_url`. [`admin_csp_logo`] is the same policy with the mark named beside it, and the
+/// widening is exactly as wide as the setting (§13.28 §6).
 ///
 /// `form-action` stays `'self'`, which is the one place this GUI is stricter than the gate and
 /// is meant to be. Every form here posts to this program and is answered with a `302` back to
@@ -3875,6 +3905,16 @@ fn respond_page(req: Request, status: u16, page: Markup, look: &Look, reveal: bo
 /// carries the Settings list boxes on every page including this one, so both hashes ride the
 /// same `'unsafe-hashes'` source, and every other page's policy is byte for byte what it was.
 fn admin_csp(look: &Look, reveal: bool) -> String {
+    admin_csp_logo(look, None, reveal)
+}
+
+/// [`admin_csp`] with the deployment's logo named in `img-src`: the policy of a page that shows
+/// it, which is every page served from a settings read that has one (§13.28 §6). The logo
+/// arrives as its own argument and not inside [`Look`] because the two consumers of it (the
+/// bar's `<img>` and this policy) are handed the same `Option` from one settings read, and a
+/// policy that named a source the bar cannot show, or the reverse, is the drift an argument
+/// shared by both cannot have.
+fn admin_csp_logo(look: &Look, logo: Option<&str>, reveal: bool) -> String {
     let script = if reveal {
         format!(
             "'unsafe-hashes' {} {}",
@@ -3885,7 +3925,7 @@ fn admin_csp(look: &Look, reveal: bool) -> String {
         format!("'unsafe-hashes' {}", csp_hash(SETTINGS_ONCHANGE))
     };
     let style = csp_hash(&format!("{THEME_CSS}{BASE_CSS}{CSS}"));
-    page_csp(&script, &style, "'self'", look.stylesheet, None, &[])
+    page_csp(&script, &style, "'self'", look.stylesheet, logo, &[])
 }
 
 /// `302` to `location`, setting one preference cookie to `value`. `location` is built from a
@@ -4298,44 +4338,48 @@ impl View<'_> {
     }
 }
 
-/// The chrome around every page: the tabs, the Settings menu, the footer.
-///
-/// Four tabs, not the access file's four sections plus the dashboard and the settings:
-/// `denied` shares the `users` tab (see [`Route::tab`]) because both are about
-/// people, and the page itself sits at the bottom of [`page_users`] rather than
-/// standing on its own in the bar. The bar reads left to right roughly as the file reads
-/// top to bottom, dashboard in front, then the settings, which are last
-/// because they are the *other* file, and the one tab not about who reaches what.
-///
-/// Every tab is a **noun**: a place that owns a section of a file. The access check used to
-/// be a fifth one and was the odd item out for exactly that reason, being a verb that owns
-/// nothing; it is now a section of [`page_user`] and [`page_app`], which is where its
-/// question is actually asked, since each of those pages already answers half of it.
-///
-/// Labels are translated, descriptive prose about a section ([`K::Groups`] and
-/// friends), not the section's own name in the file; that name still appears, untranslated,
-/// beside the heading each tab leads to.
-/// Who the header says is signed in: the given name the proxy forwarded, then the **first**
-/// address of the identity header.
+/// Who the bar says is signed in, in the two pieces the account menu needs: the **one** string
+/// the trigger shows, and **every** address of the identity header for the panel to print.
 ///
 /// The header is a list and not one address: the gate puts **every** email of the roster row
 /// into it, joined by a single space (see `handle`), and a row with three addresses is one
 /// person. Naming all three in a bar that has a few characters of room would be a second
 /// sentence about the same person, so the bar names the one the person signs in as and the
-/// roster page names the rest.
+/// panel prints the rest.
 ///
 /// The given name is decoration from a profile claim, and a deployment that does not configure
 /// `given_name` forwards no header at all. The address alone is then the whole label, which is
-/// why this takes an `Option` and answers the address alone for a name that is empty: a bar
-/// reading `· bot@example.com` is a bar with a hole in it.
-fn identity_label(given_name: Option<&str>, email_header: &str) -> String {
-    let address = email_header
+/// why this takes an `Option` and answers the address alone for a name that is empty: a trigger
+/// reading `· bot@example.com` is a trigger with a hole in it.
+struct Who {
+    /// The trigger's visible label: a name, else an address, never both and never a separator.
+    label: String,
+    /// Every address of `X-Auth-Email`, in the order the gate wrote them.
+    emails: Vec<String>,
+    /// The name alone, when there is one: the panel prints it in `strong` above the addresses,
+    /// and `label` is the same word cut to one line. `None` is "no name", which is why the
+    /// trigger shows an address.
+    name: Option<String>,
+}
+
+/// [`Who`] from the two headers. See the struct.
+fn who(given_name: Option<&str>, email_header: &str) -> Who {
+    let emails: Vec<String> = email_header
         .split_ascii_whitespace()
-        .next()
+        .map(str::to_string)
+        .collect();
+    let name = given_name
+        .map(str::trim)
+        .filter(|n| !n.is_empty())
+        .map(str::to_string);
+    let label = name
+        .clone()
+        .or_else(|| emails.first().cloned())
         .unwrap_or_default();
-    match given_name.map(str::trim).filter(|n| !n.is_empty()) {
-        Some(name) => format!("{name} \u{b7} {address}"),
-        None => address.to_string(),
+    Who {
+        label,
+        emails,
+        name,
     }
 }
 
@@ -4360,66 +4404,253 @@ fn top_bar(brand: Markup, tabs: Markup, acct: Markup) -> Markup {
     }
 }
 
-/// The Preferences trigger: the sliders glyph, the name inside the control, and the same
-/// words as the pointer tooltip.
+/// The brand slot of both shells: the operator's mark, the name, and the console's tag
+/// (§13.28 §6, §7). `href` is `Some` on the console, where the brand is the way home, and
+/// `None` on the self-service page, whose visitor came to the estate for that one page and has
+/// no home in this program to go back to. `extra` carries the page's own class
+/// (`selfserve-brand`), which is arrangement and not the slot's own shape.
 ///
-/// Factored out of [`shell_as`] for the bar's own reason: the self-service page carries the
-/// same control (§13.17), and two copies of one icon is how two surfaces drift a glyph at a
-/// time. The name is words inside the control, hidden visually, with the tooltip repeating
-/// them, because a `summary` carries no reliable `aria-label` while text content is read by
-/// every reader.
-fn prefs_trigger(name: &str) -> Markup {
+/// One function because the mark and the name are one object on both surfaces: two call sites
+/// drawing the same pair is how a logo arrives in one bar and not the other, which is the drift
+/// this file keeps writing rules about. The `alt` is empty because the name beside the picture
+/// already says what it is, and it stays empty where the text is visually hidden on a phone
+/// (§4), since a reader is then the only one reading the name.
+fn brand_block(
+    name: &str,
+    tag: Option<&str>,
+    logo: Option<&str>,
+    href: Option<&str>,
+    extra: &str,
+) -> Markup {
+    let cls = if extra.is_empty() {
+        "brand".to_string()
+    } else {
+        format!("brand {extra}")
+    };
+    let inner = html! {
+        @if let Some(src) = logo {
+            img src=(src) alt="";
+        }
+        span class="t" { (name) }
+        @if let Some(t) = tag {
+            span class="v" { (t) }
+        }
+    };
     html! {
-        summary class="pill ico" title=(name) {
-            // Three lines and three knobs, drawn on the 24 by 24 grid the stylesheet sizes,
-            // naming no colour so the palette stays the only place one is defined.
-            svg class="i-sliders" viewBox="0 0 24 24" aria-hidden="true" focusable="false" {
-                path d="M3 6h12" {}
-                circle cx="18" cy="6" r="2.5" {}
-                path d="M9 12h12" {}
-                circle cx="6" cy="12" r="2.5" {}
-                path d="M3 18h8" {}
-                circle cx="14" cy="18" r="2.5" {}
-            }
-            span class="vh" { (name) }
+        @if let Some(h) = href {
+            a class=(cls) href=(h) { (inner) }
+        } @else {
+            span class=(cls) { (inner) }
         }
     }
 }
 
-/// The Sign out pill: the open bracket and the arrow leaving it, on the same grid and with
-/// the same name-inside-the-control as the sliders. Factored out of [`shell_as`] for
-/// [`prefs_trigger`]'s reason: the self-service page carries the same pill.
-fn sign_out_pill(href: &str, name: &str) -> Markup {
+/// The Preferences form, shared by both shells (§13.28 §3, §7).
+///
+/// One function because the two surfaces differ by **one flag**, not by markup: `scripted` is
+/// the console, where the two list boxes submit themselves through the one allowed handler and
+/// Apply hides behind `noscript`; the self-service page emits no script at all, so there the
+/// button is the only way in and is always shown. Two copies of this form is how one list box
+/// gains a third option on one surface only, which is the drift this file keeps writing rules
+/// about. `action` is the page the `GET` returns to, and `hidden` re-carries the query the page
+/// was read with, so choosing a theme from a filtered list does not throw the filter away.
+fn prefs_form(
+    lang: Lang,
+    lang_pref: LangPref,
+    theme: UiTheme,
+    action: &str,
+    hidden: &[(String, String)],
+    scripted: bool,
+) -> Markup {
+    // Both lead with the choice that follows something outside this GUI (the browser, the OS),
+    // because that is where every session starts and what the other options are departures from.
+    let langs = [
+        LangPref::Auto,
+        LangPref::Fixed(Lang::En),
+        LangPref::Fixed(Lang::It),
+    ];
+    let themes = [UiTheme::System, UiTheme::Light, UiTheme::Dark];
     html! {
-        a class="pill ico" href=(href) title=(name) {
-            svg class="i-out" viewBox="0 0 24 24" aria-hidden="true" focusable="false" {
-                path d="M9 21H5a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h4" {}
-                path d="M16 17l5-5-5-5" {}
-                path d="M21 12H9" {}
+        form class="edit" method="get" action=(action) {
+            @for (k, val) in hidden {
+                input type="hidden" name=(k) value=(val);
             }
-            span class="vh" { (name) }
+            label {
+                span class="lbl" { (t(lang, K::SettingLanguage)) }
+                @if scripted {
+                    select name=(LANG_COOKIE) onchange=(SETTINGS_ONCHANGE) {
+                        @for p in langs {
+                            option value=(p.code()) selected[p == lang_pref] { (p.label(lang)) }
+                        }
+                    }
+                } @else {
+                    select name=(LANG_COOKIE) {
+                        @for p in langs {
+                            option value=(p.code()) selected[p == lang_pref] { (p.label(lang)) }
+                        }
+                    }
+                }
+            }
+            label {
+                span class="lbl" { (t(lang, K::SettingTheme)) }
+                @if scripted {
+                    select name=(THEME_COOKIE) onchange=(SETTINGS_ONCHANGE) {
+                        @for th in themes {
+                            option value=(th.code()) selected[th == theme] {
+                                (t(lang, theme_label(th)))
+                            }
+                        }
+                    }
+                } @else {
+                    select name=(THEME_COOKIE) {
+                        @for th in themes {
+                            option value=(th.code()) selected[th == theme] {
+                                (t(lang, theme_label(th)))
+                            }
+                        }
+                    }
+                }
+            }
+            // The way in for a browser with scripting off. On the console the browser parses the
+            // `noscript` block as text, so with scripting on the button is not in the DOM at all
+            // and picking an option is the whole interaction; on the page with no handler the
+            // button is the interaction.
+            @if scripted {
+                noscript { div class="actions" { button { (t(lang, K::Apply)) } } }
+            } @else {
+                div class="actions" { button { (t(lang, K::Apply)) } }
+            }
         }
     }
 }
 
-/// The chrome around every page: the tabs, the Settings menu, the footer.
+/// The account menu both shells wear (§13.28 §1, §2, §3): one trigger that opens one panel.
 ///
-/// [`shell_as`] with no given name to show, which is the honest answer for a page built from a
-/// [`View`] nobody made from a request: there is no forwarded claim on one, and the bar says
-/// the address alone.
+/// The trigger is the person's own name, because the bar has a few characters of room and a
+/// name is what a person recognises in it; the word "account menu" rides along inside the
+/// control, visually hidden, so a reader is told what the name **is** rather than left with a
+/// word that reads as a heading. The panel then says who they are in full, offers the console's
+/// places (`places`, `None` on the self-service page and on the `403`, where the caller has no
+/// console page to be offered), the nested Preferences box, and Sign out.
+///
+/// The panel is a `details` for the reason §13.20 gave: it opens with no script, closes by
+/// itself when a row navigates away, and its trigger keeps the light-dismiss cover the console
+/// already has. The nested box gets no cover of its own, so it toggles only from its own row.
+/// `logout` is `None` when the operator named no destination, and then there is no row.
+fn account_menu(
+    lang: Lang,
+    who: Option<&Who>,
+    places: Option<Markup>,
+    prefs: Markup,
+    logout: Option<&str>,
+) -> Markup {
+    let label = who.map(|w| w.label.as_str()).unwrap_or("");
+    let menu_word = format!(", {}", t(lang, K::AccountMenu));
+    html! {
+        details class="settings" {
+            // The name, the caret, and the word that names the control. `title` carries the full
+            // label because the ellipsis may cut it, and a tooltip is the one place a cut name is
+            // still the whole name.
+            summary class="pill who" title=(label) {
+                span class="who-name" { (label) }
+                span class="vh" { (menu_word) }
+                svg class="i-caret" viewBox="0 0 24 24" aria-hidden="true" focusable="false" {
+                    path d="M6 9l6 6 6-6" {}
+                }
+            }
+            div class="menu" {
+                // Who the name is, in full: every address of the roster row, because a caller is
+                // their whole row and not the one address the bar had room for. No uuid: the
+                // panel is read by a person, and an id is what the account page names under its
+                // own label.
+                @if let Some(w) = who {
+                    p class="who-full" {
+                        @if let Some(n) = &w.name {
+                            strong { (n) }
+                        }
+                        @for e in &w.emails {
+                            span class="addr muted" { (e) }
+                        }
+                    }
+                }
+                // The console's places, and the rule that divides them from the rows below. A
+                // caller with no places gets no container at all, which is what keeps the `403`
+                // from offering a page it has refused.
+                @if let Some(p) = places {
+                    div class="menu-places" { (p) }
+                    div class="sep" {}
+                }
+                details class="prefs" {
+                    // The sliders, and the word "Preferences": the panel's rows are places to go
+                    // and this one is not, and the row that opens the two display choices must
+                    // not read as the System settings page beside it.
+                    summary class="pill" {
+                        svg class="i-sliders" viewBox="0 0 24 24" aria-hidden="true" focusable="false" {
+                            path d="M3 6h12" {}
+                            circle cx="18" cy="6" r="2.5" {}
+                            path d="M9 12h12" {}
+                            circle cx="6" cy="12" r="2.5" {}
+                            path d="M3 18h8" {}
+                            circle cx="14" cy="18" r="2.5" {}
+                        }
+                        (t(lang, K::Settings))
+                    }
+                    (prefs)
+                }
+                // Sign out behind the last rule: it is the row that leaves the estate, and the
+                // rule is what separates it from the rows that only change how the estate looks.
+                @if let Some(u) = logout {
+                    div class="sep" {}
+                    a class="pill" href=(u) {
+                        svg class="i-out" viewBox="0 0 24 24" aria-hidden="true" focusable="false" {
+                            path d="M9 21H5a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h4" {}
+                            path d="M16 17l5-5-5-5" {}
+                            path d="M21 12H9" {}
+                        }
+                        (t(lang, K::SignOut))
+                    }
+                }
+            }
+        }
+    }
+}
+
+/// The chrome around every page: the tabs, the account menu, the footer.
+///
+/// [`shell_as`] with no given name, no identity header and no logo to show, which is the
+/// honest answer for a page built from a [`View`] nobody made from a request: there is no
+/// forwarded claim and no settings read on one, so the bar says the address alone and shows
+/// no mark.
 fn shell(v: &View, title: &str, content: Markup) -> Markup {
-    shell_as(v, None, title, content)
+    shell_as(v, None, "", None, title, content)
 }
 
-/// [`shell`] for a page rendered out of a request, which is the only place a given name
-/// exists: the value the proxy forwarded for the `given_name` claim, `None` when the
-/// deployment does not configure it. It goes in the bar beside the session controls and at the
-/// top of the Preferences menu, and nowhere else: the footer used to say it too, and one fact
-/// in two places is one fact that starts disagreeing with itself.
-fn shell_as(v: &View, given_name: Option<&str>, title: &str, content: Markup) -> Markup {
+/// [`shell`] for a page rendered out of a request, which is the only place the bar's two
+/// facts exist: the given name the proxy forwarded for the `given_name` claim (`None` when
+/// the deployment does not configure it), and the whole identity header, `emails`: the gate
+/// puts **every** email of the roster row into it, and a caller admitted by their second
+/// address reads a panel naming every address they have, which is the answer the account page
+/// already gives (§13.28 §2). `logo` is the deployment's `ui.logo_url`, the same `Option` the
+/// response's policy is built from. The name goes in the bar beside the session controls and
+/// at the top of the Preferences menu, and nowhere else: the footer used to say it too, and
+/// one fact in two places is one fact that starts disagreeing with itself.
+fn shell_as(
+    v: &View,
+    given_name: Option<&str>,
+    emails: &str,
+    logo: Option<&str>,
+    title: &str,
+    content: Markup,
+) -> Markup {
+    let ident = if emails.trim().is_empty() {
+        v.admin.unwrap_or_default()
+    } else {
+        emails
+    };
     shell_named(
         v,
-        v.admin.map(|a| identity_label(given_name, a)),
+        v.admin.map(|_| who(given_name, ident)),
+        logo,
         title,
         content,
     )
@@ -4432,33 +4663,27 @@ fn shell_as(v: &View, given_name: Option<&str>, title: &str, content: Markup) ->
 /// deriving the label from it leaves the bar empty on the one page where the reader most needs
 /// to see who the sentence is about. The tabs and the brand stay keyed on `v.admin`, which is
 /// what makes "an identity in the bar, no tabs" expressible: that pair *is* the refusal. The
-/// label arrives as an owned `String` because each caller builds it out of two headers. One
-/// label in and not two computed out of it: the bar and the first line of the Preferences menu
-/// render the same string, and on a phone the menu is the only one of the two left standing,
-/// because the bar would wrap to a second line to hold it.
-fn shell_named(v: &View, who: Option<String>, title: &str, content: Markup) -> Markup {
+/// identity arrives as a built [`Who`] because each caller builds it out of two headers. One
+/// identity in and not two computed out of it: the bar and the panel render the same facts,
+/// and on a phone the panel is the only one of the two left standing, because the bar would
+/// wrap to a second line to hold the name.
+fn shell_named(
+    v: &View,
+    who: Option<Who>,
+    logo: Option<&str>,
+    title: &str,
+    content: Markup,
+) -> Markup {
+    // Four tabs, not five: the Settings page is not a place in the bar (§13.28 §4). It is a row
+    // of the account panel, where the bar has room for it at every width, and the bar's four are
+    // what fits on one row at 320px with a name that is the trigger.
     let tabs = [
         (Route::Dashboard, v.t(K::Dashboard)),
         (Route::Apps, v.t(K::Apps)),
         (Route::Users, v.t(K::Users)),
         (Route::Audit, v.t(K::Audit)),
-        (Route::Config, v.t(K::Config)),
     ];
     let current = v.at.tab();
-    // The two list boxes' options, each in the order they are offered. Both lead with the
-    // choice that follows something outside this GUI (the browser, the OS), because that is
-    // where every session starts and what the other options are departures from.
-    let langs = [
-        LangPref::Auto,
-        LangPref::Fixed(Lang::En),
-        LangPref::Fixed(Lang::It),
-    ];
-    let themes = [UiTheme::System, UiTheme::Light, UiTheme::Dark];
-    // The words of the two icon controls, each used twice: once as the hidden name inside the
-    // control, once as the pointer tooltip. One binding is what keeps a sighted person and a
-    // reader from being told two different things about one control.
-    let settings_name = v.t(K::Settings);
-    let sign_out = v.t(K::SignOut);
     // The brand is the way home, but only when there is a home to go to: the 403 page has no
     // nav for the same reason, so there the brand is a plain inert span. The two lines are the
     // deployment's name over what this surface is (`K::ConsoleTag`), which is what makes the
@@ -4469,108 +4694,67 @@ fn shell_named(v: &View, who: Option<String>, title: &str, content: Markup) -> M
         .map(str::to_string)
         .unwrap_or_else(|| DEFAULT_ACCOUNT_BRAND.to_string());
     let tag = v.t(K::ConsoleTag);
-    let brand = html! {
-        @if v.admin.is_some() {
-            a class="brand" href=(v.href(&Route::Dashboard)) {
-                (name)
-                span class="v" { (tag) }
-            }
-        } @else {
-            span class="brand" {
-                (name)
-                span class="v" { (tag) }
-            }
+    let home = v.href(&Route::Dashboard);
+    let brand = brand_block(&name, Some(tag), logo, v.admin.map(|_| home.as_str()), "");
+    // The strip, and the same four rows inside the panel, from one loop (§13.28 §4): moving one
+    // element between the bar and a closed `details` cannot be done in CSS, so the links are
+    // emitted twice and exactly one copy is displayed. `aria-current="page"` is the word a
+    // reader hears for "you are here", because `.on` is a colour and colour alone is not a
+    // distinction WCAG 1.3.1 accepts.
+    let tab_links = html! {
+        @for (r, label) in &tabs {
+            a class=@if *r == current { "pill on" } @else { "pill" }
+              href=(v.href(r)) aria-current=[(*r == current).then_some("page")] { (label) }
         }
     };
     let tab_nav = html! {
-        @if v.admin.is_some() {
-            nav {
-                @for (r, label) in &tabs {
-                    a class=@if *r == current { "pill on" } @else { "pill" }
-                      href=(v.href(r)) { (label) }
-                }
-            }
-        } @else {
-            nav {}
-        }
+        @if v.admin.is_some() { nav { (tab_links) } } @else { nav {} }
     };
+    // The console's places, in the panel: the four tabs (which the bar shows above 800px and
+    // hides below), the System settings page that left the bar, and the caller's own page. All
+    // three are places to go, which is why they sit together, above the rows that only change
+    // how the estate looks. `v.admin` is the gate: a caller the allowlist refused is offered no
+    // console page at all, and gets no `div.menu-places` to be offered in.
+    let config_word = v.t(K::Config);
+    let on_config = current == Route::Config;
+    let account_word = v.t(K::NotAdminToAccount);
+    let account_href = format!("{}/", v.cfg.account_path);
+    let places = v.admin.map(|_| {
+        html! {
+            div class="menu-tabs" { (tab_links) }
+            a class=@if on_config { "pill on" } @else { "pill" }
+              href=(v.href(&Route::Config)) aria-current=[on_config.then_some("page")]
+              { (config_word) }
+            a class="pill" href=(account_href) { (account_word) }
+        }
+    });
+    let prefs = prefs_form(
+        v.lang,
+        v.lang_pref,
+        v.theme,
+        &v.href(&v.at),
+        &preserved_query(v.query),
+        true,
+    );
     // The account end of the bar, and it is a `nav` for the same reason the tabs are: it makes
-    // these controls flex items of a flex row, exactly as the five tabs are. Before this they
-    // were a `details` and a bare link sitting directly in the bar, which is three different
-    // structures for one object, and an object whose box depends on which structure it happens
-    // to be in is not one object.
+    // these controls flex items of a flex row, exactly as the tabs are. One menu, opened by the
+    // person's own name, replaces the identity span, the sliders trigger and the Sign out icon
+    // of §13.17 and the Preferences menu of §13.20.
+    //
+    // Sign out is rendered even without an administrator, unlike the places: the `403` page is
+    // exactly where this is most useful, because the way out of "you are signed in as somebody
+    // who may not use this" is to end that session and start another. It is a plain link and not
+    // a form: the gate's `/auth/logout` is a `GET` that clears the cookie and redirects, guarded
+    // there against cross-site navigation.
     let acct = html! {
         nav class="acct" {
-            // "Who am I acting as" sits where the session controls are, not below the fold in
-            // a footer. It is text and not a control, and muted because it answers a question
-            // rather than asking one.
-            @if let Some(who) = &who {
-                span class="who muted" { (who) }
-            }
-            // The Settings menu: `details` is the disclosure widget HTML has had all along, so
-            // the menu opens with no script, and closes by itself on submit, because
-            // submitting reloads the page. The form is a plain `GET` back to this same route,
-            // which is exactly the URL the old switch links built by hand; the handler below
-            // turns each parameter into a cookie and redirects it back out.
-            details class="settings" {
-                // The sliders, and not a gear: this menu sets two display preferences, and a
-                // gear beside a "Settings" tab would promise the access settings.
-                (prefs_trigger(settings_name))
-                div class="menu" {
-                    // The identity's second home, and the one that survives a phone: the bar
-                    // hides it there and the menu opens with the answer.
-                    @if let Some(who) = &who {
-                        p class="lede" { (who) }
-                    }
-                    // class=edit is not decoration here: it is the form furniture every other
-                    // field in this GUI is dressed in, and a settings field that invented its
-                    // own would be one more thing on the page that looks like nothing else.
-                    form class="edit" method="get" action=(v.href(&v.at)) {
-                        @for (k, val) in preserved_query(v.query) {
-                            input type="hidden" name=(k) value=(val);
-                        }
-                        label {
-                            span class="lbl" { (v.t(K::SettingLanguage)) }
-                            select name=(LANG_COOKIE) onchange=(SETTINGS_ONCHANGE) {
-                                @for p in langs {
-                                    option value=(p.code()) selected[p == v.lang_pref] {
-                                        (p.label(v.lang))
-                                    }
-                                }
-                            }
-                        }
-                        label {
-                            span class="lbl" { (v.t(K::SettingTheme)) }
-                            select name=(THEME_COOKIE) onchange=(SETTINGS_ONCHANGE) {
-                                @for th in themes {
-                                    option value=(th.code()) selected[th == v.theme] {
-                                        (v.t(theme_label(th)))
-                                    }
-                                }
-                            }
-                        }
-                        // The way in for a browser with scripting off, and the only path that
-                        // sets both preferences at once. With scripting on the browser parses
-                        // this as text, so the button is not in the DOM at all and picking an
-                        // option is the whole interaction.
-                        noscript { div class="actions" { button { (v.t(K::Apply)) } } }
-                    }
-                }
-            }
-            // Sign out, when the operator has said where to: last in the bar, to the right of
-            // the preferences menu, which is where a session control is looked for. It is the
-            // same pill as every other control up here and at the same size, and it gets that
-            // for being INSIDE the bar (`CSS` selects `.bar .pill`) rather than for being
-            // named.
-            //
-            // Rendered even without an administrator, unlike the tabs: the `403` page is
-            // exactly where this is most useful, because the way out of "you are signed in as
-            // somebody who may not use this" is to end that session and start another. It is a
-            // plain link and not a form: the gate's `/auth/logout` is a `GET` that clears the
-            // cookie and redirects, guarded there against cross-site navigation.
-            @if let Some(u) = &v.cfg.logout_url {
-                (sign_out_pill(u, sign_out))
-            }
+            (account_menu(
+                v.lang,
+                who.as_ref(),
+                places,
+                prefs,
+                v.cfg.logout_url.as_deref(),
+            ))
         }
     };
     html! {
@@ -8952,9 +9136,9 @@ struct AccountPrefs<'a> {
     /// redirect, both built from [`Config::account_path`].
     page: &'a str,
     /// Who the bar says is signed in, once the identity header has been read: the forwarded
-    /// `given_name` and the first address, or the address alone. `None` on the pages answered
+    /// `given_name` and every address, or the addresses alone. `None` on the pages answered
     /// before any identity exists (the `401`), where there is nobody to name.
-    who: Option<String>,
+    who: Option<Who>,
     /// Where Sign out points: [`Config::account_logout_url`], the operator's link with its `rd`
     /// dropped, and no control at all when the operator named no destination. The console's own
     /// pill is the same setting unchanged (§13.17).
@@ -8991,8 +9175,9 @@ struct AccountPrefs<'a> {
 /// `form-action` is `'self'`: the selector is a `GET` back to this same page, which is the whole
 /// interaction.
 ///
-/// `img-src` is the one place this policy is wider than the console's, and the reason is
-/// `ui.logo_url`, which the console's header does not show and this page does.
+/// `img-src` names the deployment's logo beside the `data:` that was already there, exactly as
+/// [`admin_csp_logo`] does for the console: both surfaces show the mark in the bar, so both name
+/// its source, and neither names a second one (§13.28 §6).
 fn account_csp(look: &AccountLook, reveal: bool) -> String {
     let style = csp_hash(&format!("{THEME_CSS}{BASE_CSS}{CSS}"));
     let script = if reveal {
@@ -9019,79 +9204,30 @@ fn account_shell(prefs: &AccountPrefs, title: &str, content: Markup, look: Accou
     // The two list boxes' options, each in the order they are offered, both leading with the
     // choice that follows something outside this page (the browser, the OS), because that is
     // where every session starts and what the other options are departures from.
-    let langs = [
-        LangPref::Auto,
-        LangPref::Fixed(Lang::En),
-        LangPref::Fixed(Lang::It),
-    ];
-    let themes = [UiTheme::System, UiTheme::Light, UiTheme::Dark];
     let brand_name = look.brand.unwrap_or(DEFAULT_ACCOUNT_BRAND);
-    // The words of the two icon controls, each used twice: once as the hidden name inside the
-    // control, once as the pointer tooltip, exactly as the console's bar does.
-    let settings_name = t(prefs.lang, K::Settings);
-    let sign_out = t(prefs.lang, K::SignOut);
     // The brand slot: the operator's mark and name, worn as the page showed them before the bar
     // existed. Not a link, because this page is the only one this person reached the estate for.
-    let brand = html! {
-        span class="brand selfserve-brand" {
-            // The logo only when the administrator set one: nothing configured means
-            // the page fetches no image at all. The `alt` is empty on purpose, because
-            // the name beside it already says what the picture is.
-            @if let Some(logo) = look.logo {
-                img src=(logo) alt="";
-            }
-            span class="name" { (brand_name) }
-        }
-    };
-    // The account end: the console's markup, from the console's own parts, so the two surfaces
-    // cannot drift. Language then Theme, the console's order.
+    let brand = brand_block(brand_name, None, look.logo, None, "selfserve-brand");
+    // The account end: one menu, built by the console's own function, so the two surfaces cannot
+    // drift. No places: this page has no tabs to move and offers no console page (§13.28 §2), so
+    // the panel is who the caller is, the Preferences box, and Sign out.
+    let prefs_box = prefs_form(
+        prefs.lang,
+        prefs.lang_pref,
+        prefs.theme,
+        prefs.page,
+        &[],
+        false,
+    );
     let acct = html! {
         nav class="acct" {
-            @if let Some(who) = &prefs.who {
-                span class="who muted" { (who) }
-            }
-            details class="settings" {
-                (prefs_trigger(settings_name))
-                div class="menu" {
-                    // The identity's second home, and the one that survives a phone: the bar
-                    // hides the name there, and the menu opens with the answer. A page that
-                    // carries its own lede is the exception, because that lede is the page's
-                    // first sentence and the design counts one per page (§13.23 §3, §4).
-                    @if !prefs.page_lede {
-                        @if let Some(who) = &prefs.who {
-                            p class="lede" { (who) }
-                        }
-                    }
-                    form class="edit" method="get" action=(prefs.page) {
-                        label {
-                            span class="lbl" { (t(prefs.lang, K::SettingLanguage)) }
-                            select name=(LANG_COOKIE) {
-                                @for p in langs {
-                                    option value=(p.code()) selected[p == prefs.lang_pref] {
-                                        (p.label(prefs.lang))
-                                    }
-                                }
-                            }
-                        }
-                        label {
-                            span class="lbl" { (t(prefs.lang, K::SettingTheme)) }
-                            select name=(THEME_COOKIE) {
-                                @for th in themes {
-                                    option value=(th.code()) selected[th == prefs.theme] {
-                                        (t(prefs.lang, theme_label(th)))
-                                    }
-                                }
-                            }
-                        }
-                        // Always present, not behind a `noscript`: this page emits no script and
-                        // no handler, so picking an option is only half an interaction without it.
-                        div class="actions" { button { (t(prefs.lang, K::Apply)) } }
-                    }
-                }
-            }
-            @if let Some(u) = prefs.logout {
-                (sign_out_pill(u, sign_out))
-            }
+            (account_menu(
+                prefs.lang,
+                prefs.who.as_ref(),
+                None,
+                prefs_box,
+                prefs.logout,
+            ))
         }
     };
     html! {
@@ -9128,9 +9264,9 @@ fn account_shell(prefs: &AccountPrefs, title: &str, content: Markup, look: Accou
 
 /// One HTML page under the prefix, with the estate's shared headers and this page's own policy.
 ///
-/// It does not go through [`respond_page`], because that answers with [`admin_csp`], whose
-/// `img-src 'none'` is a true statement about the console and a false one about a page that shows
-/// the deployment's logo.
+/// It does not go through [`respond_page`], because that answers with the console's policy, and
+/// the console's names the Settings list boxes' handler in `script-src` on every page. This page
+/// carries no handler at all, so its policy permits no script beyond the reveal's (§13.17).
 fn respond_account(
     req: Request,
     status: u16,
@@ -9968,7 +10104,7 @@ fn handle_account(
     // identity the estate handed over, not about one address picked out of it.
     let ids: Vec<String> = raw.split_ascii_whitespace().map(norm_email).collect();
     // The bar can name this person now, the address alone: the given name needs the settings.
-    prefs.who = Some(identity_label(None, &raw));
+    prefs.who = Some(who(None, &raw));
     // A preference is applied before anything is rendered, so the page a person lands on after a
     // submit is in the language and the appearance they just picked. `None` for a value nobody
     // recognises, which is what makes an unrecognised value set no cookie and leave the page as it
@@ -10005,7 +10141,7 @@ fn handle_account(
         .find(|c| c.claim == "given_name")
         .and_then(|c| header_value(&req, &c.header))
         .map(pct_decode);
-    prefs.who = Some(identity_label(given.as_deref(), &raw));
+    prefs.who = Some(who(given.as_deref(), &raw));
     let look = AccountLook {
         theme: settings.theme,
         stylesheet: settings.stylesheet_url.as_deref(),
@@ -12095,6 +12231,7 @@ fn handle(mut req: Request, cfg: &Config) {
             403,
             shell(&v, v.t(K::NoProxyTitle), page),
             &v.look,
+            None,
             false,
         );
         return;
@@ -12127,6 +12264,7 @@ fn handle(mut req: Request, cfg: &Config) {
                 401,
                 shell(&v, v.t(K::NoIdentityTitle), page),
                 &v.look,
+                None,
                 false,
             );
             return;
@@ -12139,7 +12277,7 @@ fn handle(mut req: Request, cfg: &Config) {
     let identities: Vec<String> = raw_email.split_ascii_whitespace().map(norm_email).collect();
     // What nginx sent, as the refusal page has to show it: an operator debugging a lockout
     // needs the header as it arrived, not one address picked out of it.
-    let who = identities.join(" ");
+    let who_header = identities.join(" ");
 
     // The allowlist, fresh off disk on every request, because this is the one service that
     // can edit it. Three outcomes, and they are deliberately different pages: a file that
@@ -12158,6 +12296,7 @@ fn handle(mut req: Request, cfg: &Config) {
                 500,
                 shell(&v, v.t(K::FileErrorTitle), page_file_error(&v, &e)),
                 &v.look,
+                None,
                 false,
             );
             return;
@@ -12171,6 +12310,10 @@ fn handle(mut req: Request, cfg: &Config) {
         stylesheet: settings.stylesheet_url.as_deref(),
         brand: settings.brand_name.as_deref(),
     };
+    // The mark the bar shows and the one `img-src` source the policy names, read from the
+    // same settings as the rest of the look and handed to both the shell and the response
+    // (§13.28 §6).
+    let logo = settings.logo_url.as_deref();
     // The given name the header shows, and it exists only where the deployment configures the
     // claim: the settings say which header the proxy was told to fill, so a deployment that
     // does not name `given_name` forwards nothing and the bar says the address alone. Decoded
@@ -12190,6 +12333,7 @@ fn handle(mut req: Request, cfg: &Config) {
             500,
             shell(&v, v.t(K::FileErrorTitle), page_file_error(&v, &e)),
             &v.look,
+            logo,
             false,
         );
         return;
@@ -12210,7 +12354,7 @@ fn handle(mut req: Request, cfg: &Config) {
                 (notice(
                     "bad",
                     v.t(K::NotAdminTitle),
-                    html! { p { code { (who) } " " (v.t(K::NotAdminBody)) } },
+                    html! { p { code { (who_header) } " " (v.t(K::NotAdminBody)) } },
                 ))
                 // The way forward. This console has no page this person may open, but the
                 // self-service page is theirs by design (§13.2), so the refusal ends in an
@@ -12227,11 +12371,13 @@ fn handle(mut req: Request, cfg: &Config) {
                 403,
                 shell_named(
                     &v,
-                    Some(identity_label(given.as_deref(), &who)),
+                    Some(who(given.as_deref(), &who_header)),
+                    logo,
                     v.t(K::NotAdminTitle),
                     page,
                 ),
                 &v.look,
+                logo,
                 false,
             );
             return;
@@ -12275,8 +12421,16 @@ fn handle(mut req: Request, cfg: &Config) {
             respond_page(
                 req,
                 404,
-                shell_as(&v, given.as_deref(), v.t(K::NotFoundTitle), page),
+                shell_as(
+                    &v,
+                    given.as_deref(),
+                    &who_header,
+                    logo,
+                    v.t(K::NotFoundTitle),
+                    page,
+                ),
                 &v.look,
+                logo,
                 false,
             );
             return;
@@ -12320,8 +12474,16 @@ fn handle(mut req: Request, cfg: &Config) {
             respond_page(
                 req,
                 403,
-                shell_as(&v, given.as_deref(), v.t(K::CsrfTitle), page),
+                shell_as(
+                    &v,
+                    given.as_deref(),
+                    &who_header,
+                    logo,
+                    v.t(K::CsrfTitle),
+                    page,
+                ),
                 &v.look,
+                logo,
                 false,
             );
             return;
@@ -12342,8 +12504,9 @@ fn handle(mut req: Request, cfg: &Config) {
                 respond_page(
                     req,
                     status,
-                    shell_as(&v, given.as_deref(), title, content),
+                    shell_as(&v, given.as_deref(), &who_header, logo, title, content),
                     &v.look,
+                    logo,
                     reveal,
                 )
             }
@@ -12444,8 +12607,16 @@ fn handle(mut req: Request, cfg: &Config) {
         respond_page(
             req,
             200,
-            shell_as(&v, given.as_deref(), v.t(K::Config), content),
+            shell_as(
+                &v,
+                given.as_deref(),
+                &who_header,
+                logo,
+                v.t(K::Config),
+                content,
+            ),
             &v.look,
+            logo,
             false,
         );
         return;
@@ -12460,10 +12631,13 @@ fn handle(mut req: Request, cfg: &Config) {
                 shell_as(
                     &v,
                     given.as_deref(),
+                    &who_header,
+                    logo,
                     v.t(K::FileErrorTitle),
                     page_file_error(&v, &e),
                 ),
                 &v.look,
+                logo,
                 false,
             );
             return;
@@ -12844,8 +13018,9 @@ fn handle(mut req: Request, cfg: &Config) {
     respond_page(
         req,
         status,
-        shell_as(&v, given.as_deref(), title, content),
+        shell_as(&v, given.as_deref(), &who_header, logo, title, content),
         &v.look,
+        logo,
         false,
     );
 }
@@ -14412,10 +14587,10 @@ mod tests {
             app.contains(r#"<a class="pill" href="/apps">"#),
             "the way back is a pill, not prose: {app}"
         );
-        // Three different structures sit in that bar (the nav's tabs, a `details`' summary,
-        // and a bare child), and every one of them must be the same object with the same
-        // click area. The size rule therefore selects the CONTAINER and not the three
-        // structures: a list of them is a list that can miss one, which is what it did.
+        // Three different structures sit in that bar (the nav's tabs, the trigger's `summary`,
+        // and the panel's rows), and every one of them must be the same object with the same
+        // click area. The size rule therefore selects the CONTAINER and not the structures: a
+        // list of them is a list that can miss one, which is what it did.
         assert!(
             the_rule(CSS, ".bar .pill").is_some(),
             "every pill in the header shares one size rule, named by the bar and not one by one"
@@ -14428,20 +14603,26 @@ mod tests {
         // because a flex container blockifies its children and an inline-flex box left on a
         // text baseline answers a click over its line box rather than over the rectangle a
         // person can see. So every pill in the header is a flex item of a `nav` — the tabs in
-        // theirs, Preferences and Sign out in `nav.acct`. The summary is the one that cannot
-        // be moved (it must stay inside its `details`), so the CSS makes that `details` a
-        // flex container instead, which blockifies it the same way.
+        // theirs, the menu in `nav.acct`. The summary is the one that cannot be moved (it must
+        // stay inside its `details`), so the CSS makes that `details` a flex container instead,
+        // which blockifies it the same way.
         assert!(
             app.contains(r#"<nav class="acct">"#),
             "the account controls share one flex row: {app}"
         );
         assert!(
             CSS.contains("details.settings{display:flex"),
-            "and the Settings trigger is blockified by its own details"
+            "and the trigger is blockified by its own details"
         );
         assert!(
-            app.contains(r#"<summary class="pill ico""#),
-            "and carry the class that rule selects: {app}"
+            app.contains(r#"<summary class="pill who""#),
+            "the trigger is a pill of the family, wearing the class the size rule selects: {app}"
+        );
+        // §13.28 §3: the panel's rows are pills too, so they read as the same objects as the
+        // bar's tabs. The Sign out row is the one every page has.
+        assert!(
+            app.contains(r#"<a class="pill" href="/auth/logout">"#),
+            "a panel row is a pill, not an icon-only control: {app}"
         );
         // The footer never tells anybody to reload: `bb-auth-reload.path` does it.
         assert!(!app.contains("systemctl reload"), "{app}");
@@ -14450,23 +14631,31 @@ mod tests {
     #[test]
     fn sign_out_is_in_the_bar_when_configured_and_absent_when_not() {
         let html = render("signout", Route::Dashboard);
-        assert!(
-            html.contains(r#"<a class="pill ico" href="/auth/logout" title="Sign out">"#)
-                && html.contains(r#"<span class="vh">Sign out</span>"#),
-            "{html}"
+        // §13.28 §2: Sign out is a row of the panel, and in a panel there is room for the word,
+        // so the icon stops being the only label: the row says Sign out in the reader's language.
+        let panel = the_panel(&html, "console");
+        let outs: Vec<String> = controls_with_class(&panel, "a", "pill")
+            .into_iter()
+            .filter(|a| a.contains("/auth/logout"))
+            .collect();
+        assert_eq!(outs.len(), 1, "one Sign out row: {panel}");
+        assert_eq!(
+            visible_text(&outs[0]),
+            t(Lang::En, K::SignOut),
+            "{}",
+            outs[0]
         );
-        // To the RIGHT of the preferences menu, and the same object as everything else in
-        // the bar. Both are easy to get wrong and neither shows up in any other assertion:
-        // the order is DOM order, and the size comes from the bar's own rule, which is why
-        // that rule selects the bar rather than listing the shapes inside it.
-        let (settings_at, signout_at) = (
-            html.find("details class=\"settings\"")
-                .or(html.find("<details class=\"settings\"")),
-            html.find(r#"<a class="pill ico" href="/auth/logout""#),
-        );
         assert!(
-            settings_at < signout_at,
-            "Sign out must come after the menu: {html}"
+            !outs[0].contains(r#"class="pill ico""#),
+            "the word is visible, not hidden behind an icon: {}",
+            outs[0]
+        );
+        // It is the panel's last row (§13.28 §2), which is also what keeps the Tab order off the
+        // destructive row step 7 adds after it.
+        let sign_out_at = panel.find(&outs[0]).expect("the row is in the panel");
+        assert!(
+            !panel[sign_out_at + outs[0].len()..].contains("<a "),
+            "Sign out is the panel's last link: {panel}"
         );
         assert!(
             the_rule(CSS, ".bar .pill").is_some(),
@@ -14619,6 +14808,17 @@ mod tests {
             .unwrap_or_else(|| panic!("the cover has no z-index: {cover}"))
             .parse()
             .expect("a numeric z-index");
+
+        // The nested Preferences box grows **no cover of its own**. The cover's selector is a child
+        // combinator off `details.settings`, which is what makes a click outside close the panel
+        // while the inner box toggles only from its own row: a second fixed cover would answer one
+        // click twice, so closing the panel would leave the preferences open under a hidden panel.
+        for (sel, body) in &rules {
+            assert!(
+                !(sel.contains("details.prefs") && sel.contains("::before")),
+                "details.prefs grows a cover of its own: {sel} {{{body}}}"
+            );
+        }
 
         // The panel stays above it, or the list boxes inside would hit the cover first.
         let menu_z: i32 = css_decl(&rule(".menu"), "z-index")
@@ -15412,9 +15612,18 @@ mod tests {
         let mut v = view(&cfg, Route::App("mpa".to_string()), "REV");
         v.query = "email=bob%40x.com&lang=en&theme=dark";
         let html = shell(&v, "t", html! { "x" }).into_string();
-        assert!(
-            html.contains(r#"<form class="edit" method="get" action="/admin/apps/mpa">"#),
-            "{html}"
+        // §13.28 §2: the form lives in the nested Preferences box now, so it is found there and
+        // not by a class. The class is the coder's; what must not move is that a GET goes back to
+        // the page it is on, which is what keeps a filter and a pager alive across a theme change.
+        let prefs = nested_block(&html, "<details class=\"prefs\">", "details");
+        let forms = elements(&prefs, "<form", "</form>");
+        assert_eq!(forms.len(), 1, "one form in the box: {prefs}");
+        let form = open_tag(&forms[0]);
+        assert_eq!(attr(form, "method").as_deref(), Some("get"), "{form}");
+        assert_eq!(
+            attr(form, "action").as_deref(),
+            Some("/admin/apps/mpa"),
+            "{form}"
         );
         // The access check's own fields survive the round trip; the two parameters the form
         // sets itself do not come back as hidden fields, or the list boxes could never
@@ -21915,12 +22124,15 @@ mod tests {
             docs.push((format!("the account keys table in {label}"), g.body));
         }
 
-        // The console's header (8b-1): Preferences and Sign out are icons too, so both are
-        // covered by the loop below the day they are built, and named in each language.
+        // The header (8b-1, 8b-2) as §13.28 §2-§3 rebuilt it: its rows are no longer icon-only,
+        // so they are not in the walk below. They are checked by the rule that replaced the
+        // hidden-name one: a glyph in the header is decoration beside a **visible** word, and
+        // that word is the reader's language. The panel is closed in the markup, so the rows are
+        // read out of the source, which is what every other assertion in this file does.
         let path = account_scratch_full("icon-names-console");
         paths.push(path.clone());
         let port = account_port(&path);
-        for (label, lang, code) in [("English", Lang::En, "en"), ("Italian", Lang::It, "it")] {
+        for (lang, code) in [(Lang::En, "en"), (Lang::It, "it")] {
             let g = console_get(port, "admin@x.com", &[("Cookie", &format!("lang={code}"))]);
             assert_eq!(
                 g.status,
@@ -21928,44 +22140,14 @@ mod tests {
                 "the console answers the admin: {}",
                 account_readable(&g.body)
             );
-            let summaries = controls_with_class(&g.body, "summary", "ico");
-            assert_eq!(
-                summaries.len(),
-                1,
-                "the console header's Preferences trigger is one `summary.pill.ico`: {}",
-                account_readable(&g.body)
-            );
-            assert_eq!(
-                visible_text(&summaries[0]),
-                t(lang, K::Settings),
-                "{label}: {}",
-                summaries[0]
-            );
-            let outs: Vec<String> = controls_with_class(&g.body, "a", "ico")
-                .into_iter()
-                .filter(|el| el.contains("/auth/logout"))
-                .collect();
-            assert_eq!(
-                outs.len(),
-                1,
-                "the console header's Sign out is one `a.pill.ico` (the fixture sets \
-                 BB_AUTH_WEB_LOGOUT_URL): {}",
-                account_readable(&g.body)
-            );
-            assert_eq!(
-                visible_text(&outs[0]),
-                t(lang, K::SignOut),
-                "{label}: {}",
-                outs[0]
-            );
-            docs.push((format!("the console header in {label}"), g.body));
+            check_header_glyphs(&g.body, lang, "console");
         }
 
-        // The account page's header (8b-2): the same two icons, named in each language.
+        // `/account/`: the same rows, the same rule.
         let path = account_scratch_full("icon-names-account");
         paths.push(path.clone());
         let base = account_serve(&path);
-        for (label, lang, code) in [("English", Lang::En, "en"), ("Italian", Lang::It, "it")] {
+        for (lang, code) in [(Lang::En, "en"), (Lang::It, "it")] {
             let g = account_call_pref(
                 &base,
                 Some("bob@x.com"),
@@ -21973,17 +22155,7 @@ mod tests {
                 None,
             );
             assert_eq!(g.status, 200, "{}", account_readable(&g.body));
-            let top = the_header_bar(&g.body, label);
-            let summaries = controls_with_class(&top, "summary", "ico");
-            assert_eq!(summaries.len(), 1, "{label}: Preferences is an icon: {top}");
-            assert_eq!(visible_text(&summaries[0]), t(lang, K::Settings), "{label}");
-            let outs: Vec<String> = controls_with_class(&top, "a", "ico")
-                .into_iter()
-                .filter(|el| el.contains("/auth/logout"))
-                .collect();
-            assert_eq!(outs.len(), 1, "{label}: Sign out is an icon: {top}");
-            assert_eq!(visible_text(&outs[0]), t(lang, K::SignOut), "{label}");
-            docs.push((format!("the account header in {label}"), g.body));
+            check_header_glyphs(&g.body, lang, "account");
         }
 
         for (where_, body) in &docs {
@@ -22098,79 +22270,74 @@ mod tests {
         got_of(req.call().expect("a response"))
     }
 
-    /// 8b-1 (§13.17, "The identity, added to the console too"): who is signed in is said where
-    /// the session controls are. `identity_label` is pure: the forwarded `given_name` (when the
-    /// deployment configures that claim) and the FIRST address of `X-Auth-Email`, which may
-    /// hold several joined by a space; else the address alone.
+    /// 8b-1 (§13.17, "The identity, added to the console too"), as §13.28 §1 reshaped it: who is
+    /// signed in is said **once**, as the trigger's label. `who` is pure: the forwarded
+    /// `given_name` (when the deployment configures that claim) else the FIRST address of
+    /// `X-Auth-Email`, which may hold several joined by a space; and every address of the header,
+    /// in order, for the panel that says the rest.
     ///
-    /// Red until the coder adds `identity_label`: it does not exist, so the test module does
-    /// not compile (E0425), which is the expected red for this slice.
+    /// Red until the coder replaces `identity_label` with `who`: the stub answers nothing, so the
+    /// label is empty and the panel has no addresses to print.
     #[test]
     fn the_identity_is_the_given_name_and_the_first_address() {
+        assert_eq!(who(Some("Bot"), "bot@example.com").label, "Bot");
         assert_eq!(
-            identity_label(Some("Bot"), "bot@example.com"),
-            "Bot \u{b7} bot@example.com"
+            who(Some("Bot"), "bot@example.com alt@example.com").label,
+            "Bot",
+            "of several addresses only the first is shown, and a name beats both"
+        );
+        assert_eq!(who(None, "bot@example.com").label, "bot@example.com");
+        assert_eq!(
+            strings(&who(None, "bot@example.com alt@example.com").emails),
+            ["bot@example.com", "alt@example.com"],
+            "the panel lists every address, in the header's order"
         );
         assert_eq!(
-            identity_label(Some("Bot"), "bot@example.com alt@example.com"),
-            "Bot \u{b7} bot@example.com",
-            "of several addresses only the first is shown"
-        );
-        assert_eq!(identity_label(None, "bot@example.com"), "bot@example.com");
-        assert_eq!(
-            identity_label(None, "bot@example.com alt@example.com"),
-            "bot@example.com"
-        );
-        assert_eq!(
-            identity_label(Some("  "), "bot@example.com"),
+            who(Some("  "), "bot@example.com").label,
             "bot@example.com",
             "a blank given name is no given name"
         );
-        assert_eq!(
-            identity_label(Some(""), "bot@example.com"),
-            "bot@example.com"
-        );
+        assert_eq!(who(Some(""), "bot@example.com").label, "bot@example.com");
+        for given in [Some("Bot"), None, Some("  ")] {
+            let label = who(given, "bot@example.com alt@example.com").label;
+            assert!(
+                !label.contains('\u{b7}'),
+                "{given:?}: one fact per line, no joined label: {label}"
+            );
+        }
 
-        // On a rendered console page: `span.who` in `nav.acct`, and the menu's first `p.lede`.
+        // On a rendered console page: the label is the trigger's `span.who-name`, and the panel's
+        // `p.who-full` prints every address. The `span.who` of §13.17 is gone.
         let path = account_scratch_full("identity-label-console");
         let port = account_port(&path);
         for (extra, label) in [
-            (
-                vec![("X-Auth-Given-Name", "Ada%20Admin")],
-                "Ada Admin \u{b7} admin@x.com",
-            ),
+            (vec![("X-Auth-Given-Name", "Ada%20Admin")], "Ada Admin"),
             (vec![], "admin@x.com"),
         ] {
-            let g = console_get(port, "admin@x.com", &extra);
+            let g = console_get(port, "admin@x.com admin@alt.com", &extra);
             assert_eq!(g.status, 200, "{}", account_readable(&g.body));
-            let acct = elements(&g.body, "<nav class=\"acct\"", "</nav>");
-            assert_eq!(acct.len(), 1, "{}", account_readable(&g.body));
-            let who = controls_with_class(&acct[0], "span", "who");
-            assert_eq!(who.len(), 1, "one span.who in nav.acct: {}", acct[0]);
-            assert_eq!(visible_text(&who[0]), label, "{}", who[0]);
+            let nav = the_account_nav(&g.body, "console");
+            let names = controls_with_class(&nav, "span", "who-name");
+            assert_eq!(names.len(), 1, "the label is in one span.who-name: {nav}");
+            assert_eq!(visible_text(&names[0]), label, "{}", names[0]);
             assert!(
-                attr(open_tag(&who[0]), "class")
-                    .is_some_and(|c| c.split_whitespace().any(|w| w == "muted")),
-                "the identity is muted text, not a control: {}",
-                who[0]
+                controls_with_class(&nav, "span", "who").is_empty(),
+                "the label is the trigger, not a span standing beside it: {nav}"
             );
+            let panel = the_panel(&g.body, "console");
+            let full = controls_with_class(&panel, "p", "who-full");
+            assert_eq!(full.len(), 1, "the panel says who: {panel}");
+            for addr in ["admin@x.com", "admin@alt.com"] {
+                assert!(
+                    full[0].contains(addr),
+                    "every address of the caller is in the panel: {addr}: {}",
+                    full[0]
+                );
+            }
             assert!(
-                acct[0].find("class=\"who").unwrap() < acct[0].find("<details").unwrap(),
-                "the identity comes before Preferences: {}",
-                acct[0]
-            );
-            let menu = elements(&acct[0], "<details", "</details>");
-            let lede = controls_with_class(&menu[0], "p", "lede");
-            assert!(
-                !lede.is_empty(),
-                "the menu opens with a p.lede: {}",
-                menu[0]
-            );
-            assert_eq!(visible_text(&lede[0]), label, "{}", lede[0]);
-            assert!(
-                menu[0].find("class=\"lede\"").unwrap() < menu[0].find("<form").unwrap(),
-                "the lede is the menu's first line, above the form: {}",
-                menu[0]
+                !full[0].contains('\u{b7}'),
+                "the panel prints the facts on their own lines, never a joined string: {}",
+                full[0]
             );
         }
         let _ = std::fs::remove_file(&path);
@@ -22197,7 +22364,7 @@ mod tests {
                 (
                     "bob@x.com",
                     vec![("X-Auth-Given-Name", "Bob%20Smith")],
-                    "Bob Smith \u{b7} bob@x.com",
+                    "Bob Smith",
                 ),
                 ("bob@x.com carol@x.com", vec![], "bob@x.com"),
                 // Vetoed in the fixture: the console does not read the veto, so same page.
@@ -22218,13 +22385,22 @@ mod tests {
                     tabs.iter().all(|n| visible_text(n).is_empty()),
                     "{ctx}: the tabs nav before nav.acct is empty: {tabs:?} of {navs:?}"
                 );
-                let who_span = controls_with_class(&acct[0], "span", "who");
-                assert_eq!(who_span.len(), 1, "{ctx}: one span.who: {}", acct[0]);
-                assert_eq!(visible_text(&who_span[0]), shown, "{ctx}");
-                let menu = elements(&acct[0], "<details", "</details>");
-                let lede = controls_with_class(&menu[0], "p", "lede");
-                assert!(!lede.is_empty(), "{ctx}: the menu opens with a p.lede");
-                assert_eq!(visible_text(&lede[0]), shown, "{ctx}");
+                let names = controls_with_class(&acct[0], "span", "who-name");
+                assert_eq!(
+                    names.len(),
+                    1,
+                    "{ctx}: the caller is named by the trigger: {}",
+                    acct[0]
+                );
+                assert_eq!(visible_text(&names[0]), shown, "{ctx}");
+                let panel = the_panel(&g.body, &ctx);
+                let full = controls_with_class(&panel, "p", "who-full");
+                assert_eq!(
+                    full.len(),
+                    1,
+                    "{ctx}: the panel says who the caller is: {panel}"
+                );
+                assert!(full[0].contains(shown), "{ctx}: {}", full[0]);
 
                 // One way forward: the account page, as the one primary action.
                 let primary = controls_with_class(&g.body, "p", "primary");
@@ -22248,12 +22424,18 @@ mod tests {
                     "{ctx}"
                 );
 
-                // Sign out stays, still the console's configured URL.
-                let outs: Vec<String> = controls_with_class(&acct[0], "a", "ico")
+                // Sign out stays, still the console's configured URL, as the panel's row.
+                let outs: Vec<String> = controls_with_class(&panel, "a", "pill")
                     .into_iter()
                     .filter(|el| el.contains("/auth/logout"))
                     .collect();
-                assert_eq!(outs.len(), 1, "{ctx}: Sign out is kept: {}", acct[0]);
+                assert_eq!(outs.len(), 1, "{ctx}: Sign out is kept: {panel}");
+                assert_eq!(
+                    visible_text(&outs[0]),
+                    t(lang, K::SignOut),
+                    "{ctx}: the row says Sign out in the reader's language: {}",
+                    outs[0]
+                );
             }
         }
         assert_eq!(t(Lang::En, K::NotAdminToAccount), "Go to your account");
@@ -22380,7 +22562,18 @@ mod tests {
             account_readable(&acct_page.body)
         );
 
-        // Tabs: the console's five pills; the account's an empty `nav`.
+        // Tabs: the console's four pills (§13.28 §4); the account's an empty `nav`.
+        assert_eq!(
+            controls_with_class(&c_top, "nav", "acct").len(),
+            1,
+            "console: one nav.acct: {c_top}"
+        );
+        assert_eq!(
+            controls_with_class(&the_tab_nav(&console.body, "console"), "a", "pill").len(),
+            4,
+            "console: the bar keeps four tabs: {}",
+            the_tab_nav(&console.body, "console")
+        );
         assert!(
             a_top.contains("<nav></nav>"),
             "account: an empty `nav` where the tabs would be: {a_top}"
@@ -22390,70 +22583,70 @@ mod tests {
             "account: no tab is current: {a_top}"
         );
 
-        // The account end: the same elements in the same order on both.
-        let c_acct = elements(&c_top, "<nav class=\"acct\"", "</nav>");
-        let a_acct = elements(&a_top, "<nav class=\"acct\"", "</nav>");
-        assert_eq!(c_acct.len(), 1, "{c_top}");
-        assert_eq!(a_acct.len(), 1, "account: one nav.acct: {a_top}");
-        assert_eq!(
-            class_values(&a_acct[0]),
-            class_values(&c_acct[0]),
-            "the account end is the same markup on both surfaces, class for class:\naccount: {}\nconsole: {}",
-            a_acct[0],
-            c_acct[0]
-        );
-        let who = controls_with_class(&a_acct[0], "span", "who");
-        assert_eq!(who.len(), 1, "account: one span.who: {}", a_acct[0]);
-        assert_eq!(
-            visible_text(&who[0]),
-            "Bob Smith \u{b7} bob@x.com",
-            "the given name and the first address: {}",
-            who[0]
-        );
-        let sums = controls_with_class(&a_acct[0], "summary", "ico");
-        assert_eq!(
-            sums.len(),
-            1,
-            "account: Preferences is summary.pill.ico: {}",
-            a_acct[0]
-        );
-        assert!(
-            a_acct[0].contains("<details class=\"settings\""),
-            "{}",
-            a_acct[0]
-        );
-        assert!(a_acct[0].contains("<div class=\"menu\""), "{}", a_acct[0]);
-        assert!(
-            a_acct[0].contains("<p class=\"lede\""),
-            "the identity is also the menu's first line: {}",
-            a_acct[0]
-        );
-
-        // The menu's fields: Language then Theme, the console's order, on both.
-        for (label, acct) in [("console", &c_acct[0]), ("account", &a_acct[0])] {
-            let lang = acct.find("<select name=\"lang\"").unwrap_or(usize::MAX);
-            let theme = acct.find("<select name=\"theme\"").unwrap_or(usize::MAX);
+        // The account end: one menu on each surface, built by one function, so the trigger is
+        // class for class the same. The panel's rows are not: the console's carries the places
+        // of a console the caller may not reach, and the page's carries none (§13.28 §2).
+        let c_acct = the_account_nav(&c_top, "console");
+        let a_acct = the_account_nav(&a_top, "account");
+        for (label, nav) in [("console", &c_acct), ("account", &a_acct)] {
+            let trigger = controls_with_class(nav, "summary", "who");
+            assert_eq!(trigger.len(), 1, "{label}: one summary.pill.who: {nav}");
+            assert_eq!(
+                class_values(&trigger[0]),
+                class_values(&controls_with_class(&c_acct, "summary", "who")[0]),
+                "{label}: the trigger is the same markup on both surfaces, class for class: \
+                 {}",
+                trigger[0]
+            );
+            assert!(
+                nav.contains("<details class=\"settings\""),
+                "{label}: the outer element stays details.settings: {nav}"
+            );
+            assert!(nav.contains("<div class=\"menu\""), "{label}: {nav}");
+            assert!(
+                !nav.contains("<p class=\"lede\""),
+                "{label}: the panel is not a lede, so the page keeps its one lede: {nav}"
+            );
+            // The preferences live in the nested box, in the console's field order.
+            let prefs = nested_block(nav, "<details class=\"prefs\">", "details");
+            assert!(
+                attr(open_tag(&prefs), "open").is_none(),
+                "{label}: the nested box is closed by default: {prefs}"
+            );
+            let lang = prefs.find("<select name=\"lang\"").unwrap_or(usize::MAX);
+            let theme = prefs.find("<select name=\"theme\"").unwrap_or(usize::MAX);
             assert!(
                 lang < theme && theme != usize::MAX,
-                "{label}: Language then Theme: {acct}"
+                "{label}: Language then Theme: {prefs}"
+            );
+            // Sign out is a row of the panel, with the word on it, from the same setting.
+            let panel = the_panel(nav, label);
+            let outs: Vec<String> = controls_with_class(&panel, "a", "pill")
+                .into_iter()
+                .filter(|el| el.contains("/auth/logout"))
+                .collect();
+            assert_eq!(
+                outs.len(),
+                1,
+                "{label}: Sign out is one a.pill row: {panel}"
+            );
+            assert_eq!(
+                visible_text(&outs[0]),
+                t(Lang::En, K::SignOut),
+                "{label}: the row says Sign out: {}",
+                outs[0]
             );
         }
-
-        // Sign out: the same pill, from the same setting (still the same URL in 8b-2).
-        let outs: Vec<String> = controls_with_class(&a_acct[0], "a", "ico")
-            .into_iter()
-            .filter(|el| el.contains("/auth/logout"))
-            .collect();
-        assert_eq!(
-            outs.len(),
-            1,
-            "account: Sign out is one a.pill.ico: {}",
-            a_acct[0]
+        let c_panel = the_panel(&c_acct, "console");
+        let a_panel = the_panel(&a_acct, "account");
+        assert!(
+            c_panel.contains("<div class=\"menu-tabs\">")
+                && c_panel.contains(&format!("{ADMIN_BASE}/config")),
+            "the console's panel carries its places: {c_panel}"
         );
         assert!(
-            a_acct[0].find("</details>").unwrap() < a_acct[0].find("/auth/logout").unwrap(),
-            "Sign out is last, to the right of Preferences: {}",
-            a_acct[0]
+            !a_panel.contains("menu-tabs") && !a_panel.contains(&format!("{ADMIN_BASE}/config")),
+            "the page offers no console place at all: {a_panel}"
         );
         let _ = std::fs::remove_file(&path);
 
@@ -22560,14 +22753,18 @@ mod tests {
         cleanup(&path);
     }
 
-    /// 8b-2: Preferences and Sign out on `/account/` are icon controls named by hidden text,
-    /// in the reader's language (the generic walk in `icon_controls_are_named_by_hidden_text`
-    /// also covers them, since it loops over every `.pill.ico` of every account page).
+    /// §13.28 §3: the header's controls say what they do **in words**, in the reader's language.
+    /// §13.17 named them by hidden text, because there the glyph was the whole control. §13.28
+    /// puts a visible word beside every header glyph, so the half of that pair that applies is
+    /// the other one: the glyph is decoration, out of the accessibility tree, and a glyph that
+    /// kept a name of its own would make the row say "Sign out" twice to a reader. The generic
+    /// walk (`icon_controls_are_named_by_hidden_text`) covers the icon controls that remain,
+    /// which are the row actions, not the header's.
     #[test]
-    fn the_account_header_icons_are_named_in_the_readers_language() {
-        let path = account_scratch_full("header-icons");
+    fn the_account_header_says_what_it_does_in_the_readers_language() {
+        let path = account_scratch_full("header-words");
         let base = account_serve(&path);
-        for (lang, code) in [(Lang::En, "en"), (Lang::It, "it")] {
+        for (code, lang) in [("en", Lang::En), ("it", Lang::It)] {
             let g = account_call_pref(
                 &base,
                 Some("bob@x.com"),
@@ -22575,28 +22772,15 @@ mod tests {
                 None,
             );
             assert_eq!(g.status, 200, "{}", account_readable(&g.body));
+            check_header_glyphs(&g.body, lang, "account");
+            // The icon-only spelling is gone from the bar: a control with a word on it wears no
+            // `ico`, because `ico` is the class that says "the glyph is the whole label".
             let top = the_header_bar(&g.body, code);
-            let sums = controls_with_class(&top, "summary", "ico");
-            assert_eq!(sums.len(), 1, "{code}: {top}");
-            assert_eq!(visible_text(&sums[0]), t(lang, K::Settings), "{}", sums[0]);
-            assert_eq!(
-                attr(open_tag(&sums[0]), "title").as_deref(),
-                Some(t(lang, K::Settings))
-            );
-            let outs: Vec<String> = controls_with_class(&top, "a", "ico")
-                .into_iter()
-                .filter(|el| el.contains("/auth/logout"))
-                .collect();
-            assert_eq!(outs.len(), 1, "{code}: Sign out is an icon pill: {top}");
-            assert_eq!(visible_text(&outs[0]), t(lang, K::SignOut), "{}", outs[0]);
-            assert_eq!(
-                attr(open_tag(&outs[0]), "title").as_deref(),
-                Some(t(lang, K::SignOut))
-            );
-            for el in sums.iter().chain(outs.iter()) {
+            for tag in ["summary", "a"] {
+                let icons = controls_with_class(&top, tag, "ico");
                 assert!(
-                    el.contains("aria-hidden=\"true\"") && el.contains("focusable=\"false\""),
-                    "{code}: the glyph is decoration: {el}"
+                    icons.is_empty(),
+                    "{code}: no header control is an icon-only {tag}: {icons:?}"
                 );
             }
         }
@@ -27738,5 +27922,1234 @@ mod tests {
                 other => panic!("{bad:?} must be refused, got {other:?}"),
             }
         }
+    }
+    // ===========================================================================================
+    // §13.28 (plan step 8, slice H): one account menu in the shared header, on one row.
+    //
+    // The bar's identity span, sliders trigger and Sign out icon of §13.17, and the Preferences
+    // menu's lede of §13.20, become ONE trigger that opens ONE panel: who you are, the console's
+    // places, Preferences, Sign out. The bar is one row at every width by construction, and the
+    // console's tabs move into that panel at 800px.
+    // ===========================================================================================
+
+    /// The element that opens with `open` through its **matching** close tag, counting nesting.
+    ///
+    /// [`elements`] stops at the first close tag of the name, which is the wrong end for a block
+    /// that holds the same tag inside it. The account menu's panel is exactly that: it holds a
+    /// `div` (its tab rows) and a `details` (its preferences), so a panel read with `elements` is
+    /// the panel up to its first nested `div`, and every assertion about what comes after that
+    /// div reads a truncated document.
+    fn nested_block(html: &str, open: &str, tag: &str) -> String {
+        let start = html
+            .find(open)
+            .unwrap_or_else(|| panic!("no {open} on the page"));
+        let open_tag = format!("<{tag}");
+        let close_tag = format!("</{tag}>");
+        let mut depth = 1usize;
+        let mut at = start + open.len();
+        loop {
+            let next_open = html[at..].find(&open_tag).map(|i| at + i);
+            let next_close = html[at..].find(&close_tag).map(|i| at + i);
+            match (next_open, next_close) {
+                (Some(i), c) if c.is_none_or(|j| i < j) => {
+                    // `<div` is a prefix of `<divx`, which is not a div.
+                    if matches!(
+                        html.as_bytes().get(i + open_tag.len()).copied(),
+                        Some(b' ') | Some(b'>')
+                    ) {
+                        depth += 1;
+                    }
+                    at = i + open_tag.len();
+                }
+                (_, Some(j)) => {
+                    depth -= 1;
+                    if depth == 0 {
+                        return html[start..j + close_tag.len()].to_string();
+                    }
+                    at = j + close_tag.len();
+                }
+                _ => panic!("no closing {tag} for {open}"),
+            }
+        }
+    }
+
+    /// `admin.css` as `(at-rule, selector, declarations)` triples: every rule tagged with the
+    /// at-rule it sits inside (`@media(max-width:800px)`) or `""` at the top level.
+    ///
+    /// [`css_rules`] cannot serve here: it loses the selector of a rule nested in an at-rule
+    /// (the selector is read into the at-rule's *body*, and an at-rule's body is discarded),
+    /// which is why [`phone_rules`] exists. This one keeps the nesting, which is the whole point
+    /// of §13.28 §4: the design is a new `@media (max-width:800px)` block beside the existing
+    /// 640 one, and a test that cannot tell a rule inside a media block from one outside it
+    /// cannot say which breakpoint a declaration answers to.
+    fn css_scoped(css: &str) -> Vec<(String, String, String)> {
+        let mut bare = String::new();
+        let mut rest = css;
+        while let Some(i) = rest.find("/*") {
+            bare.push_str(&rest[..i]);
+            rest = rest[i..].find("*/").map_or("", |j| &rest[i + j + 2..]);
+        }
+        bare.push_str(rest);
+        let mut out = Vec::new();
+        let mut stack: Vec<String> = Vec::new();
+        let mut head = String::new();
+        let mut body = String::new();
+        // Inside an at-rule's block the next thing read is a *selector*; inside a rule, a body.
+        let mut in_body = false;
+        // Whitespace is not all noise. A **selector** keeps its spaces, collapsed to one each,
+        // because `.brand img` and `.brandimg` are two different statements and the design names
+        // the first; a **declaration body** loses them, because `css_decl` compares a property
+        // name against the exact text before its colon. An at-rule's prelude loses them too, so
+        // `@media (max-width:800px)` and `@media(max-width:800px)` are one key.
+        for c in bare.chars() {
+            match c {
+                '{' => {
+                    let raw = std::mem::take(&mut head);
+                    // The head carries the whitespace that came before the selector, so the
+                    // at-rule test runs on the trimmed text: an untrimmed one reads " @media…"
+                    // as a selector, and every rule inside the block is then tagged with the
+                    // prelude **with its space**, which no caller's key matches.
+                    let at_rule = raw.trim_start().starts_with('@');
+                    let sel = if at_rule {
+                        raw.chars().filter(|c| !c.is_whitespace()).collect()
+                    } else {
+                        raw.split_whitespace().collect::<Vec<_>>().join(" ")
+                    };
+                    in_body = !at_rule;
+                    stack.push(sel);
+                }
+                '}' => {
+                    let sel = stack.pop().unwrap_or_default();
+                    if !body.is_empty() {
+                        let at = stack.last().cloned().unwrap_or_default();
+                        out.push((at, sel, std::mem::take(&mut body)));
+                    }
+                    head.clear();
+                    in_body = false;
+                }
+                ';' if in_body => body.push(';'),
+                c if in_body => {
+                    if !c.is_whitespace() {
+                        body.push(c);
+                    }
+                }
+                c => head.push(if c.is_whitespace() { ' ' } else { c }),
+            }
+        }
+        out
+    }
+
+    /// The declarations of the **top-level** rule for `sel`, with a panic that says which file
+    /// has no such rule.
+    fn top_rule(scoped: &[(String, String, String)], sel: &str) -> String {
+        scoped
+            .iter()
+            .find(|(at, s, _)| at.is_empty() && s == sel)
+            .unwrap_or_else(|| panic!("admin.css has no top-level rule for {sel}"))
+            .2
+            .clone()
+    }
+
+    /// The declarations of the rule for `sel` inside the at-rule `at`.
+    fn scoped_rule(scoped: &[(String, String, String)], at: &str, sel: &str) -> String {
+        scoped
+            .iter()
+            .find(|(a, s, _)| a == at && s == sel)
+            .unwrap_or_else(|| panic!("admin.css has no rule for {sel} inside {at}"))
+            .2
+            .clone()
+    }
+
+    /// The rules of `scoped` inside at-rule `at` that set `prop` to `want`, as `(selector, body)`.
+    ///
+    /// A design that names a selector ("the bar's tab `nav` gets `display:none`") states a
+    /// **role**, and more than one selector fills it (`nav.tabs`, `nav:not(.acct)`). A test that
+    /// pins one spelling fails a correct implementation for a reason nobody can see on the page,
+    /// so the roles checked here are matched by their declarations, not by their spelling.
+    fn rules_setting<'a>(
+        scoped: &'a [(String, String, String)],
+        at: &str,
+        prop: &str,
+        want: &str,
+    ) -> Vec<(&'a str, &'a str)> {
+        scoped
+            .iter()
+            .filter(|(a, _, body)| a == at && css_decl(body, prop).as_deref() == Some(want))
+            .map(|(_, sel, body)| (sel.as_str(), body.as_str()))
+            .collect()
+    }
+
+    /// The one rule inside at-rule `at` that caps the trigger at `want`, with a panic that names
+    /// what is missing. The trigger is `details.settings`'s `summary`, so its selector names one
+    /// of those two words; a cap on anything else is a cap on the wrong box.
+    fn trigger_cap<'a>(
+        scoped: &'a [(String, String, String)],
+        at: &str,
+        want: &str,
+    ) -> (&'a str, &'a str) {
+        let hits = rules_setting(scoped, at, "max-width", want);
+        assert_eq!(
+            hits.len(),
+            1,
+            "{at}: exactly one rule caps the trigger at {want}, found {hits:?}"
+        );
+        let (sel, body) = hits[0];
+        assert!(
+            sel.split(',').any(|p| {
+                let last = p.rsplit(['>', '+', '~', ' ']).next().unwrap_or(p);
+                last.contains("who") || last.contains("summary")
+            }),
+            "{at}: the {want} cap is on the trigger, not on {sel}"
+        );
+        (sel, body)
+    }
+
+    /// The `nav.acct` of a page: the account end of the bar, and the only place the menu is.
+    fn the_account_nav(html: &str, label: &str) -> String {
+        let all = elements(html, "<nav class=\"acct\"", "</nav>");
+        assert_eq!(all.len(), 1, "{label}: exactly one nav.acct: {html}");
+        all.into_iter().next().unwrap()
+    }
+
+    /// The panel of a page: the `div.menu` inside `details.settings`.
+    fn the_panel(html: &str, label: &str) -> String {
+        let nav = the_account_nav(html, label);
+        nested_block(&nav, "<div class=\"menu\">", "div")
+    }
+
+    /// The bar's content box, with its nested `div`s kept whole.
+    fn the_bar(html: &str, label: &str) -> String {
+        nested_block(&the_header_bar(html, label), "<div class=\"bar\">", "div")
+    }
+
+    /// The bar's tab `nav`: the first `nav` inside the bar, `nav.acct` being the last.
+    fn the_tab_nav(html: &str, label: &str) -> String {
+        let navs = elements(&the_bar(html, label), "<nav", "</nav>");
+        assert!(!navs.is_empty(), "{label}: the bar has a nav");
+        navs.into_iter().next().unwrap()
+    }
+
+    /// A console `GET` at an arbitrary path, as the proxy sends one.
+    fn console_at(port: u16, identity: &str, path: &str, cookie: &str) -> AccountGot {
+        let url = format!("http://127.0.0.1:{port}{ADMIN_BASE}{path}");
+        let r = get_with_secret(url)
+            .header(IDENTITY_HEADER, identity)
+            .header("Cookie", cookie)
+            .call()
+            .expect("a response");
+        got_of(r)
+    }
+
+    fn strings(v: &[String]) -> Vec<&str> {
+        v.iter().map(String::as_str).collect()
+    }
+
+    /// §13.28 §1: the trigger shows **one** string, and the panel says the rest. `who` is the
+    /// one place that decides which: the given name when nginx forwards one, else the first
+    /// address, with every address of the header kept for the panel.
+    ///
+    /// Red until the coder implements `who`: the stub in the file answers nothing, so the label
+    /// is empty and there are no addresses, which is a behavioural red about the label rule
+    /// rather than a compile error.
+    #[test]
+    fn who_is_the_name_else_the_first_address() {
+        let w = who(Some("Ada"), "a@x b@x");
+        assert_eq!(w.label, "Ada");
+        assert_eq!(strings(&w.emails), ["a@x", "b@x"]);
+        assert_eq!(
+            w.name.as_deref(),
+            Some("Ada"),
+            "the panel prints the name alone"
+        );
+        assert!(
+            !w.label.contains('\u{b7}'),
+            "no separator in a label: {}",
+            w.label
+        );
+
+        // No name, or a name that is only whitespace: the first address, as `identity_label`
+        // did, for the same reason (a blank is nothing to show).
+        for given in [None, Some(""), Some("  "), Some("\t")] {
+            let w = who(given, "a@x b@x");
+            assert_eq!(w.label, "a@x", "{given:?}");
+            assert_eq!(strings(&w.emails), ["a@x", "b@x"], "{given:?}");
+            assert_eq!(w.name, None, "{given:?}: a blank is no name");
+        }
+
+        // No address at all: nothing to say, and nothing to invent.
+        let w = who(None, "  ");
+        assert_eq!(w.label, "");
+        assert!(w.emails.is_empty(), "{:?}", w.emails);
+
+        // A name with no address is still a name: the trigger shows it, and the panel has no
+        // address lines to print.
+        let w = who(Some("Ada"), "");
+        assert_eq!(w.label, "Ada");
+        assert!(w.emails.is_empty(), "{:?}", w.emails);
+    }
+
+    /// §13.28 §3: the trigger is `details.settings > summary.pill.who`; its accessible name is
+    /// "Ada, account menu" (the visible label first, as WCAG 2.5.3 Label in Name asks); its
+    /// `title` carries the full label the ellipsis may cut; and the plain `span.who` of §13.17
+    /// is gone, because a label beside a control is two things where the design has one.
+    #[test]
+    fn the_trigger_is_the_label() {
+        let path = account_scratch_full("trigger-label");
+        let port = account_port(&path);
+        let base = format!("http://127.0.0.1:{port}{ACCOUNT_PATH}/");
+
+        for (lang, cookie) in [(Lang::En, "lang=en"), (Lang::It, "lang=it")] {
+            // The console: the dispatcher's `given` (the `given_name` claim's header, which
+            // ACCOUNT_SETTINGS_FULL configures) else the first address of `X-Auth-Email`.
+            for (extra, label) in [
+                (vec![("X-Auth-Given-Name", "Ada%20Admin")], "Ada Admin"),
+                (vec![], "admin@x.com"),
+            ] {
+                let mut headers: Vec<(&str, &str)> = vec![("Cookie", cookie)];
+                headers.extend(extra);
+                let g = console_get(port, "admin@x.com admin@alt.com", &headers);
+                assert_eq!(
+                    g.status,
+                    200,
+                    "{cookie} {label}: {}",
+                    account_readable(&g.body)
+                );
+                check_trigger(&g.body, label, lang, "console");
+            }
+
+            // `/account/`: the same rule, from `handle_account`, in both languages.
+            for (extra, label) in [
+                (vec![("X-Auth-Given-Name", "Bob%20Smith")], "Bob Smith"),
+                (vec![], "bob@x.com"),
+            ] {
+                let mut headers: Vec<(&str, &str)> = extra.iter().map(|(k, v)| (*k, *v)).collect();
+                headers.push(("Cookie", cookie));
+                let g = account_call_with(&base, Some("bob@x.com bob@old.com"), &headers);
+                assert_eq!(
+                    g.status,
+                    200,
+                    "{cookie} {label}: {}",
+                    account_readable(&g.body)
+                );
+                check_trigger(&g.body, label, lang, "account");
+            }
+        }
+        let _ = std::fs::remove_file(&path);
+    }
+
+    /// The trigger's shape, asserted the same way on both surfaces.
+    fn check_trigger(html: &str, label: &str, lang: Lang, at: &str) {
+        let nav = the_account_nav(html, at);
+        assert!(
+            nav.contains("<details class=\"settings\""),
+            "{at}: the outer element stays details.settings: {nav}"
+        );
+        let triggers = controls_with_class(&nav, "summary", "who");
+        assert_eq!(triggers.len(), 1, "{at}: one summary.pill.who: {nav}");
+        let text = visible_text(&triggers[0]);
+        assert!(
+            text.starts_with(label),
+            "{at}: the visible name starts with the label {label:?}: {}",
+            triggers[0]
+        );
+        assert!(
+            text.contains(&format!(", {}", t(lang, K::AccountMenu))),
+            "{at}: the accessible name is the label plus the menu word: {}",
+            triggers[0]
+        );
+        assert_eq!(
+            attr(open_tag(&triggers[0]), "title").as_deref(),
+            Some(label),
+            "{at}: the title carries the full label the ellipsis may cut: {}",
+            triggers[0]
+        );
+        assert!(
+            !text.contains('\u{b7}'),
+            "{at}: no separator, the panel says the rest: {}",
+            triggers[0]
+        );
+        assert!(
+            controls_with_class(&nav, "span", "who").is_empty(),
+            "{at}: no plain span.who is left in nav.acct: {nav}"
+        );
+        // The label is in `span.who-name`, the one box the stylesheet caps and cuts.
+        let names = controls_with_class(&triggers[0], "span", "who-name");
+        assert_eq!(
+            names.len(),
+            1,
+            "{at}: the label is in span.who-name: {}",
+            triggers[0]
+        );
+        assert_eq!(visible_text(&names[0]), label, "{at}: {}", names[0]);
+    }
+
+    /// The header's glyphs, asserted the same way on both surfaces (§13.28 §2-§3).
+    ///
+    /// §13.17's rule was "a glyph is named by hidden text", because the glyph was the whole
+    /// control. §13.28 puts a word beside every header glyph, so the rule that applies is the
+    /// other half of the same pair: the glyph is **out** of the accessibility tree and the
+    /// control's name is the visible word, in the reader's language. A glyph that kept a name of
+    /// its own would make the row say "Sign out" twice to a reader.
+    fn check_header_glyphs(html: &str, lang: Lang, at: &str) {
+        let nav = the_account_nav(html, at);
+        let glyphs = elements(&nav, "<svg", "</svg>");
+        assert!(!glyphs.is_empty(), "{at}: the header carries glyphs: {nav}");
+        for g in &glyphs {
+            assert!(
+                g.contains("aria-hidden=\"true\"") && g.contains("focusable=\"false\""),
+                "{at}: a header glyph is decoration: {g}"
+            );
+            assert!(
+                !g.contains("fill=") && !g.contains("stroke=") && !g.contains("style="),
+                "{at}: a glyph names no colour: {g}"
+            );
+        }
+        // The trigger's name is the label plus the menu word, and the word is the table's.
+        let hidden = controls_with_class(&nav, "summary", "who");
+        assert_eq!(hidden.len(), 1, "{at}: one trigger: {nav}");
+        let vh = controls_with_class(&hidden[0], "span", "vh");
+        assert_eq!(vh.len(), 1, "{at}: one span of hidden words: {}", hidden[0]);
+        assert_eq!(
+            visible_text(&vh[0]),
+            format!(", {}", t(lang, K::AccountMenu)),
+            "{at}: the hidden words name the control, in the reader's language: {}",
+            vh[0]
+        );
+        // The panel's rows say what they do, visibly, in the reader's language.
+        let panel = the_panel(html, at);
+        let prefs = controls_with_class(&panel, "summary", "pill");
+        assert_eq!(prefs.len(), 1, "{at}: the Preferences row: {panel}");
+        assert_eq!(
+            visible_text(&prefs[0]),
+            t(lang, K::Settings),
+            "{at}: {}",
+            prefs[0]
+        );
+        let outs: Vec<String> = controls_with_class(&panel, "a", "pill")
+            .into_iter()
+            .filter(|el| el.contains("/auth/logout"))
+            .collect();
+        assert_eq!(outs.len(), 1, "{at}: the Sign out row: {panel}");
+        assert_eq!(
+            visible_text(&outs[0]),
+            t(lang, K::SignOut),
+            "{at}: {}",
+            outs[0]
+        );
+        if at == "console" {
+            let sys: Vec<String> = controls_with_class(&panel, "a", "pill")
+                .into_iter()
+                .filter(|el| el.contains("/config"))
+                .collect();
+            assert_eq!(sys.len(), 1, "{at}: the System settings row: {panel}");
+            assert_eq!(
+                visible_text(&sys[0]),
+                t(lang, K::Config),
+                "{at}: the row and the page say the same thing: {}",
+                sys[0]
+            );
+        }
+    }
+
+    /// §13.28 §4 and §2: the bar keeps **four** tabs. The Settings tab is not a place in the
+    /// bar any more, and the bar's tabs say which one is current in words a reader hears, not
+    /// only in colour (WCAG 1.3.1).
+    #[test]
+    fn the_bar_has_four_tabs() {
+        let html = render("four-tabs", Route::Users);
+        let tabs = the_tab_nav(&html, "console");
+        let pills = controls_with_class(&tabs, "a", "pill");
+        let want = [
+            ("/", t(Lang::En, K::Dashboard)),
+            ("/apps", t(Lang::En, K::Apps)),
+            ("/users", t(Lang::En, K::Users)),
+            ("/audit", t(Lang::En, K::Audit)),
+        ];
+        assert_eq!(
+            pills.len(),
+            want.len(),
+            "the bar's tabs are exactly the four places: {tabs}"
+        );
+        for (i, (href, word)) in want.iter().enumerate() {
+            assert_eq!(
+                attr(open_tag(&pills[i]), "href").as_deref(),
+                Some(*href),
+                "tab {i}: {}",
+                pills[i]
+            );
+            assert_eq!(visible_text(&pills[i]), *word, "tab {i}: {}", pills[i]);
+        }
+        // The strip, not the whole bar: the panel hangs off the bar's account end, and its
+        // System settings row is a link to that page by design (§2), so a check on the bar
+        // would refuse the very row the other test in this section demands.
+        assert!(
+            !tabs.contains("/config"),
+            "no tab in the bar's strip links to the Settings page: {tabs}"
+        );
+        // The current one is named, and only one is.
+        let current = pills
+            .iter()
+            .filter(|a| attr(open_tag(a), "aria-current").as_deref() == Some("page"))
+            .collect::<Vec<_>>();
+        assert_eq!(
+            current.len(),
+            1,
+            "exactly one tab is aria-current on /users: {tabs}"
+        );
+        assert_eq!(
+            visible_text(current[0]),
+            t(Lang::En, K::Users),
+            "{}",
+            current[0]
+        );
+    }
+
+    /// §13.28 §2: the panel's content and order, on both surfaces. The panel was opened by
+    /// clicking a name, so it starts with who that name is; the console's places come next,
+    /// because they are pages of the console, and with them the row to the caller's own page
+    /// (the user's decision of 2026-11-25, which answers §13.28's open question 2: the console
+    /// carries it, `/account/` does not); Preferences is a closed group inside it; Sign out
+    /// is a row with the word on it.
+    #[test]
+    fn the_panel_is_in_order() {
+        let path = account_scratch_full("panel-order");
+        let port = account_port(&path);
+        let base = format!("http://127.0.0.1:{port}{ACCOUNT_PATH}/");
+
+        // --- the console: who, the tab rows, System settings, Preferences, Sign out.
+        let g = console_get(port, "admin@x.com admin@alt.com", &[]);
+        assert_eq!(g.status, 200, "{}", account_readable(&g.body));
+        let panel = the_panel(&g.body, "console");
+
+        let who = controls_with_class(&panel, "p", "who-full");
+        assert_eq!(who.len(), 1, "one p.who-full: {panel}");
+        for addr in ["admin@x.com", "admin@alt.com"] {
+            assert!(
+                who[0].contains(addr),
+                "every address of the caller is in the panel: {addr}: {}",
+                who[0]
+            );
+        }
+        assert!(
+            !panel.contains(ACCOUNT_BOB) && !panel.contains(ACCOUNT_CAROL),
+            "the uuid is not in the panel: {panel}"
+        );
+
+        let tabs_at = panel
+            .find("<div class=\"menu-tabs\">")
+            .expect("the console's panel carries the tab rows");
+        let settings_at = panel
+            .find(t(Lang::En, K::Config))
+            .expect("the console's panel carries the System settings row");
+        let prefs_at = panel
+            .find("<details class=\"prefs\">")
+            .expect("the console's panel carries the nested Preferences box");
+        let sign_out = controls_with_class(&panel, "a", "pill")
+            .into_iter()
+            .find(|a| visible_text(a) == t(Lang::En, K::SignOut))
+            .expect("the panel has a Sign out row that says Sign out");
+        let sign_out_at = panel
+            .find(&sign_out)
+            .expect("the Sign out row is in the panel");
+        assert!(
+            tabs_at < settings_at && settings_at < prefs_at && prefs_at < sign_out_at,
+            "the panel's order is the tabs, System settings, Preferences, Sign out: {panel}"
+        );
+
+        // The blocks are divided by a rule (§2), and Sign out sits behind the last of them: it is
+        // the row that leaves the estate, and the rule is what separates it from the rows that
+        // only change how the estate looks.
+        let mut seps = Vec::new();
+        let mut rest = panel.as_str();
+        while let Some(i) = rest.find("<div class=\"sep\"") {
+            seps.push(panel.len() - rest.len() + i);
+            rest = &rest[i + 1..];
+        }
+        assert!(
+            !seps.is_empty(),
+            "the panel's groups are divided by a rule: {panel}"
+        );
+        assert!(
+            *seps.last().unwrap() > prefs_at && *seps.last().unwrap() < sign_out_at,
+            "Sign out sits behind the last rule: {panel}"
+        );
+
+        // The tab rows are the bar's tabs: same hrefs, same order.
+        let menu_tabs = nested_block(&panel, "<div class=\"menu-tabs\">", "div");
+        let hrefs = |nav: &str| -> Vec<String> {
+            controls_with_class(nav, "a", "pill")
+                .iter()
+                .filter_map(|a| attr(open_tag(a), "href"))
+                .collect()
+        };
+        assert_eq!(
+            hrefs(&menu_tabs),
+            hrefs(&the_tab_nav(&g.body, "console")),
+            "the panel's tab rows are the bar's tabs"
+        );
+
+        // The Settings row is one link to the Settings page, reading the page's own word.
+        let settings = anchors_to(&panel, &format!("{ADMIN_BASE}/config"));
+        assert_eq!(settings.len(), 1, "one System settings row: {panel}");
+        assert!(
+            panel[tabs_at..].contains(&settings[0]),
+            "the row sits with the tabs, below them: {panel}"
+        );
+        assert_eq!(
+            visible_text(&settings[0]),
+            t(Lang::En, K::Config),
+            "the row reads the page's word: {}",
+            settings[0]
+        );
+
+        // Preferences is a closed group holding the one form.
+        let prefs = nested_block(&panel, "<details class=\"prefs\">", "details");
+        assert!(
+            attr(open_tag(&prefs), "open").is_none(),
+            "the nested box is closed by default: {prefs}"
+        );
+        let summaries = controls_with_class(&prefs, "summary", "pill");
+        assert_eq!(
+            summaries.len(),
+            1,
+            "the box's row is a summary.pill: {prefs}"
+        );
+        assert_eq!(
+            visible_text(&summaries[0]),
+            t(Lang::En, K::Settings),
+            "the row says Preferences: {}",
+            summaries[0]
+        );
+        let forms = elements(&prefs, "<form", "</form>");
+        assert_eq!(forms.len(), 1, "one form in the box: {prefs}");
+        assert!(
+            prefs.contains("<select name=\"lang\"") && prefs.contains("<select name=\"theme\""),
+            "the box holds the two list boxes: {prefs}"
+        );
+        assert!(
+            panel.find("<form").expect("the panel has a form") >= prefs_at,
+            "the form is inside the Preferences box, not loose in the panel: {panel}"
+        );
+
+        // Sign out is a row with the word on it, not an icon that is only named.
+        assert!(
+            sign_out.contains("/auth/logout"),
+            "the Sign out row is the configured link: {sign_out}"
+        );
+        assert!(
+            !sign_out.contains("class=\"pill ico\""),
+            "in a panel there is room for the word, so it is not an icon-only control: \
+             {sign_out}"
+        );
+
+        // No lede in the panel on any page: `p.who-full` is not a lede, so the panel adds no
+        // second lede to a page (§13.23 §3 counts one per page).
+        assert!(!panel.contains("<p class=\"lede\""), "no p.lede: {panel}");
+
+        // The console's panel **does** carry the way to the caller's own page: the user's
+        // decision of 2026-11-25 (PLAN.md step 8, §13.28 §2, open question 2 answered yes),
+        // which supersedes the reading this test first pinned. An `a.pill` to the account
+        // prefix, worded `K::NotAdminToAccount`, sitting with the console's places and ahead of
+        // the Preferences box, because it is a place to go and not a preference. Pinned in both
+        // languages: the pair that breaks is the row that ships the English word on an Italian
+        // page, and English alone passes on that.
+        let account_href = format!("{ACCOUNT_PATH}/");
+        for (lang, code) in [(Lang::En, "en"), (Lang::It, "it")] {
+            let cookie = format!("lang={code}");
+            let g = console_get(
+                port,
+                "admin@x.com admin@alt.com",
+                &[("Cookie", cookie.as_str())],
+            );
+            assert_eq!(g.status, 200, "{code}: {}", account_readable(&g.body));
+            let panel = the_panel(&g.body, &format!("console {code}"));
+            let rows = anchors_to(&panel, &account_href)
+                .into_iter()
+                .filter(|a| visible_text(a) == t(lang, K::NotAdminToAccount))
+                .collect::<Vec<_>>();
+            assert_eq!(
+                rows.len(),
+                1,
+                "{code}: the console's panel carries one Go to your account row: {panel}"
+            );
+            assert_eq!(
+                attr(open_tag(&rows[0]), "href").as_deref(),
+                Some(account_href.as_str()),
+                "{code}: the row goes to the account prefix: {}",
+                rows[0]
+            );
+            assert!(
+                attr(open_tag(&rows[0]), "class")
+                    .is_some_and(|c| c.split_whitespace().any(|word| word == "pill")),
+                "{code}: the row is an a.pill, the panel's row component: {}",
+                rows[0]
+            );
+            // Among the places, before Preferences: inside `div.menu-places` (§2 names that
+            // container), below the System settings row, ahead of the nested box. The row is
+            // located by its href, not by the word, because the Settings tab carries the same
+            // word as the Settings row and a word search answers for the tab.
+            let places = nested_block(&panel, "<div class=\"menu-places\">", "div");
+            assert!(
+                places.contains(&rows[0]),
+                "{code}: the row is one of the console's places: {panel}"
+            );
+            let settings = anchors_to(&panel, &format!("{ADMIN_BASE}/config"))
+                .into_iter()
+                .next()
+                .expect("the panel carries the System settings row");
+            let settings_at = panel.find(&settings).expect("the row is in its panel");
+            let prefs_at = panel
+                .find("<details class=\"prefs\">")
+                .expect("the panel carries the nested Preferences box");
+            let row_at = panel.find(&rows[0]).expect("the row is in its panel");
+            assert!(
+                settings_at < row_at && row_at < prefs_at,
+                "{code}: the row sits below the System settings row, before Preferences: {panel}"
+            );
+        }
+
+        // The `403`'s panel carries no such row: its caller has no places block at all (the
+        // places are administrators only, §2), and that page's body already ends in the one
+        // action, which `the_console_403_names_the_caller_and_links_to_their_account` pins.
+        let panel = the_panel(&console_get(port, "bob@x.com", &[]).body, "403");
+        assert!(
+            !panel.contains(t(Lang::En, K::NotAdminToAccount))
+                && !panel.contains(&format!("href=\"{ACCOUNT_PATH}/\"")),
+            "the 403's panel offers no account row: {panel}"
+        );
+        for at in every_route() {
+            let url = format!("http://127.0.0.1:{port}{ADMIN_BASE}{}", at.path());
+            let r = get_with_secret(url)
+                .header(IDENTITY_HEADER, "admin@x.com")
+                .call()
+                .expect("a response");
+            let g = got_of(r);
+            // A page that names a subject the fixture does not hold is a `404`, and a `404`
+            // renders the shell: the bar, the panel, and a lede in `main`. The assertion below
+            // is about the panel, so both answers are the page shape under test.
+            assert!(
+                g.status == 200 || g.status == 404,
+                "{at:?}: a page, not a refusal: {}",
+                account_readable(&g.body)
+            );
+            assert!(
+                !the_panel(&g.body, &format!("{at:?}")).contains("<p class=\"lede\""),
+                "no p.lede in the panel on {at:?}"
+            );
+        }
+
+        // --- `/account/`: no tabs, no Settings row, no console place at all.
+        let g = account_call(&base, Some("bob@x.com bob@old.com"));
+        assert_eq!(g.status, 200, "{}", account_readable(&g.body));
+        let panel = the_panel(&g.body, "account");
+        assert!(
+            !panel.contains("menu-tabs"),
+            "the page has no tabs to move: {panel}"
+        );
+        assert!(
+            !panel.contains(&format!("{ADMIN_BASE}/config")),
+            "the page has no System settings row: {panel}"
+        );
+        assert!(!panel.contains("<p class=\"lede\""), "{panel}");
+        let who = controls_with_class(&panel, "p", "who-full");
+        assert_eq!(who.len(), 1, "{panel}");
+        for addr in ["bob@x.com", "bob@old.com"] {
+            assert!(who[0].contains(addr), "{addr}: {}", who[0]);
+        }
+        assert!(
+            panel.contains("<details class=\"prefs\">") && panel.contains(t(Lang::En, K::SignOut)),
+            "the page's panel is who, Preferences, Sign out: {panel}"
+        );
+        // No "Go to your account" row here: this **is** that page, and the panel's rows are
+        // places to go (§13.28 §2), so the console's row is exactly the one row this surface
+        // must not carry, in either language, under either spelling of the prefix. The page's
+        // own address reaches the panel only as a form `action`, never as a link.
+        assert!(
+            !panel.contains(t(Lang::En, K::NotAdminToAccount))
+                && !panel.contains(t(Lang::It, K::NotAdminToAccount))
+                && !panel.contains(&format!("href=\"{ACCOUNT_PATH}/\""))
+                && !panel.contains(&format!("href=\"{ACCOUNT_PATH}\"")),
+            "the page offers no link to itself: {panel}"
+        );
+
+        // --- the console's `403`: the same panel, with only the person's own rows.
+        let g = console_get(port, "bob@x.com", &[]);
+        assert_eq!(g.status, 403, "{}", account_readable(&g.body));
+        let panel = the_panel(&g.body, "403");
+        assert_eq!(
+            controls_with_class(&panel, "p", "who-full").len(),
+            1,
+            "the 403 names the caller: {panel}"
+        );
+        assert!(
+            !panel.contains("menu-tabs") && !panel.contains(&format!("{ADMIN_BASE}/config")),
+            "a person who is not an administrator is offered no console page: {panel}"
+        );
+        let _ = std::fs::remove_file(&path);
+    }
+
+    /// §13.28 §5: the delete row is **not built in slice H**. Step 7 adds the row, its route,
+    /// its `K` key and its tests together; hidden markup would be a dead link a stylesheet could
+    /// reveal, and an unused `K` key is dead code. H only reserves the place (last, after a
+    /// rule) and the wording.
+    #[test]
+    fn nothing_in_the_header_deletes_an_account() {
+        let path = account_scratch_full("no-delete");
+        let port = account_port(&path);
+        let base = format!("http://127.0.0.1:{port}{ACCOUNT_PATH}/");
+
+        for (label, html) in [
+            ("console", console_get(port, "admin@x.com", &[]).body),
+            ("403", console_get(port, "bob@x.com", &[]).body),
+            ("account", account_call(&base, Some("bob@x.com")).body),
+        ] {
+            let panel = the_panel(&html, label);
+            assert!(
+                !panel.contains("/delete"),
+                "{label}: no delete link in the panel: {panel}"
+            );
+            assert!(
+                !panel.contains("pill rm"),
+                "{label}: no delete row styled as a remove: {panel}"
+            );
+            assert!(
+                !panel.contains("Delete account") && !panel.contains("Elimina l'account"),
+                "{label}: no delete words: {panel}"
+            );
+        }
+        let _ = std::fs::remove_file(&path);
+    }
+
+    /// §13.28 §4 and §2: `aria-current` names the page in both copies of the tabs, and on a
+    /// Settings page no bar tab is current while the panel's Settings row is. The page's own
+    /// heading carries the new name, in both languages.
+    #[test]
+    fn aria_current_names_the_page() {
+        let path = account_scratch_full("aria-current");
+        let port = account_port(&path);
+
+        for (lang, cookie, current) in [
+            (Lang::En, "lang=en", t(Lang::En, K::Users)),
+            (Lang::It, "lang=it", t(Lang::It, K::Users)),
+        ] {
+            let g = console_at(port, "admin@x.com", "/users", cookie);
+            assert_eq!(g.status, 200, "{cookie}: {}", account_readable(&g.body));
+            let tabs = the_tab_nav(&g.body, cookie);
+            let marked = controls_with_class(&tabs, "a", "pill")
+                .into_iter()
+                .filter(|a| attr(open_tag(a), "aria-current").as_deref() == Some("page"))
+                .collect::<Vec<_>>();
+            assert_eq!(marked.len(), 1, "{cookie}: one current tab: {tabs}");
+            assert_eq!(visible_text(&marked[0]), current, "{cookie}: {}", marked[0]);
+
+            let panel = the_panel(&g.body, cookie);
+            let menu_tabs = nested_block(&panel, "<div class=\"menu-tabs\">", "div");
+            let marked = controls_with_class(&menu_tabs, "a", "pill")
+                .into_iter()
+                .filter(|a| attr(open_tag(a), "aria-current").as_deref() == Some("page"))
+                .collect::<Vec<_>>();
+            assert_eq!(
+                marked.len(),
+                1,
+                "{cookie}: one current tab in the panel: {menu_tabs}"
+            );
+            assert_eq!(visible_text(&marked[0]), current, "{cookie}: {}", marked[0]);
+            let _ = lang;
+        }
+
+        // A Settings page: no bar tab is current (the Settings tab is gone from the bar), and
+        // the panel's row is marked and wears `.on`.
+        for (label, cookie) in [("English", "lang=en"), ("Italian", "lang=it")] {
+            let g = console_at(port, "admin@x.com", "/config", cookie);
+            assert_eq!(g.status, 200, "{label}: {}", account_readable(&g.body));
+            let tabs = the_tab_nav(&g.body, label);
+            assert!(
+                !tabs.contains("aria-current"),
+                "{label}: no bar tab is current on a Settings page: {tabs}"
+            );
+
+            let panel = the_panel(&g.body, label);
+            let menu_tabs = nested_block(&panel, "<div class=\"menu-tabs\">", "div");
+            assert!(
+                !menu_tabs.contains("aria-current"),
+                "{label}: no tab row is current either: {menu_tabs}"
+            );
+            let row = controls_with_class(&panel, "a", "pill")
+                .into_iter()
+                .find(|a| {
+                    attr(open_tag(a), "href")
+                        .is_some_and(|h| h.ends_with(&format!("{ADMIN_BASE}/config")))
+                })
+                .unwrap_or_else(|| panic!("{label}: the Settings row: {panel}"));
+            assert_eq!(
+                attr(open_tag(&row), "aria-current").as_deref(),
+                Some("page"),
+                "{label}: the row names the page: {row}"
+            );
+            assert!(
+                attr(open_tag(&row), "class")
+                    .is_some_and(|c| c.split_whitespace().any(|w| w == "on")),
+                "{label}: the current row wears .on: {row}"
+            );
+
+            // One name per place: the row, the page's `h1` and its `<title>` agree.
+            let word = t(
+                if label == "Italian" {
+                    Lang::It
+                } else {
+                    Lang::En
+                },
+                K::Config,
+            );
+            let h1 = elements(&g.body, "<h1", "</h1>");
+            assert_eq!(h1.len(), 1, "{label}: {}", account_readable(&g.body));
+            assert_eq!(visible_text(&h1[0]), word, "{label}: {}", h1[0]);
+            let title = elements(&g.body, "<title>", "</title>");
+            assert_eq!(title.len(), 1, "{label}");
+            assert!(
+                visible_text(&title[0]).contains(word),
+                "{label}: the title reads the same word: {}",
+                title[0]
+            );
+        }
+
+        // The words themselves, pinned in both languages (§13.28 §8).
+        assert_eq!(t(Lang::En, K::Config), "System settings");
+        assert_eq!(t(Lang::It, K::Config), "Impostazioni di sistema");
+        assert_eq!(t(Lang::En, K::AccountMenu), "account menu");
+        assert_eq!(t(Lang::It, K::AccountMenu), "menu dell'account");
+        let _ = std::fs::remove_file(&path);
+    }
+
+    /// §13.28 §3: the console's Preferences form keeps its one handler and its `noscript` way
+    /// round; `/account/` has no handler at all and shows its Apply always. One form, two
+    /// settings, and the difference is a flag, not a second copy of the markup.
+    #[test]
+    fn the_preferences_form_is_scripted_on_the_console_and_plain_on_the_page() {
+        let path = account_scratch_full("prefs-form");
+        let port = account_port(&path);
+        let base = format!("http://127.0.0.1:{port}{ACCOUNT_PATH}/");
+
+        let g = console_get(port, "admin@x.com", &[]);
+        let prefs = nested_block(
+            &the_panel(&g.body, "console"),
+            "<details class=\"prefs\">",
+            "details",
+        );
+        assert_eq!(
+            handlers_in(&prefs),
+            vec![
+                format!("onchange=\"{SETTINGS_ONCHANGE}\""),
+                format!("onchange=\"{SETTINGS_ONCHANGE}\"")
+            ],
+            "the console's two list boxes carry the one handler: {prefs}"
+        );
+        assert!(
+            prefs.contains("<noscript>"),
+            "and the way round it is inside noscript: {prefs}"
+        );
+
+        let g = account_call(&base, Some("bob@x.com"));
+        let prefs = nested_block(
+            &the_panel(&g.body, "account"),
+            "<details class=\"prefs\">",
+            "details",
+        );
+        assert!(
+            handlers_in(&prefs).is_empty(),
+            "the page carries no handler at all: {prefs}"
+        );
+        assert!(
+            !prefs.contains("<noscript"),
+            "its Apply is always shown: {prefs}"
+        );
+        let actions = controls_with_class(&prefs, "div", "actions");
+        assert_eq!(actions.len(), 1, "in div.actions: {prefs}");
+        assert_eq!(
+            visible_text(&actions[0]),
+            t(Lang::En, K::Apply),
+            "{}",
+            actions[0]
+        );
+        let _ = std::fs::remove_file(&path);
+    }
+
+    /// §13.28 §6 (slice L): the console's bar carries `ui.logo_url`, and its policy permits that
+    /// one source. The account page's policy is what it was, and the console's is unchanged when
+    /// nothing is configured, so the widening is exactly as wide as the setting.
+    #[test]
+    fn the_console_shows_the_logo_and_permits_it() {
+        // Configured: the logo sits in the brand, before the name, and `img-src` names its
+        // source beside the `data:` that was already there.
+        let path = account_scratch("logo-set", ACCOUNT_SETTINGS_BRAND);
+        let port = account_port(&path);
+        let g = console_get(port, "admin@x.com", &[]);
+        assert_eq!(g.status, 200, "{}", account_readable(&g.body));
+        let top = the_header_bar(&g.body, "console");
+        let brand = controls_with_class(&top, "a", "brand");
+        assert_eq!(brand.len(), 1, "{top}");
+        let img = elements(&brand[0], "<img", ">");
+        assert_eq!(img.len(), 1, "the brand holds the logo: {}", brand[0]);
+        assert_eq!(
+            attr(open_tag(&img[0]), "src").as_deref(),
+            Some("https://assets.badbat75.com/logo.png"),
+            "{}",
+            img[0]
+        );
+        assert_eq!(
+            attr(open_tag(&img[0]), "alt").as_deref(),
+            Some(""),
+            "the name beside it says what the picture is: {}",
+            img[0]
+        );
+        assert!(
+            brand[0].find("<img").unwrap() < brand[0].find("BadBat75").unwrap(),
+            "the logo is left of the name: {}",
+            brand[0]
+        );
+        let csp = g.header("Content-Security-Policy").expect("a policy");
+        assert!(
+            csp.contains("img-src https://assets.badbat75.com data:"),
+            "img-src is the logo's source followed by data:: {csp}"
+        );
+        // The page's own policy already did this, and does it the same way.
+        let a = account_call(
+            &format!("http://127.0.0.1:{port}{ACCOUNT_PATH}/"),
+            Some("bob@x.com"),
+        );
+        assert_eq!(a.status, 200, "{}", account_readable(&a.body));
+        assert!(
+            a.header("Content-Security-Policy")
+                .expect("a policy")
+                .contains("img-src https://assets.badbat75.com data:"),
+            "the account page's policy is unchanged: {}",
+            a.header("Content-Security-Policy").unwrap()
+        );
+        // And the same mark in the same slot of the account bar: `brand_block` is one function
+        // for both shells (§13.28 §7), so an operator who sets `ui.logo_url` once sees it in
+        // both bars, and a logo that arrived by two routes is two rules to keep in step.
+        let top = the_header_bar(&a.body, "account");
+        let img = elements(&top, "<img", ">");
+        assert_eq!(img.len(), 1, "the account bar carries the logo too: {top}");
+        assert_eq!(
+            attr(open_tag(&img[0]), "src").as_deref(),
+            Some("https://assets.badbat75.com/logo.png"),
+            "{top}"
+        );
+        assert!(
+            top.find("<img").unwrap() < top.find("BadBat75").unwrap(),
+            "the logo is left of the brand name: {top}"
+        );
+        cleanup(&path);
+
+        // Not configured: no image, and `img-src data:` exactly as today on both surfaces.
+        let path = account_scratch("logo-unset", ACCOUNT_SETTINGS);
+        let port = account_port(&path);
+        for (label, g) in [
+            ("console", console_get(port, "admin@x.com", &[])),
+            (
+                "account",
+                account_call(
+                    &format!("http://127.0.0.1:{port}{ACCOUNT_PATH}/"),
+                    Some("bob@x.com"),
+                ),
+            ),
+        ] {
+            assert_eq!(g.status, 200, "{label}: {}", account_readable(&g.body));
+            let top = the_header_bar(&g.body, label);
+            assert!(!top.contains("<img"), "{label}: no logo in the bar: {top}");
+            assert!(
+                g.header("Content-Security-Policy")
+                    .expect("a policy")
+                    .contains("img-src data:;"),
+                "{label}: img-src is data: and nothing else: {}",
+                g.header("Content-Security-Policy").unwrap()
+            );
+        }
+        cleanup(&path);
+    }
+
+    /// §13.28 §4: the bar is **one row by construction**. `flex-wrap:nowrap` means no operator's
+    /// font, brand or person's name can make a second line; the tabs leave the bar at 800px,
+    /// where the measured four-tab worst case (773px) stops fitting, and ride in the panel.
+    ///
+    /// Red until the coder writes the CSS: `admin.css` has no 800px block, and `.bar` wraps.
+    #[test]
+    fn the_bar_stays_one_row_at_every_width() {
+        let scoped = css_scoped(CSS);
+
+        let bar = top_rule(&scoped, ".bar");
+        assert_eq!(
+            css_decl(&bar, "flex-wrap").as_deref(),
+            Some("nowrap"),
+            "the bar cannot make a second row: {bar}"
+        );
+
+        // Above 800px the panel's tab rows are not displayed; at and below, the bar's tabs are.
+        let tabs = top_rule(&scoped, ".menu-tabs");
+        assert_eq!(
+            css_decl(&tabs, "display").as_deref(),
+            Some("none"),
+            "the panel's tab rows are hidden above the breakpoint: {tabs}"
+        );
+        let at = "@media(max-width:800px)";
+        let hidden = rules_setting(&scoped, at, "display", "none");
+        assert!(
+            hidden.iter().any(|(sel, _)| sel.split(',').any(|p| {
+                let last = p.rsplit(['>', '+', '~', ' ']).next().unwrap_or(p);
+                last.starts_with("nav") && !last.contains("nav.acct")
+            })),
+            "{at}: the bar's tab nav is hidden, so the panel's rows are the navigation: \
+             {hidden:?}"
+        );
+        let tabs = scoped_rule(&scoped, at, ".menu-tabs");
+        assert_eq!(
+            css_decl(&tabs, "display").as_deref(),
+            Some("flex"),
+            "and the panel's tab rows appear: {tabs}"
+        );
+
+        // The sideways-scrolling tab strip is gone: a strip that scrolls is the clipped tab
+        // §13.17 named, and one row with a scroll is two dimensions.
+        for (a, sel, body) in &scoped {
+            if sel
+                .split(',')
+                .any(|p| p.ends_with("nav:not(.acct)") || p == "nav.tabs")
+            {
+                assert!(
+                    css_decl(body, "overflow-x").is_none(),
+                    "{sel} in {a} scrolls sideways: {body}"
+                );
+            }
+        }
+    }
+
+    /// §13.28 §1 and §4: what gives when the bar runs out of room, in order. The name pill
+    /// shrinks with an ellipsis, then the brand's text; the tabs and the logo never shrink, and
+    /// the identity is never hidden outright (the phone rule that did that hides the trigger
+    /// now, because the name **is** the trigger).
+    #[test]
+    fn the_bar_gives_room_by_shrinking_the_ellipsis_pieces() {
+        let scoped = css_scoped(CSS);
+
+        // `text-overflow` needs exactly these companions, and a box that cannot shrink below its
+        // content shows no ellipsis at all.
+        for sel in [".who-name", ".brand .t"] {
+            let rule = top_rule(&scoped, sel);
+            for (prop, want) in [
+                ("overflow", "hidden"),
+                ("text-overflow", "ellipsis"),
+                ("white-space", "nowrap"),
+            ] {
+                assert_eq!(
+                    css_decl(&rule, prop).as_deref(),
+                    Some(want),
+                    "{sel} needs {prop}:{want} to cut at all: {rule}"
+                );
+            }
+        }
+        let (sel, trigger) = trigger_cap(&scoped, "", "16rem");
+        assert_eq!(
+            css_decl(trigger, "min-width").as_deref(),
+            Some("0"),
+            "the trigger ({sel}) is the bar's first give: {trigger}"
+        );
+        let brand = top_rule(&scoped, ".brand");
+        assert_eq!(
+            css_decl(&brand, "max-width").as_deref(),
+            Some("14rem"),
+            "the brand is capped too: {brand}"
+        );
+        assert_eq!(
+            css_decl(&brand, "min-width").as_deref(),
+            Some("0"),
+            "{brand}"
+        );
+
+        // The phone block: a tighter cap, and a logo that stands in for the brand's words.
+        let at = "@media(max-width:640px)";
+        trigger_cap(&scoped, at, "11rem");
+        let hidden = scoped_rule(&scoped, at, ".brand:has(img) .t");
+        for prop in ["position", "clip-path", "width"] {
+            assert!(
+                css_decl(&hidden, prop).is_some(),
+                "with a logo the brand's text is visually hidden by {prop}: {hidden}"
+            );
+        }
+
+        // The rule that hid the identity on a phone hides the trigger outright now.
+        for (a, sel, body) in &scoped {
+            if sel.split(',').any(|p| p.ends_with("nav.acct .who")) {
+                panic!("{sel} in {a} is the rule §13.28 deletes: {body}");
+            }
+        }
+    }
+
+    /// §13.28 §6: one rule sizes the logo on both surfaces, bounded by **height** so a wide
+    /// wordmark cannot eat the tabs' room, and `flex:none` so the bar never squeezes it.
+    #[test]
+    fn the_logo_is_bounded_by_height() {
+        let scoped = css_scoped(CSS);
+        let rule = top_rule(&scoped, ".brand img");
+        for prop in ["height", "max-width", "flex"] {
+            assert!(
+                css_decl(&rule, prop).is_some(),
+                ".brand img sets {prop}: {rule}"
+            );
+        }
+        assert_eq!(
+            css_decl(&rule, "flex").as_deref(),
+            Some("none"),
+            "the logo never shrinks: {rule}"
+        );
+        assert_eq!(
+            css_decl(&rule, "width").as_deref(),
+            Some("auto"),
+            "the height is the bound, not the width: {rule}"
+        );
+        // The account page's own rule is replaced by this one, not added to it.
+        assert!(
+            !scoped
+                .iter()
+                .any(|(_, sel, _)| sel == ".selfserve-brand img"),
+            "one rule sizes the logo on both surfaces"
+        );
+    }
+
+    /// §13.28 §2: "Auto" is the theme that follows the operating system, and the option has to
+    /// say so. The bare word answers nothing when a person is choosing between three options.
+    #[test]
+    fn the_auto_theme_says_what_it_follows() {
+        assert_eq!(t(Lang::En, K::ThemeSystem), "Auto (system)");
+        assert_eq!(t(Lang::It, K::ThemeSystem), "Auto (sistema)");
+
+        // And the word is what the page shows, in both languages.
+        let path = account_scratch_full("theme-word");
+        let port = account_port(&path);
+        for (label, cookie, word) in [
+            ("English", "lang=en", "Auto (system)"),
+            ("Italian", "lang=it", "Auto (sistema)"),
+        ] {
+            let g = console_get(port, "admin@x.com", &[("Cookie", cookie)]);
+            assert_eq!(g.status, 200, "{label}: {}", account_readable(&g.body));
+            // The option element, not a substring: the selected one carries `selected` beside
+            // its `value`, so a literal `<option value="system">` is not what the page spells.
+            let mut sels = elements(&g.body, "<select name=\"theme\"", "</select>");
+            assert_eq!(sels.len(), 1, "{label}: one theme select");
+            let opts = elements(&sels.remove(0), "<option", "</option>");
+            let sys: Vec<String> = opts
+                .iter()
+                .filter(|o| attr(open_tag(o), "value").as_deref() == Some("system"))
+                .cloned()
+                .collect();
+            assert_eq!(sys.len(), 1, "{label}: one system option: {opts:?}");
+            assert_eq!(
+                visible_text(&sys[0]),
+                word,
+                "{label}: the theme option reads {word}: {}",
+                account_readable(&g.body)
+            );
+        }
+        let _ = std::fs::remove_file(&path);
     }
 }

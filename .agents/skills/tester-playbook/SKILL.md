@@ -171,6 +171,11 @@ Rules are in `AGENTS.md`. Format of this file: `AGENTS.md`, under "Skills".
   stub the production half in an rsync copy (`/tmp/opencode/...`) with `target/` left out is fine
   (first build ~1 min) and run `node e2e/run.js` there.
 
+- A stylesheet check that must tell a rule **inside** an `@media` block from one at the top level uses
+  `css_scoped` (`bb-auth-web`'s test module): it yields `(at-rule, selector, declarations)` with a
+  selector's spaces **collapsed to one each** and a declaration body's whitespace **removed**. So
+  write the selector the way the stylesheet spells it (`.brand img`, not `.brandimg`) and compare a
+  declaration against the whitespace-free text (`max-width:16rem`).
 - The `admin.css` **field-measure** assertions (`input.f-*` `max-width`) live in `src/lib.rs`'s test
   module (`the_header_shares_the_content_column`), not in `bb-auth-web`, because that test
   already reads the stylesheet. To prove a new arm satisfiable without touching the
@@ -304,3 +309,47 @@ Rules are in `AGENTS.md`. Format of this file: `AGENTS.md`, under "Skills".
 - A Node `Response` body is **single-use**: a second `(await res.text())` throws `Body is unusable`,
   and `run.js` records the whole area as one failure ("area completed without an unhandled error"),
   hiding every check behind it. Read it once into a `const`.
+- The e2e `SETTINGS_FIXTURE` carries **no `ui` section** (every page falls back to the built-in
+  brand), so `s.ui.brand_name = …` throws `Cannot set properties of undefined`, and `shots.js`
+  records the scene as `SKIPPED` while `run.js` records the area as one failure. Create the section:
+  `s.ui = { ...(s.ui || {}), brand_name: … }`.
+- `ui.logo_url` goes through `compile_asset_url`, which accepts **absolute https or a root-relative
+  path and nothing else**: a `data:` logo in an e2e fixture is a startup refusal, not a broken image.
+  Use `/img/logo.png` — the 404 image is sized by its CSS box, which is the box the bar lays out, so
+  the geometry a one-row check measures is real.
+- Once the header's tab rows ride in the account panel, an unscoped `nav a.pill.on` or
+  `nav a:not(.on)` is a **Playwright strict-mode violation** (the panel's rows are in the DOM while
+  the panel is closed): scope the bar's strip as `header .bar > nav:not(.acct)`.
+- A closed `details` keeps its fields in the DOM, so a `.menu select` **count** passes and every
+  **click** on one times out after 30 s, which the runner records as one failed area. Open the box
+  nested in the panel (`openPreferences`, `e2e/lib/harness.js`) before touching a control inside it,
+  and **guard on its return value**: it answers `false` when a box is absent, and a
+  `locator('details.prefs').evaluate(...)` on markup that does not exist waits the full 30 s and
+  takes every later check in the area with it.
+- An e2e area that imports a short-named helper (`text`, `count`, `attr`, `prop`) must check the area
+  for an existing `const text = await mainText(page)`-style local: a `const` in the same function
+  shadows the import for the **whole** function, so the failure is `TypeError: text is not a function`
+  hundreds of lines away from the declaration, and the area dies mid-walk. Rename the local.
+- A geometry helper that returns **absence** flags (`display === 'none'`) must have its expectations
+  written in that same polarity: a pair spelled `[!inPanel, inPanel]` reads as the design and fails
+  on a correct layout. Run one new geometry check against the layout of today and read the got/want
+  line before trusting either half.
+- Never wait with `while pgrep -f "<pattern>"; do sleep …; done` inside `bash -c`: the wrapper shell's own
+  command line contains the pattern, so `pgrep -f` matches itself and the loop never ends (slice H lost 15
+  minutes this way). Run the command in the foreground, or wait on its PID (`wait $!`, `tail --pid`).
+- A CSS parser that decides "is this head an at-rule?" with `head.starts_with('@')` is reading the
+  indentation: a rule inside a `@media` block arrives as `"  @media (max-width:800px)"`, so the prelude is
+  kept as a **selector** and every nested rule is tagged with the prelude *with its space*, which no
+  caller's key matches, and each media-block assert fails as an empty list. Test `head.trim_start()`.
+- The console's user pages are keyed by the roster's **email** while the account fixture's subject is a
+  **uuid**, so a walk over `every_route()` gets a `404` on `Route::User(BOB)`. A `404` renders the shell
+  (bar, panel, a lede in `main`), so a "every page does X" loop must accept `200 || 404` and assert on the
+  region it is about, not on the status.
+- An element index found with `html.find(&el)` points at the element's **own start**, so
+  `html[at..].contains("<a ")` is true of the element itself. Slice from `at + el.len()` to ask what
+  follows it.
+- Locating a panel row by its **visible word** answers for the wrong row: §13.28's "one name per
+  place" makes the Settings tab in `div.menu-tabs` and the System settings row below it carry the
+  same `K::Config` string, so `panel.find(t(lang, K::Config))` is the tab. Locate the row by
+  `anchors_to(&panel, "{ADMIN_BASE}/config")` and measure the order from that, and pin "among the
+  places" as `nested_block(&panel, "<div class=\"menu-places\">", "div").contains(&row)`.

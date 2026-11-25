@@ -138,7 +138,132 @@ async function setDuration(page, value, scope = 'main form') {
 const formBytes = (page) =>
   page.locator('main form').first().evaluate((f) => Object.fromEntries(new FormData(f).entries()));
 
+/**
+ * Reading a control without throwing when it is not there.
+ *
+ * A walk that asserts a control exists must record that it is missing, not abort the area:
+ * Playwright's `locator.innerText()` and `getAttribute()` reject on an empty locator, and an
+ * unhandled rejection ends every check that came after. These three answer `null` / `''` /
+ * `0` instead, so a red suite says which control is absent and keeps testing the rest.
+ */
+const attr = (page, sel, name) => page.locator(sel).first().getAttribute(name).catch(() => null);
+const text = (page, sel) => page.locator(sel).first().innerText().catch(() => '');
+const count = (page, sel) => page.locator(sel).count();
+/** One property of a control, read by a function run in the page: `d.open`, a computed style. */
+const prop = (page, sel, fn) => page.locator(sel).first().evaluate(fn).catch(() => null);
+
+/**
+ * Open the header's account panel, and the Preferences box nested inside it
+ * (docs/ARCHITECTURE.md §13.28 §2), so a `.menu select` is reachable for a click.
+ *
+ * Both are `details`, and the box is closed by default, so a test that reaches a list box has
+ * to open two things. Doing it here is the point: a test that opens one and not the other
+ * fails as a click timeout on a hidden element, which says nothing about the panel.
+ * Idempotent, so a walk can call it at every step.
+ */
+async function openPreferences(page) {
+  const openIt = async (sel) => {
+    const box = page.locator(sel);
+    if ((await box.count()) === 0) return false;
+    if (!(await box.evaluate((d) => d.open))) await page.click(`${sel} > summary`);
+    return true;
+  };
+  const outer = await openIt('details.settings');
+  const inner = await openIt('details.prefs');
+  return outer && inner;
+}
+
+/**
+ * The bar's geometry, as a person sees it (§13.28 §4): does every displayed child of `.bar`
+ * share one vertical centre, and does the document scroll sideways?
+ *
+ * Both numbers come from layout, so only a browser can answer them, which is why this lives
+ * here and not in the Rust suite. `rows` counts distinct vertical centres: one means one row.
+ */
+const barGeometry = (page) =>
+  page.evaluate(() => {
+    const bar = document.querySelector('header .bar');
+    const kids = [...bar.children].filter((el) => {
+      const s = getComputedStyle(el);
+      return s.display !== 'none' && s.visibility !== 'hidden';
+    });
+    const centres = new Set(
+      kids.map((el) => Math.round(el.getBoundingClientRect().top + el.getBoundingClientRect().height / 2))
+    );
+    const de = document.documentElement;
+    return {
+      rows: centres.size,
+      kids: kids.length,
+      sideways: de.scrollWidth - de.clientWidth,
+      barScroll: bar.scrollWidth - bar.clientWidth,
+    };
+  });
+
+/**
+ * Which of the two tab strips is showing (§13.28 §4): the bar's, above the breakpoint, or the
+ * panel's, at and below it. The selector is the bar's `nav` that is not the account end, which
+ * is where the tabs live; the panel's rows are `.menu-tabs`.
+ */
+const headerLayout = (page) =>
+  page.evaluate(() => {
+    const disp = (sel) => {
+      const el = document.querySelector(sel);
+      return el ? getComputedStyle(el).display : 'absent';
+    };
+    const links = (sel) => document.querySelectorAll(sel).length;
+    return {
+      tabs: disp('header .bar > nav:not(.acct)'),
+      menuTabs: disp('.menu-tabs'),
+      // The rows themselves. A surface with no tabs may carry an empty `nav` (the shell emits
+      // one), so "no tabs" is a count of links, not the display of a box.
+      tabLinks: links('header .bar > nav:not(.acct) a'),
+      menuLinks: links('.menu-tabs a'),
+    };
+  });
+
+/**
+ * The bar is on one row, and the document does not scroll sideways, at every width the design
+ * measured (§13.28 §4): 320, 360, 640, 641, 800, 801, 1024, 1280. The breakpoint is on the
+ * inside, so 800 and 801 are the pair that says where it is. Each width is measured in both
+ * languages: the Italian words are the longer ones ("Impostazioni di sistema" against "System
+ * settings"), so the bar's worst case is Italian and a walk that only speaks English measures
+ * the easy half.
+ *
+ * The caller sets the settings first: the widest case the measurements name is a long
+ * `ui.brand_name` with a logo present, and the logo is a root-relative path, because
+ * `compile_asset_url` accepts no `data:` URL and a suite must not reach the network. A broken
+ * image is sized by its CSS box, which is the box the bar lays out, so the geometry is real.
+ */
+async function barStaysOneRow(t, page, base, path, label, tabs = true) {
+  for (const width of [320, 360, 640, 641, 800, 801, 1024, 1280]) {
+    await page.setViewportSize({ width, height: 720 });
+    for (const lang of ['en', 'it']) {
+      const sep = path.includes('?') ? '&' : '?';
+      await page.goto(`${base}${path}${sep}lang=${lang}`);
+      const g = await barGeometry(page);
+      t.eq(`${label} at ${width} ${lang}: one row`, [g.rows, g.kids > 1], [1, true]);
+      t.eq(`${label} at ${width} ${lang}: the document does not scroll sideways`, g.sideways, 0);
+      t.eq(`${label} at ${width} ${lang}: the bar does not scroll sideways`, g.barScroll, 0);
+      const l = await headerLayout(page);
+      if (tabs) {
+        const inPanel = width <= 800;
+        // Both flags read "is hidden", so the pair is (bar hidden, panel rows hidden): above the
+        // breakpoint the bar shows and the panel's rows do not, at and below it the other way.
+        t.eq(`${label} at ${width} ${lang}: the tabs are ${inPanel ? 'in the panel' : 'in the bar'}`,
+          [l.tabs === 'none', l.menuTabs === 'none'], [inPanel, !inPanel]);
+      } else {
+        // This surface has no tabs at any width, so it must not grow a second strip either. The
+        // shell emits an empty `nav` here, so the rule is about rows, not about boxes.
+        t.eq(`${label} at ${width} ${lang}: no tabs, in the bar or anywhere`,
+          [l.tabLinks, l.menuLinks], [0, 0]);
+      }
+    }
+  }
+  await page.setViewportSize({ width: 1280, height: 900 });
+}
+
 module.exports = {
   Checker, doc, bytes, writeDoc, settings, settingsBytes, writeSettings, sha256, newPage, submit,
-  mainText, pageLang, api, resubmit, formBytes, setDuration,
+  mainText, pageLang, api, resubmit, formBytes, setDuration, openPreferences, barGeometry,
+  barStaysOneRow, headerLayout, attr, text, count, prop,
 };

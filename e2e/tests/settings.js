@@ -11,12 +11,14 @@
 
 const {
   bytes, doc, writeDoc, settings, settingsBytes, writeSettings,
-  newPage, submit, mainText, formBytes,
+  newPage, submit, mainText, formBytes, openPreferences, barStaysOneRow, attr, text, count,
 } = require('../lib/harness');
 
 /** The Preferences menu closes on a click outside it (docs/ARCHITECTURE.md section 13.20).
  *  `apply` submits the chosen theme the way that surface does (a change on the console with
- *  scripting on, the Apply button otherwise) and resolves once the navigation it causes ends. */
+ *  scripting on, the Apply button otherwise) and resolves once the navigation it causes ends.
+ *  §13.28 §2 moved the list boxes into a box nested in the panel, closed by default, so the
+ *  walk opens both before it touches one. */
 async function menuClosesOutside(t, page, who, apply) {
   const isOpen = () => page.$eval('details.settings', (d) => d.open);
   const open = () => page.click('details.settings > summary');
@@ -25,7 +27,7 @@ async function menuClosesOutside(t, page, who, apply) {
   await page.mouse.click(4, 896);
   t.eq(`${who}: a click at the bottom-left of the viewport closes it`, await isOpen(), false);
 
-  await open();
+  await openPreferences(page);
   await page.click('.menu select[name=theme]');
   t.eq(`${who}: a click on a list box inside leaves it open`, await isOpen(), true);
   await page.keyboard.press('Escape');
@@ -35,6 +37,151 @@ async function menuClosesOutside(t, page, who, apply) {
   await apply(pick);
   t.eq(`${who}: submitting a theme still applies it`,
     await page.locator('html').getAttribute('data-theme'), pick);
+}
+
+/**
+ * The panel's rows, top to bottom, as a person reads them (§13.28 §2). Each entry is a shape
+ * the design names; the Sign out row is found by the word it shows, because the design names
+ * the word and not a class, and a test that invented a class would pass a markup that shows
+ * no word at all. The account row rides with the places (the user's decision of 2026-11-25,
+ * which answers §13.28's open question 2), so it is listed between them and Preferences.
+ */
+const PANEL_ROWS = [
+  { sel: 'p.who-full' },
+  { sel: '.menu-places' },
+  { sel: '.menu-places a.pill[href="/account/"]' },
+  { sel: 'details.prefs' },
+  { sel: '.menu a.pill', text: 'Sign out' },
+];
+
+/** The panel's rows in document order, as the index of each entry above (-1: not there). */
+const panelOrder = (page) =>
+  page.evaluate((rows) => {
+    const panel = document.querySelector('details.settings .menu');
+    if (!panel) return rows.map(() => -2);
+    const all = Array.from(panel.querySelectorAll('*'));
+    const at = (row) => {
+      const hit = Array.from(panel.querySelectorAll(row.sel)).find(
+        (el) => !row.text || el.textContent.includes(row.text)
+      );
+      return hit ? all.indexOf(hit) : -1;
+    };
+    return rows.map(at);
+  }, PANEL_ROWS);
+
+/**
+ * The console's account panel, and the bar it hangs off (§13.28 §2, §4, §6).
+ *
+ * Every read goes through `attr` / `text` / `count`, and every click is asked for first,
+ * because this area is here for the settings file: a walk that aborted on the first absent
+ * row would stop testing the form, the two-step and the refusals, and a red suite would say
+ * nothing about them. A missing control is recorded as a missing control.
+ */
+async function panelWalk(t, page, ctx) {
+  const bar = 'header .bar > nav:not(.acct)';
+  const sys = 'details.settings .menu-places a[href$="/config"]';
+
+  await page.goto(ctx.base + '/config?lang=en');
+  // The Settings page is not one of the bar's tabs, so the bar marks nothing here, and the
+  // panel's System settings row is the one thing that says which page this is.
+  t.eq('the bar marks no tab on this page', await count(page, `${bar} a.on`), 0);
+  await page.click('details.settings > summary');
+  t.eq('the panel row is the current page', await attr(page, sys, 'aria-current'), 'page');
+  t.check('and wears the current mark', (await attr(page, sys, 'class') || '').includes('on'),
+    await attr(page, sys, 'class'));
+  t.eq('the row reads the page name', (await text(page, sys)).trim(), 'System settings');
+
+  const who = await text(page, 'details.settings .menu p.who-full');
+  t.check('the panel heads with every address of this identity', who.includes('admin@example.com'), who);
+  t.check('and names no uuid, which is the account page to say',
+    !/[0-9a-f]{8}-[0-9a-f]{4}-/i.test(who), who);
+  const order = await panelOrder(page);
+  t.check('who you are, then the places, then my preferences, then the way out',
+    order.every((n, i) => n >= 0 && (i === 0 || n > order[i - 1])), JSON.stringify(order));
+  t.eq('and the panel adds no lede to the page',
+    await count(page, 'details.settings .menu p.lede'), 0);
+
+  // The console's panel carries the way to the caller's own page (the user's decision of
+  // 2026-11-25, §13.28 §2): one `a.pill` to the account prefix, among the places, worded in
+  // the reader's language. Pinned in both languages, because the pair that breaks is the row
+  // that ships the English word on an Italian page, and English alone passes on that.
+  const acct = 'details.settings .menu a.pill[href="/account/"]';
+  t.eq('the panel carries one Go to your account row', await count(page, acct), 1);
+  t.eq('the row says Go to your account', (await text(page, acct)).trim(), 'Go to your account');
+  await page.goto(ctx.base + '/config?lang=it');
+  await page.click('details.settings > summary');
+  t.eq('the row goes to the account prefix', await attr(page, acct, 'href'), '/account/');
+  t.eq('and says the same words in Italian',
+    (await text(page, acct)).trim(), 'Vai al tuo account');
+
+  // The bar's tabs are hidden at and below 800px, so at phone width the panel's rows are the
+  // only navigation the console has. A walk that only checked the desktop bar would not
+  // notice a console that becomes unusable on a phone.
+  for (const width of [360, 800]) {
+    await page.setViewportSize({ width, height: 760 });
+    await page.goto(ctx.base + '/users?lang=en');
+    t.eq(`at ${width}: the bar shows no tabs`,
+      await page.locator(bar).evaluate((el) => getComputedStyle(el).display).catch(() => 'absent'), 'none');
+    await page.click('details.settings > summary');
+    t.eq(`at ${width}: the panel carries the four tabs`, await count(page, '.menu-tabs a'), 4);
+    t.eq(`at ${width}: the current one is marked`, await text(page, '.menu-tabs a[aria-current=page]'), 'Users');
+    if ((await count(page, '.menu-tabs a[href$="/apps"]')) === 1) {
+      await Promise.all([page.waitForNavigation(), page.click('.menu-tabs a[href$="/apps"]')]);
+      t.check(`at ${width}: a panel tab navigates`, page.url().endsWith('/apps'), page.url());
+      await page.click('details.settings > summary');
+      t.eq(`at ${width}: and the panel marks the page it landed on`,
+        await text(page, '.menu-tabs a[aria-current=page]'), 'Applications');
+    } else {
+      t.check(`at ${width}: a panel tab navigates`, false, 'no Applications row in the panel to click');
+    }
+  }
+  await page.setViewportSize({ width: 1280, height: 900 });
+
+  // The System settings row is the way to the settings page once the tab is gone from the
+  // bar, so it has to work from a page that is not the one it names.
+  await page.goto(ctx.base + '/users?lang=en');
+  await page.click('details.settings > summary');
+  t.eq('the row is not marked while on another page', await attr(page, sys, 'aria-current'), null);
+  if ((await count(page, sys)) === 1) {
+    await Promise.all([page.waitForNavigation(), page.click(sys)]);
+    t.check('the System settings row reaches the settings page', page.url().endsWith('/config'), page.url());
+  } else {
+    t.check('the System settings row reaches the settings page', false, 'no row in the panel to click');
+  }
+  t.check('whose heading reads the same words as the row',
+    (await text(page, 'main h1')).includes('System settings'), await text(page, 'main h1'));
+
+  // The bar is one row at every width, with the widest brand an operator can type and a logo
+  // present. The name pill is the piece that gives. The logo is root-relative because
+  // `compile_asset_url` accepts no `data:` URL and this suite never reaches the network; a
+  // broken image is sized by its CSS box, which is the box the bar lays out.
+  const barLook = settings(ctx);
+  const wideLook = settings(ctx);
+  // The fixture carries no `ui` section at all (every page falls back to the built-in brand),
+  // so this creates it rather than reaching into one.
+  wideLook.ui = {
+    ...(wideLook.ui || {}),
+    brand_name: 'BadBat75 Operations Console',
+    logo_url: '/img/logo.png',
+  };
+  writeSettings(ctx, wideLook);
+  await barStaysOneRow(t, page, ctx.base, '/users', 'console bar');
+  const g = await page.evaluate(() => {
+    const img = document.querySelector('header a.brand img');
+    const name = document.querySelector('header a.brand .t');
+    const cs = (el) => (el ? getComputedStyle(el) : null);
+    return {
+      img: !!img,
+      imgH: img ? cs(img).height : '',
+      text: name ? name.textContent.trim() : '',
+      clipped: name ? name.scrollWidth > name.clientWidth : false,
+    };
+  });
+  t.check('the logo is in the brand and has a height', g.img && parseFloat(g.imgH) > 0, JSON.stringify(g));
+  t.eq('the brand text is the configured one', g.text, 'BadBat75 Operations Console');
+  t.check('and it is the piece that is cut, not the bar', g.clipped, JSON.stringify(g));
+  await t.shot(page, 'settings-bar-wide');
+  writeSettings(ctx, barLook);
 }
 
 async function run(ctx, t) {
@@ -54,7 +201,6 @@ async function run(ctx, t) {
     // --- what the page shows is what the file says -------------------------------
     await page.goto(ctx.base + '/config?lang=en');
     t.eq('and the choice outlives the page it was made on', await openCount(), 5);
-    t.eq('the tab is in the bar', await page.locator('header nav a.pill.on').innerText(), 'Settings');
     t.eq('identity_attrs comes from the file',
       await page.locator('textarea[name=identity]').inputValue(), 'email');
     t.eq('and so does the default lifetime',
@@ -273,6 +419,9 @@ async function run(ctx, t) {
       page.waitForNavigation(),
       page.selectOption('.menu select[name=theme]', pick),
     ]));
+
+    // --- the account panel, and the bar, at every width (section 13.28) -------
+    await panelWalk(t, page, ctx);
 
     // --- Italian ------------------------------------------------------------------
     await page.goto(ctx.base + '/config?lang=it');

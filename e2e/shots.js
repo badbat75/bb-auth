@@ -24,7 +24,7 @@ const fs = require('fs');
 const path = require('path');
 
 const { E2E_DIR, FIXTURE, SETTINGS_FIXTURE, boot } = require('./lib/server');
-const { submit, formBytes, resubmit, writeDoc, doc, setDuration } = require('./lib/harness');
+const { submit, formBytes, resubmit, writeDoc, doc, setDuration, openPreferences } = require('./lib/harness');
 const { profileSettingsBytes, PROFILE_HEADERS } = require('./lib/cognito');
 
 /** Where a screenshot lands. Under artifacts/, which is gitignored. */
@@ -50,6 +50,9 @@ const VIEWS = [
     only: ['dashboard', 'users', 'denied', 'apps', 'app-detail', 'can-authorized',
       'can-denied', 'can-on-a-person', 'user-rm', 'key-minted', 'error-refused', 'conflict',
       'conflict-mint', 'forbidden', 'settings-menu', 'config-landing-refused',
+      // The account panel is the copy of this slice: its rows are translated words, and the
+      // Italian spellings are the long ones that stress the bar's one row (§13.28 §4).
+      'settings-menu-prefs', 'config-menu', 'forbidden-menu', 'account-menu-prefs',
       // The self-service page is prose a person reads in their own language, so the copy of
       // the table's headings and the refusal is worth reading in Italian too.
       'account', 'account-new', 'account-new-scopes', 'account-error', 'account-rm', 'account-menu',
@@ -250,6 +253,27 @@ const SCENES = [
     await page.goto(ctx.base + '/users');
     await page.click('details.settings > summary');
   }],
+  // The same panel with the nested Preferences box open (§13.28 §2): the box is closed by
+  // default, so the two list boxes and the console's Apply are a state of their own.
+  ['settings-menu-prefs', async (page, ctx) => {
+    await page.goto(ctx.base + '/users');
+    await openPreferences(page);
+  }],
+  // The panel on the Settings page, where its System settings row is the current page. The
+  // tab is gone from the bar, so this row is the only thing that says where the person is.
+  ['config-menu', async (page, ctx) => {
+    await page.goto(ctx.base + '/config');
+    await page.click('details.settings > summary');
+  }],
+  // The bar with the widest brand an operator can type and a logo present (§13.28 §4, §6):
+  // the one page shape that shows what the bar cuts when it runs out of room.
+  ['header-logo', async (page, ctx) => {
+    // The runner puts the fixture back before every scene, so this writes and walks away.
+    const s = JSON.parse(SETTINGS_FIXTURE);
+    s.ui = { ...(s.ui || {}), brand_name: 'BadBat75 Operations Console', logo_url: '/img/logo.png' };
+    fs.writeFileSync(ctx.settingsFile, JSON.stringify(s, null, 2) + '\n');
+    await page.goto(ctx.base + '/users');
+  }],
 
   // ---- the confirmations: a GET that changes nothing ----------------------
   ['user-rm', go('/users/bot%40example.com/rm')],
@@ -274,6 +298,14 @@ const SCENES = [
     await asPerson(page);
     await page.goto(acct(ctx, '/'));
     await page.click('details.settings > summary');
+    await asAdmin(page);
+  }],
+  // The same panel with its Preferences box open: this surface shows its Apply always, and
+  // the box is the only thing that hides it from a review.
+  ['account-menu-prefs', async (page, ctx) => {
+    await asPerson(page);
+    await page.goto(acct(ctx, '/'));
+    await openPreferences(page);
     await asAdmin(page);
   }],
   ['account-new', async (page, ctx) => {
@@ -413,6 +445,17 @@ const SCENES = [
     await page.goto(ctx.base + '/');
     await page.setExtraHTTPHeaders({ 'X-Auth-Email': 'admin@example.com' });
   }],
+  // The same refusal with its panel open (§13.28 §2): this caller has no places of the
+  // console to reach, so the panel is who they are, their preferences, and the way out.
+  ['forbidden-menu', async (page, ctx) => {
+    await page.setExtraHTTPHeaders({ 'X-Auth-Email': 'friend@example.com' });
+    try {
+      await page.goto(ctx.base + '/');
+      await page.click('details.settings > summary');
+    } finally {
+      await page.setExtraHTTPHeaders({ 'X-Auth-Email': 'admin@example.com' });
+    }
+  }],
 ];
 
 /**
@@ -462,7 +505,9 @@ const STATES = [
   // hover fill is photographed anywhere.
   ['hover-tab', async (page, ctx) => {
     await page.goto(ctx.base + '/users');
-    await page.hover('nav a:not(.on)');
+    // The bar's strip only: the panel's rows are `nav a` too, and they are in the DOM while
+    // the panel is closed, so an unscoped selector is a strict-mode violation.
+    await page.hover('header .bar > nav:not(.acct) a:not(.on)');
   }],
   ['hover-submit', async (page, ctx) => {
     await page.goto(ctx.base + '/users/%2Badd');
@@ -472,7 +517,9 @@ const STATES = [
   // the only one that lives on no page a `goto` can reach.
   ['focus-select', async (page, ctx) => {
     await page.goto(ctx.base + '/users');
-    await page.click('details.settings > summary');
+    // Both disclosures: a closed `details` does not render its fields, so a Tab walk never
+    // reaches a list box that is folded away (§13.28 §2).
+    await openPreferences(page);
     await tabTo(page, '.menu select[name=lang]');
   }],
   // A dashboard count: four of the five navigate, and must say so on hover.

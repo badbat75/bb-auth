@@ -13,7 +13,7 @@
 
 const crypto = require('crypto');
 const fs = require('fs');
-const { doc, bytes, newPage, submit, mainText } = require('../lib/harness');
+const { doc, bytes, newPage, submit, mainText, openPreferences, count } = require('../lib/harness');
 const { profileSettingsBytes, PROFILE_HEADERS } = require('../lib/cognito');
 
 /** The CSP source expression that names a script whose bytes are `s`. */
@@ -41,16 +41,18 @@ async function iconBoxes(page) {
 
 /** The Preferences menu closes on a click outside it (docs/ARCHITECTURE.md section 13.20).
  *  `apply` submits the chosen theme the way that surface does (a change on the console with
- *  scripting on, the Apply button otherwise) and resolves once the navigation it causes ends. */
+ *  scripting on, the Apply button otherwise) and resolves once the navigation it causes ends.
+ *  §13.28 §2 moved the list boxes into a box nested in the panel, closed by default, so the
+ *  walk opens both before it touches one: a closed `details` keeps its fields in the DOM, so
+ *  a count passes and a click times out, which says nothing about the panel. */
 async function menuClosesOutside(t, page, who, apply) {
   const isOpen = () => page.$eval('details.settings', (d) => d.open);
-  const open = () => page.click('details.settings > summary');
-  await open();
+  await page.click('details.settings > summary');
   t.eq(`${who}: the trigger opens the menu`, await isOpen(), true);
   await page.mouse.click(4, 896);
   t.eq(`${who}: a click at the bottom-left of the viewport closes it`, await isOpen(), false);
 
-  await open();
+  await openPreferences(page);
   await page.click('.menu select[name=theme]');
   t.eq(`${who}: a click on a list box inside leaves it open`, await isOpen(), true);
   await page.keyboard.press('Escape');
@@ -435,11 +437,12 @@ async function run(ctx, t) {
   try {
     const page = await noJs.newPage();
     await page.goto(ctx.base + '/users');
-    // `details` is HTML, not script: the menu still opens.
+    // `details` is HTML, not script: the menu still opens, and so does the box nested in it.
     await page.click('details.settings > summary');
     t.eq('with scripting off the Settings menu still opens',
       await page.locator('.menu select[name=lang]').count(), 1);
     t.eq('and grows its submit button back', await page.locator('.menu button').count(), 1);
+    await openPreferences(page);
 
     await page.selectOption('.menu select[name=lang]', 'it');
     await page.selectOption('.menu select[name=theme]', 'dark');
@@ -456,6 +459,63 @@ async function run(ctx, t) {
       await page.selectOption('.menu select[name=theme]', pick);
       await Promise.all([page.waitForNavigation(), page.click('.menu button')]);
     });
+
+    // At phone width the panel is the only navigation the console has, and both of its rows
+    // are plain links, so scripting off changes nothing about reaching a page (§13.28 §4).
+    await page.setViewportSize({ width: 360, height: 760 });
+    await page.goto(ctx.base + '/users?lang=en');
+    t.eq('the bar shows no tabs here',
+      await page.locator('header .bar > nav:not(.acct)')
+        .evaluate((el) => getComputedStyle(el).display).catch(() => 'absent'),
+      'none');
+    await page.click('details.settings > summary');
+    t.eq('the panel carries the tabs', await count(page, '.menu-tabs a'), 4);
+    if ((await count(page, '.menu-tabs a[href$="/apps"]')) === 1) {
+      await Promise.all([page.waitForNavigation(), page.click('.menu-tabs a[href$="/apps"]')]);
+      t.check('a panel tab navigates', page.url().endsWith('/apps'), page.url());
+      await page.click('details.settings > summary');
+      await Promise.all([
+        page.waitForNavigation(),
+        page.click('details.settings .menu-places a[href$="/config"]'),
+      ]);
+      t.check('and the System settings row reaches the settings page',
+        page.url().endsWith('/config'), page.url());
+    } else {
+      t.check('a panel tab navigates', false, 'no Applications row in the panel to click');
+      t.check('and the System settings row reaches the settings page', false, 'no row to click');
+    }
+    await page.setViewportSize({ width: 1280, height: 900 });
+
+    // The self-service page, where there is no handler at all, so scripting off is the
+    // normal case and the Apply button is the only path.
+    const acct = await ctx.browser.newContext({
+      viewport: { width: 1280, height: 900 },
+      extraHTTPHeaders: { 'X-Auth-Email': 'you@example.com' },
+      javaScriptEnabled: false,
+    });
+    try {
+      const ap = await acct.newPage();
+      await ap.goto(ctx.origin + '/account/');
+      const opened = await openPreferences(ap);
+      t.check('the page opens both disclosures with no script', opened, 'a details never opened');
+      t.eq('its list boxes are there', await count(ap, '.menu select[name=theme]'), 1);
+      const pick = await ap.locator('html').getAttribute('data-theme');
+      const want = pick === 'dark' ? 'light' : 'dark';
+      if (opened) {
+        await ap.selectOption('.menu select[name=theme]', want);
+        await Promise.all([ap.waitForNavigation(), ap.click('.menu button')]);
+        t.eq('and its Apply button applies the theme',
+          await ap.locator('html').getAttribute('data-theme'), want);
+      } else {
+        t.check('and its Apply button applies the theme', false, 'the panel never opened');
+      }
+      await ap.click('details.settings > summary');
+      t.eq('no console tabs, no settings row, no delete',
+        await count(ap, 'details.settings .menu .menu-tabs, details.settings .menu a[href$="/config"], details.settings .menu a[href*="delete"]'),
+        0);
+    } finally {
+      await acct.close();
+    }
 
     // Every other page shape is unchanged by scripting: a mutation still goes through.
     const beforeSave = bytes(ctx);

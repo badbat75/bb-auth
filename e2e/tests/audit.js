@@ -211,7 +211,10 @@ async function run(ctx, t) {
     await page.goto(ctx.base + '/audit');
     const empty = await mainText(page);
     t.check('a file that does not exist is an empty list, not an error', empty.includes('none'), empty);
-    t.eq('and the tab is still there', await page.locator('nav a.pill.on').innerText(), 'Audit');
+    // The bar's own strip: the panel's tab rows carry the same mark, and they are in the DOM
+    // while closed, so an unscoped `nav a.pill.on` is two elements and a strict-mode error.
+    t.eq('and the tab is still there',
+      await page.locator('header .bar > nav:not(.acct) a.pill.on').innerText(), 'Audit');
   } finally {
     await context.close();
   }

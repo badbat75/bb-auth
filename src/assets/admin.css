@@ -20,7 +20,14 @@ header.top{background:var(--card);border-bottom:1px solid var(--card-border);pad
    looks the same on purpose, so space is the only thing left that says where one group ends,
    and separating them with a rule or a tint would put back exactly the differentiating trait
    the pill object exists to remove. */
-.bar{max-width:1000px;margin:0 auto;display:flex;flex-wrap:wrap;gap:20px;align-items:center;
+/* `flex-wrap:nowrap` is the whole of "one row, always" (§13.28 §4), and it is a construction
+   and not an arithmetic: with `wrap` the row breaks whenever the brand, the four tabs and a
+   person's name together outgrow the width, which is every deployment's font and every roster
+   and nothing this file can measure. What gives instead, in order, is the name pill (it shrinks
+   to an ellipsis), then the brand's text (the same), and never the tabs or the logo, because a
+   cut tab is a navigation item nobody can read. The gap stays 20px: the three groups are still
+   three groups, and space is the only thing that says so. */
+.bar{max-width:1000px;margin:0 auto;display:flex;flex-wrap:nowrap;gap:20px;align-items:center;
   padding:0 16px}
 /* The side padding lives on the bar, not on the header, and that is the whole of a fix: the
    header is full-bleed so its fill reaches both edges, and the bar is the same centred,
@@ -31,11 +38,35 @@ header.top{background:var(--card);border-bottom:1px solid var(--card-border);pad
    second line reads as part of the name, and it is not: it is the label that tells an
    administrator's bar from a person's page. The version used to sit here, and it is what this
    binary happens to be, which matters when a deploy has just happened and not at all the rest
-   of the time; the footer says it, where a person reading a deploy looks. */
-.brand{display:inline-block;font-weight:600;letter-spacing:.02em;line-height:1.2}
+   of the time; the footer says it, where a person reading a deploy looks.
+
+   `min-width:0` and `max-width:14rem` are the bar's second give (§13.28 §4): the name pill
+   shrinks first, and the brand's words shrink next, and a flex item with no `min-width` cannot
+   shrink below its content at all, so without the first the second is a rule that never fires.
+   The cap is a measure of the longest brand worth reading, not of the width the bar can spare:
+   a brand longer than that is an operator's stylesheet's business, and the ellipsis is what
+   keeps it from taking the tabs' room. */
+.brand{display:flex;align-items:center;gap:10px;min-width:0;max-width:14rem;font-weight:600;
+  letter-spacing:.02em;line-height:1.2}
 a.brand{color:inherit;text-decoration:none}
 a.brand:hover{text-decoration:underline}
-.brand .v{display:block;color:var(--muted);font-weight:400;font-size:.85em}
+/* The name, cut with an ellipsis. The three companions are not decoration: `text-overflow`
+   paints nothing without `overflow:hidden`, and neither does anything without
+   `white-space:nowrap`, and a box that can wrap makes a second line in a bar that has none. */
+.brand .t{min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+/* The tag line is cut with the name, by the same three companions and for the same reason: it
+   is the second line of the brand's text, and a truncated "Administ…" says the same thing the
+   whole word does about which surface this is. */
+.brand .v{display:block;color:var(--muted);font-weight:400;font-size:.85em;min-width:0;
+  overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+/* One rule sizes the mark on both surfaces (§13.28 §6), and **height** is the bound: a logo is
+   whatever shape the operator uploaded, and a rule keyed on width lets a wide wordmark eat the
+   tabs' room, which is the same room the ellipsis pieces are fighting for. 96px is the width the
+   design measured with, so the cap is the number the measurements behind the 800px breakpoint
+   were taken at. `flex:none` is what makes the mark the one thing in the bar that never shrinks,
+   and `filter` is the palette's logo arm, so a mark set for a light ground stays legible on the
+   dark arm. */
+.brand img{height:30px;max-width:96px;width:auto;flex:none;filter:var(--logo-filter)}
 /* `align-items:center` and not the default `stretch`: a flex row makes its items as tall as
    its tallest, so the moment anything in the nav is taller than a pill, every nav pill grows
    and the two controls at the other end of the bar (which sit in `.bar`, centred) do not.
@@ -46,6 +77,25 @@ nav{display:flex;flex-wrap:wrap;align-items:center;gap:4px;flex:1 1 auto}
    items exactly as the five tabs are. `flex:0 0 auto` because, unlike the tabs, this row
    never takes the space that is left; `margin-left:auto` is what pushes it to the far edge. */
 nav.acct{flex:0 0 auto;align-items:center;gap:6px;margin-left:auto}
+/* The trigger is the bar's first give (§13.28 §4), and the cap is what makes it one: a name is
+   as long as the longest address in the roster, which is a fact about the file and not a measure
+   this file can take. 16rem is the longest label worth reading in a bar whose job is to say
+   *who* you are, and the panel below says the rest whole. `min-width:0` is the half that
+   actually lets it give: a flex item's floor is its content, so without it the cap is a number
+   the box never goes under. */
+.bar .who{max-width:16rem;min-width:0}
+/* The label inside the trigger, cut with an ellipsis. The three companions are not decoration:
+   `text-overflow` paints nothing without `overflow:hidden`, and neither does anything without
+   `white-space:nowrap`, and a box that can wrap makes a second line in a bar that has none.
+   Nothing is lost by the cut: the trigger's `title` carries the whole label, and the panel's
+   first block prints every address whole. */
+.who-name{min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+/* The caret, sized. An inline `svg` with no box is 300x150, which in a one row bar is the
+   widest thing in it, and in the panel pushes every row below out of the viewport. 1em keeps
+   it the size of the word it sits beside. The panel's glyphs ride the same rule: they are the
+   base sheet's `.pill.ico svg`, and this is the caret in the Preferences summary, which is a
+   pill with no `ico` class because it carries a word as well as the glyph. */
+.bar .who svg,.prefs summary svg{width:1em;height:1em;flex:none}
 /* The size step: body-size pills wherever one sits next to body text or a button. It is
    `.bar .pill` and not a list of the places inside the bar, which is what it used to be and
    what kept going wrong: the nav's tabs, the Settings trigger (a `details`' own summary) and
@@ -62,6 +112,23 @@ nav.acct{flex:0 0 auto;align-items:center;gap:6px;margin-left:auto}
    above with `:not` since that would drop the bar's font size too and make the glyph
    smaller than its neighbours. The note follows its rule for the same reason as in
    `base.css`: the test reads the rule by its exact selector. */
+/* The panel's copy of the tab strip, hidden above the breakpoint (§13.28 §4). The four links
+   exist twice, once in the bar and once in the panel, because moving an element out of a closed
+   `details` and into a bar is not a thing CSS can do: the markup carries both and exactly one is
+   displayed, which is also why the panel's rows are `.pill`s, so the copy that appears is the
+   same object as the copy it replaces. */
+.menu-tabs{display:none;gap:6px}
+/* The one breakpoint for the tabs, and the number is the bar's width and not a device: at 800px
+   the brand, four tabs, a person's name and the trigger stop fitting on a row that cannot wrap,
+   and the thing a bar must never do is cut a tab. Below it the bar's strip is hidden and the
+   panel's rows are the navigation, which is the compromise the user accepted on 2026-11-25: the
+   tabs move one tap away rather than onto a second row. `nav:not(.acct)` is the bar's tab row;
+   the account end is excluded because it holds the trigger that opens the panel the tabs have
+   just moved into. */
+@media (max-width:800px){
+  nav:not(.acct){display:none}
+  .menu-tabs{display:flex;flex-direction:column}
+}
 /* The page's one action, and the way out beside it, are one object and must be one height:
    `cancel` next to `Create key` at three quarters the height reads as a caption of the button
    rather than as its peer. So the pill takes the button's measure exactly, from `base.css`
@@ -284,7 +351,27 @@ details.settings[open]>summary::before{content:"";position:fixed;inset:0;z-index
 details.settings[open]>summary{background:var(--chip);border-color:var(--accent);color:var(--accent)}
 .menu{position:absolute;right:0;top:calc(100% + 8px);z-index:10;min-width:230px;
   background:var(--card);border:1px solid var(--card-border);border-radius:var(--r-box);
-  padding:14px 16px;box-shadow:var(--shadow-md)}
+  padding:14px 16px;box-shadow:var(--shadow-md);
+  /* The panel is a page's worth of rows now (the tabs, the system's settings, the preferences,
+     sign out), so it is bounded by the viewport that opens it: `dvh` so a phone in landscape
+     measures the visible part of the screen and not the whole of it, and the last row is
+     reachable by scrolling the panel rather than by being off-screen. The width guard is the
+     same courtesy on a narrow screen, where `min-width:230px` alone would push a row out. */
+  max-height:calc(100dvh - 80px);overflow-y:auto;max-width:calc(100vw - 32px)}
+/* The panel's rows are full-width, because a panel is a list read top to bottom and not a row
+   of pills scanned across: `display:block` is what makes one (`.pill` is inline-flex in
+   base.css), and `text-align:left` undoes the centring a block box gives text, so the labels
+   and the `.on` fill start at the edge the eye enters at. */
+.menu .pill{display:block;width:100%;text-align:left;margin-bottom:4px}
+/* The rule between the panel's groups (§13.28 §2): places to go, what this looks like, and who
+   is leaving are three kinds of row, and space alone was too quiet to say so in a list this
+   dense. It is a border, not a tint, so it is the same object as the card's own edge. */
+.menu .sep{border-top:1px solid var(--card-border);margin:10px 0}
+/* Every address of the row, on a line of its own (§13.28 §1): a caller admitted by their second
+   address reads a panel naming every address they have, and a list of them inline reads as one
+   long string. `anywhere` is what keeps a 60-character address inside the panel's own width
+   rather than widening the panel. */
+.who-full .addr{display:block;overflow-wrap:anywhere}
 /* The panel's own padding is the space below the last field, so the gap above the button is
    left to .actions and reads exactly as it does in any form on any page. */
 .menu form.edit label:last-of-type{margin-bottom:0}
@@ -343,12 +430,11 @@ details.settings[open]>summary{background:var(--chip);border-color:var(--accent)
 body:has(.selfserve){background:var(--bg)}
 /* The deployment's mark and name, in the bar's brand slot (§13.17). `margin:0` because the bar
    is a flex row with its own gap: a bottom margin here would push the bar's height, which is
-   what the two controls at the other end are centred against. `filter:var(--logo-filter)` is
-   the palette's logo arm, so a mark the operator set for a light ground stays legible on the
-   dark arm. */
-.selfserve-brand{display:flex;flex-wrap:wrap;align-items:center;gap:10px;margin:0}
-.selfserve-brand img{height:30px;width:auto;filter:var(--logo-filter)}
-.selfserve-brand .name{font-weight:600;letter-spacing:.02em}
+   what the two controls at the other end are centred against. The mark, the name and the row
+   itself are `.brand`'s rules, one set for both surfaces (§13.28 §6); what is left here is the
+   arrangement of the account page's own slot, which is the only thing the two surfaces differ
+   on: the name and the id wrap under the mark instead of beside it. */
+.selfserve-brand{flex-wrap:wrap;margin:0}
 /* The account id is one token, so the stylesheet can keep it whole: `white-space:nowrap` stops a
    36-character uuid breaking at a hyphen, and it moves to its own line under the addresses
    instead of ending in the middle of an id. The addresses beside it are deliberately not given
@@ -366,11 +452,10 @@ body:has(.selfserve){background:var(--bg)}
   header.top{padding:6px 0}
   .bar{gap:6px 8px}
   .brand{order:1}
-  /* The account row keeps the brand company on the first line, at the right edge, and the
-     tabs get the whole second line to scroll along. One trigger instead of ten pills is what
-     makes that first line fit on a phone at all. Ordering the two controls together is now
-     one rule on the row that holds them, rather than one rule per control: that is the same
-     saving the row was introduced for. */
+  /* The account row keeps the brand company on the first line, at the right edge. One trigger
+     instead of ten pills is what makes that first line fit on a phone at all. Ordering the two
+     controls together is now one rule on the row that holds them, rather than one rule per
+     control: that is the same saving the row was introduced for. */
   .acct{order:2}
   /* No phone size for a row pill, deliberately (§13.21, 2): the old `padding:3px 8px` shrank a
      text pill to 28px while `.pill.ico` (0,2,0, so it outranked the bare `.pill`) stayed 30px,
@@ -380,15 +465,22 @@ body:has(.selfserve){background:var(--bg)}
      bar's pills keep their own phone size below. */
   .bar .pill{font-size:var(--fs-sm);padding:4px 9px}
   .bar .pill.ico{padding:4px}
-  nav.acct .who{display:none}
-  /* The identity goes on a phone and the menu keeps it. The bar's first line holds the brand,
-     the trigger and the sign-out, and a name plus an address is what wraps it to a second
-     line, so the bar gives the words up rather than the row. The Preferences menu opens with
-     the same string, so the answer is one tap away and not gone. */
-  /* `:not(.acct)` because the account row is a `nav` too, and everything below is about the
-     tabs: the full second line and the horizontal scroll would send it off on its own. */
-  nav:not(.acct){order:3;flex:1 1 100%;flex-wrap:nowrap;overflow-x:auto;gap:1px;
-    padding-bottom:2px}
+  /* The trigger is the identity now, so nothing is hidden outright: the rule that hid
+     `nav.acct .who` hid the one control the panel is reached through, and the panel is where a
+     phone's room goes. The cap tightens instead, and the name cuts itself: 11rem is what a
+     320px screen leaves the bar's first line once the brand and the sign-out pill are counted,
+     and the trigger's `title` and the panel's first block both carry the whole label. */
+  .bar .who{max-width:11rem}
+  /* `:not(.acct)` because the account row is a `nav` too, and this is about the tabs. They are
+     in the panel at this width (the 800px block above moved them), so the strip is not hidden
+     and scrolled: a row that scrolls sideways is the clipped tab §13.17 named, and one row
+     with a scroll is two dimensions, which is what WCAG 1.4.10 Reflow asks not to do. */
+  nav:not(.acct){display:none}
+  /* With a mark in the bar, the brand's words are the part that can go: the logo says which
+     deployment this is, and a mark plus a name plus a trigger does not fit a 320px row. The
+     words are visually hidden, not removed, which is why the image keeps `alt=""`: a reader
+     hears the name the eye no longer has. Without a logo the text stays, and truncates. */
+  .brand:has(img) .t{position:absolute;width:1px;height:1px;overflow:hidden;clip-path:inset(50%)}
   /* The id keeps its `nowrap` here, so this is where it pays for it: at .85em the 36 characters
      fit the width a 320px screen leaves once `main`'s padding is gone, which is what makes it
      move whole to a line of its own instead of pushing the page sideways. */

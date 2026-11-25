@@ -114,6 +114,15 @@ Rules are in `AGENTS.md`. Format of this file: `AGENTS.md`, under "Skills".
   (`nojs.js`, `crud.js`), where the Rust test only forbids the bearer glued to a `Bearer` prefix. So
   the hint names the shape as "the word `Bearer`, a space, then the key". Run `node e2e/run.js` for
   any change to displayed text, not only `cargo test`.
+- Inside an opencode agent run (not in the coordinator's shell, where the suite passes as is), `node e2e/run.js`
+  can die with `browserType.launch: Timeout 180000ms exceeded`, and it is
+  not the code: `e2e/lib/server.js` launches Edge with no `--no-sandbox` and this machine's Chromium
+  sandbox hangs (a bare `chromium.launch({channel:'msedge'})` probe reproduces it; the same launch with
+  `--no-sandbox` takes 200ms). The suite reads no env for browser args, and Playwright's own browser is
+  not installed (it wants `chromium_headless_shell-1234`, the cache has `1255`), so run it through a
+  preload outside the repo: `NODE_OPTIONS="--require /tmp/opencode/nosandbox.js" node e2e/run.js`, where
+  that file hooks `Module._load` for `playwright` and appends `--no-sandbox` to `launch`'s args. `e2e/`
+  stays byte for byte; say in the report that the run used the shim.
 - Playwright's `click()` returns after the event dispatch, not after a promise the handler started, so
   a button label set in `navigator.clipboard.writeText(…).then(…)` is still the old word when the test
   reads `innerText()` a line later. Set the label on the click and replace it in `.catch`.

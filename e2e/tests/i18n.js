@@ -9,7 +9,7 @@
 // parameters, and picking an option has to apply it on the spot while keeping the rest of
 // the URL intact.
 
-const { newPage, pageLang, api } = require('../lib/harness');
+const { newPage, pageLang, api, openPreferences } = require('../lib/harness');
 
 async function run(ctx, t) {
   // The redirect + cookie contract, at the HTTP level.
@@ -55,8 +55,13 @@ async function run(ctx, t) {
     // Picking an option IS the interaction: the handler submits the form, so every `pick`
     // below is one navigation. The `<noscript>` submit button that does the same job for a
     // browser with scripting off is exercised in the nojs area, not here.
-    const pick = (sel, value) =>
-      Promise.all([page.waitForNavigation(), page.selectOption(`.menu select[name=${sel}]`, value)]);
+    // The list boxes live in a box nested in the panel, closed by default (§13.28 §2), and
+    // every pick navigates, which closes both. So a pick opens what it needs: a test that
+    // opened only the outer one would click a hidden element and fail on a timeout.
+    const pick = async (sel, value) => {
+      await openPreferences(page);
+      await Promise.all([page.waitForNavigation(), page.selectOption(`.menu select[name=${sel}]`, value)]);
+    };
 
     const canUrl = '/apps/app1?email=spammer%40example.com&url=https%3A%2F%2Fapp.example.com%2Fapp1';
     await page.goto(ctx.base + canUrl);
@@ -90,7 +95,7 @@ async function run(ctx, t) {
     await page.goto(ctx.base + '/users');
     t.eq('the language persists', await pageLang(page), 'it');
     t.eq('the theme persists', await page.locator('html').getAttribute('data-theme'), 'dark');
-    await page.click('details.settings > summary');
+    await openPreferences(page);
     t.eq('the language list box reopens on the choice',
       await page.locator('.menu select[name=lang]').inputValue(), 'it');
     t.eq('and so does the theme list box',
@@ -104,7 +109,7 @@ async function run(ctx, t) {
     t.eq('and is stored as a choice of its own',
       (cookies.find((c) => c.name === 'lang') || {}).value, 'auto');
     await page.goto(ctx.base + '/users');
-    await page.click('details.settings > summary');
+    await openPreferences(page);
     t.eq('so the menu reopens on auto, not on the language it resolved to',
       await page.locator('.menu select[name=lang]').inputValue(), 'auto');
     t.eq('and the theme is untouched by a language submit',

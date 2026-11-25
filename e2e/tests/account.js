@@ -20,7 +20,11 @@
 // removes exactly one secret; the same identity is a `403` on the console; and a form left
 // open in a second tab is a `409` that mints nothing.
 
-const { doc, bytes, sha256, settings, api, submit, mainText } = require('../lib/harness');
+const {
+  doc, bytes, sha256, settings, writeSettings, api, submit, mainText,
+  openPreferences, barStaysOneRow, attr, text, count, prop,
+} = require('../lib/harness');
+const { PROFILE_HEADERS, profileSettingsBytes } = require('../lib/cognito');
 
 const WHO = 'you@example.com';
 const UUID = '8f14e45f-ceea-467a-9f79-3b4e5c6d7a8b';
@@ -113,7 +117,9 @@ const readable = (html) => words(html
 
 /** The Preferences menu closes on a click outside it (docs/ARCHITECTURE.md section 13.20).
  *  `apply` submits the chosen theme the way that surface does (a change on the console with
- *  scripting on, the Apply button otherwise) and resolves once the navigation it causes ends. */
+ *  scripting on, the Apply button otherwise) and resolves once the navigation it causes ends.
+ *  §13.28 §2 moved the list boxes into a box nested in the panel, closed by default, so the
+ *  walk opens both before it touches one. */
 async function menuClosesOutside(t, page, who, apply) {
   const isOpen = () => page.$eval('details.settings', (d) => d.open);
   const open = () => page.click('details.settings > summary');
@@ -122,16 +128,93 @@ async function menuClosesOutside(t, page, who, apply) {
   await page.mouse.click(4, 896);
   t.eq(`${who}: a click at the bottom-left of the viewport closes it`, await isOpen(), false);
 
-  await open();
-  await page.click('.menu select[name=theme]');
-  t.eq(`${who}: a click on a list box inside leaves it open`, await isOpen(), true);
-  await page.keyboard.press('Escape');
+  // `openPreferences` says whether BOTH boxes exist and opened. Ask before touching the
+  // nested one: a locator on markup that is not there waits the full 30 s and takes the rest
+  // of the area with it.
+  const opened = await openPreferences(page);
+  if (opened) {
+    t.eq(`${who}: the nested box opens too`,
+      await page.locator('details.prefs').evaluate((d) => d.open), true);
+    await page.click('.menu select[name=theme]');
+    t.eq(`${who}: a click on a list box inside leaves it open`, await isOpen(), true);
+    await page.keyboard.press('Escape');
+  } else {
+    t.check(`${who}: the nested box opens too`, false, 'no details.prefs in the panel');
+    t.check(`${who}: a click on a list box inside leaves it open`, false, 'no list box to click');
+  }
 
   const before = await page.locator('html').getAttribute('data-theme');
   const pick = before === 'dark' ? 'light' : 'dark';
   await apply(pick);
   t.eq(`${who}: submitting a theme still applies it`,
     await page.locator('html').getAttribute('data-theme'), pick);
+}
+
+/**
+ * The panel as a person on this page sees it (§13.28 §2): it names who they are, it holds no
+ * part of the console, and the way out says so in words. The console's own panel is walked in
+ * tests/settings.js; this is the half a person who is not an administrator reaches.
+ *
+ * Every read goes through the harness's safe accessors: this area is here for the keys, the
+ * durations, the reveal and the conflicts, and an area that aborted on a missing panel row
+ * would stop testing all of that and say nothing about it.
+ */
+async function panelWalk(t, page, url, label) {
+  await page.goto(url);
+  await page.click('details.settings > summary');
+  const panel = 'details.settings .menu';
+  const trigSel = 'details.settings > summary';
+  const trig = await text(page, trigSel);
+
+  t.check(`${label}: the trigger says who opened the panel`, trig.includes(WHO), trig);
+  t.check(`${label}: and names the control to a screen reader`,
+    (await text(page, `${trigSel} span.vh`)).includes('account menu'),
+    await text(page, trigSel));
+  // The label the ellipsis may cut, read out of the box that is cut, and compared with the
+  // `title` that repeats it in full: the two must agree, and neither is a substring test on
+  // the trigger's own innerText, which joins the hidden words with whitespace of its own.
+  const name = (await text(page, `${trigSel} span.who-name`)).trim();
+  t.eq(`${label}: the trigger's word is the label`, name, WHO);
+  t.eq(`${label}: the title is the whole label`, await attr(page, trigSel, 'title'), name);
+
+  const who = await text(page, `${panel} p.who-full`);
+  t.check(`${label}: the panel heads with the addresses`, who.includes(WHO), who);
+  t.eq(`${label}: no console tabs here`, await count(page, `${panel} .menu-tabs`), 0);
+  t.eq(`${label}: no System settings row here`, await count(page, `${panel} a[href$="/config"]`), 0);
+  // The console's panel carries a row to this page (the user's decision of 2026-11-25,
+  // §13.28 §2). This page must not carry it: a panel's rows are places to go, and this is the
+  // place. The page's own address reaches its panel only as the preferences form's `action`,
+  // never as a link, so the prefix is absent from every `href` here.
+  t.eq(`${label}: no row to the page it is standing on`,
+    await count(page, `${panel} a[href="/account/"], ${panel} a:has-text("Go to your account")`), 0);
+  t.eq(`${label}: and no lede, so the page keeps its one`, await count(page, `${panel} p.lede`), 0);
+
+  const out = `${panel} a.pill:has-text("Sign out")`;
+  t.eq(`${label}: the way out is one row`, await count(page, out), 1);
+  t.check(`${label}: the word is visible, not only an icon`,
+    (await text(page, out)).includes('Sign out'), await text(page, out));
+  t.check(`${label}: and it carries no round trip of the console's`,
+    !(await attr(page, out, 'href') || '').includes('rd='), await attr(page, out, 'href'));
+  t.eq(`${label}: nothing here deletes an account`,
+    await count(page, `${panel} a[href*="delete"], ${panel} form[action*="delete"]`), 0);
+
+  // The preferences are a box inside the panel, closed until asked for, and this surface
+  // applies them with a button it always shows (no handler of its own).
+  t.eq(`${label}: the preferences box is closed by default`,
+    await prop(page, 'details.prefs', (d) => d.open), false);
+  if ((await count(page, 'details.prefs > summary')) === 1) {
+    await page.click('details.prefs > summary');
+    t.eq(`${label}: its own row opens it`,
+      await prop(page, 'details.prefs', (d) => d.open), true);
+  } else {
+    t.check(`${label}: its own row opens it`, false, 'no Preferences row in the panel');
+  }
+  t.eq(`${label}: two list boxes`, await count(page, 'details.prefs select'), 2);
+  t.eq(`${label}: the console handler is not here`,
+    await page.locator('details.prefs select').evaluateAll(
+      (els) => els.filter((e) => [...e.attributes].some((a) => a.name.startsWith('on'))).length
+    ).catch(() => -1), 0);
+  t.eq(`${label}: Apply is a row of its own`, await count(page, 'details.prefs div.actions button'), 1);
 }
 
 async function run(ctx, t) {
@@ -184,10 +267,12 @@ async function run(ctx, t) {
   const admins = (settings(ctx).web || {}).admins || [];
   t.check('this person is a roster row and not an administrator',
     !admins.includes(WHO) && admins.includes('admin@example.com'), JSON.stringify(admins));
-  const text = await mainText(page);
+  // `body` and not `text`: the helper of that name is imported, and a `const` in this
+  // function's scope would shadow it for every later check in the area.
+  const body = await mainText(page);
   t.check('the caller is named with the address the header carried',
-    text.includes('Account id') && text.includes(WHO), text.slice(0, 200));
-  t.check('and the page names their uuid', text.includes(UUID), text.slice(0, 200));
+    body.includes('Account id') && body.includes(WHO), body.slice(0, 200));
+  t.check('and the page names their uuid', body.includes(UUID), body.slice(0, 200));
 
   // --- 2. the mint page: five choices, one picked --------------------------------------
   const openNew = await page.goto(abs(page, NEW));
@@ -555,6 +640,52 @@ async function run(ctx, t) {
     [Math.round(mine.x), Math.round(mine.width)], [Math.round(console_.x), Math.round(console_.width)]);
   await widePage.close();
   await wide.close();
+
+  // --- the account menu (docs/ARCHITECTURE.md section 13.28) ----------------------
+  // The panel a person who is not an administrator reaches: who they are, their preferences,
+  // and the way out. Nothing of the console is in it, and the two disclosures work with
+  // scripting off, which is how this whole area runs.
+  await panelWalk(t, page, url, 'account');
+
+  // The same absence in Italian: the row the console's panel carries is worded in the reader's
+  // language, so the page that must not carry it is checked in that language too.
+  await page.goto(`${url}?lang=it`);
+  await page.click('details.settings > summary');
+  t.eq('account it: no row to the page it is standing on',
+    await count(page, 'details.settings .menu a[href="/account/"], '
+      + 'details.settings .menu a:has-text("Vai al tuo account")'), 0);
+
+  // The trigger names the person by the name the deployment forwards, when it forwards one.
+  // Without the claim configured there is no header to read, which is the fixture's state and
+  // the case the trigger's address spelling is for.
+  const settingsBefore = settings(ctx);
+  writeSettings(ctx, JSON.parse(profileSettingsBytes()));
+  await page.setExtraHTTPHeaders({ 'X-Auth-Email': WHO, ...PROFILE_HEADERS });
+  await page.goto(url);
+  const trig = await text(page, 'details.settings > summary');
+  t.check('the trigger reads the forwarded name, not the address',
+    trig.trim().startsWith('Ada') && !trig.includes(WHO), trig);
+  await page.click('details.settings > summary');
+  const full = await text(page, 'details.settings .menu p.who-full');
+  t.check('and the panel prints the name and the address together',
+    full.includes('Ada') && full.includes(WHO), full);
+  await page.setExtraHTTPHeaders({ 'X-Auth-Email': WHO });
+  writeSettings(ctx, settingsBefore);
+
+  // The bar is one row here too, with the widest brand an operator can type. The logo is
+  // root-relative because `compile_asset_url` accepts no `data:` URL and this suite never
+  // reaches the network; a broken image is sized by its CSS box, which is the box laid out.
+  const wideLook = settings(ctx);
+  // The fixture carries no `ui` section at all (every page falls back to the built-in brand),
+  // so this creates it rather than reaching into one.
+  wideLook.ui = {
+    ...(wideLook.ui || {}),
+    brand_name: 'BadBat75 Operations Console',
+    logo_url: '/img/logo.png',
+  };
+  writeSettings(ctx, wideLook);
+  await barStaysOneRow(t, page, ctx.origin, PAGE, 'account bar', false);
+  writeSettings(ctx, settingsBefore);
 
   // The same menu on this page, scripting off, applied with the Apply button it always has.
   await page.goto(url);
