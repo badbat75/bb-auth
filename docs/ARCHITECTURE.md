@@ -3151,3 +3151,180 @@ New, by part (each a tester and coder pass):
 
 The slice closes on the user's look at the `shots.js` walk in both themes and both languages,
 at desktop and phone width, with and without the operator's token file.
+
+### 13.19 Where a login lands when nothing named a place (`gate.landing_url`, asked 2026-11-25)
+
+The user's words: "configure the account page as the default rd, so that after a logout it at
+least doesn't loop on the login page".
+
+#### What happens today
+
+Read in the code (`safe_rd`, `logout_target`, `login_rd`, `handle_login`, `handle_session` in
+`src/bin/bb-auth.rs`; `logout_without_rd` in `src/bin/bb-auth-web.rs`):
+
+1. Sign out on `/account/` is `BB_AUTH_WEB_LOGOUT_URL` with its `rd` dropped (§13.17), so
+   `/auth/logout` gets no `rd`, and no `Referer` either, because every page we serve sends
+   `Referrer-Policy: no-referrer`. `logout_target`'s last arm sends the browser to the login
+   page, and `login_rd` gives that page an empty `data-rd`.
+2. After the sign-in, `/auth/session` gets no `rd` and `safe_rd`'s no-`rd` branch answers the
+   **caller's root**. The caller is the host of the `/auth/session` request, which is the host
+   serving the sign-in page, so that root is always the auth host's root
+   (`https://auth.badbat75.com/` on rpi-01), never the application the person came from.
+3. What that root serves on rpi-01 is **not verified**: the vhost could not be read for this
+   design (SSH from this machine failed host-key verification). The user reports a loop back
+   to the sign-in page, which is consistent with `/` redirecting to `/auth/login`. Whatever it
+   serves, it is not a page anybody chose, and the same happens to anybody who opens the
+   sign-in page from a bookmark.
+
+So the loop is not a logout problem. A logout already ends at the sign-in page, which is the
+right place for a signed-out person to be; what is missing is somewhere for a sign-in to land
+when nobody named one.
+
+#### Decision
+
+One new settings-file value, `gate.landing_url`: an absolute `https://` URL, empty by default.
+It is used in exactly **one** place, `safe_rd`'s no-`rd` branch (an absent or empty `rd`): set,
+the login lands there; empty, it lands on the caller's root exactly as today. Nothing else
+changes:
+
+- a present `rd` still wins, so every 401 round trip ("sign in, and be where you were") is
+  untouched;
+- a **rejected** `rd` still falls back to the login page, as the `safe_rd` invariant says
+  (a rejected value is an attack or a misconfiguration, and landing it on a real page would hide
+  both);
+- `logout_target` is **not** changed: a logout with nothing said still ends at the sign-in page,
+  and the sign-in it leads to now lands on `gate.landing_url`. Sending the logout itself to the
+  landing page would reach the same end one `401` hop later, and would drop a signed-out person
+  on a page instead of the sign-in when the landing page happens to be public.
+
+Because `logout_target` only ever calls `safe_rd` with a non-empty candidate, the change is
+visible on `/auth/session` alone, and through it on both ways in: the email sign-in page and the
+social callback, which posts `bb_social_rd` (empty when the page had none).
+
+The name is `landing_url` and not `default_rd`: the section's other pages are `login_url` and
+`denied_url`, and `rd` is the name of a query parameter, not of a page.
+
+#### The three-part rule, out loud
+
+1. **Read per request**: on every `/auth/session`, under the same settings read that already
+   takes `authorized_hosts` and the session lifetime. Passes.
+2. **Cannot lock the operator out irreversibly**: it is read **after** the token has been
+   verified and the cookie built, and it decides only where a browser that is already signed in
+   is sent. The worst a wrong value does is land somebody on a `403`, a `404`, or (pointed at the
+   sign-in page itself) today's loop; the cookie is set either way, so the editor still reaches
+   the GUI, and `bb-auth-adm` over SSH is there regardless. Passes cleanly, and for that reason
+   it is **not** a guarded change (`guarded_changes` stays five), the same argument
+   `gate.denied_url` made.
+3. **Not a secret**: it is a `Location:` a browser follows. Passes.
+
+The settings invariant's count becomes twenty-four, and the paragraph above is the argument it
+asks for.
+
+#### Validation, and why the guard moves into the library
+
+`compile_settings` refuses, with a sentence naming `landing_url`, a value that fails
+`compile_page_url("landing_url", …)` (absolute https, printable ASCII, no `@`, no `\`) **or**
+whose host `gate.authorized_hosts` does not cover. The second check is the one that matters: a
+landing page outside the redirect scope would be refused by `safe_rd` at every login and fall
+back to the login page, which is today's loop with a setting standing beside it saying it is
+fixed. Silent is the half that costs an afternoon, so the refusal belongs on the way to disk,
+where both editors can still say so, exactly as `cookie_domain_covers` already refuses a cookie
+domain that misses a host.
+
+That makes `rd_url_allowed` a rule the settings file has an opinion about, and by the library's
+own membership rule ("the moment an editor must refuse to *write* a bad value, the rule that
+decides one is shared") it **moves into `bb_auth_core`**, unchanged, and the gate imports it.
+`safe_rd` stays in the gate: it is HTTP. `safe_rd` still runs the landing URL through
+`rd_url_allowed` at use time as it does every candidate, so the invariant "every candidate
+passes the same gate" keeps holding with no exception; the load-time check only makes the
+refusal visible before it can be silent.
+
+A file that carries a landing URL outside the hosts is refused like any other bad settings file:
+fail-soft on SIGHUP (the live values stay), fatal at startup. Removing the `authorized_hosts`
+entry the landing URL needs is therefore refused too, with that sentence, which is the right
+answer and not a sixth guarded change.
+
+#### Version, and an older binary
+
+**No version bump.** The precedent is `gate.denied_url`, added under version 3 (commit
+`131b35f`), and a bump would make every existing file a refusal for an optional key. But
+`GateSettings` is `deny_unknown_fields`, so an **older binary refuses a file that carries
+`landing_url`**: on a SIGHUP it keeps the live values, at a restart it does not start. Two
+consequences, both cheap:
+
+- `landing_url` is serialized with `skip_serializing_if = "String::is_empty"`, unlike its
+  neighbours: an editor that never set it never writes the key, so a host that does not use the
+  setting can still roll back to `share/previous/` with no step at all.
+- On a host that does use it, the order is **deploy all three packages, then set it**, and a
+  rollback to an older binary is preceded by `settings set --landing-url ''`. This goes in the
+  release notes.
+
+#### The editors
+
+- **`bb-auth-adm`**: `settings set --landing-url URL` (an empty value unsets it, as for the
+  other `settings set` URLs), and `settings show` prints it, `(caller's root)` when empty.
+- **`bb-auth-web`, Settings tab**: one text field in the gate group, beside `denied_url`, with
+  its own `K` label and help line (`GlobalLandingUrl`, `GlobalLandingUrlHelp`). A refusal shows on
+  the field and writes nothing, through the same `Refusal::on` path `denied_url` uses. The help
+  line is the designer's to word; the field is the one `denied_url` already has, so no new layout.
+- **`bb-auth --check-settings`**: prints the landing page, or that a login with no `rd` lands on
+  the caller's root.
+
+#### The three logouts, on rpi-01 with `landing_url` = `https://auth.badbat75.com/account/`
+
+| Sign out from | What happens |
+| --- | --- |
+| `/account/` | `/auth/logout` with no `rd` → the sign-in page with no `rd` → sign in → `/account/`. The loop is gone. |
+| the console (`/admin/`) | Unchanged. If `BB_AUTH_WEB_LOGOUT_URL` carries `rd=…/admin/` (the env example's recipe; rpi-01's value is not verified), the round trip returns to `/admin/` through a `401`. If it carries none, the administrator lands on `/account/`, their own page, rather than on the auth host's root. |
+| another application | Unchanged when its link names an `rd`, or its own page sends a `Referer` the gate accepts: the browser returns there through a `401`. When it says nothing, the sign-in now lands on `/account/` instead of the auth host's root. |
+
+#### Rejected for the landing page
+
+- **Carry `rd=<account page>` on `/account/`'s Sign out** (no new setting). `bb-auth-web` does
+  not know its own absolute URL, which is the reason `BB_AUTH_WEB_LOGOUT_URL` exists, and a
+  relative `rd` falls back to the login page because the ungated logout location carries no
+  `X-Original-URL` (the env example says so). Deriving it from `Host` would be a canonical base
+  URL by the back door; a second env var would be restart-only and a value written in two files.
+  And it fixes only that one link: a bookmark to the sign-in page, or another application's
+  logout that says nothing, still lands on the auth host's root.
+- **Change `logout_target`'s last arm to the landing page as well**: same end state, one more
+  hop, and a public landing page would leave a signed-out person off the sign-in page. See above.
+- **Change the no-`rd` default to the login page** with no setting: that *is* the loop.
+- **A landing URL per application**, as `login_url` and `denied_url` have: `/auth/session` runs
+  on the sign-in page's host, which is inside no application's area when it is the gate's own
+  page, so a per-area value would have nothing to resolve against. Nobody asked for one.
+
+#### How each part is shown to hold, and the work
+
+Three parts, each a tester and coder pass:
+
+- **19-1, library** (`src/lib.rs`): `GateSettings::landing_url`, `Settings::landing_url`,
+  `rd_url_allowed` moved in. Tests: `a_landing_url_is_absolute_https_on_an_authorized_host`
+  (accepts `https://auth.x.com/account/` under `auth.x.com`; refuses `http://`, a relative path,
+  `@`, `\`, and a host the patterns do not cover, each message naming `landing_url`);
+  `an_unset_landing_url_is_never_written` (a `SettingsFile` with it empty serializes with no
+  `landing_url` key, and the file round-trips); `removing_the_host_a_landing_url_needs_is_refused`;
+  `the_landing_url_is_not_a_guarded_change`. The existing `rd_url_allowed_*` tests keep passing
+  against the moved function.
+- **19-2, gate** (`src/bin/bb-auth.rs`): `safe_rd` takes the landing URL. Tests:
+  `safe_rd_with_no_rd_lands_on_the_landing_url` (absent and empty `rd` → the landing URL; empty
+  landing → the caller's root, as `safe_rd_resolves_relative_against_the_caller` already pins; a
+  present `rd` still wins; a rejected `rd` still → the login page, not the landing URL);
+  `a_session_with_no_rd_redirects_to_the_landing_url` (router over a real socket, in the style of
+  `a_whole_login_lands_where_the_page_that_ran_it_permits`);
+  `logout_with_nothing_said_still_ends_at_the_login_page` (router: `landing_url` set, `/auth/logout`
+  with no `rd` and no `Referer` → `Location:` is the login page); `check_settings_names_the_landing_page`
+  if `--check-settings` output is already under test, else a look at its output.
+- **19-3, editors** (`src/bin/bb-auth-adm.rs`, `src/bin/bb-auth-web.rs`):
+  `settings_set_landing_url_writes_and_an_empty_value_unsets`,
+  `settings_set_landing_url_off_the_authorized_hosts_is_refused`, and in the GUI
+  `the_settings_form_saves_the_landing_url` and
+  `the_settings_form_refuses_a_landing_url_off_the_authorized_hosts` (the field carries the
+  refusal, the file's bytes are unchanged). Markup changes, so `node e2e/run.js` and
+  `node e2e/shots.js config` for the designer's look; no new e2e step.
+
+The real run that closes it, after the deploy and the operator's `settings set` (both the user's
+to approve): Sign out on `https://auth.badbat75.com/account/`, sign in, land on `/account/`.
+
+When it lands, `docs` updates §8b's first row, the settings invariant's count and list, §8a, and
+`deploy/settings.example.json`.

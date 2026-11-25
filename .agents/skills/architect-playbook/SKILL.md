@@ -51,3 +51,8 @@ Rules are in `AGENTS.md`. Format of this file: `AGENTS.md`, under "Skills".
   console's flow before designing a "new" confirmation.
 - Every page here sends `Referrer-Policy: no-referrer` (`PAGE_SECURITY_HEADERS`), so the gate's
   `Referer` fallback (`rd_candidate`) never fires for a link on our own pages: design with `?rd=`.
+- `GateSettings` (and every settings section) is `deny_unknown_fields`: a new key makes an older
+  binary refuse the file, so a new setting needs `skip_serializing_if` when empty and a
+  deploy-then-set order (§13.19).
+- `/auth/session`'s caller is the sign-in page's host, so `safe_rd`'s "caller's root" default is
+  the auth host's root, never the application the person came from.
