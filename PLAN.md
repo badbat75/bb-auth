@@ -241,4 +241,3 @@ look by hand at the native "Preferences" tooltip while the open menu's cover is 
     denied by email") where it used to say "also removed from ... (excluded)", which the new
     behaviour made false. The admin GUI says nothing about exclusions on removal, so it is
     unchanged, though §13.8 had said the admin pages would change too.
-
