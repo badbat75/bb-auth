@@ -184,7 +184,7 @@ form.can label.fld{display:flex;flex-direction:column;gap:4px;flex:1 1 240px;mar
    `f-profile` is the one class written by hand rather than stamped: the profile edit's fields
    are claim names, not wire fields, and a name, a family name, a website is the same measure
    as an email. */
-input.f-id,input.f-duration{max-width:14ch}
+input.f-id,input.f-duration,input.f-code{max-width:14ch}
 input.f-email,input.f-name,input.f-login_url,input.f-aud,input.f-profile{max-width:40ch}
 input.f-client_ip_header,input.f-request_id_header{max-width:24ch}
 form.edit label{display:block;margin:0 0 14px}

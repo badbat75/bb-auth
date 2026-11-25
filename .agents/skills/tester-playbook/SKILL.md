@@ -160,6 +160,13 @@ Rules are in `AGENTS.md`. Format of this file: `AGENTS.md`, under "Skills".
   stub the production half in an rsync copy (`/tmp/opencode/...`) with `target/` left out is fine
   (first build ~1 min) and run `node e2e/run.js` there.
 
+- The `admin.css` **field-measure** assertions (`input.f-*` `max-width`) live in `src/lib.rs`'s test
+  module (`the_header_shares_the_content_column`), not in `bb-auth-web`, because that test
+  already reads the stylesheet. To prove a new arm satisfiable without touching the
+  repo's stylesheet, compile a replica of `without_comments`/`flat_rules`/`rules_named` in
+  `/tmp/opencode` and run it against a `sed`-mutated copy of the CSS: red on the repo's file, green on
+  the mutated one, neighbours still green.
+
 ## Pitfalls
 
 - `links_to` returns the **opening tag only**, so `visible_text` of it is always `""` and `elements(x,

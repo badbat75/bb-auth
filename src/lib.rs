@@ -9713,6 +9713,9 @@ mod tests {
             );
         }
         has("input.f-profile", "max-width:40ch");
+        // §13.23: the profile code field is a short numeric token, so it wears the short-id
+        // measure and not the 40ch one above it: a full-width box reads as "type a sentence".
+        has("input.f-code", "max-width:14ch");
         has(".bar.pill", "font-size:.95rem");
         has(".bar.pill", "padding:6px12px");
         has(".bar.pill.ico", "padding:6px");
