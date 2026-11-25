@@ -16,6 +16,7 @@ You may change any part of the plan when needed. Say why in the commit, and tell
 requirement changes.
 
 For each request:
+
 1. Restate the goal as a checkable outcome and pick the smallest useful slice. If it is ambiguous, or has
    real effects as described in `AGENTS.md`, ask the user first.
 2. Delegate in order: `architect` (only if the slice adds or changes a component, an interface, a

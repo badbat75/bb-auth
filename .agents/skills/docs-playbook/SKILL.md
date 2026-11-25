@@ -41,7 +41,7 @@ Rules are in `AGENTS.md`. Format of this file: `AGENTS.md`, under "Skills".
   reports ~22 pre-existing MD041 and MD032 errors in the `.agents/`, `.claude/` and `.opencode/`
   skill and agent files, because MD041 fires on their YAML frontmatter. Judge the run by whether
   your own files appear in the list, not by the exit code, and do not "fix" the frontmatter.
-- The `N: ` prefix `read` prints makes an AGENTS.md bullet continuation look indented **three**
+- The line-number prefix (`N:` and a space) that `read` prints makes an AGENTS.md bullet continuation look indented **three**
   spaces; it is **two** (same in CHANGELOG.md's `*` bullets). An `edit` oldString copied from
   `read` fails to match. Check with `sed -n 'A,Bp' AGENTS.md | awk '{printf "[%s]\n", $0}'`.
 - CHANGELOG.md has **no `## 1.99.8` heading** on purpose (an untagged candidate gets no section
