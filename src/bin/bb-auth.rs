@@ -1808,25 +1808,39 @@ fn build_cookie(cfg: &Config, settings: &Settings, value: &str, max_age: i64) ->
 /// relative `rd` resolves against, and `hosts` (`BB_AUTH_AUTHORIZED_HOSTS`) is the sole
 /// authority on where a redirect may land.
 ///
-/// Every candidate — absolute, relative, or the no-`rd` default — goes through the
-/// same `rd_url_allowed` gate, so even a spoofed caller origin cannot produce an
+/// Every candidate (absolute, relative, the landing page, the caller's root) goes
+/// through the same `rd_url_allowed` gate, so even a spoofed caller origin cannot produce an
 /// off-domain redirect. Anything rejected falls back to `login_url`. A leading `//evil`
 /// or `/\evil` is not treated as a path (browsers normalise `/\` to `//`, i.e. an
 /// off-host redirect). Any control byte, including CR/LF, is rejected outright, so
 /// attacker-supplied bytes can never reach the `Location` header (no response
 /// splitting).
+///
+/// `landing_url` (`gate.landing_url`) answers only the no-`rd` case, and it is what that
+/// case was missing: the caller here is the host the sign-in page was served from, so the
+/// caller's root is that page, and a sign-in that lands on the sign-in page is a loop with
+/// no error in it anywhere. Set, the login lands there; empty, the caller's root stands,
+/// which is what a deployment that has not named a landing page gets. A present `rd` still
+/// wins and a rejected one still goes to the login page: a rejected value is an attack or a
+/// misconfiguration, and landing it on a real page would hide both.
 fn safe_rd(
     rd: Option<&str>,
     caller_origin: Option<&str>,
     hosts: &[UrlPattern],
     login_url: &str,
+    landing_url: &str,
 ) -> String {
     let fallback = || login_url.to_string();
     let candidate = match rd {
-        // No `rd`: land on the root of whichever host the login happened on.
-        None | Some("") => match caller_origin {
-            Some(o) => format!("{o}/"),
-            None => return fallback(),
+        // No `rd`: the landing page if one is configured, else the root of whichever host
+        // the login happened on. The landing page needs no caller origin, because it names
+        // a whole URL: the caller is only ever what a *relative* value resolves against.
+        None | Some("") => match landing_url {
+            "" => match caller_origin {
+                Some(o) => format!("{o}/"),
+                None => return fallback(),
+            },
+            url => url.to_string(),
         },
         Some(r) => {
             if r.bytes().any(|b| b < 0x20 || b == 0x7f) {
@@ -3418,6 +3432,7 @@ fn handle_session(mut req: Request, state: &State) {
             caller_origin.as_deref(),
             &settings.authorized_hosts,
             &login,
+            &settings.landing_url,
         );
         let ttl = settings.session_ttl;
         let cookie = build_cookie(
@@ -3464,7 +3479,12 @@ fn logout_target(
     login_url: &str,
 ) -> String {
     match rd_candidate(rd, referer) {
-        Some(candidate) => safe_rd(Some(candidate), caller_origin, hosts, login_url),
+        // `landing_url` is empty here on purpose: a logout with nothing said ends at the
+        // sign-in page, which is the right end for a signed-out person, and the sign-in it
+        // leads to is what lands on `gate.landing_url`. Sending the logout there itself would
+        // reach the same end one `401` hop later, and would drop the person on a page instead
+        // of the sign-in when that page happens to be public.
+        Some(candidate) => safe_rd(Some(candidate), caller_origin, hosts, login_url, ""),
         None => login_url.to_string(),
     }
 }
@@ -3638,6 +3658,135 @@ fn check_access(path: &str) -> ! {
     }
 }
 
+/// What `--check-settings` prints about a compiled settings file, as one string: the lines
+/// an operator reads, joined with newlines.
+///
+/// It is a function rather than a run of `println!`s so that the report can be *read* and not
+/// only watched. The lines worth pinning are the ones that say what an empty setting means
+/// ("the caller's root", "no login can complete"), and those are prose about a value, which no
+/// check of a file's bytes can show.
+fn settings_report(path: &str, s: &Settings) -> String {
+    let mut lines: Vec<String> = Vec::new();
+    lines.push(format!(
+        "[bb-auth] {path}: OK: identity {}, {} profile claim(s), session_ttl {}s",
+        s.identity_attrs
+            .iter()
+            .map(|a| format!("{} ({})", a.attr, a.header))
+            .collect::<Vec<_>>()
+            .join(", "),
+        s.profile_claims.len(),
+        s.session_ttl
+    ));
+    for c in &s.profile_claims {
+        lines.push(format!(
+            "[bb-auth] {path}: claim '{}' -> {}",
+            c.claim, c.header
+        ));
+    }
+    // The app clients, which are also the audiences: a Cognito id_token carries the
+    // app client it was minted for in `aud`, so naming an app client here IS saying
+    // which tokens the gate accepts. Printed rather than judged: whether Cognito has
+    // ever heard of one of these is not a question a file can answer.
+    lines.push(format!(
+        "[bb-auth] {path}: sign-in page: {}",
+        match s.login_url.as_str() {
+            "" => "(none: the gate's own /auth/login, on the calling host)",
+            url => url,
+        }
+    ));
+    lines.push(format!(
+        "[bb-auth] {path}: refusal page: {}",
+        match s.denied_url.as_str() {
+            "" => "(none: the gate's own /auth/denied, on the calling host)",
+            url => url,
+        }
+    ));
+    // The landing page, named with what an empty one is, because "nothing" here is the root of
+    // the host the sign-in page was served from, which the line above has just named: an
+    // operator who reads the two together should see that a deployment with no landing page
+    // sends a sign-in back to its own sign-in page.
+    lines.push(format!(
+        "[bb-auth] {path}: landing page: {}",
+        match s.landing_url.as_str() {
+            "" => "(none: the caller's root)",
+            url => url,
+        }
+    ));
+    lines.push(format!(
+        "[bb-auth] {path}: email app client: {}",
+        match s.client_id.as_str() {
+            "" => "(none: no login can complete)",
+            id => id,
+        }
+    ));
+    lines.push(format!(
+        "[bb-auth] {path}: accepted audiences: {}",
+        match s.audiences.len() {
+            0 => "(none)".to_string(),
+            _ => s.audiences.join(", "),
+        }
+    ));
+    match (&s.oauth_domain, &s.social_callback_url) {
+        (Some(d), Some(c)) => lines.push(format!(
+            "[bb-auth] {path}: social sign-in via {d}, back to {c}"
+        )),
+        _ => lines.push(format!("[bb-auth] {path}: social sign-in: (off)")),
+    }
+    for b in &s.social_buttons {
+        lines.push(format!(
+            "[bb-auth] {path}: button '{}' through app client {}",
+            b.idp, b.audience
+        ));
+    }
+    if s.allow_unverified_social {
+        let scope = match &s.social_providers {
+            Some(p) => p.join(", "),
+            None => "any provider".to_string(),
+        };
+        lines.push(format!(
+            "[bb-auth] {path}: accepting unverified emails for social logins [{scope}]"
+        ));
+    }
+    // The two headers the audit believes, by name, because believing one is a promise
+    // about nginx that a check of this file cannot keep: the operator reading this is
+    // the one who has to know that nginx overwrites both on every gated location.
+    lines.push(format!(
+        "[bb-auth] {path}: audit: client address from {}, request id from {}",
+        s.client_ip_header
+            .as_deref()
+            .unwrap_or("(nowhere: not recorded)"),
+        s.request_id_header
+            .as_deref()
+            .unwrap_or("(nowhere: not recorded)"),
+    ));
+    // The disk figure is the one worth reading: it is what a flood can cost, whatever
+    // the two settings are written in.
+    lines.push(format!(
+        "[bb-auth] {path}: audit: {}",
+        audit_policy_line(&s.audit_policy)
+    ));
+    // Named, not counted: this list is the GUI's whole door, and an operator reading
+    // a check should see whether their own address is on it.
+    lines.push(format!(
+        "[bb-auth] {path}: bb-auth-web administrators: {}",
+        match s.admins.len() {
+            0 => "(none: bb-auth-web will refuse to serve)".to_string(),
+            _ => s.admins.join(", "),
+        }
+    ));
+    // The look, and the stylesheet by name: it is the one setting whose effect an
+    // operator cannot see from the host, since whether it loads is the browser's
+    // business and a page that fails to load one looks like a page that has none.
+    lines.push(format!(
+        "[bb-auth] {path}: pages: brand '{}', theme {}, stylesheet {}, logo {}",
+        s.brand_name.as_deref().unwrap_or(DEFAULT_BRAND),
+        s.theme.code(),
+        s.stylesheet_url.as_deref().unwrap_or("(built-in only)"),
+        s.logo_url.as_deref().unwrap_or("(none)"),
+    ));
+    lines.join("\n")
+}
+
 /// Validate a settings file with the parser both services use, print what it says, exit 0/1.
 ///
 /// The same job `--check-access` does for the other file, and it earns its place for a
@@ -3651,109 +3800,7 @@ fn check_access(path: &str) -> ! {
 fn check_settings(path: &str) -> ! {
     match read_settings(path) {
         Ok(s) => {
-            println!(
-                "[bb-auth] {path}: OK: identity {}, {} profile claim(s), session_ttl {}s",
-                s.identity_attrs
-                    .iter()
-                    .map(|a| format!("{} ({})", a.attr, a.header))
-                    .collect::<Vec<_>>()
-                    .join(", "),
-                s.profile_claims.len(),
-                s.session_ttl
-            );
-            for c in &s.profile_claims {
-                println!("[bb-auth] {path}: claim '{}' -> {}", c.claim, c.header);
-            }
-            // The app clients, which are also the audiences: a Cognito id_token carries the
-            // app client it was minted for in `aud`, so naming an app client here IS saying
-            // which tokens the gate accepts. Printed rather than judged: whether Cognito has
-            // ever heard of one of these is not a question a file can answer.
-            println!(
-                "[bb-auth] {path}: sign-in page: {}",
-                match s.login_url.as_str() {
-                    "" => "(none: the gate's own /auth/login, on the calling host)",
-                    url => url,
-                }
-            );
-            println!(
-                "[bb-auth] {path}: refusal page: {}",
-                match s.denied_url.as_str() {
-                    "" => "(none: the gate's own /auth/denied, on the calling host)",
-                    url => url,
-                }
-            );
-            println!(
-                "[bb-auth] {path}: email app client: {}",
-                match s.client_id.as_str() {
-                    "" => "(none: no login can complete)",
-                    id => id,
-                }
-            );
-            println!(
-                "[bb-auth] {path}: accepted audiences: {}",
-                match s.audiences.len() {
-                    0 => "(none)".to_string(),
-                    _ => s.audiences.join(", "),
-                }
-            );
-            match (&s.oauth_domain, &s.social_callback_url) {
-                (Some(d), Some(c)) => {
-                    println!("[bb-auth] {path}: social sign-in via {d}, back to {c}")
-                }
-                _ => println!("[bb-auth] {path}: social sign-in: (off)"),
-            }
-            for b in &s.social_buttons {
-                println!(
-                    "[bb-auth] {path}: button '{}' through app client {}",
-                    b.idp, b.audience
-                );
-            }
-            if s.allow_unverified_social {
-                let scope = match &s.social_providers {
-                    Some(p) => p.join(", "),
-                    None => "any provider".to_string(),
-                };
-                println!(
-                    "[bb-auth] {path}: accepting unverified emails for social logins [{scope}]"
-                );
-            }
-            // The two headers the audit believes, by name, because believing one is a promise
-            // about nginx that a check of this file cannot keep: the operator reading this is
-            // the one who has to know that nginx overwrites both on every gated location.
-            println!(
-                "[bb-auth] {path}: audit: client address from {}, request id from {}",
-                s.client_ip_header
-                    .as_deref()
-                    .unwrap_or("(nowhere: not recorded)"),
-                s.request_id_header
-                    .as_deref()
-                    .unwrap_or("(nowhere: not recorded)"),
-            );
-            // The disk figure is the one worth reading: it is what a flood can cost, whatever
-            // the two settings are written in.
-            println!(
-                "[bb-auth] {path}: audit: {}",
-                audit_policy_line(&s.audit_policy)
-            );
-            // Named, not counted: this list is the GUI's whole door, and an operator reading
-            // a check should see whether their own address is on it.
-            println!(
-                "[bb-auth] {path}: bb-auth-web administrators: {}",
-                match s.admins.len() {
-                    0 => "(none: bb-auth-web will refuse to serve)".to_string(),
-                    _ => s.admins.join(", "),
-                }
-            );
-            // The look, and the stylesheet by name: it is the one setting whose effect an
-            // operator cannot see from the host, since whether it loads is the browser's
-            // business and a page that fails to load one looks like a page that has none.
-            println!(
-                "[bb-auth] {path}: pages: brand '{}', theme {}, stylesheet {}, logo {}",
-                s.brand_name.as_deref().unwrap_or(DEFAULT_BRAND),
-                s.theme.code(),
-                s.stylesheet_url.as_deref().unwrap_or("(built-in only)"),
-                s.logo_url.as_deref().unwrap_or("(none)"),
-            );
+            println!("{}", settings_report(path, &s));
             std::process::exit(0);
         }
         Err(e) => {
@@ -5339,25 +5386,31 @@ mod tests {
         let h = bb_hosts();
         // a relative rd lands on whichever host the login happened on …
         assert_eq!(
-            safe_rd(Some("/preferences"), Some(CALLER), &h, LOGIN),
+            safe_rd(Some("/preferences"), Some(CALLER), &h, LOGIN, ""),
             "https://search.badbat75.com/preferences"
         );
         assert_eq!(
-            safe_rd(Some("/q?x=1"), Some("https://mcp.badbat75.com"), &h, LOGIN),
+            safe_rd(
+                Some("/q?x=1"),
+                Some("https://mcp.badbat75.com"),
+                &h,
+                LOGIN,
+                ""
+            ),
             "https://mcp.badbat75.com/q?x=1"
         );
         // … and with no rd at all, on that host's root
         assert_eq!(
-            safe_rd(None, Some(CALLER), &h, LOGIN),
+            safe_rd(None, Some(CALLER), &h, LOGIN, ""),
             "https://search.badbat75.com/"
         );
         assert_eq!(
-            safe_rd(Some(""), Some(CALLER), &h, LOGIN),
+            safe_rd(Some(""), Some(CALLER), &h, LOGIN, ""),
             "https://search.badbat75.com/"
         );
         // no caller origin (nginx didn't send the header) => the login page
-        assert_eq!(safe_rd(Some("/preferences"), None, &h, LOGIN), LOGIN);
-        assert_eq!(safe_rd(None, None, &h, LOGIN), LOGIN);
+        assert_eq!(safe_rd(Some("/preferences"), None, &h, LOGIN, ""), LOGIN);
+        assert_eq!(safe_rd(None, None, &h, LOGIN, ""), LOGIN);
     }
 
     #[test]
@@ -5368,14 +5421,18 @@ mod tests {
             "https://search.badbat75.com/q?x=1",
             "https://badbat75.com/", // the apex, listed explicitly
         ] {
-            assert_eq!(safe_rd(Some(rd), Some(CALLER), &h, LOGIN), rd, "rd={rd}");
+            assert_eq!(
+                safe_rd(Some(rd), Some(CALLER), &h, LOGIN, ""),
+                rd,
+                "rd={rd}"
+            );
         }
     }
 
     #[test]
     fn safe_rd_blocks_open_redirect_and_splitting() {
         let h = bb_hosts();
-        let f = |rd: &str| safe_rd(Some(rd), Some(CALLER), &h, LOGIN);
+        let f = |rd: &str| safe_rd(Some(rd), Some(CALLER), &h, LOGIN, "");
         // scheme-relative + backslash variant (browsers normalise `/\` -> `//`)
         assert_eq!(f("//evil.com"), LOGIN);
         assert_eq!(f("/\\evil.com"), LOGIN);
@@ -5390,7 +5447,7 @@ mod tests {
     #[test]
     fn safe_rd_rejects_lookalikes_and_tricks() {
         let h = bb_hosts();
-        let f = |rd: &str| safe_rd(Some(rd), Some(CALLER), &h, LOGIN);
+        let f = |rd: &str| safe_rd(Some(rd), Some(CALLER), &h, LOGIN, "");
         assert_eq!(f("https://evilbadbat75.com/"), LOGIN); // suffix without the dot
         assert_eq!(f("https://badbat75.com.evil.com/"), LOGIN); // base as a left label
         assert_eq!(f("https://mcp.badbat75.com@evil.com/"), LOGIN); // userinfo: real host is evil.com
@@ -5401,7 +5458,7 @@ mod tests {
         // A spoofed caller origin cannot smuggle a redirect either: the resolved
         // candidate goes through the same host gate.
         assert_eq!(
-            safe_rd(Some("/x"), Some("https://evil.com"), &h, LOGIN),
+            safe_rd(Some("/x"), Some("https://evil.com"), &h, LOGIN, ""),
             LOGIN
         );
     }
@@ -5473,6 +5530,147 @@ mod tests {
         assert_eq!(f("http://mcp.badbat75.com/"), LOGIN); // not https
         assert_eq!(f("https://mcp.badbat75.com@evil.com/"), LOGIN); // userinfo
         assert_eq!(f("/\r\nSet-Cookie: x=1"), LOGIN); // response splitting
+    }
+
+    const LANDING: &str = "https://auth.badbat75.com/account/";
+
+    /// `gate.landing_url` is the no-`rd` arm and nothing else: a present `rd` wins, a rejected
+    /// one is still an attack or a mistake and still goes to the sign-in page, and the landing
+    /// page itself goes through `rd_url_allowed` at use time, because the settings file may
+    /// have been edited since it was compiled.
+    #[test]
+    fn safe_rd_with_no_rd_lands_on_the_landing_url() {
+        let h = bb_hosts();
+        // Nothing said, or an empty rd: the landing page, ahead of the caller's root.
+        for rd in [None, Some("")] {
+            assert_eq!(
+                safe_rd(rd, Some(CALLER), &h, LOGIN, LANDING),
+                LANDING,
+                "{rd:?}"
+            );
+            // With no caller origin the arm used to fall back to the login page.
+            assert_eq!(safe_rd(rd, None, &h, LOGIN, LANDING), LANDING, "{rd:?}");
+            // No landing configured: the caller's root, exactly as before.
+            assert_eq!(
+                safe_rd(rd, Some(CALLER), &h, LOGIN, ""),
+                "https://search.badbat75.com/"
+            );
+        }
+        // A present, valid rd (relative or absolute) still wins.
+        assert_eq!(
+            safe_rd(Some("/preferences"), Some(CALLER), &h, LOGIN, LANDING),
+            "https://search.badbat75.com/preferences"
+        );
+        assert_eq!(
+            safe_rd(
+                Some("https://mcp.badbat75.com/x"),
+                Some(CALLER),
+                &h,
+                LOGIN,
+                LANDING
+            ),
+            "https://mcp.badbat75.com/x"
+        );
+        // A rejected rd is not promoted to the landing page.
+        for bad in [
+            "https://evil.com/",
+            "//evil.com",
+            "/\\evil.com",
+            "/a\r\nX: y",
+        ] {
+            assert_eq!(
+                safe_rd(Some(bad), Some(CALLER), &h, LOGIN, LANDING),
+                LOGIN,
+                "{bad}"
+            );
+        }
+        // The landing page is checked when used: one off the estate, or not https, is refused
+        // and the login page answers.
+        for bad in ["https://evil.com/account/", "http://auth.badbat75.com/"] {
+            assert_eq!(safe_rd(None, Some(CALLER), &h, LOGIN, bad), LOGIN, "{bad}");
+        }
+    }
+
+    /// A logout with nothing said ends at the sign-in page even when a landing page is set:
+    /// `logout_target` is deliberately unchanged, and the sign-in it leads to lands there.
+    #[test]
+    fn logout_with_nothing_said_still_ends_at_the_login_page() {
+        let base = serve(token_state(gate_settings(&format!(
+            r#"{{ "landing_url": "{LANDING}" }}"#
+        ))));
+        let r = agent().get(format!("{base}/auth/logout")).call().unwrap();
+        assert_eq!(r.status(), 302);
+        assert_eq!(r.headers().get("Location").unwrap(), LOGIN);
+        // An empty rd is nothing said as well.
+        let r = agent()
+            .get(format!("{base}/auth/logout?rd="))
+            .call()
+            .unwrap();
+        assert_eq!(r.headers().get("Location").unwrap(), LOGIN);
+    }
+
+    #[test]
+    fn a_session_with_no_rd_redirects_to_the_landing_url() {
+        let go = |gate: &str, fields: &[(&str, &str)], caller: Option<&str>| {
+            let base = serve(token_state(gate_settings(gate)));
+            let mut req = agent()
+                .post(format!("{base}/auth/session"))
+                .header("Sec-Fetch-Site", "same-origin");
+            if let Some(c) = caller {
+                req = req.header("X-Original-URL", c);
+            }
+            let mut form = vec![("id_token", IT_TOKEN_OK)];
+            form.extend_from_slice(fields);
+            let r = req.send_form(form).unwrap();
+            assert_eq!(r.status(), 302);
+            assert!(r.headers().get("Set-Cookie").is_some());
+            r.headers()
+                .get("Location")
+                .unwrap()
+                .to_str()
+                .unwrap()
+                .to_string()
+        };
+        let set = format!(r#"{{ "landing_url": "{LANDING}" }}"#);
+        // No rd, an empty rd, and with or without a caller origin: the landing page.
+        assert_eq!(go(&set, &[], None), LANDING);
+        assert_eq!(go(&set, &[("rd", "")], None), LANDING);
+        assert_eq!(
+            go(&set, &[], Some("https://search.badbat75.com/x")),
+            LANDING
+        );
+        // A given rd still wins.
+        assert_eq!(
+            go(&set, &[("rd", "https://search.badbat75.com/x")], None),
+            "https://search.badbat75.com/x"
+        );
+        // A rejected rd goes to the sign-in page, not the landing page.
+        assert_eq!(go(&set, &[("rd", "https://evil.com/")], None), LOGIN);
+        // No landing configured: today's behaviour, the caller's root.
+        assert_eq!(
+            go("{}", &[], Some("https://search.badbat75.com/x")),
+            "https://search.badbat75.com/"
+        );
+    }
+
+    /// `--check-settings` names the landing page, and says what an empty one means, because an
+    /// operator reading it should not have to know that "nothing" is the caller's root.
+    #[test]
+    fn check_settings_names_the_landing_page() {
+        let report = |gate: &str| settings_report("s.json", &gate_settings(gate));
+        let set = report(&format!(r#"{{ "landing_url": "{LANDING}" }}"#));
+        let line = set
+            .lines()
+            .find(|l| l.contains("landing"))
+            .unwrap_or_else(|| panic!("no landing line: {set}"));
+        assert!(line.contains(LANDING), "{line}");
+        let unset = report("{}");
+        let line = unset
+            .lines()
+            .find(|l| l.contains("landing"))
+            .unwrap_or_else(|| panic!("no landing line: {unset}"));
+        assert!(line.contains("(none"), "{line}");
+        assert!(!line.contains("https://"), "{line}");
     }
 
     /// The refusal page's sign-out, which is the one link in this repository that is read
