@@ -2954,3 +2954,190 @@ functions:
   branch of the console's handler, `K::NotAdminToAccount`, and the `account-menu` scene in
   `e2e/shots.js`. Green: `the_console_403_names_the_caller_and_links_to_their_account`, and
   the scene rendering in its four views.
+
+### 13.18 The theme, reviewed (plan step 8d)
+
+The user found the theme unsightly (2026-11-24) and set one constraint: **the theme contract
+does not change**. Every custom property `THEME_CSS` defines keeps its name and its meaning, none
+is removed, and an operator's token file written for today's `theme.css` must still render
+correctly after ours. This design meets it **without a new token**: every change is either a new
+*value* for an existing token or a rule in `base.css` / `admin.css` that reads existing tokens. So
+no migration guide is owed to theme authors; the CHANGELOG still lists the changed defaults and
+the values a token file may want to copy (below), because the operator's file pins the old ones.
+
+What was looked at: `theme.css`, `base.css`, `admin.css`, `auth.css`; the `shots.js` walk of
+2026-11-25 (light, dark, phone); and a mockup harness that captures the console and `/account/`
+pages as served by the e2e server, renders `login.html` with its placeholders filled, and shoots
+each with and without the proposed rules, and with and without the operator's `tokens.css`
+(rpi-01's copy) loaded after ours. Before and after: `/tmp/d8d/shots/{before,after}/`
+(`<page>-{light,dark,phone}[-tok].png`), the delta itself `/tmp/d8d/proposed.css`.
+
+#### What made it unsightly
+
+Measured on the screenshots, in the order a person notices them.
+
+1. **Everything clickable is the same loud blue box.** The five tabs, the two header icons,
+   every `+ add`, `Apply`, `edit`, `rotate`, `cancel` and `+ New key` are `.pill`s with a 1px
+   accent border and accent text, and in the header they are body-size with 7px by 15px padding.
+   A screen of the users page carries a dozen of them, all equally loud, so nothing leads: the
+   primary button, the selected tab and a link are the same blue as a filter's Apply. The tabs
+   also look like buttons, which they are not (Nielsen 4, consistency: a control should look
+   like what it does).
+2. **The ground repeats.** `body` paints `var(--bg-grad),var(--bg)` with the default
+   `background-repeat`, and `html{height:100%}` makes the positioning area one viewport tall,
+   so on any page longer than the window the glow starts again one viewport down: a hard band of
+   a second shade across the content. This is the "background shade change on the phone
+   dashboard" from 8c's review, and it shows on the desktop users page too; the
+   `body:has(.selfserve)` rule only hid it on one page.
+3. **Card soup.** Every panel, tile, message and state box has a border **and** a drop shadow
+   (`--shadow-md`). Stacked down a page, the shadows add a grey haze between panels and make a
+   column of sections read as a pile of floating cards. A shadow says "this floats above the
+   page", which only the Preferences menu and the sign-in card actually do.
+4. **A flat type scale.** `h1` is 1.25rem against a 15px body, `h2` 1rem, the body size, told
+   apart by weight alone; a section heading barely outranks the paragraph under it.
+5. **Pale fields read as disabled.** In light, a field is `#f6f7fb` with a `#d8d9e4` border:
+   1.4:1 against the card. The days box beside the duration list (8c's review) looks greyed out,
+   and the boundary of a text field fails WCAG 2.2 SC 1.4.11, which asks 3:1 of the indicator
+   that shows a field is a field
+   (<https://www.w3.org/WAI/WCAG22/Understanding/non-text-contrast.html>, figures 31 to 34).
+   Dark has the same fault (`#3a3a48` on `#20202a`, 1.44:1).
+6. **Misalignment.** The header bar's content starts 16px left of the page's content (the bar
+   has no inner padding, `main` has 16px), and on `/account/` the bar is 1000px wide over a 620px
+   column, so the brand floats far to the left of everything under it (8b's review).
+7. **Small ragged details.** The count tiles wrap five and one at desktop width
+   (`minmax(110px,160px)` cannot stretch); every link in a table cell is underlined, so a column
+   of emails is a column of blue rules; a panel whose first child carries a top margin opens with
+   an empty band (the revoke confirmation, 8c's review) and the same at the bottom of the
+   Profile panel.
+
+The sign-in page was checked the same way and has little of this: one card, one primary button,
+no pills. It changes in one value only (5, the field), which is the point of saying so: the
+console is what was unsightly, and the gate's page is what the console now follows more closely.
+
+#### The changes
+
+**In our built-in `theme.css`, values only** (repaints the gate's four pages, the console and
+`/account/`; checked on `login.html` light and dark, the dashboard, users, application and
+account pages, each with and without `tokens.css`):
+
+| Token | Arm | Was | Becomes | Why |
+|---|---|---|---|---|
+| `--input-border` | light | `#d8d9e4` | `#8a8c9e` | 3.32:1 on `--card`, 3.10:1 on `--bg` (SC 1.4.11) |
+| `--input-bg` | light | `#f6f7fb` | `#ffffff` | a field level with the card reads as enabled once its border carries it |
+| `--input-border` | both dark arms | `#3a3a48` | `#6e6e86` | 3.26:1 on `--card`, 3.49:1 on `--input-bg` |
+
+No other value moves. The accent, the states and every text colour already pass AA and keep
+their measured comments. `--bg-grad` keeps its value: the band was a missing `no-repeat`, not
+the gradient.
+
+**In `base.css`, the shared components** (both programs):
+
+- `body`'s background becomes `var(--bg-grad) no-repeat,var(--bg)`: the glow is painted once at
+  the top and the flat `--bg` it fades into carries the rest of the page. Fixes 2 on every page
+  and every token file, the operator's included.
+- The surface rule (`.card,.panel,.msg,.flash,.err,.secret`) drops `box-shadow` to `none`. The
+  two surfaces that float keep theirs from their own layout, as they already state it:
+  `auth.css`'s `.card` (`--shadow-lg`) and `admin.css`'s `.menu` (`--shadow-md`). Both shadow
+  tokens therefore stay in use.
+- A surface owns its padding: `>:first-child{margin-top:0}` and `>:last-child{margin-bottom:0}`
+  on the same six surfaces. Removes the empty band at the top of the confirmation card and at the
+  foot of a panel, with no markup change.
+- Type: `h1` 1.5rem, line-height 1.25, weight 650, letter-spacing -.01em, margin `0 0 6px`;
+  `h2` 1.0625rem, weight 600, margin `28px 0 10px`. The sign-in card's `.brand h1` keeps its own
+  size from `auth.css`.
+- The secondary pill is neutral: `.pill` text `--text`, border `--input-border` (the same 3:1
+  boundary a field has, so a pill still reads as a control on every surface, which is the reason
+  the border was `currentColor`); hover adds `--chip` fill, accent border and accent text;
+  `.pill.rm` stays `--muted` and turns `--error` on hover; `.pill.on` keeps the accent fill. The
+  accent is left to what deserves it: the primary button, the selected tab, links and the focus
+  ring.
+- A pill in a `nav` is a tab: `nav .pill` has no visible box at rest (border `--card`, the
+  header's own fill, so the box keeps its size across states), text `--muted`; hover fills
+  `--chip`. That reaches the two header icons too (they sit in `nav.acct`), which is intended:
+  icon buttons in a bar need no box, and their glyph in `--muted` is 6:1. SC 1.4.11 does not ask
+  for a boundary where the content identifies the control (same Understanding page, "a border or
+  other indication of the overall boundary of the hit area is not required"), and the focus ring
+  is unchanged. The auth pages have no `nav`, so this rule paints nothing there.
+- Links in a table cell or a list item are not underlined at rest, underlined on hover. They
+  are not links inside a block of text, which is where colour alone would fail SC 1.4.1
+  (<https://www.w3.org/WAI/WCAG22/Techniques/failures/F73>).
+
+**In `admin.css`, the arrangement:**
+
+- `header.top` padding `10px 0`, `.bar` padding `0 16px` (phone: `6px 0` and `0 16px`), so the
+  bar's content edge is `main`'s. `body:has(.selfserve) .bar{max-width:620px}` (phone padding
+  `0 12px`) puts the account page's brand over its column. `:has` is Baseline 2023
+  (<https://developer.mozilla.org/en-US/docs/Web/CSS/:has>); without it the brand stays where it
+  is today, which costs alignment and nothing else.
+- `.bar .pill` 0.95rem, padding `6px 12px` (`.pill.ico` `6px`): a header that holds tabs, not
+  buttons. Phone sizes unchanged.
+- `p.primary .pill,.actions .pill` take the button's measure (font-size inherit, line-height
+  1.55, padding `9px 16px`), so `cancel` beside `Create key` is the same height.
+- `.cards` becomes `repeat(auto-fill,minmax(140px,1fr))`: the six counts sit on one row at
+  desktop width and wrap evenly on a phone.
+
+**Not done, and why.** Radii stay (14px and 10px are the brand's, and the operator's file states
+them as such). The uppercase table headings stay: they hide two `K` capitalisation slips
+(`expiry`, `API_KEYS`) that sentence case would expose, which is a separate wording task. The
+dashboard's monospaced file words (`api_keys`, `user_groups`) stay: they teach the file's
+vocabulary on purpose, and the question is the user's (below).
+
+**For the operator's `tokens.css`** (rpi-01; not in this repository, recommendations only).
+The file redefines `--input-bg` and `--input-border` with today's built-in values, so after this
+change it keeps pale fields and faint pills on that deployment. Everything else here reaches it
+untouched, since it is rules and not values. To match: in `:root`, `--input-bg: #ffffff;
+--input-border: #8a8c9e;` and in both dark arms `--input-border: #6e6e86;`. With Inter loaded, the
+`h1` weight 650 is a real weight (the face is variable, 100 to 900). Nothing in it needs
+removing; `--danger-*` are untouched.
+
+#### The rest of 8d's list, folded in
+
+- **The two brands agree.** The console's bar says "bb-auth-web" over a version, the account
+  page "bb-auth" (or `ui.brand_name`). Both become `ui.brand_name`, default `bb-auth` (the
+  account page's `DEFAULT_ACCOUNT_BRAND`), with the logo when `ui.logo_url` is set; the console's
+  second line becomes `K::ConsoleTag` ("Administration" / "Amministrazione") instead of the
+  version, which stays in the footer, where `version_line` already prints the full build string.
+- **The account id on a phone.** The id becomes `code.uid`, and `.uid{white-space:nowrap}` with
+  `font-size:.85em` under 640px: 36 characters fit 296px at 320px wide, so it moves whole to its
+  own line instead of breaking at a hyphen. The email beside it is not given `nowrap`, since a
+  long address must still wrap.
+- **The days box.** Its presence is the price of no JavaScript; its look is fixed by the field
+  values above (white, 3:1 border, the `days` placeholder in `--muted`).
+- **The Name hint while a refusal shows.** `account_key_row` omits the field's hint when that
+  field carries the refusal: the refusal already says what is allowed, as a sentence.
+- **The scope radios.** A `shots.js` scene `account-new-scopes` opens `/account/keys/new` as
+  `bot@example.com`, whose `laptop` key shows `mcp/api` is reachable, so the radios get a look.
+
+#### Tests
+
+Kept green, unchanged: `the_theme_defines_every_token_in_all_four_arms`,
+`only_the_palette_names_a_colour`, `the_components_are_shared_and_the_layouts_only_arrange_them`.
+
+New, by part (each a tester and coder pass):
+
+- **8d-1, `theme.css` values and `base.css` surfaces** (lib.rs): `the_token_set_is_the_contract`
+  (the set of custom-property names `THEME_CSS` defines equals a fixed list of today's 29, so a
+  rename or a removal is red); `fields_have_a_three_to_one_border_in_every_arm` (parses each
+  arm's `--input-border`, `--card`, `--input-bg` and computes the WCAG ratio, at least 3.0);
+  `the_ground_is_painted_once` (`BASE_CSS`'s body background reads `var(--bg-grad) no-repeat`);
+  `only_floating_surfaces_cast_a_shadow` (the surface rule says `box-shadow:none`, `AUTH_CSS`'s
+  `.card` names `--shadow-lg`, `admin.css`'s `.menu` `--shadow-md`);
+  `a_surface_owns_its_padding` (the first-child and last-child rules exist). Plus a look at
+  `/auth/login` in both themes, as the commands table asks.
+- **8d-2, the controls and the arrangement** (lib.rs and bb-auth-web):
+  `the_secondary_pill_is_neutral` (`.pill{` reads `--text` and `--input-border`, and `.pill.on`
+  is the only pill rule naming `--accent` as a fill); `a_pill_in_a_nav_is_a_tab`
+  (`nav .pill` exists in `BASE_CSS`, border `--card`); `table_links_underline_on_hover`;
+  `the_header_shares_the_content_column` (the `.bar` and `body:has(.selfserve) .bar` rules). In
+  `e2e/run.js`: the header brand's left edge equals the `h1`'s at 1280 and 360, on `/admin/` and
+  `/account/`; `.actions .pill` and `.actions button` are equally tall (within 1px); the six
+  dashboard tiles share one top at 1280.
+- **8d-3, the markup items** (bb-auth-web): `both_bars_name_the_deployment` (console and account
+  brand text is `ui.brand_name`, else `bb-auth`; the console's second line is `K::ConsoleTag` in
+  both languages; the version appears in the footer); `the_account_id_is_one_token` (`code.uid`;
+  e2e at 320: no page scroll and the id is one line tall);
+  `a_refused_field_shows_the_refusal_not_the_hint`; and the `account-new-scopes` scene rendering
+  in its four views.
+
+The slice closes on the user's look at the `shots.js` walk in both themes and both languages,
+at desktop and phone width, with and without the operator's token file.

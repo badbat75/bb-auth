@@ -227,6 +227,13 @@ review. Steps 5 and 7 add their forms into this layout later (Profile, a last pa
     narrow; the console's `403` keeps its Sign out with `rd` and gains "Go to your account",
     shown even to a vetoed person, who then gets the account page's own `403`; the Italian
     `AccountKeyNotYours` says "rigenerarla" to match the button.
+  - 8d (designer, §13.18): the theme contract is untouched (no token added, renamed or removed),
+    so no migration guide; three default values change (light `--input-border` and
+    `--input-bg`, dark `--input-border`), which the CHANGELOG lists for theme authors, and
+    rpi-01's `tokens.css` should set the same three to get the 3:1 field borders. The console's
+    brand becomes `ui.brand_name` with an "Administration" line, the version only in the footer;
+    header tabs and icons lose their boxes; secondary pills become neutral; light fields white;
+    uppercase table headings kept. Before and after images: /tmp/d8d/shots/{before,after}/.
 
 - Before step 5: a read-only check of the real pool (`aws cognito-idp describe-user-pool` and
   `describe-user-pool-client`): email sign-in, `ALLOW_USER_AUTH`, `WriteAttributes`,
