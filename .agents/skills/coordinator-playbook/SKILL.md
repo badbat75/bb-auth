@@ -112,5 +112,7 @@ files outside the repo.
 - cargo can keep a stale test binary after an agent's edit (a tester saw 191 green while the repo
   build kept failing on the old assertion). When an agent's green run and yours disagree on
   unchanged files, `touch` the edited source and rerun before sending the work back.
-- Never `git commit -a` (or `-am`) while an agent may be editing: on 2026-11-25 a plan-only commit
-  swept a running tester's half-written tests in with it. Name the files: `git commit PATH...`.
+- Commit with the paths named **on the commit itself**: `git commit -m … -- <paths>`. Never `git commit -a`,
+  and never `git add X && git commit`, which commits the whole index: staged tests waiting for their coder
+  were swept into a plan-only commit (2026-11-25) and into a playbook commit (982a670, 2026-11-26), both
+  split back out by hand.
