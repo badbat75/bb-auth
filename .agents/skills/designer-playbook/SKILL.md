@@ -50,6 +50,12 @@ Rules are in `AGENTS.md`. Format of this file: `AGENTS.md`, under "Skills".
 - A mockup of a sign-in step with no server: `/tmp/d6/gen.js` fills `login.html` with the three real stylesheets, strips the script, makes one step `.active` and shoots it light/dark at 1280/360/320.
   copied bar, `/tmp/d5b/shot.js <names>` shoots them light/dark/360 and reports any sideways scroll.
 
+- The real sign-in page past its email step: `/tmp/d6r/walk.js` runs the debug `bb-auth` (env:
+  `BB_AUTH_LISTEN`, `BB_AUTH_HMAC_KEY` of 32+ bytes, `BB_AUTH_ACCESS_FILE`, `BB_AUTH_ORIGINAL_URL_HEADER`;
+  `settings.json` beside the access file with an empty `gate.issuer`, so no JWKS fetch), then answers the
+  page's Cognito `fetch` with `page.route` on the `X-Amz-Target` header (`UserNotFoundException` opens
+  the registration step). An empty issuer leaves `connect-src` empty, so the context needs `bypassCSP: true`.
+
 ## Pitfalls
 
 - `autofocus` is ignored when the URL has a fragment (MDN): a link that opens a form must not add `#id`.
