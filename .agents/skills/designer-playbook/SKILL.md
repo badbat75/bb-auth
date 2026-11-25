@@ -80,3 +80,5 @@ Rules are in `AGENTS.md`. Format of this file: `AGENTS.md`, under "Skills".
 - The sign-in page's social buttons live inside the email step, so they are hidden on the registration and code steps: anything that points at "your provider" on a later step must render them there too.
 - `node e2e/shots.js` takes one substring filter, not a regex (`a|b` matches nothing): run one filter per call.
 - Every pill inside the header panel is also matched by `nav .pill` and `.bar .pill` (it sits in `nav.acct`), and the phone block hides `nav.acct .who`: check a new header element against both before measuring it.
+- An inline `svg` outside `.pill.ico` gets no size and no stroke (300x150, filled black): a glyph in a worded pill needs its own `width/height/fill:none/stroke:currentColor` rule. The 8H panel shipped that way, and `shots.js menu` showed it but no test did.
+- The "one row" check must use a long given name with a long brand (`X-Auth-Given-Name` plus `profile_claims:['given_name']`), measuring `.bar` height and not only item midpoints: as built, the tab `nav` wrapped inside itself from 804 to 900px (`/tmp/d8h-review/probe/r.js`).
