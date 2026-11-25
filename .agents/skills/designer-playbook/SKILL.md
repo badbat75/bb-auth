@@ -11,6 +11,7 @@ Rules are in `AGENTS.md`. Format of this file: `AGENTS.md`, under "Skills".
   `e2e/artifacts/visual/{light,dark}/`. The full walk is long, so always pass a filter.
 - The self-service page is `/account/` in `src/bin/bb-auth-web.rs` (`handle_account`, `account_key_forms`,
   `bearer_reveal`); its CSS is under `.selfserve` in `src/assets/admin.css`.
+- The console's `403` (a non-administrator on `/admin/`) is the `forbidden` scene of `shots.js`.
 - A confirmation with no JavaScript is a GET page with a POST form on it (the console's `page_confirm`).
 - `shots.js` has no `/account/` scene yet: drive it with a scratch script that calls `boot()` from
   `e2e/lib/server.js` and opens `ctx.origin + '/account/'` with header `X-Auth-Email`
@@ -32,4 +33,5 @@ Rules are in `AGENTS.md`. Format of this file: `AGENTS.md`, under "Skills".
 - `aspect-ratio` on a padded, border-box `.pill` squeezes its vertical padding to nothing: give an icon pill equal padding instead.
 - A `summary` has no ARIA role (MDN), so name an icon-only one with hidden text (`.vh`), not `aria-label`.
 - A verb-plus-id `aria-label` passes WCAG 2.5.3 in English and fails in Italian when the two `K` keys are worded apart (`Rotate` "rigenera" vs `AccountKeyRotate` "Ruota la chiave"): review the `it` view's names, not only its look.
-- `shots.js` has no scene with the `/account/` Preferences menu open, so its always-present Apply is unseen in review: ask for one or shoot it with a scratch script.
+- `shots.js` has no scene with the `/account/` Preferences menu open until 8c-3 adds `account-menu`; before that, shoot it with a scratch script.
+- A refusal sentence must name the field by its visible label (`Name`), not the file's word (`id`), or the person cannot find what to fix.

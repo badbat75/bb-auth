@@ -2613,6 +2613,165 @@ groups "Groups an administrator has put you in."; keys "A key lets a script or a
 as you. It reaches at most what you reach."; profile "What your sign-in tells these
 applications about you." (Italian in the `K` table.)
 
+**The body's markup, exactly (8c-1).** All in `page_account`; every class exists.
+
+- The lede: `p.lede` holding each address as `code`, separated by one space, then `br`, then
+  `K::AccountIdLabel` `": "` and the uuid in `code`; for a stranger, after the `br`,
+  `K::AccountNoRow` as plain text. The old `p` "signed in as" and the separate uuid `p` go:
+  the bar already says "signed in as" (§13.17 header), and the lede says which addresses and
+  which account.
+- Each section: `section#<id>.panel` > `h2` > `p.lede.sub` > content.
+- Where you reach: one `ul.plain`, one `li` per pair holding `code` `app/scope`, in
+  `account_reached`'s order (file order). The per-application `p` and nested `ul` go: the
+  console's person page lists pairs the same way, and one flat list reads at a glance.
+- Groups: `ul.plain`, one `li` > `code` per group. The heading becomes `K::AccountGroups`
+  ("Groups"), not the console's `K::Groups` ("User groups"), which names the file section.
+- Profile: `ul.plain`, one `li` per claim: `code` claim, `": "`, then the decoded value as
+  plain text, or `span.muted` `K::AccountNotProvided`. The value is the person's name or
+  department, which is prose, not code.
+- Empty: `p.muted` with the section's own `*None` key. `K::AccountNone` ("None.") then has no
+  caller and is removed.
+
+Italian for the body's keys (English above): `AccountIdLabel` "Id dell'account";
+`AccountGroups` "Gruppi"; `AccountReachSub` "Le applicazioni a cui il tuo accesso apre la
+porta, e le aree dentro ciascuna."; `AccountGroupsSub` "I gruppi in cui ti ha messo un
+amministratore."; `AccountKeysSub` "Una chiave permette a uno script o a uno strumento di
+accedere come te. Arriva al massimo dove arrivi tu."; `AccountProfileSub` "Cosa il tuo accesso
+dice di te a queste applicazioni."; `AccountNotProvided` "non fornito"; `AccountReachNone` "Il
+tuo accesso non apre ancora nessuna applicazione."; `AccountGroupsNone` "Non sei in nessun
+gruppo."; `AccountProfileNone` "Questa installazione non condivide dettagli del profilo.".
+`AccountUuid` is removed (replaced by `AccountIdLabel`).
+
+Tests (8c-1): `the_lede_names_the_addresses_and_the_account_id` (a row with two addresses:
+one `p.lede` before the first section, both addresses in `code`, `Account id: <uuid>`; a
+stranger: the address and `AccountNoRow`, no uuid; no "signed in as" in `main`);
+`each_section_says_what_it_is_for` (each of the four sections has exactly one `p.lede.sub`
+right after its `h2`, with its key's text, in both languages); `empty_sections_name_what_is_missing`
+(a stranger with no groups and a deployment with no claims: the three `*None` sentences in
+`p.muted`, and `None.` nowhere); `the_sections_are_plain_lists` (reach, groups and profile
+each a `ul.plain`, reach items read `app/scope`, a configured but unforwarded claim shows
+`span.muted` "not provided"). The existing `account_the_reach_section_…`,
+`account_the_groups_section_…`, `account_the_profile_section_…` and
+`account_a_stranger_…` tests change to the flat `app/scope` form and the new words.
+
+#### The key form's refusals, the days box and the restriction (8c-2, from the review of 8a)
+
+**One refusal, one fact.** `K::AccountKeyBound` says two things ("a key id is … and a key
+lasts at least a day") whichever field was wrong, so a person who typed `My Laptop` reads
+about durations. It is split, and removed:
+
+| Key | Field marked | English | Italian |
+|---|---|---|---|
+| `AccountKeyIdBad` | `id` | A key name is lowercase letters, digits and dashes, up to 32 characters, such as laptop. | Il nome di una chiave è fatto di lettere minuscole, cifre e trattini, fino a 32 caratteri, per esempio laptop. |
+| `AccountKeyTooShort` | `duration` | A key must last at least a day; choose a longer duration. | Una chiave deve durare almeno un giorno; scegli una durata più lunga. |
+| `KeyScopesChoose` | none | Choose 'all scopes' or 'only these'. | Scegli 'tutti gli ambiti' o 'solo questi'. |
+
+The message says "name" because the field is labelled `K::KeyColName` ("Name") since 8a; the
+file's word `id` is not on this page. `KeyScopesChoose` answers the third former use of
+`AccountKeyBound` (a `restrict` that is neither `all` nor `some`), which only a hand-written
+`POST` sends; a sentence that names the two choices is still the honest answer to it.
+
+**Surfaces.** `/account/` only: the console never used `AccountKeyBound`, and its own id and
+duration refusals are the library's words, verbatim, by design (`form_shell_at`). The two
+duration refusals `duration_from_form` answers on **both** surfaces are made sentences too,
+because they sit beside `KeyDurationRequired`, already one, in the same box:
+`KeyDaysWithoutCustom` "You typed a number of days; choose 'after a number of days', or clear
+it." / "Hai scritto un numero di giorni; scegli 'dopo un numero di giorni', o cancellalo."
+(it named an option "Custom" that no longer exists: the option reads `K::DurCustom`), and
+`KeyDaysInvalid` "Write a whole number of days, at least 1." / "Scrivi un numero intero di
+giorni, almeno 1.". The account page's other refusals become sentences with a capital and a
+period, words unchanged otherwise: `AccountKeyFull` "This account has ten keys, which is the
+most this page mints." / "Questo account ha dieci chiavi, il massimo che questa pagina crea.",
+`AccountKeyDup` "This account already has a key with that name." / "Questo account ha già una
+chiave con quel nome." ("name", for the label's reason), `AccountKeyUnknownScope` "A scope you
+picked is not one a key of yours can reach." / "Uno degli ambiti scelti non è uno che una tua
+chiave può raggiungere." ("ambiti", the word the form's radios use). WCAG 3.3.1 and 3.3.3:
+the error is identified in text and the fix is named
+(<https://www.w3.org/WAI/WCAG22/Understanding/error-identification.html>,
+<https://www.w3.org/WAI/WCAG22/Understanding/error-suggestion.html>).
+
+**The days box.** Today the box sits beside the select with the hint "days" alone on the line
+below it, which reads as a caption of the whole row. `duration_choice` takes the box's
+placeholder and an optional hint: `/account/` passes placeholder `K::DurDaysHint` ("days",
+"giorni") and no hint, so no `span.hint` is rendered; the console passes no placeholder (no
+attribute) and its hint `<n>d · <n>h` unchanged, because its box takes the whole grammar and a
+placeholder of "days" would be a lie about `12h`. The box keeps its own name as an
+`aria-label`, since a placeholder is not a label (MDN,
+<https://developer.mozilla.org/en-US/docs/Web/HTML/Reference/Elements/input#placeholder>) and
+the wrapping `label` labels only its first labelable descendant, the select
+(<https://html.spec.whatwg.org/multipage/forms.html#the-label-element>). `K::DurDaysLabel` is
+reworded to "Number of days" / "Numero di giorni" on both surfaces: it echoes the option the
+person picked ("after a number of days") and contains the placeholder's word, where "Custom
+duration" named nothing on screen (WCAG 2.5.3,
+<https://www.w3.org/WAI/WCAG22/Understanding/label-in-name.html>). The placeholder is painted
+`--muted` by `base.css`, the colour every hint already uses. Trade-off: a placeholder
+disappears once the person types; here that costs nothing, because what was typed is a number
+and the select beside it still says "after a number of days".
+
+**The restriction, left out when there is nothing to narrow to.** `account_key_row` already
+drops "only these" when `key_scopes_for` is empty, but still shows the "Scopes" label and a
+lone checked radio "all scopes": a choice of one. With nothing to narrow to, the whole `div`
+(the `span.lbl` and the radio) is not rendered, and the form carries
+`input type="hidden" name="restrict" value="all"` in its place, so the handler is unchanged
+and still refuses a request that chose nothing. The section's sub-line already says a key
+reaches at most what its owner reaches. With pairs to offer, the block is as today.
+
+Tests (8c-2): `a_bad_key_name_is_refused_without_naming_the_duration` (`id=My Laptop`:
+`400`, `div.err` is `AccountKeyIdBad` and contains neither "day" nor "giorn", the `id` input
+`aria-invalid="true"`, the select not; the file unchanged);
+`a_too_short_key_is_refused_without_naming_the_name` (`duration=custom`, `days=12h`:
+`AccountKeyTooShort`, the select `aria-invalid="true"`, the `id` input not);
+`the_account_refusals_are_sentences` (unit, over the account form's refusal keys and the
+three `Key*` duration keys, both languages: first letter uppercase, last character `.`);
+`the_days_box_has_a_placeholder_and_its_own_name` (on `GET /account/keys/new`, `en` and `it`:
+`input[name=days]` has `placeholder` "days"/"giorni" and `aria-label` "Number of days"/"Numero
+di giorni", and the form has no `span.hint` reading "days"; on the console's key add page the
+box has no `placeholder` and the hint `<n>d · <n>h` is there);
+`a_key_with_nothing_to_narrow_has_no_scope_choice` (a caller whose `key_scopes_for` is empty:
+no `input[type=radio][name=restrict]`, no "all scopes" in the form, one hidden `restrict=all`;
+posting the form as rendered mints a key with no `scopes`; a caller with pairs still gets both
+radios). `a_refused_key_keeps_the_row_and_says_where` changes to the new key, and the test's
+list of `K` names drops `AccountKeyBound` and gains the three new ones.
+
+#### The console's 403, and the menu scene (8c-3, from the review of 8b)
+
+**Who lands there.** Any signed-in person who opens `/admin/`, for example from an old bookmark
+or a link an administrator shared. Today the page says, in a red panel, that their address is
+not an administrator, and offers nothing but the two icons; the bar names nobody, because
+`shell_as` takes the identity from `v.admin`, which is `None` here. Screenshot of today:
+`e2e/artifacts/visual/light/forbidden.png`.
+
+**The identity in the bar.** `shell_as` is split: `shell_named(v, who: Option<String>, title,
+content)` renders the page with the bar's identity as given, and `shell_as` becomes the
+one-line call `shell_named(v, v.admin.map(|a| identity_label(given_name, a)), title, content)`,
+so every console page is byte for byte as today. The `403` branch calls
+`shell_named(&v, Some(identity_label(given, &who)), …)`, `who` being the identity header as
+received (first address, given name when configured), so the bar and the menu's first line say
+who is signed in, as on every other page (Nielsen 1, visibility of system status). Tabs stay
+an empty `nav` and the brand an inert `span`, as today.
+
+**A way forward.** After the red panel, the console's add control: `p.primary` > `a.pill`
+`K::NotAdminToAccount` ("Go to your account", "Vai al tuo account") to `Config::account_path`
+plus `/`. Nielsen 9 (help users recognise, diagnose and recover from errors): the page now says
+what the person can do instead. A pill and not a sentence link because it is the one action on
+the page. The panel's sentence is unchanged. Sign out stays the console's full
+`BB_AUTH_WEB_LOGOUT_URL`, with its `rd`: on this page it is the way to sign in as somebody
+else, an administrator, and come back here.
+
+Test (8c-3): `the_console_403_names_the_caller_and_links_to_their_account` (over a socket,
+`you@example.com`, not an administrator: `403`; `nav.acct span.who` and the menu's first
+`p.lede` read the address; with `given_name` configured and forwarded, "Name · address"; with
+two addresses in the header, the first; one `p.primary a.pill` whose `href` is `/account/` and
+whose text is `NotAdminToAccount`, in both languages; the `nav` before `nav.acct` is empty);
+`icon_controls_are_named_by_hidden_text` keeps passing on the `403`.
+
+**The menu scene.** `e2e/shots.js` gains `account-menu`, next to `account`: `asPerson`, `goto`
+`/account/`, `click('details.settings > summary')`, `asAdmin`; added to the `it` view's `only`
+list. It is the one place the account menu's always-present Apply is seen in review. The phone
+view runs it with no change, since that view takes every scene. Check: `node e2e/shots.js
+account-menu` writes `{light,dark,phone,it}/account-menu.png`, and the image shows the menu
+open with the identity line, both list boxes and Apply.
+
 #### Icons instead of words: one component (asked 2026-11-24)
 
 The user: "let's start using some icons instead of buttons (settings and logout, for
@@ -2747,7 +2906,7 @@ in as" change.
 
 **Slices.** 8a: §13.16 (the table, the + row, the confirmations through a shared
 `page_confirm`, the `td.pills` fix, the duration select on both surfaces). 8c: the body's lede,
-sub-lines, lists and empty states. 8b: the shared header on both surfaces, the identity, the
+sub-lines, lists and empty states, plus the review items (its three parts are at the end of this section). 8b: the shared header on both surfaces, the identity, the
 footer change, the removal of the foot form, in three tester and coder passes, each over a few
 functions:
 
@@ -2775,3 +2934,23 @@ functions:
   `page_account_confirm`, whose caller passes the action word as the title. Green:
   `logout_without_rd_keeps_everything_else`, `the_account_sign_out_carries_no_rd`,
   `the_account_confirmation_has_one_h1`.
+
+**8c, in three tester and coder passes**, each over a few functions:
+
+- **8c-1, the body.** `page_account` and the `K` table only: the lede, the sub-lines, the
+  plain lists, the empty states, `AccountGroups` as the heading; `AccountNone` and
+  `AccountUuid` removed. Green: `the_lede_names_the_addresses_and_the_account_id`,
+  `each_section_says_what_it_is_for`, `empty_sections_name_what_is_missing`,
+  `the_sections_are_plain_lists`, and the four existing `account_*` section tests updated.
+- **8c-2, the key form.** `account_key_row`, `duration_choice` (placeholder and optional
+  hint; both callers), `account_key_post`'s three former `AccountKeyBound` arms, and the `K`
+  table (`AccountKeyIdBad`, `AccountKeyTooShort`, `KeyScopesChoose`, the rewordings above).
+  Green: `a_bad_key_name_is_refused_without_naming_the_duration`,
+  `a_too_short_key_is_refused_without_naming_the_name`, `the_account_refusals_are_sentences`,
+  `the_days_box_has_a_placeholder_and_its_own_name`,
+  `a_key_with_nothing_to_narrow_has_no_scope_choice`, and
+  `a_refused_key_keeps_the_row_and_says_where` updated.
+- **8c-3, the console's 403 and the scene.** `shell_named` split out of `shell_as`, the `403`
+  branch of the console's handler, `K::NotAdminToAccount`, and the `account-menu` scene in
+  `e2e/shots.js`. Green: `the_console_403_names_the_caller_and_links_to_their_account`, and
+  the scene rendering in its four views.

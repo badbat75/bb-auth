@@ -220,6 +220,14 @@ of the confirmation card, and one look at a background shade change on the phone
   - 8b-1: the tester's part went to a Claude tester on Sonnet after two local runs failed (an
     opencode error, then a run that lost its task after compaction), by extending the user's
     Sonnet fallback rule from the coder to the tester.
+  - 8c (designer, §13.17): `K::AccountKeyBound` split into three `/account` refusals (bad name,
+    shorter than a day, scopes chosen by hand) worded "name" as the field is labelled;
+    `KeyDaysWithoutCustom` and `KeyDaysInvalid` reworded as sentences on both surfaces; a "days"
+    placeholder on `/account` only (the console's box also takes hours); the box named "Number
+    of days" on both; no scope block at all (a hidden `restrict=all`) when there is nothing to
+    narrow; the console's `403` keeps its Sign out with `rd` and gains "Go to your account",
+    shown even to a vetoed person, who then gets the account page's own `403`; the Italian
+    `AccountKeyNotYours` says "rigenerarla" to match the button.
 
 - Before step 5: a read-only check of the real pool (`aws cognito-idp describe-user-pool` and
   `describe-user-pool-client`): email sign-in, `ALLOW_USER_AUTH`, `WriteAttributes`,
