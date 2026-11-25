@@ -154,16 +154,21 @@ One crate, four targets, and the split is load-bearing:
   page, and a base that normalises to nothing is every path, leaving no sibling space to mount
   anything beside, which is what makes an empty `BB_AUTH_WEB_BASE_PATH` a fatal startup. The
   proxy secret is route-global and is not relaxed for this page, and a non-administrator's
-  request to an admin route is a `403`, never a `404` that names which paths exist. What the
-  page shows is the caller's addresses (every email of one roster row, space-joined, as the gate
-  sends them) and, where a row exists, its uuid, then four sections, three of them
-  **read-only**: *Where you reach* (the applications and scope names `Access::scopes_reached`
-  returns, grouped by application, never a URL), *Groups* (the `user_groups` naming the
-  caller's uuid), *API keys* (the console's own key table: each key's id, its expiry date or
-  "never", and its restriction, never the hash or the bearer, each row ending in a rotate pill and
-  a revoke icon that lead to a confirmation page) and *Profile* (each configured
-  `gate.profile_claims` claim and the value nginx forwarded, percent-decoded, where a configured
-  claim with nothing forwarded shows "None.").
+  request to an admin route is a `403`, never a `404` that names which paths exist; that `403`
+  names the caller in the bar as every other page does and ends in one action, a "Go to your
+  account" pill to this page, because the console has no page that person may open and this one
+  is theirs by design. What the page shows is one lede with the caller's addresses (every email
+  of one roster row, space-joined, as the gate sends them) and, on the line below, the uuid they
+  resolve to under the label "Account id", where a caller with no row is told there is none.
+  Then four sections, each with a sub-line saying what it is for and each empty state a sentence
+  naming what is missing, three of them **read-only**: *Where you reach* (the applications and
+  scope names `Access::scopes_reached` returns, as one flat `app/scope` list in the file's order,
+  never a URL), *Groups* (the `user_groups` naming the caller's uuid, under the page's own word
+  for that section, "Groups", not the console's "User groups"), *API keys* (the console's own key
+  table: each key's id, its expiry date or "never", and its restriction, never the hash or the
+  bearer, each row ending in a rotate pill and a revoke icon that lead to a confirmation page)
+  and *Profile* (each configured `gate.profile_claims` claim and the value nginx forwarded,
+  percent-decoded, where a configured claim with nothing forwarded reads "not provided").
   The `denied` veto is answered with a `403` ahead of everything the page would otherwise say
   about the caller, and a stranger and an administrator with no roster row see the same page.
   It wears the `ui` section per request as the console does (brand name and logo, the operator's
@@ -346,7 +351,8 @@ passed, on code untouched since it passed, tells you nothing you did not already
 `cargo doc --no-deps` earns its place when an intra-doc link could have moved, which is a
 real risk when a type or a function is renamed and no risk at all when a border-radius
 changes. `node e2e/shots.js` takes a scene-name filter for the same reason: the full walk is
-124 screenshots across seven views, and a change to one page needs one of them.
+168 screenshots across seven views (39 scenes, plus the 13 interaction states in the two views
+that run them), and a change to one page needs one of them.
 
 Markdown is linted with markdownlint (`.markdownlint.jsonc`, which documents its own
 invocation): `npx markdownlint-cli2 "**/*.md" "#target" "#dist" "#e2e/node_modules"`.

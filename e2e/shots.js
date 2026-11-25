@@ -51,7 +51,7 @@ const VIEWS = [
       'conflict-mint', 'forbidden', 'settings-menu',
       // The self-service page is prose a person reads in their own language, so the copy of
       // the table's headings and the refusal is worth reading in Italian too.
-      'account', 'account-new', 'account-error', 'account-rm'],
+      'account', 'account-new', 'account-error', 'account-rm', 'account-menu'],
   },
   // An explicit theme is only worth photographing against the OPPOSITE `colorScheme`:
   // that is the pair that proves the choice beat the operating system. Under a matching
@@ -210,6 +210,13 @@ const SCENES = [
     await page.fill('input[name=id]', 'demo');
     await submit(page);
     await page.goto(acct(ctx, '/'));
+    await asAdmin(page);
+  }],
+  // The account menu, open: the one place its always-present Apply is seen in review.
+  ['account-menu', async (page, ctx) => {
+    await asPerson(page);
+    await page.goto(acct(ctx, '/'));
+    await page.click('details.settings > summary');
     await asAdmin(page);
   }],
   ['account-new', async (page, ctx) => {

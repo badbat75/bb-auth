@@ -13,6 +13,11 @@ Rules are in `AGENTS.md`. Format of this file: `AGENTS.md`, under "Skills".
   `Subject::Key` arm asks (`denied_users`, `excluded_users`, `credentials.api_key`, `members`),
   because the identifier helpers resolve an email and a uuid resolves to nothing.
 - Run `cargo fmt` before `cargo fmt --check`: rustfmt splits long method chains.
+- A maud `(name)` **borrows**: `Render::render_to(&self)` (maud 0.27), so a `String` rendered inside
+  one panel is still owned and can be passed by reference after the `html!`. No clone needed, and
+  none of the `(expr)` sites move.
+- A page's one primary action needs no CSS: `p.primary` and `p.primary .pill` are already rules in
+  `admin.css`, so the markup is the whole change.
 - The tester's uncommitted test is already in the tree. It may be **staged**, where plain `git diff` is
   empty and says nothing: read `git diff --cached` (and `git status --porcelain`, where `MM` means both).
 - To see a page the way an operator does, drive the real binary through `e2e/lib/server.js`'s `boot()`

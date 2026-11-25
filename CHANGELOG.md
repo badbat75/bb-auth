@@ -71,6 +71,44 @@ when there is no tag to check out.
 release logs anybody out.** The settings file goes from version 1 to version 3, which needs an
 edit before the binaries land: see "Upgrading" below.
 
+### Changed: the account page says what each section is for, and the console's 403 points at it
+
+* **`/account` opens with one lede**: every address of the caller's roster row, and on the line
+  below the uuid they resolve to, labelled "Account id". The "signed in as" paragraph is gone,
+  because the header has named the person since the section above, and one fact in two places is
+  one fact that starts disagreeing with itself. A caller with no roster row is told so in that
+  same place: this URL is an `authenticated` scope, so "bb-auth has no roster row for you" is a
+  page a real person reaches, not a defensive one.
+* **Each of the four sections says what it is for**, in a sub-line under its heading, and each
+  empty state names what is missing ("You are in no group.", "Your sign-in opens no application
+  yet.") where a bare "None." said only that something was absent. A profile claim the
+  deployment configured and the proxy did not forward reads "not provided": a bare colon after
+  the claim's name reads as "your name is empty", which is a statement nobody made.
+* **The lists are plain.** Reach is one flat list of `app/scope` pairs in the file's order, as
+  the console's person page lists them, where it was a list nested under each application's
+  name: the question a person asks is "where can I go", and each answer is one place. The groups
+  heading is the page's own "Groups", not the console's "User groups", which names the file
+  section an administrator edits.
+* **The `/account` key form refuses one field at a time.** A bad name says what a name is, and a
+  key shorter than a day says so, each on the field at fault: the sentence these replaced
+  (`AccountKeyBound`) named the id and the window whatever was wrong, so a person who typed
+  `My Laptop` read about durations. On **both** surfaces the days box is now named "Number of
+  days", which contains the placeholder's word where "Custom duration" named nothing on screen,
+  and the two refusals beside it say what to write instead (`KeyDaysWithoutCustom` named a
+  "Custom" option that no longer exists; `KeyDaysInvalid` asks for a whole number of days, at
+  least 1). `/account` carries a "days" placeholder in place of the lone hint, because that box
+  takes a number and nothing else; the console keeps its `<n>d · <n>h` hint, because its box
+  also takes `12h`. When an account has no scope to narrow to, the scope block is left out and a
+  hidden `restrict=all` takes its place: a choice of one is a control that can only be answered
+  wrong.
+* **The console's `403` to a signed-in person who is not an administrator names that person in
+  the bar**, which was empty there on the one page whose sentence is about its reader, **and ends
+  in one action**: a "Go to your account" pill to `/account`. The console has no page that person
+  may open, and the self-service page is theirs by design, so the refusal ends in a way forward
+  rather than in two icons.
+
+No cookie, access-file or settings-file format changes, and nothing here logs anybody out.
+
 ### Changed: the console and `/account` wear one header, and it names who is signed in
 
 * **One bar, both surfaces.** The console's bar is factored out as `top_bar` and the

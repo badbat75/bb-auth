@@ -851,6 +851,7 @@ enum K {
     NoIdentityBody,
     NotAdminTitle,
     NotAdminBody,
+    NotAdminToAccount,
     NotFoundTitle,
     NotFoundBody,
     FileErrorTitle,
@@ -1815,6 +1816,7 @@ fn t(lang: Lang, key: K) -> &'static str {
             "is authenticated, but is not an administrator of this interface.",
             "è autenticato, ma non è amministratore di questa interfaccia.",
         ),
+        K::NotAdminToAccount => m(lang, "Go to your account", "Vai al tuo account"),
         K::NotFoundTitle => m(lang, "Not found", "Non trovato"),
         K::NotFoundBody => m(
             lang,
@@ -4072,6 +4074,26 @@ fn shell(v: &View, title: &str, content: Markup) -> Markup {
 /// top of the Preferences menu, and nowhere else: the footer used to say it too, and one fact
 /// in two places is one fact that starts disagreeing with itself.
 fn shell_as(v: &View, given_name: Option<&str>, title: &str, content: Markup) -> Markup {
+    shell_named(
+        v,
+        v.admin.map(|a| identity_label(given_name, a)),
+        title,
+        content,
+    )
+}
+
+/// [`shell_as`] with the bar's identity **given** rather than read out of `v.admin`.
+///
+/// The console's `403` is the caller that needs it (§13.17). That page has to name the person
+/// it is refusing, and `v.admin` is `None` there precisely because the allowlist said no, so
+/// deriving the label from it leaves the bar empty on the one page where the reader most needs
+/// to see who the sentence is about. The tabs and the brand stay keyed on `v.admin`, which is
+/// what makes "an identity in the bar, no tabs" expressible: that pair *is* the refusal. The
+/// label arrives as an owned `String` because each caller builds it out of two headers. One
+/// label in and not two computed out of it: the bar and the first line of the Preferences menu
+/// render the same string, and on a phone the menu is the only one of the two left standing,
+/// because the bar would wrap to a second line to hold it.
+fn shell_named(v: &View, who: Option<String>, title: &str, content: Markup) -> Markup {
     let tabs = [
         (Route::Dashboard, v.t(K::Dashboard)),
         (Route::Apps, v.t(K::Apps)),
@@ -4089,10 +4111,6 @@ fn shell_as(v: &View, given_name: Option<&str>, title: &str, content: Markup) ->
         LangPref::Fixed(Lang::It),
     ];
     let themes = [UiTheme::System, UiTheme::Light, UiTheme::Dark];
-    // Who the bar says is signed in, computed once: the bar and the first line of the
-    // Preferences menu render the same string, and on a phone the menu is the only one of the
-    // two left standing, because the bar would wrap to a second line to hold it.
-    let who = v.admin.map(|a| identity_label(given_name, a));
     // The words of the two icon controls, each used twice: once as the hidden name inside the
     // control, once as the pointer tooltip. One binding is what keeps a sighted person and a
     // reader from being told two different things about one control.
@@ -10223,15 +10241,31 @@ fn handle(mut req: Request, cfg: &Config) {
         Some(e) => e,
         None => {
             let v = anon_view(cfg, lang, lang_pref, theme, look);
-            let page = notice(
-                "bad",
-                v.t(K::NotAdminTitle),
-                html! { p { code { (who) } " " (v.t(K::NotAdminBody)) } },
-            );
+            let page = html! {
+                (notice(
+                    "bad",
+                    v.t(K::NotAdminTitle),
+                    html! { p { code { (who) } " " (v.t(K::NotAdminBody)) } },
+                ))
+                // The way forward. This console has no page this person may open, but the
+                // self-service page is theirs by design (§13.2), so the refusal ends in an
+                // action and not in two icons (§13.17). A pill, because it is the one action
+                // on the page.
+                p class="primary" {
+                    a class="pill" href=(format!("{}/", cfg.account_path)) {
+                        (v.t(K::NotAdminToAccount))
+                    }
+                }
+            };
             respond_page(
                 req,
                 403,
-                shell(&v, v.t(K::NotAdminTitle), page),
+                shell_named(
+                    &v,
+                    Some(identity_label(given.as_deref(), &who)),
+                    v.t(K::NotAdminTitle),
+                    page,
+                ),
                 &v.look,
                 false,
             );
@@ -19920,6 +19954,91 @@ mod tests {
                 menu[0]
             );
         }
+        let _ = std::fs::remove_file(&path);
+    }
+
+    /// 8c-3 (§13.17, "The console's 403"): a signed-in person who is not on `web.admins` and
+    /// opens the console gets the `403` with the caller named in the bar (as on every other
+    /// page), and one way forward, a `p.primary a.pill` to the self-service page. A vetoed
+    /// caller sees the same page: the console never reads the veto, and the link leads to a
+    /// page that answers them with its own `403`.
+    ///
+    /// Red until the coder adds `K::NotAdminToAccount` ("Go to your account", "Vai al tuo
+    /// account"), `shell_named` and the `403` branch's call to it: the key does not exist, so
+    /// the test module does not compile (E0599), which is the expected red for this slice.
+    #[test]
+    fn the_console_403_names_the_caller_and_links_to_their_account() {
+        let path = account_scratch_full("console-403-names");
+        let port = account_port(&path);
+        let want_href = format!("{ACCOUNT_PATH}/");
+        for (label, lang, code) in [("English", Lang::En, "en"), ("Italian", Lang::It, "it")] {
+            let cookie = format!("lang={code}");
+            for (who, extra, shown) in [
+                ("bob@x.com", vec![], "bob@x.com"),
+                (
+                    "bob@x.com",
+                    vec![("X-Auth-Given-Name", "Bob%20Smith")],
+                    "Bob Smith \u{b7} bob@x.com",
+                ),
+                ("bob@x.com carol@x.com", vec![], "bob@x.com"),
+                // Vetoed in the fixture: the console does not read the veto, so same page.
+                ("spammer@x.com", vec![], "spammer@x.com"),
+            ] {
+                let mut headers = vec![("Cookie", cookie.as_str())];
+                headers.extend(extra);
+                let g = console_get(port, who, &headers);
+                let ctx = format!("{label}, {who}, {shown}");
+                assert_eq!(g.status, 403, "{ctx}: {}", account_readable(&g.body));
+
+                let navs = elements(&g.body, "<nav", "</nav>");
+                let acct = elements(&g.body, "<nav class=\"acct\"", "</nav>");
+                assert_eq!(acct.len(), 1, "{ctx}: {}", account_readable(&g.body));
+                let before = &g.body[..g.body.find("<nav class=\"acct\"").unwrap()];
+                let tabs = elements(before, "<nav", "</nav>");
+                assert!(
+                    tabs.iter().all(|n| visible_text(n).is_empty()),
+                    "{ctx}: the tabs nav before nav.acct is empty: {tabs:?} of {navs:?}"
+                );
+                let who_span = controls_with_class(&acct[0], "span", "who");
+                assert_eq!(who_span.len(), 1, "{ctx}: one span.who: {}", acct[0]);
+                assert_eq!(visible_text(&who_span[0]), shown, "{ctx}");
+                let menu = elements(&acct[0], "<details", "</details>");
+                let lede = controls_with_class(&menu[0], "p", "lede");
+                assert!(!lede.is_empty(), "{ctx}: the menu opens with a p.lede");
+                assert_eq!(visible_text(&lede[0]), shown, "{ctx}");
+
+                // One way forward: the account page, as the one primary action.
+                let primary = controls_with_class(&g.body, "p", "primary");
+                assert_eq!(
+                    primary.len(),
+                    1,
+                    "{ctx}: one p.primary: {}",
+                    account_readable(&g.body)
+                );
+                let links = controls_with_class(&primary[0], "a", "pill");
+                assert_eq!(links.len(), 1, "{ctx}: one a.pill in it: {}", primary[0]);
+                assert_eq!(
+                    attr(open_tag(&links[0]), "href").as_deref(),
+                    Some(want_href.as_str()),
+                    "{ctx}: {}",
+                    links[0]
+                );
+                assert_eq!(
+                    visible_text(&links[0]),
+                    t(lang, K::NotAdminToAccount),
+                    "{ctx}"
+                );
+
+                // Sign out stays, still the console's configured URL.
+                let outs: Vec<String> = controls_with_class(&acct[0], "a", "ico")
+                    .into_iter()
+                    .filter(|el| el.contains("/auth/logout"))
+                    .collect();
+                assert_eq!(outs.len(), 1, "{ctx}: Sign out is kept: {}", acct[0]);
+            }
+        }
+        assert_eq!(t(Lang::En, K::NotAdminToAccount), "Go to your account");
+        assert_eq!(t(Lang::It, K::NotAdminToAccount), "Vai al tuo account");
         let _ = std::fs::remove_file(&path);
     }
 
