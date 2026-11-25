@@ -129,6 +129,15 @@ edit before the binaries land: see "Upgrading" below.
   instead of breaking in the middle at a hyphen. And a key field that carries a refusal stops
   showing its hint, because the refusal says in a sentence what the hint said in a fragment, and
   the two side by side read as two complaints.
+* **The headings have a scale.** `h1` is 1.5rem, line-height 1.25, weight 650, letter-spacing
+  `-.01em`, `margin:0 0 6px`; `h2` is 1.0625rem, weight 600, `margin:28px 0 10px`. `h2` had been
+  1rem against the page's 15px body text, so a section heading read as a paragraph and every page
+  was one flat column: a size gap is what says "new section" with no rule and no icon. `BASE_CSS`
+  is emitted by both HTML programs, so the gate's four pages, the console and `/account` all take
+  it; the sign-in page's brand heading is that page's own arrangement (`.brand h1` in `auth.css`)
+  and keeps its own size. `the_headings_follow_the_type_scale` pins the values. For theme authors:
+  no token changed, these are literal sizes in the component file, so a token file has nothing to
+  follow.
 * **For theme authors**: no token is added, renamed or removed, so a token file written for the
   last release renders as it did, and nothing in it needs removing. Three *defaults* moved, and a
   file that pins them keeps the old look, so to follow: in `:root`, `--input-bg:#ffffff` and
