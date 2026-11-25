@@ -1481,11 +1481,15 @@ request that obtained them.** Three requests, no JavaScript, no state on the ser
 
 The `Session` lasts `AuthSessionValidity`, 3 to 15 minutes per app client
 ([UserPoolClientType](https://docs.aws.amazon.com/cognito-user-identity-pools/latest/APIReference/API_UserPoolClientType.html));
-the value on the real pool is **unverified**. A late code is `NotAuthorizedException` and the
+the value on the real pool is **unverified**. (Changed by §13.22: 3 minutes on `gate.client_id`,
+read from the pool on 2026-11-25.) A late code is `NotAuthorizedException` and the
 page starts again. The action is bound to the right Cognito user without reading any token,
 because `USERNAME` is one of the caller's own identifiers and the code goes to that inbox.
+(Changed by §13.22: the `IdToken` that `RespondToAuthChallenge` returns **is** read, and must
+name the chosen email for this audience and issuer before the action runs, so a `Session` carried
+in from another flow can never act on the caller's behalf.)
 **Assumed:** the pool signs in by email, which `login.html` relies on too; the read-only
-`describe-user-pool` under "Waiting for the user" confirms it.
+`describe-user-pool` under "Waiting for the user" confirms it. (Changed by §13.22: read on 2026-11-25, `UsernameAttributes: [email]`.)
 
 **The outbound call, and the unit's IP filter.** `bb-auth-web.service` carries
 `IPAddressDeny=any` and `IPAddressAllow=localhost`, and those cgroup filters apply to outbound
@@ -1515,6 +1519,9 @@ says their profile is their provider's, which Cognito re-maps at every sign-in
 ([attribute mapping](https://docs.aws.amazon.com/cognito/latest/developerguide/cognito-user-pools-specifying-attribute-mapping.html)),
 and that an administrator must delete their Cognito account (accepted as meeting R4, 13.12).
 **Unverified:** that the federated profile would be re-created at their next social sign-in.
+(Changed by §13.22: the real social client allows only `ALLOW_REFRESH_TOKEN_AUTH`, and the page
+tells a person this before they start and again when `InitiateAuth` answers
+`UserNotFoundException`, which is how a social-only email shows on the native client.)
 
 **Editable attributes**: those in `gate.profile_claims`, minus `email`, `phone_number`,
 `preferred_username` and anything under `dev:`. Cognito's `WriteAttributes` on the app client is
@@ -1524,7 +1531,12 @@ depending on `AttributesRequireVerificationBeforeUpdate` a change either replace
 unverified (a lockout, since `email_verified` is mandatory for native users) or leaves the roster
 naming an address the token no longer carries
 ([verifying changed emails](https://docs.aws.amazon.com/cognito/latest/developerguide/signing-up-users-in-your-app.html#verifying-when-users-change-their-email-or-phone-number)).
-It stays an administrator's job, and the page says so.
+It stays an administrator's job, and the page says so. (Changed by §13.22: the editable set is an
+**allowlist**, the `oidc:profile` attributes minus `preferred_username`, intersected with
+`gate.profile_claims`; `WriteAttributes` is unset on the real native client, which Cognito
+documents as every standard and custom attribute writable; and the pool's
+`AttributesRequireVerificationBeforeUpdate` is empty, which would make an email change apply
+unconfirmed, one more reason it stays read-only.)
 
 ### 13.8 What moves into the library
 
@@ -3612,3 +3624,317 @@ The scene renders in `light`, `dark`, `phone` and `it` (`node e2e/shots.js confi
 The slice closes on the designer's look at `node e2e/shots.js users account audit scope-edit
 config-landing` against `/tmp/d8f/shots/before/`, and a look at `/auth/login` in both themes,
 which must be unchanged.
+
+### 13.22 The profile edit, in slices (plan step 5, designed 2026-11-25)
+
+Plan step 5 turned into test-first slices, now that the real pool has been read. It settles
+what §13.7 left open, and §13.7 carries "(Changed by §13.22 ...)" where these facts change it.
+
+What was read to write it: `PLAN.md` steps 5 and 7 (with the pool facts recorded there),
+§13.7, §13.11 to §13.13 and §13.17 of this document, `AGENTS.md` (the invariants and
+`bb-auth-web`'s trust model), `src/bin/bb-auth.rs` (`cognito_endpoint`, `origin_of`,
+`email_verified_true`, the JWKS agent), `src/assets/login.html` (`cognito`, `startLogin`, the
+code step), `src/bin/bb-auth-web.rs` (`handle_account` and its closed path list, `account_claims`,
+the Profile panel, the `K` keys `Account*`, `MAX_BODY`, the test harness `cfg_for` and its
+`ureq` clients), `src/lib.rs` (`Settings`, `compile_issuer`, `IDENTITY_ATTRS`, `norm_email`, the
+test that reads both unit files), `deploy/bb-auth-web.service`, and `ureq-3.4.0/src/config.rs`
+and `src/proxy.rs` in the cargo registry.
+
+#### What is known, and how
+
+**Measured** (a real run): the email-code sign-in works against the real pool from the browser,
+with `Content-Type: application/x-amz-json-1.1`, `X-Amz-Target:
+AWSCognitoIdentityProviderService.<Action>`, the error code in the body's `__type` after its last
+`#`, and `RespondToAuthChallenge`'s `USERNAME` taken from `ChallengeParameters.USERNAME`: that is
+what `login.html` does on every sign-in on rpi-01. And the sign-up branch of that page works,
+which means `InitiateAuth` on `gate.client_id` answers `UserNotFoundException` for an unknown
+email, which only happens with `PreventUserExistenceErrors` `LEGACY` (the page's own comment says
+it relies on that).
+
+**Read in the pool on 2026-11-25** (PLAN.md step 5, read-only, by the IT-Admin session): email is
+the username; `EMAIL_OTP` is a first factor; the native client `gate.client_id` allows
+`ALLOW_USER_AUTH`, `AuthSessionValidity` 3 minutes, no secret, `ReadAttributes` and
+`WriteAttributes` unset; the social client allows only `ALLOW_REFRESH_TOKEN_AUTH`;
+`AttributesRequireVerificationBeforeUpdate` is empty; no custom attributes. The pool and both
+clients are OpenTofu-managed in another repository, so **this step changes nothing in the pool**.
+
+**Read in a source:**
+
+- `InitiateAuth` cannot sign in a federated user, and `USER_AUTH` takes `USERNAME` and
+  `PREFERRED_CHALLENGE`; an `EMAIL_OTP` answer carries `ChallengeName`, `ChallengeParameters` and
+  `Session` ([InitiateAuth](https://docs.aws.amazon.com/cognito-user-identity-pools/latest/APIReference/API_InitiateAuth.html)).
+- `EMAIL_OTP` is answered with `USERNAME` and `EMAIL_OTP_CODE`; a `Session` is 20 to 4096
+  characters; the errors include `CodeMismatchException`, `ExpiredCodeException`,
+  `NotAuthorizedException`, `TooManyRequestsException`; success is an `AuthenticationResult`
+  with `AccessToken`, `IdToken`, `RefreshToken`
+  ([RespondToAuthChallenge](https://docs.aws.amazon.com/cognito-user-identity-pools/latest/APIReference/API_RespondToAuthChallenge.html)).
+- `UpdateUserAttributes` is authorized by the access token alone (scope
+  `aws.cognito.signin.user.admin`, IAM not evaluated), a blank value deletes the attribute, and
+  an attribute the client may not write is `NotAuthorizedException`
+  ([UpdateUserAttributes](https://docs.aws.amazon.com/cognito-user-identity-pools/latest/APIReference/API_UpdateUserAttributes.html),
+  [attribute permissions](https://docs.aws.amazon.com/cognito/latest/developerguide/user-pool-settings-attributes.html#user-pool-settings-attribute-permissions-and-scopes)).
+- With `WriteAttributes` unset, an app client may write every standard and custom attribute, and
+  `DescribeUserPoolClient` returns the two lists only when they are not the default; values are up
+  to 2048 characters; the `oidc:profile` set is `name`, `family_name`, `given_name`,
+  `middle_name`, `nickname`, `preferred_username`, `profile`, `picture`, `website`, `gender`,
+  `birthdate`, `zoneinfo`, `locale`
+  ([user attributes](https://docs.aws.amazon.com/cognito/latest/developerguide/user-pool-settings-attributes.html)).
+  This replaces the plan's "unverified" on the default.
+- With `PreventUserExistenceErrors` `ENABLED`, `USER_AUTH` answers an unknown user with a
+  simulated challenge instead of `UserNotFoundException`
+  ([user existence errors](https://docs.aws.amazon.com/cognito/latest/developerguide/cognito-user-pool-managing-errors.html)).
+- An ID token carries `iss`, `sub`, `aud` (the app client), `exp`, `token_use` = `id`, and
+  `email`/`email_verified` when readable; `identities` marks a federated sign-in
+  ([ID token](https://docs.aws.amazon.com/cognito/latest/developerguide/amazon-cognito-user-pools-using-the-id-token.html)).
+- `IPAddressDeny=`/`IPAddressAllow=` filter both ingress and egress, by destination for outgoing
+  packets, and `localhost` is 127.0.0.0/8 and ::1/128
+  ([systemd.resource-control(5)](https://www.freedesktop.org/software/systemd/man/latest/systemd.resource-control.html)).
+- `ureq` 3.4: no timeout unless set (`Timeouts::default`), `http_status_as_error` true by
+  default (a `400` would be an `Err` with no body), a proxy taken from `ALL_PROXY`/`HTTPS_PROXY`
+  when set, and `timeout_global` end to end (`config.rs`, `proxy.rs`).
+
+**Assumed, and to be confirmed by the real run of 5d:** that a social-only email gets
+`UserNotFoundException` from the native client rather than a challenge (it follows from
+`LEGACY` and from `InitiateAuth` not signing federated users in, but no run has shown it); that
+the `AccessToken` and `IdToken` of one `AuthenticationResult` name the same user; that one
+`UpdateUserAttributes` applies all its attributes or none; that 5 s per call is enough; that
+an email code is at most 16 ASCII letters and digits (the documented example is 8 digits).
+
+#### Decisions
+
+**The client is `gate.client_id`**, read per request from the settings file as the page already
+reads it. It is the client that has `ALLOW_USER_AUTH`, the one `login.html` signs in with, and
+it has no secret, so no `SECRET_HASH` and no secret anywhere in `bb-auth-web`. A social button's
+`audience` is never used: the social client cannot run this flow at all. An empty
+`gate.client_id` or `gate.issuer` means the edit is **not offered** (no Edit control), because a
+form that can only end in an error is a promise the page cannot keep.
+
+**The endpoint is `Settings::cognito_endpoint()`**, moved from the gate's private
+`cognito_endpoint` into the library with the origin rule it needs (the gate's `origin_of` keeps
+its other use). By the membership rule: both programs derive the API's address from the
+settings file's `gate.issuer`, and two derivations are two answers. `email_verified_true` moves
+beside it for the same reason one step along: both programs read a Cognito ID token, and must
+not disagree on what "verified" means.
+
+**The call is the existing `ureq` with rustls, no new crate.** One function,
+`cognito_call(cfg, settings, action, body) -> Result<Value, CognitoError>`, used for all three
+actions, with an agent built with `timeout_global(Some(cfg.cognito_timeout))`,
+`http_status_as_error(false)` (so a `400`'s `__type` is readable), `max_redirects(0)` (a
+redirect from the API is a refusal, never a second host handed a token), the two headers above,
+and the body as JSON. `CognitoError` is `NoAnswer` (timeout or transport) or `Refused(code)`,
+the code being `__type` after its last `#` and nothing else from the body. `cfg.cognito_timeout`
+is the constant `COGNITO_TIMEOUT` = 5 s in production and is no env var (§13.13: assumed, no
+retry, at most two calls per request: the start makes one, the code step two).
+
+**The fake endpoint is a `Config` field, not an env var.** `compile_issuer` is https-only, so a
+plain-HTTP fake cannot be named through the settings file, and a TLS fake would need a test CA
+the bundled roots do not trust. So `Config` gains `cognito_endpoint: Option<String>`, which
+`from_env` always leaves `None` (then `Settings::cognito_endpoint()` is used) and which the tests
+set to their fake's `http://127.0.0.1:<port>/`; no variable and no file can set it on a host.
+`FakeCognito`, in `bb-auth-web`'s test module: a `tiny_http` server on `127.0.0.1:0` in a
+thread, recording every request as `(X-Amz-Target, JSON body)` and answering each action from a
+per-test script (status, JSON). It mints ID tokens as `base64url(header).base64url(payload).x`
+with whatever claims a test chooses, and uses distinctive token strings (`FAKEACCESS...`,
+`FAKEID...`, `FAKEREFRESH...`) so a test can search every response for them. A `silent` mode is
+a plain `TcpListener` that accepts and holds the socket without a byte. The tests set
+`cognito_timeout` to 300 ms so the silent test is fast, and never reach the real pool.
+
+**The identity is bound twice: before Cognito, and after.**
+
+1. *Before*, on both `POST`s, against the live files: the identity header, the `denied` veto,
+   the one-row rule (§13.5), and the chosen email **among the header's own values**
+   (`norm_email` on both sides). A chosen email that is not the caller's is a `400` and **no**
+   Cognito call is made. Every hidden field the code step carries back (email, values, the
+   challenge username, the `Session`) is re-validated there as if new.
+2. *After*, between `RespondToAuthChallenge` and `UpdateUserAttributes`, the returned `IdToken`
+   must have `token_use` = `id`, `iss` = `gate.issuer`, `aud` = `gate.client_id`, `exp` in the
+   future, a truthy `email_verified`, and an `email` equal (`norm_email`) to the chosen email.
+   Anything else is a `403`, the `AccessToken` is dropped unused, and the journal says a token
+   named another account (without that account's email). This is what makes a `Session`
+   obtained for some other address (one the caller also reads mail for) unable to act here,
+   whatever Cognito does with a mismatched `USERNAME`.
+
+   The `sub` is not compared: nginx hands `bb-auth-web` no Cognito `sub` (the identity
+   attributes are `email` and the roster's `uuid`), so the email is the only identity the two
+   sides share, and it is the pool's username. **The signature is not verified**, on purpose:
+   the token arrived in the TLS response to a request this process made to the endpoint
+   derived from `gate.issuer`, so a forger would have to be the endpoint, and a party that can
+   answer as the endpoint can answer `UpdateUserAttributes` too. Verifying would need the JWKS,
+   a third call. The AWS page's "verify before you trust" is about a token a client *hands* an
+   application, which is the gate's case and not this one.
+
+**Editable is an allowlist, intersected with the settings.** An attribute is editable iff it is
+in `gate.profile_claims` **and** in the `oidc:profile` list minus `preferred_username`
+(`name`, `family_name`, `given_name`, `middle_name`, `nickname`, `profile`, `picture`, `website`,
+`gender`, `birthdate`, `zoneinfo`, `locale`). Not `email`, `phone_number`, `address`, `sub`,
+`updated_at`, `dev:`, and not `custom:` today: the pool has none, and adding them is a later
+decision with its own argument. A list of what is allowed fails closed when somebody configures
+a new claim; the denylist of §13.7 failed open. A value is trimmed, at most 2048 characters (the
+documented limit), and free of control characters, else a `400` before Cognito. Only the fields
+whose value differs from what nginx forwarded on this request are sent; a form with no change
+sends **no** code. An emptied field that had a value is sent empty, which deletes the attribute
+(as documented), and the form says so beside each field.
+
+**The page and its routes.** Two paths join `handle_account`'s closed list, both under the
+account prefix and both `no-store`:
+
+- `GET <prefix>/profile`: the account page with the Profile panel as a `form.edit` (the
+  `keys/new` pattern of §13.16): one field per editable claim, prefilled with the forwarded
+  value; the configured claims that are not editable and the caller's email(s) shown read-only,
+  email with the sentence that an administrator changes it; "Send code to" as a `select` over
+  the header's emails, or a hidden field when there is one; a line saying a person who signs in
+  only through a social provider has their profile from that provider and cannot change it here.
+  The read-only panel gains an Edit pill to this page when the edit is offered.
+- `POST <prefix>/profile`: validate (above), call `InitiateAuth` (`USER_AUTH`,
+  `PREFERRED_CHALLENGE=EMAIL_OTP`, `USERNAME` = chosen email, `ClientId` = `gate.client_id`), and
+  answer the code page: one code field, a Save button, a Start-again link to `GET
+  <prefix>/profile`, and hidden fields for the `Session`, `ChallengeParameters.USERNAME`, the
+  chosen email and the changed values. An answer that is not an `EMAIL_OTP` challenge (tokens
+  straight away, another challenge) is a refusal: nothing acts without a code.
+- `POST <prefix>/profile/code`: re-check (above), `RespondToAuthChallenge`, bind, then
+  `UpdateUserAttributes` with the changed values, and drop every token. Success is a `200` page
+  (not a redirect: the panel is drawn from the cookie and would show the old values) naming the
+  attributes changed and saying the applications see the change from the next sign-in.
+
+| Cognito says | The person sees | Status |
+|---|---|---|
+| no answer within the bound | the service did not answer, nothing changed | `504` |
+| `UserNotFoundException` (start) | this account does not sign in with an email code, so its profile is its provider's | `400` |
+| `CodeMismatchException` | the code form again, "wrong code", with the answer's new `Session` if it carried one, else the same | `400` |
+| `ExpiredCodeException`, `NotAuthorizedException` (code step) | the code has expired, start again | `400` |
+| `TooManyRequestsException` | too many attempts, try later | `502` |
+| `NotAuthorizedException`, `InvalidParameterException` (update) | the change was refused, nothing changed (a value Cognito did not accept for the second) | `502`, `400` |
+| anything else | the service refused, nothing changed | `502` |
+| a token for another account | nothing changed | `403` |
+
+**Social-only people are told twice and never sent an email that cannot arrive.** Once on the
+form, before they start, and again when `InitiateAuth` answers `UserNotFoundException`, which is
+how their email shows on the native client while `PreventUserExistenceErrors` stays `LEGACY`
+(which `login.html`'s sign-up branch already requires). If the pool ever moved to `ENABLED`,
+the same person would get a code form and no email, and the code form's line "No code? An
+account that signs in only through a social provider cannot change its profile here" covers that
+case too, so the design does not depend on which value the pool holds. A person with both a
+native and an unlinked social user under one email edits the native one; the success page names
+the email the change was made for.
+
+**Who may edit**: anybody the page already serves, roster row or not, since the Cognito profile
+is the person's whatever the access file says and §13.12 (2) opens the page to strangers. The
+`denied` veto is answered before any of it, as everywhere on the page.
+
+**What is never logged**: the code, the `Session`, any token, any attribute value, and Cognito's
+`message` text (it can carry the username). The journal gets, in the GUI's shape,
+`[bb-auth-web] <uuid, else the chosen email> (self): profile update <attribute names>` on success,
+`... (self): profile update refused (<code>)` when the update is refused, `... (self): profile
+update refused (token named another account)` on a binding failure, and `cognito <Action> did not
+answer within 5s` on a timeout. A wrong code is not logged (it is the ordinary mistake).
+`stderr` cannot be read over the test socket (§13.15's note), so the guarantee is made by type:
+the journal line is built by a function that takes attribute **names** only, and the type that
+holds the tokens prints as `Tokens { .. }` under `Debug`.
+
+**The unit loses `IPAddressDeny=any` and `IPAddressAllow=localhost`** in the slice that makes
+the first call, with the unit's comment rewritten ("no outbound connection at all" stops being
+true). The cost is §13.7's, restated: the kernel's loopback lock on the listener goes, leaving
+the binary's bind check and the proxy secret, and the most privileged process on the host gains
+egress anywhere. `RestrictAddressFamilies` already allows `AF_INET`/`AF_INET6`;
+`InaccessiblePaths=/opt/bb-auth/etc` stays, so egress does not come with the HMAC key. Rejected
+again, for §13.7's reasons: an `IPAddressAllow=` of AWS ranges, and relaying through the gate.
+
+**Abuse**: each start sends one email, only to one of the caller's own addresses, and Cognito
+throttles (`TooManyRequestsException`). A signed-in person looping the form spends the pool's
+authentication quota, which anyone can already do by calling the public `InitiateAuth` with the
+client id `login.html` publishes; no new exposure, no limiter added.
+
+#### The `K` keys and the page sections
+
+No new section: the edit lives in the existing `section#profile` panel, as a form on
+`<prefix>/profile` and as two card pages after it, all inside `account_shell`. New keys, English
+and Italian, wording the designer's (5b): `AccountProfileEdit` (the pill), `AccountProfileEditSub`
+(what the code is for), `AccountProfileEmailFixed` (an administrator changes the email),
+`AccountProfileClearDeletes` (an emptied field removes the value), `AccountProfileSocialNote`
+(a social-only account's profile is its provider's), `AccountProfileSendTo`,
+`AccountProfileSendCode`, `AccountProfileCodeTitle`, `AccountProfileCodeBody` (the code went to
+`{email}` and lasts a few minutes, never a number the pool may change), `AccountProfileCodeLabel`,
+`AccountProfileNoCode` (the line for a code that never arrives), `AccountProfileSave`,
+`AccountProfileStartAgain`, `AccountProfileSavedTitle`, `AccountProfileSavedBody` (the change shows
+from the next sign-in), `AccountProfileNothingChanged`, `AccountProfileWrongCode`,
+`AccountProfileExpired`, `AccountProfileNoEmailSignIn`, `AccountProfileNoAnswer`,
+`AccountProfileTooMany`, `AccountProfileRefused`, `AccountProfileBadValue`, `AccountProfileNotYours`.
+No logic reads any of them.
+
+#### Slices
+
+Each starts with its tests red. Design first: **5b needs the designer** for the form, the code
+page and the outcome pages of 5c (one pass covering both, with Italian texts); 5a and 5c's
+logic do not.
+
+**5a. `Settings::cognito_endpoint` and `email_verified_true` in the library.** No behaviour
+changes.
+
+- Tests: `the_cognito_endpoint_is_the_issuers_origin` (lib: the pool URL gives
+  `https://cognito-idp.<region>.amazonaws.com/`, an empty issuer gives empty);
+  `email_verified_is_true_or_the_string_true` (lib, moved from the gate); the gate's test that
+  the sign-in page carries `var ENDPOINT = "https://cognito-idp.eu-central-1.amazonaws.com/";`
+  stays green unchanged.
+- Done when: the gate's private function is gone, both programs call the method, `cargo test`,
+  clippy, fmt and `cargo doc --no-deps` clean.
+
+**5b. The form and the start: refusals before Cognito, `InitiateAuth`, the code page, the
+unit.** Lands `cognito_call`, `FakeCognito`, the two `Config` fields, the keys above
+and the unit change together, because a client nobody calls is a `dead_code` warning and clippy
+must stay clean.
+
+- Tests (bb-auth-web unless marked): `the_profile_panel_offers_edit_only_when_wired` (no
+  `client_id`, no `issuer`, no editable claim: no pill; all three: a pill to `<prefix>/profile`);
+  `the_profile_form_offers_only_editable_claims` (`email`, `phone_number`,
+  `preferred_username`, `address` configured: read-only, never an input);
+  `the_code_goes_only_to_the_callers_own_emails` (a `select` of the header's values, a hidden
+  field for one); `an_email_not_among_the_callers_is_refused_before_cognito`,
+  `a_non_editable_attribute_is_refused_before_cognito`,
+  `an_overlong_or_control_value_is_refused_before_cognito`, `an_unchanged_form_sends_no_code`,
+  `a_denied_caller_cannot_start_a_profile_edit`, `a_cross_site_profile_post_is_refused` (each:
+  the status, and the fake recorded **zero** calls);
+  `starting_an_edit_asks_cognito_for_an_email_code` (one `InitiateAuth`, the target header, the
+  content type, `USER_AUTH`, `gate.client_id`, the chosen email, `EMAIL_OTP`);
+  `the_code_page_carries_the_session_and_is_not_stored`;
+  `an_email_with_no_code_sign_in_is_told_its_profile_is_its_providers`
+  (`UserNotFoundException`); `an_answer_that_is_not_an_email_code_is_refused`;
+  `a_cognito_call_follows_no_redirect`; `a_silent_cognito_answers_within_the_bound_and_frees_the_worker`
+  (one worker, the silent fake: a `504` within the bound plus 2 s, then `GET <prefix>/` is a
+  `200`); the route-classification test of §13.11 extended to the two paths;
+  `the_gui_unit_lets_cognito_out` (lib, reading `deploy/bb-auth-web.service`: no `IPAddress`
+  line, `InaccessiblePaths=/opt/bb-auth/etc` and `RestrictAddressFamilies` still there); the
+  existing `BB_AUTH_WEB_ALLOW_NONLOOPBACK` startup refusal stays.
+- Done when: the above, the designer's look at the form and the code page (`node e2e/shots.js
+  account`, light, dark, phone, `it`), `node e2e/run.js` including the scripting-off walk (the
+  pages carry no script). **5b and 5c ship together**: no deploy between them, since 5b's code
+  page posts to 5c's route.
+
+**5c. The code step: answer, bind, update.**
+
+- Tests: `a_wrong_code_changes_nothing` (`CodeMismatchException`: the form again, no
+  `UpdateUserAttributes` recorded, the new `Session` reused);
+  `an_expired_code_starts_again`; `a_token_for_another_account_is_never_used` (an `IdToken`
+  naming another email: `403`, no update recorded);
+  `a_token_of_the_wrong_audience_issuer_or_use_is_never_used` (one case each, plus expired and
+  unverified); `the_code_step_rechecks_everything` (a hidden email edited to a stranger's, the
+  caller added to `denied` between the steps, the claim dropped from `gate.profile_claims`
+  between the steps: each refused with zero calls);
+  `a_right_code_updates_exactly_the_changed_attributes` (the fake's `AccessToken`, only the
+  changed names, the success page names them and says "next sign-in");
+  `an_emptied_field_deletes_the_attribute`; `a_refused_update_says_so`;
+  `no_token_reaches_any_response` (the three fake token strings in no body and no header of the
+  whole flow, and the `Session` not on the success page); `at_most_two_cognito_calls_per_request`;
+  `the_profile_journal_line_names_attributes_only`; `tokens_print_as_redacted`.
+- Done when: the above, the designer's look at the outcome pages, e2e green.
+
+**5d. Real, with the user's go-ahead.** Deploy (this is where egress opens on rpi-01), then: the
+unit has no `IPAddress` line; `curl` to `127.0.0.1:8091` without the secret is still a `403`; a
+non-loopback `BB_AUTH_WEB_LISTEN` without the opt-in still refuses to start; in a browser, a
+native test account changes `given_name`, signs out and in, and `/account/` shows the new value
+(the next token's profile claim); a social-only account is told its profile is its provider's
+and receives no email (this confirms the first assumption above); nginx's
+`$upstream_response_time` for those requests is recorded against the 5 s bound. Docs: the
+trust model in `AGENTS.md` (the GUI now calls Cognito, and what it never logs), the unit's
+comments, and this section shrinking to the component view.
+
+- Done when: step 5's "Done when" in `PLAN.md` holds.

@@ -26,6 +26,15 @@ Rules are in `AGENTS.md`. Format of this file: `AGENTS.md`, under "Skills".
   connections: `tiny_http` 0.12 queues every parsed request with no bound, so too few workers is
   latency, never a refusal (`tiny_http-0.12.0/src/lib.rs`, `util/task_pool.rs` in the cargo registry).
 
+- A Cognito API call from Rust here copies `login.html`: `POST` the issuer's origin with
+  `Content-Type: application/x-amz-json-1.1` and `X-Amz-Target:
+  AWSCognitoIdentityProviderService.<Action>`; the error is `__type` after its last `#`. Build
+  the `ureq` agent with `http_status_as_error(false)` or a `400`'s body is lost.
+- A plain-HTTP fake cannot be named through the settings file (`compile_issuer` is https-only):
+  give `bb-auth-web`'s `Config` a field `from_env` never sets, as §13.22 does.
+- The real pool's facts are in `PLAN.md` step 5 (read 2026-11-25); its changes go through the
+  OpenTofu repository named there, never the AWS CLI.
+
 ## Pitfalls
 
 - `ureq` 3 has no timeout by default (`Timeouts::default`, `config.rs`): every outbound call needs
@@ -56,3 +65,7 @@ Rules are in `AGENTS.md`. Format of this file: `AGENTS.md`, under "Skills".
   deploy-then-set order (§13.19).
 - `/auth/session`'s caller is the sign-in page's host, so `safe_rd`'s "caller's root" default is
   the auth host's root, never the application the person came from.
+- A slice that lands a function with no production caller fails clippy (`dead_code`): land a
+  client together with its first use.
+- `DescribeUserPoolClient` omits `ReadAttributes`/`WriteAttributes` when they are the default,
+  which is every attribute writable: an absent list is not "none".
