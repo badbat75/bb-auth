@@ -196,16 +196,12 @@ then asked for a **header** with the person's identity, the settings (theme, lan
 out, the usual pattern, replacing the preferences form at the foot of the page; the designer adds
 it to §13.17.
 
-Slices 8a to 8d are done (8d, the theme, within the same token contract: §13.18). Left, in order:
-(8e) §13.18's type scale, which did not ship with 8d (h1 1.5rem/650, h2 1.0625rem/600 in
-`base.css`, still 1.25rem and 1rem); then, from the designer's review of 8d (2026-11-25), as nits:
-table row rules stopping short of the column of buttons (`td.pills`, older than 8d), three sizes of
-secondary control in one section, and radios and checkboxes in the browser's blue rather than
-`accent-color`. The logo in the console's brand is its own later step, since it widens the
-console's CSP `img-src`. From the designer's review of steps 9 and 10 (2026-11-25): a
-`config-landing-refused` screenshot scene; library refusals on the Settings tab (the landing URL's
-among them) are in the file's English words rather than the page's labels and language; and one
-look by hand at the native "Preferences" tooltip while the open menu's cover is up. Steps 5 and 7 add their forms into this layout later (Profile, a last panel).
+Slices 8a to 8f are done (8f, §13.21: row rules, one control size, ticks in the accent). Left,
+as later items: base.css's accent-color rule sits above a note whose "above" meant the field
+rule (move it below); library refusals on the Settings tab are in the file's English words rather
+than the page's labels and language (its own slice, sketched in §13.21); one look by hand at the
+native "Preferences" tooltip while the open menu's cover is up; and the logo in the console's
+brand, its own step since it widens the console's CSP `img-src`. Steps 5 and 7 add their forms into this layout later (Profile, a last panel).
 
 - Done when: the user approves screenshots of the page in both themes and both languages, at
   desktop and phone width, with the forms of steps 4, 5 and 7 on it; e2e and the scripting-off
