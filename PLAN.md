@@ -61,8 +61,8 @@ as not checked, and the step stays open.
 
 The gate, the CLI (`bb-auth-adm`) and the admin GUI (`bb-auth-web`) are built and deployed; `README.md`,
 `AGENTS.md` and `CHANGELOG.md` say what they do. The agent structure (roles, skills, this plan) was added
-on 2026-11-23; the work before it is in `git log`. The self-service page is the `/account` section of `bb-auth-web`, live and read-only on rpi-01 since
-2026-11-24 (1.99.8, gc11c0d1); self-service account deletion is missing there until step 7.
+on 2026-11-23; the work before it is in `git log`. The self-service page is the `/account` section of `bb-auth-web`, live on rpi-01 since
+2026-11-24, with its key writes, header and theme from 1.99.9 (gb9d7100, 2026-11-25); self-service account deletion is missing there until step 7.
 
 ## Next steps
 
@@ -113,7 +113,9 @@ Done so far: `Access::key_scopes_for` (4a), minting (4b), rotating and removing 
 `/account`. Made reliable in parallel (4d); the worker count is
 `BB_AUTH_WEB_WORKERS` (4e). The e2e flow with scripting off passes (`nojs.js`).
 
-Installed on rpi-01 on 2026-11-24 (gd49d43a): the user minted and removed a key in a browser
+1.99.9 (gb9d7100, with 8a to 8e) installed on rpi-01 on 2026-11-25, verify.sh green; still to see
+in a browser: a rotate, the copy icon, the confirmations, the header and the theme. Earlier,
+installed on 2026-11-24 (gd49d43a): the user minted and removed a key in a browser
 (journal: `(self): key add test`, `key remove test`); a rotate is still to be seen. The reveal page shows only the key with a copy button (4g, done).
 
 The user's rework after trying 4g (4h: copy icon, confirmations, five duration choices, the

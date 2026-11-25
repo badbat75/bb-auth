@@ -22,9 +22,10 @@ Versions are the crate's (`Cargo.toml`); packages add a Debian revision
 
 ## Unreleased
 
-**Due out as 1.99.9, and the numbers before it are behind us.** The version is the last
+**Due out as 1.99.10, and the numbers before it are behind us.** The version is the last
 deployed one plus one, and it stays there until the next deploy spends it (plan W11): every
-section below that names no earlier number ships in 1.99.9. 1.99.8 was spent by a deploy on
+section below that names no earlier number ships in 1.99.10. 1.99.9 was spent by a deploy on
+2026-11-25 from `gb9d7100`, which carried everything below. 1.99.8 was spent by a deploy on
 2026-11-24 from `gc1a9fd8`, which carried everything below except the first five sections, from
 removing a user down to a key's duration being one of five. 1.99.7 was spent by a deploy on
 2026-10-17 from `g4041845`, which carried everything below except the two sections above the
