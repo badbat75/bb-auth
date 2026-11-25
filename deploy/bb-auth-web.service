@@ -25,8 +25,9 @@ RestartSec=2
 
 # --- Hardening ---
 # Mirrors bb-auth.service, with two deliberate differences: this one writes (see
-# ReadWritePaths below), and it makes no outbound connection at all — no JWKS, no
-# Cognito, no network beyond the loopback socket it binds.
+# ReadWritePaths below), and it makes one outbound call: the profile edit on `/account`
+# reaches Cognito, so the egress the gate has, this one has too (docs/ARCHITECTURE.md
+# §13.22). That is what the removed IP filter below is about.
 NoNewPrivileges=true
 ProtectSystem=strict
 ProtectHome=true
@@ -44,17 +45,19 @@ RestrictSUIDSGID=true
 LockPersonality=true
 MemoryDenyWriteExecute=true
 # bind 127.0.0.1:8091; AF_NETLINK/AF_UNIX for the resolver, in case BB_AUTH_WEB_LISTEN
-# is written as a name rather than a literal address.
+# is written as a name rather than a literal address. AF_INET/AF_INET6 are also the family
+# of the outbound call the profile edit makes.
 RestrictAddressFamilies=AF_INET AF_INET6 AF_UNIX AF_NETLINK
-# LOOPBACK ONLY, enforced by the kernel and not only by the bind address. This service's
-# entire credential is a request header nginx injects, so anything that can reach its port
-# is an administrator: a stray `BB_AUTH_WEB_LISTEN=0.0.0.0:8091` would be an unauthenticated
-# remote writer of the estate's access list. The binary refuses that bind unless
-# BB_AUTH_WEB_ALLOW_NONLOOPBACK says otherwise; this is the same rule one layer down, where
-# an env edit cannot reach it. A deployment that genuinely proxies from another host has to
-# change both, which is the point.
-IPAddressDeny=any
-IPAddressAllow=localhost
+# The kernel's loopback lock on the listener (`IPAddressDeny=any` +
+# `IPAddressAllow=localhost`) is GONE, and the profile edit is why: those cgroup filters apply
+# to outbound traffic as well, so the pair dropped every packet the call to Cognito sends
+# (docs/ARCHITECTURE.md §13.7, §13.22). Against a caller on this host what replaces them is
+# stronger than the filter was: the binary refuses a non-loopback bind unless
+# BB_AUTH_WEB_ALLOW_NONLOOPBACK says otherwise, and every request, GET or POST, must carry the
+# proxy secret. The cost is stated rather than glossed: on a stray non-loopback bind the
+# secret is now the only lock, and the most privileged process on the host can open
+# connections anywhere. An `IPAddressAllow=` of AWS's ranges was rejected: it takes static
+# prefixes and AWS publishes a list that changes, so it would rot in this file.
 # The same bounds the gate carries, and for the same reason.
 TasksMax=256
 MemoryMax=192M

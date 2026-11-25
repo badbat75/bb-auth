@@ -171,3 +171,7 @@ Rules are in `AGENTS.md`. Format of this file: `AGENTS.md`, under "Skills".
   that box, but `transform`, `filter`, `perspective` or `will-change` on `header.top`, `.bar`,
   `nav.acct` or `details.settings` does, quietly and only in a browser. `an_open_menu_closes_on_a_click_outside_it`
   is where that lands red; keep any such property off those four selectors.
+- ureq 3 with `http_status_as_error(false)` and `max_redirects(0)` returns a `3xx` as a response, not
+  an error: only `Error::Timeout` means Cognito did not answer, and a redirect is handled as a refusal.
+- On an `/account` page the body's first `class="lede"` is the bar's menu, not the page's lede; a
+  test or helper looking for the page's lede must skip the header.

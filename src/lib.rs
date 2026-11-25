@@ -10554,4 +10554,31 @@ mod tests {
         assert!(!email_verified_true(&serde_json::json!(1)));
         assert!(!email_verified_true(&serde_json::json!(null)));
     }
+
+    /// The GUI's unit lets the process reach Cognito (docs/ARCHITECTURE.md §13.22, slice 5b):
+    /// `IPAddressDeny=any` would drop every packet the profile edit sends, so the directive
+    /// pair is gone, while the two things that keep egress from coming with the HMAC key stay.
+    #[test]
+    fn the_gui_unit_lets_cognito_out() {
+        let unit = include_str!("../deploy/bb-auth-web.service");
+        let directives: Vec<&str> = unit
+            .lines()
+            .map(str::trim)
+            .filter(|l| !l.starts_with('#') && !l.is_empty())
+            .collect();
+        assert!(
+            !directives.iter().any(|l| l.starts_with("IPAddress")),
+            "the unit must carry no IPAddressDeny/IPAddressAllow line: {directives:?}"
+        );
+        assert!(
+            directives.contains(&"InaccessiblePaths=/opt/bb-auth/etc"),
+            "the HMAC key stays unreachable: {directives:?}"
+        );
+        assert!(
+            directives
+                .iter()
+                .any(|l| l.starts_with("RestrictAddressFamilies=")),
+            "the address families stay restricted: {directives:?}"
+        );
+    }
 }

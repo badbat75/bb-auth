@@ -282,6 +282,7 @@ use bb_auth_core::{
 use maud::{html, Markup, PreEscaped, DOCTYPE};
 use sha2::{Digest, Sha256};
 use std::io::Read;
+use std::time::Duration;
 use tiny_http::{Header, Method, Request, Response, Server, StatusCode};
 
 /// Cookie remembering the language choice. It carries no identity and no capability: the
@@ -1111,6 +1112,52 @@ enum K {
     AccountProfileSub,
     AccountProfileNone,
     AccountNotProvided,
+    // The profile edit (§13.22) and its interface (§13.23). The words are the designer's, in one
+    // table, and no logic reads any of them. The 5c keys (the code step's own refusals, the
+    // success page) are not here yet: a key nothing emits is a dead-code warning, and the slice
+    // that emits them adds them.
+    AccountProfileEdit,
+    AccountProfileEditSub,
+    AccountProfileSendTo,
+    AccountProfileEmailFixed,
+    AccountProfileClearDeletes,
+    AccountProfileDateHint,
+    AccountProfileSocialNote,
+    AccountProfileSendCode,
+    AccountProfileNothingChanged,
+    AccountProfileValueBad,
+    AccountProfileNotYourEmail,
+    AccountProfileCannotEdit,
+    AccountProfileCodeTitle,
+    AccountProfileCodeSent,
+    AccountProfileCodeLasts,
+    AccountProfileChanges,
+    AccountProfileWas,
+    AccountProfileRemoved,
+    AccountProfileCodeLabel,
+    AccountProfileSave,
+    AccountProfileNoCode,
+    AccountProfileSendNew,
+    AccountProfileNotSavedTitle,
+    AccountProfileNoAnswer,
+    AccountProfileNoEmailSignIn,
+    AccountProfileTooMany,
+    AccountProfileRefused,
+    // The twelve `oidc:profile` attributes in words (§13.23 §5). One key each, used as the form's
+    // label, as the change summary's name and as the read-only panel's name, so the three can
+    // never call one field by two names.
+    AttrName,
+    AttrGivenName,
+    AttrFamilyName,
+    AttrMiddleName,
+    AttrNickname,
+    AttrProfile,
+    AttrPicture,
+    AttrWebsite,
+    AttrGender,
+    AttrBirthdate,
+    AttrZoneinfo,
+    AttrLocale,
     AccountKeyAdd,
     AccountKeyCreate,
     AccountKeyIdHint,
@@ -2301,6 +2348,128 @@ fn t(lang: Lang, key: K) -> &'static str {
         // A claim the deployment configured and the proxy did not forward. Lowercase, because it
         // reads as the tail of the row's sentence, after the claim's name, not as a heading.
         K::AccountNotProvided => m(lang, "not provided", "non fornito"),
+        // The profile edit (§13.23 §5). The wording is the designer's table, verbatim, and the
+        // sentences around a value are split into separate keys (`CodeSent` / `CodeLasts`,
+        // `Was` / `Removed`) because the table has no placeholders and a sentence built by
+        // gluing a value into the middle of a string is a sentence that reads wrong in one of
+        // the two languages.
+        K::AccountProfileEdit => m(lang, "Edit profile", "Modifica il profilo"),
+        K::AccountProfileEditSub => m(
+            lang,
+            "Change what you need, then confirm with a code we email you.",
+            "Cambia ciò che ti serve, poi conferma con un codice che ti mandiamo per email.",
+        ),
+        K::AccountProfileClearDeletes => m(
+            lang,
+            "Empty it to remove it.",
+            "Svuotalo per eliminarlo.",
+        ),
+        K::AccountProfileDateHint => m(lang, "YYYY-MM-DD", "AAAA-MM-GG"),
+        K::AccountProfileSendTo => m(lang, "Send the code to", "Invia il codice a"),
+        K::AccountProfileEmailFixed => m(
+            lang,
+            "Your email address is how you sign in, so only an administrator can change it.",
+            "Il tuo indirizzo email è il modo in cui accedi, quindi solo un amministratore può cambiarlo.",
+        ),
+        K::AccountProfileSocialNote => m(
+            lang,
+            "If you sign in only with a social account such as Google, your profile comes from \
+             that provider and cannot be changed here.",
+            "Se accedi solo con un account social come Google, il tuo profilo viene da quel \
+             fornitore e non si può cambiare qui.",
+        ),
+        K::AccountProfileSendCode => m(lang, "Send code", "Invia il codice"),
+        K::AccountProfileNothingChanged => m(
+            lang,
+            "Nothing to save: every field is as it was, so no code was sent.",
+            "Niente da salvare: ogni campo è com'era, quindi non è stato inviato alcun codice.",
+        ),
+        K::AccountProfileValueBad => m(
+            lang,
+            "too long, or holds characters that cannot be saved.",
+            "troppo lungo, o contiene caratteri che non si possono salvare.",
+        ),
+        K::AccountProfileNotYourEmail => m(
+            lang,
+            "The code can only go to one of your own email addresses.",
+            "Il codice può andare solo a uno dei tuoi indirizzi email.",
+        ),
+        K::AccountProfileCannotEdit => m(
+            lang,
+            "cannot be changed here.",
+            "non si può cambiare qui.",
+        ),
+        K::AccountProfileCodeTitle => m(lang, "Enter the code", "Inserisci il codice"),
+        K::AccountProfileCodeSent => m(
+            lang,
+            "We emailed a code to",
+            "Abbiamo inviato un codice a",
+        ),
+        K::AccountProfileCodeLasts => m(
+            lang,
+            "It works for 3 minutes.",
+            "Vale per 3 minuti.",
+        ),
+        K::AccountProfileChanges => m(lang, "What will change", "Cosa cambierà"),
+        K::AccountProfileWas => m(lang, "was", "prima:"),
+        K::AccountProfileRemoved => m(lang, "removed", "eliminato"),
+        K::AccountProfileCodeLabel => m(lang, "Code", "Codice"),
+        K::AccountProfileSave => m(lang, "Save profile", "Salva il profilo"),
+        K::AccountProfileNoCode => m(
+            lang,
+            "No email after a minute? Look in your spam folder, or send a new code. If you sign \
+             in only with a social account, no code will come: your profile is kept by that \
+             provider.",
+            "Nessuna email dopo un minuto? Guarda nello spam, o invia un nuovo codice. Se accedi \
+             solo con un account social, nessun codice arriverà: il tuo profilo è gestito da quel \
+             fornitore.",
+        ),
+        K::AccountProfileSendNew => m(lang, "Send a new code", "Invia un nuovo codice"),
+        K::AccountProfileNotSavedTitle => m(
+            lang,
+            "Your profile was not changed",
+            "Il tuo profilo non è stato modificato",
+        ),
+        K::AccountProfileNoAnswer => m(
+            lang,
+            "The sign-in service did not answer within 5 seconds. Try again in a minute.",
+            "Il servizio di accesso non ha risposto entro 5 secondi. Riprova tra un minuto.",
+        ),
+        K::AccountProfileNoEmailSignIn => m(
+            lang,
+            "Your account signs in through a social provider such as Google, so your profile \
+             comes from there and no code was sent. Change it with that provider, or ask an \
+             administrator.",
+            "Il tuo account accede tramite un fornitore social come Google, quindi il profilo \
+             viene da lì e non è stato inviato alcun codice. Cambialo presso quel fornitore, o \
+             chiedi a un amministratore.",
+        ),
+        K::AccountProfileTooMany => m(
+            lang,
+            "Too many attempts. Wait a few minutes, then try again.",
+            "Troppi tentativi. Aspetta qualche minuto, poi riprova.",
+        ),
+        K::AccountProfileRefused => m(
+            lang,
+            "The sign-in service refused the change.",
+            "Il servizio di accesso ha rifiutato la modifica.",
+        ),
+        K::AttrName => m(lang, "Full name", "Nome completo"),
+        K::AttrGivenName => m(lang, "Given name", "Nome"),
+        K::AttrFamilyName => m(lang, "Family name", "Cognome"),
+        K::AttrMiddleName => m(lang, "Middle name", "Secondo nome"),
+        K::AttrNickname => m(lang, "Nickname", "Soprannome"),
+        K::AttrProfile => m(lang, "Profile page", "Pagina del profilo"),
+        K::AttrPicture => m(
+            lang,
+            "Picture (web address)",
+            "Immagine (indirizzo web)",
+        ),
+        K::AttrWebsite => m(lang, "Website", "Sito web"),
+        K::AttrGender => m(lang, "Gender", "Genere"),
+        K::AttrBirthdate => m(lang, "Date of birth", "Data di nascita"),
+        K::AttrZoneinfo => m(lang, "Time zone", "Fuso orario"),
+        K::AttrLocale => m(lang, "Language and region", "Lingua e regione"),
         // The keys' empty state names keys, in the feminine (*chiavi*): Italian agrees an
         // adjective with the noun it stands for, and the section's heading is the noun a reader
         // sees beside the sentence, so a borrowed pronoun reads as a slip in the page's own
@@ -2690,7 +2859,32 @@ struct Config {
     /// workers therefore shows up as latency for everybody, which is why the count is a
     /// deployment's to state and not a constant.
     workers: usize,
+    /// The address the Cognito API calls go to, and **never set from the environment**.
+    ///
+    /// `None` means "derive it from the settings file", which is what every real deployment does
+    /// ([`Settings::cognito_endpoint`]). The field exists for the tests alone: `compile_issuer`
+    /// is https-only, so a plain-HTTP fake pool cannot be named through `gate.issuer`, and a TLS
+    /// fake would need a certificate authority the bundled Mozilla roots do not trust (the design
+    /// of docs/ARCHITECTURE.md §13.22). No env var and no file sets it, so a host never points
+    /// the sign-in flow at an address an operator wrote in a config.
+    cognito_endpoint: Option<String>,
+    /// How long one Cognito call may take before this gives up and says so.
+    ///
+    /// [`COGNITO_TIMEOUT`] at startup, and the tests shorten it so the "pool that never answers"
+    /// case is fast. It is a constant and not a setting because it is not a value an operator has
+    /// a reason to tune per deployment, and because a setting that bounds a call nobody can
+    /// reproduce is a setting nobody can debug.
+    cognito_timeout: std::time::Duration,
 }
+
+/// The bound on one Cognito call, end to end (§13.22).
+///
+/// It is a wall on the **worker**, not a hint: `tiny_http` runs a fixed pool of handler threads,
+/// so a call that hangs forever is a worker that never serves anybody again. Five seconds is
+/// generous against the ~1 s a real `InitiateAuth` takes from rpi-01, and short enough that the
+/// worst case is a slow page and not a wedged service. There is no retry: a start is one call and
+/// the code step is two, so the most a request can spend is twice this.
+const COGNITO_TIMEOUT: Duration = Duration::from_secs(5);
 
 /// Read an env var, falling back to `default` when unset.
 fn env_or(key: &str, default: &str) -> String {
@@ -2989,6 +3183,10 @@ impl Config {
             audit_path: env_or("BB_AUTH_AUDIT_FILE", DEFAULT_AUDIT_FILE)
                 .trim()
                 .to_string(),
+            // Never read from the environment: see the field's own doc. A host always derives the
+            // endpoint from `gate.issuer`, and the production bound is the constant.
+            cognito_endpoint: None,
+            cognito_timeout: COGNITO_TIMEOUT,
         }
     }
 }
@@ -8634,6 +8832,16 @@ struct AccountPrefs<'a> {
     /// dropped, and no control at all when the operator named no destination. The console's own
     /// pill is the same setting unchanged (§13.17).
     logout: Option<&'a str>,
+    /// Whether **this page** carries its own `p.lede`, and the bar's menu therefore keeps the
+    /// identity out.
+    ///
+    /// The menu's lede is the identity's second home for a page that has no lede of its own: the
+    /// bar hides the name on a phone, and the menu opens with the answer. A step page whose lede
+    /// is the sentence the person must read first (the code page names the address the code went
+    /// to, an outcome page says why nothing was saved) is the case the design counts as *one*
+    /// `p.lede` (§13.23 §3, §4): a second one above it in the document would put the identity
+    /// ahead of the sentence that explains the page. The bar's own name is untouched.
+    page_lede: bool,
 }
 
 /// This page's `Content-Security-Policy`.
@@ -8719,9 +8927,13 @@ fn account_shell(prefs: &AccountPrefs, title: &str, content: Markup, look: Accou
                 (prefs_trigger(settings_name))
                 div class="menu" {
                     // The identity's second home, and the one that survives a phone: the bar
-                    // hides the name there, and the menu opens with the answer.
-                    @if let Some(who) = &prefs.who {
-                        p class="lede" { (who) }
+                    // hides the name there, and the menu opens with the answer. A page that
+                    // carries its own lede is the exception, because that lede is the page's
+                    // first sentence and the design counts one per page (§13.23 §3, §4).
+                    @if !prefs.page_lede {
+                        @if let Some(who) = &prefs.who {
+                            p class="lede" { (who) }
+                        }
                     }
                     form class="edit" method="get" action=(prefs.page) {
                         label {
@@ -8880,6 +9092,12 @@ struct AccountOwn<'a> {
     rev: &'a str,
     /// The page's own URL: where every cancel link goes.
     page: &'a str,
+    /// `<prefix>/profile`, the form's `POST` target and the Edit pill's href. Beside `keys_path`
+    /// for the same reason: it belongs to the request, not to the files.
+    profile_path: &'a str,
+    /// Whether the edit can work here at all, which is what puts the Edit pill on the panel or
+    /// takes it off (§13.22, "The client is `gate.client_id`").
+    profile_edit: bool,
 }
 
 /// The scopes a signed-in caller reaches, grouped by application in file order.
@@ -8945,6 +9163,7 @@ fn account_own<'a>(
     keys_path: &'a str,
     rev: &'a str,
     page: &'a str,
+    profile_path: &'a str,
 ) -> AccountOwn<'a> {
     AccountOwn {
         reached: account_reached(access, &ids[0]),
@@ -8962,6 +9181,8 @@ fn account_own<'a>(
         keys_path,
         rev,
         page,
+        profile_path,
+        profile_edit: profile_offered(settings),
     }
 }
 
@@ -9307,6 +9528,7 @@ fn page_account(
     uuid: Option<&str>,
     own: &AccountOwn,
     row: Option<&NewKeyRow>,
+    profile: Option<&ProfileForm>,
 ) -> Markup {
     html! {
         // One paragraph says who this page is about: every address of the row (as the gate sends
@@ -9400,25 +9622,54 @@ fn page_account(
         }
         section id="profile" class="panel" {
             h2 { (t(lang, K::AccountProfile)) }
-            p class="lede sub" { (t(lang, K::AccountProfileSub)) }
-            @if own.claims.is_empty() {
-                p class="muted" { (t(lang, K::AccountProfileNone)) }
+            // The sub-line says what this section is doing: reading, or editing. The edit page
+            // says what happens after the form (a code by email), because that is the fact a
+            // person needs before they type anything (§13.23 §2).
+            p class="lede sub" {
+                (t(lang, if profile.is_some() { K::AccountProfileEditSub } else { K::AccountProfileSub }))
+            }
+            @if let Some(f) = profile {
+                // The form, on this page alone (`<prefix>/profile`, the `keys/new` pattern): the
+                // panel is the section, and the section is what a caller of `/account/profile`
+                // came to.
+                (profile_form(lang, f, own.profile_path, own.page, ids))
             } @else {
-                ul class="plain" {
-                    @for (claim, value) in &own.claims {
-                        li {
-                            code { (claim) } ": "
-                            // The claim's name is the file's vocabulary, so it is code; the value
-                            // is the person's name or department, which is prose. A claim the
-                            // deployment configured and the proxy did not forward is a fact about
-                            // the wiring, and says so in words: a bare colon after a name reads as
-                            // "your name is empty", a statement nobody made.
-                            @if let Some(v) = value {
-                                (v)
-                            } @else {
-                                span class="muted" { (t(lang, K::AccountNotProvided)) }
+                @if own.claims.is_empty() {
+                    p class="muted" { (t(lang, K::AccountProfileNone)) }
+                } @else {
+                    ul class="plain" {
+                        @for (claim, value) in &own.claims {
+                            li {
+                                // A claim the design names a word for is called by that word, in
+                                // the same words the form labels it with, so the panel and the
+                                // form never call one field by two names. The rest keep the
+                                // claim's own name, in code: it is the file's vocabulary, and a
+                                // name nobody translated is the honest answer.
+                                @if let Some(word) = profile_label(lang, claim) {
+                                    (word)
+                                } @else {
+                                    code { (claim) }
+                                }
+                                ": "
+                                // The value is the person's name or department, which is prose. A
+                                // claim the deployment configured and the proxy did not forward is
+                                // a fact about the wiring, and says so in words: a bare colon after
+                                // a name reads as "your name is empty", a statement nobody made.
+                                @if let Some(v) = value {
+                                    (v)
+                                } @else {
+                                    span class="muted" { (t(lang, K::AccountNotProvided)) }
+                                }
                             }
                         }
+                    }
+                }
+                // The way in, and only where the edit can work: a pool, a native client and at
+                // least one editable claim. A control that can only end in an error is a promise
+                // the page cannot keep, so it is absent, not disabled.
+                @if own.profile_edit {
+                    p class="primary" {
+                        a class="pill" href=(own.profile_path) { (t(lang, K::AccountProfileEdit)) }
                     }
                 }
             }
@@ -9481,6 +9732,11 @@ fn handle_account(
     let remove = format!("{keys}/remove");
     // The mint row is a page of its own (§13.16): the keys section with one more row.
     let new_key = format!("{keys}/new");
+    // The profile edit (§13.22): the panel with fields instead of text, and the `POST` target
+    // of those fields. The code page it hands the person posts to `<profile>/code`, which 5c
+    // answers; today that path is a form target and nothing else, so it is not in the list
+    // below and a `POST` to it is the same `404` as any other unknown path.
+    let profile = format!("{}/profile", cfg.account_path);
     let posting = *req.method() == Method::Post;
     // The bar's identity starts empty and is filled as the facts behind it are read: the
     // address once nginx has named somebody, the given name once the settings say which
@@ -9493,17 +9749,19 @@ fn handle_account(
         page: &page,
         who: None,
         logout: cfg.account_logout_url.as_deref(),
+        page_lede: false,
     };
-    // Below the prefix, only the page and the three key mutations exist. A path that is nothing
-    // is a `404` for every caller alike, administrator included, because a page that answers a
-    // stranger `403` and an administrator `404` is a page describing its own layout to whoever
-    // asks.
+    // Below the prefix, only the page, the profile edit and the three key mutations exist. A
+    // path that is nothing is a `404` for every caller alike, administrator included, because a
+    // page that answers a stranger `403` and an administrator `404` is a page describing its own
+    // layout to whoever asks.
     if path != cfg.account_path
         && path != page
         && path != keys
         && path != rotate
         && path != remove
         && path != new_key
+        && path != profile
     {
         respond_account(
             req,
@@ -9668,10 +9926,22 @@ fn handle_account(
         }
     };
     let rev = sha256_hex(&bytes);
-    // A `POST` to one of the three key paths is answered here, after the identity, the veto and
-    // the row resolution, because each of those is a refusal this submission has to meet on the
-    // same terms as the `GET` that rendered its form.
+    // The facts the page is built out of, for a `GET` and for a `POST` alike: the profile
+    // submission answers with the page around its form, and the panel that holds the form is
+    // part of that page, so it needs the same facts the `GET` showed.
+    let own = account_own(
+        &doc, &access, &settings, &req, &ids, uuid, &keys, &rev, &page, &profile,
+    );
+    // A `POST` to one of the key paths, or to the profile edit, is answered here: after the
+    // proxy secret, the identity, the veto and the row resolution, because each of those is a
+    // refusal this submission has to meet on the same terms as the `GET` that rendered its form.
     if posting {
+        if path == profile {
+            account_profile_post(
+                req, cfg, &mut prefs, lang, look, &settings, &ids, uuid, &own, &profile, &page,
+            );
+            return;
+        }
         let op = if path == rotate {
             AccountKeyOp::Rotate
         } else if path == remove {
@@ -9680,13 +9950,10 @@ fn handle_account(
             AccountKeyOp::Mint
         };
         account_key_post(
-            req, cfg, &prefs, lang, look, uuid, op, &settings, &ids, &keys,
+            req, cfg, &prefs, lang, look, uuid, op, &settings, &ids, &keys, &profile,
         );
         return;
     }
-    let own = account_own(
-        &doc, &access, &settings, &req, &ids, uuid, &keys, &rev, &page,
-    );
     // The three pages that are about one key or one row exist for a caller with a row, and a
     // stranger gets the page's own refusal for them, exactly as the mutations give it.
     let wants_row = path == new_key || path == rotate || path == remove;
@@ -9737,21 +10004,815 @@ fn handle_account(
         );
         return;
     }
+    // The edit form rides on one page only: `<prefix>/profile` is the panel with fields, and
+    // every other page under the prefix shows the panel as read-only text (§13.22).
+    let form = (path == profile).then(|| ProfileForm::open(&settings, &req, &ids));
     respond_account(
         req,
         200,
         &prefs,
-        t(lang, K::AccountTitle),
+        if path == profile {
+            t(lang, K::AccountProfileEdit)
+        } else {
+            t(lang, K::AccountTitle)
+        },
         page_account(
             lang,
             &ids,
             uuid,
             &own,
             (path == new_key).then_some(&NewKeyRow::OPEN),
+            form.as_ref(),
         ),
         look,
         false,
     );
+}
+
+/// The longest value this page accepts for one claim, and the `maxlength` the field says.
+///
+/// One constant for both, because a field that lets a person type more than the server will
+/// accept is a field that sets them up to be refused.
+const PROFILE_VALUE_MAX: usize = 2048;
+
+/// The claims the profile form puts a field for, in the order the OIDC profile document
+/// lists them (§13.22).
+///
+/// These are the claims Cognito keeps as user-pool attributes, so the update step
+/// (`UpdateUserAttributes`, slice 5c) accepts them; a claim outside this list is refused on
+/// the way in, because a field the directory will not store is a field that cannot save, and a
+/// field that cannot save is worse than no field at all. `preferred_username` is absent on
+/// purpose: it is the sign-in name, and changing it changes who the person is, which is not
+/// what this page is for.
+const PROFILE_EDITABLE: [&str; 12] = [
+    "name",
+    "family_name",
+    "given_name",
+    "middle_name",
+    "nickname",
+    "profile",
+    "picture",
+    "website",
+    "gender",
+    "birthdate",
+    "zoneinfo",
+    "locale",
+];
+
+/// The word a claim is shown under, and `None` when the design names no word for it.
+///
+/// One function for the form's label, the change summary's name and the read-only panel's
+/// name, because the panel and the form must never call one field by two names: a person who
+/// read "Given name" on the panel is entitled to read it on the field they type into. A claim
+/// with no word keeps its own name, in `code`, which is the file's vocabulary and the honest
+/// answer for a name nobody translated.
+fn profile_label(lang: Lang, claim: &str) -> Option<String> {
+    let key = match claim {
+        "name" => K::AttrName,
+        "given_name" => K::AttrGivenName,
+        "family_name" => K::AttrFamilyName,
+        "middle_name" => K::AttrMiddleName,
+        "nickname" => K::AttrNickname,
+        "profile" => K::AttrProfile,
+        "picture" => K::AttrPicture,
+        "website" => K::AttrWebsite,
+        "gender" => K::AttrGender,
+        "birthdate" => K::AttrBirthdate,
+        "zoneinfo" => K::AttrZoneinfo,
+        "locale" => K::AttrLocale,
+        _ => return None,
+    };
+    Some(t(lang, key).to_string())
+}
+
+/// The configured claims that are editable, in the settings' own order.
+///
+/// The order is the settings', not the allowlist's, because the operator chose it:
+/// `gate.profile_claims` is the list the deployment says it forwards, and the form is a
+/// field-for-field version of the panel that shows that list.
+fn profile_editable(settings: &Settings) -> Vec<String> {
+    settings
+        .profile_claims
+        .iter()
+        .map(|c| c.claim.as_str())
+        .filter(|c| PROFILE_EDITABLE.contains(c))
+        .map(str::to_string)
+        .collect()
+}
+
+/// Whether the edit can work at all: a pool to call, a native app client to call it with, and
+/// at least one claim worth a field.
+///
+/// All three, because a form that can only end in an error is a promise the page cannot keep.
+/// The pill is absent rather than disabled: a disabled control is skipped by the keyboard and
+/// says nothing, and the reason here is a setting, not the person's doing.
+fn profile_offered(settings: &Settings) -> bool {
+    !settings.issuer.trim().is_empty()
+        && !settings.client_id.trim().is_empty()
+        && !profile_editable(settings).is_empty()
+}
+
+/// The autofill token for a field, as WCAG 1.3.5 asks for one: a name, a birthday and a
+/// nickname are values the browser already holds, and a person who has typed them once should
+/// not have to type them again. A claim with no token in the HTML spec's vocabulary gets no
+/// attribute at all, which leaves the browser guessing nothing.
+fn autocomplete_of(claim: &str) -> Option<&'static str> {
+    match claim {
+        "name" => Some("name"),
+        "given_name" => Some("given-name"),
+        "family_name" => Some("family-name"),
+        "middle_name" => Some("additional-name"),
+        "nickname" => Some("nickname"),
+        "picture" => Some("photo"),
+        "gender" => Some("sex"),
+        "birthdate" => Some("bday"),
+        _ => None,
+    }
+}
+
+/// The profile form as one render needs it: the fields, the address the code goes to, and the
+/// one sentence above the form, which is an error, a warning, or nothing.
+///
+/// A struct and not six arguments because the page that renders it is the page that refused a
+/// submission, and every one of these is what the person left on the page: the values they
+/// typed, the address they picked, the field that was refused. Deriving that from the request
+/// at render time would be a second answer to "what did they submit".
+struct ProfileForm {
+    /// Each editable claim, with the value its field shows.
+    editable: Vec<(String, String)>,
+    /// Each configured claim that is not editable, with the value the panel shows it by.
+    other: Vec<(String, String)>,
+    /// Which of the caller's addresses the code goes to.
+    email: String,
+    /// The claim a refusal is attributed to, and the sentence above the form. The sentence
+    /// names the field by its visible label, because that is the word the person read.
+    err: Option<(String, String)>,
+    /// A sentence above the form that is not an error: the values changed nothing.
+    warn: Option<String>,
+}
+
+impl ProfileForm {
+    /// The form as the page shows it before anyone has typed anything: every editable claim
+    /// prefilled with the value the proxy forwarded, and the first address as the destination.
+    fn open(settings: &Settings, req: &Request, ids: &[String]) -> ProfileForm {
+        let (editable, other) = profile_split(settings, req, &profile_editable(settings), None);
+        ProfileForm {
+            editable,
+            other,
+            email: ids.first().cloned().unwrap_or_default(),
+            err: None,
+            warn: None,
+        }
+    }
+
+    /// The form as it comes back after a refusal: the values as posted, the address as posted,
+    /// and the sentence. A person who typed a name is not being asked to type it again.
+    fn again(
+        settings: &Settings,
+        req: &Request,
+        form: &Form,
+        ids: &[String],
+        err: Option<(String, String)>,
+        warn: Option<String>,
+    ) -> ProfileForm {
+        let (editable, other) =
+            profile_split(settings, req, &profile_editable(settings), Some(form));
+        ProfileForm {
+            editable,
+            other,
+            email: match form.get("email").trim() {
+                "" => ids.first().cloned().unwrap_or_default(),
+                e => e.to_string(),
+            },
+            err,
+            warn,
+        }
+    }
+}
+
+/// The two lists of claims the edit page shows, from the settings, the forwarded values and
+/// (after a refusal) what was posted: the editable ones as fields, the rest as read-only text.
+///
+/// `posted` is the submission whose values the fields must show; `None` is the first render,
+/// where every field holds what the proxy forwarded.
+///
+/// The two lists are a pair of `(claim, value)` vectors, which is exactly what the form and
+/// the read-only list consume; naming that pair would say less than the tuple does, so
+/// clippy's `type_complexity` is answered here rather than with an alias.
+#[allow(clippy::type_complexity)]
+fn profile_split(
+    settings: &Settings,
+    req: &Request,
+    editable_claims: &[String],
+    posted: Option<&Form>,
+) -> (Vec<(String, String)>, Vec<(String, String)>) {
+    let mut editable = Vec::new();
+    let mut other = Vec::new();
+    for c in &settings.profile_claims {
+        let value = forwarded_claim(req, &c.header);
+        if editable_claims.iter().any(|e| e == &c.claim) {
+            editable.push((
+                c.claim.clone(),
+                match posted {
+                    Some(f) if f.0.iter().any(|(k, _)| k == &c.claim) => {
+                        f.get(&c.claim).to_string()
+                    }
+                    _ => value,
+                },
+            ));
+        } else {
+            other.push((c.claim.clone(), value));
+        }
+    }
+    (editable, other)
+}
+
+/// The value the proxy forwarded for one derived header, percent-decoded, `""` for none.
+fn forwarded_claim(req: &Request, header: &str) -> String {
+    header_value(req, header)
+        .map(pct_decode)
+        .unwrap_or_default()
+}
+
+/// The edit form (§13.23 §2). Every field is a `label` that wraps its input, so the name is
+/// the click target too, and the value is prefilled, because a person correcting a name is
+/// correcting one word and not retyping the rest.
+///
+/// The address the code goes to is never a field. It is the identity nginx named, and a form
+/// that let a person type an address here would be a form that emails a code to anybody, which
+/// is the whole reason the code exists. With one address there is nothing to choose, so the
+/// address is text beside a hidden input; with several, a `select` over the header's own
+/// values, in the header's order.
+fn profile_form(lang: Lang, f: &ProfileForm, action: &str, page: &str, ids: &[String]) -> Markup {
+    // The first text field is the one the page focuses, and only it: two `autofocus` on one
+    // page is no focus at all.
+    let first = f.editable.first().map(|(c, _)| c.clone());
+    html! {
+        form class="edit" method="post" action=(action) {
+            // The console's shape in this page's shell: the sentence above the form, and the
+            // field it names marked for assistive tech and not only coloured. `err` is this
+            // form's own id, because the account page has no console furniture to share an id
+            // with.
+            @if let Some((_, msg)) = &f.err {
+                div class="err" id="err" { (msg) }
+            }
+            @if let Some(msg) = &f.warn {
+                div class="msg warn" { (msg) }
+            }
+            @for (claim, value) in &f.editable {
+                label {
+                    span class="lbl" {
+                        (profile_label(lang, claim).unwrap_or_else(|| claim.clone()))
+                    }
+                    input type="text"
+                          name=(claim)
+                          value=(value)
+                          maxlength=(PROFILE_VALUE_MAX)
+                          autocomplete=[autocomplete_of(claim)]
+                          autocapitalize="off"
+                          spellcheck="false"
+                          autofocus=[(first.as_deref() == Some(claim.as_str())).then(|| "true")]
+                          aria-invalid=[f.err.as_ref().is_some_and(|(c, _)| c == claim).then_some("true")]
+                          aria-describedby=[f.err.as_ref().is_some_and(|(c, _)| c == claim).then_some("err")];
+                    // Where there is something to remove, the page says so before the person
+                    // finds it by submitting: emptying a field is a removal, not a no-op.
+                    @if !value.is_empty() {
+                        span class="hint" { (t(lang, K::AccountProfileClearDeletes)) }
+                    }
+                    @if claim == "birthdate" {
+                        span class="hint" { (t(lang, K::AccountProfileDateHint)) }
+                    }
+                }
+            }
+            // Configured and not editable: shown as the read-only panel shows them, so the page
+            // a person is editing says everything the page they came from said.
+            @if !f.other.is_empty() {
+                ul class="plain" {
+                    @for (claim, value) in &f.other {
+                        li {
+                            @if let Some(word) = profile_label(lang, claim) {
+                                (word)
+                            } @else {
+                                code { (claim) }
+                            }
+                            ": "
+                            @if value.is_empty() {
+                                span class="muted" { (t(lang, K::AccountNotProvided)) }
+                            } @else {
+                                (value)
+                            }
+                        }
+                    }
+                }
+            }
+            @if ids.len() > 1 {
+                label {
+                    span class="lbl" { (t(lang, K::AccountProfileSendTo)) }
+                    select name="email" {
+                        @for e in ids {
+                            option value=(e) selected=[(e == &f.email).then(|| "selected")] { (e) }
+                        }
+                    }
+                }
+            } @else {
+                div class="fixed" {
+                    span class="lbl" { (t(lang, K::AccountProfileSendTo)) }
+                    code { (f.email) }
+                    input type="hidden" name="email" value=(f.email);
+                }
+            }
+            // Said once, under the address, because this is the moment the person needs it: the
+            // address is not a field, and the reason is that a code is being sent to it.
+            span class="hint" { (t(lang, K::AccountProfileEmailFixed)) }
+            p class="muted" { (t(lang, K::AccountProfileSocialNote)) }
+            p class="actions" {
+                button type="submit" { (t(lang, K::AccountProfileSendCode)) }
+                a class="pill" href=(page) { (t(lang, K::Cancel)) }
+            }
+        }
+    }
+}
+
+/// One line of the change summary: the claim, what it was, what it becomes. `after` is `None`
+/// for a removal, which is the case that has to be a word and not an empty box.
+struct ProfileChange {
+    claim: String,
+    before: Option<String>,
+    after: Option<String>,
+}
+
+/// The page that asks for the code (§13.23 §3): the address it went to, the clock as a number,
+/// the changes as they will be described back, the code field, and a way to start over.
+///
+/// The `Session` rides in a hidden field and nowhere else: this is a form, not a server-side
+/// transaction, and a person who opens two tabs holds two independent codes. The resend form is
+/// a form of its own that posts the email and the changed values back to the start, because
+/// "send a new code" is starting over, and a second `Session` in the page would be two answers
+/// to which code the field belongs to.
+fn page_profile_code(
+    lang: Lang,
+    email: &str,
+    session: &str,
+    changes: &[ProfileChange],
+    resend: &[(String, String)],
+    profile_path: &str,
+    page: &str,
+) -> Markup {
+    let code_path = format!("{profile_path}/code");
+    html! {
+        p class="lede" {
+            (t(lang, K::AccountProfileCodeSent)) " "
+            code { (email) }
+            "." " " (t(lang, K::AccountProfileCodeLasts))
+        }
+        // The card, as the confirmations wear theirs: the summary and the field are one act, and
+        // the shell has already rendered the act's name as the page's one heading.
+        div class="card" {
+            p class="lbl" { (t(lang, K::AccountProfileChanges)) }
+            ul class="plain changes" {
+                @for c in changes {
+                    li {
+                        (profile_label(lang, &c.claim).unwrap_or_else(|| c.claim.clone())) ": "
+                        @if let Some(after) = &c.after {
+                            strong { (after) }
+                            // An attribute that had no value has no `was` part: there is nothing
+                            // to say it was.
+                            @if let Some(before) = &c.before {
+                                " " (t(lang, K::AccountProfileWas)) " " code { (before) }
+                            }
+                        } @else {
+                            // A removal is a word, not strike-through: `s` is not announced by
+                            // most screen readers, and this is the deletion the person must
+                            // confirm before it happens. `warn` and not `bad`: it is what they
+                            // asked for, so it is pointed out, not alarmed about.
+                            span class="tag warn" { (t(lang, K::AccountProfileRemoved)) }
+                            " " (t(lang, K::AccountProfileWas)) " "
+                            code { (c.before.clone().unwrap_or_default()) }
+                        }
+                    }
+                }
+            }
+            form class="edit" method="post" action=(code_path) {
+                input type="hidden" name="Session" value=(session);
+                label {
+                    span class="lbl" { (t(lang, K::AccountProfileCodeLabel)) }
+                    // A text field with `inputmode="numeric"`, not a `number` field: a code is
+                    // digits, and a `number` field brings a spinner and a locale-dependent
+                    // decimal separator to a value that is never a number. `one-time-code` is
+                    // what lets the browser fill it from the message it arrived in. **No
+                    // `pattern`**: a pasted `123 456` would be blocked by the browser for a
+                    // space the server simply strips.
+                    input class="f-code" name="code" type="text" inputmode="numeric"
+                          autocomplete="one-time-code" autocapitalize="off" spellcheck="false"
+                          required maxlength="32" autofocus;
+                }
+                div class="actions" {
+                    button type="submit" { (t(lang, K::AccountProfileSave)) }
+                    a class="pill" href=(page) { (t(lang, K::Cancel)) }
+                }
+            }
+        }
+        // Resend is starting over, and says so by being the start's own form: the email and the
+        // changed values, never the `Session`, posted back to the start. A second `Session` in
+        // the page would be two answers to which code the field belongs to.
+        form class="edit" method="post" action=(profile_path) {
+            @for (name, value) in resend {
+                input type="hidden" name=(name) value=(value);
+            }
+            p class="muted" { (t(lang, K::AccountProfileNoCode)) }
+            div class="actions" {
+                button type="submit" class="pill" { (t(lang, K::AccountProfileSendNew)) }
+            }
+        }
+    }
+}
+
+/// The page a start that did not work ends on: the `h1` says the profile was not saved, the
+/// lede says why, and a way back is the only action.
+///
+/// Cognito's own `message` is never on the page. It is a sentence written for an AWS console, it
+/// repeats the address back, and for the cases that mean "this account cannot sign in this way"
+/// it is a string the person has no vocabulary for. The status is the operator's diagnostic; the
+/// words are the person's.
+fn page_profile_outcome(
+    lang: Lang,
+    key: K,
+    resend: Option<&[(String, String)]>,
+    profile_path: &str,
+    page: &str,
+) -> Markup {
+    html! {
+        p class="lede" { (t(lang, key)) }
+        @if let Some(fields) = resend {
+            // Only the case that timed out offers a new code: the pool may have taken the
+            // request, so the honest answer is "ask again", and asking again is the same start.
+            // A refusal that named the account has nothing to resend. The button is the primary
+            // action here, because on this page it is the way forward.
+            form class="edit" method="post" action=(profile_path) {
+                @for (name, value) in fields {
+                    input type="hidden" name=(name) value=(value);
+                }
+                div class="actions" {
+                    button type="submit" { (t(lang, K::AccountProfileSendNew)) }
+                    a class="pill" href=(page) { "← " (t(lang, K::Back)) }
+                }
+            }
+        } @else {
+            p class="primary" {
+                a class="pill" href=(page) { "← " (t(lang, K::Back)) }
+            }
+        }
+    }
+}
+
+/// How a call to Cognito's API ended, when it did not produce a code.
+enum CognitoError {
+    /// The endpoint answered, and the answer is not a code. The key is which of §13.23 §4's
+    /// sentences to show; the status is the operator's, and the line is whether the pool was
+    /// reached: a refusal the pool means is a `502` (an upstream said no), a pool that never
+    /// answered is a `504`.
+    Refused(K, u16),
+    /// No answer within the bound.
+    NoAnswer,
+}
+
+/// Where this deployment's Cognito API lives: the endpoint a test named, else the origin of the
+/// issuer the settings name.
+///
+/// The fake is a `Config` field and not an environment variable, and that is the whole
+/// argument: an env var is a setting a deployment can point at a host of its choosing, and the
+/// only thing a test needs is a host on loopback. `compile_issuer` is https-only, so the real
+/// answer can only ever be an https origin, and a plain-HTTP loopback URL cannot be expressed as
+/// a setting at all.
+fn cognito_endpoint_of(cfg: &Config, settings: &Settings) -> String {
+    match cfg.cognito_endpoint.as_deref() {
+        Some(e) => e.to_string(),
+        None => settings.cognito_endpoint(),
+    }
+}
+
+/// Ask Cognito for an email code for `email` (§13.22's one call): `USER_AUTH`, the native app
+/// client from the settings, and `PREFERRED_CHALLENGE=EMAIL_OTP`.
+///
+/// No `ClientSecret` and no `SECRET_HASH`: the client this flow uses is a public client, the
+/// same one the browser's sign-in page uses, and a secret is exactly what a binary that ships to
+/// a browser does not have.
+///
+/// One attempt, and the bound is the whole wait. `http_status_as_error(false)` because a `400`
+/// from this API is a named reason, and the reason is what the person is told;
+/// `max_redirects(0)` because a redirect from a managed API is not a step this code takes, and
+/// following one would hand a code, an address and a session to a host the settings never named.
+/// Nothing that comes back is logged: the response carries the `Session`, and on the paths that
+/// answer with an `AuthenticationResult` it carries tokens.
+fn cognito_call(cfg: &Config, settings: &Settings, email: &str) -> Result<String, CognitoError> {
+    let endpoint = cognito_endpoint_of(cfg, settings);
+    if endpoint.is_empty() {
+        return Err(CognitoError::Refused(K::AccountProfileRefused, 502));
+    }
+    let payload = serde_json::json!({
+        "AuthFlow": "USER_AUTH",
+        "ClientId": settings.client_id,
+        "AuthParameters": {
+            "USERNAME": email,
+            "PREFERRED_CHALLENGE": "EMAIL_OTP",
+        },
+    });
+    let agent = ureq::Agent::new_with_config(
+        ureq::config::Config::builder()
+            .timeout_global(Some(cfg.cognito_timeout))
+            .http_status_as_error(false)
+            .max_redirects(0)
+            .build(),
+    );
+    let response = match agent
+        .post(&endpoint)
+        .header(
+            "X-Amz-Target",
+            "AWSCognitoIdentityProviderService.InitiateAuth",
+        )
+        .header("Content-Type", "application/x-amz-json-1.1")
+        .send(payload.to_string())
+    {
+        Ok(r) => r,
+        Err(ureq::Error::Timeout(_)) => return Err(CognitoError::NoAnswer),
+        Err(_) => return Err(CognitoError::Refused(K::AccountProfileRefused, 502)),
+    };
+    let status = response.status().as_u16();
+    let mut body = response.into_body();
+    let text = body.read_to_string().unwrap_or_default();
+    let value = serde_json::from_str::<serde_json::Value>(&text).ok();
+    if !(200..300).contains(&status) {
+        // The `__type` is `"TooManyRequestsException"` or
+        // `"com.amazonaws.cognito#UserNotFoundException"`: the reason is after the last `#`.
+        let name = value
+            .as_ref()
+            .and_then(|v| v.get("__type"))
+            .and_then(|v| v.as_str())
+            .unwrap_or("")
+            .rsplit('#')
+            .next()
+            .unwrap_or("")
+            .to_string();
+        return Err(match name.as_str() {
+            "UserNotFoundException"
+            | "UserNotConfirmedException"
+            | "NotAuthorizedException"
+            | "CodeDeliveryFailureException" => {
+                CognitoError::Refused(K::AccountProfileNoEmailSignIn, 400)
+            }
+            "TooManyRequestsException" | "LimitExceededException" => {
+                CognitoError::Refused(K::AccountProfileTooMany, 502)
+            }
+            _ => CognitoError::Refused(K::AccountProfileRefused, 502),
+        });
+    }
+    let value = match value {
+        Some(v) => v,
+        None => return Err(CognitoError::Refused(K::AccountProfileRefused, 502)),
+    };
+    // A pool that hands back tokens at once is a pool that did not do what was asked: the
+    // request was for a code, and these are not this page's to keep. They are dropped here, and
+    // they reach no page, no header and no log line.
+    if value.get("AuthenticationResult").is_some() {
+        return Err(CognitoError::Refused(K::AccountProfileRefused, 502));
+    }
+    if value.get("ChallengeName").and_then(|v| v.as_str()) != Some("EMAIL_OTP") {
+        return Err(CognitoError::Refused(K::AccountProfileRefused, 502));
+    }
+    match value.get("Session").and_then(|v| v.as_str()) {
+        Some(s) if !s.trim().is_empty() => Ok(s.to_string()),
+        _ => Err(CognitoError::Refused(K::AccountProfileRefused, 502)),
+    }
+}
+
+/// The profile edit's `POST` (§13.22, §13.23): refuse everything that must be refused without
+/// asking Cognito anything, then ask for a code and show the page that names the address it
+/// went to.
+///
+/// The order is the console's, for the same reasons: the door (`Sec-Fetch-Site`) first, because
+/// a cross-site form must not reach anybody's mailbox; then the address, because the code can
+/// only go to an identity nginx named; then the field names, because a claim outside the
+/// allowlist is a field that cannot save and a request cannot be honoured in part; then the
+/// values. Every refusal writes nothing and calls nothing.
+///
+/// There is no `rev` here. This `POST` writes no access file: the write is Cognito's, and it
+/// happens in slice 5c, behind the code.
+#[allow(clippy::too_many_arguments)]
+fn account_profile_post(
+    mut req: Request,
+    cfg: &Config,
+    prefs: &mut AccountPrefs,
+    lang: Lang,
+    look: AccountLook,
+    settings: &Settings,
+    ids: &[String],
+    uuid: Option<&str>,
+    own: &AccountOwn,
+    profile_path: &str,
+    page: &str,
+) {
+    // (1) The door, and the console's strict policy: `same-origin` and nothing else.
+    if !csrf_ok(
+        header_value(&req, "Sec-Fetch-Site"),
+        header_value(&req, "Origin"),
+        header_value(&req, "Host"),
+    ) {
+        respond_account(
+            req,
+            403,
+            prefs,
+            t(lang, K::CsrfTitle),
+            html! { p { (t(lang, K::CsrfBody)) } },
+            look,
+            false,
+        );
+        return;
+    }
+    let form = Form::parse(&read_body(&mut req));
+    let editable = profile_editable(settings);
+    // (2) The address the code goes to must be one of the values the identity header carried.
+    // Not "an address of the row the file has for this uuid": the header is what nginx attested,
+    // and a row carries addresses the gate chose not to send. The comparison is the header's
+    // own, normalised, because the header arrives lowercased and a form may not.
+    let email = form.get("email").trim().to_string();
+    if email.is_empty() || !ids.iter().any(|e| *e == norm_email(&email)) {
+        respond_account(
+            req,
+            400,
+            prefs,
+            t(lang, K::AccountProfileNotSavedTitle),
+            html! { p { (t(lang, K::AccountProfileNotYourEmail)) } },
+            look,
+            false,
+        );
+        return;
+    }
+    // (3) Every posted name is an editable claim, or the whole submission is refused. A name
+    // that is not one is a hand-made form naming a claim Cognito will not accept, and honouring
+    // the rest of it would tell the person their change was sent.
+    for (name, _) in &form.0 {
+        if name != "email" && !editable.iter().any(|c| c == name) {
+            respond_account(
+                req,
+                400,
+                prefs,
+                t(lang, K::AccountProfileNotSavedTitle),
+                html! { p { (format!("{name} {}", t(lang, K::AccountProfileCannotEdit))) } },
+                look,
+                false,
+            );
+            return;
+        }
+    }
+    // (4) Each value: at most the length the field says, and no control character. A newline in
+    // a name is not a name, and a value that reaches a directory with control bytes in it is a
+    // value every later reader has to guess about. The refusal names the field by the word the
+    // person read, marks it, and leaves the rest of the form standing.
+    for (name, value) in &form.0 {
+        if name == "email" {
+            continue;
+        }
+        if value.chars().count() > PROFILE_VALUE_MAX || value.chars().any(|c| c.is_control()) {
+            let label = profile_label(lang, name).unwrap_or_else(|| name.clone());
+            // The page is built before the response, because the page reads the request's
+            // headers (the forwarded claims) and the response takes the request.
+            let body = page_account(
+                lang,
+                ids,
+                uuid,
+                own,
+                None,
+                Some(&ProfileForm::again(
+                    settings,
+                    &req,
+                    &form,
+                    ids,
+                    Some((
+                        name.clone(),
+                        format!("{label}: {}", t(lang, K::AccountProfileValueBad)),
+                    )),
+                    None,
+                )),
+            );
+            respond_account(
+                req,
+                400,
+                prefs,
+                t(lang, K::AccountProfileEdit),
+                body,
+                look,
+                false,
+            );
+            return;
+        }
+    }
+    // (5) What would change, against what the proxy forwarded. A field the form did not post is
+    // a field that is not being changed, which is what lets the code page's resend post only the
+    // changed ones: an absent field means "leave it", an empty one means "remove it".
+    let mut changes: Vec<ProfileChange> = Vec::new();
+    let mut resend: Vec<(String, String)> = vec![("email".to_string(), email.clone())];
+    for (name, value) in &form.0 {
+        if name == "email" {
+            continue;
+        }
+        let header = match settings
+            .profile_claims
+            .iter()
+            .find(|c| &c.claim == name)
+            .map(|c| c.header.clone())
+        {
+            Some(header) => header,
+            None => continue,
+        };
+        let before = forwarded_claim(&req, &header).trim().to_string();
+        let after = value.trim().to_string();
+        if before == after {
+            continue;
+        }
+        changes.push(ProfileChange {
+            claim: name.clone(),
+            before: (!before.is_empty()).then_some(before),
+            after: (!after.is_empty()).then_some(after),
+        });
+        resend.push((name.clone(), value.clone()));
+    }
+    if changes.is_empty() {
+        // Not an error: nothing was refused and nothing was sent. A warning, in the page the
+        // person is already looking at, because the ordinary cause is a field they did not type
+        // in.
+        let body = page_account(
+            lang,
+            ids,
+            uuid,
+            own,
+            None,
+            Some(&ProfileForm::again(
+                settings,
+                &req,
+                &form,
+                ids,
+                None,
+                Some(t(lang, K::AccountProfileNothingChanged).to_string()),
+            )),
+        );
+        respond_account(
+            req,
+            200,
+            prefs,
+            t(lang, K::AccountProfileEdit),
+            body,
+            look,
+            false,
+        );
+        return;
+    }
+    // Every page past this point carries its own lede (the address the code went to, or why
+    // nothing was saved), so the bar's menu keeps the identity out: the design counts one
+    // `p.lede` per page (§13.23 §3, §4).
+    prefs.page_lede = true;
+    match cognito_call(cfg, settings, &email) {
+        Ok(session) => respond_account(
+            req,
+            200,
+            prefs,
+            t(lang, K::AccountProfileCodeTitle),
+            page_profile_code(
+                lang,
+                &email,
+                &session,
+                &changes,
+                &resend,
+                profile_path,
+                page,
+            ),
+            look,
+            false,
+        ),
+        Err(CognitoError::NoAnswer) => respond_account(
+            req,
+            504,
+            prefs,
+            t(lang, K::AccountProfileNotSavedTitle),
+            page_profile_outcome(
+                lang,
+                K::AccountProfileNoAnswer,
+                Some(&resend),
+                profile_path,
+                page,
+            ),
+            look,
+            false,
+        ),
+        Err(CognitoError::Refused(key, status)) => respond_account(
+            req,
+            status,
+            prefs,
+            t(lang, K::AccountProfileNotSavedTitle),
+            page_profile_outcome(lang, key, None, profile_path, page),
+            look,
+            false,
+        ),
+    }
 }
 
 /// Which key mutation a `POST` under the keys prefix is asking for.
@@ -9816,6 +10877,7 @@ fn account_key_post(
     settings: &Settings,
     ids: &[String],
     keys_path: &str,
+    profile_path: &str,
 ) {
     // (1) The door, and the console's strict policy: `same-origin` and nothing else.
     if !csrf_ok(
@@ -10053,7 +11115,16 @@ fn account_key_post(
         Err(refusal) if op == AccountKeyOp::Mint => {
             let rev = sha256_hex(&raw);
             let own = account_own(
-                &doc, &access, settings, &req, ids, uuid, keys_path, &rev, prefs.page,
+                &doc,
+                &access,
+                settings,
+                &req,
+                ids,
+                uuid,
+                keys_path,
+                &rev,
+                prefs.page,
+                profile_path,
             );
             let ticked = form.all("scope");
             let row = NewKeyRow {
@@ -10069,7 +11140,7 @@ fn account_key_post(
                 400,
                 prefs,
                 t(lang, K::AccountTitle),
-                page_account(lang, ids, uuid, &own, Some(&row)),
+                page_account(lang, ids, uuid, &own, Some(&row), None),
                 look,
                 false,
             );
@@ -11181,6 +12252,11 @@ mod tests {
             // handlers a test drives are reached over a socket, and the one test that needs
             // more than one thread builds its own server (`account_serve_with_workers`).
             workers: DEFAULT_WORKERS,
+            // The production values: no fake endpoint (the settings file's issuer names the
+            // address) and the real bound. The profile tests build their own `Config` to
+            // point at a fake (`profile_boot`).
+            cognito_endpoint: None,
+            cognito_timeout: COGNITO_TIMEOUT,
         }
     }
 
@@ -16362,14 +17438,19 @@ mod tests {
         );
         let s = account_section(&g.body, "profile");
         assert!(
-            s.contains("given_name"),
-            "the page must name the claim it is showing, since that is the name the deployment \
-             configured: {s}"
+            s.contains(t(Lang::En, K::AttrGivenName)) && !s.contains("given_name"),
+            "the page names the claim it is showing by its word label, not the claim name: {s}"
         );
+        // The claim is named in words, the form's own label (user decision 2026-11-25), so the
+        // read-only panel and the edit form never disagree about what a field is called.
+        let lis: Vec<String> = elements(&s, "<li>", "</li>")
+            .iter()
+            .map(|l| visible_text(l))
+            .collect();
         assert!(
-            s.contains("<li><code>given_name</code>: Bob Smith</li>"),
+            lis.contains(&format!("{}: Bob Smith", t(Lang::En, K::AttrGivenName))),
             "the forwarded value is percent-encoded on the wire and must reach the page decoded, \
-             as plain text after the claim's name, because a name is prose and not code: {s}"
+             after the claim's word label: {lis:?}"
         );
 
         // Nothing forwarded, nothing shown: a page that invented a value would be showing a
@@ -17072,8 +18153,8 @@ mod tests {
         );
         let s = account_section(&g.body, "profile");
         assert!(
-            s.contains("given_name"),
-            "the page must still name the claim it has nothing to show: {s}"
+            s.contains(t(Lang::En, K::AttrGivenName)),
+            "the page must still name the claim it has nothing to show, in words: {s}"
         );
         assert!(
             s.contains("<span class=\"muted\">not provided</span>"),
@@ -17084,7 +18165,7 @@ mod tests {
             "the bare word for none has no caller left on this page: {s}"
         );
         assert!(
-            !s.contains("<code>not provided</code>") && !s.contains("given_name</code>:</li>"),
+            !s.contains("<code>not provided</code>") && !s.contains(":</li>"),
             "the muted word is not wrapped in code, and a bare colon never ends the item: {s}"
         );
 
@@ -17295,9 +18376,8 @@ mod tests {
             "the per-application paragraph is gone: {reach}"
         );
         assert!(
-            account_section(&g.body, "profile").contains(
-                "<li><code>given_name</code>: <span class=\"muted\">not provided</span></li>"
-            ),
+            visible_text(&account_section(&g.body, "profile"))
+                .contains(&format!("{}: not provided", t(Lang::En, K::AttrGivenName))),
             "a configured but unforwarded claim says not provided: {}",
             account_section(&g.body, "profile")
         );
@@ -22894,5 +23974,1245 @@ mod tests {
             "the refused field shows the refusal, not the hint: {label}"
         );
         cleanup(&path);
+    }
+
+    // ---------------------------------------------------------------------
+    // The profile edit, slice 5b (docs/ARCHITECTURE.md §13.22 and §13.23): the form, the
+    // refusals that happen before any call, `InitiateAuth`, the code page. The code step
+    // (`RespondToAuthChallenge` onward) is 5c's.
+    //
+    // Everything here talks to a fake Cognito that is a local socket: `Config::cognito_endpoint`
+    // points the process at it, and no test reaches a real pool.
+    // ---------------------------------------------------------------------
+
+    /// What the fake recorded for one request: the `X-Amz-Target` it carried, its content type
+    /// and its JSON body.
+    #[derive(Debug, Clone)]
+    struct CognitoCall {
+        target: String,
+        content_type: String,
+        body: serde_json::Value,
+    }
+
+    /// One scripted answer of the fake. `location` makes it a redirect.
+    struct Reply {
+        status: u16,
+        body: String,
+        location: Option<String>,
+    }
+
+    fn reply(status: u16, body: &str) -> Reply {
+        Reply {
+            status,
+            body: body.to_string(),
+            location: None,
+        }
+    }
+
+    /// A `Session` is 20 to 4096 characters (RespondToAuthChallenge's documentation).
+    const FAKE_SESSION: &str = "FAKESESSION0123456789abcdefghijklmnop";
+
+    /// The answer a pool gives `USER_AUTH` with `PREFERRED_CHALLENGE=EMAIL_OTP`.
+    fn email_code_challenge() -> Reply {
+        reply(
+            200,
+            &serde_json::json!({
+                "ChallengeName": "EMAIL_OTP",
+                "ChallengeParameters": { "USERNAME": "bob@x.com", "CODE_DELIVERY_DESTINATION": "b***@x.com" },
+                "Session": FAKE_SESSION,
+            })
+            .to_string(),
+        )
+    }
+
+    /// The fake endpoint: a `tiny_http` server on an ephemeral loopback port that records every
+    /// request and answers each action from the script, or holds the socket and never answers
+    /// (`silent`). An action nobody scripted is a `400` that names no known error.
+    struct FakeCognito {
+        port: u16,
+        calls: std::sync::Arc<std::sync::Mutex<Vec<CognitoCall>>>,
+        // Silent mode keeps the accepted sockets open, so the caller waits on a live connection
+        // rather than being refused.
+        _held: std::sync::Arc<std::sync::Mutex<Vec<std::net::TcpStream>>>,
+    }
+
+    impl FakeCognito {
+        fn answering(script: Vec<(&'static str, Reply)>) -> FakeCognito {
+            let calls = std::sync::Arc::new(std::sync::Mutex::new(Vec::new()));
+            let server = Server::http("127.0.0.1:0").expect("bind the fake");
+            let port = server.server_addr().to_ip().expect("an ip address").port();
+            let seen = std::sync::Arc::clone(&calls);
+            std::thread::spawn(move || {
+                for mut req in server.incoming_requests() {
+                    let header = |n: &str| {
+                        req.headers()
+                            .iter()
+                            .find(|h| h.field.as_str().as_str().eq_ignore_ascii_case(n))
+                            .map(|h| h.value.as_str().to_string())
+                            .unwrap_or_default()
+                    };
+                    let target = header("X-Amz-Target");
+                    let content_type = header("Content-Type");
+                    let mut raw = String::new();
+                    let _ = req.as_reader().read_to_string(&mut raw);
+                    let body = serde_json::from_str(&raw).unwrap_or(serde_json::Value::Null);
+                    seen.lock().unwrap().push(CognitoCall {
+                        target: target.clone(),
+                        content_type,
+                        body,
+                    });
+                    let action = target.rsplit('.').next().unwrap_or("").to_string();
+                    let (status, body, location) = script
+                        .iter()
+                        .find(|(a, _)| *a == action)
+                        .map(|(_, r)| (r.status, r.body.clone(), r.location.clone()))
+                        .unwrap_or((
+                            400,
+                            r#"{"__type":"ResourceNotFoundException"}"#.into(),
+                            None,
+                        ));
+                    let mut resp = Response::from_string(body)
+                        .with_status_code(StatusCode(status))
+                        .with_header(
+                            Header::from_bytes(
+                                &b"Content-Type"[..],
+                                &b"application/x-amz-json-1.1"[..],
+                            )
+                            .unwrap(),
+                        );
+                    if let Some(l) = location {
+                        resp = resp.with_header(
+                            Header::from_bytes(&b"Location"[..], l.as_bytes()).unwrap(),
+                        );
+                    }
+                    let _ = req.respond(resp);
+                }
+            });
+            FakeCognito {
+                port,
+                calls,
+                _held: Default::default(),
+            }
+        }
+
+        /// A listener that accepts and says nothing, ever.
+        fn silent() -> FakeCognito {
+            let listener =
+                std::net::TcpListener::bind("127.0.0.1:0").expect("bind the silent fake");
+            let port = listener.local_addr().unwrap().port();
+            let held: std::sync::Arc<std::sync::Mutex<Vec<std::net::TcpStream>>> =
+                Default::default();
+            let keep = std::sync::Arc::clone(&held);
+            std::thread::spawn(move || {
+                for s in listener.incoming().flatten() {
+                    keep.lock().unwrap().push(s);
+                }
+            });
+            FakeCognito {
+                port,
+                calls: Default::default(),
+                _held: held,
+            }
+        }
+
+        fn endpoint(&self) -> String {
+            format!("http://127.0.0.1:{}/", self.port)
+        }
+
+        fn calls(&self) -> Vec<CognitoCall> {
+            self.calls.lock().unwrap().clone()
+        }
+
+        /// The action names, in order: `InitiateAuth`, not the whole target.
+        fn actions(&self) -> Vec<String> {
+            self.calls()
+                .iter()
+                .map(|c| c.target.rsplit('.').next().unwrap_or("").to_string())
+                .collect()
+        }
+    }
+
+    /// The settings of a deployment that can run the edit: the pool, the native client, and
+    /// eight claims, four of them editable (`given_name`, `family_name`, `birthdate`,
+    /// `zoneinfo`) and four never (`phone_number`, `preferred_username`, `address`, and a
+    /// `custom:` one). `email` cannot be configured as a claim at all.
+    fn profile_settings(client_id: &str, issuer: &str, claims: &str) -> String {
+        format!(
+            r#"{{ "version": 3, "gate": {{ "client_id": "{client_id}", "issuer": "{issuer}",
+            "authorized_hosts": ["badbat75.com", "*.badbat75.com"],
+            "profile_claims": [{claims}] }},
+            "web": {{ "admins": ["admin@x.com"] }} }}"#
+        )
+    }
+
+    const PROFILE_POOL: &str = "https://cognito-idp.eu-central-1.amazonaws.com/eu-central-1_TEST";
+    const PROFILE_CLAIMS: &str = r#""given_name", "family_name", "birthdate", "zoneinfo",
+        "phone_number", "preferred_username", "address", "custom:department""#;
+
+    fn profile_wired() -> String {
+        profile_settings("email-client", PROFILE_POOL, PROFILE_CLAIMS)
+    }
+
+    /// What nginx forwards for bob on every request: the claims, percent-encoded as the gate
+    /// sends them. `zoneinfo` is deliberately not forwarded, so one editable field is empty.
+    const PROFILE_HEADERS: [(&str, &str); 6] = [
+        ("X-Auth-Given-Name", "Bob"),
+        ("X-Auth-Family-Name", "Smith%20Jr"),
+        ("X-Auth-Birthdate", "1990-01-02"),
+        ("X-Auth-Phone-Number", "%2B390000"),
+        ("X-Auth-Preferred-Username", "bobby"),
+        ("X-Auth-Custom-Department", "Sales"),
+    ];
+
+    /// The form exactly as bob's page renders it, nothing edited. The field names are the claim
+    /// names and `email` (assumed from §13.22: "the chosen email and the changed values").
+    fn profile_same() -> Vec<(&'static str, &'static str)> {
+        vec![
+            ("email", "bob@x.com"),
+            ("given_name", "Bob"),
+            ("family_name", "Smith Jr"),
+            ("birthdate", "1990-01-02"),
+            ("zoneinfo", ""),
+        ]
+    }
+
+    fn profile_with(
+        mut f: Vec<(&'static str, &'static str)>,
+        key: &'static str,
+        value: &'static str,
+    ) -> Vec<(&'static str, &'static str)> {
+        match f.iter_mut().find(|(k, _)| *k == key) {
+            Some(slot) => slot.1 = value,
+            None => f.push((key, value)),
+        }
+        f
+    }
+
+    /// The GUI over a socket with its Cognito calls aimed at `endpoint`, `workers` threads and
+    /// the given bound; returns the fixture path and the page's URL (`/account/`).
+    fn profile_boot(
+        name: &str,
+        settings: &str,
+        endpoint: Option<String>,
+        timeout_ms: Option<u64>,
+        workers: usize,
+    ) -> (String, String) {
+        let path = account_scratch(name, settings);
+        let mut cfg = cfg_for(&path, ADMIN_BASE);
+        cfg.cognito_endpoint = endpoint;
+        if let Some(ms) = timeout_ms {
+            cfg.cognito_timeout = std::time::Duration::from_millis(ms);
+        }
+        let cfg = std::sync::Arc::new(cfg);
+        let server =
+            std::sync::Arc::new(Server::http("127.0.0.1:0").expect("bind an ephemeral port"));
+        let port = server.server_addr().to_ip().expect("an ip address").port();
+        for _ in 0..workers {
+            let server = std::sync::Arc::clone(&server);
+            let cfg = std::sync::Arc::clone(&cfg);
+            std::thread::spawn(move || loop {
+                if let Ok(req) = server.recv() {
+                    handle(req, &cfg);
+                }
+            });
+        }
+        (path, format!("http://127.0.0.1:{port}{ACCOUNT_PATH}/"))
+    }
+
+    /// The usual boot: the wired settings and the given fake, one worker is enough.
+    fn profile_serve(name: &str, fake: &FakeCognito) -> (String, String) {
+        profile_boot(name, &profile_wired(), Some(fake.endpoint()), None, 2)
+    }
+
+    fn profile_get(url: &str, who: &str, extra: &[(&str, &str)]) -> AccountGot {
+        let mut headers: Vec<(&str, &str)> = PROFILE_HEADERS.to_vec();
+        headers.extend_from_slice(extra);
+        account_call_with(url, Some(who), &headers)
+    }
+
+    /// A `POST` the way the browser makes it from the form: the profile headers nginx adds, the
+    /// identity, the secret, and `Sec-Fetch-Site`.
+    fn profile_post_as(
+        url: &str,
+        who: Option<&str>,
+        fields: &[(&str, &str)],
+        sec_fetch: &str,
+        with_secret: bool,
+        extra: &[(&str, &str)],
+    ) -> AccountGot {
+        let mut req = account_client()
+            .post(url)
+            .header("Sec-Fetch-Site", sec_fetch);
+        if with_secret {
+            req = req.header(SECRET_HEADER, TEST_SECRET);
+        }
+        if let Some(v) = who {
+            req = req.header(IDENTITY_HEADER, v);
+        }
+        for (k, v) in PROFILE_HEADERS.iter().chain(extra.iter()) {
+            req = req.header(*k, *v);
+        }
+        let mut r = req
+            .send_form(fields.iter().copied())
+            .expect("a POST response");
+        let headers = r
+            .headers()
+            .iter()
+            .map(|(k, v)| (k.as_str().to_string(), v.to_str().unwrap_or("").to_string()))
+            .collect();
+        AccountGot {
+            status: r.status().as_u16(),
+            headers,
+            body: r.body_mut().read_to_string().expect("a body"),
+        }
+    }
+
+    fn profile_post(url: &str, who: &str, fields: &[(&str, &str)]) -> AccountGot {
+        profile_post_as(url, Some(who), fields, "same-origin", true, &[])
+    }
+
+    /// The form whose `action` is exactly `action`.
+    fn form_posting_to(body: &str, action: &str) -> String {
+        elements(body, "<form", "</form>")
+            .into_iter()
+            .find(|f| attr(f, "action").as_deref() == Some(action))
+            .unwrap_or_else(|| panic!("no form posts to {action}: {}", account_readable(body)))
+    }
+
+    /// The hidden inputs of a form, `(name, value)`.
+    fn hidden_fields(form: &str) -> Vec<(String, String)> {
+        elements(form, "<input", ">")
+            .into_iter()
+            .filter(|i| attr(i, "type").as_deref() == Some("hidden"))
+            .map(|i| {
+                (
+                    attr(&i, "name").unwrap_or_default(),
+                    attr(&i, "value")
+                        .unwrap_or_default()
+                        .replace("&quot;", "\"")
+                        .replace("&#39;", "'")
+                        .replace("&lt;", "<")
+                        .replace("&gt;", ">")
+                        .replace("&amp;", "&"),
+                )
+            })
+            .collect()
+    }
+
+    /// The input tag named `name` in `html`.
+    fn input_named(html: &str, name: &str) -> String {
+        elements(html, "<input", ">")
+            .into_iter()
+            .find(|i| attr(i, "name").as_deref() == Some(name))
+            .unwrap_or_else(|| panic!("no input named {name}: {html}"))
+    }
+
+    /// A refusal that happened before any call: the status, and the fake saw nothing.
+    fn assert_refused_before_cognito(g: &AccountGot, status: u16, fake: &FakeCognito, what: &str) {
+        assert_eq!(g.status, status, "{what}: {}", account_readable(&g.body));
+        assert!(
+            fake.calls().is_empty(),
+            "{what}: no call may reach Cognito, and these did: {:?}",
+            fake.calls()
+        );
+    }
+
+    /// The edit is offered only where it can work: the pool, the native client and at least one
+    /// editable claim, and then as `p.primary > a.pill` to `/account/profile` with no fragment,
+    /// for a stranger too (§13.22 "Who may edit", §13.23 §1).
+    #[test]
+    fn the_profile_panel_offers_edit_only_when_wired() {
+        let fake = FakeCognito::answering(vec![]);
+        let cases = [
+            (
+                "no-client",
+                profile_settings("", PROFILE_POOL, PROFILE_CLAIMS),
+                false,
+            ),
+            (
+                "no-issuer",
+                profile_settings("email-client", "", PROFILE_CLAIMS),
+                false,
+            ),
+            (
+                "no-editable",
+                profile_settings("email-client", PROFILE_POOL, r#""phone_number", "address""#),
+                false,
+            ),
+            ("wired", profile_wired(), true),
+        ];
+        for (name, settings, offered) in cases {
+            let (path, base) = profile_boot(
+                &format!("panel-{name}"),
+                &settings,
+                Some(fake.endpoint()),
+                None,
+                1,
+            );
+            for who in ["bob@x.com", "stranger@elsewhere.com"] {
+                let g = profile_get(&base, who, &[]);
+                assert_eq!(g.status, 200, "{name}/{who}: {}", account_readable(&g.body));
+                let panel = account_section(&g.body, "profile");
+                let pills = anchors_to(&panel, "/account/profile");
+                if offered {
+                    assert_eq!(pills.len(), 1, "{name}/{who}: one Edit pill: {panel}");
+                    assert_eq!(attr(&pills[0], "href").as_deref(), Some("/account/profile"));
+                    assert_eq!(visible_text(&pills[0]), t(Lang::En, K::AccountProfileEdit));
+                    assert!(
+                        panel.contains("<p class=\"primary\"><a class=\"pill\""),
+                        "{name}/{who}: the pill is p.primary > a.pill: {panel}"
+                    );
+                } else {
+                    assert!(pills.is_empty(), "{name}/{who}: no Edit offered: {panel}");
+                }
+            }
+            cleanup(&path);
+        }
+        assert!(
+            fake.calls().is_empty(),
+            "reading the page never calls Cognito"
+        );
+    }
+
+    /// Only an editable claim becomes an input: the others stay read-only text, in code, and a
+    /// configured claim outside the allowlist can never be posted into.
+    #[test]
+    fn the_profile_form_offers_only_editable_claims() {
+        let fake = FakeCognito::answering(vec![]);
+        let (path, base) = profile_serve("form-editable", &fake);
+        let g = profile_get(&format!("{base}profile"), "bob@x.com", &[]);
+        assert_eq!(g.status, 200, "{}", account_readable(&g.body));
+        let panel = account_section(&g.body, "profile");
+        let form = form_posting_to(&panel, "/account/profile");
+        for editable in ["given_name", "family_name", "birthdate", "zoneinfo"] {
+            let i = input_named(&form, editable);
+            assert_eq!(attr(&i, "type").as_deref(), Some("text"), "{editable}: {i}");
+        }
+        for fixed in [
+            "phone_number",
+            "preferred_username",
+            "address",
+            "custom:department",
+        ] {
+            assert!(
+                !form.contains(&format!("name=\"{fixed}\"")),
+                "{fixed} is never an input: {form}"
+            );
+        }
+        assert!(
+            visible_text(&panel).contains("Sales")
+                && panel.contains("<code>custom:department</code>"),
+            "a configured claim that is not editable is shown read-only, by claim name: {panel}"
+        );
+        // The rest of the account page is still there around the open panel.
+        let _ = account_section(&g.body, "reach");
+        assert!(fake.calls().is_empty());
+        cleanup(&path);
+    }
+
+    /// Every field is labelled in words, in both languages, with the autofill token WCAG 1.3.5
+    /// asks for, as text, 2048 characters at most, the first one focused (§13.23 §2).
+    #[test]
+    fn the_profile_form_labels_fields_in_words() {
+        let fake = FakeCognito::answering(vec![]);
+        let (path, base) = profile_serve("form-labels", &fake);
+        let tokens = [
+            ("given_name", "given-name"),
+            ("family_name", "family-name"),
+            ("birthdate", "bday"),
+        ];
+        for (lang, cookie, labels) in [
+            (
+                Lang::En,
+                "lang=en",
+                [
+                    ("given_name", "Given name"),
+                    ("family_name", "Family name"),
+                    ("birthdate", "Date of birth"),
+                    ("zoneinfo", "Time zone"),
+                ],
+            ),
+            (
+                Lang::It,
+                "lang=it",
+                [
+                    ("given_name", "Nome"),
+                    ("family_name", "Cognome"),
+                    ("birthdate", "Data di nascita"),
+                    ("zoneinfo", "Fuso orario"),
+                ],
+            ),
+        ] {
+            let g = profile_get(
+                &format!("{base}profile"),
+                "bob@x.com",
+                &[("Cookie", cookie)],
+            );
+            assert_eq!(g.status, 200, "{}", account_readable(&g.body));
+            let form = form_posting_to(&account_section(&g.body, "profile"), "/account/profile");
+            for (claim, word) in labels {
+                let label = elements(&form, "<label", "</label>")
+                    .into_iter()
+                    .find(|l| l.contains(&format!("name=\"{claim}\"")))
+                    .unwrap_or_else(|| panic!("{claim}: no label holds the input: {form}"));
+                let text = visible_text(&label);
+                assert!(
+                    text.contains(word),
+                    "{lang:?} {claim}: label says {text:?}, wants {word:?}"
+                );
+                assert!(
+                    !text.contains(claim),
+                    "{claim}: the label is words, not the claim name: {text}"
+                );
+                let i = input_named(&label, claim);
+                assert_eq!(attr(&i, "type").as_deref(), Some("text"));
+                assert_eq!(attr(&i, "maxlength").as_deref(), Some("2048"), "{claim}");
+            }
+            for (claim, token) in tokens {
+                let i = input_named(&form, claim);
+                assert_eq!(
+                    attr(&i, "autocomplete").as_deref(),
+                    Some(token),
+                    "{claim}: {i}"
+                );
+            }
+            assert!(
+                attr(&input_named(&form, "zoneinfo"), "autocomplete").is_none(),
+                "zoneinfo has no autofill token"
+            );
+            let texts: Vec<String> = elements(&form, "<input", ">")
+                .into_iter()
+                .filter(|i| attr(i, "type").as_deref() == Some("text"))
+                .collect();
+            assert!(
+                texts[0].contains("autofocus"),
+                "the first field is focused: {}",
+                texts[0]
+            );
+            assert!(
+                texts.iter().skip(1).all(|i| !i.contains("autofocus")),
+                "only the first: {texts:?}"
+            );
+            assert!(
+                form.contains(t(lang, K::AccountProfileDateHint)),
+                "birthdate carries its format hint: {form}"
+            );
+        }
+        cleanup(&path);
+    }
+
+    /// The twelve `Attr*` words, English and Italian, as §13.23 §5 gives them: the form's label,
+    /// the change summary's name and the read-only panel's name are one key each.
+    #[test]
+    fn the_attr_labels_are_the_designers_words() {
+        let table = [
+            (K::AttrName, "Full name", "Nome completo"),
+            (K::AttrGivenName, "Given name", "Nome"),
+            (K::AttrFamilyName, "Family name", "Cognome"),
+            (K::AttrMiddleName, "Middle name", "Secondo nome"),
+            (K::AttrNickname, "Nickname", "Soprannome"),
+            (K::AttrProfile, "Profile page", "Pagina del profilo"),
+            (
+                K::AttrPicture,
+                "Picture (web address)",
+                "Immagine (indirizzo web)",
+            ),
+            (K::AttrWebsite, "Website", "Sito web"),
+            (K::AttrGender, "Gender", "Genere"),
+            (K::AttrBirthdate, "Date of birth", "Data di nascita"),
+            (K::AttrZoneinfo, "Time zone", "Fuso orario"),
+            (K::AttrLocale, "Language and region", "Lingua e regione"),
+        ];
+        for (k, en, it) in table {
+            assert_eq!(t(Lang::En, k), en);
+            assert_eq!(t(Lang::It, k), it);
+        }
+        // The decisions of 2026-11-25 that are literal: the clock the code page names, and the
+        // act's own words.
+        assert_eq!(
+            t(Lang::En, K::AccountProfileCodeLasts),
+            "It works for 3 minutes."
+        );
+        assert_eq!(
+            t(Lang::It, K::AccountProfileCodeLasts),
+            "Vale per 3 minuti."
+        );
+        assert_eq!(t(Lang::En, K::AccountProfileEdit), "Edit profile");
+        assert_eq!(t(Lang::It, K::AccountProfileEdit), "Modifica il profilo");
+        assert_eq!(t(Lang::En, K::AccountProfileSendCode), "Send code");
+        assert_eq!(t(Lang::En, K::AccountProfileSave), "Save profile");
+        assert_eq!(t(Lang::En, K::AccountProfileSendNew), "Send a new code");
+        assert_eq!(
+            t(Lang::En, K::AccountProfileClearDeletes),
+            "Empty it to remove it."
+        );
+    }
+
+    /// The read-only panel names a claim in the same words as the form (user decision
+    /// 2026-11-25); a claim with no word keeps its name, in code.
+    #[test]
+    fn the_read_only_panel_uses_the_word_labels() {
+        let fake = FakeCognito::answering(vec![]);
+        let (path, base) = profile_serve("panel-words", &fake);
+        for (cookie, given, dept) in [
+            ("lang=en", "Given name", "Sales"),
+            ("lang=it", "Nome", "Sales"),
+        ] {
+            let g = profile_get(&base, "bob@x.com", &[("Cookie", cookie)]);
+            let panel = account_section(&g.body, "profile");
+            let items: Vec<String> = elements(&panel, "<li>", "</li>")
+                .iter()
+                .map(|l| visible_text(l))
+                .collect();
+            assert!(
+                items.contains(&format!("{given}: Bob")),
+                "{cookie}: {items:?}"
+            );
+            assert!(
+                items.contains(&format!("custom:department: {dept}")),
+                "{cookie}: {items:?}"
+            );
+            assert!(
+                !panel.contains("<code>given_name</code>"),
+                "{cookie}: {panel}"
+            );
+        }
+        cleanup(&path);
+    }
+
+    /// An emptied field is announced where it happens (a hint under each field that has a value)
+    /// and again on the code page, where a removal is a word and the old value follows "was".
+    #[test]
+    fn an_emptied_field_is_announced_before_saving() {
+        let fake = FakeCognito::answering(vec![("InitiateAuth", email_code_challenge())]);
+        let (path, base) = profile_serve("emptied", &fake);
+        let g = profile_get(&format!("{base}profile"), "bob@x.com", &[]);
+        let hint = t(Lang::En, K::AccountProfileClearDeletes);
+        assert_eq!(
+            g.body.matches(hint).count(),
+            3,
+            "one hint per field that has a value (given, family, birthdate), none for the empty \
+             zoneinfo: {}",
+            account_readable(&g.body)
+        );
+
+        let g = profile_post(
+            &format!("{base}profile"),
+            "bob@x.com",
+            &profile_with(profile_same(), "family_name", ""),
+        );
+        assert_eq!(g.status, 200, "{}", account_readable(&g.body));
+        let changes = element_containing(&g.body, "changes", "</ul>");
+        let lis = elements(&changes, "<li>", "</li>");
+        assert_eq!(lis.len(), 1, "only the emptied field changed: {changes}");
+        let text = visible_text(&lis[0]);
+        assert!(
+            lis[0].contains("tag warn"),
+            "a removal is a warn tag: {}",
+            lis[0]
+        );
+        for want in [
+            t(Lang::En, K::AttrFamilyName),
+            t(Lang::En, K::AccountProfileRemoved),
+            t(Lang::En, K::AccountProfileWas),
+            "Smith Jr",
+        ] {
+            assert!(text.contains(want), "{text:?} lacks {want:?}");
+        }
+        cleanup(&path);
+    }
+
+    /// One address shows no choice; several show a `select` over the header's own values in its
+    /// order. Both say why the email is not a field.
+    #[test]
+    fn one_email_shows_no_choice() {
+        let fake = FakeCognito::answering(vec![]);
+        let (path, base) = profile_serve("one-email", &fake);
+        let fixed = t(Lang::En, K::AccountProfileEmailFixed);
+
+        let g = profile_get(&format!("{base}profile"), "bob@x.com", &[]);
+        let form = form_posting_to(&account_section(&g.body, "profile"), "/account/profile");
+        assert!(!form.contains("<select"), "{form}");
+        assert!(form.contains("<code>bob@x.com</code>"), "{form}");
+        assert!(
+            hidden_fields(&form).contains(&("email".to_string(), "bob@x.com".to_string())),
+            "{form}"
+        );
+        assert!(form.contains(fixed), "{form}");
+
+        let g = profile_get(&format!("{base}profile"), "bob@x.com bob@old.com", &[]);
+        let form = form_posting_to(&account_section(&g.body, "profile"), "/account/profile");
+        let select = element_containing(&form, "<select", "</select>");
+        assert_eq!(attr(&select, "name").as_deref(), Some("email"), "{select}");
+        let options = duration_options(&select);
+        assert_eq!(
+            options.iter().map(|o| o.0.as_str()).collect::<Vec<_>>(),
+            ["bob@x.com", "bob@old.com"],
+            "the header's order"
+        );
+        assert!(
+            options[0].2 && !options[1].2,
+            "the first is selected: {options:?}"
+        );
+        assert!(form.contains(fixed), "{form}");
+        assert!(
+            form.contains(t(Lang::En, K::AccountProfileSendTo)),
+            "{form}"
+        );
+        cleanup(&path);
+    }
+
+    /// The code goes to one of the caller's own addresses, and the chosen one is what Cognito
+    /// is asked about.
+    #[test]
+    fn the_code_goes_only_to_the_callers_own_emails() {
+        let fake = FakeCognito::answering(vec![("InitiateAuth", email_code_challenge())]);
+        let (path, base) = profile_serve("own-emails", &fake);
+        let url = format!("{base}profile");
+
+        let g = profile_post_as(
+            &url,
+            Some("bob@x.com BOB@old.com"),
+            &profile_with(
+                profile_with(profile_same(), "email", "bob@old.com"),
+                "given_name",
+                "Robert",
+            ),
+            "same-origin",
+            true,
+            &[],
+        );
+        assert_eq!(g.status, 200, "{}", account_readable(&g.body));
+        let calls = fake.calls();
+        assert_eq!(calls.len(), 1, "{calls:?}");
+        assert_eq!(calls[0].body["AuthParameters"]["USERNAME"], "bob@old.com");
+
+        // A stranger edits their own profile too (user decision 2026-11-25).
+        let g = profile_post(
+            &url,
+            "stranger@elsewhere.com",
+            &profile_with(
+                profile_with(profile_same(), "email", "stranger@elsewhere.com"),
+                "given_name",
+                "Sam",
+            ),
+        );
+        assert_eq!(g.status, 200, "{}", account_readable(&g.body));
+        assert_eq!(fake.calls().len(), 2);
+        cleanup(&path);
+    }
+
+    /// An email that is not among the header's own values is refused with no call.
+    #[test]
+    fn an_email_not_among_the_callers_is_refused_before_cognito() {
+        let fake = FakeCognito::answering(vec![("InitiateAuth", email_code_challenge())]);
+        let (path, base) = profile_serve("foreign-email", &fake);
+        let url = format!("{base}profile");
+        for email in ["carol@x.com", "", "bob@x.com carol@x.com"] {
+            let g = profile_post(
+                &url,
+                "bob@x.com",
+                &profile_with(
+                    profile_with(profile_same(), "email", email),
+                    "given_name",
+                    "Robert",
+                ),
+            );
+            assert_refused_before_cognito(&g, 400, &fake, &format!("email {email:?}"));
+            assert!(
+                g.body.contains(t(Lang::En, K::AccountProfileNotYourEmail)),
+                "the sentence says so: {}",
+                account_readable(&g.body)
+            );
+        }
+        // `bob@old.com` is bob's own, but only when the header carried it: this request's did not.
+        let g = profile_post(
+            &url,
+            "bob@x.com",
+            &profile_with(
+                profile_with(profile_same(), "email", "bob@old.com"),
+                "given_name",
+                "Robert",
+            ),
+        );
+        assert_refused_before_cognito(
+            &g,
+            400,
+            &fake,
+            "an address of the row the header did not carry",
+        );
+        cleanup(&path);
+    }
+
+    /// An attribute outside the allowlist (configured but not editable, or not configured at
+    /// all) is refused with no call, and the page says which one.
+    #[test]
+    fn a_non_editable_attribute_is_refused_before_cognito() {
+        let fake = FakeCognito::answering(vec![("InitiateAuth", email_code_challenge())]);
+        let (path, base) = profile_serve("non-editable", &fake);
+        let url = format!("{base}profile");
+        for attr_name in [
+            "phone_number",
+            "preferred_username",
+            "address",
+            "custom:department",
+            "nickname",
+            "email_verified",
+            "sub",
+        ] {
+            let g = profile_post(
+                &url,
+                "bob@x.com",
+                &profile_with(profile_same(), "given_name", "Robert")
+                    .into_iter()
+                    .chain([(attr_name, "changed")])
+                    .collect::<Vec<_>>(),
+            );
+            assert_refused_before_cognito(&g, 400, &fake, attr_name);
+            assert!(
+                visible_text(&g.body).contains(&format!(
+                    "{attr_name} {}",
+                    t(Lang::En, K::AccountProfileCannotEdit)
+                )) || visible_text(&g.body).contains(&format!(
+                    "{attr_name}: {}",
+                    t(Lang::En, K::AccountProfileCannotEdit)
+                )),
+                "{attr_name}: the sentence names the claim and says it cannot be changed here: {}",
+                account_readable(&g.body)
+            );
+        }
+        cleanup(&path);
+    }
+
+    /// A value over 2048 characters or holding a control character is refused with no call,
+    /// the page names the field by its visible label, marks it invalid and keeps what was
+    /// typed in the other fields.
+    #[test]
+    fn a_bad_value_names_the_field_by_its_label() {
+        let fake = FakeCognito::answering(vec![("InitiateAuth", email_code_challenge())]);
+        let (path, base) = profile_serve("bad-value", &fake);
+        let url = format!("{base}profile");
+        let long = "a".repeat(2049);
+        for bad in [long.as_str(), "x\u{7}y", "line\nbreak"] {
+            let fields = profile_with(
+                profile_with(
+                    profile_same(),
+                    "given_name",
+                    Box::leak(bad.to_string().into_boxed_str()),
+                ),
+                "family_name",
+                "Typed",
+            );
+            let g = profile_post(&url, "bob@x.com", &fields);
+            assert_refused_before_cognito(&g, 400, &fake, "a bad value");
+            let err = element_containing(&g.body, "id=\"err\"", "</div>");
+            assert!(err.contains("class=\"err\""), "div.err#err: {err}");
+            assert_eq!(
+                visible_text(&err),
+                format!(
+                    "{}: {}",
+                    t(Lang::En, K::AttrGivenName),
+                    t(Lang::En, K::AccountProfileValueBad)
+                )
+            );
+            let i = input_named(&g.body, "given_name");
+            assert_eq!(attr(&i, "aria-invalid").as_deref(), Some("true"), "{i}");
+            assert_eq!(attr(&i, "aria-describedby").as_deref(), Some("err"), "{i}");
+            assert_eq!(
+                attr(&input_named(&g.body, "family_name"), "value").as_deref(),
+                Some("Typed")
+            );
+        }
+        cleanup(&path);
+    }
+
+    /// Nothing differs from what nginx forwarded (a trimmed value is the same value): no code
+    /// is sent, the form comes back as a `200` with a warning, not an error.
+    #[test]
+    fn an_unchanged_form_sends_no_code() {
+        let fake = FakeCognito::answering(vec![("InitiateAuth", email_code_challenge())]);
+        let (path, base) = profile_serve("unchanged", &fake);
+        let url = format!("{base}profile");
+        for fields in [
+            profile_same(),
+            profile_with(profile_same(), "given_name", "  Bob  "),
+        ] {
+            let g = profile_post(&url, "bob@x.com", &fields);
+            assert_refused_before_cognito(&g, 200, &fake, "an unchanged form");
+            let warn = element_containing(&g.body, "msg warn", "</div>");
+            assert_eq!(
+                visible_text(&warn),
+                t(Lang::En, K::AccountProfileNothingChanged)
+            );
+            assert!(
+                !g.body.contains("class=\"err\""),
+                "not an error: {}",
+                account_readable(&g.body)
+            );
+            assert!(form_posting_to(&g.body, "/account/profile").contains("name=\"given_name\""));
+        }
+        cleanup(&path);
+    }
+
+    /// The veto, a cross-site `POST`, a missing secret and a missing identity are each refused
+    /// with no call, and the new paths are fixed ones: anything under them is a `404`.
+    #[test]
+    fn the_profile_post_is_guarded_like_every_other_write() {
+        let fake = FakeCognito::answering(vec![("InitiateAuth", email_code_challenge())]);
+        let (path, base) = profile_serve("guards", &fake);
+        let url = format!("{base}profile");
+        let edit = profile_with(profile_same(), "given_name", "Robert");
+
+        let g = profile_post_as(
+            &url,
+            Some("spammer@x.com"),
+            &profile_with(profile_same(), "email", "spammer@x.com"),
+            "same-origin",
+            true,
+            &[],
+        );
+        assert_refused_before_cognito(&g, 403, &fake, "a denied caller");
+        let g = profile_get(&url, "spammer@x.com", &[]);
+        assert_eq!(g.status, 403, "a denied caller is not shown the form");
+
+        let g = profile_post_as(&url, Some("bob@x.com"), &edit, "cross-site", true, &[]);
+        assert_refused_before_cognito(&g, 403, &fake, "a cross-site POST");
+        let g = profile_post_as(&url, Some("bob@x.com"), &edit, "same-origin", false, &[]);
+        assert_refused_before_cognito(&g, 403, &fake, "no proxy secret");
+        let g = profile_post_as(&url, None, &edit, "same-origin", true, &[]);
+        assert_refused_before_cognito(&g, 401, &fake, "no identity header");
+
+        for nothing in ["profile/nope", "profile/code/deeper"] {
+            let g = profile_get(&format!("{base}{nothing}"), "bob@x.com", &[]);
+            assert_eq!(g.status, 404, "{nothing}");
+        }
+        cleanup(&path);
+    }
+
+    /// One `InitiateAuth`: the target header, the content type, `USER_AUTH`, the native client
+    /// from the settings, the chosen email and `EMAIL_OTP`, and nothing secret beside them.
+    #[test]
+    fn starting_an_edit_asks_cognito_for_an_email_code() {
+        let fake = FakeCognito::answering(vec![("InitiateAuth", email_code_challenge())]);
+        let (path, base) = profile_serve("initiate", &fake);
+        let g = profile_post(
+            &format!("{base}profile"),
+            "bob@x.com",
+            &profile_with(profile_same(), "given_name", "Robert"),
+        );
+        assert_eq!(g.status, 200, "{}", account_readable(&g.body));
+        let calls = fake.calls();
+        assert_eq!(calls.len(), 1, "exactly one call at the start: {calls:?}");
+        let c = &calls[0];
+        assert_eq!(c.target, "AWSCognitoIdentityProviderService.InitiateAuth");
+        assert_eq!(c.content_type, "application/x-amz-json-1.1");
+        assert_eq!(c.body["AuthFlow"], "USER_AUTH", "{}", c.body);
+        assert_eq!(c.body["ClientId"], "email-client");
+        assert_eq!(c.body["AuthParameters"]["USERNAME"], "bob@x.com");
+        assert_eq!(c.body["AuthParameters"]["PREFERRED_CHALLENGE"], "EMAIL_OTP");
+        assert!(
+            c.body.get("ClientSecret").is_none()
+                && c.body["AuthParameters"].get("SECRET_HASH").is_none()
+        );
+        cleanup(&path);
+    }
+
+    /// The code page: its own page, `no-store`, one code field made for a one-time code, the
+    /// clock said as a number in both languages, the session in a hidden field, and no script.
+    #[test]
+    fn the_code_page_carries_the_session_and_is_not_stored() {
+        let fake = FakeCognito::answering(vec![("InitiateAuth", email_code_challenge())]);
+        let (path, base) = profile_serve("code-page", &fake);
+        let url = format!("{base}profile");
+        for (lang, cookie, lasts) in [
+            (Lang::En, "lang=en", "It works for 3 minutes."),
+            (Lang::It, "lang=it", "Vale per 3 minuti."),
+        ] {
+            let g = profile_post_as(
+                &url,
+                Some("bob@x.com"),
+                &profile_with(profile_same(), "given_name", "Robert"),
+                "same-origin",
+                true,
+                &[("Cookie", cookie)],
+            );
+            assert_eq!(g.status, 200, "{}", account_readable(&g.body));
+            assert!(
+                g.header("Cache-Control").unwrap_or("").contains("no-store"),
+                "{:?}",
+                g.headers
+            );
+            assert_eq!(
+                account_heading(&g.body, "h1"),
+                t(lang, K::AccountProfileCodeTitle)
+            );
+            let lede = element_containing(&g.body, "class=\"lede\"", "</p>");
+            assert!(lede.contains("<code>bob@x.com</code>"), "{lede}");
+            assert!(visible_text(&lede).contains(lasts), "{lede}");
+
+            let form = form_posting_to(&g.body, "/account/profile/code");
+            assert!(
+                hidden_fields(&form).iter().any(|(_, v)| v == FAKE_SESSION),
+                "the Session rides in a hidden field: {form}"
+            );
+            let code = input_named(&form, "code");
+            for needle in [
+                "type=\"text\"",
+                "inputmode=\"numeric\"",
+                "autocomplete=\"one-time-code\"",
+                " required",
+                "maxlength=\"32\"",
+                " autofocus",
+            ] {
+                assert!(code.contains(needle), "{needle} in {code}");
+            }
+            assert!(!code.contains("pattern"), "{code}");
+            let label = elements(&form, "<label", "</label>")
+                .into_iter()
+                .find(|l| l.contains("name=\"code\""))
+                .expect("a label holds the code field");
+            assert!(visible_text(&label).contains(t(lang, K::AccountProfileCodeLabel)));
+            assert!(form.contains(t(lang, K::AccountProfileSave)));
+
+            // Neither the script nor a handler: every step is a link or a form.
+            let doc = g.body.to_ascii_lowercase();
+            assert!(!doc.contains("<script"), "{}", account_readable(&g.body));
+            assert!(!account_carries_inline_handler(&g.body));
+        }
+        let form = profile_get(&url, "bob@x.com", &[]);
+        assert!(!form.body.to_ascii_lowercase().contains("<script"));
+        assert!(!account_carries_inline_handler(&form.body));
+        cleanup(&path);
+    }
+
+    /// Resend is starting over: a form of its own that re-posts the email and the changed
+    /// values to the start, never the Session; submitting it asks Cognito again and the new page
+    /// lists the same changes.
+    #[test]
+    fn resend_starts_over_with_the_same_values() {
+        let fake = FakeCognito::answering(vec![("InitiateAuth", email_code_challenge())]);
+        let (path, base) = profile_serve("resend", &fake);
+        let url = format!("{base}profile");
+        let g = profile_post(
+            &url,
+            "bob@x.com",
+            &profile_with(profile_same(), "given_name", "Robert"),
+        );
+        assert_eq!(g.status, 200);
+        let resend = form_posting_to(&g.body, "/account/profile");
+        assert!(
+            !resend.contains(FAKE_SESSION),
+            "no Session in the resend form: {resend}"
+        );
+        assert!(
+            resend.contains(t(Lang::En, K::AccountProfileSendNew)),
+            "{resend}"
+        );
+        let hidden = hidden_fields(&resend);
+        assert!(
+            hidden.contains(&("email".into(), "bob@x.com".into())),
+            "{hidden:?}"
+        );
+        assert!(
+            hidden.contains(&("given_name".into(), "Robert".into())),
+            "{hidden:?}"
+        );
+
+        let fields: Vec<(&str, &str)> = hidden
+            .iter()
+            .map(|(k, v)| (k.as_str(), v.as_str()))
+            .collect();
+        let g = profile_post(&url, "bob@x.com", &fields);
+        assert_eq!(g.status, 200, "{}", account_readable(&g.body));
+        assert_eq!(fake.actions(), ["InitiateAuth", "InitiateAuth"]);
+        let changes = visible_text(&element_containing(&g.body, "changes", "</ul>"));
+        assert!(
+            changes.contains("Robert") && changes.contains("Bob"),
+            "{changes}"
+        );
+        cleanup(&path);
+    }
+
+    /// What a person is told for each way the start can end, §13.23 §4's rows that 5b reaches:
+    /// the `h1`, the sentence, the status, and whether "Send a new code" is offered. Cognito's
+    /// own `message` text and the tokens never reach the page.
+    #[test]
+    fn each_start_outcome_states_its_result_in_the_h1() {
+        let not_saved = t(Lang::En, K::AccountProfileNotSavedTitle);
+        let tokens = r#"{"AuthenticationResult":{"IdToken":"FAKEID.x.y","AccessToken":"FAKEACCESS","RefreshToken":"FAKEREFRESH"}}"#;
+        let other = r#"{"ChallengeName":"PASSWORD_VERIFIER","ChallengeParameters":{},"Session":"FAKESESSION0123456789abcdefghijklmnop"}"#;
+        let cases: Vec<(&str, Reply, u16, K)> = vec![
+            (
+                "not-found",
+                reply(
+                    400,
+                    r#"{"__type":"com.amazonaws.cognito#UserNotFoundException","message":"secret-detail bob@x.com"}"#,
+                ),
+                400,
+                K::AccountProfileNoEmailSignIn,
+            ),
+            (
+                "too-many",
+                reply(
+                    400,
+                    r#"{"__type":"TooManyRequestsException","message":"secret-detail"}"#,
+                ),
+                502,
+                K::AccountProfileTooMany,
+            ),
+            (
+                "other-error",
+                reply(
+                    500,
+                    r#"{"__type":"InternalErrorException","message":"secret-detail"}"#,
+                ),
+                502,
+                K::AccountProfileRefused,
+            ),
+            (
+                "tokens-at-once",
+                reply(200, tokens),
+                502,
+                K::AccountProfileRefused,
+            ),
+            (
+                "other-challenge",
+                reply(200, other),
+                502,
+                K::AccountProfileRefused,
+            ),
+            (
+                "not-json",
+                reply(200, "<html>nope</html>"),
+                502,
+                K::AccountProfileRefused,
+            ),
+        ];
+        for (name, answer, status, lede_key) in cases {
+            let fake = FakeCognito::answering(vec![("InitiateAuth", answer)]);
+            let (path, base) = profile_serve(&format!("outcome-{name}"), &fake);
+            let g = profile_post(
+                &format!("{base}profile"),
+                "bob@x.com",
+                &profile_with(profile_same(), "given_name", "Robert"),
+            );
+            assert_eq!(g.status, status, "{name}: {}", account_readable(&g.body));
+            assert_eq!(account_heading(&g.body, "h1"), not_saved, "{name}");
+            let lede = visible_text(&element_containing(&g.body, "class=\"lede\"", "</p>"));
+            assert_eq!(lede, t(Lang::En, lede_key), "{name}");
+            assert!(
+                !anchors_to(&g.body, "href=\"/account/\"").is_empty(),
+                "{name}: a way back"
+            );
+            assert!(
+                !g.body.contains(t(Lang::En, K::AccountProfileSendNew)),
+                "{name}: nothing to resend"
+            );
+            for secret in [
+                "secret-detail",
+                "FAKEACCESS",
+                "FAKEID",
+                "FAKEREFRESH",
+                FAKE_SESSION,
+            ] {
+                assert!(
+                    !everything(&g).contains(secret),
+                    "{name}: {secret} reached the response"
+                );
+            }
+            assert_eq!(fake.calls().len(), 1, "{name}: one call, no retry");
+            cleanup(&path);
+        }
+    }
+
+    fn everything(g: &AccountGot) -> String {
+        let mut all = String::new();
+        for (k, v) in &g.headers {
+            all.push_str(&format!("{k}: {v}\n"));
+        }
+        all.push_str(&g.body);
+        all
+    }
+
+    /// A redirect from the API is a refusal, never a second host handed a token or a code: the
+    /// second listener sees nothing.
+    #[test]
+    fn a_cognito_call_follows_no_redirect() {
+        let elsewhere = FakeCognito::answering(vec![("InitiateAuth", email_code_challenge())]);
+        let fake = FakeCognito::answering(vec![(
+            "InitiateAuth",
+            Reply {
+                status: 302,
+                body: String::new(),
+                location: Some(elsewhere.endpoint()),
+            },
+        )]);
+        let (path, base) = profile_serve("redirect", &fake);
+        let g = profile_post(
+            &format!("{base}profile"),
+            "bob@x.com",
+            &profile_with(profile_same(), "given_name", "Robert"),
+        );
+        assert_eq!(g.status, 502, "{}", account_readable(&g.body));
+        assert_eq!(fake.calls().len(), 1);
+        assert!(
+            elsewhere.calls().is_empty(),
+            "the redirect target was called: {:?}",
+            elsewhere.calls()
+        );
+        cleanup(&path);
+    }
+
+    /// A pool that never answers costs one worker the bound and no more: a `504` that says
+    /// nothing was changed and offers a new code, within the bound plus two seconds, and the
+    /// single worker then serves the next request.
+    #[test]
+    fn a_silent_cognito_answers_within_the_bound_and_frees_the_worker() {
+        let fake = FakeCognito::silent();
+        let (path, base) = profile_boot(
+            "silent",
+            &profile_wired(),
+            Some(fake.endpoint()),
+            Some(300),
+            1,
+        );
+        let started = std::time::Instant::now();
+        let g = profile_post(
+            &format!("{base}profile"),
+            "bob@x.com",
+            &profile_with(profile_same(), "given_name", "Robert"),
+        );
+        let took = started.elapsed();
+        assert_eq!(g.status, 504, "{}", account_readable(&g.body));
+        assert!(
+            took >= std::time::Duration::from_millis(250),
+            "it waited for the bound: {took:?}"
+        );
+        assert!(
+            took < std::time::Duration::from_millis(2300),
+            "and not past it: {took:?}"
+        );
+        assert_eq!(
+            account_heading(&g.body, "h1"),
+            t(Lang::En, K::AccountProfileNotSavedTitle)
+        );
+        assert!(visible_text(&g.body).contains(t(Lang::En, K::AccountProfileNoAnswer)));
+        assert!(
+            form_posting_to(&g.body, "/account/profile")
+                .contains(t(Lang::En, K::AccountProfileSendNew)),
+            "a new code is offered"
+        );
+        let next = profile_get(&base, "bob@x.com", &[]);
+        assert_eq!(next.status, 200, "the only worker is free again");
+        cleanup(&path);
+    }
+
+    /// The production bound is the one the design says, and the production config names no fake.
+    #[test]
+    fn the_cognito_bound_is_five_seconds_and_no_env_names_a_fake() {
+        assert_eq!(COGNITO_TIMEOUT, std::time::Duration::from_secs(5));
+        let cfg = cfg_for("x", "/admin");
+        assert!(cfg.cognito_endpoint.is_none());
+        assert_eq!(cfg.cognito_timeout, COGNITO_TIMEOUT);
     }
 }
