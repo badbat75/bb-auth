@@ -24,7 +24,8 @@ Rules are in `AGENTS.md` and `PLAN.md`. Format of this file: `AGENTS.md`, under 
 The user chooses at every cold start (see the coordinator role): local subagents or Claude Code ones.
 
 - Local: delegate tester, coder and docs work to the local model through OpenCode, as below; keep
-  designer and architect as Claude subagents.
+  designer and architect as Claude subagents. The tester is local too: the user said so again on 2026-11-25
+  ("usa l'agente locale, non sonnet"), after a run of Claude Sonnet testers.
 - Claude Code: every role runs as a Claude subagent, and the OpenCode command below is not used.
 
 The designer exists since 2026-11-24 (user's request); brief it before tester for any slice that
@@ -103,3 +104,5 @@ files outside the repo.
 - cargo can keep a stale test binary after an agent's edit (a tester saw 191 green while the repo
   build kept failing on the old assertion). When an agent's green run and yours disagree on
   unchanged files, `touch` the edited source and rerun before sending the work back.
+- Never `git commit -a` (or `-am`) while an agent may be editing: on 2026-11-25 a plan-only commit
+  swept a running tester's half-written tests in with it. Name the files: `git commit PATH...`.
