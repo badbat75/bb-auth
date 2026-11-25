@@ -53,8 +53,8 @@ code,.mono{font-family:var(--font-mono);font-size:.92em}
    Type
    --------------------------------------------------------------------------- */
 
-h1{font-size:1.25rem;margin:0 0 4px}
-h2{font-size:1rem;margin:26px 0 8px}
+h1{font-size:1.5rem;line-height:1.25;font-weight:650;letter-spacing:-.01em;margin:0 0 6px}
+h2{font-size:1.0625rem;font-weight:600;margin:28px 0 10px}
 p.lede{color:var(--muted);margin:0 0 18px}
 .hint{color:var(--muted);font-size:var(--fs-sm)}
 .muted{color:var(--muted)}

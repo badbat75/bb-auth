@@ -9272,6 +9272,28 @@ mod tests {
             .collect()
     }
 
+    /// §13.18 (8e): the type scale. `h1` 1.5rem / 1.25 / 650 / -.01em, `h2` 1.0625rem / 600,
+    /// with the margins the section gives (`flat_rules` strips whitespace, hence `margin:006px`).
+    #[test]
+    fn the_headings_follow_the_type_scale() {
+        let h1 = rules_named(BASE_CSS, "h1");
+        assert_eq!(h1.len(), 1, "one `h1` rule");
+        for want in [
+            "font-size:1.5rem",
+            "line-height:1.25",
+            "font-weight:650",
+            "letter-spacing:-.01em",
+            "margin:006px",
+        ] {
+            assert!(h1[0].contains(want), "h1 lacks {want}: {}", h1[0]);
+        }
+        let h2 = rules_named(BASE_CSS, "h2");
+        assert_eq!(h2.len(), 1, "one `h2` rule");
+        for want in ["font-size:1.0625rem", "font-weight:600", "margin:28px010px"] {
+            assert!(h2[0].contains(want), "h2 lacks {want}: {}", h2[0]);
+        }
+    }
+
     /// §13.18 (8d-2): the secondary pill is neutral. Text `--text`, a 3:1 `--input-border` box,
     /// and the accent fill belongs to `.pill.on` alone.
     #[test]
