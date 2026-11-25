@@ -145,7 +145,8 @@ use bb_auth_core::{
     social_idp_label, stylesheet_link, version_line, Access, AccessKind, ApiKeyRecord, AuditClient,
     AuditCredential, AuditEvent, AuditKind, AuditPolicy, AuditWriter, Decision, IdentityAttr,
     KeyDecision, ProfileClaim, RequestSite, Settings, SocialButton, Subject, UrlPattern,
-    API_KEY_PREFIX, BASE_CSS, DEFAULT_AUDIT_FILE, PAGE_SECURITY_HEADERS, THEME_CSS,
+    API_KEY_PREFIX, BASE_CSS, DEFAULT_AUDIT_FILE, NATIVE_USERNAME_HEADER, PAGE_SECURITY_HEADERS,
+    THEME_CSS,
 };
 
 type HmacSha256 = Hmac<Sha256>;
@@ -211,6 +212,28 @@ const MAX_CLAIM_VALUE_BYTES: usize = 256;
 /// the re-auth, and do not ship it in the middle of something. [`make_session`],
 /// [`verify_session`] and their tests pin the format.
 const COOKIE_VERSION: &str = "bb1";
+
+/// The claims-segment key that carries a native session's Cognito username, the value
+/// [`NATIVE_USERNAME_HEADER`] names downstream.
+///
+/// It rides **inside** the self-describing claims object rather than as a seventh positional
+/// segment, which is what keeps this off the [`COOKIE_VERSION`] axis: the serialization and
+/// the signed bytes are unchanged, and the key and its value pass the same
+/// [`claim_name_ok`]/[`claim_value_ok`] grammar the segment has always been checked against,
+/// so an old cookie verifies under this binary and a new cookie verifies under the previous
+/// one. Nobody is logged out in either direction.
+///
+/// The key cannot collide with a profile claim, and that is not luck: the header this value
+/// derives to is reserved by [`bb_auth_core::compile_profile_claims`], so `native_username`,
+/// `native:username` and `native-username` are all refused as configured claims and no
+/// settings file can put a self-asserted value under this name. Cognito issues no
+/// `native_username` claim of its own (custom attributes are `custom:`), so no cookie minted
+/// before this change carries the key.
+///
+/// [`verify_session`] splits it out of the map into [`UserIdentity::native_username`] before
+/// anything reads `claims`, so the profile-claim path never sees it and it can never be
+/// emitted as a profile header.
+const NATIVE_USERNAME_CLAIM: &str = "native_username";
 
 /// Response header naming the authenticated user on a `204` from `/auth/validate`.
 ///
@@ -1328,6 +1351,26 @@ struct UserIdentity {
     /// like `cred` and for the same reason: `None` when the identity came out of a cookie,
     /// which does not carry it and must not start to.
     sub: Option<String>,
+    /// The Cognito username of the user this credential **is**, present only for a native
+    /// sign-in: a token whose `identities` is empty, or the cookie such a token minted.
+    ///
+    /// It is not decoration and not an identity. It is the answer to a question no email can
+    /// answer, because a pool holds a native user and a federated one under one address: the
+    /// profile edit of §13.25 has to act on the session's own user, and the email is exactly
+    /// the key that let it write the twin. So this goes out on the `204` as
+    /// [`NATIVE_USERNAME_HEADER`] and nothing downstream guesses it from anything else.
+    ///
+    /// `None` for a federated sign-in (its profile is its provider's, and an edit there would
+    /// be rewritten by the provider at the next sign-in), for an API key (no token, so no
+    /// username), for an anonymous grant, and for a cookie minted before this field existed,
+    /// which is the fail-closed reading: absent means no edit, never "assume native", since
+    /// that would keep the bug alive for every federated cookie already issued.
+    ///
+    /// It is the one value of the cookie's claims object that is not a profile claim, under
+    /// the gate-owned key [`NATIVE_USERNAME_CLAIM`]. It is signed into the cookie by the
+    /// HMAC, and it is not `sub`: the audit records what the login proved, once, and a cookie
+    /// says nothing about the credential behind it ([`AuditCredential::Session`]).
+    native_username: Option<String>,
 }
 
 /// The id_token claims bb-auth consumes. `exp`, `aud` and `iss` are enforced by
@@ -1401,6 +1444,38 @@ fn social_provider_names(identities: &[Identity]) -> String {
         .join(",")
 }
 
+/// The Cognito username of a **native** sign-in, the value
+/// [`NATIVE_USERNAME_HEADER`] carries downstream (§13.25).
+///
+/// The `identities` test is the whole of it. A federated token carries a username as well
+/// (`Google_1234567890`), and it is not one the profile edit may act on: a federated user's
+/// mapped attributes are rewritten from the provider at every sign-in that changes them, so an
+/// edit there is a promise the pool breaks. Naming none is how `bb-auth-web` is told to offer
+/// no form at all, and it is the fail-closed direction it shares with a cookie minted before
+/// this field existed.
+///
+/// The value passes [`clean_claim`], the same hygiene a profile claim gets, and then one test
+/// a claim does not need: printable ASCII with no space, because it leaves this process as a
+/// response header nginx re-injects raw, and a space is the byte the identity headers reserve
+/// for joining values. A username that fails costs the edit and never the login, exactly as a
+/// bad claim costs its header.
+///
+/// It is read out of `Claims::extra` and never as a typed field, the way `sub` already is: a
+/// typed field would hide `cognito:username` from `serde`'s `flatten` and force the name into
+/// [`bb_auth_core::RESERVED_CLAIMS`], which would refuse a settings file that configures it today.
+fn capture_native_username(
+    identities: &[Identity],
+    extra: &serde_json::Map<String, serde_json::Value>,
+) -> Option<String> {
+    if !identities.is_empty() {
+        return None;
+    }
+    extra
+        .get("cognito:username")
+        .and_then(clean_claim)
+        .filter(|u| u.bytes().all(|b| b.is_ascii_graphic()))
+}
+
 /// Whether a profile-claim value is one bb-auth would keep: non-empty, at most
 /// [`MAX_CLAIM_VALUE_BYTES`] raw UTF-8 bytes, no control character, and already trimmed.
 ///
@@ -1442,6 +1517,11 @@ fn clean_claim(v: &serde_json::Value) -> Option<String> {
 /// nothing, they need no `header_safe_email` (the encoder at emission is what makes them
 /// safe), and `allow_unverified_social` does not change their standing — a profile
 /// attribute is self-asserted on *every* token, whatever the email's verification status.
+///
+/// The third thing this returns is the Cognito username of a native sign-in
+/// ([`capture_native_username`]): the one value taken out of a token here that something
+/// downstream *acts on* rather than displays, which is why it is captured at the one point a
+/// token is validated and never re-derived from anything else.
 fn validate_id_token(token: &str, state: &State) -> Result<UserIdentity, String> {
     let header = decode_header(token).map_err(|e| format!("bad token header: {e}"))?;
     if header.alg != Algorithm::RS256 {
@@ -1534,6 +1614,11 @@ fn validate_id_token(token: &str, state: &State) -> Result<UserIdentity, String>
         // token whose `sub` is not a string must cost the row its account and never the login,
         // which is what `Claims::extra` already does for a profile claim.
         sub: account_sub(c.extra.get("sub")),
+        // The same read, one step further out: taken from `extra` beside `identities`, and
+        // only for a token with none of them. It is the one carried value of this identity
+        // that a program's correctness depends on, so it is captured here, at the one point a
+        // token is validated, and rides to the `204` through the cookie.
+        native_username: capture_native_username(&c.identities, &c.extra),
     })
 }
 
@@ -1615,6 +1700,12 @@ fn decode_claims_segment(seg: &str) -> Option<BTreeMap<String, String>> {
 /// Mint a session cookie for `ident`, valid for `ttl` seconds, signed with the active
 /// key in the [`COOKIE_VERSION`] format. An identity with no profile claims gets the
 /// empty segment, so the field count never varies.
+///
+/// A native identity's Cognito username is written into that same object, under
+/// [`NATIVE_USERNAME_CLAIM`], which is why this is not a format change: the segment stays a
+/// JSON object of strings this gate could itself have minted, so a cookie minted here verifies
+/// under a binary that knows nothing of the key, and one minted before the key existed
+/// verifies here and simply names no username.
 fn make_session(ident: &UserIdentity, ttl: u64, keys: &HmacKeys) -> String {
     // Saturating, though `compile_settings` already refuses a `session_ttl_secs` anywhere
     // near the wrap: this is the arithmetic whose overflow mints a cookie that expired
@@ -1623,10 +1714,16 @@ fn make_session(ident: &UserIdentity, ttl: u64, keys: &HmacKeys) -> String {
     let exp = now().saturating_add(ttl);
     let b64 = |s: &str| URL_SAFE_NO_PAD.encode(s.as_bytes());
     let eb = b64(&ident.email);
-    let cb = if ident.claims.is_empty() {
+    // The claims object plus the gate-owned key, in one map, so the serialization stays the
+    // single `BTreeMap` write it was and the key sorts among the claims like any other name.
+    let mut segment = ident.claims.clone();
+    if let Some(u) = &ident.native_username {
+        segment.insert(NATIVE_USERNAME_CLAIM.to_string(), u.clone());
+    }
+    let cb = if segment.is_empty() {
         String::new()
     } else {
-        b64(&serde_json::to_string(&ident.claims).expect("a map of strings serializes"))
+        b64(&serde_json::to_string(&segment).expect("a map of strings serializes"))
     };
     let msg = format!("{COOKIE_VERSION}.{}.{exp}.{eb}.{cb}", keys.active_id);
     let sig = sign(keys.active(), &msg);
@@ -1652,13 +1749,23 @@ fn verify_session(val: &str, keys: &HmacKeys) -> Option<UserIdentity> {
                 return None;
             }
             let email = finish_session(exp, eb)?;
+            // The gate-owned key is taken out of the map here, before anything reads `claims`,
+            // so the profile path never sees it and it cannot be emitted as a profile header.
+            // The same fact read from the other side is what makes a rollback safe: to a binary
+            // that knows nothing of the key it is one more claim nobody configured, and
+            // emission is config-authoritative, so it produces no header there either.
+            let mut claims = decode_claims_segment(cb)?;
+            let native_username = claims.remove(NATIVE_USERNAME_CLAIM);
             Some(UserIdentity {
                 email,
-                claims: decode_claims_segment(cb)?,
+                claims,
                 // What a cookie can say about how its holder signed in, which is nothing, and
                 // about which Cognito account that was, which is nothing either.
                 cred: AuditCredential::Session,
                 sub: None,
+                // The one thing a cookie does say about the user, because the login wrote it
+                // into the signed bytes: `None` for every cookie minted before this key existed.
+                native_username,
             })
         }
         _ => None,
@@ -1878,10 +1985,17 @@ fn profile_headers<'a>(
 /// roster row at all: that is the whole point of such a scope, and enrolling them is the
 /// application's business. `emails` then holds the single identifier the credential
 /// carried, so `X-Auth-Email` says the same thing it always did.
+///
+/// `native_username` is the Cognito user the credential **is**, carried straight through from
+/// [`UserIdentity::native_username`] and `None` for a federated sign-in, an API key, an
+/// anonymous grant, and every cookie minted before the value existed. It is here because the
+/// `204` is the only thing that tells an application which user a session is, and the profile
+/// edit of §13.25 acts on that answer.
 struct Authorized {
     uuid: Option<String>,
     emails: Vec<String>,
     claims: BTreeMap<String, String>,
+    native_username: Option<String>,
 }
 
 /// What a granted request carries.
@@ -1928,7 +2042,8 @@ fn identity_headers<'a>(attrs: &'a [IdentityAttr], who: &Authorized) -> Vec<(&'a
 /// Respond `204` to an authorized `auth_request`, naming the identity in the configured
 /// [`IdentityAttr`] headers ([`identity_headers`]) and, for each configured
 /// [`ProfileClaim`] the credential carried, its value in the header derived from that
-/// claim ([`profile_headers`]).
+/// claim ([`profile_headers`]). A native Cognito sign-in names one more thing: the username
+/// of the user that session **is**, in [`NATIVE_USERNAME_HEADER`], and nothing else does.
 ///
 /// An `anonymous` scope authorizes with no identity at all, so the `204` carries no header
 /// whatsoever. Everything below is about the case where there *is* an identity.
@@ -2012,6 +2127,26 @@ fn authorized_response(granted: &Granted, settings: &Settings) -> ResponseBox {
                 continue;
             }
             resp = resp.with_header(h(name, &enc));
+        }
+        if let Some(u) = &who.native_username {
+            // The third name this gate's contract defines in code, beside the identity header
+            // and the login URL: not an attribute an operator switches, not a claim the user
+            // asserts, because the profile edit of §13.25 is correct only if this names the
+            // session's own Cognito user. Absent is the answer that means "no edit", so it is
+            // emitted once, for a present value, and never for a federated sign-in, an API key
+            // or an old cookie.
+            //
+            // The value was checked at capture, and a cookie carries it back under the HMAC.
+            // It is checked again here, in release, for the reason the identity headers are:
+            // this one goes out **raw**, not percent-encoded, because nginx has to hand
+            // `bb-auth-web` the exact username to ask Cognito with, and a value that slipped
+            // through must cost one header rather than [`h`]'s `expect` in a process built with
+            // `panic = "abort"`.
+            if u.is_empty() || !u.bytes().all(|b| b.is_ascii_graphic()) {
+                eprintln!("[bb-auth] BUG: unsafe native username, header omitted");
+            } else {
+                resp = resp.with_header(h(NATIVE_USERNAME_HEADER, u));
+            }
         }
     }
     resp.boxed()
@@ -3054,7 +3189,9 @@ fn authorize(
 }
 
 /// The identity an API key acts as: its owner's row. A key carries no token, so it can
-/// never bring a profile claim with it, whatever the configuration.
+/// never bring a profile claim with it, whatever the configuration, and no Cognito username
+/// either: the key is a credential of this gate's own, and the pool's user it stands for is
+/// not something a bearer proves, so the profile edit of §13.25 is not offered through one.
 fn key_identity(access: &Access, rec: &ApiKeyRecord) -> Authorized {
     Authorized {
         uuid: Some(rec.uuid.clone()),
@@ -3064,6 +3201,7 @@ fn key_identity(access: &Access, rec: &ApiKeyRecord) -> Authorized {
             .map(|u| u.emails.clone())
             .unwrap_or_default(),
         claims: BTreeMap::new(),
+        native_username: None,
     }
 }
 
@@ -3089,6 +3227,7 @@ fn authorize_login(
         claims,
         cred,
         sub,
+        native_username,
     } = ident;
     let caller = Caller::identity(&email, cred, sub, access);
     if !authorize(access, &Subject::Identifier(&email), url, &caller, audit) {
@@ -3113,6 +3252,10 @@ fn authorize_login(
         uuid,
         emails,
         claims,
+        // Carried through untouched, and deliberately not resolved against the roster on the
+        // way: it is a fact of the credential, not of the row, and the row's emails are exactly
+        // the thing that cannot say which Cognito user a session is (§13.25).
+        native_username,
     }))
 }
 
@@ -4404,6 +4547,7 @@ mod tests {
             claims: BTreeMap::new(),
             cred: AuditCredential::Local,
             sub: None,
+            native_username: None,
         }
     }
     /// An identity carrying an arbitrary claim set.
@@ -4416,6 +4560,7 @@ mod tests {
                 .collect(),
             cred: AuditCredential::Local,
             sub: None,
+            native_username: None,
         }
     }
     /// An identity carrying the two claims a display name is usually built from.
@@ -6151,6 +6296,7 @@ mod tests {
             uuid: Some(BOB.to_string()),
             emails: vec!["bob@x.com".into(), "bob@old.com".into()],
             claims: BTreeMap::new(),
+            native_username: None,
         };
         assert_eq!(
             identity_headers(&attrs("uuid,email"), &who),
@@ -6169,6 +6315,7 @@ mod tests {
             uuid: None,
             emails: vec!["new@x.com".into()],
             claims: BTreeMap::new(),
+            native_username: None,
         };
         assert_eq!(
             identity_headers(&attrs("uuid,email"), &stranger),
@@ -7092,5 +7239,329 @@ mod tests {
         ] {
             assert!(!listen_is_loopback(no), "{no}");
         }
+    }
+
+    // --- section 13.25: the session's own Cognito user ------------------------------------
+    //
+    // A third offline RSA key (kid `bb-auth-un`), generated once and thrown away, signs the
+    // tokens below: the older fixtures carry no `cognito:username`. Every token has the claims
+    // of `IT_TOKEN_OK` (so it validates and lands in the `authenticated` scope `app1`) plus,
+    // per token, `cognito:username` and `identities` as the name says.
+    use bb_auth_core::NATIVE_USERNAME_HEADER;
+
+    const UN_JWKS: &str = r#"{"keys":[{"kty":"RSA","alg":"RS256","use":"sig","kid":"bb-auth-un","e":"AQAB","n":"s-hoHHdqYKUEzHY3XeKpTYBFs6yRIwqDqDJKb9VRYN0woK8ynxd14XSboU_UuSBcej2cJegSbExrIqywG6XJu0djOBP4Od6FS_MKZaAteYRMOunZWJL5ycV9Xq9ylqrOzlA3KzLuYjGdUFXEJ3AKGjLPesNAjQZIF_IvAdnwaeN6jRTsyVUX3absp4p17A6P_lkTPx-B5Du-MFyMzZqZDwjXHsVD5zGIEvuOS0USP6CSI46sGBXGOmS29Ul_3EEOm1snZJP8ZV1N9r59PnGFSfUNJ3GutAFR5qDHMZWtijChJMn-PdqUbHmENdul4_r_iWYbqCb4txnRarLLwPt8Hw"}]}"#;
+    /// Native user: `"cognito:username":"0a1b2c3d-4e5f-4a6b-8c7d-9e0f1a2b3c4d"`, no `identities`.
+    const UN_NATIVE: &str = "eyJhbGciOiJSUzI1NiIsInR5cCI6IkpXVCIsImtpZCI6ImJiLWF1dGgtdW4ifQ.eyJpc3MiOiJodHRwczovL2NvZ25pdG8taWRwLmV1LWNlbnRyYWwtMS5hbWF6b25hd3MuY29tL2V1LWNlbnRyYWwtMV9URVNUUE9PTCIsImF1ZCI6InRlc3RjbGllbnQiLCJ0b2tlbl91c2UiOiJpZCIsImV4cCI6NDEwMjQ0NDgwMCwiaWF0IjoxMDAwMDAwMDAwLCJlbWFpbCI6ImFkYUBleGFtcGxlLmNvbSIsImVtYWlsX3ZlcmlmaWVkIjp0cnVlLCJjb2duaXRvOnVzZXJuYW1lIjoiMGExYjJjM2QtNGU1Zi00YTZiLThjN2QtOWUwZjFhMmIzYzRkIn0.RZUlzYkqvsSsdHOw5hsu21PC8MOi8gWT0PuDPRX2_wDudcZERozBUHC8KO265QpL5oEsg4O2mXCaErMCq20W2wMIveZr4-X6ohuniYuywB04KZqiUJJnlRxsA9BwjjX82aZGo7l-yHUGX_gB-S1eSzBWy430SoLvR2a6_BbbyQTO13X1Dms2gVI0QV9cSFTsLolV9tM9B0R-NECJX6hnvZSlz6RdpGKJ0ARMCVaIAhylmTWfN2tKWNlm2yfvY7vPwc6TMD1oIOMqfS4ZnHVESLO6J81fkkJ-hrzMDkWU8I7nPTcYZ22yvVbVXZs1QdjtiNZLcsXjS_dRYzVQ-pCFtQ";
+    const UN_NATIVE_NAME: &str = "0a1b2c3d-4e5f-4a6b-8c7d-9e0f1a2b3c4d";
+    /// Federated user: `"cognito:username":"Google_1234567890"` and a Google `identities` entry.
+    const UN_FEDERATED: &str = "eyJhbGciOiJSUzI1NiIsInR5cCI6IkpXVCIsImtpZCI6ImJiLWF1dGgtdW4ifQ.eyJpc3MiOiJodHRwczovL2NvZ25pdG8taWRwLmV1LWNlbnRyYWwtMS5hbWF6b25hd3MuY29tL2V1LWNlbnRyYWwtMV9URVNUUE9PTCIsImF1ZCI6InRlc3RjbGllbnQiLCJ0b2tlbl91c2UiOiJpZCIsImV4cCI6NDEwMjQ0NDgwMCwiaWF0IjoxMDAwMDAwMDAwLCJlbWFpbCI6ImFkYUBleGFtcGxlLmNvbSIsImVtYWlsX3ZlcmlmaWVkIjp0cnVlLCJjb2duaXRvOnVzZXJuYW1lIjoiR29vZ2xlXzEyMzQ1Njc4OTAiLCJpZGVudGl0aWVzIjpbeyJwcm92aWRlck5hbWUiOiJHb29nbGUiLCJ1c2VySWQiOiIxMjM0NTY3ODkwIn1dfQ.ogE2na2omfwksp1DYBAvvYTXbLCHd1CDJKV3nciuyWB2Z1PCNcMiOY-h2uU1DB_tvmg87QKwCXbbSEukathOZaaAkLlySQ0aJXqI6x8xMuHAP_O5tqX1OiiFudGQHopwmqrb5Vp_c4oqwmtvrvd0gymKrQw9mUrYlUvJ9O6FuyjLBowPrbzCambndOOspcR8S-3ZqWhaAbtLuYyLSe1M7Hque2RSg8fGlh1tKmTGvHe9cZ1wWHMrwRKN5ze0rOimXLLvfxJe_tjqZ08qOQSBxQbFmoz1jgbNvuePjxVrpGOVgtAc_ohubBcVO2CDb5o0pqlM6X3WgSGqg14Ul_boBg";
+    /// A native-looking token with no `cognito:username` at all.
+    const UN_NO_USERNAME: &str = "eyJhbGciOiJSUzI1NiIsInR5cCI6IkpXVCIsImtpZCI6ImJiLWF1dGgtdW4ifQ.eyJpc3MiOiJodHRwczovL2NvZ25pdG8taWRwLmV1LWNlbnRyYWwtMS5hbWF6b25hd3MuY29tL2V1LWNlbnRyYWwtMV9URVNUUE9PTCIsImF1ZCI6InRlc3RjbGllbnQiLCJ0b2tlbl91c2UiOiJpZCIsImV4cCI6NDEwMjQ0NDgwMCwiaWF0IjoxMDAwMDAwMDAwLCJlbWFpbCI6ImFkYUBleGFtcGxlLmNvbSIsImVtYWlsX3ZlcmlmaWVkIjp0cnVlfQ.Hka5-mfbq11skaG_BZxGkhb386R5Sl43gTZrJ0xoMclR7cjNuDvirQOhMA4ovRxLe-4nyFWVKxj90dWfhUwGL2B_e_3YQfzPWPYah7KJ31tekQ_jo5579yUFWfiFWgv6xIEXpwscsfry8OfVrJh7UHX0PWruX5U0bqYwXvGlYC7UFG4cvUJBKzAPjt7Y1l2yhIjTCggGho_O3Cr98pBc56heIXHxKEsL2UwZY5Ob_B4M1rEbo2EsIs7t4-G4OgKj0ruftQ7YX_ezMgNp8tkuePYSMlYqfRN1Wvjq0AQ7nmmnEuYN67kn7UQrazlrM2h8-Vcvgcu_YZzo5v42DejQCg";
+    /// `"cognito:username":"bad name"` (a space), no `identities`.
+    const UN_SPACE: &str = "eyJhbGciOiJSUzI1NiIsInR5cCI6IkpXVCIsImtpZCI6ImJiLWF1dGgtdW4ifQ.eyJpc3MiOiJodHRwczovL2NvZ25pdG8taWRwLmV1LWNlbnRyYWwtMS5hbWF6b25hd3MuY29tL2V1LWNlbnRyYWwtMV9URVNUUE9PTCIsImF1ZCI6InRlc3RjbGllbnQiLCJ0b2tlbl91c2UiOiJpZCIsImV4cCI6NDEwMjQ0NDgwMCwiaWF0IjoxMDAwMDAwMDAwLCJlbWFpbCI6ImFkYUBleGFtcGxlLmNvbSIsImVtYWlsX3ZlcmlmaWVkIjp0cnVlLCJjb2duaXRvOnVzZXJuYW1lIjoiYmFkIG5hbWUifQ.jR2zgo4jf8GOEkVC5_PQk69UQbLPYEc9Top9hX59kQCoewqeklin0qMejKjAdiFL1Lwt_TbaBE7t3KQ1yZgn79TINHoIJX2AWUGkJ1_yuB28ZkS1oEJ3GX2S199KmETHeLCS5KKrcxxJDwcDZ0Hso8dGs3L1ead9j-smPE4xpOCoLcPTUpkfXSxf5amXr3hf5sLPVI4Z6ENtmqfPjsI-f_pjZYa39e1TkCxMMfOlKVWhvq7mang2oHQy_UaHrpoKnvMsCVREoaHLbLDxH59ugzyA1SR7WalnczujVSrPGIQIsufE3kpfKyW0ESdlqQdr2try-6FsleIB8dnuBQwX4Q";
+    /// `"cognito:username":"us\u00e9r"` (non-ASCII), no `identities`.
+    const UN_NON_ASCII: &str = "eyJhbGciOiJSUzI1NiIsInR5cCI6IkpXVCIsImtpZCI6ImJiLWF1dGgtdW4ifQ.eyJpc3MiOiJodHRwczovL2NvZ25pdG8taWRwLmV1LWNlbnRyYWwtMS5hbWF6b25hd3MuY29tL2V1LWNlbnRyYWwtMV9URVNUUE9PTCIsImF1ZCI6InRlc3RjbGllbnQiLCJ0b2tlbl91c2UiOiJpZCIsImV4cCI6NDEwMjQ0NDgwMCwiaWF0IjoxMDAwMDAwMDAwLCJlbWFpbCI6ImFkYUBleGFtcGxlLmNvbSIsImVtYWlsX3ZlcmlmaWVkIjp0cnVlLCJjb2duaXRvOnVzZXJuYW1lIjoidXNcdTAwZTlyIn0.Mcz5-evw8Xu-iaAxC0wbsMlHYmrxQDhYXEoZ7KwzJBqKujvUCEmRaIhbcuPoL2cgnQYafCs_nqD97ySMqgvIAcN-nHNQORbGDU79nB4v7iwJjTY7sGv8w1TxPIAlIVT2eFgKdDzUadnmA1Ee-aSoQOb1ZMxifBj1SmhHH_jYSTk7EK4e1SqZUgDb0UpBohaYg_hOe4ji0ayoQ0oYuE9qG10UAqM4YD1G-03eM7HqWsUHHUuxZDpCE0hSHWheBKQPwdpeuWT8jzVe32gsEB1IC5LNkZWRhBFrffSN47bvuXuqTrs04MxjiCGBChoJ4neVLsNYWN7qAQEnv3Ok4-1r0w";
+
+    /// The fixture state plus the third key, so nothing here touches the network.
+    fn username_state(settings: Settings) -> State {
+        let st = token_state(settings);
+        let set: JwkSet = serde_json::from_str(UN_JWKS).expect("fixture JWKS parses");
+        for jwk in &set.keys {
+            st.jwks.write().unwrap().keys.insert(
+                jwk.common.key_id.clone().unwrap(),
+                DecodingKey::from_jwk(jwk).expect("fixture JWK becomes a key"),
+            );
+        }
+        st
+    }
+
+    const APP1_URL: &str = "https://app.x.com/app1/x";
+
+    fn native_ident(email: &str, username: Option<&str>) -> UserIdentity {
+        UserIdentity {
+            native_username: username.map(str::to_string),
+            ..ident(email)
+        }
+    }
+
+    /// `GET /auth/validate` on the `authenticated` area, with one credential header.
+    fn validate_with(
+        base: &str,
+        name: &str,
+        value: &str,
+        url: &str,
+    ) -> ureq::http::Response<ureq::Body> {
+        agent()
+            .get(format!("{base}/auth/validate"))
+            .header("X-Original-URL", url)
+            .header(name, value)
+            .call()
+            .unwrap()
+    }
+
+    fn native_header(r: &ureq::http::Response<ureq::Body>) -> Option<String> {
+        r.headers()
+            .get(NATIVE_USERNAME_HEADER)
+            .map(|v| v.to_str().unwrap().to_string())
+    }
+
+    /// The cookie value `/auth/session` sets for `token`.
+    fn session_cookie_for(base: &str, token: &str) -> String {
+        let r = agent()
+            .post(format!("{base}/auth/session"))
+            .header("Sec-Fetch-Site", "same-origin")
+            .send_form([("id_token", token), ("rd", "https://search.badbat75.com/x")])
+            .unwrap();
+        assert_eq!(r.status(), 302);
+        let sc = r.headers().get("Set-Cookie").unwrap().to_str().unwrap();
+        sc.split(';').next().unwrap().to_string()
+    }
+
+    #[test]
+    fn validate_id_token_captures_the_username_only_for_a_native_token() {
+        let st = username_state(gate_settings("{}"));
+        let native = validate_id_token(UN_NATIVE, &st).expect("a native token verifies");
+        assert_eq!(native.native_username.as_deref(), Some(UN_NATIVE_NAME));
+        // It is never a profile claim: nothing was configured, and it must not leak into the map.
+        assert!(native.claims.is_empty(), "{:?}", native.claims);
+
+        // A federated token carries `cognito:username` too (`Google_...`), and it is NOT the
+        // session's Cognito user for editing: `identities` present means no capture at all.
+        let fed = validate_id_token(UN_FEDERATED, &st).expect("a federated token still signs in");
+        assert_eq!(fed.native_username, None);
+
+        // No claim, no capture; the login itself is untouched.
+        let none = validate_id_token(UN_NO_USERNAME, &st).expect("it still signs in");
+        assert_eq!(none.native_username, None);
+        assert_eq!(none.email, "ada@example.com");
+    }
+
+    /// A `bb1` cookie for `ada@example.com`, signed by hand with the test key and carrying
+    /// `claims` as its claims segment. `make_session` is not the only way bytes reach the
+    /// verifier, and a test of what the verifier does with a value it did not mint has to
+    /// sign it the way an attacker with the key would.
+    fn hand_signed(claims: &str) -> String {
+        let keys = keys_one();
+        let exp = now() + 3600;
+        let b64 = |s: &str| URL_SAFE_NO_PAD.encode(s.as_bytes());
+        let msg = format!(
+            "{COOKIE_VERSION}.{}.{exp}.{}.{}",
+            keys.active_id,
+            b64("ada@example.com"),
+            b64(claims)
+        );
+        format!("{msg}.{}", sign(keys.active(), &msg))
+    }
+
+    #[test]
+    fn an_unsafe_username_is_omitted_not_emitted() {
+        let st = username_state(gate_settings("{}"));
+        // The token still signs in (cost the edit, never the login) and captures nothing.
+        for tok in [UN_SPACE, UN_NON_ASCII] {
+            let id = validate_id_token(tok, &st).expect("the login itself is unaffected");
+            assert_eq!(id.native_username, None, "kept an unsafe username");
+        }
+        // A cookie that carries one anyway (a bug elsewhere, a key compromise) is still
+        // granted and still emits no header: the run-time guard the identity headers have,
+        // applied on the way out rather than only on the way in.
+        let base = serve(username_state(gate_settings("{}")));
+        for bad in ["bad name", "us\u{e9}r"] {
+            let cookie = format!(
+                "bb_session={}",
+                hand_signed(&format!(r#"{{"native_username":"{bad}"}}"#))
+            );
+            let r = validate_with(&base, "Cookie", &cookie, APP1_URL);
+            assert_eq!(
+                r.status(),
+                204,
+                "{bad:?}: the request itself is still granted"
+            );
+            assert_eq!(native_header(&r), None, "{bad:?} must not be emitted");
+        }
+        // A control byte and an empty value are not claim values at all, so the
+        // claims-segment grammar owns them: the whole cookie fails, which is what that
+        // grammar has always done for a claim value it could not have minted.
+        for claims in [
+            r#"{"native_username":""}"#,
+            r#"{"native_username":"x\r\nX-Auth-Admin: 1"}"#,
+        ] {
+            let r = validate_with(
+                &base,
+                "Cookie",
+                &format!("bb_session={}", hand_signed(claims)),
+                APP1_URL,
+            );
+            assert_eq!(r.status(), 401, "{claims} fails the cookie, not the header");
+        }
+    }
+
+    #[test]
+    fn a_native_token_names_its_username_on_the_204() {
+        let base = serve(username_state(gate_settings("{}")));
+        let r = validate_with(
+            &base,
+            "Authorization",
+            &format!("Bearer {UN_NATIVE}"),
+            APP1_URL,
+        );
+        assert_eq!(r.status(), 204);
+        assert_eq!(native_header(&r).as_deref(), Some(UN_NATIVE_NAME));
+        // The identity header is still what it was.
+        assert_eq!(r.headers().get(IDENTITY_HEADER).unwrap(), "ada@example.com");
+    }
+
+    #[test]
+    fn a_federated_token_names_no_native_username() {
+        let base = serve(username_state(gate_settings("{}")));
+        let r = validate_with(
+            &base,
+            "Authorization",
+            &format!("Bearer {UN_FEDERATED}"),
+            APP1_URL,
+        );
+        // The sign-in is fine, the header is simply not there.
+        assert_eq!(r.status(), 204);
+        assert_eq!(r.headers().get(IDENTITY_HEADER).unwrap(), "ada@example.com");
+        assert_eq!(native_header(&r), None);
+        // And so is a token with no username to name.
+        let r = validate_with(
+            &base,
+            "Authorization",
+            &format!("Bearer {UN_NO_USERNAME}"),
+            APP1_URL,
+        );
+        assert_eq!(r.status(), 204);
+        assert_eq!(native_header(&r), None);
+    }
+
+    #[test]
+    fn the_cookie_carries_the_native_username_and_gives_it_back() {
+        let base = serve(username_state(gate_settings("{}")));
+        let cookie = session_cookie_for(&base, UN_NATIVE);
+        let r = validate_with(&base, "Cookie", &cookie, APP1_URL);
+        assert_eq!(r.status(), 204);
+        assert_eq!(native_header(&r).as_deref(), Some(UN_NATIVE_NAME));
+
+        // A federated sign-in mints a cookie that names none.
+        let cookie = session_cookie_for(&base, UN_FEDERATED);
+        let r = validate_with(&base, "Cookie", &cookie, APP1_URL);
+        assert_eq!(r.status(), 204);
+        assert_eq!(native_header(&r), None);
+    }
+
+    #[test]
+    fn the_new_claims_segment_passes_the_old_grammar_and_the_version_is_unchanged() {
+        let base = serve(username_state(gate_settings("{}")));
+        let cookie = session_cookie_for(&base, UN_NATIVE);
+        let value = cookie.strip_prefix("bb_session=").unwrap();
+        // No bump: same tag, same six segments.
+        assert!(value.starts_with(&format!("{COOKIE_VERSION}.")), "{value}");
+        assert_eq!(COOKIE_VERSION, "bb1");
+        let parts: Vec<&str> = value.splitn(6, '.').collect();
+        assert_eq!(parts.len(), 6);
+        // The username rides in the self-describing claims object, under a gate-owned key.
+        let raw = URL_SAFE_NO_PAD.decode(parts[4]).unwrap();
+        let map: BTreeMap<String, String> = serde_json::from_slice(&raw).unwrap();
+        assert_eq!(
+            map.get("native_username").map(String::as_str),
+            Some(UN_NATIVE_NAME)
+        );
+        // What a rollback binary checks, restated: every key a claim name, every value a
+        // claim value. A cookie that fails this would log the rollback's users out.
+        assert!(map
+            .iter()
+            .all(|(k, v)| claim_name_ok(k) && claim_value_ok(v)));
+        // And the current verifier hands the username back as its own field, never as a claim.
+        let id = verify_session(value, &keys_one()).unwrap();
+        assert_eq!(id.native_username.as_deref(), Some(UN_NATIVE_NAME));
+        assert!(
+            !id.claims.contains_key("native_username"),
+            "{:?}",
+            id.claims
+        );
+    }
+
+    #[test]
+    fn a_native_username_survives_a_cookie_round_trip_beside_profile_claims() {
+        let mut who = ident_claims("ada@example.com", &[("given_name", "Ada")]);
+        who.native_username = Some(UN_NATIVE_NAME.to_string());
+        let back = verify_session(&make_session(&who, 3600, &keys_one()), &keys_one()).unwrap();
+        assert_eq!(back, from_cookie(who));
+        // Without one, the segment is byte for byte what it was before this change.
+        let plain = ident_claims("ada@example.com", &[("given_name", "Ada")]);
+        let cookie = make_session(&plain, 3600, &keys_one());
+        let seg = cookie.split('.').nth(4).unwrap();
+        assert_eq!(
+            String::from_utf8(URL_SAFE_NO_PAD.decode(seg).unwrap()).unwrap(),
+            r#"{"given_name":"Ada"}"#
+        );
+        // And a native identity with no claims at all still gets a segment, not an empty one.
+        let only = native_ident("ada@example.com", Some(UN_NATIVE_NAME));
+        let cookie = make_session(&only, 3600, &keys_one());
+        let seg = cookie.split('.').nth(4).unwrap();
+        assert_eq!(
+            String::from_utf8(URL_SAFE_NO_PAD.decode(seg).unwrap()).unwrap(),
+            format!(r#"{{"native_username":"{UN_NATIVE_NAME}"}}"#)
+        );
+    }
+
+    #[test]
+    fn a_cookie_without_it_still_verifies_and_names_none() {
+        // The "no bump" test: a `bb1` cookie of the shape every gate minted before this
+        // change, signed by hand rather than by `make_session`, which is what is changing.
+        let keys = keys_one();
+        let cookie = hand_signed(r#"{"given_name":"Ada"}"#);
+        let id = verify_session(&cookie, &keys).expect("an old cookie still verifies");
+        assert_eq!(id.native_username, None);
+        assert_eq!(id.claims.get("given_name").map(String::as_str), Some("Ada"));
+
+        let base = serve(username_state(gate_settings("{}")));
+        let r = validate_with(&base, "Cookie", &format!("bb_session={cookie}"), APP1_URL);
+        assert_eq!(r.status(), 204);
+        assert_eq!(native_header(&r), None, "an old cookie fails closed");
+    }
+
+    #[test]
+    fn an_api_key_names_no_native_username() {
+        let base = serve(username_state(gate_settings("{}")));
+        let r = validate_with(
+            &base,
+            "Authorization",
+            "Bearer bbk_secret",
+            "https://app.x.com/other/x",
+        );
+        assert_eq!(r.status(), 204);
+        assert_eq!(native_header(&r), None);
+    }
+
+    #[test]
+    fn the_native_username_is_never_a_profile_header() {
+        // With profile claims configured, a native session emits the configured claim and the
+        // one reserved header, once, and nothing else of that name.
+        let base = serve(username_state(gate_settings(
+            r#"{ "profile_claims": ["given_name"] }"#,
+        )));
+        let mut who = ident_claims("ada@example.com", &[("given_name", "Ada")]);
+        who.native_username = Some(UN_NATIVE_NAME.to_string());
+        let cookie = format!("bb_session={}", make_session(&who, 3600, &keys_one()));
+        let r = validate_with(&base, "Cookie", &cookie, APP1_URL);
+        assert_eq!(r.status(), 204);
+        assert_eq!(r.headers().get("X-Auth-Given-Name").unwrap(), "Ada");
+        assert_eq!(native_header(&r).as_deref(), Some(UN_NATIVE_NAME));
+        assert_eq!(
+            r.headers().get_all(NATIVE_USERNAME_HEADER).iter().count(),
+            1
+        );
+
+        // A cookie an older binary configured with a `native_username` claim could carry that
+        // key as a *claim value* only if it is also the reserved one: whichever, the live
+        // config cannot name it, so no second header appears.
+        let names: Vec<String> = r
+            .headers()
+            .keys()
+            .map(|k| k.as_str().to_ascii_lowercase())
+            .filter(|k| k.contains("native"))
+            .collect();
+        assert_eq!(names, vec!["x-auth-native-username".to_string()]);
     }
 }

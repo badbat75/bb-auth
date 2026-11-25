@@ -3274,6 +3274,25 @@ pub const LOGIN_URL_HEADER: &str = "X-Auth-Login-URL";
 /// should spell it. The nginx wiring is on the gate's constant of the same name.
 pub const IDENTITY_HEADER: &str = "X-Auth-Email";
 
+/// The wire name of the header that names **the Cognito user a session is**, and only when
+/// that user is one of the pool's own (a native sign-in, no `identities` on the token).
+///
+/// It is here for the same reason [`IDENTITY_HEADER`] is, plus one: the gate emits it,
+/// `bb-auth-web` reads it, and [`compile_profile_claims`] reserves it, so three uses need
+/// exactly one spelling. `bb-auth-web` needs it for the profile edit of docs/ARCHITECTURE.md
+/// §13.25: that edit must act on the session's own Cognito user, and no email says which one
+/// that is. A pool holds a native user and a federated one under the same address, and an edit
+/// driven by the email wrote the native twin of a person signed in through a provider, then
+/// told them their profile was saved.
+///
+/// It is **not** an identity attribute and **not** a profile claim. Those are the operator's
+/// choice, derived from the roster or self-asserted by the user; this is a fact of the
+/// credential that another program's correctness depends on, so an operator switch that
+/// could turn it off would silently turn the edit off with it. Reserving the name here is
+/// what stops a configured claim from deriving it and answering it with a value the user
+/// typed.
+pub const NATIVE_USERNAME_HEADER: &str = "X-Auth-Native-Username";
+
 /// What this build was made from: a `git describe --always --dirty --tags`, or `unknown`.
 ///
 /// Read from `BB_AUTH_BUILD` at compile time, which is what `scripts/build.sh` and
@@ -3426,8 +3445,9 @@ pub struct ProfileClaim {
 /// Rejects, naming the entry: a name outside `[A-Za-z0-9_:-]`; an empty token around a
 /// separator (`:dept`, `dept:`, `a--b`), which would derive a header with an empty component;
 /// a claim in [`RESERVED_CLAIMS`]; and a derived header that collides case-insensitively with
-/// **any possible** identity header, with [`LOGIN_URL_HEADER`], or with another entry's (which
-/// also catches a repeated claim, and spellings that differ only in case or separator).
+/// **any possible** identity header, with [`LOGIN_URL_HEADER`], with
+/// [`NATIVE_USERNAME_HEADER`], or with another entry's (which also catches a repeated claim,
+/// and spellings that differ only in case or separator).
 pub fn compile_profile_claims(list: &[String]) -> Result<Vec<ProfileClaim>, String> {
     let mut out: Vec<ProfileClaim> = Vec::new();
     for raw in list {
@@ -3458,7 +3478,11 @@ pub fn compile_profile_claims(list: &[String]) -> Result<Vec<ProfileClaim>, Stri
         let reserved = IDENTITY_ATTRS
             .iter()
             .map(|a| derive_profile_header(a))
-            .chain(std::iter::once(LOGIN_URL_HEADER.to_string()));
+            .chain(
+                [LOGIN_URL_HEADER, NATIVE_USERNAME_HEADER]
+                    .iter()
+                    .map(|r| r.to_string()),
+            );
         for r in reserved {
             if header.eq_ignore_ascii_case(&r) {
                 return Err(format!(
@@ -8494,6 +8518,25 @@ mod tests {
                 .len(),
             2
         );
+    }
+
+    #[test]
+    fn the_native_username_header_is_spelled_once_and_reserved() {
+        // The gate emits it, `bb-auth-web` reads it and this compiler reserves it: three uses
+        // and one spelling, pinned where `IDENTITY_HEADER`'s is (section 13.25).
+        assert_eq!(NATIVE_USERNAME_HEADER, "X-Auth-Native-Username");
+        // Every spelling of the claim derives that header, and none may be configured: the
+        // value is a fact of the credential, not decoration an operator can switch.
+        for claim in ["native_username", "native:username", "native-username"] {
+            assert_eq!(derive_profile_header(claim), NATIVE_USERNAME_HEADER);
+            let err = compile_profile_claims(&claims(claim)).unwrap_err();
+            assert!(
+                err.contains(NATIVE_USERNAME_HEADER),
+                "{claim}: the refusal names the header: {err}"
+            );
+        }
+        // And a claim that merely resembles it stays legal.
+        assert!(compile_profile_claims(&claims("native_name")).is_ok());
     }
 
     #[test]

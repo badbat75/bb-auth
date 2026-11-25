@@ -24,6 +24,22 @@ Rules are in `AGENTS.md`. Format of this file: `AGENTS.md`, under "Skills".
   suite against it), rsync the tree **with** `target/` instead: the copy is a few GB and takes
   minutes, the first build is 2 s instead of 10, and `cp -a e2e/node_modules` there lets
   `node <runner> <area>` run against the stubbed binary. Discard the copy afterwards.
+- When the slice adds a **field to a struct the test module constructs** (`UserIdentity`), the repo's
+  red is a compile error (E0560/E0609) and no test runs, so the assertions are unproven. In the stub
+  copy apply a **red stub** first: the field exists, every construction site fills `None`, nothing
+  reads it. The target compiles, so the new tests fail on their own assertions, and the same script
+  then swaps in the green stub and each mutant. Keep the stub in a script that restores the repo's
+  test sources first, so the repo's file is the only copy of the tests.
+- `cargo test` stops at the first failing target, so a red lib target hides the gate's results:
+  add `--no-fail-fast` when more than one target carries new tests.
+- A fixture that must **verify** (a signed RS256 `id_token`) is generated with node `crypto` and
+  checked with `crypto.verify` against the fixture JWK, printing the decoded payload, before the test
+  is trusted: a bad signature is red as "token invalid", which reads exactly like the feature missing.
+- To test what the **verifier** does with bytes the writer would never emit (a claims segment
+  carrying a value `make_session` refuses to write), sign the cookie by hand:
+  `format!("{COOKIE_VERSION}.{kid}.{exp}.{b64(email)}.{b64(claims)}.{sign(keys.active(), msg)}")`.
+  Minting it through the API under test over-constrains the design, because it asserts the writer
+  cannot produce the input.
 - Assert anything about a **response** (CSP, `X-Frame-Options`, status line) over a real socket.
   The in-process `post(&cfg, Route, fields)` helper calls `mutate` and builds the `shell` itself, so
   its `Got` carries **no headers at all**: it cannot see a `Content-Security-Policy`, and a test
@@ -162,6 +178,10 @@ Rules are in `AGENTS.md`. Format of this file: `AGENTS.md`, under "Skills".
   every e2e drive of it goes through `setDuration(page, value, scope)` in `e2e/lib/harness.js`.
   A `page.fill('input[name=duration]', …)` on a `select` throws after 30 s and the runner records
   the whole area as one failure, which hides the twenty checks behind it.
+
+- `validate_id_token` moves `c.email` at its top (`c.email.ok_or(…)`), so a new capture added to its
+  `UserIdentity` literal borrows `c.identities` and `c.extra` **individually**, never `&c`: E0382
+  "borrow of partially moved value", and it lands on the coder's stub, not on the tests.
 
 - A test polling a stub in another thread hung forever.
 - The console's mint (`Route::KeyAdd`) refuses **only an empty `id`**: `0d`, `never` and a long
