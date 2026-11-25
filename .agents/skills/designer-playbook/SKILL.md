@@ -37,6 +37,9 @@ Rules are in `AGENTS.md`. Format of this file: `AGENTS.md`, under "Skills".
   `getComputedStyle()` of every control in `main` at 1280 and 390 (example: `/tmp/d8f/m2.js`), before
   and after the injected rule.
 
+- A mockup of a whole account flow with no server: `/tmp/d5b/gen.js` writes pages from the real CSS and a
+  copied bar, `/tmp/d5b/shot.js <names>` shoots them light/dark/360 and reports any sideways scroll.
+
 ## Pitfalls
 
 - `autofocus` is ignored when the URL has a fragment (MDN): a link that opens a form must not add `#id`.
@@ -51,3 +54,5 @@ Rules are in `AGENTS.md`. Format of this file: `AGENTS.md`, under "Skills".
 - `nav .pill` also matches the header icons, because `nav.acct` is a `nav` too.
 - A desktop rule that sizes `.pill` is undone on a phone by the `@media` block in `admin.css` (line `.bar .pill,p.primary .pill,.actions .pill`): check every size change in the `phone` view too.
 - At 360 the Preferences panel covers the middle of the screen: a "click outside" in a phone check must aim at a corner (bottom-left), not the centre.
+- A prefilled field must not use `type="date"` or `type="url"`: the browser blanks or refuses a stored value it cannot parse, and on the profile form a blank posts as a deletion.
+- The `K` table has no placeholders: a sentence around a value is two keys (`…Lead`/`…Tail`), so plan copy that way.
