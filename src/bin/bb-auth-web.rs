@@ -1118,18 +1118,17 @@ enum K {
     // table, and no logic reads any of them.
     AccountProfileEdit,
     AccountProfileEditSub,
-    AccountProfileSendTo,
+    AccountProfileNotNative,
     AccountProfileEmailFixed,
     AccountProfileClearDeletes,
     AccountProfileDateHint,
-    AccountProfileSocialNote,
     AccountProfileSendCode,
     AccountProfileNothingChanged,
     AccountProfileValueBad,
-    AccountProfileNotYourEmail,
     AccountProfileCannotEdit,
     AccountProfileCodeTitle,
     AccountProfileCodeSent,
+    AccountProfileCodeSentNoDest,
     AccountProfileCodeLasts,
     AccountProfileChanges,
     AccountProfileWas,
@@ -1140,7 +1139,7 @@ enum K {
     AccountProfileSendNew,
     AccountProfileNotSavedTitle,
     AccountProfileNoAnswer,
-    AccountProfileNoEmailSignIn,
+    AccountProfileNoUser,
     AccountProfileTooMany,
     AccountProfileRefused,
     // The code step (§13.22, §13.23 §4): the three ways the code itself goes wrong, the page a
@@ -2348,8 +2347,8 @@ fn t(lang: Lang, key: K) -> &'static str {
         K::AccountProfile => m(lang, "Profile", "Profilo"),
         K::AccountProfileSub => m(
             lang,
-            "What your sign-in tells these applications about you.",
-            "Cosa il tuo accesso dice di te a queste applicazioni.",
+            "What your sign-in tells your applications about you.",
+            "Cosa il tuo accesso dice di te alle tue applicazioni.",
         ),
         K::AccountProfileNone => m(
             lang,
@@ -2376,18 +2375,23 @@ fn t(lang: Lang, key: K) -> &'static str {
             "Svuotalo per eliminarlo.",
         ),
         K::AccountProfileDateHint => m(lang, "YYYY-MM-DD", "AAAA-MM-GG"),
-        K::AccountProfileSendTo => m(lang, "Send the code to", "Invia il codice a"),
+        // The one sentence the profile panel says to a person whose session is not a native
+        // Cognito sign-in (§13.25): the profile of a federated account belongs to the provider,
+        // and a session minted before the gate named the Cognito user has to sign in again to
+        // reach the edit. It says what to do, not only what is wrong.
+        K::AccountProfileNotNative => m(
+            lang,
+            "If you sign in with a social account such as Google, your profile comes from that \
+             provider and cannot be changed here. If you sign in with your email address, sign \
+             out and sign in again to edit it.",
+            "Se accedi con un account social come Google, il tuo profilo viene da quel fornitore \
+             e non si può cambiare qui. Se accedi con il tuo indirizzo email, esci e accedi di \
+             nuovo per modificarlo.",
+        ),
         K::AccountProfileEmailFixed => m(
             lang,
             "Your email address is how you sign in, so only an administrator can change it.",
             "Il tuo indirizzo email è il modo in cui accedi, quindi solo un amministratore può cambiarlo.",
-        ),
-        K::AccountProfileSocialNote => m(
-            lang,
-            "If you sign in only with a social account such as Google, your profile comes from \
-             that provider and cannot be changed here.",
-            "Se accedi solo con un account social come Google, il tuo profilo viene da quel \
-             fornitore e non si può cambiare qui.",
         ),
         K::AccountProfileSendCode => m(lang, "Send code", "Invia il codice"),
         K::AccountProfileNothingChanged => m(
@@ -2400,11 +2404,6 @@ fn t(lang: Lang, key: K) -> &'static str {
             "too long, or holds characters that cannot be saved.",
             "troppo lungo, o contiene caratteri che non si possono salvare.",
         ),
-        K::AccountProfileNotYourEmail => m(
-            lang,
-            "The code can only go to one of your own email addresses.",
-            "Il codice può andare solo a uno dei tuoi indirizzi email.",
-        ),
         K::AccountProfileCannotEdit => m(
             lang,
             "cannot be changed here.",
@@ -2415,6 +2414,14 @@ fn t(lang: Lang, key: K) -> &'static str {
             lang,
             "We emailed a code to",
             "Abbiamo inviato un codice a",
+        ),
+        // The same sentence with no address in it, for the case the provider does not name one
+        // (§13.25): the code went to the address the account signs in with, and the page may say
+        // that much without inventing an address it was not given.
+        K::AccountProfileCodeSentNoDest => m(
+            lang,
+            "We emailed a code to the address you sign in with.",
+            "Abbiamo inviato un codice all'indirizzo con cui accedi.",
         ),
         K::AccountProfileCodeLasts => m(
             lang,
@@ -2428,12 +2435,8 @@ fn t(lang: Lang, key: K) -> &'static str {
         K::AccountProfileSave => m(lang, "Save profile", "Salva il profilo"),
         K::AccountProfileNoCode => m(
             lang,
-            "No email after a minute? Look in your spam folder, or send a new code. If you sign \
-             in only with a social account, no code will come: your profile is kept by that \
-             provider.",
-            "Nessuna email dopo un minuto? Guarda nello spam, o invia un nuovo codice. Se accedi \
-             solo con un account social, nessun codice arriverà: il tuo profilo è gestito da quel \
-             fornitore.",
+            "No email after a minute? Look in your spam folder, or send a new code.",
+            "Nessuna email dopo un minuto? Guarda nello spam, o invia un nuovo codice.",
         ),
         K::AccountProfileSendNew => m(lang, "Send a new code", "Invia un nuovo codice"),
         K::AccountProfileNotSavedTitle => m(
@@ -2446,14 +2449,16 @@ fn t(lang: Lang, key: K) -> &'static str {
             "The sign-in service did not answer within 5 seconds. Try again in a minute.",
             "Il servizio di accesso non ha risposto entro 5 secondi. Riprova tra un minuto.",
         ),
-        K::AccountProfileNoEmailSignIn => m(
+        // The account the session named is gone from the pool (`UserNotFoundException`,
+        // `UserNotConfirmedException`), so there is nobody to send a code to. It says so in the
+        // same breath as what to do about it, because the person's own sign-in is the thing that
+        // has to be redone.
+        K::AccountProfileNoUser => m(
             lang,
-            "Your account signs in through a social provider such as Google, so your profile \
-             comes from there and no code was sent. Change it with that provider, or ask an \
-             administrator.",
-            "Il tuo account accede tramite un fornitore social come Google, quindi il profilo \
-             viene da lì e non è stato inviato alcun codice. Cambialo presso quel fornitore, o \
-             chiedi a un amministratore.",
+            "The sign-in service no longer has the account you signed in with, so no code was \
+             sent. Sign out and sign in again.",
+            "Il servizio di accesso non ha più l'account con cui hai effettuato l'accesso, \
+             quindi non è stato inviato alcun codice. Esci e accedi di nuovo.",
         ),
         K::AccountProfileTooMany => m(
             lang,
@@ -2477,8 +2482,8 @@ fn t(lang: Lang, key: K) -> &'static str {
         ),
         K::AccountProfileNotYours => m(
             lang,
-            "The code belonged to a different account, so nothing was changed.",
-            "Il codice apparteneva a un altro account, quindi non è cambiato nulla.",
+            "The sign-in service answered for a different account, so nothing was changed.",
+            "Il servizio di accesso ha risposto per un altro account, quindi non è cambiato nulla.",
         ),
         K::AccountProfileBadValue => m(
             lang,
@@ -9189,7 +9194,8 @@ fn respond_account_preferences(
     let _ = req.respond(resp);
 }
 
-/// What the four sections show, all of it read out of the two files this request opened.
+/// What the four sections show: most of it read out of the two files this request opened, and
+/// the two facts that belong to the request itself (`native`, and the paths) beside them.
 ///
 /// A struct because the page function takes the caller's identity separately (it comes from the
 /// request, not from the files), and a page that took six loose arguments was a page whose
@@ -9220,6 +9226,11 @@ struct AccountOwn<'a> {
     /// Whether the edit can work here at all, which is what puts the Edit pill on the panel or
     /// takes it off (§13.22, "The client is `gate.client_id`").
     profile_edit: bool,
+    /// Whether this session is a **native** Cognito sign-in, which is the gate's
+    /// `X-Auth-Native-Username` speaking (§13.25). The edit acts on that one Cognito user, so a
+    /// session the gate did not name gets no pill, no form and no code, and the sentence that
+    /// says why. It is a `bool` and not the name because the page only asks whether to offer.
+    native: bool,
 }
 
 /// The scopes a signed-in caller reaches, grouped by application in file order.
@@ -9271,6 +9282,27 @@ fn account_keys<'a>(doc: &'a AccessFile, uuid: Option<&str>) -> Vec<&'a ApiKeySp
         .map_or_else(Vec::new, |i| doc.users[i].api_keys.iter().collect())
 }
 
+/// The Cognito user this session **is**, as the gate named it, or `None` when the gate named
+/// nobody.
+///
+/// The gate sends [`bb_auth_core::NATIVE_USERNAME_HEADER`] (the token's `cognito:username`) only
+/// for a sign-in that went straight to Cognito: a federated sign-in, an API key, an anonymous
+/// grant, and a cookie minted before that header existed all send nothing. That is the whole
+/// basis of the profile edit, because the edit acts on **one Cognito user** and the only honest
+/// name for that user is the one the token carried. Reading it from anywhere else is the bug this
+/// step exists for: the rpi-01 deployment has native accounts whose roster email is not their
+/// Cognito username, so an edit aimed at an email resolves to a different user, or to nobody, and
+/// the person's save silently lands somewhere else.
+///
+/// An empty value counts as no name: a header that names nothing cannot be sent as a `USERNAME`,
+/// and offering the edit on it would end in a pool error the page cannot explain.
+///
+/// The value is never written to a log, the journal or the audit: it is a personal identifier, and
+/// the only thing that reads it is the Cognito request that carries it.
+fn native_user(req: &Request) -> Option<&str> {
+    header_value(req, bb_auth_core::NATIVE_USERNAME_HEADER).filter(|v| !v.is_empty())
+}
+
 /// Everything the page shows, gathered from the two files this request opened. One function for
 /// the page a `GET` renders and for the page a refused mint answers with, so the refusal cannot
 /// show a different account from the one it refused.
@@ -9305,6 +9337,7 @@ fn account_own<'a>(
         page,
         profile_path,
         profile_edit: profile_offered(settings),
+        native: native_user(req).is_some(),
     }
 }
 
@@ -9639,11 +9672,17 @@ fn page_account_minted(lang: Lang, page: &str, bearer: &str) -> Markup {
 /// page a real caller reaches, not a defensive one. A stranger and an administrator with no roster
 /// row get the same page, because `web.admins` is not read here.
 ///
-/// The sections are siblings, each a `.panel` whose `h2` is followed by one `p.lede.sub` saying
-/// what that section is for, and whose empty state is a `p.muted` naming what is missing. The
-/// page's contract is the one that made this page few keys: **which fact belongs in which
-/// section**, so a sub-line says what a section is for and never states a fact that belongs to
-/// another one.
+/// The sections are siblings, each a `.panel` whose `h2 class="tight"` is followed by one
+/// `p.lede.sub` saying what that section is for, and whose empty state is a `p.muted` naming what
+/// is missing. The page's contract is the one that made this page few keys: **which fact belongs
+/// in which section**, so a sub-line says what a section is for and never states a fact that
+/// belongs to another one.
+///
+/// The order is what a person **does** first (§13.26 §1): the two sections you act in, profile
+/// and keys, then the two you read, groups and reach. The ids do not move with it, so no link and
+/// no selector changes. The heading carries `tight` because the page is the console's column now
+/// and the console writes the same rule at each of its headings; a rule scoped to this page is
+/// what used to say it, and that rule was one of the width rules §13.26 deleted.
 fn page_account(
     lang: Lang,
     ids: &[String],
@@ -9667,39 +9706,69 @@ fn page_account(
                 (t(lang, K::AccountNoRow))
             }
         }
-        section id="reach" class="panel" {
-            h2 { (t(lang, K::AccountReach)) }
-            p class="lede sub" { (t(lang, K::AccountReachSub)) }
-            @if own.reached.is_empty() {
-                p class="muted" { (t(lang, K::AccountReachNone)) }
+        section id="profile" class="panel" {
+            h2 class="tight" { (t(lang, K::AccountProfile)) }
+            // The sub-line says what this section is doing: reading, or editing. The edit page
+            // says what happens after the form (a code by email), because that is the fact a
+            // person needs before they type anything (§13.23 §2).
+            p class="lede sub" {
+                (t(lang, if profile.is_some() { K::AccountProfileEditSub } else { K::AccountProfileSub }))
+            }
+            @if let Some(f) = profile {
+                // The form, on this page alone (`<prefix>/profile`, the `keys/new` pattern): the
+                // panel is the section, and the section is what a caller of `/account/profile`
+                // came to.
+                (profile_form(lang, f, own.profile_path, own.page))
             } @else {
-                // One flat list of `app/scope` pairs, in the file's order: the question is "where
-                // can I go", and each answer is one place. The console's person page lists them
-                // the same way.
-                ul class="plain" {
-                    @for (app, scopes) in &own.reached {
-                        @for scope in scopes {
-                            li { code { (app) "/" (scope) } }
+                @if own.claims.is_empty() {
+                    p class="muted" { (t(lang, K::AccountProfileNone)) }
+                } @else {
+                    ul class="plain" {
+                        @for (claim, value) in &own.claims {
+                            li {
+                                // A claim the design names a word for is called by that word, in
+                                // the same words the form labels it with, so the panel and the
+                                // form never call one field by two names. The rest keep the
+                                // claim's own name, in code: it is the file's vocabulary, and a
+                                // name nobody translated is the honest answer.
+                                @if let Some(word) = profile_label(lang, claim) {
+                                    (word)
+                                } @else {
+                                    code { (claim) }
+                                }
+                                ": "
+                                // The value is the person's name or department, which is prose. A
+                                // claim the deployment configured and the proxy did not forward is
+                                // a fact about the wiring, and says so in words: a bare colon after
+                                // a name reads as "your name is empty", a statement nobody made.
+                                @if let Some(v) = value {
+                                    (v)
+                                } @else {
+                                    span class="muted" { (t(lang, K::AccountNotProvided)) }
+                                }
+                            }
                         }
                     }
                 }
-            }
-        }
-        section id="groups" class="panel" {
-            h2 { (t(lang, K::AccountGroups)) }
-            p class="lede sub" { (t(lang, K::AccountGroupsSub)) }
-            @if own.groups.is_empty() {
-                p class="muted" { (t(lang, K::AccountGroupsNone)) }
-            } @else {
-                ul class="plain" {
-                    @for g in &own.groups {
-                        li { code { (g) } }
+                // The way in, and only where the edit can work: a pool, a native client, at least
+                // one editable claim, and a session the gate named a Cognito user for (§13.25).
+                // A control that can only end in an error is a promise the page cannot keep, so it
+                // is absent, not disabled, and the person is told the reason in the sentence that
+                // stands where the pill would be. A deployment with no pool says nothing about
+                // editing at all: there is nothing to sign out and back into.
+                @if own.profile_edit {
+                    @if own.native {
+                        p class="primary" {
+                            a class="pill" href=(own.profile_path) { (t(lang, K::AccountProfileEdit)) }
+                        }
+                    } @else {
+                        p class="muted" { (t(lang, K::AccountProfileNotNative)) }
                     }
                 }
             }
         }
         section id="keys" class="panel" {
-            h2 { (t(lang, K::AccountKeys)) }
+            h2 class="tight" { (t(lang, K::AccountKeys)) }
             p class="lede sub" { (t(lang, K::AccountKeysSub)) }
             // Ten keys close the row (§13.16), counting every key on the row. A sentence and not
             // a disabled control: a disabled control is skipped by the keyboard and says nothing
@@ -9742,56 +9811,33 @@ fn page_account(
                 }
             }
         }
-        section id="profile" class="panel" {
-            h2 { (t(lang, K::AccountProfile)) }
-            // The sub-line says what this section is doing: reading, or editing. The edit page
-            // says what happens after the form (a code by email), because that is the fact a
-            // person needs before they type anything (§13.23 §2).
-            p class="lede sub" {
-                (t(lang, if profile.is_some() { K::AccountProfileEditSub } else { K::AccountProfileSub }))
-            }
-            @if let Some(f) = profile {
-                // The form, on this page alone (`<prefix>/profile`, the `keys/new` pattern): the
-                // panel is the section, and the section is what a caller of `/account/profile`
-                // came to.
-                (profile_form(lang, f, own.profile_path, own.page, ids))
+        section id="groups" class="panel" {
+            h2 class="tight" { (t(lang, K::AccountGroups)) }
+            p class="lede sub" { (t(lang, K::AccountGroupsSub)) }
+            @if own.groups.is_empty() {
+                p class="muted" { (t(lang, K::AccountGroupsNone)) }
             } @else {
-                @if own.claims.is_empty() {
-                    p class="muted" { (t(lang, K::AccountProfileNone)) }
-                } @else {
-                    ul class="plain" {
-                        @for (claim, value) in &own.claims {
-                            li {
-                                // A claim the design names a word for is called by that word, in
-                                // the same words the form labels it with, so the panel and the
-                                // form never call one field by two names. The rest keep the
-                                // claim's own name, in code: it is the file's vocabulary, and a
-                                // name nobody translated is the honest answer.
-                                @if let Some(word) = profile_label(lang, claim) {
-                                    (word)
-                                } @else {
-                                    code { (claim) }
-                                }
-                                ": "
-                                // The value is the person's name or department, which is prose. A
-                                // claim the deployment configured and the proxy did not forward is
-                                // a fact about the wiring, and says so in words: a bare colon after
-                                // a name reads as "your name is empty", a statement nobody made.
-                                @if let Some(v) = value {
-                                    (v)
-                                } @else {
-                                    span class="muted" { (t(lang, K::AccountNotProvided)) }
-                                }
-                            }
-                        }
+                ul class="plain" {
+                    @for g in &own.groups {
+                        li { code { (g) } }
                     }
                 }
-                // The way in, and only where the edit can work: a pool, a native client and at
-                // least one editable claim. A control that can only end in an error is a promise
-                // the page cannot keep, so it is absent, not disabled.
-                @if own.profile_edit {
-                    p class="primary" {
-                        a class="pill" href=(own.profile_path) { (t(lang, K::AccountProfileEdit)) }
+            }
+        }
+        section id="reach" class="panel" {
+            h2 class="tight" { (t(lang, K::AccountReach)) }
+            p class="lede sub" { (t(lang, K::AccountReachSub)) }
+            @if own.reached.is_empty() {
+                p class="muted" { (t(lang, K::AccountReachNone)) }
+            } @else {
+                // One flat list of `app/scope` pairs, in the file's order: the question is "where
+                // can I go", and each answer is one place. The console's person page lists them
+                // the same way.
+                ul class="plain" {
+                    @for (app, scopes) in &own.reached {
+                        @for scope in scopes {
+                            li { code { (app) "/" (scope) } }
+                        }
                     }
                 }
             }
@@ -10060,9 +10106,7 @@ fn handle_account(
     // refusal this submission has to meet on the same terms as the `GET` that rendered its form.
     if posting {
         if path == code {
-            account_profile_code_post(
-                req, cfg, &mut prefs, lang, look, &settings, &ids, &profile, &page,
-            );
+            account_profile_code_post(req, cfg, &mut prefs, lang, look, &settings, &profile, &page);
             return;
         }
         if path == profile {
@@ -10134,13 +10178,16 @@ fn handle_account(
         return;
     }
     // The edit form rides on one page only: `<prefix>/profile` is the panel with fields, and
-    // every other page under the prefix shows the panel as read-only text (§13.22).
-    let form = (path == profile).then(|| ProfileForm::open(&settings, &req, &ids));
+    // every other page under the prefix shows the panel as read-only text (§13.22). A session the
+    // gate named no Cognito user for gets the read-only panel on that path too (§13.25): the form
+    // acts on one Cognito user, and a page with no user to act on is not an edit page, so its
+    // title says the same thing the panel says.
+    let form = (path == profile && own.native).then(|| ProfileForm::open(&settings, &req));
     respond_account(
         req,
         200,
         &prefs,
-        if path == profile {
+        if form.is_some() {
             t(lang, K::AccountProfileEdit)
         } else {
             t(lang, K::AccountTitle)
@@ -10279,20 +10326,18 @@ fn autocomplete_of(claim: &str) -> Option<&'static str> {
     }
 }
 
-/// The profile form as one render needs it: the fields, the address the code goes to, and the
-/// one sentence above the form, which is an error, a warning, or nothing.
+/// The profile form as one render needs it: the fields, and the one sentence above the form,
+/// which is an error, a warning, or nothing.
 ///
 /// A struct and not six arguments because the page that renders it is the page that refused a
 /// submission, and every one of these is what the person left on the page: the values they
-/// typed, the address they picked, the field that was refused. Deriving that from the request
-/// at render time would be a second answer to "what did they submit".
+/// typed, the field that was refused. Deriving that from the request at render time would be a
+/// second answer to "what did they submit".
 struct ProfileForm {
     /// Each editable claim, with the value its field shows.
     editable: Vec<(String, String)>,
     /// Each configured claim that is not editable, with the value the panel shows it by.
     other: Vec<(String, String)>,
-    /// Which of the caller's addresses the code goes to.
-    email: String,
     /// The claim a refusal is attributed to, and the sentence above the form. The sentence
     /// names the field by its visible label, because that is the word the person read.
     err: Option<(String, String)>,
@@ -10302,25 +10347,23 @@ struct ProfileForm {
 
 impl ProfileForm {
     /// The form as the page shows it before anyone has typed anything: every editable claim
-    /// prefilled with the value the proxy forwarded, and the first address as the destination.
-    fn open(settings: &Settings, req: &Request, ids: &[String]) -> ProfileForm {
+    /// prefilled with the value the proxy forwarded.
+    fn open(settings: &Settings, req: &Request) -> ProfileForm {
         let (editable, other) = profile_split(settings, req, &profile_editable(settings), None);
         ProfileForm {
             editable,
             other,
-            email: ids.first().cloned().unwrap_or_default(),
             err: None,
             warn: None,
         }
     }
 
-    /// The form as it comes back after a refusal: the values as posted, the address as posted,
-    /// and the sentence. A person who typed a name is not being asked to type it again.
+    /// The form as it comes back after a refusal: the values as posted, and the sentence. A
+    /// person who typed a name is not being asked to type it again.
     fn again(
         settings: &Settings,
         req: &Request,
         form: &Form,
-        ids: &[String],
         err: Option<(String, String)>,
         warn: Option<String>,
     ) -> ProfileForm {
@@ -10329,10 +10372,6 @@ impl ProfileForm {
         ProfileForm {
             editable,
             other,
-            email: match form.get("email").trim() {
-                "" => ids.first().cloned().unwrap_or_default(),
-                e => e.to_string(),
-            },
             err,
             warn,
         }
@@ -10387,12 +10426,12 @@ fn forwarded_claim(req: &Request, header: &str) -> String {
 /// the click target too, and the value is prefilled, because a person correcting a name is
 /// correcting one word and not retyping the rest.
 ///
-/// The address the code goes to is never a field. It is the identity nginx named, and a form
-/// that let a person type an address here would be a form that emails a code to anybody, which
-/// is the whole reason the code exists. With one address there is nothing to choose, so the
-/// address is text beside a hidden input; with several, a `select` over the header's own
-/// values, in the header's order.
-fn profile_form(lang: Lang, f: &ProfileForm, action: &str, page: &str, ids: &[String]) -> Markup {
+/// Nothing here names an address (§13.26 §4). The code goes to the Cognito user the session
+/// **is** (§13.25), which is a name the person did not type and cannot choose, so there is
+/// nothing to pick: the "Send the code to" line, its `select` and its hidden `email` are gone,
+/// and a posted `email` is refused as a non-editable name. What stays is the sentence that says
+/// why the email is not a field, after the fields, where a person who is looking for it reads it.
+fn profile_form(lang: Lang, f: &ProfileForm, action: &str, page: &str) -> Markup {
     // The first text field is the one the page focuses, and only it: two `autofocus` on one
     // page is no focus at all.
     let first = f.editable.first().map(|(c, _)| c.clone());
@@ -10414,6 +10453,7 @@ fn profile_form(lang: Lang, f: &ProfileForm, action: &str, page: &str, ids: &[St
                         (profile_label(lang, claim).unwrap_or_else(|| claim.clone()))
                     }
                     input type="text"
+                          class="f-profile"
                           name=(claim)
                           value=(value)
                           maxlength=(PROFILE_VALUE_MAX)
@@ -10454,26 +10494,10 @@ fn profile_form(lang: Lang, f: &ProfileForm, action: &str, page: &str, ids: &[St
                     }
                 }
             }
-            @if ids.len() > 1 {
-                label {
-                    span class="lbl" { (t(lang, K::AccountProfileSendTo)) }
-                    select name="email" {
-                        @for e in ids {
-                            option value=(e) selected=[(e == &f.email).then(|| "selected")] { (e) }
-                        }
-                    }
-                }
-            } @else {
-                div class="fixed" {
-                    span class="lbl" { (t(lang, K::AccountProfileSendTo)) }
-                    code { (f.email) }
-                    input type="hidden" name="email" value=(f.email);
-                }
-            }
-            // Said once, under the address, because this is the moment the person needs it: the
-            // address is not a field, and the reason is that a code is being sent to it.
-            span class="hint" { (t(lang, K::AccountProfileEmailFixed)) }
-            p class="muted" { (t(lang, K::AccountProfileSocialNote)) }
+            // Said after the fields, because this is the page of the person who was looking for
+            // an email field and did not find one: the address is how they sign in, so it is not
+            // a field here, and the sentence that says so belongs where their eye lands.
+            p class="muted" { (t(lang, K::AccountProfileEmailFixed)) }
             p class="actions" {
                 button type="submit" { (t(lang, K::AccountProfileSendCode)) }
                 a class="pill" href=(page) { (t(lang, K::Cancel)) }
@@ -10492,14 +10516,16 @@ struct ProfileChange {
 
 /// What the code page carries, and what its two forms post.
 ///
-/// The two field lists are separate on purpose. `carry` is the code step's: the `Session`, the
-/// `USERNAME` the challenge named, the address the code went to, and one entry per changed claim,
-/// which is everything the step needs to answer the challenge and write the attributes. `resend`
-/// is the start's: the address and the changed claims, **never** the `Session`, because "send a
-/// new code" is starting over and a page holding two sessions would be two answers to which code
-/// the field belongs to.
+/// The two field lists are separate on purpose. `carry` is the code step's: the `Session` and one
+/// entry per changed claim, which is everything the step needs to answer the challenge and write
+/// the attributes. `resend` is the start's: the changed claims, **never** the `Session`, because
+/// "send a new code" is starting over and a page holding two sessions would be two answers to
+/// which code the field belongs to. Neither carries a username (§13.25 step 2): the code step
+/// answers for the user of the request that arrives, named by the gate's header.
 struct ProfileCode<'a> {
-    email: &'a str,
+    /// The masked address Cognito said it sent to, as the challenge named it, and `None` when the
+    /// pool did not name one. Shown only when [`code_destination`] accepts it.
+    destination: Option<&'a str>,
     changes: &'a [ProfileChange],
     carry: &'a [(String, String)],
     resend: &'a [(String, String)],
@@ -10509,8 +10535,25 @@ struct ProfileCode<'a> {
     err: Option<&'a str>,
 }
 
-/// The page that asks for the code (§13.23 §3): the address it went to, the clock as a number,
-/// the changes as they will be described back, the code field, and a way to start over.
+/// The masked destination the pool named, when it is a value this page may put on a page.
+///
+/// It is the provider's word, not the person's, and it arrives in a response body: a value that
+/// is not printable ASCII has no business in a document, and one with a space in it is not an
+/// address-shaped mask (Cognito's own mask is `t***@e***`). The bound is the length a mask can
+/// plausibly be, and a value over it is a provider saying something this page cannot lay out.
+/// Anything rejected is simply not named: the generic sentence says everything the page knows,
+/// and a page that shows a raw address it was handed would be a page leaking somebody's address
+/// through a field meant to mask it.
+fn code_destination(destination: Option<&str>) -> Option<&str> {
+    destination
+        .map(str::trim)
+        .filter(|d| !d.is_empty() && d.chars().count() <= 254)
+        .filter(|d| d.chars().all(|c| c.is_ascii_graphic()))
+}
+
+/// The page that asks for the code (§13.23 §3, §13.26 §4): the masked address it went to, the
+/// clock as a number, the changes as they will be described back, the code field, and a way to
+/// start over.
 ///
 /// The `Session` rides in a hidden field and nowhere else: this is a form, not a server-side
 /// transaction, and a person who opens two tabs holds two independent codes.
@@ -10523,9 +10566,18 @@ fn page_profile_code(
 ) -> Markup {
     html! {
         p class="lede" {
-            (t(lang, K::AccountProfileCodeSent)) " "
-            code { (c.email) }
-            "." " " (t(lang, K::AccountProfileCodeLasts))
+            @if let Some(dest) = code_destination(c.destination) {
+                (t(lang, K::AccountProfileCodeSent)) " "
+                code { (dest) }
+                "." " " (t(lang, K::AccountProfileCodeLasts))
+            } @else {
+                // The pool named no address, so the page says what it knows and no more: the code
+                // went to the address the account signs in with. It invents nothing, because the
+                // address the pool writes to is the pool's, and on a pool whose `email` and
+                // `username` differ the address this page could invent is not the one used.
+                (t(lang, K::AccountProfileCodeSentNoDest)) " "
+                (t(lang, K::AccountProfileCodeLasts))
+            }
         }
         // The card, as the confirmations wear theirs: the summary and the field are one act, and
         // the shell has already rendered the act's name as the page's one heading.
@@ -10589,8 +10641,8 @@ fn page_profile_code(
                 }
             }
         }
-        // Resend is starting over, and says so by being the start's own form: the email and the
-        // changed values, never the `Session`, posted back to the start.
+        // Resend is starting over, and says so by being the start's own form: the changed values,
+        // never the `Session`, posted back to the start.
         form class="edit" method="post" action=(profile_path) {
             @for (name, value) in c.resend {
                 input type="hidden" name=(name) value=(value);
@@ -10765,24 +10817,34 @@ fn cognito_post(
     }
 }
 
-/// Ask Cognito for an email code for `email` (§13.22's one call): `USER_AUTH`, the native app
-/// client from the settings, and `PREFERRED_CHALLENGE=EMAIL_OTP`.
+/// Ask Cognito for an email code for **the session's own user** (§13.22's one call, §13.25
+/// step 1): `USER_AUTH`, the native app client from the settings, and
+/// `PREFERRED_CHALLENGE=EMAIL_OTP`.
 ///
-/// The answer is the `Session` to answer with **and** the `USERNAME` the challenge named
-/// (`ChallengeParameters.USERNAME`). The second one is not the address we asked about: it is the
-/// pool saying which of its users it is asking, and the code step answers with that name, because
-/// answering a challenge with an address the pool did not name is a request to sign in as
-/// somebody else.
+/// `username` is the gate's `X-Auth-Native-Username`, never an address and never a posted field.
+/// That is the whole point of the shape: the pool resolves a `USERNAME` to one of its users, and
+/// the only name that is guaranteed to be *this* session's user is the one the session's own
+/// token carried. An address is not that name, and on a pool whose users' `email` and
+/// `username` differ it is a different user or nobody. The body carries no `SECRET_HASH` and no
+/// `ClientSecret` for the same reason the login page carries none: this is a public native
+/// client, and a secret here would be a secret shipped to a binary a browser can read.
+///
+/// The answer is the `Session` to answer with, the masked address the code went to
+/// (`CODE_DELIVERY_DESTINATION`, shown on the code page), and the `USERNAME` the challenge named
+/// (`ChallengeParameters.USERNAME`). The third is the pool saying which of its users it is
+/// asking: a pool that names one **other** than the user it was asked about has answered for
+/// somebody else, and that is a refusal here, at the start, before a code reaches anybody's
+/// mailbox on someone's behalf.
 fn cognito_call(
     cfg: &Config,
     settings: &Settings,
-    email: &str,
-) -> Result<(String, String), CognitoError> {
+    username: &str,
+) -> Result<(String, Option<String>, String), CognitoError> {
     let payload = serde_json::json!({
         "AuthFlow": "USER_AUTH",
         "ClientId": settings.client_id,
         "AuthParameters": {
-            "USERNAME": email,
+            "USERNAME": username,
             "PREFERRED_CHALLENGE": "EMAIL_OTP",
         },
     });
@@ -10794,13 +10856,15 @@ fn cognito_call(
     )? {
         CognitoReply::Error(body) => {
             return Err(match cognito_error_name(&body).as_str() {
-                // A `400` the pool means, in words the person has a chance of acting on: this
-                // account does not sign in with an email the pool can write to.
+                // The pool has no such user, or has one it will not sign in. Both mean the same
+                // thing to the person: the account this session signed in with is not one the
+                // pool will send a code to, and signing out and in again is the way to find out
+                // what happened.
                 "UserNotFoundException"
                 | "UserNotConfirmedException"
                 | "NotAuthorizedException"
                 | "CodeDeliveryFailureException" => {
-                    CognitoError::Refused(K::AccountProfileNoEmailSignIn, 400)
+                    CognitoError::Refused(K::AccountProfileNoUser, 400)
                 }
                 "TooManyRequestsException" | "LimitExceededException" => {
                     CognitoError::Refused(K::AccountProfileTooMany, 502)
@@ -10819,18 +10883,31 @@ fn cognito_call(
     if value.get("ChallengeName").and_then(|v| v.as_str()) != Some("EMAIL_OTP") {
         return Err(CognitoError::Refused(K::AccountProfileRefused, 502));
     }
+    let params = value.get("ChallengeParameters");
+    // The username the challenge names, when it names one. A pool that names none is answering
+    // about the user it was asked about, which is the name this call already holds.
+    let named = params
+        .and_then(|p| p.get("USERNAME"))
+        .and_then(|v| v.as_str())
+        .filter(|u| !u.trim().is_empty())
+        .map(|u| u.trim().to_string());
+    if let Some(named) = &named {
+        if named != username {
+            // The pool answered for a different account. Nothing is sent on, and the other
+            // account is not named on the page: this is a shared surface, and a refusal that
+            // says which user the pool reached is an oracle for anybody with any account.
+            return Err(CognitoError::Refused(K::AccountProfileNotYours, 403));
+        }
+    }
     match value.get("Session").and_then(|v| v.as_str()) {
         Some(s) if !s.trim().is_empty() => Ok((
             s.to_string(),
-            value
-                .get("ChallengeParameters")
-                .and_then(|p| p.get("USERNAME"))
+            params
+                .and_then(|p| p.get("CODE_DELIVERY_DESTINATION"))
                 .and_then(|v| v.as_str())
-                // A pool that names no username is answering about the address it was asked
-                // about, which is the only name this page has.
-                .filter(|u| !u.trim().is_empty())
-                .unwrap_or(email)
-                .to_string(),
+                .filter(|d| !d.trim().is_empty())
+                .map(|d| d.to_string()),
+            named.unwrap_or_else(|| username.to_string()),
         )),
         _ => Err(CognitoError::Refused(K::AccountProfileRefused, 502)),
     }
@@ -10966,18 +11043,24 @@ fn cognito_update(
     }
 }
 
-/// The `email` of the ID token the code step just got back, normalised, and `None` for a token
-/// that does not name one this page can use.
+/// The `cognito:username` of the ID token the code step just got back, and `None` for a token
+/// that does not name a user this page can use.
 ///
 /// The token is **not** verified, and that is the design's decision (§13.22): it arrives over the
 /// same TLS call that asked for the code, from the endpoint the settings name, and the only thing
-/// this page does with it is check that it names the address the code went to. A signature check
+/// this page does with it is check that it names the user the code went to. A signature check
 /// would need the pool's JWKS, which the gate holds and this process does not, and it would
 /// change nothing: whoever can hand this process a token can hand it one that passes every claim
 /// check below as well. What the checks are for is the accident, not the attacker: a pool that
 /// answered the wrong user, and a token from another pool, from another app client, for an access
 /// token, or out of its life, are all a token this page must not spend.
-fn id_token_email(token: &str, settings: &Settings) -> Option<String> {
+///
+/// §13.25 step 3: the name compared is the **username**, not the `email`. The address is not the
+/// identity here, and on a pool whose users' two names differ a token that names this user
+/// carries an address nobody signed in with (the fixture's stranger signs in as
+/// `sam@elsewhere.com` on a token whose `email` is `Sam@Elsewhere.COM`). A token with no
+/// `cognito:username` is refused: a bind that cannot be satisfied is a bind that failed.
+fn id_token_username(token: &str, settings: &Settings) -> Option<String> {
     let parts: Vec<&str> = token.split('.').collect();
     if parts.len() != 3 {
         return None;
@@ -11006,21 +11089,21 @@ fn id_token_email(token: &str, settings: &Settings) -> Option<String> {
         return None;
     }
     claims
-        .get("email")
+        .get("cognito:username")
         .and_then(|v| v.as_str())
-        .filter(|e| !e.trim().is_empty())
-        .map(norm_email)
+        .filter(|u| !u.trim().is_empty())
+        .map(|u| u.trim().to_string())
 }
 
-/// The profile edit's `POST` (§13.22, §13.23): refuse everything that must be refused without
-/// asking Cognito anything, then ask for a code and show the page that names the address it
-/// went to.
+/// The profile edit's `POST` (§13.22, §13.23, §13.25): refuse everything that must be refused
+/// without asking Cognito anything, then ask for a code for **this session's own Cognito user**
+/// and show the page that names the address it went to.
 ///
 /// The order is the console's, for the same reasons: the door (`Sec-Fetch-Site`) first, because
-/// a cross-site form must not reach anybody's mailbox; then the address, because the code can
-/// only go to an identity nginx named; then the field names, because a claim outside the
-/// allowlist is a field that cannot save and a request cannot be honoured in part; then the
-/// values. Every refusal writes nothing and calls nothing.
+/// a cross-site form must not reach anybody's mailbox; then the user, because the pool acts on
+/// one name and only the gate's header names the one this session is; then the field names,
+/// because a claim outside the allowlist is a field that cannot save and a request cannot be
+/// honoured in part; then the values. Every refusal writes nothing and calls nothing.
 ///
 /// There is no `rev` here. This `POST` writes no access file: the write is Cognito's, and it
 /// happens in slice 5c, behind the code.
@@ -11057,34 +11140,39 @@ fn account_profile_post(
     }
     let form = Form::parse(&read_body(&mut req));
     let editable = profile_editable(settings);
-    // (2) The address the code goes to must be one of the values the identity header carried.
-    // Not "an address of the row the file has for this uuid": the header is what nginx attested,
-    // and a row carries addresses the gate chose not to send. The comparison is the header's
-    // own, normalised, because the header arrives lowercased and a form may not.
-    let email = form.get("email").trim().to_string();
-    if email.is_empty() || !ids.iter().any(|e| *e == norm_email(&email)) {
-        respond_account(
-            req,
-            400,
-            prefs,
-            t(lang, K::AccountProfileNotSavedTitle),
-            html! { p { (t(lang, K::AccountProfileNotYourEmail)) } },
-            look,
-            false,
-        );
-        return;
-    }
-    // (3) Every posted name is an editable claim, or the whole submission is refused. A name
-    // that is not one is a hand-made form naming a claim Cognito will not accept, and honouring
-    // the rest of it would tell the person their change was sent.
-    for (name, _) in &form.0 {
-        if name != "email" && !editable.iter().any(|c| c == name) {
+    // (2) The session must name the Cognito user the edit acts on. The gate sends that name for a
+    // native sign-in and for nothing else, so a social session, an API key and a cookie from
+    // before the header has no user this page can ask a pool about, and the sentence that says so
+    // is the one the panel already shows. Refused before the body is looked at beyond the names,
+    // and before any call: a code sent on a name nobody holds goes to a stranger's mailbox.
+    let native = match native_user(&req) {
+        Some(u) => u.to_string(),
+        None => {
             respond_account(
                 req,
                 400,
                 prefs,
                 t(lang, K::AccountProfileNotSavedTitle),
-                html! { p { (format!("{name} {}", t(lang, K::AccountProfileCannotEdit))) } },
+                html! { p { (t(lang, K::AccountProfileNotNative)) } },
+                look,
+                false,
+            );
+            return;
+        }
+    };
+    // (3) Every posted name is an editable claim, or the whole submission is refused. A name
+    // that is not one is a hand-made form naming a claim Cognito will not accept, and honouring
+    // the rest of it would tell the person their change was sent. `email` is one of those names
+    // now (§13.26 §4): the address is not a field on this page, and a form that posts one is a
+    // form trying to choose where the code goes.
+    for (name, _) in &form.0 {
+        if !editable.iter().any(|c| c == name) {
+            respond_account(
+                req,
+                400,
+                prefs,
+                t(lang, K::AccountProfileNotSavedTitle),
+                html! { p { (format!("{name}: {}", t(lang, K::AccountProfileCannotEdit))) } },
                 look,
                 false,
             );
@@ -11096,9 +11184,6 @@ fn account_profile_post(
     // value every later reader has to guess about. The refusal names the field by the word the
     // person read, marks it, and leaves the rest of the form standing.
     for (name, value) in &form.0 {
-        if name == "email" {
-            continue;
-        }
         if value.chars().count() > PROFILE_VALUE_MAX || value.chars().any(|c| c.is_control()) {
             let label = profile_label(lang, name).unwrap_or_else(|| name.clone());
             // The page is built before the response, because the page reads the request's
@@ -11113,7 +11198,6 @@ fn account_profile_post(
                     settings,
                     &req,
                     &form,
-                    ids,
                     Some((
                         name.clone(),
                         format!("{label}: {}", t(lang, K::AccountProfileValueBad)),
@@ -11137,11 +11221,8 @@ fn account_profile_post(
     // a field that is not being changed, which is what lets the code page's resend post only the
     // changed ones: an absent field means "leave it", an empty one means "remove it".
     let mut changes: Vec<ProfileChange> = Vec::new();
-    let mut resend: Vec<(String, String)> = vec![("email".to_string(), email.clone())];
+    let mut resend: Vec<(String, String)> = Vec::new();
     for (name, value) in &form.0 {
-        if name == "email" {
-            continue;
-        }
         let header = match settings
             .profile_claims
             .iter()
@@ -11177,7 +11258,6 @@ fn account_profile_post(
                 settings,
                 &req,
                 &form,
-                ids,
                 None,
                 Some(t(lang, K::AccountProfileNothingChanged).to_string()),
             )),
@@ -11197,18 +11277,16 @@ fn account_profile_post(
     // nothing was saved), so the bar's menu keeps the identity out: the design counts one
     // `p.lede` per page (§13.23 §3, §4).
     prefs.page_lede = true;
-    match cognito_call(cfg, settings, &email) {
-        Ok((session, username)) => {
-            // What the code step needs, as hidden fields: the `Session` to answer with, the
-            // `USERNAME` the challenge named, the address the code went to, and one entry per
-            // changed claim, an emptied one posted empty. The code page is a form and not a
-            // session: everything the next request must send is on the page, and nothing the
-            // person did not type is kept on the server (§13.22).
-            let mut carry: Vec<(String, String)> = vec![
-                ("Session".to_string(), session),
-                ("username".to_string(), username),
-                ("email".to_string(), email.clone()),
-            ];
+    match cognito_call(cfg, settings, &native) {
+        Ok((session, destination, _)) => {
+            // What the code step needs, as hidden fields: the `Session` to answer with, and one
+            // entry per changed claim, an emptied one posted empty. The code page is a form and
+            // not a session: everything the next request must send is on the page, and nothing
+            // the person did not type is kept on the server (§13.22). The username is **not**
+            // among them (§13.25 step 2): the code step answers for the user of the request that
+            // arrives, and a username that rides in a form is a form that can be posted by
+            // somebody else and answered for them.
+            let mut carry: Vec<(String, String)> = vec![("Session".to_string(), session)];
             for ch in &changes {
                 carry.push((ch.claim.clone(), ch.after.clone().unwrap_or_default()));
             }
@@ -11220,7 +11298,7 @@ fn account_profile_post(
                 page_profile_code(
                     lang,
                     &ProfileCode {
-                        email: &email,
+                        destination: destination.as_deref(),
                         changes: &changes,
                         carry: &carry,
                         resend: &resend,
@@ -11261,8 +11339,9 @@ fn account_profile_post(
     }
 }
 
-/// The code step (§13.22): answer the `EMAIL_OTP` challenge, bind the token it returns to the
-/// address the code went to, write the attributes, and render the outcome.
+/// The code step (§13.22, §13.25 step 2): answer the `EMAIL_OTP` challenge **for the user of the
+/// request that arrived**, bind the token it returns to that same user, write the attributes, and
+/// render the outcome.
 ///
 /// Every check the start made is made **again** here, against the live files, because the two
 /// steps are two requests and the files are edited between requests: the claim list, the roster
@@ -11272,9 +11351,9 @@ fn account_profile_post(
 /// the veto, which `handle_account` has just done for this request on the same terms as the `GET`.
 ///
 /// The order of the calls is the design's: at most two, and the update only after the code has
-/// been accepted **and** the token it returned names this address. A token for another account is
-/// dropped unused, so no `UpdateUserAttributes` ever runs with an access token the pool handed to
-/// somebody else.
+/// been accepted **and** the token it returned names this session's user. A token for another
+/// account is dropped unused, so no `UpdateUserAttributes` ever runs with an access token the pool
+/// handed to somebody else.
 #[allow(clippy::too_many_arguments)]
 fn account_profile_code_post(
     mut req: Request,
@@ -11283,7 +11362,6 @@ fn account_profile_code_post(
     lang: Lang,
     look: AccountLook,
     settings: &Settings,
-    ids: &[String],
     profile_path: &str,
     page: &str,
 ) {
@@ -11319,33 +11397,34 @@ fn account_profile_code_post(
             false,
         );
     };
-    // (2) The address, again, against the header this request carries. A form posted by another
-    // person fails here: their header does not name this address.
-    let email = form.get("email").trim().to_string();
-    if email.is_empty() || !ids.iter().any(|e| *e == norm_email(&email)) {
-        refused(req, prefs, K::AccountProfileNotYourEmail, &[]);
-        return;
-    }
-    // (3) Every posted name is the code, one of the three fields the page carries, or an
-    // editable claim **the settings still list**. A name that is not one is a hand-made form
-    // naming a claim the directory will not accept, and honouring the rest of it would tell the
-    // person their change was written.
+    // (2) The user this request is, as the gate named it on **this** request (§13.25 step 2).
+    // Not a field: a code step that answered the username its form carried would answer for the
+    // user of whoever posted the form, and the person whose session minted it would be the one
+    // whose attributes got written. A request the gate named nobody for answers nothing.
+    let native = match native_user(&req) {
+        Some(u) => u.to_string(),
+        None => {
+            refused(req, prefs, K::AccountProfileNotNative, &[]);
+            return;
+        }
+    };
+    // (3) Every posted name is the code, the `Session` the page carries, or an editable claim
+    // **the settings still list**. A name that is not one is a hand-made form naming a claim the
+    // directory will not accept, and honouring the rest of it would tell the person their change
+    // was written. `email` and `username` are not names any more: a form that posts one of them
+    // is a form from before this step, or a form choosing where a code goes.
     for (name, _) in &form.0 {
-        let known = name == "code"
-            || name == "email"
-            || name == "Session"
-            || name == "username"
-            || editable.iter().any(|c| c == name);
+        let known = name == "code" || name == "Session" || editable.iter().any(|c| c == name);
         if !known {
             refused(req, prefs, K::AccountProfileCannotEdit, &[]);
             return;
         }
     }
-    // (4) The values, the `Session` and the username: bounded, and no control character. The
-    // last two are the pool's own strings riding through a form, so they get the same bound as
-    // anything else a hand-made form can fill.
+    // (4) The values and the `Session`: bounded, and no control character. The last is the pool's
+    // own string riding through a form, so it gets the same bound as anything else a hand-made
+    // form can fill.
     for (name, value) in &form.0 {
-        if name == "code" || name == "email" {
+        if name == "code" {
             continue;
         }
         if value.chars().count() > PROFILE_VALUE_MAX || value.chars().any(|c| c.is_control()) {
@@ -11376,19 +11455,13 @@ fn account_profile_code_post(
         refused(req, prefs, K::AccountProfileExpired, &[]);
         return;
     }
-    let username = form.get("username").trim().to_string();
-    let username = if username.is_empty() {
-        email.clone()
-    } else {
-        username
-    };
     // (6) What the form says to write, recomputed against the claims the settings list **now**
     // and the values the proxy forwarded on this request. A claim that left the settings between
     // the two steps is not written, and a form left with nothing to write is refused rather than
     // answered with a save that changed nothing.
     let mut changes: Vec<ProfileChange> = Vec::new();
     for (name, value) in &form.0 {
-        if name == "code" || name == "email" || name == "Session" || name == "username" {
+        if name == "code" || name == "Session" {
             continue;
         }
         let header = match settings
@@ -11413,12 +11486,8 @@ fn account_profile_code_post(
     }
     // What the code page and the start's form carry, rebuilt from this request so a refusal shows
     // the same summary the person was reading.
-    let mut resend: Vec<(String, String)> = vec![("email".to_string(), email.clone())];
-    let mut carry: Vec<(String, String)> = vec![
-        ("Session".to_string(), session.clone()),
-        ("username".to_string(), username.clone()),
-        ("email".to_string(), email.clone()),
-    ];
+    let mut resend: Vec<(String, String)> = Vec::new();
+    let mut carry: Vec<(String, String)> = vec![("Session".to_string(), session.clone())];
     for ch in &changes {
         let value = ch.after.clone().unwrap_or_default();
         resend.push((ch.claim.clone(), value.clone()));
@@ -11431,20 +11500,20 @@ fn account_profile_code_post(
     // Every page past here carries its own lede, so the bar's menu keeps the identity out.
     prefs.page_lede = true;
     let code_path = format!("{profile_path}/code");
-    match cognito_answer(cfg, settings, &session, &username, &code) {
+    match cognito_answer(cfg, settings, &session, &native, &code) {
         Ok(auth) => {
-            // The token the challenge returned, bound to this address (§13.22). It is decoded,
-            // not verified, and what the checks are for is the accident: a pool that answered the
-            // wrong user, a token from another pool, from another app client, an access token
-            // posing as an ID token, and a token out of its life are each a token this page must
-            // not spend. `id_token_email` is that list.
+            // The token the challenge returned, bound to this session's user (§13.22, §13.25
+            // step 3). It is decoded, not verified, and what the checks are for is the accident:
+            // a pool that answered the wrong user, a token from another pool, from another app
+            // client, an access token posing as an ID token, and a token out of its life are
+            // each a token this page must not spend. `id_token_username` is that list, and the
+            // name it returns is compared to the header, never to an address.
             let id = auth
                 .get("IdToken")
                 .and_then(|v| v.as_str())
                 .unwrap_or_default();
-            let token_email = id_token_email(id, settings);
-            if token_email.as_deref() != Some(norm_email(&email).as_str()) {
-                // The other address is not named on the page: this is a shared surface, and a
+            if id_token_username(id, settings).as_deref() != Some(native.as_str()) {
+                // The other user is not named on the page: this is a shared surface, and a
                 // refusal that says which account the code belonged to is an oracle for anybody
                 // with any account at all.
                 respond_account(
@@ -11511,7 +11580,10 @@ fn account_profile_code_post(
                 page_profile_code(
                     lang,
                     &ProfileCode {
-                        email: &email,
+                        // No destination on this page: the answer that refused the code names a
+                        // new `Session`, not a new address, and the address the first code went to
+                        // is not this page's to repeat.
+                        destination: None,
                         changes: &changes,
                         carry: &carry,
                         resend: &resend,
@@ -17877,11 +17949,30 @@ mod tests {
     /// heading, because a whole section also carries names, emails and ids, and those are the
     /// file's vocabulary, which is never translated.
     fn account_heading(haystack: &str, tag: &str) -> String {
-        let open = format!("<{tag}>");
-        let start = haystack
-            .find(&open)
-            .unwrap_or_else(|| panic!("the page has no <{tag}>: {}", account_readable(haystack)));
+        // The tag **name**, not the bare `<h2>`: an account section's heading carries
+        // `class="tight"` (§13.26 §2), and a search for the closed bracket loses every heading
+        // that has an attribute. The character after the name is what says one tag name is not
+        // the prefix of another.
+        let open = format!("<{tag}");
+        let mut from = 0;
+        let start = loop {
+            let at = from
+                + haystack[from..].find(&open).unwrap_or_else(|| {
+                    panic!("the page has no <{tag}…>: {}", account_readable(haystack))
+                });
+            if matches!(
+                haystack[at + open.len()..].chars().next(),
+                Some('>') | Some(' ') | Some('\n') | Some('\t')
+            ) {
+                break at;
+            }
+            from = at + open.len();
+        };
         let rest = &haystack[start + open.len()..];
+        let open_end = rest
+            .find('>')
+            .unwrap_or_else(|| panic!("<{tag} is never opened: {haystack}"));
+        let rest = &rest[open_end + 1..];
         let end = rest.find(&format!("</{tag}>")).unwrap_or_else(|| {
             panic!(
                 "<{tag}> is opened and never closed: {}",
@@ -18925,15 +19016,17 @@ mod tests {
     }
 
     /// What the page says between its `h1` and its first section: the lede, and nothing the
-    /// header bar already says.
+    /// header bar already says. §13.26 §1 puts the sections in a new order, so the boundary is
+    /// the first `<section`, not one named section: a named one would swallow the three that
+    /// now come before it.
     fn account_lede_zone(body: &str) -> String {
         let after = body
             .split_once("</h1>")
             .unwrap_or_else(|| panic!("no h1: {}", account_readable(body)))
             .1;
         let end = after
-            .find("<section id=\"reach\"")
-            .unwrap_or_else(|| panic!("no reach section: {}", account_readable(body)));
+            .find("<section")
+            .unwrap_or_else(|| panic!("no section: {}", account_readable(body)));
         after[..end].to_string()
     }
 
@@ -19017,8 +19110,8 @@ mod tests {
             ),
             (
                 "profile",
-                "What your sign-in tells these applications about you.",
-                "Cosa il tuo accesso dice di te a queste applicazioni.",
+                PROFILE_SUB,
+                "Cosa il tuo accesso dice di te alle tue applicazioni.",
             ),
         ];
         for (cookie, pick) in [("lang=en", 1), ("lang=it", 2)] {
@@ -24764,17 +24857,33 @@ mod tests {
     /// A `Session` is 20 to 4096 characters (RespondToAuthChallenge's documentation).
     const FAKE_SESSION: &str = "FAKESESSION0123456789abcdefghijklmnop";
 
-    /// The answer a pool gives `USER_AUTH` with `PREFERRED_CHALLENGE=EMAIL_OTP`.
-    fn email_code_challenge() -> Reply {
+    /// The answer a pool gives `USER_AUTH` with `PREFERRED_CHALLENGE=EMAIL_OTP`. §13.25: the
+    /// answer names the user it is answering for (`ChallengeParameters.USERNAME`), and a pool
+    /// that sends one names the masked address the code goes to
+    /// (`CODE_DELIVERY_DESTINATION`, documented as a masked address such as `t***@e***`).
+    fn email_otp(username: &str, destination: Option<&str>) -> Reply {
+        let mut params = serde_json::Map::new();
+        params.insert("USERNAME".to_string(), serde_json::json!(username));
+        if let Some(d) = destination {
+            params.insert(
+                "CODE_DELIVERY_DESTINATION".to_string(),
+                serde_json::json!(d),
+            );
+        }
         reply(
             200,
             &serde_json::json!({
                 "ChallengeName": "EMAIL_OTP",
-                "ChallengeParameters": { "USERNAME": "bob@x.com", "CODE_DELIVERY_DESTINATION": "b***@x.com" },
+                "ChallengeParameters": params,
                 "Session": FAKE_SESSION,
             })
             .to_string(),
         )
+    }
+
+    /// The usual answer: this session's own user, and the masked address the code goes to.
+    fn email_code_challenge() -> Reply {
+        email_otp(FAKE_USERNAME, Some("b***@x.com"))
     }
 
     /// The fake endpoint: a `tiny_http` server on an ephemeral loopback port that records every
@@ -24891,6 +25000,10 @@ mod tests {
         }
     }
 
+    /// The header the gate names a native session's Cognito user in (§13.25). The web binary
+    /// reads it from 5g on; the tests name it here so a spelling change is one edit.
+    use bb_auth_core::NATIVE_USERNAME_HEADER;
+
     /// The settings of a deployment that can run the edit: the pool, the native client, and
     /// eight claims, four of them editable (`given_name`, `family_name`, `birthdate`,
     /// `zoneinfo`) and four never (`phone_number`, `preferred_username`, `address`, and a
@@ -24914,20 +25027,50 @@ mod tests {
 
     /// What nginx forwards for bob on every request: the claims, percent-encoded as the gate
     /// sends them. `zoneinfo` is deliberately not forwarded, so one editable field is empty.
-    const PROFILE_HEADERS: [(&str, &str); 6] = [
+    ///
+    /// §13.25 adds the seventh: `X-Auth-Native-Username`, the Cognito user this session *is*,
+    /// which is the only user the edit may act on. bob's is a pool-style UUID-shaped username.
+    const PROFILE_HEADERS: [(&str, &str); 7] = [
         ("X-Auth-Given-Name", "Bob"),
         ("X-Auth-Family-Name", "Smith%20Jr"),
         ("X-Auth-Birthdate", "1990-01-02"),
         ("X-Auth-Phone-Number", "%2B390000"),
         ("X-Auth-Preferred-Username", "bobby"),
         ("X-Auth-Custom-Department", "Sales"),
+        (NATIVE_USERNAME_HEADER, FAKE_USERNAME),
     ];
 
+    /// The same headers with no `X-Auth-Native-Username`: what a federated session arrives with,
+    /// and what a cookie minted before §13.25's gate change arrives with (§13.25 step 1).
+    fn profile_headers_no_native() -> Vec<(&'static str, &'static str)> {
+        PROFILE_HEADERS
+            .iter()
+            .filter(|(k, _)| *k != NATIVE_USERNAME_HEADER)
+            .copied()
+            .collect()
+    }
+
+    /// The profile headers with `X-Auth-Native-Username` set to `username`: the same session on
+    /// a different Cognito user. The whole list is rebuilt rather than one header appended,
+    /// because a request that carries the header twice is a fixture that asks which one the
+    /// server reads, not a session on a second user.
+    fn profile_headers_for(username: &'static str) -> Vec<(&'static str, &'static str)> {
+        PROFILE_HEADERS
+            .iter()
+            .map(|(k, v)| {
+                if *k == NATIVE_USERNAME_HEADER {
+                    (*k, username)
+                } else {
+                    (*k, *v)
+                }
+            })
+            .collect()
+    }
+
     /// The form exactly as bob's page renders it, nothing edited. The field names are the claim
-    /// names and `email` (assumed from §13.22: "the chosen email and the changed values").
+    /// names, and nothing else: §13.25 removed the address choice, so there is no `email` field.
     fn profile_same() -> Vec<(&'static str, &'static str)> {
         vec![
-            ("email", "bob@x.com"),
             ("given_name", "Bob"),
             ("family_name", "Smith Jr"),
             ("birthdate", "1990-01-02"),
@@ -24984,9 +25127,24 @@ mod tests {
     }
 
     fn profile_get(url: &str, who: &str, extra: &[(&str, &str)]) -> AccountGot {
-        let mut headers: Vec<(&str, &str)> = PROFILE_HEADERS.to_vec();
-        headers.extend_from_slice(extra);
-        account_call_with(url, Some(who), &headers)
+        profile_get_as(url, who, &PROFILE_HEADERS, extra)
+    }
+
+    /// A `GET` that arrives with no `X-Auth-Native-Username`: a federated session, or one whose
+    /// cookie predates §13.25's gate change.
+    fn profile_get_no_native(url: &str, who: &str) -> AccountGot {
+        profile_get_as(url, who, &profile_headers_no_native(), &[])
+    }
+
+    fn profile_get_as(
+        url: &str,
+        who: &str,
+        headers: &[(&str, &str)],
+        extra: &[(&str, &str)],
+    ) -> AccountGot {
+        let mut all: Vec<(&str, &str)> = headers.to_vec();
+        all.extend_from_slice(extra);
+        account_call_with(url, Some(who), &all)
     }
 
     /// A `POST` the way the browser makes it from the form: the profile headers nginx adds, the
@@ -24999,6 +25157,39 @@ mod tests {
         with_secret: bool,
         extra: &[(&str, &str)],
     ) -> AccountGot {
+        profile_post_headers(
+            url,
+            who,
+            fields,
+            sec_fetch,
+            with_secret,
+            &PROFILE_HEADERS,
+            extra,
+        )
+    }
+
+    /// A `POST` that arrives with no `X-Auth-Native-Username` (§13.25 step 1).
+    fn profile_post_no_native(url: &str, who: &str, fields: &[(&str, &str)]) -> AccountGot {
+        profile_post_headers(
+            url,
+            Some(who),
+            fields,
+            "same-origin",
+            true,
+            &profile_headers_no_native(),
+            &[],
+        )
+    }
+
+    fn profile_post_headers(
+        url: &str,
+        who: Option<&str>,
+        fields: &[(&str, &str)],
+        sec_fetch: &str,
+        with_secret: bool,
+        req_headers: &[(&str, &str)],
+        extra: &[(&str, &str)],
+    ) -> AccountGot {
         let mut req = account_client()
             .post(url)
             .header("Sec-Fetch-Site", sec_fetch);
@@ -25008,7 +25199,7 @@ mod tests {
         if let Some(v) = who {
             req = req.header(IDENTITY_HEADER, v);
         }
-        for (k, v) in PROFILE_HEADERS.iter().chain(extra.iter()) {
+        for (k, v) in req_headers.iter().chain(extra.iter()) {
             req = req.header(*k, *v);
         }
         let mut r = req
@@ -25381,126 +25572,652 @@ mod tests {
         cleanup(&path);
     }
 
-    /// One address shows no choice; several show a `select` over the header's own values in its
-    /// order. Both say why the email is not a field.
+    /// The new wording §13.26 §5 gives, spelled out here because this module may not add `K`
+    /// variants, and the coder adds them. Each literal is the designer's sentence, so a key
+    /// added with different words fails the test that names it.
+    const PROFILE_SUB: &str = "What your sign-in tells your applications about you.";
+    const NOT_NATIVE: &str = "If you sign in with a social account such as Google, your profile \
+                             comes from that provider and cannot be changed here. If you sign in \
+                             with your email address, sign out and sign in again to edit it.";
+    /// The same sentence in Italian. It is pinned because this is the one sentence the page
+    /// says to a person who cannot act on it, and a page that speaks one language to a
+    /// person who reads another says nothing.
+    const NOT_NATIVE_IT: &str = "Se accedi con un account social come Google, il tuo profilo \
+                                viene da quel fornitore e non si può cambiare qui. Se accedi \
+                                con il tuo indirizzo email, esci e accedi di nuovo per \
+                                modificarlo.";
+    const CODE_SENT_NO_DEST: &str = "We emailed a code to the address you sign in with.";
+    /// The Italian of the same sentence: the page that shows it is the one a person reads in
+    /// the language they chose, and §13.26 §5 gives both.
+    const CODE_SENT_NO_DEST_IT: &str = "Abbiamo inviato un codice all'indirizzo con cui accedi.";
+    /// `AccountProfileNoCode` loses its social sentence, which §13.26 §5 says is now never true
+    /// of the person reading it: a session that cannot get a code never reaches this page.
+    const NO_CODE: &str = "No email after a minute? Look in your spam folder, or send a new code.";
+    const NO_CODE_IT: &str =
+        "Nessuna email dopo un minuto? Guarda nello spam, o invia un nuovo codice.";
+    const NO_USER: &str = "The sign-in service no longer has the account you signed in with, so \
+                          no code was sent. Sign out and sign in again.";
+    const NOT_YOURS: &str = "The sign-in service answered for a different account, so nothing \
+                            was changed.";
+    /// The Italian of the two sentences §13.26 §5 adds and rewords, spelled here for the same
+    /// reason as the English: the outcome page is read by the person who chose Italian, and the
+    /// design gives both strings, so both are pinned.
+    const NO_USER_IT: &str = "Il servizio di accesso non ha più l'account con cui hai effettuato \
+                             l'accesso, quindi non è stato inviato alcun codice. Esci e accedi \
+                             di nuovo.";
+    const NOT_YOURS_IT: &str = "Il servizio di accesso ha risposto per un altro account, quindi \
+                               non è cambiato nulla.";
+    /// The sentences §13.26 §5 removes, spelled here so a test can say none of them is rendered
+    /// anywhere. They are prefixes, not whole sentences, because the whole of a removed sentence
+    /// is what must not appear in any shape.
+    const GONE_SEND_TO: &str = "Send the code to";
+    const GONE_SOCIAL_NOTE: &str = "If you sign in only with a social account";
+    const GONE_NOT_YOUR_EMAIL: &str = "The code can only go to one of your own email addresses.";
+    const GONE_NO_EMAIL_SIGN_IN: &str = "Your account signs in through a social provider";
+    /// The Italian spelling of the same four, because a removed key is two strings and the
+    /// Italian one is what a `lang=it` page renders.
+    const GONE_SEND_TO_IT: &str = "Invia il codice a";
+    const GONE_SOCIAL_NOTE_IT: &str = "Se accedi solo con un account social";
+    const GONE_NOT_YOUR_EMAIL_IT: &str =
+        "Il codice può andare solo a uno dei tuoi indirizzi email.";
+    const GONE_NO_EMAIL_SIGN_IN_IT: &str = "Il tuo account accede tramite un fornitore social";
+
+    /// Every `p.muted` of a document, as visible text.
+    fn muted_paragraphs(body: &str) -> Vec<String> {
+        elements(body, "<p class=\"muted\"", "</p>")
+            .into_iter()
+            .map(|p| visible_text(&p))
+            .collect()
+    }
+
+    /// §13.26 §1: the two sections a person acts in come first and the two read-only lists
+    /// last, on every path that draws the page. The ids do not change, so no link and no
+    /// selector changes.
     #[test]
-    fn one_email_shows_no_choice() {
-        let fake = FakeCognito::answering(vec![]);
-        let (path, base) = profile_serve("one-email", &fake);
+    fn the_sections_come_in_the_users_order() {
+        let fake = FakeCognito::answering(vec![("InitiateAuth", email_code_challenge())]);
+        let (path, base) = profile_serve("order", &fake);
+        let pages = [
+            ("account", base.clone()),
+            ("profile", format!("{base}profile")),
+            ("keys/new", format!("{base}keys/new")),
+        ];
+        for (name, url) in pages {
+            let g = profile_get(&url, "bob@x.com", &[]);
+            assert_eq!(g.status, 200, "{name}: {}", account_readable(&g.body));
+            let at = |id: &str| {
+                g.body
+                    .find(&format!("id=\"{id}\""))
+                    .unwrap_or_else(|| panic!("{name}: no section id=\"{id}\""))
+            };
+            let seen = [at("profile"), at("keys"), at("groups"), at("reach")];
+            assert!(
+                seen.windows(2).all(|w| w[0] < w[1]),
+                "{name}: the sections must come profile, keys, groups, reach, and their byte \
+                 offsets are {seen:?}"
+            );
+        }
+        cleanup(&path);
+    }
+
+    /// The form names no address at all (§13.26 §4): no `select`, no `email` field, no "Send
+    /// the code to" line and no social note, for one address or several, and the reason the
+    /// email is not a field is a `p.muted` after the fields. The resend form carries no
+    /// `email` either.
+    #[test]
+    fn the_form_names_no_address() {
+        let fake = FakeCognito::answering(vec![("InitiateAuth", email_code_challenge())]);
+        let (path, base) = profile_serve("no-address", &fake);
         let fixed = t(Lang::En, K::AccountProfileEmailFixed);
+        for who in [
+            "bob@x.com",
+            "bob@x.com bob@old.com",
+            "stranger@elsewhere.com",
+        ] {
+            let g = profile_get(&format!("{base}profile"), who, &[]);
+            assert_eq!(g.status, 200, "{who}: {}", account_readable(&g.body));
+            let form = form_posting_to(&account_section(&g.body, "profile"), "/account/profile");
+            assert!(!form.contains("<select"), "{who}: {form}");
+            assert!(!form.contains("name=\"email\""), "{who}: {form}");
+            for gone in [
+                GONE_SEND_TO,
+                GONE_SOCIAL_NOTE,
+                GONE_NOT_YOUR_EMAIL,
+                GONE_NO_EMAIL_SIGN_IN,
+            ] {
+                assert!(
+                    !g.body.contains(gone),
+                    "{who}: `{gone}` is removed: {}",
+                    account_readable(&g.body)
+                );
+            }
+            assert!(
+                muted_paragraphs(&g.body).iter().any(|p| p == fixed),
+                "the reason the email is not a field is a `p.muted`: {}",
+                account_readable(&g.body)
+            );
+            let at = |needle: &str| form.find(needle).unwrap_or(usize::MAX);
+            assert!(
+                at("name=\"zoneinfo\"") < at(fixed),
+                "{who}: the sentence sits after the fields: {form}"
+            );
+        }
 
-        let g = profile_get(&format!("{base}profile"), "bob@x.com", &[]);
-        let form = form_posting_to(&account_section(&g.body, "profile"), "/account/profile");
-        assert!(!form.contains("<select"), "{form}");
-        assert!(form.contains("<code>bob@x.com</code>"), "{form}");
-        assert!(
-            hidden_fields(&form).contains(&("email".to_string(), "bob@x.com".to_string())),
-            "{form}"
+        // Resend posts the changed values only.
+        let g = profile_post(
+            &format!("{base}profile"),
+            "bob@x.com",
+            &profile_with(profile_same(), "given_name", "Robert"),
         );
-        assert!(form.contains(fixed), "{form}");
-
-        let g = profile_get(&format!("{base}profile"), "bob@x.com bob@old.com", &[]);
-        let form = form_posting_to(&account_section(&g.body, "profile"), "/account/profile");
-        let select = element_containing(&form, "<select", "</select>");
-        assert_eq!(attr(&select, "name").as_deref(), Some("email"), "{select}");
-        let options = duration_options(&select);
-        assert_eq!(
-            options.iter().map(|o| o.0.as_str()).collect::<Vec<_>>(),
-            ["bob@x.com", "bob@old.com"],
-            "the header's order"
-        );
+        assert_eq!(g.status, 200, "{}", account_readable(&g.body));
+        let resend = form_posting_to(&g.body, "/account/profile");
+        assert!(!resend.contains("name=\"email\""), "{resend}");
         assert!(
-            options[0].2 && !options[1].2,
-            "the first is selected: {options:?}"
-        );
-        assert!(form.contains(fixed), "{form}");
-        assert!(
-            form.contains(t(Lang::En, K::AccountProfileSendTo)),
-            "{form}"
+            hidden_fields(&resend).contains(&("given_name".to_string(), "Robert".to_string())),
+            "{resend}"
         );
         cleanup(&path);
     }
 
-    /// The code goes to one of the caller's own addresses, and the chosen one is what Cognito
-    /// is asked about.
+    /// §13.26 §7: the four sentences the design removes are rendered nowhere, on any page of the
+    /// flow, in either language. Each page named here is one that used to carry one of them: the
+    /// form named an address and carried the social note, the address refusal named an address,
+    /// and the `UserNotFoundException` row said the account signs in through a social provider.
+    /// The check runs on `account_readable`, because every page inlines the stylesheets.
     #[test]
-    fn the_code_goes_only_to_the_callers_own_emails() {
+    fn the_removed_sentences_are_rendered_nowhere() {
+        let gone: [(&str, &str); 4] = [
+            (GONE_SEND_TO, GONE_SEND_TO_IT),
+            (GONE_SOCIAL_NOTE, GONE_SOCIAL_NOTE_IT),
+            (GONE_NOT_YOUR_EMAIL, GONE_NOT_YOUR_EMAIL_IT),
+            (GONE_NO_EMAIL_SIGN_IN, GONE_NO_EMAIL_SIGN_IN_IT),
+        ];
+        let check = |what: &str, body: &str| {
+            let text = account_readable(body);
+            for (en, it) in gone {
+                for s in [en, it] {
+                    assert!(!text.contains(s), "{what}: `{s}` is a removed sentence");
+                }
+            }
+        };
+        let edit = profile_with(profile_same(), "given_name", "Robert");
+
+        // The wired deployment: the page, the form for one address, several and none of the
+        // caller's own, the code page, and the refusal of a posted `email`.
         let fake = FakeCognito::answering(vec![("InitiateAuth", email_code_challenge())]);
-        let (path, base) = profile_serve("own-emails", &fake);
+        let (path, base) = profile_serve("gone", &fake);
+        let url = format!("{base}profile");
+        for cookie in ["lang=en", "lang=it"] {
+            check(
+                "account page",
+                &profile_get(&base, "bob@x.com", &[("Cookie", cookie)]).body,
+            );
+            for who in ["bob@x.com", "bob@x.com bob@old.com", "sam@elsewhere.com"] {
+                check(
+                    "profile page",
+                    &profile_get(&url, who, &[("Cookie", cookie)]).body,
+                );
+            }
+            check(
+                "code page",
+                &profile_post_as(
+                    &url,
+                    Some("bob@x.com"),
+                    &edit,
+                    "same-origin",
+                    true,
+                    &[("Cookie", cookie)],
+                )
+                .body,
+            );
+            check(
+                "a posted email",
+                &profile_post(
+                    &url,
+                    "bob@x.com",
+                    &edit
+                        .clone()
+                        .into_iter()
+                        .chain([("email", "bob@x.com")])
+                        .collect::<Vec<_>>(),
+                )
+                .body,
+            );
+        }
+        cleanup(&path);
+
+        // The two refusals that used to name a social sign-in or an address.
+        let fake = FakeCognito::answering(vec![(
+            "InitiateAuth",
+            reply(
+                400,
+                r#"{"__type":"com.amazonaws.cognito#UserNotFoundException","message":"gone"}"#,
+            ),
+        )]);
+        let (path, base) = profile_serve("gone-nouser", &fake);
+        for cookie in ["lang=en", "lang=it"] {
+            check(
+                "the user is gone",
+                &profile_post_as(
+                    &format!("{base}profile"),
+                    Some("bob@x.com"),
+                    &edit,
+                    "same-origin",
+                    true,
+                    &[("Cookie", cookie)],
+                )
+                .body,
+            );
+        }
+        cleanup(&path);
+
+        // A session with nothing to edit: the sentence it gets is the new one, not the old note.
+        let fake = FakeCognito::answering(vec![("InitiateAuth", email_code_challenge())]);
+        let (path, base) = profile_serve("gone-native", &fake);
+        for cookie in ["lang=en", "lang=it"] {
+            check(
+                "no native username",
+                &profile_get_as(
+                    &base,
+                    "bob@x.com",
+                    &profile_headers_no_native(),
+                    &[("Cookie", cookie)],
+                )
+                .body,
+            );
+            check(
+                "no native username, posted",
+                &profile_post_headers(
+                    &format!("{base}profile"),
+                    Some("bob@x.com"),
+                    &edit,
+                    "same-origin",
+                    true,
+                    &profile_headers_no_native(),
+                    &[("Cookie", cookie)],
+                )
+                .body,
+            );
+        }
+        cleanup(&path);
+    }
+
+    /// §13.25 step 1, shown §13.26 §3: a session with no `X-Auth-Native-Username` (a federated
+    /// sign-in, or a cookie minted before the gate change) is offered nothing. The read-only
+    /// panel shows its claims and one sentence where the pill would be; `GET profile` is the
+    /// same page, and both `POST`s refuse with that sentence and no Cognito call. A deployment
+    /// that does not wire the edit says nothing about editing.
+    #[test]
+    fn a_session_with_no_native_username_gets_no_form_and_no_code() {
+        let fake = FakeCognito::answering(vec![("InitiateAuth", email_code_challenge())]);
+        let (path, base) = profile_serve("no-native", &fake);
+        for who in ["bob@x.com", "stranger@elsewhere.com"] {
+            let g = profile_get_no_native(&base, who);
+            assert_eq!(g.status, 200, "{who}: {}", account_readable(&g.body));
+            let panel = account_section(&g.body, "profile");
+            assert!(
+                anchors_to(&panel, "/account/profile").is_empty(),
+                "{who}: no Edit pill: {panel}"
+            );
+            assert_eq!(
+                panel.matches(NOT_NATIVE).count(),
+                1,
+                "{who}: exactly one sentence, inside #profile: {panel}"
+            );
+            assert!(
+                muted_paragraphs(&panel).iter().any(|p| p == NOT_NATIVE),
+                "{who}: it is a `p.muted`: {panel}"
+            );
+            // The claims are still read, and the form is not there.
+            assert!(
+                panel.contains("Bob"),
+                "{who}: the panel still shows the claims: {panel}"
+            );
+            assert!(
+                !panel.contains("name=\"given_name\""),
+                "{who}: no form: {panel}"
+            );
+
+            let g = profile_get_no_native(&format!("{base}profile"), who);
+            assert_eq!(g.status, 200, "{who}: GET profile is the same page");
+            assert!(
+                g.body.contains(NOT_NATIVE),
+                "{who}: {}",
+                account_readable(&g.body)
+            );
+            assert!(
+                !g.body.contains("name=\"given_name\""),
+                "{who}: no form on GET profile: {}",
+                account_readable(&g.body)
+            );
+
+            let edit = profile_with(profile_same(), "given_name", "Robert");
+            let g = profile_post_no_native(&format!("{base}profile"), who, &edit);
+            assert_refused_before_cognito(&g, 400, &fake, "the start POST");
+            assert!(
+                g.body.contains(NOT_NATIVE),
+                "{who}: the start refusal names the same sentence: {}",
+                account_readable(&g.body)
+            );
+            assert!(
+                !g.body.contains("class=\"err\""),
+                "{who}: the person did nothing wrong, so this is not an error: {}",
+                account_readable(&g.body)
+            );
+            let g = profile_post_no_native(
+                &format!("{base}profile/code"),
+                who,
+                &[("code", "123456"), ("Session", FAKE_SESSION)],
+            );
+            assert_refused_before_cognito(&g, 400, &fake, "the code POST");
+            assert!(
+                g.body.contains(NOT_NATIVE),
+                "{who}: the code refusal names the same sentence: {}",
+                account_readable(&g.body)
+            );
+        }
+
+        // The sentence is translated: this is the one sentence the page says to a person who
+        // cannot act on it, so it has to speak the reader's language.
+        let g = profile_get_as(
+            &base,
+            "bob@x.com",
+            &profile_headers_no_native(),
+            &[("Cookie", "lang=it")],
+        );
+        assert_eq!(g.status, 200, "{}", account_readable(&g.body));
+        let panel = account_section(&g.body, "profile");
+        assert!(
+            panel.contains(NOT_NATIVE_IT),
+            "the Italian page says it in Italian: {panel}"
+        );
+        assert!(
+            !panel.contains(NOT_NATIVE),
+            "an Italian page carries no English sentence: {panel}"
+        );
+
+        // A deployment that does not wire the edit says nothing about editing.
+        let unwired = profile_settings("", PROFILE_POOL, PROFILE_CLAIMS);
+        let (path2, base2) = profile_boot("no-native-unwired", &unwired, None, None, 1);
+        let g = profile_get_no_native(&base2, "bob@x.com");
+        assert_eq!(g.status, 200, "{}", account_readable(&g.body));
+        assert!(
+            !g.body.contains(NOT_NATIVE),
+            "no sentence about editing where there is no edit to offer: {}",
+            account_readable(&g.body)
+        );
+        cleanup(&path);
+        cleanup(&path2);
+    }
+
+    /// §13.25 step 2: the code is asked for the session's own Cognito user, the header's value,
+    /// and the request names no address at all. A stranger's own header names their own user.
+    #[test]
+    fn the_code_is_asked_for_the_sessions_own_username() {
+        let fake = FakeCognito::answering(vec![("InitiateAuth", email_code_challenge())]);
+        let (path, base) = profile_serve("own-username", &fake);
         let url = format!("{base}profile");
 
-        let g = profile_post_as(
+        let g = profile_post(
             &url,
-            Some("bob@x.com BOB@old.com"),
-            &profile_with(
-                profile_with(profile_same(), "email", "bob@old.com"),
-                "given_name",
-                "Robert",
-            ),
+            "bob@x.com",
+            &profile_with(profile_same(), "given_name", "Robert"),
+        );
+        assert_eq!(g.status, 200, "{}", account_readable(&g.body));
+        let calls = fake.calls();
+        assert_eq!(calls.len(), 1, "{calls:?}");
+        assert_eq!(calls[0].body["AuthFlow"], "USER_AUTH");
+        assert_eq!(calls[0].body["AuthParameters"]["USERNAME"], FAKE_USERNAME);
+        assert_eq!(
+            calls[0].body["AuthParameters"]["PREFERRED_CHALLENGE"],
+            "EMAIL_OTP"
+        );
+        assert!(
+            !calls[0].body.to_string().contains("bob@x.com"),
+            "the call names the username, never an address: {}",
+            calls[0].body
+        );
+
+        // A stranger with no roster row, on their own username. The pool is scripted with
+        // *their* username in the challenge: a reply naming bob would be the pool answering
+        // for somebody else, which is the refusal the next test pins, not this one.
+        let sam = "cog-sam-0002";
+        let fake = FakeCognito::answering(vec![(
+            "InitiateAuth",
+            email_otp(sam, Some("s***@e***.com")),
+        )]);
+        let (path2, base2) = profile_serve("own-username-stranger", &fake);
+        let g = profile_post_headers(
+            &format!("{base2}profile"),
+            Some("sam@elsewhere.com"),
+            &profile_with(profile_same(), "given_name", "Samuel"),
             "same-origin",
             true,
+            &profile_headers_for(sam),
             &[],
         );
         assert_eq!(g.status, 200, "{}", account_readable(&g.body));
         let calls = fake.calls();
         assert_eq!(calls.len(), 1, "{calls:?}");
-        assert_eq!(calls[0].body["AuthParameters"]["USERNAME"], "bob@old.com");
-
-        // A stranger edits their own profile too (user decision 2026-11-25).
-        let g = profile_post(
-            &url,
-            "stranger@elsewhere.com",
-            &profile_with(
-                profile_with(profile_same(), "email", "stranger@elsewhere.com"),
-                "given_name",
-                "Sam",
-            ),
+        assert_eq!(calls[0].body["AuthParameters"]["USERNAME"], sam);
+        assert!(
+            !calls[0].body.to_string().contains("sam@elsewhere.com"),
+            "the call names the username, never an address: {}",
+            calls[0].body
         );
-        assert_eq!(g.status, 200, "{}", account_readable(&g.body));
-        assert_eq!(fake.calls().len(), 2);
+        cleanup(&path2);
         cleanup(&path);
     }
 
-    /// An email that is not among the header's own values is refused with no call.
+    /// A posted `email` is a non-editable name like any other (§13.26 §4): refused before
+    /// Cognito, naming the field.
     #[test]
-    fn an_email_not_among_the_callers_is_refused_before_cognito() {
+    fn a_posted_email_field_is_refused_before_cognito() {
         let fake = FakeCognito::answering(vec![("InitiateAuth", email_code_challenge())]);
-        let (path, base) = profile_serve("foreign-email", &fake);
+        let (path, base) = profile_serve("posted-email", &fake);
         let url = format!("{base}profile");
-        for email in ["carol@x.com", "", "bob@x.com carol@x.com"] {
+        for email in ["bob@x.com", "carol@x.com", ""] {
             let g = profile_post(
                 &url,
                 "bob@x.com",
-                &profile_with(
-                    profile_with(profile_same(), "email", email),
-                    "given_name",
-                    "Robert",
-                ),
+                &profile_with(profile_same(), "given_name", "Robert")
+                    .into_iter()
+                    .chain([("email", email)])
+                    .collect::<Vec<_>>(),
             );
             assert_refused_before_cognito(&g, 400, &fake, &format!("email {email:?}"));
             assert!(
-                g.body.contains(t(Lang::En, K::AccountProfileNotYourEmail)),
-                "the sentence says so: {}",
+                visible_text(&g.body).contains(&format!(
+                    "email: {}",
+                    t(Lang::En, K::AccountProfileCannotEdit)
+                )),
+                "email: the sentence names the field: {}",
                 account_readable(&g.body)
             );
         }
-        // `bob@old.com` is bob's own, but only when the header carried it: this request's did not.
-        let g = profile_post(
-            &url,
-            "bob@x.com",
-            &profile_with(
-                profile_with(profile_same(), "email", "bob@old.com"),
-                "given_name",
-                "Robert",
-            ),
-        );
-        assert_refused_before_cognito(
-            &g,
-            400,
-            &fake,
-            "an address of the row the header did not carry",
-        );
         cleanup(&path);
+    }
+
+    /// §13.25 step 2: a `ChallengeParameters.USERNAME` that is present and is not the header's
+    /// value is a refusal, and nothing further is sent. The pool answered for somebody else.
+    #[test]
+    fn a_challenge_for_another_username_is_refused() {
+        let twin = "0f8fad5b-d9cb-469f-a165-70867728950e";
+        // The `InitiateAuth` reply is the whole case, so the fake is scripted here rather than
+        // through `flow_with`, whose two replies are the code step and the update.
+        let fake = FakeCognito::answering(vec![
+            ("InitiateAuth", email_otp(twin, Some("b***@x.com"))),
+            ("UpdateUserAttributes", ok_empty()),
+        ]);
+        let (path, base) = profile_serve("c5-twin-challenge", &fake);
+        let g = profile_post(
+            &format!("{base}profile"),
+            "bob@x.com",
+            &profile_with(profile_same(), "given_name", "Robert"),
+        );
+        assert_eq!(g.status, 403, "{}", account_readable(&g.body));
+        assert_eq!(
+            fake.actions(),
+            ["InitiateAuth"],
+            "nothing further is sent to the pool"
+        );
+        assert_eq!(
+            account_heading(&g.body, "h1"),
+            t(Lang::En, K::AccountProfileNotSavedTitle),
+            "{}",
+            account_readable(&g.body)
+        );
+        assert!(lede_of(&g).contains(NOT_YOURS), "{}", lede_of(&g));
+        assert!(!g.body.contains(twin), "the other user is not named");
+        cleanup(&path);
+    }
+
+    /// The regression of rpi-01 (§13.25): the code is answered with a token for the **native
+    /// twin** of the session's email, a different Cognito user. The bind is the username, so
+    /// this is a refusal, and the twin is never written.
+    #[test]
+    fn the_rpi01_twin_is_never_written() {
+        let twin = "0f8fad5b-d9cb-469f-a165-70867728950e";
+        let f = flow_with(
+            "c5-rpi01-twin",
+            signed_in(&token_from("bob@x.com", twin)),
+            ok_empty(),
+        );
+        let g = start_bob(&f);
+        let g = post_code(&f, "bob@x.com", &code_fields(&g, "123456"));
+        assert_eq!(g.status, 403, "{}", account_readable(&g.body));
+        assert_eq!(
+            f.fake.actions(),
+            ["InitiateAuth", "RespondToAuthChallenge"],
+            "no `UpdateUserAttributes`: the twin's attributes stand"
+        );
+        assert_eq!(
+            account_heading(&g.body, "h1"),
+            t(Lang::En, K::AccountProfileNotSavedTitle),
+            "{}",
+            account_readable(&g.body)
+        );
+        assert!(lede_of(&g).contains(NOT_YOURS), "{}", lede_of(&g));
+        assert!(!g.body.contains(twin), "the twin is not named");
+        cleanup(&f.path);
+    }
+
+    /// §13.25 step 3: the code step answers the challenge with the username the **header**
+    /// names on that request, not a hidden field. A header that changed between the steps is
+    /// the one used, so the bind fails and nothing is written.
+    #[test]
+    fn the_code_step_uses_the_header_not_a_form_field() {
+        let other = "0f8fad5b-d9cb-469f-a165-70867728950e";
+        let f = flow("c5-code-header");
+        let g = start_bob(&f);
+        let form = form_posting_to(&g.body, "/account/profile/code");
+        assert!(
+            !form.contains("name=\"username\""),
+            "no username rides in the form: {form}"
+        );
+        let fields = code_fields(&g, "123456");
+        f.fake.calls.lock().unwrap().clear();
+        let g = post_code_with(&f, "bob@x.com", &fields, &[(NATIVE_USERNAME_HEADER, other)]);
+        assert_eq!(g.status, 403, "{}", account_readable(&g.body));
+        let calls = f.fake.calls();
+        assert_eq!(calls.len(), 1, "one call, and no update: {calls:?}");
+        assert_eq!(
+            calls[0].body["ChallengeResponses"]["USERNAME"], other,
+            "the code step answers with the header it arrived on"
+        );
+        assert_eq!(
+            calls[0].target,
+            format!("{CALL_PREFIX}RespondToAuthChallenge")
+        );
+        cleanup(&f.path);
+    }
+
+    /// §13.26 §4: the code page names Cognito's masked destination, escaped as every value is.
+    /// A destination that is absent, empty, over 254 characters, or holds a space, is not shown
+    /// at all, and the lede is the whole generic sentence.
+    #[test]
+    fn the_code_page_names_cognitos_masked_destination() {
+        let shown = "e***@o***.com";
+        for (name, destination, want) in [
+            ("masked", Some(shown), true),
+            ("escaped", Some("<b>&x</b>"), true),
+            ("absent", None, false),
+            ("empty", Some(""), false),
+            ("space", Some("e***@o***. com"), false),
+            ("long", Some(&"a".repeat(255)), false),
+        ] {
+            let fake = FakeCognito::answering(vec![(
+                "InitiateAuth",
+                email_otp(FAKE_USERNAME, destination),
+            )]);
+            let (path, base) = profile_serve(&format!("dest-{name}"), &fake);
+            let g = profile_post(
+                &format!("{base}profile"),
+                "bob@x.com",
+                &profile_with(profile_same(), "given_name", "Robert"),
+            );
+            assert_eq!(g.status, 200, "{name}: {}", account_readable(&g.body));
+            let lede = element_containing(&g.body, "class=\"lede\"", "</p>");
+            if want {
+                let escaped = destination
+                    .unwrap()
+                    .replace('&', "&amp;")
+                    .replace('<', "&lt;")
+                    .replace('>', "&gt;");
+                assert!(
+                    lede.contains(&format!("<code>{escaped}</code>")),
+                    "{name}: the destination is in `code`: {lede}"
+                );
+                assert!(
+                    lede.contains(t(Lang::En, K::AccountProfileCodeSent)),
+                    "{name}: {lede}"
+                );
+                assert!(
+                    visible_text(&lede).contains(t(Lang::En, K::AccountProfileCodeLasts)),
+                    "{name}: {lede}"
+                );
+            } else {
+                assert!(
+                    !lede.contains("<code>"),
+                    "{name}: nothing to name, so no `code`: {lede}"
+                );
+                assert!(lede.contains(CODE_SENT_NO_DEST), "{name}: {lede}");
+                assert!(
+                    visible_text(&lede).contains(t(Lang::En, K::AccountProfileCodeLasts)),
+                    "{name}: {lede}"
+                );
+                // The same page in the other language the estate speaks: the generic sentence is
+                // one key, so its Italian is what this person reads.
+                let it_g = profile_post_as(
+                    &format!("{base}profile"),
+                    Some("bob@x.com"),
+                    &profile_with(profile_same(), "given_name", "Robert"),
+                    "same-origin",
+                    true,
+                    &[("Cookie", "lang=it")],
+                );
+                assert_eq!(
+                    it_g.status,
+                    200,
+                    "{name} (lang=it): {}",
+                    account_readable(&it_g.body)
+                );
+                let it_lede = element_containing(&it_g.body, "class=\"lede\"", "</p>");
+                assert!(
+                    !it_lede.contains("<code>"),
+                    "{name} (lang=it): nothing to name, so no `code`: {it_lede}"
+                );
+                assert!(
+                    it_lede.contains(CODE_SENT_NO_DEST_IT),
+                    "{name} (lang=it): {it_lede}"
+                );
+                assert!(
+                    visible_text(&it_lede).contains(t(Lang::It, K::AccountProfileCodeLasts)),
+                    "{name} (lang=it): {it_lede}"
+                );
+            }
+            cleanup(&path);
+        }
     }
 
     /// An attribute outside the allowlist (configured but not editable, or not configured at
@@ -25622,14 +26339,7 @@ mod tests {
         let url = format!("{base}profile");
         let edit = profile_with(profile_same(), "given_name", "Robert");
 
-        let g = profile_post_as(
-            &url,
-            Some("spammer@x.com"),
-            &profile_with(profile_same(), "email", "spammer@x.com"),
-            "same-origin",
-            true,
-            &[],
-        );
+        let g = profile_post_as(&url, Some("spammer@x.com"), &edit, "same-origin", true, &[]);
         assert_refused_before_cognito(&g, 403, &fake, "a denied caller");
         let g = profile_get(&url, "spammer@x.com", &[]);
         assert_eq!(g.status, 403, "a denied caller is not shown the form");
@@ -25649,7 +26359,8 @@ mod tests {
     }
 
     /// One `InitiateAuth`: the target header, the content type, `USER_AUTH`, the native client
-    /// from the settings, the chosen email and `EMAIL_OTP`, and nothing secret beside them.
+    /// from the settings, the session's own username and `EMAIL_OTP`, and nothing secret beside
+    /// them. §13.26: the username, not an address, so the body names no email at all.
     #[test]
     fn starting_an_edit_asks_cognito_for_an_email_code() {
         let fake = FakeCognito::answering(vec![("InitiateAuth", email_code_challenge())]);
@@ -25667,8 +26378,13 @@ mod tests {
         assert_eq!(c.content_type, "application/x-amz-json-1.1");
         assert_eq!(c.body["AuthFlow"], "USER_AUTH", "{}", c.body);
         assert_eq!(c.body["ClientId"], "email-client");
-        assert_eq!(c.body["AuthParameters"]["USERNAME"], "bob@x.com");
+        assert_eq!(c.body["AuthParameters"]["USERNAME"], FAKE_USERNAME);
         assert_eq!(c.body["AuthParameters"]["PREFERRED_CHALLENGE"], "EMAIL_OTP");
+        assert!(
+            !c.body.to_string().contains('@'),
+            "the call names a username, never an address: {}",
+            c.body
+        );
         assert!(
             c.body.get("ClientSecret").is_none()
                 && c.body["AuthParameters"].get("SECRET_HASH").is_none()
@@ -25683,9 +26399,9 @@ mod tests {
         let fake = FakeCognito::answering(vec![("InitiateAuth", email_code_challenge())]);
         let (path, base) = profile_serve("code-page", &fake);
         let url = format!("{base}profile");
-        for (lang, cookie, lasts) in [
-            (Lang::En, "lang=en", "It works for 3 minutes."),
-            (Lang::It, "lang=it", "Vale per 3 minuti."),
+        for (lang, cookie, lasts, no_code) in [
+            (Lang::En, "lang=en", "It works for 3 minutes.", NO_CODE),
+            (Lang::It, "lang=it", "Vale per 3 minuti.", NO_CODE_IT),
         ] {
             let g = profile_post_as(
                 &url,
@@ -25706,8 +26422,20 @@ mod tests {
                 t(lang, K::AccountProfileCodeTitle)
             );
             let lede = element_containing(&g.body, "class=\"lede\"", "</p>");
-            assert!(lede.contains("<code>bob@x.com</code>"), "{lede}");
+            assert!(lede.contains("<code>b***@x.com</code>"), "{lede}");
+            assert!(
+                !lede.contains("bob@x.com"),
+                "the masked destination, never the address: {lede}"
+            );
             assert!(visible_text(&lede).contains(lasts), "{lede}");
+
+            // The "no code arrived" hint says nothing about a social account: a session that
+            // cannot get a code never reaches this page (§13.26 §5).
+            assert!(
+                muted_paragraphs(&g.body).iter().any(|p| p == no_code),
+                "{lang:?}: the hint is the whole sentence: {}",
+                account_readable(&g.body)
+            );
 
             let form = form_posting_to(&g.body, "/account/profile/code");
             assert!(
@@ -25744,9 +26472,9 @@ mod tests {
         cleanup(&path);
     }
 
-    /// Resend is starting over: a form of its own that re-posts the email and the changed
-    /// values to the start, never the Session; submitting it asks Cognito again and the new page
-    /// lists the same changes.
+    /// Resend is starting over: a form of its own that re-posts the changed values to the start,
+    /// never the Session and never an address (§13.26 §4); submitting it asks Cognito again and
+    /// the new page lists the same changes.
     #[test]
     fn resend_starts_over_with_the_same_values() {
         let fake = FakeCognito::answering(vec![("InitiateAuth", email_code_challenge())]);
@@ -25769,8 +26497,8 @@ mod tests {
         );
         let hidden = hidden_fields(&resend);
         assert!(
-            hidden.contains(&("email".into(), "bob@x.com".into())),
-            "{hidden:?}"
+            hidden.iter().all(|(k, _)| k != "email"),
+            "no address rides in the resend form: {hidden:?}"
         );
         assert!(
             hidden.contains(&("given_name".into(), "Robert".into())),
@@ -25794,21 +26522,26 @@ mod tests {
 
     /// What a person is told for each way the start can end, §13.23 §4's rows that 5b reaches:
     /// the `h1`, the sentence, the status, and whether "Send a new code" is offered. Cognito's
-    /// own `message` text and the tokens never reach the page.
+    /// own `message` text and the tokens never reach the page. The lede is spelled as text, not
+    /// as a `K`, because §13.26 §5 changes one of them and adds one, and each is asked in both
+    /// languages: a page that answers one language to a person who reads the other says nothing.
     #[test]
     fn each_start_outcome_states_its_result_in_the_h1() {
-        let not_saved = t(Lang::En, K::AccountProfileNotSavedTitle);
         let tokens = r#"{"AuthenticationResult":{"IdToken":"FAKEID.x.y","AccessToken":"FAKEACCESS","RefreshToken":"FAKEREFRESH"}}"#;
         let other = r#"{"ChallengeName":"PASSWORD_VERIFIER","ChallengeParameters":{},"Session":"FAKESESSION0123456789abcdefghijklmnop"}"#;
-        let cases: Vec<(&str, Reply, u16, K)> = vec![
+        let cases: Vec<(&str, Reply, u16, &str, &str)> = vec![
             (
-                "not-found",
+                // §13.26 §4: the request names the pool's user by username, so a
+                // `UserNotFoundException` now means the session's own user is gone from the
+                // pool, which is a different sentence from the social one it used to mean.
+                "user-not-found",
                 reply(
                     400,
                     r#"{"__type":"com.amazonaws.cognito#UserNotFoundException","message":"secret-detail bob@x.com"}"#,
                 ),
                 400,
-                K::AccountProfileNoEmailSignIn,
+                NO_USER,
+                NO_USER_IT,
             ),
             (
                 "too-many",
@@ -25817,7 +26550,8 @@ mod tests {
                     r#"{"__type":"TooManyRequestsException","message":"secret-detail"}"#,
                 ),
                 502,
-                K::AccountProfileTooMany,
+                t(Lang::En, K::AccountProfileTooMany),
+                t(Lang::It, K::AccountProfileTooMany),
             ),
             (
                 "other-error",
@@ -25826,60 +26560,88 @@ mod tests {
                     r#"{"__type":"InternalErrorException","message":"secret-detail"}"#,
                 ),
                 502,
-                K::AccountProfileRefused,
+                t(Lang::En, K::AccountProfileRefused),
+                t(Lang::It, K::AccountProfileRefused),
             ),
             (
                 "tokens-at-once",
                 reply(200, tokens),
                 502,
-                K::AccountProfileRefused,
+                t(Lang::En, K::AccountProfileRefused),
+                t(Lang::It, K::AccountProfileRefused),
             ),
             (
                 "other-challenge",
                 reply(200, other),
                 502,
-                K::AccountProfileRefused,
+                t(Lang::En, K::AccountProfileRefused),
+                t(Lang::It, K::AccountProfileRefused),
             ),
             (
                 "not-json",
                 reply(200, "<html>nope</html>"),
                 502,
-                K::AccountProfileRefused,
+                t(Lang::En, K::AccountProfileRefused),
+                t(Lang::It, K::AccountProfileRefused),
+            ),
+            (
+                // §13.25 step 2: the pool answered for a **different** user, so the code page is
+                // never drawn. One outcome with a token for that user, one sentence.
+                "challenge-other-username",
+                email_otp("0f8fad5b-d9cb-469f-a165-70867728950e", Some("b***@x.com")),
+                403,
+                NOT_YOURS,
+                NOT_YOURS_IT,
             ),
         ];
-        for (name, answer, status, lede_key) in cases {
+        for (name, answer, status, en, it) in cases {
             let fake = FakeCognito::answering(vec![("InitiateAuth", answer)]);
             let (path, base) = profile_serve(&format!("outcome-{name}"), &fake);
-            let g = profile_post(
-                &format!("{base}profile"),
-                "bob@x.com",
-                &profile_with(profile_same(), "given_name", "Robert"),
-            );
-            assert_eq!(g.status, status, "{name}: {}", account_readable(&g.body));
-            assert_eq!(account_heading(&g.body, "h1"), not_saved, "{name}");
-            let lede = visible_text(&element_containing(&g.body, "class=\"lede\"", "</p>"));
-            assert_eq!(lede, t(Lang::En, lede_key), "{name}");
-            assert!(
-                !anchors_to(&g.body, "href=\"/account/\"").is_empty(),
-                "{name}: a way back"
-            );
-            assert!(
-                !g.body.contains(t(Lang::En, K::AccountProfileSendNew)),
-                "{name}: nothing to resend"
-            );
-            for secret in [
-                "secret-detail",
-                "FAKEACCESS",
-                "FAKEID",
-                "FAKEREFRESH",
-                FAKE_SESSION,
-            ] {
-                assert!(
-                    !everything(&g).contains(secret),
-                    "{name}: {secret} reached the response"
+            for (lang, cookie, lede_text) in [(Lang::En, "lang=en", en), (Lang::It, "lang=it", it)]
+            {
+                let g = profile_post_as(
+                    &format!("{base}profile"),
+                    Some("bob@x.com"),
+                    &profile_with(profile_same(), "given_name", "Robert"),
+                    "same-origin",
+                    true,
+                    &[("Cookie", cookie)],
                 );
+                assert_eq!(
+                    g.status,
+                    status,
+                    "{name} ({cookie}): {}",
+                    account_readable(&g.body)
+                );
+                assert_eq!(
+                    account_heading(&g.body, "h1"),
+                    t(lang, K::AccountProfileNotSavedTitle),
+                    "{name} ({cookie})"
+                );
+                let lede = visible_text(&element_containing(&g.body, "class=\"lede\"", "</p>"));
+                assert_eq!(lede, lede_text, "{name} ({cookie})");
+                assert!(
+                    !anchors_to(&g.body, "href=\"/account/\"").is_empty(),
+                    "{name} ({cookie}): a way back"
+                );
+                assert!(
+                    !g.body.contains(t(lang, K::AccountProfileSendNew)),
+                    "{name} ({cookie}): nothing to resend"
+                );
+                for secret in [
+                    "secret-detail",
+                    "FAKEACCESS",
+                    "FAKEID",
+                    "FAKEREFRESH",
+                    FAKE_SESSION,
+                ] {
+                    assert!(
+                        !everything(&g).contains(secret),
+                        "{name} ({cookie}): {secret} reached the response"
+                    );
+                }
             }
-            assert_eq!(fake.calls().len(), 1, "{name}: one call, no retry");
+            assert_eq!(fake.calls().len(), 2, "{name}: one call each, no retry");
             cleanup(&path);
         }
     }
@@ -25993,20 +26755,18 @@ mod tests {
     const FAKE_USERNAME: &str = "cog-bob-0001";
     const CALL_PREFIX: &str = "AWSCognitoIdentityProviderService.";
 
+    /// The 5c flow's answer: the challenge names this session's own user, and carries no
+    /// masked address, which is the case the code page's generic sentence is for.
     fn challenge_for_username() -> Reply {
-        reply(
-            200,
-            &serde_json::json!({
-                "ChallengeName": "EMAIL_OTP",
-                "ChallengeParameters": { "USERNAME": FAKE_USERNAME },
-                "Session": FAKE_SESSION,
-            })
-            .to_string(),
-        )
+        email_otp(FAKE_USERNAME, None)
     }
 
     /// An ID token the way the pool mints one: `header.payload.signature`, unsigned here
     /// because the design does not verify it (§13.22). `exp_in` is seconds from now.
+    ///
+    /// §13.25: the payload carries `cognito:username`, the pool's own name for the user, which
+    /// is what the code step binds the returned token by.
+    #[allow(clippy::too_many_arguments)]
     fn id_token(
         email: &str,
         aud: &str,
@@ -26014,6 +26774,7 @@ mod tests {
         token_use: &str,
         exp_in: i64,
         verified: serde_json::Value,
+        username: &str,
     ) -> String {
         use base64::Engine;
         let enc = |v: serde_json::Value| {
@@ -26023,17 +26784,30 @@ mod tests {
             .duration_since(std::time::UNIX_EPOCH)
             .unwrap()
             .as_secs() as i64;
+        let mut payload = serde_json::json!({
+            "iss": iss, "aud": aud, "sub": "sub-1", "token_use": token_use,
+            "exp": now + exp_in, "email": email, "email_verified": verified,
+        });
+        if !username.is_empty() {
+            payload["cognito:username"] = serde_json::json!(username);
+        }
         format!(
             "{}.{}.x",
             enc(serde_json::json!({ "alg": "RS256", "kid": "k" })),
-            enc(serde_json::json!({
-                "iss": iss, "aud": aud, "sub": "sub-1", "token_use": token_use,
-                "exp": now + exp_in, "email": email, "email_verified": verified,
-            }))
+            enc(payload)
         )
     }
 
+    /// A token for `email` that names **this session's** Cognito user, so the bind of §13.25
+    /// (3) is satisfied and the flow reaches the update.
     fn good_id_token(email: &str) -> String {
+        token_from(email, FAKE_USERNAME)
+    }
+
+    /// A token that names `username` as its Cognito user, everything else good. An empty
+    /// `username` omits the claim, which is what a token from a pool that does not send one
+    /// looks like.
+    fn token_from(email: &str, username: &str) -> String {
         id_token(
             email,
             "email-client",
@@ -26041,6 +26815,7 @@ mod tests {
             "id",
             3600,
             serde_json::json!(true),
+            username,
         )
     }
 
@@ -26119,11 +26894,31 @@ mod tests {
     }
 
     fn post_code(f: &Flow, who: &str, fields: &[(String, String)]) -> AccountGot {
+        post_code_with(f, who, fields, &PROFILE_HEADERS)
+    }
+
+    /// The code step as a request that arrives with `headers`: §13.25 (3) answers the challenge
+    /// with the username the **header** names on this request, so a test changes the header
+    /// between the two steps and watches which one the call carries.
+    fn post_code_with(
+        f: &Flow,
+        who: &str,
+        fields: &[(String, String)],
+        headers: &[(&'static str, &'static str)],
+    ) -> AccountGot {
         let borrowed: Vec<(&str, &str)> = fields
             .iter()
             .map(|(k, v)| (k.as_str(), v.as_str()))
             .collect();
-        profile_post(&f.code_url(), who, &borrowed)
+        profile_post_headers(
+            &f.code_url(),
+            Some(who),
+            &borrowed,
+            "same-origin",
+            true,
+            headers,
+            &[],
+        )
     }
 
     fn set_field(f: &mut Vec<(String, String)>, key: &str, value: &str) {
@@ -26137,8 +26932,9 @@ mod tests {
         visible_text(&element_containing(&g.body, "class=\"lede\"", "</p>"))
     }
 
-    /// The code page names what it will send: only the changed claims, the challenge's own
-    /// username, the chosen email and the `Session`, and never the code.
+    /// The code page names what it will send: only the changed claims and the `Session`. No
+    /// address and no username ride in the form (§13.25 step 3): the username comes from the
+    /// header of the request that posts it.
     #[test]
     fn the_code_page_carries_what_the_code_step_needs() {
         let f = flow("c5-hidden");
@@ -26146,13 +26942,10 @@ mod tests {
         let form = form_posting_to(&g.body, "/account/profile/code");
         let mut hidden = hidden_fields(&form);
         hidden.sort();
-        let mut want = vec![
+        let want = vec![
             ("Session".to_string(), FAKE_SESSION.to_string()),
-            ("email".to_string(), "bob@x.com".to_string()),
             ("given_name".to_string(), "Robert".to_string()),
-            ("username".to_string(), FAKE_USERNAME.to_string()),
         ];
-        want.sort();
         assert_eq!(hidden, want, "{form}");
         cleanup(&f.path);
     }
@@ -26230,27 +27023,35 @@ mod tests {
         cleanup(&f.path);
     }
 
-    /// A stranger (no roster row) completes the edit for their own email (user decision), and
-    /// the token is compared normalised: `BOB@X.com` names `bob@x.com`.
+    /// A stranger (no roster row) completes the edit on their own Cognito user (user decision),
+    /// and the bind is the username, not the address: the token the pool returns names the
+    /// header's user, and the address it carries is not compared at all.
     #[test]
-    fn a_stranger_completes_the_edit_and_the_email_is_compared_normalised() {
+    fn a_stranger_completes_the_edit_on_their_own_user() {
+        let sam = "cog-sam-0002";
         let f = flow_with(
             "c5-stranger",
-            signed_in(&good_id_token("Sam@Elsewhere.COM")),
+            signed_in(&token_from("Sam@Elsewhere.COM", sam)),
             ok_empty(),
         );
         let g = start_as(
             &f,
             "sam@elsewhere.com",
-            &profile_with(
-                profile_with(profile_same(), "email", "sam@elsewhere.com"),
-                "given_name",
-                "Samuel",
-            ),
+            &profile_with(profile_same(), "given_name", "Samuel"),
         );
-        let g = post_code(&f, "sam@elsewhere.com", &code_fields(&g, "123456"));
+        let g = post_code_with(
+            &f,
+            "sam@elsewhere.com",
+            &code_fields(&g, "123456"),
+            &[(NATIVE_USERNAME_HEADER, sam)],
+        );
         assert_eq!(g.status, 200, "{}", account_readable(&g.body));
         assert_eq!(f.fake.actions().len(), 3);
+        assert_eq!(
+            f.fake.calls()[1].body["ChallengeResponses"]["USERNAME"],
+            sam,
+            "the code step answers for the header's user"
+        );
         cleanup(&f.path);
     }
 
@@ -26363,7 +27164,10 @@ mod tests {
                 again.contains(&("Session".to_string(), session.to_string())),
                 "{name}: {again:?}"
             );
-            assert!(again.contains(&("username".to_string(), FAKE_USERNAME.to_string())));
+            assert!(
+                again.iter().all(|(k, _)| k != "username" && k != "email"),
+                "{name}: no username and no address ride in the form: {again:?}"
+            );
             cleanup(&f.path);
         }
     }
@@ -26397,30 +27201,33 @@ mod tests {
         }
     }
 
-    /// An `IdToken` that names another email is never used: `403`, the sentence, and the
-    /// fake never sees an update.
+    /// An `IdToken` that does not name the session's own Cognito user is never used: `403`, the
+    /// sentence, and the fake never sees an update. Both shapes of it: a token for another user,
+    /// and a token that names no user at all, since a bind that cannot be satisfied is a bind
+    /// that failed (§13.25 step 3).
     #[test]
-    fn a_token_for_another_account_is_never_used() {
-        let f = flow_with(
-            "c5-other-account",
-            signed_in(&good_id_token("carol@x.com")),
-            ok_empty(),
-        );
-        let g = start_bob(&f);
-        let g = post_code(&f, "bob@x.com", &code_fields(&g, "123456"));
-        assert_eq!(g.status, 403, "{}", account_readable(&g.body));
-        assert_eq!(f.fake.actions(), ["InitiateAuth", "RespondToAuthChallenge"]);
-        assert!(
-            lede_of(&g)
-                .contains("The code belonged to a different account, so nothing was changed."),
-            "{}",
-            lede_of(&g)
-        );
-        assert!(
-            !g.body.contains("carol@x.com"),
-            "the other account is not named"
-        );
-        cleanup(&f.path);
+    fn a_token_that_does_not_name_this_user_is_never_used() {
+        let other = "0f8fad5b-d9cb-469f-a165-70867728950e";
+        for (name, id) in [
+            ("other-username", token_from("bob@x.com", other)),
+            ("no-username-claim", token_from("bob@x.com", "")),
+        ] {
+            let f = flow_with(&format!("c5-{name}"), signed_in(&id), ok_empty());
+            let g = start_bob(&f);
+            let g = post_code(&f, "bob@x.com", &code_fields(&g, "123456"));
+            assert_eq!(g.status, 403, "{name}: {}", account_readable(&g.body));
+            assert_eq!(
+                f.fake.actions(),
+                ["InitiateAuth", "RespondToAuthChallenge"],
+                "{name}: the access token is dropped unused"
+            );
+            assert!(lede_of(&g).contains(NOT_YOURS), "{name}: {}", lede_of(&g));
+            assert!(
+                !g.body.contains(other),
+                "{name}: the other user is not named"
+            );
+            cleanup(&f.path);
+        }
     }
 
     /// One case each: audience, issuer, `token_use`, expired, unverified, no email verified
@@ -26429,7 +27236,7 @@ mod tests {
     fn a_token_of_the_wrong_audience_issuer_or_use_is_never_used() {
         let iss = PROFILE_POOL;
         let good = |aud: &str, iss: &str, tu: &str, exp: i64, v: serde_json::Value| {
-            signed_in(&id_token("bob@x.com", aud, iss, tu, exp, v))
+            signed_in(&id_token("bob@x.com", aud, iss, tu, exp, v, FAKE_USERNAME))
         };
         let t = serde_json::json!(true);
         let cases: Vec<(&str, Reply)> = vec![
@@ -26483,8 +27290,10 @@ mod tests {
         }
     }
 
-    /// Every hidden field the code step carries back is checked again, against the live
-    /// files, before any call: the status, and the fake saw only the start.
+    /// Every field the code step carries back is checked again, against the live files, before
+    /// any call: the status, and the fake saw only the start. The username is not one of them:
+    /// it is the header of this request, so a form posted by a second person binds against
+    /// *their* user and the write fails closed.
     #[test]
     fn the_code_step_rechecks_everything() {
         let f = flow("c5-recheck");
@@ -26510,22 +27319,44 @@ mod tests {
             g
         };
 
-        // The hidden email edited to somebody else's, and to bob's address the header did not carry.
-        for (what, email) in [
-            ("stranger email", "carol@x.com"),
-            ("not this request's", "bob@old.com"),
-        ] {
-            let g = fresh();
-            let mut fields = code_fields(&g, "123456");
-            set_field(&mut fields, "email", email);
-            one_call(what, &post_code(&f, "bob@x.com", &fields), 400);
-        }
-        // Another person posting bob's form.
+        // The request arrives with no `X-Auth-Native-Username`: nothing to answer with.
         let g = fresh();
         one_call(
-            "another caller",
-            &post_code(&f, "carol@x.com", &code_fields(&g, "123456")),
+            "no native header",
+            &profile_post_headers(
+                &f.code_url(),
+                Some("bob@x.com"),
+                &code_fields(&g, "123456")
+                    .iter()
+                    .map(|(k, v)| (k.as_str(), v.as_str()))
+                    .collect::<Vec<_>>(),
+                "same-origin",
+                true,
+                &profile_headers_no_native(),
+                &[],
+            ),
             400,
+        );
+        // Somebody else posting bob's form: the code step answers for *their* user, the fake
+        // returns bob's token, and the bind refuses. One call, and no write.
+        let g = fresh();
+        let carol = "1a79a4d6-60df-4c01-9f83-7f8f8b8c1a2b";
+        let g = post_code_with(
+            &f,
+            "carol@x.com",
+            &code_fields(&g, "123456"),
+            &[(NATIVE_USERNAME_HEADER, carol)],
+        );
+        assert_eq!(g.status, 403, "{}", account_readable(&g.body));
+        assert_eq!(
+            f.fake.actions(),
+            ["InitiateAuth", "RespondToAuthChallenge"],
+            "the stolen form is answered, and the bind is what stops it"
+        );
+        assert_eq!(
+            f.fake.calls()[1].body["ChallengeResponses"]["USERNAME"],
+            carol,
+            "the code step answers the caller's own user, not the form's"
         );
         // A claim that is not editable, and a value too long.
         for (what, key, value) in [
@@ -26809,7 +27640,10 @@ mod tests {
             ),
             (
                 "c5-two-other",
-                signed_in(&good_id_token("carol@x.com")),
+                signed_in(&token_from(
+                    "bob@x.com",
+                    "0f8fad5b-d9cb-469f-a165-70867728950e",
+                )),
                 ok_empty(),
                 1,
             ),

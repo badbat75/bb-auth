@@ -9670,6 +9670,11 @@ mod tests {
     /// §13.18 (8d-2), `admin.css`: the bar shares `main`'s column, the header's pills are
     /// tabs and not buttons, a pill beside a button has the button's measure, and the tiles
     /// fill one row.
+    ///
+    /// §13.26 (5g): the account page is the console's width, so the bar shares *one* column and
+    /// nothing narrows it for one surface. The `.selfserve` width rules are gone, and the
+    /// reading measure that replaces them (`main p.lede` at 75ch, a profile field at 40ch) is
+    /// asserted here because it is the rule that keeps a 1000px column readable on both pages.
     #[test]
     fn the_header_shares_the_content_column() {
         let admin = include_str!("assets/admin.css");
@@ -9683,8 +9688,31 @@ mod tests {
         has("header.top", "padding:10px0");
         has("header.top", "padding:6px0");
         has(".bar", "padding:016px");
-        has("body:has(.selfserve).bar", "max-width:620px");
-        has("body:has(.selfserve).bar", "padding:012px");
+        for gone in [
+            ".selfserve",
+            "body:has(.selfserve).bar",
+            ".selfserve.panelh2",
+        ] {
+            assert!(
+                rules_named(admin, gone).is_empty(),
+                "`{gone}` must be gone: the account page is the console's column, and a second \
+                 rule naming a width is the drift §13.26 deletes ({:?})",
+                rules_named(admin, gone)
+            );
+        }
+        // `rules_named` matches one part of a selector list at a time, so each arm of the
+        // measure is looked up on its own, and both must land on the same one rule (that is
+        // the point of one rule for both surfaces).
+        for arm in ["mainp.lede", "mainp.muted"] {
+            let rules = rules_named(admin, arm);
+            assert_eq!(rules.len(), 1, "`{arm}` needs exactly one rule: {rules:?}");
+            assert!(
+                rules[0].contains("max-width:75ch"),
+                "`{arm}` lacks the reading measure: {}",
+                rules[0]
+            );
+        }
+        has("input.f-profile", "max-width:40ch");
         has(".bar.pill", "font-size:.95rem");
         has(".bar.pill", "padding:6px12px");
         has(".bar.pill.ico", "padding:6px");

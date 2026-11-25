@@ -53,11 +53,12 @@ const VIEWS = [
       // The self-service page is prose a person reads in their own language, so the copy of
       // the table's headings and the refusal is worth reading in Italian too.
       'account', 'account-new', 'account-new-scopes', 'account-error', 'account-rm', 'account-menu',
-      // The profile edit is all prose (section 13.23): every shape of it is read in Italian too.
-      'account-profile', 'account-profile-edit', 'account-profile-edit-one', 'account-profile-nothing',
+      // The profile edit is all prose (section 13.23, and §13.25 and §13.26 for what it acts
+      // on): every shape of it is read in Italian too.
+      'account-profile', 'account-profile-edit', 'account-profile-nothing',
       'account-profile-code', 'account-profile-code-wrong', 'account-profile-saved',
-      'account-profile-expired', 'account-profile-social', 'account-profile-noanswer',
-      'account-profile-unsure'],
+      'account-profile-expired', 'account-profile-gone', 'account-profile-provider',
+      'account-profile-notyours', 'account-profile-noanswer', 'account-profile-unsure'],
   },
   // An explicit theme is only worth photographing against the OPPOSITE `colorScheme`:
   // that is the pair that proves the choice beat the operating system. Under a matching
@@ -119,22 +120,37 @@ async function tabTo(page, selector, max = 30) {
 }
 
 /**
- * A profile scene (docs/ARCHITECTURE.md section 13.23). The settings that offer the edit are
- * written, the fake Cognito is emptied and the browser carries the identity nginx would send
- * plus the profile claims it would forward; `who` is the identity header's value, which is two
- * addresses, space-joined as the gate sends them, for the scene that shows the choice. The
- * administrator is put back afterwards, because a view's scenes share one browser context.
+ * A profile scene (docs/ARCHITECTURE.md section 13.23, and §13.25 for what the edit acts on).
+ * The settings that offer the edit are written, the fake Cognito is emptied and the browser
+ * carries the identity nginx would send plus the profile claims it would forward; `who` is the
+ * identity header's value, and `headers` the whole set, so a scene can drop
+ * `X-Auth-Native-Username` and be a federated session. The administrator is put back
+ * afterwards, because a view's scenes share one browser context.
  */
-const profileScene = (steps, who = 'you@example.com') => async (page, ctx) => {
+const profileScene = (steps, who = 'you@example.com', headers = PROFILE_HEADERS) => async (page, ctx) => {
   fs.writeFileSync(ctx.settingsFile, profileSettingsBytes());
   ctx.cognito.reset();
-  await page.setExtraHTTPHeaders({ ...PROFILE_HEADERS, 'X-Auth-Email': who });
+  await page.setExtraHTTPHeaders({ ...headers, 'X-Auth-Email': who });
   try {
     await steps(page, ctx);
   } finally {
     await asAdmin(page);
   }
 };
+/** The claims of a session with no Cognito user to write to (§13.25 step 1): nginx forwarded
+ *  the profile and no `X-Auth-Native-Username`, because the person signed in with a provider. */
+const NO_NATIVE = Object.fromEntries(
+  Object.entries(PROFILE_HEADERS).filter(([k]) => k !== 'X-Auth-Native-Username'),
+);
+/** The pool's answer to a start, naming a user who is **not** the session's (§13.25 (3)). */
+const challengeForOther = (username) => ({
+  status: 200,
+  body: {
+    ChallengeName: 'EMAIL_OTP',
+    Session: 'fake-session-1',
+    ChallengeParameters: { USERNAME: username, CODE_DELIVERY_DESTINATION: 'y***@e***.com' },
+  },
+});
 /** Change the given name, empty the family name, and send the code: the code page follows. */
 const sendChanges = async (page, ctx) => {
   await page.goto(acct(ctx, '/profile'));
@@ -299,12 +315,10 @@ const SCENES = [
     await asAdmin(page);
   }],
 
-  // ---- the profile edit (section 13.23): eleven shapes --------------------------------
+  // ---- the profile edit (section 13.23, §13.25, §13.26): twelve shapes -------------------
   ['account-profile', profileScene(async (page, ctx) => { await page.goto(acct(ctx, '/')); })],
+  // The form of a native session: one identity, and the address is not a field (§13.26 §4).
   ['account-profile-edit', profileScene(async (page, ctx) => {
-    await page.goto(acct(ctx, '/profile'));
-  }, 'bot@example.com bot@old.example.com')],
-  ['account-profile-edit-one', profileScene(async (page, ctx) => {
     await page.goto(acct(ctx, '/profile'));
   })],
   ['account-profile-nothing', profileScene(async (page, ctx) => {
@@ -328,8 +342,20 @@ const SCENES = [
     ctx.cognito.script([['RespondToAuthChallenge', { status: 400, body: { __type: 'ExpiredCodeException' } }]]);
     await sendCode(page);
   })],
-  ['account-profile-social', profileScene(async (page, ctx) => {
+  // The pool no longer has the user the session names (§13.25: the request names it by
+  // username, so this is a lost account, not a person who signs in some other way).
+  ['account-profile-gone', profileScene(async (page, ctx) => {
     ctx.cognito.script([['InitiateAuth', { status: 400, body: { __type: 'UserNotFoundException' } }]]);
+    await sendChanges(page, ctx);
+  })],
+  // A session with no Cognito user to write to: the page says so, and there is no form. It is
+  // the shape a federated sign-in sees, and the one a scene cannot reach by POST.
+  ['account-profile-provider', profileScene(async (page, ctx) => {
+    await page.goto(acct(ctx, '/'));
+  }, 'you@example.com', NO_NATIVE)],
+  // The pool answered for a different user: the refusal, not a code step (§13.25 (3)).
+  ['account-profile-notyours', profileScene(async (page, ctx) => {
+    ctx.cognito.script([['InitiateAuth', challengeForOther('9b2f6d1c-7a44-4c1e-8f52-6d0c1b9e4a77')]]);
     await sendChanges(page, ctx);
   })],
   // The two silences each cost the binary's whole five-second bound.

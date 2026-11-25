@@ -526,6 +526,36 @@ async function run(ctx, t) {
   t.check('the two mints that were current both landed',
     idsOf(ctx).includes('first-tab') && idsOf(ctx).includes('third-tab'), JSON.stringify(idsOf(ctx)));
 
+  // --- 9. the order of the sections, and the width of the column (§13.26 §1 and §2) -------
+  // The order is asserted on the markup as served, which this area reads with scripting off.
+  // The width needs a layout box, so it runs in a context of its own with scripting on: the
+  // decision is that the account column **is** the console's `main`, so the two boxes must be
+  // the same box, and a rule that only narrows one of them fails here.
+  await page.goto(url);
+  const served = await page.content();
+  const offsets = ['profile', 'keys', 'groups', 'reach']
+    .map((id) => served.indexOf(`<section id="${id}"`));
+  t.check(`the sections come profile, keys, groups, reach: ${JSON.stringify(offsets)}`,
+    offsets.every((n) => n >= 0) && offsets.every((n, i) => i === 0 || n > offsets[i - 1]),
+    JSON.stringify(offsets));
+  const wide = await ctx.browser.newContext({
+    viewport: { width: 1280, height: 900 },
+    extraHTTPHeaders: { 'X-Auth-Email': WHO },
+  });
+  const widePage = await wide.newPage();
+  await widePage.goto(url);
+  const ids = await widePage.$$eval('main section', (els) => els.map((e) => e.id));
+  t.eq('the sections come in the person\'s order: profile, keys, groups, reach',
+    ids, ['profile', 'keys', 'groups', 'reach']);
+  const mine = await widePage.locator('main').boundingBox();
+  await widePage.setExtraHTTPHeaders({ 'X-Auth-Email': 'admin@example.com' });
+  await widePage.goto(ctx.base + '/');
+  const console_ = await widePage.locator('main').boundingBox();
+  t.eq('the account column is the console\'s width, not a narrower copy of it',
+    [Math.round(mine.x), Math.round(mine.width)], [Math.round(console_.x), Math.round(console_.width)]);
+  await widePage.close();
+  await wide.close();
+
   // The same menu on this page, scripting off, applied with the Apply button it always has.
   await page.goto(url);
   await menuClosesOutside(t, page, 'account', (pick) => Promise.all([

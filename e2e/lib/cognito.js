@@ -15,6 +15,18 @@ const http = require('http');
 const TARGET_PREFIX = 'AWSCognitoIdentityProviderService.';
 const CONTENT_TYPE = 'application/x-amz-json-1.1';
 
+/**
+ * The Cognito user the walks' session names (§13.25): what the gate puts in
+ * `X-Auth-Native-Username`, and what the fake's challenge and ID token name in answer. Fixed,
+ * so a scene can script a challenge that names a **different** one and be refused.
+ */
+const NATIVE_USERNAME = '3f2504e0-4f89-41d3-9a0c-0305e82c3301';
+
+/** The address of that user on the pool. The walks drive `you@example.com`, the fixture's one
+ *  roster row that is not an administrator. Since §13.25 the code step binds by the username,
+ *  so the token's address is carried, never compared. */
+const POOL_EMAIL = 'you@example.com';
+
 /** base64url of a string or a JSON value, without padding. */
 const b64url = (v) =>
   Buffer.from(typeof v === 'string' ? v : JSON.stringify(v)).toString('base64url');
@@ -36,7 +48,7 @@ function fixtureWiring() {
 }
 
 /** The happy path: what the pool answers when nothing is scripted. */
-function defaultReply(target, body, wiring) {
+function defaultReply(target, wiring) {
   switch (target) {
     case 'InitiateAuth':
       return {
@@ -44,7 +56,14 @@ function defaultReply(target, body, wiring) {
         body: {
           ChallengeName: 'EMAIL_OTP',
           Session: 'fake-session-1',
-          ChallengeParameters: { USERNAME: (body.AuthParameters || {}).USERNAME },
+          // Both fixed, not echoed (§13.25): the pool answers for the user it knows, and a
+          // challenge naming a *different* one is the refusal a scene scripts. Echoing the
+          // request would make that refusal unrepresentable, and the code page needs a masked
+          // address to name.
+          ChallengeParameters: {
+            USERNAME: NATIVE_USERNAME,
+            CODE_DELIVERY_DESTINATION: 'y***@e***.com',
+          },
         },
       };
     case 'RespondToAuthChallenge':
@@ -58,7 +77,10 @@ function defaultReply(target, body, wiring) {
               aud: wiring.clientId,
               exp: Math.floor(Date.now() / 1000) + 3600,
               email_verified: true,
-              email: (body.ChallengeResponses || {}).USERNAME,
+              email: POOL_EMAIL,
+              // The bind of §13.25 (3): the pool's own name for the user is what the code step
+              // compares, and the address it carries is not compared at all.
+              'cognito:username': NATIVE_USERNAME,
             }),
             AccessToken: 'fake-access',
             RefreshToken: 'fake-refresh',
@@ -113,7 +135,7 @@ function startFakeCognito(wiring = fixtureWiring()) {
         return send(400, { __type: 'InvalidContentTypeException' });
       }
       const at = queue.findIndex(([t]) => t === target);
-      const reply = at >= 0 ? queue.splice(at, 1)[0][1] : defaultReply(target, body, wiring);
+      const reply = at >= 0 ? queue.splice(at, 1)[0][1] : defaultReply(target, wiring);
       if (reply === 'silent') return; // hold the socket: the caller's own bound is the test
       return send(reply.status, reply.body);
     });
@@ -158,12 +180,22 @@ function profileSettingsBytes() {
   return JSON.stringify(d, null, 2) + '\n';
 }
 
-/** What nginx forwards for the roster person of the walks, percent-encoded as the gate sends it. */
+/** What nginx forwards for the roster person of the walks, percent-encoded as the gate sends it.
+ *  `X-Auth-Native-Username` is the pool's own name for that person (§13.25), which is what the
+ *  profile edit acts on; a walk that drops it is a federated session. */
 const PROFILE_HEADERS = {
   'X-Auth-Given-Name': 'Ada',
   'X-Auth-Family-Name': 'Lovelace',
   'X-Auth-Birthdate': '1815-12-10',
   'X-Auth-Phone-Number': '%2B390000',
+  'X-Auth-Native-Username': NATIVE_USERNAME,
 };
 
-module.exports = { startFakeCognito, idToken, profileSettingsBytes, PROFILE_HEADERS };
+module.exports = {
+  startFakeCognito,
+  idToken,
+  profileSettingsBytes,
+  PROFILE_HEADERS,
+  NATIVE_USERNAME,
+  POOL_EMAIL,
+};

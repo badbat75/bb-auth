@@ -74,6 +74,11 @@ p.primary .pill,.actions .pill{font-size:inherit;line-height:1.55;padding:9px 16
    --------------------------------------------------------------------------- */
 
 main{max-width:1000px;margin:0 auto;padding:18px 16px 40px}
+/* Prose keeps a reading measure on a 1000px column: a lede or a muted sentence 140 characters
+   wide is hard to track back to the next line. One rule for both, because both surfaces are
+   `main` and the self-service page is this column too (§13.26), so the measure cannot be set
+   for one page and drift on the other. */
+main p.lede,main p.muted{max-width:75ch}
 /* A group's own heading, inside a .panel that already carries top padding: the panel's
    padding and this h2's own top margin would otherwise stack. */
 h2.tight{margin-top:0}
@@ -175,9 +180,12 @@ form.can label.fld{display:flex;flex-direction:column;gap:4px;flex:1 1 240px;mar
 /* Per-field measure, keyed off the wire field name text_field() stamps onto the input as
    `f-<name>` (see its doc comment): a short token stays narrow, an email/name/URL stays
    readable but never balloons to the panel's full width. Both still shrink below their
-   measure on a narrow viewport because base.css's width:100% is left standing. */
+   measure on a narrow viewport because base.css's width:100% is left standing.
+   `f-profile` is the one class written by hand rather than stamped: the profile edit's fields
+   are claim names, not wire fields, and a name, a family name, a website is the same measure
+   as an email. */
 input.f-id,input.f-duration{max-width:14ch}
-input.f-email,input.f-name,input.f-login_url,input.f-aud{max-width:40ch}
+input.f-email,input.f-name,input.f-login_url,input.f-aud,input.f-profile{max-width:40ch}
 input.f-client_ip_header,input.f-request_id_header{max-width:24ch}
 form.edit label{display:block;margin:0 0 14px}
 /* An amount and its unit on one line: a short number box and the list box beside it, which is
@@ -314,26 +322,18 @@ details.settings[open]>summary{background:var(--chip);border-color:var(--accent)
 /* ---------------------------------------------------------------------------
    The self-service page
 
-   A centred column of panels and nothing else: this page is one person's own account, so it
-   has no header bar, no tabs and no table. Everything below is arrangement. The panels are
-   base.css's `.panel`, so the surface is the same object the console's are, and every colour
-   here is a palette token, because this file is inside the CSP style hash of both pages.
+   One column of panels and nothing else: this page is one person's own account, so it has no
+   header bar, no tabs and no table. The column is the console's `main` (§13.26): no rule here
+   sets a width, because a second rule naming a width is one that can drift from `main`'s.
+   Everything below is arrangement. The panels are base.css's `.panel`, so the surface is the
+   same object the console's are, and every colour here is a palette token, because this file
+   is inside the CSP style hash of both pages.
    --------------------------------------------------------------------------- */
 
-/* Narrower than the console's `main`, which needs width for tables: this page is a list of
-   names, and a list of names reads as a column, not as a sheet. */
-.selfserve{max-width:620px;margin:0 auto;padding:28px 16px 48px}
-/* The bar over this column is the column: the console's bar is 1000px wide, so on a page whose
-   content is 620px the brand floated far to the left of everything under it (8b's review). One
-   value, and the brand lands on the same left edge as the `h1`, because the bar is already the
-   same centred, 16px-padded column as `main`. `:has` is Baseline 2023
-   (https://developer.mozilla.org/en-US/docs/Web/CSS/:has); a browser without it keeps the brand
-   where it was, which costs the alignment and nothing else. */
-body:has(.selfserve) .bar{max-width:620px}
 /* The ground on this page is flat. `--bg-grad` is a decorative glow painted over `--bg` that
    reaches its outer stop at 60% of a 1200x600 ellipse, so it goes flat about a quarter of the
    way down the viewport: on the console, a wide sheet, that is a ground, but this page is one
-   narrow column of facts about one person, and the boundary crossing the ground above the
+   column of facts about one person, and the boundary crossing the ground above the
    first panel reads as a band of a second shade laid under the content. A flat ground is a
    state the palette already sanctions (a deployment sets `--bg-grad: none` to get it estate
    wide), so this asks for it for the one page that shows the seam, and `:has` is what keeps
@@ -349,12 +349,6 @@ body:has(.selfserve){background:var(--bg)}
 .selfserve-brand{display:flex;flex-wrap:wrap;align-items:center;gap:10px;margin:0}
 .selfserve-brand img{height:30px;width:auto;filter:var(--logo-filter)}
 .selfserve-brand .name{font-weight:600;letter-spacing:.02em}
-/* A section's heading is the first thing in a panel that already carries top padding, so the
-   two would stack. The console says the same thing with `h2.tight` written at each heading;
-   here the heading carries no class, because the section's own `id` is the whole markup
-   contract this page has, and a rule scoped to the page is how the same result is had without
-   adding an attribute to it. */
-.selfserve .panel h2{margin-top:0}
 /* The account id is one token, so the stylesheet can keep it whole: `white-space:nowrap` stops a
    36-character uuid breaking at a hyphen, and it moves to its own line under the addresses
    instead of ending in the middle of an id. The addresses beside it are deliberately not given
@@ -395,15 +389,9 @@ body:has(.selfserve){background:var(--bg)}
      tabs: the full second line and the horizontal scroll would send it off on its own. */
   nav:not(.acct){order:3;flex:1 1 100%;flex-wrap:nowrap;overflow-x:auto;gap:1px;
     padding-bottom:2px}
-  /* The self-service column has no table to fit, so the only thing a phone costs it is the
-     side padding, and 16px of it is a third of the width of a small screen. */
-  .selfserve{padding:16px 12px 32px}
-  /* The bar's side padding goes with the column's, by the same rule and for the same reason:
-     the brand has to start where the page's `h1` starts, and on a phone that is 12px. */
-  body:has(.selfserve) .bar{padding:0 12px}
   /* The id keeps its `nowrap` here, so this is where it pays for it: at .85em the 36 characters
-     fit the 296px a 320px screen leaves once the column's 12px padding is gone, which is what
-     makes it move whole to a line of its own instead of pushing the page sideways. */
+     fit the width a 320px screen leaves once `main`'s padding is gone, which is what makes it
+     move whole to a line of its own instead of pushing the page sideways. */
   .uid{font-size:.85em}
   table{min-width:0}
   table,thead,tbody,tr,td{display:block}

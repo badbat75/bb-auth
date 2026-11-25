@@ -206,7 +206,7 @@ async function run(ctx, t) {
     await page.setViewportSize({ width: 1280, height: 900 });
 
     // §13.18 (8d-2), the arrangement as the layout engine made it. The header's brand starts
-    // where the page's h1 starts (the console's `main` and the account's 620px column), at
+    // where the page's h1 starts (both surfaces are the console's `main` since §13.26), at
     // both widths; a pill beside a button is as tall as the button; the six dashboard tiles
     // share one row at desktop width.
     const left = (p, sel) => p.locator(sel).first().evaluate((el) => el.getBoundingClientRect().left);

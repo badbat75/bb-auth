@@ -53,6 +53,13 @@ Rules are in `AGENTS.md`. Format of this file: `AGENTS.md`, under "Skills".
   channel, so `navigator.clipboard.readText()` can be compared byte for byte. Wrap the grant in
   `try/catch` and emit a passing "not verifiable" check when it throws, so a browser that refuses
   the permission fails the *behaviour* (the button's word) and not the harness.
+- When the design (`docs/ARCHITECTURE.md`) carries a **`K` table** of new wording, spell its EN and IT
+  strings **verbatim** in the test's local consts (the test module may not add `K` variants). A
+  paraphrased const is red after the coder lands the table, and reads like a broken implementation.
+  Pin **both** languages: a stub (or a coder) that paraphrases the Italian, "hai acceduto" for the
+  design's "hai effettuato l'accesso", is caught only by the IT assert.
+- To run **several** tests by name: `cargo test --bin bb-auth-web -- --test-threads=1 name1 name2`.
+  Only one filter fits before `--`, and `--test-threads=1` keeps each failure's dump in its own block.
 - `K` carries no `PartialEq`, so a refusal is asserted through a helper that maps the variant to a
   `&'static str` name (`dur_answer`). Couple the assertion itself to the **English translation
   string** when the test reads a rendered page: that is what the operator sees, and it is the repo's
@@ -253,3 +260,25 @@ Rules are in `AGENTS.md`. Format of this file: `AGENTS.md`, under "Skills".
   list (`"a,b"`) finds nothing: look each part up on its own. `the_rule` (bb-auth-web) swallows the
   first rule inside an `@media` block and returns the first match in file order, so a phone-block
   rule needs its own reader (`phone_rules`).
+- A markup helper that searches `"<h2>"` finds **no** heading once a heading carries an attribute:
+  §13.26 gives every account `h2` `class="tight"`, and `account_heading` went red on a correct page.
+  Search the tag **name** (`<h2`) and require the next character to be `>`, a space or a newline, so
+  one name cannot match a longer one (`h1` versus `h1x`).
+- `api(ctx, path, opts)` (e2e harness) fills `X-Auth-Email` with `admin@example.com` when
+  `opts.email` is **omitted**, so a walk that means the roster person posts as the administrator and
+  passes for the wrong reason. Pass `email: WHO` on every `api` call that is not an administrator's.
+- A fake that **echoes** the request's `USERNAME` in its challenge makes "the pool answered for a
+  different user" unrepresentable, so the test for that refusal cannot be written at all. Answer with
+  fixed `ChallengeParameters` (`USERNAME`, `CODE_DELIVERY_DESTINATION`) and let a scene script the
+  other username.
+- `element_containing(body, "class=\"lede\"", "</p>")` reads the **first** lede of the document, and
+  every account page carries one in the Preferences menu (the caller's name). A page whose own
+  sentence is a bare `<p>` therefore answers a "the page says X" assert with `Bob · bob@x.com`,
+  which reads like a broken helper. Assert the page's lede **carries** `class="lede"` first, and
+  when a design changes that markup, say so in the test's comment.
+- The Rust `FakeCognito` scripts replies by **action lookup**, not as a queue: every request for
+  `InitiateAuth` gets the same scripted reply, so one fake answers the same `POST` in two languages
+  and `fake.calls().len()` counts both. Assert the count you expect from the number of requests.
+- A Node `Response` body is **single-use**: a second `(await res.text())` throws `Body is unusable`,
+  and `run.js` records the whole area as one failure ("area completed without an unhandled error"),
+  hiding every check behind it. Read it once into a `const`.

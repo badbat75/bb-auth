@@ -1,16 +1,28 @@
 'use strict';
-// The profile edit on `/account` (docs/ARCHITECTURE.md §13.22 and §13.23), end to end against
-// the fake Cognito of `lib/cognito.js`: the form, the emailed code, and every outcome page a
-// person can land on. The Rust tests pin each handler; this area pins what a browser does with
-// them (autofocus, Enter in a field, Back, the forms' order) and, above all, that the binary
-// really sends the envelope the pool requires, since the fake refuses anything else.
+// The profile edit on `/account` (docs/ARCHITECTURE.md §13.22, §13.23, §13.25 and §13.26), end
+// to end against the fake Cognito of `lib/cognito.js`: the form, the emailed code, and every
+// outcome page a person can land on. The Rust tests pin each handler; this area pins what a
+// browser does with them (autofocus, Enter in a field, Back, the forms' order) and, above all,
+// that the binary really sends the envelope the pool requires, since the fake refuses anything
+// else.
 //
 // Driven as `you@example.com`, a roster row who is not an administrator, with the claims nginx
-// would forward in the headers. `nojs.js` walks the happy path again with scripting off.
+// would forward in the headers **and the native username it forwards** (§13.25): the edit acts
+// on the user that header names, never on an address the form carries. One walk drops that
+// header, which is a federated session, and sees a sentence and no form. `nojs.js` walks the
+// happy path again with scripting off.
 
 const fs = require('fs');
-const { submit } = require('../lib/harness');
-const { profileSettingsBytes, PROFILE_HEADERS } = require('../lib/cognito');
+const { submit, api } = require('../lib/harness');
+const { profileSettingsBytes, PROFILE_HEADERS, NATIVE_USERNAME } = require('../lib/cognito');
+
+/** The headers of a session with nothing to edit: nginx forwarded the claims and no
+ *  `X-Auth-Native-Username`, because the person signed in through a social provider. */
+const NO_NATIVE = Object.fromEntries(
+  Object.entries(PROFILE_HEADERS).filter(([k]) => k !== 'X-Auth-Native-Username'),
+);
+/** A `ChallengeParameters.USERNAME` that is **not** the session's user (§13.25 (3)). */
+const OTHER_USERNAME = '9b2f6d1c-7a44-4c1e-8f52-6d0c1b9e4a77';
 
 const WHO = 'you@example.com';
 const PAGE = '/account/';
@@ -26,11 +38,12 @@ const text = (page) => page.locator('main').innerText();
 const h1 = async (page) => (await page.locator('h1').first().innerText()).trim();
 const targets = (ctx) => ctx.cognito.calls.map((c) => c.target);
 
-/** A context for the person, carrying what nginx would forward for them. */
-async function personPage(ctx, extra = {}) {
+/** A context for the person, carrying what nginx would forward for them. `headers` is the
+ *  whole set, so a walk can drop the native username and be a federated session. */
+async function personPage(ctx, extra = {}, headers = PROFILE_HEADERS) {
   const context = await ctx.browser.newContext({
     viewport: { width: 1280, height: 900 },
-    extraHTTPHeaders: { 'X-Auth-Email': WHO, ...PROFILE_HEADERS },
+    extraHTTPHeaders: { 'X-Auth-Email': WHO, ...headers },
     ...extra,
   });
   return { context, page: await context.newPage() };
@@ -63,9 +76,14 @@ async function run(ctx, t) {
       await page.evaluate(() => document.activeElement && document.activeElement.name), 'given_name');
     t.eq('its value is what nginx forwarded', await page.inputValue('input[name=given_name]'), 'Ada');
     t.eq('the family name too', await page.inputValue('input[name=family_name]'), 'Lovelace');
-    t.eq('with one address there is no choice to make',
-      await page.locator(`${START} select[name=email]`).count(), 0);
-    t.eq('the address rides hidden', await page.locator(`${START} input[type=hidden][name=email]`).inputValue(), WHO);
+    t.eq('the form names no address at all (§13.26)',
+      await page.locator(`${START} [name=email]`).count(), 0);
+    t.check('the reason the address is not a field is said under the fields',
+      (await page.locator(`${START} p.muted`).innerText()).includes('only an administrator can change it'),
+      await page.locator(START).innerText());
+    t.check('no line names an address to send the code to',
+      !(await page.locator(START).innerText()).includes('Send the code to'),
+      await page.locator(START).innerText());
     t.eq('a configured claim that is not editable is not an input',
       await page.locator('input[name=phone_number]').count(), 0);
     t.eq('the form carries no script', await page.locator('script').count(), 0);
@@ -77,12 +95,13 @@ async function run(ctx, t) {
     const init = ctx.cognito.calls[0];
     t.eq('it is a USER_AUTH start asking for an email code',
       [init.body.AuthFlow, (init.body.AuthParameters || {}).PREFERRED_CHALLENGE], ['USER_AUTH', 'EMAIL_OTP']);
-    t.eq('for the caller\'s address, on the native app client',
-      [(init.body.AuthParameters || {}).USERNAME, init.body.ClientId], [WHO, 'email-client']);
+    t.eq('for the user the session names, on the native app client (§13.25)',
+      [(init.body.AuthParameters || {}).USERNAME, init.body.ClientId], [NATIVE_USERNAME, 'email-client']);
     t.eq('in the envelope the pool requires', init.contentType, 'application/x-amz-json-1.1');
     const code = await text(page);
-    t.check('the lede names the address and says how long the code lasts',
-      code.includes(WHO) && code.includes('3 minutes'), code.slice(0, 300));
+    t.check('the lede names the masked address the pool sent it to and says how long it lasts',
+      code.includes('y***@e***.com') && code.includes('3 minutes'), code.slice(0, 300));
+    t.check('and never the address itself (§13.26 §4)', !code.includes(WHO), code.slice(0, 300));
     const changes = page.locator('ul.changes li');
     t.eq('two changes are listed', await changes.count(), 2);
     const given = (await changes.nth(0).innerText()).replace(/\s+/g, ' ');
@@ -92,6 +111,10 @@ async function run(ctx, t) {
       (await changes.nth(1).locator('.tag.warn').innerText()).trim() === 'removed'
         && (await changes.nth(1).innerText()).includes('Lovelace'), await changes.nth(1).innerText());
     t.eq('the code field has the focus', await page.evaluate(() => document.activeElement && document.activeElement.name), 'code');
+    t.eq('the code form names no address and no username (§13.26 §4: the code step reads the header)',
+      await page.locator(`${SAVE_FORM} [name=email], ${SAVE_FORM} [name=username]`).count(), 0);
+    t.eq('and the resend form beneath it names no address either',
+      await page.locator(`${START} [name=email]`).count(), 0);
 
     // --- 2. a wrong code changes nothing -------------------------------------------------
     ctx.cognito.script([['RespondToAuthChallenge', {
@@ -117,6 +140,8 @@ async function run(ctx, t) {
     t.eq('the code reached the pool with its spaces gone',
       (reply[1].body.ChallengeResponses || {}).EMAIL_OTP_CODE, '123456');
     t.eq('answered with the Session the wrong code handed back', reply[1].body.Session, 'fake-session-2');
+    t.eq('the code step names the user by the header it was sent, not by a form field (§13.25)',
+      (reply[1].body.ChallengeResponses || {}).USERNAME, NATIVE_USERNAME);
     const update = ctx.cognito.calls.find((c) => c.target === 'UpdateUserAttributes');
     t.check('exactly one update was made', !!update && targets(ctx).filter((x) => x === 'UpdateUserAttributes').length === 1,
       JSON.stringify(targets(ctx)));
@@ -162,17 +187,82 @@ async function run(ctx, t) {
     t.eq('on a fresh code page', await h1(page), 'Enter the code');
     t.eq('with the same two changes', await page.locator('ul.changes li').count(), 2);
 
-    // --- 6. a social-only account --------------------------------------------------------
+    // --- 6. the user the session names is gone from the pool ------------------------------
+    // §13.25: the request names that user by username, so `UserNotFoundException` no longer
+    // means "this person signs in some other way" (that person is never offered a form at
+    // all): it means the pool lost the very user the session names.
     ctx.cognito.reset();
     ctx.cognito.script([['InitiateAuth', { status: 400, body: { __type: 'UserNotFoundException' } }]]);
-    const soc = await start();
-    t.eq('an account with no email sign-in is a 400', soc.status(), 400);
+    const gone = await start();
+    t.eq('a pool with no such user is a 400', gone.status(), 400);
     t.eq('headed by the result', await h1(page), 'Your profile was not changed');
-    t.check('and told its profile is its provider\'s', (await text(page)).includes('social provider'), await text(page));
+    t.check('and told the sign-in service no longer has that account',
+      (await text(page)).includes('no longer has the account you signed in with'), await text(page));
+    t.check('and never that the profile belongs to a provider',
+      !(await text(page)).includes('social provider'), await text(page));
     t.eq('no code was sent, so there is no form to ask for one', await page.locator('main form').count(), 0);
     t.eq('and the pool was asked once', targets(ctx), ['InitiateAuth']);
 
-    // --- 7. a pool that does not answer --------------------------------------------------
+    // --- 7. a challenge that names a different user ---------------------------------------
+    // §13.25 (3): the pool answers for the user it knows. A challenge naming another one is a
+    // refusal, not a code step, and the only thing it may cost is the one call that asked.
+    ctx.cognito.reset();
+    ctx.cognito.script([['InitiateAuth', {
+      status: 200,
+      body: {
+        ChallengeName: 'EMAIL_OTP',
+        Session: 'fake-session-1',
+        ChallengeParameters: { USERNAME: OTHER_USERNAME, CODE_DELIVERY_DESTINATION: 'y***@e***.com' },
+      },
+    }]]);
+    const notYours = await start();
+    t.eq('a challenge for another user is a 403', notYours.status(), 403);
+    t.eq('headed by the result', await h1(page), 'Your profile was not changed');
+    t.check('and says the sign-in service answered for a different account',
+      (await text(page)).includes('answered for a different account'), await text(page));
+    t.eq('the pool was asked once, and no code was ever sent for the other user',
+      targets(ctx), ['InitiateAuth']);
+
+    // --- 8. a federated session: nothing to edit ------------------------------------------
+    // §13.25 step 1: with no `X-Auth-Native-Username` the session names no Cognito user this
+    // gate may write to, so the page says so in one sentence and the pool is never called, on
+    // a read or on a posted form.
+    ctx.cognito.reset();
+    const fed = await personPage(ctx, {}, NO_NATIVE);
+    try {
+      await open(ctx, fed.page, PAGE);
+      const panel = fed.page.locator('#profile');
+      t.eq('the profile panel offers no Edit pill',
+        await panel.locator(`a[href="${EDIT}"]`).count(), 0);
+      t.check('and says the profile comes from the provider',
+        (await panel.innerText()).includes('your profile comes from that provider'), await panel.innerText());
+      t.check('while the claims it does have are still read',
+        (await panel.innerText()).includes('Ada'), await panel.innerText());
+      const fedForm = await fed.page.goto(ctx.origin + EDIT);
+      t.eq('the form path is the same page, not a refusal', fedForm.status(), 200);
+      t.eq('with no form on it', await fed.page.locator(`${START} input[name=given_name]`).count(), 0);
+      const fedPost = await api(ctx, EDIT, {
+        method: 'POST',
+        email: WHO,
+        headers: {
+          'Content-Type': 'application/x-www-form-urlencoded',
+          'Sec-Fetch-Site': 'same-origin',
+          ...NO_NATIVE,
+        },
+        body: new URLSearchParams({ given_name: 'Augusta' }).toString(),
+      });
+      t.eq('a posted form is a 400 naming the same sentence', fedPost.status, 400);
+      // A `Response` body is single-use: read it once, then assert on the string.
+      const fedBody = await fedPost.text();
+      t.check('and not an error: the person did nothing wrong',
+        fedBody.includes('your profile comes from that provider')
+        && !fedBody.includes('id="err"'), fedBody.slice(0, 300));
+      t.eq('the pool was never called', ctx.cognito.calls.length, 0);
+    } finally {
+      await fed.context.close();
+    }
+
+    // --- 9. a pool that does not answer --------------------------------------------------
     ctx.cognito.reset();
     ctx.cognito.script([['InitiateAuth', 'silent']]);
     const t0 = Date.now();
@@ -186,7 +276,7 @@ async function run(ctx, t) {
     const after = await page.goto(ctx.origin + PAGE);
     t.eq('the worker was freed: the account page still answers', after.status(), 200);
 
-    // --- 8. a timeout at the update does not claim nothing changed -----------------------
+    // --- 10. a timeout at the update does not claim nothing changed ---------------------
     ctx.cognito.reset();
     await start();
     ctx.cognito.script([['UpdateUserAttributes', 'silent']]);
@@ -199,7 +289,7 @@ async function run(ctx, t) {
     t.eq('and never says nothing changed', (await page.content()).includes('Your profile was not changed'), false);
     t.eq('with no way to ask for a new code', await page.locator(START_BTN).count(), 0);
 
-    // --- 9. the keyboard alone -----------------------------------------------------------
+    // --- 11. the keyboard alone ---------------------------------------------------------
     ctx.cognito.reset();
     await open(ctx, page, EDIT);
     t.eq('Tab from the top of the form stays in it: the first field has the focus already',
