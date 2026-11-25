@@ -107,7 +107,7 @@ One crate, four targets, and the split is load-bearing:
   quietly testing the empty subject. One `decide`, two arrangements: `verdict` and
   `verdict_panel` are shared, the forms are not. There is deliberately no `/can` route left,
   not even a redirect, because there is no single page a bookmark to it could honestly land on. Every unordered list carries a filter and a pager, both living
-  entirely in the query string (`Listing`, `list_controls`) since a page here must work with
+  entirely in the query string (`Listing`, `list_controls`) so a list works with
   scripting off; each list namespaces its two parameters (`uq`/`up`, `gq`/`gp`, …) so several
   on one page do not steal each other's state. The audit's three list boxes ride in the same
   form through `list_controls_with`, rather than in a second one beside it: two forms over one
@@ -116,16 +116,19 @@ One crate, four targets, and the split is load-bearing:
   when the page reads the file on every request and every filter is already in the address. **Scopes are deliberately excluded from that**:
   their order is their meaning and the ↑/↓ buttons move them within the *file*, so a filtered
   view would show positions that are not the file's and a move that appears to do nothing.
-  **No page may need JavaScript.** Two things stand on the far side of that rule. One is
-  `SETTINGS_ONCHANGE`, one inline handler that applies a Settings list box the moment it is
-  picked, with a `<noscript>` submit button behind it. The other is `COPY_SCRIPT`, the one
-  `<script>` this GUI emits, carried only by the page that reveals a freshly minted or rotated
-  key and allowed only by that response's CSP, by its hash; it reveals a hidden copy button,
-  and with scripting off no button shows and one click still selects the whole key. No other
-  element carries a handler and no other page carries a script; a page that stops working with
-  scripting off is the thing that must never ship
-  (`no_page_but_the_reveal_carries_a_script`, and `nojs.js` runs the whole GUI with scripting
-  disabled). A `GET` never mutates;
+  **JavaScript is used sparingly** (the user's rule since 2026-11-25, replacing "no page may
+  need JavaScript"). HTML and CSS come first, and a script is added only where it clearly
+  improves an interaction that markup alone does badly; each one is small, inline, allowed by
+  its response's CSP by hash or nonce, never loaded from another host, and no framework. What a
+  page is for (reading it, submitting its form) should still work with scripting off wherever
+  that costs little, which `nojs.js` checks by running the whole GUI with scripting disabled.
+  Two scripts exist today. One is `SETTINGS_ONCHANGE`, one inline handler that applies a
+  Settings list box the moment it is picked, with a `<noscript>` submit button behind it. The
+  other is `COPY_SCRIPT`, carried only by the page that reveals a freshly minted or rotated key
+  and allowed only by that response's CSP, by its hash; it reveals a hidden copy button, and with
+  scripting off no button shows and one click still selects the whole key.
+  `no_page_but_the_reveal_carries_a_script` pins where scripts are, so adding one is a decision
+  made on purpose and written down here, never a side effect. A `GET` never mutates;
   every mutation is a `POST` guarded by a strict same-origin check (`Sec-Fetch-Site`, else
   `Origin`'s host vs `Host`'s — never the scheme, it speaks plain HTTP behind nginx) and by a
   hidden `rev` = sha256 of the file's exact bytes as the form was rendered, so a lost update

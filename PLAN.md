@@ -33,7 +33,8 @@ as the column says. A requirement still open must be covered by a step.
 | W8 | Everything in English; only the conversation with the user may be in their language | Applies to every step |
 | W9 | Displayed text in the `K` translation table or the page templates, ready for more languages | Applies to every step |
 | W10 | Agents run only the tests of the part they work on, plus linter and format check; the tester runs the full suite once, on main after the merge, before installing | Applies to every step |
-| W11 | The version stays 1.99.8 until the next release (the tag that becomes 2.0.0); a deploy does not bump it, and the build string (`v1.99.8-g<commit>`) is what tells two deploys apart (the user's decision, 2026-11-25, replacing "the last deployed version plus one") | Applies to every step |
+| W11 | The version stays 1.99.8 until the release, tagged `v1.99.8` (step 11, the user's choice on 2026-11-25); a deploy does not bump it, and the build string (`v1.99.8-g<commit>`) is what tells two deploys apart (the user's decision, 2026-11-25, replacing "the last deployed version plus one") | Applies to every step |
+| W12 | JavaScript sparingly: HTML and CSS first, a small inline script only where it clearly improves an interaction, allowed by the page's CSP, never from another host (the user's rule, 2026-11-25, replacing "no page may need JavaScript"; stated in `AGENTS.md`) | Applies to every step |
 
 ## Definition of Done
 
@@ -79,10 +80,10 @@ believes `X-Auth-Email` from any local process. The design is `docs/ARCHITECTURE
 ### 9. The Preferences menu closes on a click outside it (first, by the user's order)
 
 Asked by the user on 2026-11-25. Today the menu (a `details`) closes only from its own trigger.
-A click anywhere outside it must close it, on `/account` and in the console (one `top_bar`),
-with no script: the "no page needs JavaScript" invariant and `/account`'s "no handler at all"
-both stand, so the designer specifies a CSS-only way (an open `details`' summary covering the
-page behind the menu) and its accessibility.
+A click anywhere outside it must close it, on `/account` and in the console (one `top_bar`).
+JavaScript is now allowed sparingly (the user's rule, 2026-11-25), so the designer chooses
+between a CSS-only way (an open `details`' summary covering the page behind the menu) and a
+small script, and specifies its accessibility.
 
 - Done when: a test that failed first pins the rule, an e2e check clicks outside the open menu
   on both surfaces and finds it closed (scripting on and off), the menu's own controls still
@@ -130,7 +131,7 @@ Hard requirements (invariants this feature touches):
   after the write lands, with `Cache-Control: no-store`, and is never stored, re-rendered or logged.
 - **Write path unchanged.** `add_api_key`, `rotate_api_key`, `remove_api_key` through
   `AccessWrite`, the `rev` 409 check and `bb-auth-web`'s write lock.
-- **No page needs JavaScript** (4g allows one copy script on the reveal). GET never mutates; POST carries the proxy secret, the strict same-origin
+- **JavaScript sparingly** (4g's copy script on the reveal is one). GET never mutates; POST carries the proxy secret, the strict same-origin
   check and `rev`.
 - **Bound**: at most 10 keys per row, `duration` at least `1d` or `never` (the 365-day bound was
   lifted by the user in 4h), `id` matching `[a-z0-9-]{1,32}`.
