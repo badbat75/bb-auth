@@ -3328,3 +3328,100 @@ to approve): Sign out on `https://auth.badbat75.com/account/`, sign in, land on 
 
 When it lands, `docs` updates §8b's first row, the settings invariant's count and list, §8a, and
 `deploy/settings.example.json`.
+
+### 13.20 The Preferences menu closes on a click outside it (plan step 9, asked 2026-11-25)
+
+The menu is `details.settings` in `top_bar`'s account end, one markup on both surfaces (the
+console's `shell_as` and the account page). Today it closes only from its own trigger, so a
+person who opened it and clicked back into the page finds it still hanging over the content.
+
+#### Decision: CSS only, the open trigger covers the page
+
+```css
+details.settings[open]>summary::before{content:"";position:fixed;inset:0;z-index:9;cursor:default}
+details.settings[open]>summary{background:var(--chip);border-color:var(--accent);color:var(--accent)}
+```
+
+Both rules go in `admin.css`, beside `details.settings` (it is the header's arrangement, and it
+names only tokens). While the menu is open, its trigger grows a transparent box over the whole
+viewport. A click anywhere outside the menu lands on that box, which *is* the `summary`, so the
+browser does what activating a summary always does: it toggles the `details` shut. `.menu`
+keeps `z-index:10`, one above the cover, so everything inside the panel (the list boxes, Apply,
+the console's `SETTINGS_ONCHANGE` submit) is hit first and works as it does today. No markup
+changes and no script is added, so the account page keeps "no handler at all".
+
+Why not a script, under "JavaScript is used sparingly": markup and CSS do this one well, and a
+script would buy only Escape-to-close. Escape is not owed here. The control is a disclosure (a
+`summary` revealing a form), not an ARIA menu, and the APG disclosure pattern's keyboard
+contract is Enter and Space only (<https://www.w3.org/WAI/ARIA/apg/patterns/disclosure/>).
+WCAG 2.2 SC 1.4.13 asks for dismissal of content shown on *hover or focus*, not on activation
+(<https://www.w3.org/WAI/WCAG22/Understanding/content-on-hover-or-focus.html>). And the CSS way
+works with scripting off, which a script cannot.
+
+What was checked, against the real pages with the two rules injected (Edge, 1280 and 360,
+scripting on and off, `/admin/users` and `/account/`; scratch script `/tmp/menu9/proto.js`,
+screenshots `/tmp/menu9/*-open.png`): the trigger opens it; a click on a list box inside leaves
+it open; a click outside closes it; a click inside the panel's area at 360 (where it covers the
+middle of a phone screen) leaves it open; Apply still submits and applies the theme; the hit
+test at the centre of a list box is the `SELECT`, not the cover; `scrollWidth` stays 360.
+
+- **Containing block.** A `position:fixed` box is placed against the viewport unless an
+  ancestor has `transform`, `perspective`, `filter` or `will-change:transform`
+  (<https://developer.mozilla.org/en-US/docs/Web/CSS/Reference/Properties/position>). No ancestor
+  of the trigger has any of them today (`button:active`'s `transform` is on buttons, not on
+  the summary). A future rule that puts one on `header.top`, `.bar`, `nav.acct` or
+  `details.settings` shrinks the cover to that box and quietly breaks this; the Rust test below
+  is where that is caught.
+- **Stacking.** No ancestor sets a `z-index`, so the cover (9) and the panel (10) stack in the
+  same context. A future `z-index` on the header must stay below neither.
+- **Accessible name.** `content:""` adds no text, so the trigger's name stays its `.vh` words.
+  Focus after an outside click is on the trigger, which is where a closed disclosure should
+  leave it.
+- **Scrolling.** The cover is not a scroller, so a wheel or a touch drag over it scrolls the
+  page as before; only a tap is taken.
+- **The open state.** The second rule is not decoration: with the cover up, the pointer is
+  "on" the trigger everywhere outside the panel, so `.pill:hover` would flash on and off as
+  the pointer crossed the panel's edge. Giving the open trigger the hover look for as long as
+  it is open makes that steady and shows the state (Nielsen 1, visibility of system status).
+
+**The trade-off, stated.** The click that closes the menu does nothing else: a click on a link
+or on Sign out while the menu is open closes the menu, and a second click follows the link.
+That is the platform's own "light dismiss" (the Popover API's `popover="auto"` behaves the
+same, <https://developer.mozilla.org/en-US/docs/Web/API/Popover_API/Using>), and it is the safe
+side of the error: a click meant to dismiss never navigates by accident. A second, minor cost:
+the trigger's `title` tooltip ("Preferences") may appear if the pointer rests outside the
+panel while it is open, because the cover is the trigger. Not verified in a screenshot (native
+tooltips are not captured); to look at in the review.
+
+Leaving the menu by `Tab` still leaves it open, as today. Not asked, and closing on focus loss
+needs a script.
+
+#### Rejected for the menu
+
+- **A script for click outside and Escape** (a `document` listener, hashed into `admin_csp`
+  and a new account-page CSP). Gives Escape, costs a third script, a policy on a page that has
+  none, and nothing with scripting off. Revisit only if the user wants Escape.
+- **CSS for click outside plus a script only for Escape.** The same third script for a key
+  nothing here requires.
+- **`popover` instead of `details`.** Light dismiss and Escape with no script, but the panel
+  goes to the top layer centred in the viewport and hanging it off the trigger needs CSS anchor
+  positioning; it rewrites a control two surfaces and several tests are built on, for one key.
+- **The cover on `details.settings::before`.** A click on it hits the `details`, not the
+  `summary`, and nothing closes.
+
+#### Tests, in two parts
+
+- **9-1, the rule** (`src/assets/admin.css`, tests in `src/bin/bb-auth-web.rs`):
+  `an_open_menu_closes_on_a_click_outside_it` asserts `CSS` contains
+  `details.settings[open]>summary::before{content:"";position:fixed;inset:0;z-index:9` and the
+  open-state rule, that `.menu`'s `z-index` is greater than the cover's, and that none of
+  `header.top`, `.bar`, `nav.acct`, `details.settings` carries `transform`, `filter`,
+  `perspective` or `will-change`. `no_page_but_the_reveal_carries_a_script` stays as it is: it
+  is what says no script came with this.
+- **9-2, the walk** (`e2e/tests/settings.js` for the console, `e2e/tests/account.js` for the
+  page, and the same two checks in `nojs.js`'s scripting-off pass): open the menu, click a
+  point outside the panel (bottom-left of the viewport), `details.settings` is not `open`;
+  open it, click a list box inside, still `open`; pick a theme and submit (onchange in the
+  console, Apply on the page, Apply in the console with scripting off), `data-theme` changed.
+  The designer then looks at `node e2e/shots.js settings-menu` and `account-menu` for the open
+  state, light and dark.

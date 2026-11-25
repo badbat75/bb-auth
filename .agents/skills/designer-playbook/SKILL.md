@@ -30,6 +30,9 @@ Rules are in `AGENTS.md`. Format of this file: `AGENTS.md`, under "Skills".
   also beats `auth.css`, so restore any layout override it clobbers (the sign-in card's shadow).
 - Shoot every mockup twice: built-in palette, and the operator's token file (a copy is under
   `/tmp/claude-1000/bb-auth-tasks/ext/tokens.css`) linked after our CSS; block network fetches in the shot.
+- To try a CSS rule on the real pages (scripting on and off): `boot()`, then `page.route` the page's own
+  path, `fetch()` it, insert a `<style>` before `</head>` and fulfil with the `content-security-policy`
+  header deleted (the hash-only CSP drops any added style). Example: `/tmp/menu9/proto.js`.
 
 ## Pitfalls
 
@@ -43,3 +46,4 @@ Rules are in `AGENTS.md`. Format of this file: `AGENTS.md`, under "Skills".
 - The ground is one viewport tall (`html{height:100%}`), so a background without `no-repeat` restarts one viewport down: a band of a second shade on any long page.
 - `nav .pill` also matches the header icons, because `nav.acct` is a `nav` too.
 - A desktop rule that sizes `.pill` is undone on a phone by the `@media` block in `admin.css` (line `.bar .pill,p.primary .pill,.actions .pill`): check every size change in the `phone` view too.
+- At 360 the Preferences panel covers the middle of the screen: a "click outside" in a phone check must aim at a corner (bottom-left), not the centre.
