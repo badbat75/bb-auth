@@ -5130,3 +5130,287 @@ the rendered page in a browser with the registration step active, light and dark
    right under it, or soften it for every deployment to "No account signs in with a code for
    {email} yet"?
 2. The email step's own hint promises "No account yet? We'll create one on the fly." Leave it?
+
+### 13.28 One account menu in the shared header (plan step 8, slice H, designed 2026-11-25)
+
+The user asked on 2026-11-25 to slim the header: the bar shows only the person's name or only the
+email, and a click on it opens one panel holding the page menu, the settings (expanding) and Sign
+out. Accepted compromise: on desktop the console's tabs stay in the bar, as the primary
+navigation, and at phone width they move into the panel; `/account/` has no tabs. Added the same
+day: the panel also holds "Delete account and all its data", the entry to step 7. This replaces
+the header's identity span, the sliders trigger and the Sign out icon of §13.17 and the
+Preferences menu of §13.20 (whose light-dismiss cover is kept), and it absorbs slice M of §13.26
+§6.
+
+What was looked at: §13.17, §13.20, §13.26 §6, `PLAN.md` steps 7 and 8; in
+`src/bin/bb-auth-web.rs` `identity_label`, `top_bar`, `prefs_trigger`, `sign_out_pill`,
+`shell_as`, `shell_named`, `account_shell`, `AccountPrefs` (`who`, `page_lede`), `account_csp`,
+`admin_csp`, `SETTINGS_ONCHANGE`, and the two places the given name is read (the console's
+dispatcher and `handle_account`, both `settings.profile_claims` → the `given_name` claim's header
+→ `pct_decode`); `src/assets/admin.css` (the header block, `details.settings`, `.menu`, the phone
+block at `@media (max-width:640px)`, the only `@media` in the file) and `base.css` (`.pill`,
+`.pill.rm`, `.pill.on`, `nav .pill`, `.vh`). Rendered today: `node e2e/shots.js settings-menu`
+and `account-menu`, copied to `/tmp/d8h/before/{light,dark,phone,it,noscript}/`. At 360 the
+console's bar is two lines, the tabs strip scrolls sideways with the fifth tab clipped, and the
+open menu covers the strip.
+
+Measured on a static mockup over the real `theme.css`, `base.css` and `admin.css` plus a delta
+(`/tmp/d8h/proposed.css`; pages `/tmp/d8h/{console,account}-{light,dark}.html`, shot by
+`/tmp/d8h/shot.js` in Edge; screenshots `/tmp/d8h/{console,account}-{light,dark}-{1280,360}.png`):
+no sideways scroll at 1280 or 360; the panel spans x=84 to 344 at 360 (inside the 16px gutters)
+and 864 to 1124 at 1280 (right-aligned with the content column); the trigger is 36px tall at
+1280 and 30px at 360; a 33-character address truncates to 256px at 1280 and 176px at 360. The
+console's panel at 360 with all five tabs, two addresses and the Preferences open is 592px tall.
+Found while measuring: the phone rule `nav.acct .who{display:none}` hides the new trigger
+outright, so it must go (below). Read in a source: each browser and WCAG fact, cited where used.
+
+#### 1. The label
+
+The trigger shows **one** string: the given name when nginx forwards it, else the first address.
+No "·", no second fact: the panel says the rest.
+
+- **Console**: the dispatcher already computes `given` (the `given_name` claim's header named by
+  `settings.profile_claims`, percent-decoded) before any page is built, and the email header is
+  `v.admin` (or, on the `403`, the raw header `shell_named` receives today).
+- **`/account/`**: `handle_account` computes the same `given` from the same settings, and the
+  email header is `raw` (the `X-Auth-Email` value).
+- A deployment that does not configure `given_name`, or a person whose token has none, shows the
+  address. An empty or whitespace name counts as none (as `identity_label` does today).
+
+`identity_label` is replaced by `Who { label: String, emails: Vec<String>, name: Option<String> }`
+built by one `who(given, email_header)`: `label` is the name else the first address, `emails`
+every address of the header split on ASCII whitespace, in order. Both shells take `Option<Who>`
+where they take `Option<String>` today; the `403` builds one the same way.
+
+**Truncation.** `span.who-name` inside the trigger: `overflow:hidden; text-overflow:ellipsis;
+white-space:nowrap; min-width:0`, and the trigger `max-width:16rem` (256px) above 640px and
+`11rem` (176px) at or below it. `text-overflow` needs exactly those three companions
+(<https://developer.mozilla.org/en-US/docs/Web/CSS/text-overflow>). Nothing is lost: the full
+text stays in the DOM (a reader hears all of it), the trigger's `title` carries the full label,
+and the panel's first block prints every address whole, wrapping with `overflow-wrap:anywhere`.
+That is what keeps the cut acceptable under WCAG 1.4.10 Reflow, which asks that content stay
+available without two-dimensional scrolling, not that every string be shown in full in place
+(<https://www.w3.org/WAI/WCAG22/Understanding/reflow.html>).
+
+#### 2. The panel's content and order
+
+Top to bottom, each block present only where it applies:
+
+1. **The tabs, at phone width, console only** (`div.menu-tabs`): the five tab links as full-width
+   rows, the current one `.pill.on` with `aria-current="page"`, then a rule (`div.sep`).
+2. **Who** (`p.who-full`): the name in `strong` when there is one, then every address on its own
+   line, muted and small. All addresses and not the first, because this is the one place a
+   person with several addresses or several accounts checks which identity they are acting as.
+   **The uuid is not here**: it is a machine id, the account page's lede already shows it as
+   "Account id" (one home for one fact), and on the console nobody asked for it.
+3. **Preferences**, as a **nested `details.prefs`**: a full-width row `summary.pill` with the
+   sliders glyph, the word `K::Settings` ("Preferences") and a caret that turns when open; inside
+   it the existing form (Language, then Theme, the two `select`s), closed by default.
+4. A rule, then **Sign out**: `a.pill` row with the existing out glyph **and** the visible word
+   `K::SignOut`. In a panel there is room for the word, so the icon stops being the only label.
+5. A rule, then **Delete account and all its data** (§5 below), last, **added by step 7**.
+
+**Why a nested group and not inline radios.** The user's own word was "the settings
+(expanding)". The common case is opening the panel to check who you are or to sign out, and
+preferences are set once; a closed group keeps the panel at five rows on `/account/` instead of
+eleven (progressive disclosure, Nielsen 8). It also reuses the existing two `select`s, their
+option lists, the console's `onchange` and its tests unchanged, where six radios would need a new
+fieldset markup, a new test set and the handler attribute moved onto six inputs. The trade-off:
+one more click to reach a preference (Nielsen 7, efficiency), accepted because it is rare.
+
+`p.who-full` is **not** a `p.lede`, so the panel adds no lede to a page and the one-lede rule of
+§13.23 holds by construction: `AccountPrefs::page_lede` and the branch on it are deleted. A closed
+`details`' content is not rendered, so it is not read before the page's own lede either
+(<https://developer.mozilla.org/en-US/docs/Web/HTML/Reference/Elements/details>).
+
+#### 3. Mechanics
+
+- **The control.** The outer element stays `details.settings` (the class names "the bar's
+  menu"; the §13.20 cover rule, its Rust test and every e2e selector target it, and renaming
+  buys a word). Its `summary` becomes `summary.pill.who`: `span.who-name` (the label), a hidden
+  `span.vh` ", " + `K::AccountMenu`, and the caret `svg.i-caret` (`aria-hidden`). The accessible
+  name is "Ada, account menu", which contains the visible "Ada" as WCAG 2.5.3 Label in Name asks
+  (<https://www.w3.org/WAI/WCAG22/Understanding/label-in-name.html>). Not `role="menu"`: the
+  panel holds a form and links, and the APG menu-button pattern would promise arrow-key
+  navigation and `menuitem` children that a form cannot be
+  (<https://www.w3.org/WAI/ARIA/apg/patterns/menu-button/>); a disclosure is the honest pattern
+  (<https://www.w3.org/WAI/ARIA/apg/patterns/disclosure/>), and `details` exposes its
+  expanded state to assistive technology natively.
+- **Closing.** The §13.20 cover stays as is: `details.settings[open]>summary::before` covers the
+  viewport while open, so a click outside closes. Its selector is a child combinator, so the
+  nested `details.prefs` gets no cover of its own and toggles only from its own row. Submitting
+  the form reloads the page, which closes both. Escape does not close, as in §13.20.
+- **Keyboard.** Tab reaches the trigger (after the tabs on desktop); Enter or Space opens it;
+  focus stays on the trigger; the next Tab enters the panel in DOM order (phone tabs, then the
+  Preferences row, its fields when open, Sign out, Delete). Tab past the last item leaves the
+  panel open, as today. Both `summary` rows show the existing focus ring.
+- **Scripting off.** Everything is HTML: both disclosures open, the links navigate, and the
+  Preferences form submits with its button. The console keeps its one handler as it is
+  (`onchange=SETTINGS_ONCHANGE` on both `select`s, `noscript` Apply); `/account/` has no handler
+  and its Apply is always shown in `div.actions`. The form is the same `GET` to the page and the
+  same `302` that sets `theme` and `lang`.
+- **No CSP change.** No script and no new handler: the console's `'unsafe-hashes'` hash is of
+  the same handler text, and `account_csp` keeps `script-src 'none'`. The new rules live in
+  `admin.css`, whose bytes are already inside both style hashes, so the hash moves with the file
+  and nothing is listed by hand. `img-src` is untouched (the caret and glyphs are inline `svg`).
+- **Size.** The panel gets `max-height:calc(100dvh - 80px); overflow-y:auto`, so a short phone in
+  landscape can still reach Delete (`dvh`:
+  <https://developer.mozilla.org/en-US/docs/Web/CSS/length#dynamic_viewport_units>), and
+  `max-width:calc(100vw - 32px)`. Rows are `.bar .pill`, so at least 30px tall at phone width,
+  above WCAG 2.5.8's 24px (<https://www.w3.org/WAI/WCAG22/Understanding/target-size-minimum.html>).
+- **Look of the rows.** The panel sits inside `nav.acct`, so `nav .pill` already gives every row
+  the quiet tab look (muted text, chip on hover) and `.pill.on` the current tab's fill: no new
+  colour, and the rows read as the same objects as the bar's tabs.
+
+#### 4. The phone breakpoint, and the tabs
+
+The existing `@media (max-width:640px)` block, nothing new. At or below it: the bar's tab `nav`
+gets `display:none` (replacing today's sideways-scrolling strip, which ends the clipped fifth tab
+§13.17 named), `div.menu-tabs` gets `display:flex; flex-direction:column`, and the trigger keeps
+showing (delete `nav.acct .who{display:none}` and its comment; the name **is** the trigger now).
+Above it, `div.menu-tabs{display:none}`. The bar becomes one line: brand left, trigger right.
+
+**The tab links are emitted twice, from one loop.** Moving one element between the bar and the
+inside of a closed `details` cannot be done in CSS: a closed `details` does not render its
+content, and positioning the bar's `nav` over the panel would put it before the trigger in the
+tab order and fight the cover's stacking. So one helper, `tab_links(v) -> Markup` (the `@for`
+`shell_named` has today, plus `aria-current="page"` on the current one), is called in the bar's
+`nav` and in `div.menu-tabs`. Acceptable because the source has one copy; at any width exactly
+one copy is displayed and `display:none` removes the other from the accessibility tree, so no
+reader hears five links twice; and the cost is five anchors per page. `aria-current="page"` is
+the attribute for "the current item in a set of links"
+(<https://www.w3.org/TR/wai-aria-1.2/#aria-current>), and it is added in the bar's copy as well,
+which today says "current" only by colour (WCAG 1.3.1). `div` and not `nav` for the panel copy:
+it is already inside `nav.acct`, and a second `nav` would also be caught by the phone rule
+`nav:not(.acct)`.
+
+#### 5. Delete account and all its data
+
+- **Placement.** The last row, after Sign out, behind its own rule. Last because Tab order then
+  never crosses it on the way to Sign out, and the destructive, rare action sits farthest from
+  the first rows a person reaches; the rule plus the row gap (12px between the two targets) keeps
+  a slip off Sign out from landing on it.
+- **Style.** `a.pill.rm`, the console's remove component: muted text, the error colour on hover
+  and focus, no new colour. The words say what it does; there is no icon.
+- **A link, never a form.** A plain `GET` to `{account}/delete` (`Config::account_path` +
+  `delete`), which renders step 7's confirmation page and changes nothing; only that page's
+  `POST` deletes. A prefetch or a misclick costs nothing. This is the confirmation-before-
+  deletion WCAG 3.3.4 asks for on data deletion
+  (<https://www.w3.org/WAI/WCAG22/Understanding/error-prevention-legal-financial-data.html>).
+- **On the console.** Recommended: **not** in the console's menu. On the console every page is
+  about other people's accounts and the users page has its own "remove"; "Delete account" in a
+  panel opened over `/admin/users/bob` reads as deleting bob, and the cost of that misreading is
+  high. An administrator is a person with an account, and reaches its deletion from `/account/`.
+  Whether the console's panel should then carry a "Your account" row to `/account/` (reusing
+  `K::NotAdminToAccount`, "Go to your account") is open question 2.
+- **Before step 7.** Recommended: **not built in H**. Step 7 adds the row, its route, its `K`
+  key and its tests together. Hidden markup would be a dead link a stylesheet could reveal, and
+  an unused `K` key is dead code; H only reserves the place (last, after a rule) and this
+  wording.
+
+| Key | English | Italian |
+|---|---|---|
+| `AccountDelete` (step 7) | Delete account and all its data | Elimina l'account e tutti i suoi dati |
+
+#### 6. What slice M becomes
+
+M (one `prefs_menu` for both shells) is done inside H, one level up: one `account_menu` built by
+both shells, so no menu markup is written twice.
+
+- `prefs_form(lang, lang_pref, theme, action, hidden: &[(String, String)], scripted: bool) ->
+  Markup`: the `form.edit` with the two `select`s; `scripted` adds the `onchange` and wraps
+  Apply in `noscript`, else Apply is plain in `div.actions`. Deletes the second copy in
+  `account_shell`.
+- `account_menu(lang, who: Option<&Who>, tabs: Option<Markup>, prefs: Markup, logout:
+  Option<&str>) -> Markup`: the `details.settings` with the trigger and the panel in §2's order.
+  Step 7 adds a `delete: Option<&str>` argument. `shell_named` passes `Some(tab_links(v))` when
+  `v.admin` is set, `Config::logout_url`, `scripted: true`; `account_shell` passes `None`,
+  `Config::account_logout_url`, `scripted: false`.
+- `prefs_trigger` and `sign_out_pill` are replaced by the two rows (the glyphs move with them);
+  `identity_label` by `who`; `span.who` in `nav.acct` and `AccountPrefs::page_lede` go.
+  `nav.acct` keeps only `account_menu`.
+
+#### 7. `K` keys (H)
+
+| Key | English | Italian | Use |
+|---|---|---|---|
+| `AccountMenu` | account menu | menu dell'account | hidden suffix of the trigger's name |
+
+Reused unchanged: `K::Settings` (the Preferences row), `K::SignOut` (now also visible text),
+`K::SettingLanguage`, `K::SettingTheme`, `K::Apply`, the tab keys.
+
+#### 8. Tests and scenes (slice H)
+
+Unit and socket tests in `src/bin/bb-auth-web.rs`:
+
+- `who_is_the_name_else_the_first_address`: `who(Some("Ada"), "a@x b@x")` has label `Ada` and
+  both emails; `who(None, …)` and `who(Some("  "), …)` have label `a@x`; no `·` anywhere.
+- `the_trigger_is_the_label`: on the console and on `/account/`, with and without the
+  `given_name` header configured and forwarded, `details.settings > summary` text starts with the
+  label, carries `span.vh` with `K::AccountMenu` in both languages, a `title` equal to the full
+  label, and no `span.who` is left in `nav.acct`.
+- `the_panel_is_in_order`: inside `.menu`, in this order: `div.menu-tabs` (console only), one
+  `p.who-full` listing every address, one `details.prefs` holding the one `form`, one
+  `a.pill` Sign out whose text is `K::SignOut` (only when the logout URL is set); no `p.lede` in
+  `.menu` on any page, including the profile code page.
+- `the_tabs_are_written_twice_and_marked`: on a console page, the bar's `nav` and
+  `div.menu-tabs` hold the same hrefs in the same order, and each holds exactly one
+  `aria-current="page"`, on the current tab; `/account/` and the console's `403` have no
+  `div.menu-tabs`.
+- The preference handlers: the console's two `select`s carry `onchange="this.form.submit()"` and
+  Apply is inside `noscript`; the account's carry no `on…` attribute and Apply is in
+  `div.actions`. `admin_csp` and `account_csp` produce the same directives as before apart from
+  the style hash; `no_page_but_the_reveal_carries_a_script` unchanged.
+- CSS, parsed as `an_open_menu_closes_on_a_click_outside_it` does: outside the phone block
+  `.menu-tabs{display:none}` and the trigger's `max-width:16rem`, `.who-name` with
+  `text-overflow:ellipsis`, `overflow:hidden`, `white-space:nowrap`; inside it
+  `nav:not(.acct){display:none}`, `.menu-tabs` `display:flex`, the `11rem` cap, and **no**
+  `nav.acct .who` rule; the cover test extended so `details.prefs` has no `::before` cover.
+- Existing tests to rewrite: those on `span.who` and the menu's `p.lede` (the `who_span` and
+  `account_lede_zone` assertions), the icon trigger and the Sign out pill.
+
+e2e:
+
+- `e2e/tests/settings.js`: open `details.settings > summary`, open `details.prefs > summary`, pick
+  a theme, `data-theme` changes (the handler); click bottom-left, the menu is closed. At 360x760:
+  the bar's tab `nav` is not visible, the panel shows five tab links with `aria-current` on the
+  current one, clicking "Applications" navigates; `scrollWidth` is 360.
+- `e2e/tests/account.js`: the trigger reads the email (fixture without `given_name`) and the name
+  when `PROFILE_HEADERS` forward one; open, open Preferences, Apply changes `data-theme`; the Sign
+  out `href` has no `rd`; no `div.menu-tabs`.
+- `e2e/tests/nojs.js`: the same open, nested open and Apply on both surfaces with scripting off,
+  and at 360 a tab reached from the panel navigates.
+- `e2e/shots.js`: `settings-menu` and `account-menu` now open the account menu (closed
+  Preferences); add `settings-menu-prefs` and `account-menu-prefs` (Preferences open) and
+  `forbidden-menu` (the `403`'s panel: who and Sign out only). The phone view of `settings-menu`
+  is the one that shows the tabs in the panel; the designer reviews all of them light, dark,
+  phone and `it` before the slice closes.
+
+For the coder: `src/bin/bb-auth-web.rs` (`who`, `tab_links`, `prefs_form`, `account_menu`,
+`shell_named`, `account_shell`, `AccountPrefs`, the dispatcher's and `handle_account`'s label
+building, the `K` table); `src/assets/admin.css` (the trigger, `.who-name`, `.menu` as a flex
+column with `max-height`, `.menu .pill` full-width rows and their glyph size, `.menu .sep`,
+`p.who-full`, `details.prefs` marker removal and caret turn, `.menu-tabs`, the phone block's
+three changes). The delta in `/tmp/d8h/proposed.css` is a starting point, not the rules to copy:
+it overrides where the real change edits.
+
+#### 9. Alternatives rejected (slice H)
+
+- **Tabs always in the panel, on desktop too**: the user's first idea; hides the primary
+  navigation behind a click on every page (recognition over recall). The user accepted the
+  compromise.
+- **Inline radios for the preferences**: §2.
+- **`popover` or `role="menu"`**: §13.20's reasons, plus a form inside a menu role.
+- **The sliders icon as a second trigger beside the name**: two controls where the user asked
+  for one.
+- **The uuid in the panel**: §2.
+- **Moving the bar's `nav` into the panel with CSS only**: §4.
+- **Delete above Sign out, or in red at rest**: Tab would cross it on the way to Sign out; red at
+  rest would be the loudest row of a panel opened mostly to sign out, and the console's removes
+  are quiet until hovered.
+
+#### 10. Open questions for the user (slice H)
+
+1. Delete on the console's panel: recommended no (§5). Agree?
+2. If not there, should the console's panel carry "Go to your account" (a link to `/account/`)?
+   Recommended yes, one row above Sign out; it is a new item nobody has asked for yet.

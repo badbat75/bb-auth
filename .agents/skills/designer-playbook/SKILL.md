@@ -55,6 +55,7 @@ Rules are in `AGENTS.md`. Format of this file: `AGENTS.md`, under "Skills".
   `settings.json` beside the access file with an empty `gate.issuer`, so no JWKS fetch), then answers the
   page's Cognito `fetch` with `page.route` on the `X-Amz-Target` header (`UserNotFoundException` opens
   the registration step). An empty issuer leaves `connect-src` empty, so the context needs `bypassCSP: true`.
+- A mockup of the shared header and its account menu (§13.28): `/tmp/d8h/{console,account}-{light,dark}.html` over the real CSS plus `/tmp/d8h/proposed.css`, shot by `/tmp/d8h/shot.js` (logs `scrollWidth`, the panel's box and the trigger's size).
 
 ## Pitfalls
 
@@ -77,3 +78,5 @@ Rules are in `AGENTS.md`. Format of this file: `AGENTS.md`, under "Skills".
 - `node e2e/shots.js <filter>` deletes all of `e2e/artifacts/visual/` first: shooting a console scene for comparison wipes the shots under review. Copy them to `/tmp` before, or rerun their filter after.
 - `docs/ARCHITECTURE.md` fails markdownlint MD024 on a repeated heading ("8. Open questions for the user" already exists twice): give a new section's `####` headings a suffix naming it.
 - The sign-in page's social buttons live inside the email step, so they are hidden on the registration and code steps: anything that points at "your provider" on a later step must render them there too.
+- `node e2e/shots.js` takes one substring filter, not a regex (`a|b` matches nothing): run one filter per call.
+- Every pill inside the header panel is also matched by `nav .pill` and `.bar .pill` (it sits in `nav.acct`), and the phone block hides `nav.acct .who`: check a new header element against both before measuring it.
