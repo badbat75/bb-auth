@@ -3327,6 +3327,20 @@ pub fn version_line(program: &str) -> String {
 /// form can show.
 pub const RESERVED_CLAIMS: [&str; 4] = ["email", "email_verified", "token_use", "identities"];
 
+/// Whether the `email_verified` claim is truthy. Cognito types it as a bool, but some
+/// federated flows stringify it, so `"true"` counts. Anything else is false.
+///
+/// It lives in the library because the gate is not the only program that will validate a
+/// token: `bb-auth-web` starts to (docs/ARCHITECTURE.md §13.22, slice 5b), and what
+/// Cognito's `email_verified` means must not have two answers.
+pub fn email_verified_true(v: &Value) -> bool {
+    match v {
+        Value::Bool(b) => *b,
+        Value::String(s) => s.eq_ignore_ascii_case("true"),
+        _ => false,
+    }
+}
+
 /// Every identity attribute the gate knows how to emit.
 ///
 /// The **set** an installation emits is configuration ([`GateSettings::identity_attrs`]); the
@@ -5444,6 +5458,37 @@ impl Settings {
     /// Whether `email` (already [`norm_email`]-normalised) may use the GUI.
     pub fn is_admin(&self, email: &str) -> bool {
         self.admins.iter().any(|a| a == email)
+    }
+
+    /// The Cognito JSON API endpoint a browser-side client talks to: the issuer's origin,
+    /// since the pool id is the only part of an issuer URL that is not it.
+    ///
+    /// **Derived and never configured**: a page that named its own endpoint could name a
+    /// pool this deployment does not validate against, and the symptom would be a login
+    /// that succeeds in the browser and is refused by the gate a redirect later. Computed
+    /// per use rather than held, because the issuer is a setting and a held copy would be
+    /// the stale half of a reload.
+    ///
+    /// It lives in the library because the gate is not the only program that needs the
+    /// answer: the gate stamps it into the sign-in page it serves, and `bb-auth-web` will
+    /// call Cognito itself (docs/ARCHITECTURE.md §13.22, slice 5b), so a second answer to
+    /// "where does this pool's API live" is exactly the drift this library exists to end.
+    ///
+    /// Empty when the issuer has no origin: a page must never be handed a bare "/" to
+    /// post a credential to.
+    pub fn cognito_endpoint(&self) -> String {
+        match self.issuer.find("://") {
+            Some(i) => {
+                let rest = &self.issuer[i + 3..];
+                let end = rest.find(['/', '?', '#']).unwrap_or(rest.len());
+                if end == 0 {
+                    String::new()
+                } else {
+                    format!("{}/", &self.issuer[..i + 3 + end])
+                }
+            }
+            None => String::new(),
+        }
     }
 }
 
@@ -10473,5 +10518,40 @@ mod tests {
         );
         assert!(AuditKind::LoginGranted.granted());
         assert!(!AuditKind::AccessRefused.granted());
+    }
+
+    #[test]
+    fn the_cognito_endpoint_is_the_issuers_origin() {
+        // The pool id is the only part of an issuer URL that is not the API's address.
+        let s = settings(
+            r#"{ "version": 3, "gate": { "issuer":
+                "https://cognito-idp.eu-central-1.amazonaws.com/eu-central-1_TESTPOOL" } }"#,
+        )
+        .unwrap();
+        assert_eq!(
+            s.cognito_endpoint(),
+            "https://cognito-idp.eu-central-1.amazonaws.com/"
+        );
+        // A port belongs to the origin, the path does not.
+        let s = settings(
+            r#"{ "version": 3, "gate": { "issuer": "https://idp.example.com:8443/pool" } }"#,
+        )
+        .unwrap();
+        assert_eq!(s.cognito_endpoint(), "https://idp.example.com:8443/");
+        // No issuer, no endpoint: empty, never a bare "/" a page would then post to.
+        let s = settings(r#"{ "version": 3 }"#).unwrap();
+        assert_eq!(s.cognito_endpoint(), "");
+    }
+
+    #[test]
+    fn email_verified_is_true_or_the_string_true() {
+        assert!(email_verified_true(&serde_json::json!(true)));
+        assert!(email_verified_true(&serde_json::json!("true")));
+        assert!(email_verified_true(&serde_json::json!("TRUE")));
+        assert!(!email_verified_true(&serde_json::json!(false)));
+        assert!(!email_verified_true(&serde_json::json!("false")));
+        assert!(!email_verified_true(&serde_json::json!("1")));
+        assert!(!email_verified_true(&serde_json::json!(1)));
+        assert!(!email_verified_true(&serde_json::json!(null)));
     }
 }

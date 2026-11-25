@@ -140,8 +140,8 @@ use tiny_http::{Header, Request, Response, ResponseBox, Server, StatusCode};
 // contract — stays here, in one file, read top to bottom.
 use bb_auth_core::{
     claim_name_ok, decide, decide_api_key, decision_reason, default_settings_path, denied_url_for,
-    estate_form_action, header_safe_email, html_escape, login_url_for, now, page_csp,
-    rd_url_allowed, read_access, read_settings, request_site, request_url, sha256_hex,
+    email_verified_true, estate_form_action, header_safe_email, html_escape, login_url_for, now,
+    page_csp, rd_url_allowed, read_access, read_settings, request_site, request_url, sha256_hex,
     social_idp_label, stylesheet_link, version_line, Access, AccessKind, ApiKeyRecord, AuditClient,
     AuditCredential, AuditEvent, AuditKind, AuditPolicy, AuditWriter, Decision, IdentityAttr,
     KeyDecision, ProfileClaim, RequestSite, Settings, SocialButton, Subject, UrlPattern,
@@ -440,21 +440,6 @@ struct Config {
     audit_file: String,
     /// `BB_AUTH_WORKERS`, the number of blocking request threads. At least 1.
     workers: usize,
-}
-
-/// The Cognito JSON API endpoint the sign-in page talks to: the live issuer's origin, since
-/// the pool id is the only part of an issuer URL that is not it.
-///
-/// **Derived and never configured**, which is the whole argument for serving the sign-in page
-/// from here: a page that named its own endpoint could name a pool this gate does not validate
-/// against, and the symptom would be a login that succeeds in the browser and is refused by
-/// the gate a redirect later. It is computed per use rather than held, because the issuer is a
-/// setting now and a held copy would be the stale half of a reload.
-fn cognito_endpoint(settings: &Settings) -> String {
-    match origin_of(&settings.issuer) {
-        Some(o) => format!("{o}/"),
-        None => String::new(),
-    }
 }
 
 /// Read an env var, falling back to `default` when unset.
@@ -1384,16 +1369,6 @@ struct Identity {
     provider_name: Option<String>,
 }
 
-/// Whether the `email_verified` claim is truthy. Cognito types it as a bool, but some
-/// federated flows stringify it, so `"true"` counts. Anything else is false.
-fn email_verified_true(v: &serde_json::Value) -> bool {
-    match v {
-        serde_json::Value::Bool(b) => *b,
-        serde_json::Value::String(s) => s.eq_ignore_ascii_case("true"),
-        _ => false,
-    }
-}
-
 /// Whether an `email_verified=false` token may still be accepted under the
 /// social-login relaxation. Requires the feature to be enabled AND the token to
 /// carry a federated `identities` entry from an accepted provider. A native
@@ -2124,7 +2099,7 @@ const AUTH_CSS: &str = include_str!("../assets/auth.css");
 /// needs the app-client id, the issuer's endpoint and the list of hosts a post-login `rd` may
 /// land on, and the gate already holds all three **as the values it validates against**: the
 /// client id is one it accepts as an audience ([`bb_auth_core::Settings::audiences`]), the endpoint is derived from
-/// the issuer whose signature it verifies ([`cognito_endpoint`]), and the hosts are
+/// the issuer whose signature it verifies ([`bb_auth_core::Settings::cognito_endpoint`]), and the hosts are
 /// what [`safe_rd`] enforces. Served from here, the page and the gate cannot disagree about
 /// any of them; served from a static host, every one of the three is a second copy.
 ///
@@ -2422,7 +2397,7 @@ fn handle_login(req: Request, state: &State) {
             header_value(&req, REFERER_HEADER),
             &settings.authorized_hosts,
         );
-        let endpoint = cognito_endpoint(&settings);
+        let endpoint = settings.cognito_endpoint();
         let page = login_page(&settings, &rd, &nonce);
         let csp = gate_csp(&settings, &nonce, &[&endpoint]);
         (page, csp)
@@ -2469,7 +2444,7 @@ fn login_rd(rd: Option<&str>, referer: Option<&str>, hosts: &[UrlPattern]) -> St
 fn login_page(settings: &Settings, rd: &str, nonce: &str) -> String {
     let mut subs = look_subs(settings, nonce);
     subs.push(("__BB_RD__", html_escape(rd)));
-    subs.push(("__BB_ENDPOINT__", cognito_endpoint(settings)));
+    subs.push(("__BB_ENDPOINT__", settings.cognito_endpoint()));
     // The app client the email flow runs against. Empty is a deployment nobody has told
     // which app client it is, and the page then cannot complete a login: the gate says so at
     // startup rather than here, because a page is the wrong place to explain a config gap.
@@ -2666,7 +2641,7 @@ fn handle_callback(req: Request, state: &State) {
             let (_, token_url) = oauth_urls(domain);
             let page = callback_page(&token_url, callback, &settings, &nonce);
             let token_origin = origin_of(&token_url).unwrap_or_default();
-            let endpoint = cognito_endpoint(&settings);
+            let endpoint = settings.cognito_endpoint();
             let csp = gate_csp(&settings, &nonce, &[&endpoint, &token_origin]);
             (page, csp)
         })
@@ -2680,7 +2655,7 @@ fn handle_callback(req: Request, state: &State) {
 /// Render the callback page. Split from its handler for the reason [`login_page`] is.
 fn callback_page(token_url: &str, callback_url: &str, settings: &Settings, nonce: &str) -> String {
     let mut subs = look_subs(settings, nonce);
-    subs.push(("__BB_ENDPOINT__", cognito_endpoint(settings)));
+    subs.push(("__BB_ENDPOINT__", settings.cognito_endpoint()));
     subs.push(("__BB_TOKEN_URL__", token_url.to_string()));
     // No app client here on purpose: the one to exchange with is whichever the clicked button
     // named, and only the page that clicked it knows that.
@@ -4247,7 +4222,7 @@ fn main() {
     eprintln!(
         "[bb-auth] pages: /auth/login, /auth/callback and /auth/denied (leave all three \
          UNGATED in nginx) | cognito={} | client={} | login={} | denied={} | social={}",
-        cognito_endpoint(&settings),
+        settings.cognito_endpoint(),
         settings.client_id,
         global_login(&settings),
         match settings.denied_url.as_str() {
