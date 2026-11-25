@@ -181,6 +181,20 @@ later, the date hint order, a gap under the read-only phone line, browser defaul
 autocapitalize on names, autofocus on the refused field, and §13.23 to say the edit page's h1 is
 "Edit profile".
 
+5f and 5g are committed (98bb8ff, 13d0dc0); the designer passed 5g for the deploy, with the code
+field's `max-width:14ch` still to add. On 2026-11-25, at the user's request, the IT-Admin session
+deleted the native twin (`a3144842-…`), so that email now matches only the MicrosoftPersonal
+user. A real 5e run therefore needs an account that signs in by email code.
+
+Federated users, read-only from IT-Admin on 2026-11-25 (`cognito.tf`; AWS: "Amazon Cognito updates
+mapped attributes when users sign in to your application through an IdP"): MicrosoftPersonal maps
+`email`, `name`, `given_name`, `family_name`, and Google maps `email`, `given_name`, `family_name`.
+Any edit of those on a federated user would therefore be reverted at that user's next sign-in, so the
+one sentence 5g shows instead of a form is the honest answer, not a gap. A federated edit path would
+need the user's decision first: drop those mappings in OpenTofu (edits stick, the automatic name sync
+is lost), plus a re-authentication through the social client whose `prompt=login`/`max_age`
+forwarding nobody has verified. Not planned.
+
 Inherited from §13.13: every Cognito call carries `timeout_global` of 5 s (assumed, not measured),
 no retry, at most two calls per request, so a slow Cognito cannot pin the workers; a test with a
 fake endpoint that never answers shows the handler answering within the bound and the worker
