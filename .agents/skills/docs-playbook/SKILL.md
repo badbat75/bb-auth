@@ -44,6 +44,12 @@ Rules are in `AGENTS.md`. Format of this file: `AGENTS.md`, under "Skills".
 - The line-number prefix (`N:` and a space) that `read` prints makes an AGENTS.md bullet continuation look indented **three**
   spaces; it is **two** (same in CHANGELOG.md's `*` bullets). An `edit` oldString copied from
   `read` fails to match. Check with `sed -n 'A,Bp' AGENTS.md | awk '{printf "[%s]\n", $0}'`.
+- The invariant count in `AGENTS.md` is stated in **three** places and pinned by no test: the
+  contents-table row (`**42 rules…**`), the lead sentence (`Forty-two of them`), and the index
+  list at the top of the section.
+  The body's count is `grep -c '^- \*\*'` over the section after `### What lives where`; the
+  index is the bullet list at the top of the section. Add the missing index entry, before
+  repeating any number: the body carried 42 while both prose copies said 41.
 - CHANGELOG.md: `## 1.99.8 (2026-11-25)` is the release tagged `v1.99.8`; new work goes under
   `## Unreleased` above it, as `###` sections newest first. When a section is inserted, renumber
   any "except the first N sections" clause in a lead paragraph: those clauses are a ledger.

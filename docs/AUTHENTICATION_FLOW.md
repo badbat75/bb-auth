@@ -78,6 +78,14 @@ a second OTP**.
  Cognito ──id_token──▶ page
 ```
 
+The step this lands on is the **registration step**, and it opens with a warning panel and the
+deployment's social buttons repeated under it. A person who normally signs in with a provider
+arrives here too, because the pool has no *native* user with their address, and "Create account"
+would make a second, separate account beside the federated one. The gate decides that the buttons
+exist, exactly as it decides the social section of the email step, so on a deployment with no
+`gate.social_buttons` neither the panel nor the buttons is in the document at all
+(`ARCHITECTURE.md` §13.27).
+
 In both 2a and 2b the page ends up holding a valid **id_token** for a
 `token_use=id`, `email_verified=true`, RS256-signed JWT whose `aud` is the public
 client id.
@@ -167,9 +175,10 @@ Inside bb-auth (`handle_session`):
 4. **Build the cookie** (see `ARCHITECTURE.md` §7):
    `bb1.<keyid>.<exp>.<b64url(email)>.<b64url(claims_json)>.<b64url(HMAC_SHA256(prefix))>`,
    signed with the active key, `exp = now + TTL`. `claims_json` is a JSON object naming
-   each captured claim; no claims at all is the empty segment, never `{}`. This is the
-   only moment the claims are readable, which is why the cookie carries them: on a later
-   request there is no token to consult.
+   each captured claim, plus one key of the gate's own, `native_username`: the Cognito
+   username of a native sign-in (`ARCHITECTURE.md` §13.25). No claims at all is the empty
+   segment, never `{}`. This is the only moment the claims are readable, which is why the
+   cookie carries them: on a later request there is no token to consult.
 5. **`safe_rd(rd)`:** the redirect target must resolve to an `https://` URL whose host
    matches `gate.authorized_hosts`. An absolute path (no `//`, no `/\`) resolves
    against the caller's own host, which nginx supplies via `X-Original-URL` on this
@@ -220,6 +229,9 @@ would be `/internal/auth-gate`. For programmatic clients it also forwards the
    └─ 204 naming the identity in one header per configured attribute (default
       X-Auth-Email) if any of a/b/c/d authorizes
       (+ one header per configured profile claim, percent-encoded, when known)
+      (+ X-Auth-Native-Username when this session came from a native Cognito sign-in: the
+         pool name of the user the self-service profile edit acts on, §13.25. Forwarded by
+         the /account/ location alone; every other gated location clears the name)
    └─ 403 if a/b/c produced an identity and nothing admitted it: this client IS
       signed in, so the login page has nothing to offer them
    └─ 401 + X-Auth-Login-URL otherwise: no credential, or none this gate accepts
@@ -260,6 +272,13 @@ A few things are worth emphasizing:
   key resolves to its *owning user's* row. The app must not decode the credential itself: the cookie is not a
   JWT and an API key carries no token, and a valid `id_token` proves identity, never
   authorization. This holds only while the app is unreachable except through nginx.
+- **The gate also names the pool user, for a native sign-in.** `X-Auth-Native-Username` carries
+  the Cognito username behind the session, and only a native token's session has one: a federated
+  sign-in, an API key and a cookie minted before the header existed send nothing, and nginx drops
+  a header whose variable is empty. It authorizes nothing and no field of the access file mentions
+  it; it is the name the self-service profile edit acts on, because a pool holds a native user and
+  a federated one under one email (`ARCHITECTURE.md` §13.25). The `/account/` location forwards it
+  and every other gated location clears it.
 - **It can also name them, optionally.** `profile_claims` lists OIDC claims to
   carry, each in a header derived from its own name (`given_name` → `X-Auth-Given-Name`),
   percent-encoded (RFC 3986), when the credential has them — so never for an API key, and

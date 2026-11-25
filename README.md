@@ -49,8 +49,8 @@ nginx error_page 401 → 302  <login-page>/?rd=<original>
 
 | Method | Path             | Who        | Purpose                                            |
 |--------|------------------|------------|----------------------------------------------------|
-| GET    | `/auth/validate` | nginx only | `auth_request`: 204 naming the identity in one header per configured attribute (default `X-Auth-Email`, plus one per configured profile claim when known) if the session cookie, an `Authorization: Bearer <id_token>`, or a static `Authorization: Bearer bbk_…` API key is admitted by the scope that owns the URL. **401 + `X-Auth-Login-URL`** when nothing identified the caller, **403** when something did and no scope admits them. An `anonymous` scope answers 204 with no credential at all, and then names nobody; a request that *did* carry a credential is still named on it, except a `denied` one, which is never named. |
-| GET, HEAD | `/auth/login`    | browser    | the sign-in page: runs the Cognito flow and POSTs the `id_token` to `/auth/session`. Self-contained (no external stylesheet, script or font), IT/EN, with the social buttons `gate.social_buttons` enables (and none at all when it enables none, or when this deployment has no usable social app client). Lands on `?rd=`, else on the `Referer` the browser sent |
+| GET    | `/auth/validate` | nginx only | `auth_request`: 204 naming the identity in one header per configured attribute (default `X-Auth-Email`, plus one per configured profile claim when known, plus `X-Auth-Native-Username` when this session came from a native Cognito sign-in) if the session cookie, an `Authorization: Bearer <id_token>`, or a static `Authorization: Bearer bbk_…` API key is admitted by the scope that owns the URL. **401 + `X-Auth-Login-URL`** when nothing identified the caller, **403** when something did and no scope admits them. An `anonymous` scope answers 204 with no credential at all, and then names nobody; a request that *did* carry a credential is still named on it, except a `denied` one, which is never named. |
+| GET, HEAD | `/auth/login`    | browser    | the sign-in page: runs the Cognito flow and POSTs the `id_token` to `/auth/session`. Self-contained (no external stylesheet, script or font), IT/EN, with the social buttons `gate.social_buttons` enables (and none at all when it enables none, or when this deployment has no usable social app client). Its registration step opens with a warning that signing up with a code creates a second, separate account, and repeats those buttons under it, so a person who signs in with a provider has the way back in front of them; on a deployment with no buttons neither is in the document. Lands on `?rd=`, else on the `Referer` the browser sent |
 | GET, HEAD | `/auth/callback` | browser    | finishes a social sign-in (OAuth code + PKCE). `404` unless this deployment has a social sign-in at all: `gate.oauth_domain` and `gate.social_callback_url` in the settings file |
 | GET, HEAD | `/auth/denied`   | browser    | the refusal page a `403` lands on, in the same palette as the sign-in page. `302` to your own page instead when the area's `denied_url`, or `gate.denied_url`, names one |
 | POST   | `/auth/session`  | browser    | validate posted `id_token`, set cookie, 302 → `rd`, else `gate.landing_url`, else the caller's root |
@@ -140,15 +140,25 @@ proxy_set_header X-Auth-Email $bb_email;   # rename to whatever the app reads
 The header name bb-auth emits is fixed; nginx renames it on the way through, so an app
 expecting `X-Forwarded-User` or `Remote-User` needs no change on this side.
 
+One more header rides on the `204`, and it is the gate's own rather than a claim:
+**`X-Auth-Native-Username`** carries the Cognito **username** of the user this session *is*,
+and only when that user is a native one, a token with no `identities` entry. A federated
+sign-in, an API key and a cookie minted before the header existed send nothing, and nginx
+drops a header whose variable is empty, so an app sees an absent header, never an empty one.
+It is not an identity: it authorizes nothing, no field of the access file mentions it, and it
+exists because a pool holds a native user and a federated one under one email, which is
+exactly the key that cannot say which of the two to act on. The self-service page's profile
+edit is what asked for it (docs/ARCHITECTURE.md §13.25).
+
 Two things make the header trustworthy, and both are required:
 
 - **nginx sets or clears it on every gated location.** `proxy_set_header` overwrites
   whatever the client sent and nginx drops the header when the variable is empty — but
   only for the names it lists. Explicitly clear any *other* name the app also trusts, and
-  that includes every identity header the gate *could* emit while this deployment has it
-  switched off (`X-Auth-Uuid`): the set of possible names is fixed in the code, precisely
-  so that it can be cleared exhaustively, and clearing one now means switching the
-  attribute on later needs no nginx change at all.
+  that includes every name the gate *could* emit while this location has it switched off:
+  every identity header (`X-Auth-Uuid`) and `X-Auth-Native-Username`. The set of possible
+  names is fixed in the code, precisely so that it can be cleared exhaustively, and
+  clearing one now means turning the real one on later needs no nginx change at all.
 - **The app is unreachable except through nginx** (loopback, unix socket, firewall).
   An app reachable directly believes any header anybody sends it.
 
@@ -190,8 +200,10 @@ proxy_set_header X-Auth-Family-Name $bb_family;
   `custom:department` → `X-Auth-Custom-Department` (nginx variable
   `$upstream_http_x_auth_custom_department`). A claim name may contain only
   `[A-Za-z0-9_:-]`; anything else, a claim the gate consumes itself (`email`,
-  `email_verified`, `token_use`, `identities`), or two entries deriving the same header
-  is a **fatal startup error**, not a skipped entry.
+  `email_verified`, `token_use`, `identities`), a claim deriving a header the gate owns
+  (every spelling of `native_username`, which would collide with
+  `X-Auth-Native-Username`), or two entries deriving the same header, is a **fatal startup
+  error**, not a skipped entry.
 - **Percent-encoded UTF-8** (RFC 3986), because HTTP header values are not UTF-8: every
   byte outside `[A-Za-z0-9-._~]` is `%XX`, so a space is `%20` and `Niccolò` is
   `Niccol%C3%B2`. Decode with any standard URI-decoder — note this is *not* the
@@ -694,10 +706,13 @@ hatch that keeps the guard from being a trap.
 
 One page of this binary is not an administrator's: the **self-service page** at
 `BB_AUTH_WEB_ACCOUNT_PATH` (`/account`), where one signed-in person reads **their own**
-account and manages **their own** API keys: where they reach, the groups naming them, the
-keys as the console's table shows them (id, expiry date, restriction; never the bearer;
-rotate and revoke each asked first, on a page of its own) and the profile claims the
-deployment forwards. It is the console's trust model with the
+account and manages **their own** API keys. Four sections, in the order a person reads them:
+**Profile** (the claims the deployment forwards, and the edit of them, offered only to a
+native Cognito account, the only one this page can name to Cognito, through the header
+above: docs/ARCHITECTURE.md §13.25), **API keys** (the console's own table: id, expiry date,
+restriction; never the bearer; rotate and revoke each asked first, on a page of its own),
+**Groups** (the `user_groups` naming them) and **Where you reach** (the applications and
+scopes they are admitted to, never a URL). It is the console's trust model with the
 privilege taken out, and `web.admins` is **not** read there at all, because an administrator there
 is one more person looking at their own account. That is why the prefix is dispatched *ahead of*
 the administrator list, and why the two prefixes must be siblings: a page nested under `/admin`
@@ -815,13 +830,17 @@ sig = HMAC_SHA256("bb1.<keyid>.<exp>.<b64url(email)>.<b64url(claims_json)>", key
 Six fields always. `claims_json` is a JSON object of the profile claims the token
 asserted — `{"family_name":"Byron","given_name":"Ada"}` — with **no claims written as the
 empty segment**, never as `{}`. Values are stored as raw UTF-8 and percent-encoded only
-when emitted as a header.
+when emitted as a header. The gate writes one key of its own into that same object,
+`native_username`: the Cognito username of a native sign-in ([Passing the identity to the
+app](#passing-the-identity-to-the-app)). That is possible precisely because the object
+names its keys, so a cookie minted here verifies under a binary that has never heard of
+the key, and one minted before the key existed verifies here and simply names no username.
 
 The blob names its own claims rather than relying on position, which is what makes
 the claim list safe to edit: a cookie lives up to a month, and positional
 segments would let a change to that list reinterpret a live cookie's values under
 someone else's claim name. Editing the list is therefore *not* a format change — no one
-is logged out by it.
+is logged out by it, and neither is a new key of the gate's own.
 
 The tag is a version, and **exactly one version is ever accepted**: there is no
 verify-only arm for any other. Changing the serialization or the signed bytes therefore
@@ -1239,6 +1258,9 @@ The binary is service-agnostic. To front a service at `app.example.com`:
            # would have it passed straight through to the app. Clearing it now also means
            # turning the attribute on later needs no nginx change at all.
            proxy_set_header X-Auth-Uuid      "";
+           # The gate's own header, and the same argument applies: only the /account/
+           # location below forwards it, so every other gated location clears it.
+           proxy_set_header X-Auth-Native-Username "";
            proxy_set_header X-Forwarded-User "";   # clear names we do NOT set
            proxy_set_header Remote-User      "";
 
@@ -1391,6 +1413,10 @@ server {
         # The other identity attribute, cleared whether or not it is configured: see the
         # main vhost above for why the code-defined set is what gets cleared.
         proxy_set_header X-Auth-Uuid      "";
+        # The pool name the profile edit acts on. The console has no profile edit, so this
+        # surface has no use for it, and clearing it is what keeps the one location that
+        # forwards it from being the only place the name is trustworthy.
+        proxy_set_header X-Auth-Native-Username "";
         proxy_set_header X-Forwarded-User "";
         proxy_set_header Remote-User      "";
         # bb-auth-web compares Origin against Host on a POST when the browser sends no
@@ -1436,6 +1462,13 @@ server {
         auth_request_set $bb_email $upstream_http_x_auth_email;
         proxy_set_header X-Auth-Email     $bb_email;
         proxy_set_header X-Auth-Uuid      "";
+        # The pool name of a native sign-in, which is what the profile edit on this page
+        # acts on (§13.25). Forwarded HERE and nowhere else: a federated sign-in, an API
+        # key and a cookie minted before the header existed send no value, and nginx drops
+        # a header whose variable is empty, so the page sees the edit absent rather than
+        # an empty name. Every other gated location clears this name.
+        auth_request_set $bb_native $upstream_http_x_auth_native_username;
+        proxy_set_header X-Auth-Native-Username $bb_native;
         proxy_set_header X-Forwarded-User "";
         proxy_set_header Remote-User      "";
         proxy_set_header Host             $host;
@@ -1525,7 +1558,8 @@ Four operator notes, and the first is the one that matters:
 - **Every gated location must set or clear `X-Auth-Email`**, here as everywhere — see
   [Passing the identity to the app](#passing-the-identity-to-the-app). `proxy_set_header`
   only overrides the names it lists, so an unlisted one travels straight through from the
-  client.
+  client. The same holds for `X-Auth-Native-Username`, and that one is forwarded by
+  `/account/` alone: every other gated location, `/admin/` included, clears it.
 
 The vhost's host must also match `gate.authorized_hosts`, or the `401 → login → back
 here` round trip lands on the login page instead (`*.badbat75.com` covers

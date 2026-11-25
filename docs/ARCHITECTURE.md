@@ -134,8 +134,8 @@ same goes for README's operator-facing version.
 
 | Method | Path | Caller | Behavior |
 |--------|------|--------|----------|
-| `GET` | `/auth/validate` | nginx only (`auth_request`) | `204` naming the identity in one header per `identity_attrs` entry (default `X-Auth-Email`) if an accepted credential authorizes the request URL; `401` + `X-Auth-Login-URL: <this area's login page>` when nothing identified the caller; `403`, and no login page, when something did and no scope admits them. A `204` also carries one header per `profile_claims` entry the credential knows (percent-encoded; omitted otherwise). Accepts (in order) an `Authorization: Bearer bbk_…` static API key, an `Authorization: Bearer <id_token>`, or the session cookie, and then no credential at all, which only an `anonymous` scope grants. A request with no credential names nobody; one that carried a valid credential is still named, so the header is bimodal on such a scope and an application there must treat it as "if you know who this is, say so". A **vetoed** identity is never named. See §12. |
-| `GET`, `HEAD` | `/auth/login[?rd=…]` | browser | The sign-in page: runs the Cognito `USER_AUTH` flow in the browser and POSTs the resulting id_token to `/auth/session`. Self-contained (palette, layout, script and both languages in the document; only the operator's optional stylesheet and logo are external). `rd` is validated here with the same `rd_url_allowed` `safe_rd` uses and dropped if it fails; with none, the browser's `Referer` answers in its place, through that same check and absolute-only, since this page resolves nothing against nginx. Social buttons appear only when `gate.oauth_domain`, `gate.social_callback_url` and at least one `gate.social_buttons` entry add up to a social sign-in that could work. |
+| `GET` | `/auth/validate` | nginx only (`auth_request`) | `204` naming the identity in one header per `identity_attrs` entry (default `X-Auth-Email`) if an accepted credential authorizes the request URL; `401` + `X-Auth-Login-URL: <this area's login page>` when nothing identified the caller; `403`, and no login page, when something did and no scope admits them. A `204` also carries one header per `profile_claims` entry the credential knows (percent-encoded; omitted otherwise), and `X-Auth-Native-Username` when this session came from a native Cognito sign-in: the pool username behind it, which the self-service profile edit acts on (§13.25) and which a federated sign-in, an API key and a cookie minted before the header existed do not send. Accepts (in order) an `Authorization: Bearer bbk_…` static API key, an `Authorization: Bearer <id_token>`, or the session cookie, and then no credential at all, which only an `anonymous` scope grants. A request with no credential names nobody; one that carried a valid credential is still named, so the header is bimodal on such a scope and an application there must treat it as "if you know who this is, say so". A **vetoed** identity is never named. See §12. |
+| `GET`, `HEAD` | `/auth/login[?rd=…]` | browser | The sign-in page: runs the Cognito `USER_AUTH` flow in the browser and POSTs the resulting id_token to `/auth/session`. Self-contained (palette, layout, script and both languages in the document; only the operator's optional stylesheet and logo are external). `rd` is validated here with the same `rd_url_allowed` `safe_rd` uses and dropped if it fails; with none, the browser's `Referer` answers in its place, through that same check and absolute-only, since this page resolves nothing against nginx. Social buttons appear only when `gate.oauth_domain`, `gate.social_callback_url` and at least one `gate.social_buttons` entry add up to a social sign-in that could work. The registration step, which is where a `UserNotFoundException` lands, opens with a warning that signing up with a code creates a second, separate account, and repeats those buttons under it, so a person who signs in with a provider has the way back in front of them; on a deployment with no buttons neither is in the document (§13.27). |
 | `GET`, `HEAD` | `/auth/denied` | browser (through nginx `error_page 403`) | `403` with the refusal page, in the same palette every other page wears. Says that this account cannot open that page without saying whether the page exists, and links to a sign-out rather than a sign-in. `302` to the operator's own page instead when the area's `denied_url`, or `gate.denied_url`, names one; the area is resolved from `BB_AUTH_ORIGINAL_URL_HEADER` when nginx forwards it here, and without it the global page answers. |
 | `GET`, `HEAD` | `/auth/callback` | browser | Finishes a social sign-in: exchanges the OAuth code and the PKCE verifier for tokens, offers a profile form when the IdP sent no names, and delivers the id_token exactly as the sign-in page does. `404` when no social client is configured. |
 | `POST` | `/auth/session` | browser | Body `application/x-www-form-urlencoded`: `id_token=…&rd=…`. Fully validates the id_token; on success sets the session cookie and `302`s to `rd` (open-redirect guarded). |
@@ -214,7 +214,10 @@ sig = HMAC_SHA256("bb1.<keyid>.<exp>.<b64url(email)>.<b64url(claims_json)>", key
   emission (§12). No claims is the **empty segment**, never `{}`: six fields, always. It
   is inside the signed bytes, so a claim cannot be swapped or forged, and a blob that is
   not an object of well-formed values fails the whole cookie (fail-closed — we could not
-  have minted it). Each value is capped at 256 bytes.
+  have minted it). Each value is capped at 256 bytes. The gate writes one key of its own into
+  that same object, `native_username` (§13.25), and the same self-description is what makes that
+  a no-logout change too: a binary that never wrote the key verifies a cookie that carries it,
+  and this one names no username for a cookie minted before it existed.
 - **The blob is self-describing, and that is what makes the claim list configurable.** A
   cookie lives up to a month; positional segments would let an edit to
   the claim list reinterpret a live cookie's values under a different claim
@@ -1046,6 +1049,7 @@ nginx location lifts them into the proxied request:
 auth_request_set $bb_email $upstream_http_x_auth_email;
 proxy_set_header X-Auth-Email $bb_email;   # rename to whatever the app reads
 proxy_set_header X-Auth-Uuid  "";          # clear what this location does not set
+proxy_set_header X-Auth-Native-Username "";  # the gate's own name, cleared the same way
 ```
 
 **Which** attributes go out is configuration (`gate.identity_attrs`, default `email`);
@@ -1058,6 +1062,11 @@ consequences:
   this installation has turned off is a name a client can send. The set of possible names is
   finite and code-defined (`IDENTITY_ATTRS`) precisely so that it *can* be cleared, and
   turning an attribute on later then needs no nginx change at all.
+- **The gate's own `X-Auth-Native-Username` follows the same rule, and is not an
+  `identity_attrs` entry.** It names the Cognito username of the session, for a native sign-in
+  only, and the self-service profile edit acts on it (§13.25). The `/account/` location forwards
+  it; every other gated location clears it, the console included, because a name a program
+  trusts has to be one only the gate wrote.
 - **Multiple values of one attribute are joined with a space** (a user with two emails).
   That is unambiguous by construction, not by convention: every identifier passed
   `header_safe_email`, which requires printable ASCII, and a space is not printable ASCII. A
@@ -1109,7 +1118,10 @@ proxy_set_header X-Auth-Family-Name $bb_family;
   a derived header is always a valid token — which is why `h()` cannot panic on it.
 - **The reserved set is every *possible* identity header**, not the enabled ones: turning
   an attribute on tomorrow must not collide with a claim configured yesterday, because that
-  discovery would happen at runtime, on a header an application already trusts.
+  discovery would happen at runtime, on a header an application already trusts. It reserves the
+  gate's own `X-Auth-Native-Username` for the same reason in the other direction: every spelling
+  of `native_username` derives it, and a self-asserted claim arriving on the header the profile
+  edit acts on would be a pool name an attacker typed.
 - **Every config error is fatal at startup** (`compile_profile_claims`): a bad character,
   an empty part around a separator, a claim the gate consumes itself (`email`,
   `email_verified`, `token_use`, `identities` — they never reach `Claims::extra`), or two

@@ -22,7 +22,65 @@ Versions are the crate's (`Cargo.toml`); packages add a Debian revision
 
 ## Unreleased
 
-Nothing yet. Builds say 1.99.9 and their commit until the next release (plan W11).
+Builds say 1.99.9 and their commit until the next release (plan W11).
+
+**The cookie format stays `bb1` and the access-file format is untouched, so this upgrade logs
+nobody out.** The claims segment gains a key of the gate's own, and that segment names its keys,
+which is what makes it a no-logout change: see the first section below.
+
+**One nginx change is needed for the new profile edit to appear**, and it is the whole of the
+upgrade: the `/account/` location forwards `X-Auth-Native-Username` and every other gated
+location clears it. The packages need no order. Without that line the page shows the profile
+list and the sentence where the edit pill would be, to everybody, native accounts included.
+
+### New: the sign-in page warns before a duplicate account
+
+* **The registration step opens with a warning.** When Cognito answers that no native user has
+  the address someone typed, the step that offers "Create account" now says what that does:
+  signing up with a code creates a **second, separate account** beside the federated one, and
+  asks whether this person usually signs in with one of the buttons below.
+* **The deployment's social buttons are repeated under it**, before the divider and the form,
+  which stays open: a person who signs in with a provider has the way back in front of them at
+  the exact moment they were about to make a twin. The gate decides that the buttons exist,
+  exactly as it decides the social section of the email step, so on a deployment with no
+  `gate.social_buttons` neither the panel nor the buttons is in the document at all.
+* **This is the front-end half of the twin.** Step 5's bug reached a real one: the pool holds a
+  native user and a federated one under one address, and the page offered the second without
+  saying so (`docs/ARCHITECTURE.md` §13.27).
+
+### Changed: the self-service page's order, its width, and who is offered the profile edit
+
+* **The four sections are in the order a person reads them**: Profile, API keys, Groups, Where
+  you reach. Reach and Groups stay read-only.
+* **The page takes the console's width.** The account page's own width rules are gone: it rides
+  the console's `main` column, one width for both surfaces, with prose capped at 75ch (WCAG
+  1.4.8, applied because it costs one rule). The header, the table cards, the Preferences menu
+  and the phone stacking are the console's already.
+* **The profile edit is offered to a native sign-in only.** The pill appears when nginx forwards
+  `X-Auth-Native-Username` (the section below), and the pool is asked by that **username**, never
+  by an email: the form names no address and a posted email field is refused before any call.
+  After the code, the IdToken Cognito returns must carry the same `cognito:username`, so a
+  challenge or a token for anybody else is a `403` that writes nothing. That binding replaces the
+  email check that let a native twin through. The code page names Cognito's masked destination,
+  and the code field is capped at the measure the id and duration fields use, because a
+  full-width box reads as a field for a sentence (§13.26).
+
+### New: the gate names the session's native Cognito user to nginx
+
+* **A `204` carries `X-Auth-Native-Username`** for a **native** sign-in: an `id_token` with no
+  `identities` claim. Never for a federated sign-in, never for an API key, never for a cookie
+  minted before this version, which names no username.
+* **It travels in the cookie, as a `native_username` key of the JSON claims segment, and
+  `COOKIE_VERSION` stays `bb1`.** That segment is a self-describing object, so a key added to it
+  is not a format change: a binary that never wrote the key verifies a cookie that carries it,
+  and this binary names no username for a cookie minted before it existed. The key is taken out
+  on the way back, so it never becomes a profile claim.
+* **The name is defined once, in the library, and its header is reserved.** `compile_profile_claims`
+  refuses every claim spelling that would derive `X-Auth-Native-Username`, because a self-asserted
+  claim arriving on the header the profile edit acts on would be a pool name an attacker typed.
+* **It authorizes nothing.** No field of the access file mentions it, and it is not an
+  `identity_attrs` entry: it is the name the self-service profile edit acts on, and nothing else
+  (§13.25).
 
 ## 1.99.8 (2026-11-25, pre-release)
 

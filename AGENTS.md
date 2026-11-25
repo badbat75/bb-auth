@@ -18,7 +18,7 @@ left to do, in order.
 | [Commands](#commands) | what to run, and **which check matches which change** |
 | [After a dependency change](#after-a-dependency-change) | the two `cargo tree` greps, and what they mean |
 | [Conventions](#conventions) | English, why-not-what, no new em-dashes, one home per rule |
-| [Invariants](#invariants--do-not-break-these) | **41 rules, in ten groups, indexed at the top of the section** |
+| [Invariants](#invariants--do-not-break-these) | **42 rules, in ten groups, indexed at the top of the section** |
 | [Config & deploy notes](#config--deploy-notes) | the configuration reference (the deploy *rules* are invariants) |
 | [Working from the plan](#working-from-the-plan) | `PLAN.md`, agent commands, skills and roles |
 
@@ -163,19 +163,26 @@ One crate, four targets, and the split is load-bearing:
   is theirs by design. What the page shows is one lede with the caller's addresses (every email
   of one roster row, space-joined, as the gate sends them) and, on the line below, the uuid they
   resolve to under the label "Account id", where a caller with no row is told there is none.
-  Then four sections, each with a sub-line saying what it is for and each empty state a sentence
-  naming what is missing, three of them **read-only**: *Where you reach* (the applications and
-  scope names `Access::scopes_reached` returns, as one flat `app/scope` list in the file's order,
-  never a URL), *Groups* (the `user_groups` naming the caller's uuid, under the page's own word
-  for that section, "Groups", not the console's "User groups"), *API keys* (the console's own key
+  Then four sections, in the order a person reads them, each with a sub-line saying what it is
+  for and each empty state a sentence naming what is missing: *Profile* (each configured
+  `gate.profile_claims` claim and the value nginx forwarded, percent-decoded, where a configured
+  claim with nothing forwarded reads "not provided", and the **edit** of those claims, offered
+  only on a request that carries `X-Auth-Native-Username`, because the edit acts on one Cognito
+  user and the pool name is the only honest name for them: a session with no header, federated or
+  minted before that header existed, sees the list and one sentence where the pill would be, never
+  a disabled control), *API keys* (the console's own key
   table: each key's id, its expiry date or "never", and its restriction, never the hash or the
-  bearer, each row ending in a rotate pill and a revoke icon that lead to a confirmation page)
-  and *Profile* (each configured `gate.profile_claims` claim and the value nginx forwarded,
-  percent-decoded, where a configured claim with nothing forwarded reads "not provided").
+  bearer, each row ending in a rotate pill and a revoke icon that lead to a confirmation page),
+  *Groups* (the `user_groups` naming the caller's uuid, under the page's own word
+  for that section, "Groups", not the console's "User groups") and *Where you reach* (the
+  applications and
+  scope names `Access::scopes_reached` returns, as one flat `app/scope` list in the file's order,
+  never a URL). The last two are **read-only**.
   The `denied` veto is answered with a `403` ahead of everything the page would otherwise say
   about the caller, and a stranger and an administrator with no roster row see the same page.
   It wears the `ui` section per request as the console does (brand name and logo, the operator's
-  stylesheet, `ui.theme` as the default theme stamped as `data-theme`), in a centred card, under
+  stylesheet, `ui.theme` as the default theme stamped as `data-theme`), on the console's own
+  `main` column, one width for both surfaces with prose capped at 75ch (§13.26), under
   the console's own header (`top_bar`, one function for both surfaces): the operator's brand as
   a `span` and not a link, since this page is the only one its visitor came to the estate for,
   an empty tabs nav, the identity, the Preferences menu and Sign out. The person chooses only
@@ -201,7 +208,11 @@ One crate, four targets, and the split is load-bearing:
   console's `form.edit`, and a refused mint keeps that row with the values as posted, because a
   person who typed a name and a restriction is not being asked to type them again. At ten keys the
   `+` is the sentence that says why there is none, not a disabled control, which the keyboard
-  skips and which says nothing. The profile edit and the Cognito leg are the next steps. Its
+  skips and which says nothing. The profile edit is there, and it acts on the session's own
+  native user: the pool is asked by `USERNAME`, taken from `X-Auth-Native-Username` on **this**
+  request and never from a posted field, and the IdToken Cognito returns is bound by
+  `cognito:username`, so a challenge that answers for anybody else writes nothing and says so
+  (§13.25). Account deletion is the next step. Its
   design is
   [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md) §13.
 
@@ -426,7 +437,7 @@ is fatal on failure, so reaching the `listening on …` line proves the fetch, t
 
 ## Invariants — do not break these
 
-**The rules, in one place.** Forty-one of them, grouped. The lead sentence of each is
+**The rules, in one place.** Forty-two of them, grouped. The lead sentence of each is
 its whole claim; the prose under it is the reason, which is the part worth reading before
 changing anything. Seven of these used to sit in "Config & deploy notes" below, so this
 section under-read itself by a fifth, and two of the seven are lockout-class.
@@ -500,6 +511,7 @@ section under-read itself by a fifth, and two of the seven are lockout-class.
 - The access file's name is a config contract
 - The live `access.json` is the copy that is current
 - The deploy is `dpkg -i`, and the packages are where the install lives.
+- A release runs the tests and says which commit it is.
 - `scripts/deploy.sh` is what a package may not do
 
 ### What lives where
@@ -540,7 +552,8 @@ section under-read itself by a fifth, and two of the seven are lockout-class.
   `same-origin` while the gate also accepts `same-site`, because `gate.login_url` may name a
   sign-in page on a sibling host. Its limit is where a thing
   stops and an ARRANGEMENT of things starts: the admin's header, tables and phone stacking are
-  the GUI's, the centred card and its steps are the gate's and the account page's, and nothing
+  the GUI's, the centred card and its steps are the gate's, and the account page wears the
+  console's column rather than a card of its own (§13.26), and nothing
   requires those to agree. What stays in a tool is what has an
   operator: flags, warnings, and the wording of a verdict. HTTP, the cookie, the JWT,
   the env, the nginx contract and the pages themselves are the **gate's**, and stay in
@@ -580,7 +593,11 @@ section under-read itself by a fifth, and two of the seven are lockout-class.
   all. The claims segment is a
   **self-describing JSON object**, and that is what keeps `profile_claims` off this
   axis: positional segments would let a config edit reinterpret a live cookie's values under
-  another claim's name, so editing the list must stay a no-logout change. Verify checks the
+  another claim's name, so editing the list must stay a no-logout change. The gate writes one
+  key of its own into that same object, `native_username` (the pool name of a native sign-in,
+  docs/ARCHITECTURE.md §13.25), and it lands on the same no-logout side of the axis for the
+  same reason: a binary that never wrote that key verifies a cookie that carries it, and this
+  binary names no username for a cookie minted before it existed. Verify checks the
   signature over the segment **as received** and only then parses it — never parse and
   re-serialize to compare.
 
@@ -833,9 +850,11 @@ the unit creates through `LogsDirectory` precisely so that the gate's own prefix
   so a misnamed header still cannot write one down), and the user agent, which needs no setting
   because it is the client's word and recorded as such, is cut at `AUDIT_UA_MAX`. It is stamped
   by `RequestAudit` rather than at each call site, so no event can be written without it. The
-  account (`sub`) comes from a validated token and from nothing else, never from a cookie,
-  which would be a `COOKIE_VERSION` bump. And an address is personal data kept for as long as
-  the file's bytes last rather than for a number of days, which is worth saying on any page
+  account (`sub`) comes from a validated token and from nothing else, and it is in no cookie,
+  by choice rather than by necessity: the login event already records what that login proved.
+  (A new key in the cookie's claims object would not be a `COOKIE_VERSION` bump, which is how
+  `native_username` travels; only a change to the signed bytes' layout is.) And an address
+  is personal data kept for as long as the file's bytes last rather than for a number of days, which is worth saying on any page
   that tells people what this estate records about them.
 
 ### Resolving a URL
@@ -965,11 +984,15 @@ the unit creates through `LogsDirectory` precisely so that the gate's own prefix
   `email` and therefore `X-Auth-Email`, which is what every application behind this gate already
   reads. It is only safe because nginx sets or clears those names on **every** gated location
   (`proxy_set_header` overrides just the names it lists) and the app is unreachable except through
-  nginx. Two consequences that must not be lost:
+  nginx. Three consequences that must not be lost:
   - **nginx must clear every *possible* identity header, not the configured ones.** The set of
     possible names is finite and code-defined (`IDENTITY_ATTRS`), precisely so that it *can* be
     cleared; an attribute that is off must still be cleared, or a client can send it, and turning it
     on later then needs no nginx change at all.
+  - **The gate's own `X-Auth-Native-Username` is on that list too.** It names the Cognito username
+    of the session, for a native sign-in only, and it is what the self-service page's profile edit
+    acts on (§13.25), so it is forwarded by that one location and cleared by every other, the
+    console included: a name the app (or the GUI) trusts has to be one only the gate wrote.
   - **Multiple values of one attribute are joined with a space**, which is unambiguous by
     construction rather than by convention: every identifier passed `header_safe_email`, which
     requires printable ASCII, and a space is not printable ASCII. A comma would not do, because
@@ -1015,11 +1038,15 @@ the unit creates through `LogsDirectory` precisely so that the gate's own prefix
   typo-reachable. Since a claim name is restricted to `[A-Za-z0-9_:-]`, a derived header is always a
   valid token: that, not a check, is why `h()` cannot panic on it. Keep four things.
   `compile_profile_claims` is **fatal on every bad entry** (bad charset, empty part around a
-  separator, a collision with `LOGIN_URL_HEADER` or another entry) — a silently skipped claim is a
-  header an application waits for forever, the same reflex as a fatal scope error. It must reserve
-  **every possible identity header**, not the enabled ones, or turning an attribute on tomorrow
-  collides with a claim configured yesterday and the discovery happens at runtime, on a header an
-  application already trusts. It must keep rejecting `RESERVED_CLAIMS` (`email`, `email_verified`,
+  separator, a collision with `LOGIN_URL_HEADER`, `NATIVE_USERNAME_HEADER` or another entry); a
+  silently skipped claim is a header an application waits for forever, the same reflex as a fatal
+  scope error. It must reserve **every possible identity header**, not the enabled ones, or
+  turning an attribute on tomorrow collides with a claim configured yesterday and the discovery
+  happens at runtime, on a header an application already trusts. It reserves the gate's own
+  `X-Auth-Native-Username` for the same reason in the other direction: every spelling of
+  `native_username` derives it, and a self-asserted claim arriving on the header the profile edit
+  acts on would be a pool name an attacker typed. It must keep rejecting `RESERVED_CLAIMS`
+  (`email`, `email_verified`,
   `token_use`, `identities`), because `Claims` takes those into typed fields and
   `#[serde(flatten)]` never sees a key a typed field took, so configuring one would propagate
   nothing, forever. And `compile_identity_attrs` is **fatal on an empty list**: an authorized `204`
