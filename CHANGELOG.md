@@ -24,12 +24,12 @@ Versions are the crate's (`Cargo.toml`); packages add a Debian revision
 
 Nothing yet. Builds say 1.99.8 and their commit until the next release (plan W11).
 
-## 1.99.8 (2026-11-25)
+## 1.99.8 (2026-11-25, pre-release)
 
-**Released on 2026-11-25 as `v1.99.8`**, the first release since 1.0.0. The user's decision of
-that day: the tag `v1.99.8` names the tree it was cut from, is pushed to GitHub, and its
-packages are installed on rpi-01. It was developed as a candidate for 2.0.0 and keeps that
-content: the findings of an architecture and process review, addressed; the gate's whole
+**Pre-released on 2026-11-25 as `v1.99.8`**, the first tag since 1.0.0 and a **pre-release** of
+2.0.0, by the user's decision of that day: the tag names the tree it was cut from, it is pushed
+to GitHub with its GitHub release marked pre-release (1.0.0 stays the latest release), and its
+packages are installed on rpi-01. It is a candidate for 2.0.0 and carries that content: the findings of an architecture and process review, addressed; the gate's whole
 Cognito wiring and the estate it serves moved out of the environment and into the settings
 file; and a confirmation step in front of the five settings that can stop people getting in.
 The number says what shipped, not what comes next: the configuration surface moved far enough
@@ -40,10 +40,10 @@ in one window that calling it 1.2.0 would have undersold what an upgrade has to 
 `v1.99.8-g<commit>`: what tells two deploys apart is the commit in the build string, not the
 number.
 
-**A version gets a section of its own here once it is tagged and released.** That is what this
-section is, and it reverses the rule this file carried while the release was still a candidate,
-which said a candidate is not tagged and that this section would become `## 2.0.0` on the day
-2.0.0 was tagged: the user tagged the candidate instead of waiting for it. The same rule is
+**A version gets a section of its own here once it is tagged, as a release or a pre-release.**
+That is what this section is, and it reverses the rule this file carried before, which said a
+candidate is not tagged and that this section would become `## 2.0.0` on the day 2.0.0 was
+tagged: the user tagged the candidate as a pre-release instead of waiting for it. The same rule is
 what took 1.1.0 out of this file: it was built, deployed and never released, with no tag and no
 artefact anybody could have installed from, and the single host that ran it was running a
 working tree. It had a section here as though it had shipped, which is a version number
