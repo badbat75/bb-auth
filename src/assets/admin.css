@@ -288,10 +288,12 @@ details.settings > summary::-webkit-details-marker{display:none}
    `:has` is the only way to reach the body from here, because the page's own element is the
    `main` inside it, and the ground is painted on the body. */
 body:has(.selfserve){background:var(--bg)}
-/* The deployment's mark and name, above the page's own heading. `filter:var(--logo-filter)` is
+/* The deployment's mark and name, in the bar's brand slot (§13.17). `margin:0` because the bar
+   is a flex row with its own gap: a bottom margin here would push the bar's height, which is
+   what the two controls at the other end are centred against. `filter:var(--logo-filter)` is
    the palette's logo arm, so a mark the operator set for a light ground stays legible on the
    dark arm. */
-.selfserve-brand{display:flex;flex-wrap:wrap;align-items:center;gap:10px;margin:0 0 16px}
+.selfserve-brand{display:flex;flex-wrap:wrap;align-items:center;gap:10px;margin:0}
 .selfserve-brand img{height:30px;width:auto;filter:var(--logo-filter)}
 .selfserve-brand .name{font-weight:600;letter-spacing:.02em}
 /* A section's heading is the first thing in a panel that already carries top padding, so the
@@ -300,12 +302,6 @@ body:has(.selfserve){background:var(--bg)}
    contract this page has, and a rule scoped to the page is how the same result is had without
    adding an attribute to it. */
 .selfserve .panel h2{margin-top:0}
-/* The selector at the foot of the page: two list boxes side by side, and the page's one main
-   action under them. `.lbl` is base.css's field label and `button.primary` its main action, so
-   both are the objects every form in the estate already paints. */
-.selfserve-prefs{margin:22px 0 0}
-.selfserve-prefs .fields{display:flex;flex-wrap:wrap;gap:12px}
-.selfserve-prefs .fields label{flex:1 1 150px}
 
 /* ---------------------------------------------------------------------------
    Phone layout

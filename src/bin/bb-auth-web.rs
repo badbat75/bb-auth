@@ -3904,6 +3904,48 @@ fn top_bar(brand: Markup, tabs: Markup, acct: Markup) -> Markup {
     }
 }
 
+/// The Preferences trigger: the sliders glyph, the name inside the control, and the same
+/// words as the pointer tooltip.
+///
+/// Factored out of [`shell_as`] for the bar's own reason: the self-service page carries the
+/// same control (§13.17), and two copies of one icon is how two surfaces drift a glyph at a
+/// time. The name is words inside the control, hidden visually, with the tooltip repeating
+/// them, because a `summary` carries no reliable `aria-label` while text content is read by
+/// every reader.
+fn prefs_trigger(name: &str) -> Markup {
+    html! {
+        summary class="pill ico" title=(name) {
+            // Three lines and three knobs, drawn on the 24 by 24 grid the stylesheet sizes,
+            // naming no colour so the palette stays the only place one is defined.
+            svg class="i-sliders" viewBox="0 0 24 24" aria-hidden="true" focusable="false" {
+                path d="M3 6h12" {}
+                circle cx="18" cy="6" r="2.5" {}
+                path d="M9 12h12" {}
+                circle cx="6" cy="12" r="2.5" {}
+                path d="M3 18h8" {}
+                circle cx="14" cy="18" r="2.5" {}
+            }
+            span class="vh" { (name) }
+        }
+    }
+}
+
+/// The Sign out pill: the open bracket and the arrow leaving it, on the same grid and with
+/// the same name-inside-the-control as the sliders. Factored out of [`shell_as`] for
+/// [`prefs_trigger`]'s reason: the self-service page carries the same pill.
+fn sign_out_pill(href: &str, name: &str) -> Markup {
+    html! {
+        a class="pill ico" href=(href) title=(name) {
+            svg class="i-out" viewBox="0 0 24 24" aria-hidden="true" focusable="false" {
+                path d="M9 21H5a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h4" {}
+                path d="M16 17l5-5-5-5" {}
+                path d="M21 12H9" {}
+            }
+            span class="vh" { (name) }
+        }
+    }
+}
+
 /// The chrome around every page: the tabs, the Settings menu, the footer.
 ///
 /// [`shell_as`] with no given name to show, which is the honest answer for a page built from a
@@ -3992,24 +4034,8 @@ fn shell_as(v: &View, given_name: Option<&str>, title: &str, content: Markup) ->
             // turns each parameter into a cookie and redirects it back out.
             details class="settings" {
                 // The sliders, and not a gear: this menu sets two display preferences, and a
-                // gear beside a "Settings" tab would promise the access settings. The name is
-                // words inside the control, hidden visually, with the tooltip repeating them,
-                // because a `summary` carries no reliable `aria-label` while text content is
-                // read by every reader (§13.17).
-                summary class="pill ico" title=(settings_name) {
-                    // Three lines and three knobs, drawn here on the 24 by 24 grid the
-                    // stylesheet sizes, naming no colour so the palette stays the only place
-                    // one is defined.
-                    svg class="i-sliders" viewBox="0 0 24 24" aria-hidden="true" focusable="false" {
-                        path d="M3 6h12" {}
-                        circle cx="18" cy="6" r="2.5" {}
-                        path d="M9 12h12" {}
-                        circle cx="6" cy="12" r="2.5" {}
-                        path d="M3 18h8" {}
-                        circle cx="14" cy="18" r="2.5" {}
-                    }
-                    span class="vh" { (settings_name) }
-                }
+                // gear beside a "Settings" tab would promise the access settings.
+                (prefs_trigger(settings_name))
                 div class="menu" {
                     // The identity's second home, and the one that survives a phone: the bar
                     // hides it there and the menu opens with the answer.
@@ -4063,16 +4089,7 @@ fn shell_as(v: &View, given_name: Option<&str>, title: &str, content: Markup) ->
             // plain link and not a form: the gate's `/auth/logout` is a `GET` that clears the
             // cookie and redirects, guarded there against cross-site navigation.
             @if let Some(u) = &v.cfg.logout_url {
-                // The open bracket and the arrow leaving it, on the same grid and with the
-                // same name-inside-the-control as the sliders.
-                a class="pill ico" href=(u) title=(sign_out) {
-                    svg class="i-out" viewBox="0 0 24 24" aria-hidden="true" focusable="false" {
-                        path d="M9 21H5a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h4" {}
-                        path d="M16 17l5-5-5-5" {}
-                        path d="M21 12H9" {}
-                    }
-                    span class="vh" { (sign_out) }
-                }
+                (sign_out_pill(u, sign_out))
             }
         }
     };
@@ -8355,11 +8372,15 @@ struct AccountLook<'a> {
 const DEFAULT_ACCOUNT_BRAND: &str = "bb-auth";
 
 /// What the chrome needs that is not the page: this browser's two preferences, the language they
-/// render as, and the URL the selector form goes back to.
+/// render as, the URL the selector form goes back to, and the two facts the header bar shows
+/// beside it (§13.17).
 ///
 /// A struct rather than four more arguments because every page under the prefix is answered
 /// through [`respond_account`], and a preference that reached only some of them is a page whose
-/// selector shows something other than what that page is rendered in.
+/// selector shows something other than what that page is rendered in. The bar's two facts are
+/// here for the same reason: the identity and the Sign out target exist only once the identity
+/// header and the settings have been read, and a bar that showed them on some pages and not
+/// others is the drift this struct exists to stop.
 struct AccountPrefs<'a> {
     /// The language every string on the page is looked up by.
     lang: Lang,
@@ -8372,6 +8393,14 @@ struct AccountPrefs<'a> {
     /// The prefix with a trailing slash: the form's `action` and the target of the preference
     /// redirect, both built from [`Config::account_path`].
     page: &'a str,
+    /// Who the bar says is signed in, once the identity header has been read: the forwarded
+    /// `given_name` and the first address, or the address alone. `None` on the pages answered
+    /// before any identity exists (the `401`), where there is nobody to name.
+    who: Option<String>,
+    /// Where Sign out points: [`Config::logout_url`], and no control at all when the operator
+    /// named no destination. The console's own pill, the same setting, unchanged here (the `rd`
+    /// question is 8b-3's).
+    logout: Option<&'a str>,
 }
 
 /// This page's `Content-Security-Policy`.
@@ -8410,10 +8439,14 @@ fn account_csp(look: &AccountLook, reveal: bool) -> String {
 /// it, the centred-card arrangement, then the operator's stylesheet, so an override wins by
 /// source order and needs no `!important`.
 ///
-/// It is not [`shell`], and the difference is the console's own furniture: a header bar with five
-/// tabs, a `details` carrying the one inline handler this program emits, and a footer naming the
-/// administrator. None of that belongs on a page a person reaches about their own account, and
-/// the `details` would put the Settings handler on a page whose rule is that it carries none.
+/// The bar is the console's, from [`top_bar`], and the three slots say what the two surfaces are
+/// for: the operator's brand where the console names the tool, an empty `nav` where the console's
+/// five tabs are (this page is one page, so there is nothing to switch between), and the account
+/// end with the identity, the Preferences menu and Sign out. The menu is the console's menu as a
+/// browser with scripting off sees it: **no handler of any kind** (the estate's rule for this
+/// page), and the Apply button always present in `div.actions` rather than behind a `noscript`,
+/// because here the button is not a fallback, it is the only way. The form is a plain `GET` back
+/// to the page, so the existing `302` that sets the `theme` and `lang` cookies keeps working.
 fn account_shell(prefs: &AccountPrefs, title: &str, content: Markup, look: AccountLook) -> Markup {
     // The two list boxes' options, each in the order they are offered, both leading with the
     // choice that follows something outside this page (the browser, the OS), because that is
@@ -8424,7 +8457,71 @@ fn account_shell(prefs: &AccountPrefs, title: &str, content: Markup, look: Accou
         LangPref::Fixed(Lang::It),
     ];
     let themes = [UiTheme::System, UiTheme::Light, UiTheme::Dark];
-    let brand = look.brand.unwrap_or(DEFAULT_ACCOUNT_BRAND);
+    let brand_name = look.brand.unwrap_or(DEFAULT_ACCOUNT_BRAND);
+    // The words of the two icon controls, each used twice: once as the hidden name inside the
+    // control, once as the pointer tooltip, exactly as the console's bar does.
+    let settings_name = t(prefs.lang, K::Settings);
+    let sign_out = t(prefs.lang, K::SignOut);
+    // The brand slot: the operator's mark and name, worn as the page showed them before the bar
+    // existed. Not a link, because this page is the only one this person reached the estate for.
+    let brand = html! {
+        span class="brand selfserve-brand" {
+            // The logo only when the administrator set one: nothing configured means
+            // the page fetches no image at all. The `alt` is empty on purpose, because
+            // the name beside it already says what the picture is.
+            @if let Some(logo) = look.logo {
+                img src=(logo) alt="";
+            }
+            span class="name" { (brand_name) }
+        }
+    };
+    // The account end: the console's markup, from the console's own parts, so the two surfaces
+    // cannot drift. Language then Theme, the console's order.
+    let acct = html! {
+        nav class="acct" {
+            @if let Some(who) = &prefs.who {
+                span class="who muted" { (who) }
+            }
+            details class="settings" {
+                (prefs_trigger(settings_name))
+                div class="menu" {
+                    // The identity's second home, and the one that survives a phone: the bar
+                    // hides the name there, and the menu opens with the answer.
+                    @if let Some(who) = &prefs.who {
+                        p class="lede" { (who) }
+                    }
+                    form class="edit" method="get" action=(prefs.page) {
+                        label {
+                            span class="lbl" { (t(prefs.lang, K::SettingLanguage)) }
+                            select name=(LANG_COOKIE) {
+                                @for p in langs {
+                                    option value=(p.code()) selected[p == prefs.lang_pref] {
+                                        (p.label(prefs.lang))
+                                    }
+                                }
+                            }
+                        }
+                        label {
+                            span class="lbl" { (t(prefs.lang, K::SettingTheme)) }
+                            select name=(THEME_COOKIE) {
+                                @for th in themes {
+                                    option value=(th.code()) selected[th == prefs.theme] {
+                                        (t(prefs.lang, theme_label(th)))
+                                    }
+                                }
+                            }
+                        }
+                        // Always present, not behind a `noscript`: this page emits no script and
+                        // no handler, so picking an option is only half an interaction without it.
+                        div class="actions" { button { (t(prefs.lang, K::Apply)) } }
+                    }
+                }
+            }
+            @if let Some(u) = prefs.logout {
+                (sign_out_pill(u, sign_out))
+            }
+        }
+    };
     html! {
         (DOCTYPE)
         // The theme, resolved here and in one expression, because the fallback order is the
@@ -8436,7 +8533,7 @@ fn account_shell(prefs: &AccountPrefs, title: &str, content: Markup, look: Accou
             head {
                 meta charset="utf-8";
                 meta name="viewport" content="width=device-width,initial-scale=1";
-                title { (brand) " · " (title) }
+                title { (brand_name) " · " (title) }
                 // The three deliberately raw emissions on the page, and all three are
                 // compile-time constants: never request data and never anything read out of the
                 // access file. The order is the console's order, because the policy's hash
@@ -8447,47 +8544,10 @@ fn account_shell(prefs: &AccountPrefs, title: &str, content: Markup, look: Accou
                 (PreEscaped(stylesheet_link(look.stylesheet)))
             }
             body {
+                (top_bar(brand, html! { nav {} }, acct))
                 main class="selfserve" {
-                    header class="selfserve-brand" {
-                        // The logo only when the administrator set one: nothing configured means
-                        // the page fetches no image at all. The `alt` is empty on purpose, because
-                        // the name beside it already says what the picture is.
-                        @if let Some(logo) = look.logo {
-                            img src=(logo) alt="";
-                        }
-                        span class="name" { (brand) }
-                    }
                     h1 { (title) }
                     (content)
-                    // The selector: theme, then language, then a visible submit. A plain `GET`
-                    // back to this same page, so a bookmark and a reload cannot change anything,
-                    // and the button is not decoration: this page emits no script and no handler,
-                    // so picking an option is only half an interaction without it.
-                    form class="selfserve-prefs" method="get" action=(prefs.page) {
-                        div class="fields" {
-                            label {
-                                span class="lbl" { (t(prefs.lang, K::SettingTheme)) }
-                                select name=(THEME_COOKIE) {
-                                    @for th in themes {
-                                        option value=(th.code()) selected[th == prefs.theme] {
-                                            (t(prefs.lang, theme_label(th)))
-                                        }
-                                    }
-                                }
-                            }
-                            label {
-                                span class="lbl" { (t(prefs.lang, K::SettingLanguage)) }
-                                select name=(LANG_COOKIE) {
-                                    @for p in langs {
-                                        option value=(p.code()) selected[p == prefs.lang_pref] {
-                                            (p.label(prefs.lang))
-                                        }
-                                    }
-                                }
-                            }
-                        }
-                        button class="primary" { (t(prefs.lang, K::Apply)) }
-                    }
                 }
             }
         }
@@ -9159,11 +9219,17 @@ fn handle_account(
     // The mint row is a page of its own (§13.16): the keys section with one more row.
     let new_key = format!("{keys}/new");
     let posting = *req.method() == Method::Post;
-    let prefs = AccountPrefs {
+    // The bar's identity starts empty and is filled as the facts behind it are read: the
+    // address once nginx has named somebody, the given name once the settings say which
+    // header carries it. A page answered before any of that (the `404`, the `401`) shows no
+    // name, because there is nobody to name.
+    let mut prefs = AccountPrefs {
         lang,
         lang_pref,
         theme,
         page: &page,
+        who: None,
+        logout: cfg.logout_url.as_deref(),
     };
     // Below the prefix, only the page and the three key mutations exist. A path that is nothing
     // is a `404` for every caller alike, administrator included, because a page that answers a
@@ -9211,6 +9277,8 @@ fn handle_account(
     // it, joined by a single space. Every one of them is shown, because the page is about the
     // identity the estate handed over, not about one address picked out of it.
     let ids: Vec<String> = raw.split_ascii_whitespace().map(norm_email).collect();
+    // The bar can name this person now, the address alone: the given name needs the settings.
+    prefs.who = Some(identity_label(None, &raw));
     // A preference is applied before anything is rendered, so the page a person lands on after a
     // submit is in the language and the appearance they just picked. `None` for a value nobody
     // recognises, which is what makes an unrecognised value set no cookie and leave the page as it
@@ -9238,6 +9306,16 @@ fn handle_account(
             return;
         }
     };
+    // The given name the bar shows, by the console's rule: it exists only where the deployment
+    // configures the claim, since the settings are what say which header the proxy was told to
+    // fill, and it is percent-decoded because the gate sends a profile value encoded.
+    let given = settings
+        .profile_claims
+        .iter()
+        .find(|c| c.claim == "given_name")
+        .and_then(|c| header_value(&req, &c.header))
+        .map(pct_decode);
+    prefs.who = Some(identity_label(given.as_deref(), &raw));
     let look = AccountLook {
         theme: settings.theme,
         stylesheet: settings.stylesheet_url.as_deref(),
@@ -16378,20 +16456,29 @@ mod tests {
             account_readable(&g.body)
         );
         let body = account_readable(&g.body);
-        let form = body.find("<form").expect("the page must carry a form");
-        let theme = body
-            .find(r#"<select name="theme""#)
-            .expect("the page must carry a theme list box");
-        let lang = body
+        // 8b-2: the selector lives in the header's Preferences menu, Language then Theme (the
+        // console's order), and the foot form is gone.
+        let top = the_header_bar(&g.body, "selector");
+        let form = top
+            .find("<form")
+            .expect("the header menu must carry a form");
+        let lang = top
             .find(r#"<select name="lang""#)
-            .expect("the page must carry a language list box");
+            .expect("the menu must carry a language list box");
+        let theme = top
+            .find(r#"<select name="theme""#)
+            .expect("the menu must carry a theme list box");
         assert!(
-            form < theme && theme < lang,
-            "both list boxes sit inside one form: {body}"
+            form < lang && lang < theme,
+            "both list boxes sit inside one form in the header, Language first: {top}"
         );
         assert!(
-            body.contains(r#"method="get""#),
-            "a preference is a GET, so a bookmark and a reload cannot change anything: {body}"
+            !body.contains("selfserve-prefs"),
+            "no foot form any more: {body}"
+        );
+        assert!(
+            top.contains(r#"method="get""#),
+            "a preference is a GET, so a bookmark and a reload cannot change anything: {top}"
         );
         for value in ["light", "dark", "system"] {
             assert!(
@@ -19222,6 +19309,31 @@ mod tests {
             docs.push((format!("the console header in {label}"), g.body));
         }
 
+        // The account page's header (8b-2): the same two icons, named in each language.
+        let path = account_scratch_full("icon-names-account");
+        paths.push(path.clone());
+        let base = account_serve(&path);
+        for (label, lang, code) in [("English", Lang::En, "en"), ("Italian", Lang::It, "it")] {
+            let g = account_call_pref(
+                &base,
+                Some("bob@x.com"),
+                Some(&format!("lang={code}")),
+                None,
+            );
+            assert_eq!(g.status, 200, "{}", account_readable(&g.body));
+            let top = the_header_bar(&g.body, label);
+            let summaries = controls_with_class(&top, "summary", "ico");
+            assert_eq!(summaries.len(), 1, "{label}: Preferences is an icon: {top}");
+            assert_eq!(visible_text(&summaries[0]), t(lang, K::Settings), "{label}");
+            let outs: Vec<String> = controls_with_class(&top, "a", "ico")
+                .into_iter()
+                .filter(|el| el.contains("/auth/logout"))
+                .collect();
+            assert_eq!(outs.len(), 1, "{label}: Sign out is an icon: {top}");
+            assert_eq!(visible_text(&outs[0]), t(lang, K::SignOut), "{label}");
+            docs.push((format!("the account header in {label}"), g.body));
+        }
+
         for (where_, body) in &docs {
             let icons = controls_with_class(body, "button", "ico")
                 .into_iter()
@@ -19441,6 +19553,317 @@ mod tests {
             footer[0]
         );
         let _ = std::fs::remove_file(&path);
+    }
+
+    /// The `header.top` element of a page, and a failure that says so when there is not exactly
+    /// one: a page with two bars, or none, is the drift 8b exists to end.
+    fn the_header_bar(html: &str, label: &str) -> String {
+        let all = elements(html, "<header class=\"top\"", "</header>");
+        assert_eq!(
+            all.len(),
+            1,
+            "{label}: exactly one `header.top`: {}",
+            account_readable(html)
+        );
+        all.into_iter().next().unwrap()
+    }
+
+    /// Every `class="…"` value inside `markup`, in document order. Two surfaces built from one
+    /// function have the same list; a slot that arrives with a class of its own shows up here.
+    fn class_values(markup: &str) -> Vec<String> {
+        let mut out = Vec::new();
+        let mut rest = markup;
+        while let Some(i) = rest.find(" class=\"") {
+            let tail = &rest[i + 8..];
+            let end = tail.find('"').expect("a closed attribute");
+            out.push(tail[..end].to_string());
+            rest = &tail[end..];
+        }
+        out
+    }
+
+    /// 8b-2 (§13.17, "The header: the console's, shared"): the console and `/account/` wear one
+    /// bar from `top_bar`, and differ only where the design says: the brand slot, the (empty)
+    /// tabs, the Preferences menu's handler, and the Sign out `href`.
+    ///
+    /// Red until `account_shell` calls `top_bar`: today the account page has no `header.top`.
+    #[test]
+    fn both_surfaces_share_one_header() {
+        let path = account_scratch_full("shared-header");
+        let port = account_port(&path);
+        let base = format!("http://127.0.0.1:{port}{ACCOUNT_PATH}/");
+
+        let console = console_get(port, "admin@x.com", &[]);
+        assert_eq!(console.status, 200, "{}", account_readable(&console.body));
+        let acct_page = account_call_with(
+            &base,
+            Some("bob@x.com"),
+            &[("X-Auth-Given-Name", "Bob%20Smith")],
+        );
+        assert_eq!(
+            acct_page.status,
+            200,
+            "{}",
+            account_readable(&acct_page.body)
+        );
+
+        let c_top = the_header_bar(&console.body, "console");
+        let a_top = the_header_bar(&acct_page.body, "account");
+        let c_bar = elements(&c_top, "<div class=\"bar\"", "</div>");
+        assert_eq!(c_bar.len(), 1, "console: one div.bar: {c_top}");
+        assert!(
+            a_top.contains("<div class=\"bar\">"),
+            "account: the same `div.bar` inside the header: {a_top}"
+        );
+
+        // Brand slot: the console's is a link home, the account's an inert span that wears the
+        // operator's brand (here the default, nothing configured).
+        assert!(c_top.contains("<a class=\"brand\""), "{c_top}");
+        let brands = controls_with_class(&a_top, "span", "brand");
+        assert_eq!(brands.len(), 1, "account: one span.brand: {a_top}");
+        assert!(
+            attr(open_tag(&brands[0]), "class")
+                .is_some_and(|c| c.split_whitespace().any(|w| w == "selfserve-brand")),
+            "the account's brand slot is `span.brand.selfserve-brand`: {}",
+            brands[0]
+        );
+        assert!(
+            !brands[0].contains("<a "),
+            "the page is the only one, so its brand is not a link: {}",
+            brands[0]
+        );
+        assert!(
+            visible_text(&brands[0]).contains(DEFAULT_ACCOUNT_BRAND),
+            "the brand names the deployment: {}",
+            brands[0]
+        );
+        assert!(
+            !acct_page.body.contains("<header class=\"selfserve-brand\""),
+            "the old standalone brand header is gone: {}",
+            account_readable(&acct_page.body)
+        );
+
+        // Tabs: the console's five pills; the account's an empty `nav`.
+        assert!(
+            a_top.contains("<nav></nav>"),
+            "account: an empty `nav` where the tabs would be: {a_top}"
+        );
+        assert!(
+            !a_top.contains("class=\"pill on\""),
+            "account: no tab is current: {a_top}"
+        );
+
+        // The account end: the same elements in the same order on both.
+        let c_acct = elements(&c_top, "<nav class=\"acct\"", "</nav>");
+        let a_acct = elements(&a_top, "<nav class=\"acct\"", "</nav>");
+        assert_eq!(c_acct.len(), 1, "{c_top}");
+        assert_eq!(a_acct.len(), 1, "account: one nav.acct: {a_top}");
+        assert_eq!(
+            class_values(&a_acct[0]),
+            class_values(&c_acct[0]),
+            "the account end is the same markup on both surfaces, class for class:\naccount: {}\nconsole: {}",
+            a_acct[0],
+            c_acct[0]
+        );
+        let who = controls_with_class(&a_acct[0], "span", "who");
+        assert_eq!(who.len(), 1, "account: one span.who: {}", a_acct[0]);
+        assert_eq!(
+            visible_text(&who[0]),
+            "Bob Smith \u{b7} bob@x.com",
+            "the given name and the first address: {}",
+            who[0]
+        );
+        let sums = controls_with_class(&a_acct[0], "summary", "ico");
+        assert_eq!(
+            sums.len(),
+            1,
+            "account: Preferences is summary.pill.ico: {}",
+            a_acct[0]
+        );
+        assert!(
+            a_acct[0].contains("<details class=\"settings\""),
+            "{}",
+            a_acct[0]
+        );
+        assert!(a_acct[0].contains("<div class=\"menu\""), "{}", a_acct[0]);
+        assert!(
+            a_acct[0].contains("<p class=\"lede\""),
+            "the identity is also the menu's first line: {}",
+            a_acct[0]
+        );
+
+        // The menu's fields: Language then Theme, the console's order, on both.
+        for (label, acct) in [("console", &c_acct[0]), ("account", &a_acct[0])] {
+            let lang = acct.find("<select name=\"lang\"").unwrap_or(usize::MAX);
+            let theme = acct.find("<select name=\"theme\"").unwrap_or(usize::MAX);
+            assert!(
+                lang < theme && theme != usize::MAX,
+                "{label}: Language then Theme: {acct}"
+            );
+        }
+
+        // Sign out: the same pill, from the same setting (still the same URL in 8b-2).
+        let outs: Vec<String> = controls_with_class(&a_acct[0], "a", "ico")
+            .into_iter()
+            .filter(|el| el.contains("/auth/logout"))
+            .collect();
+        assert_eq!(
+            outs.len(),
+            1,
+            "account: Sign out is one a.pill.ico: {}",
+            a_acct[0]
+        );
+        assert!(
+            a_acct[0].find("</details>").unwrap() < a_acct[0].find("/auth/logout").unwrap(),
+            "Sign out is last, to the right of Preferences: {}",
+            a_acct[0]
+        );
+        let _ = std::fs::remove_file(&path);
+
+        // The operator's brand and logo wear the same slot.
+        let path = account_scratch("shared-header-brand", ACCOUNT_SETTINGS_BRAND);
+        let base = account_serve(&path);
+        let g = account_call(&base, Some("bob@x.com"));
+        let top = the_header_bar(&g.body, "branded account");
+        let brand = controls_with_class(&top, "span", "brand");
+        assert_eq!(brand.len(), 1, "{top}");
+        assert!(
+            brand[0].contains("<img src=\"https://assets.badbat75.com/logo.png\"")
+                && visible_text(&brand[0]).contains("BadBat75"),
+            "the logo and the brand name are inside the brand slot: {}",
+            brand[0]
+        );
+        cleanup(&path);
+    }
+
+    /// 8b-2: `/account/` carries no handler at all, so its Preferences menu is the console's
+    /// menu as scripting-off sees it: no `onchange`, the Apply button always present (not
+    /// inside a `noscript`), and a plain `GET` to the page. The submit still answers the `302`
+    /// that sets both cookies.
+    #[test]
+    fn the_account_menu_has_no_handler() {
+        let path = account_scratch_full("menu-no-handler");
+        let base = account_serve(&path);
+
+        for cookie in ["lang=en", "lang=it"] {
+            let g = account_call_pref(&base, Some("bob@x.com"), Some(cookie), None);
+            assert_eq!(g.status, 200, "{}", account_readable(&g.body));
+            assert!(
+                !account_carries_inline_handler(&g.body),
+                "{cookie}: no `on…=` attribute anywhere on /account/, the menu included: {}",
+                account_readable(&g.body)
+            );
+            assert!(
+                !g.body.to_ascii_lowercase().contains("<noscript"),
+                "{cookie}: nothing on /account/ hides behind a noscript: {}",
+                account_readable(&g.body)
+            );
+            let top = the_header_bar(&g.body, cookie);
+            let menu = elements(&top, "<div class=\"menu\"", "</form>");
+            assert_eq!(menu.len(), 1, "{cookie}: one menu with its form: {top}");
+            let form = elements(&menu[0], "<form", "</form>");
+            assert_eq!(form.len(), 1, "{cookie}: {}", menu[0]);
+            let tag = open_tag(&form[0]);
+            assert_eq!(attr(tag, "method").as_deref(), Some("get"), "{tag}");
+            assert_eq!(
+                attr(tag, "action").as_deref(),
+                Some(ACCOUNT_PAGE),
+                "the form goes back to the account page: {tag}"
+            );
+            let actions = controls_with_class(&form[0], "div", "actions");
+            assert_eq!(actions.len(), 1, "{cookie}: div.actions: {}", form[0]);
+            let buttons = elements(&actions[0], "<button", "</button>");
+            assert_eq!(
+                buttons.len(),
+                1,
+                "{cookie}: one Apply button: {}",
+                actions[0]
+            );
+            let lang = if cookie == "lang=it" {
+                Lang::It
+            } else {
+                Lang::En
+            };
+            assert_eq!(
+                visible_text(&buttons[0]),
+                t(lang, K::Apply),
+                "{}",
+                buttons[0]
+            );
+        }
+
+        // The foot form is gone: the page's only theme and language selects are the menu's.
+        let g = account_call(&base, Some("bob@x.com"));
+        assert_eq!(
+            g.body.matches("<select name=\"theme\"").count(),
+            1,
+            "one theme list box on the page: {}",
+            account_readable(&g.body)
+        );
+        assert_eq!(g.body.matches("<select name=\"lang\"").count(), 1);
+        assert!(
+            !g.body.contains("selfserve-prefs"),
+            "the foot form is gone: {}",
+            account_readable(&g.body)
+        );
+
+        // Submitting the menu's own fields still answers one 302 that sets both cookies.
+        let top = the_header_bar(&g.body, "submit");
+        let names: Vec<String> = elements(&top, "<select", ">")
+            .iter()
+            .filter_map(|s| attr(s, "name"))
+            .collect();
+        assert_eq!(names, ["lang", "theme"], "{top}");
+        let g = account_call(&format!("{base}?lang=it&theme=dark"), Some("bob@x.com"));
+        assert_eq!(g.status, 302, "{}", account_readable(&g.body));
+        assert_eq!(g.header("Location"), Some(ACCOUNT_PAGE));
+        let set = g.cookies();
+        assert!(set.iter().any(|c| c.starts_with("theme=dark;")), "{set:?}");
+        assert!(set.iter().any(|c| c.starts_with("lang=it;")), "{set:?}");
+        cleanup(&path);
+    }
+
+    /// 8b-2: Preferences and Sign out on `/account/` are icon controls named by hidden text,
+    /// in the reader's language (the generic walk in `icon_controls_are_named_by_hidden_text`
+    /// also covers them, since it loops over every `.pill.ico` of every account page).
+    #[test]
+    fn the_account_header_icons_are_named_in_the_readers_language() {
+        let path = account_scratch_full("header-icons");
+        let base = account_serve(&path);
+        for (lang, code) in [(Lang::En, "en"), (Lang::It, "it")] {
+            let g = account_call_pref(
+                &base,
+                Some("bob@x.com"),
+                Some(&format!("lang={code}")),
+                None,
+            );
+            assert_eq!(g.status, 200, "{}", account_readable(&g.body));
+            let top = the_header_bar(&g.body, code);
+            let sums = controls_with_class(&top, "summary", "ico");
+            assert_eq!(sums.len(), 1, "{code}: {top}");
+            assert_eq!(visible_text(&sums[0]), t(lang, K::Settings), "{}", sums[0]);
+            assert_eq!(
+                attr(open_tag(&sums[0]), "title").as_deref(),
+                Some(t(lang, K::Settings))
+            );
+            let outs: Vec<String> = controls_with_class(&top, "a", "ico")
+                .into_iter()
+                .filter(|el| el.contains("/auth/logout"))
+                .collect();
+            assert_eq!(outs.len(), 1, "{code}: Sign out is an icon pill: {top}");
+            assert_eq!(visible_text(&outs[0]), t(lang, K::SignOut), "{}", outs[0]);
+            assert_eq!(
+                attr(open_tag(&outs[0]), "title").as_deref(),
+                Some(t(lang, K::SignOut))
+            );
+            for el in sums.iter().chain(outs.iter()) {
+                assert!(
+                    el.contains("aria-hidden=\"true\"") && el.contains("focusable=\"false\""),
+                    "{code}: the glyph is decoration: {el}"
+                );
+            }
+        }
+        cleanup(&path);
     }
 
     /// The five choices map onto the file's duration grammar, in one function,
@@ -20023,12 +20446,19 @@ mod tests {
             // their comments say "phone" (the stacking rules) and "ci" (inside "decide",
             // "specificity"), so a substring test over the bytes fails on a page that
             // names nothing.
-            let shown = account_readable(&g.body);
+            // The header's glyphs are `<svg>` markup (`<circle` holds "ci"), and no id is
+            // ever written in one, so the SVG blocks are cut out before the names are sought.
+            let mut shown = account_readable(&g.body);
+            while let Some(i) = shown.find("<svg") {
+                let end = shown[i..].find("</svg>").map_or(shown.len(), |e| i + e + 6);
+                shown.replace_range(i..end, "");
+            }
             for name in [
                 "laptop",
                 "ci",
                 "phone",
-                "bob@x.com",
+                // Not "bob@x.com": the header (8b-2) says who is signed in, which is the
+                // caller's own address and no leak. Every other address stays barred.
                 "bob@old.com",
                 "carol@x.com",
                 ACCOUNT_BOB,
@@ -20810,7 +21240,13 @@ mod tests {
             "and says what a rotate costs, in the reader's language: {}",
             account_readable(&g.body)
         );
-        let form = element_containing(&g.body, "class=\"edit\"", "</form>");
+        // The header's Preferences menu is also a `form.edit`, so the card's form is found by
+        // the path it posts to.
+        let form = element_containing(
+            &g.body,
+            &format!("action=\"{ACCOUNT_PATH}/keys/rotate\""),
+            "</form>",
+        );
         assert!(
             form.contains(&format!("action=\"{ACCOUNT_PATH}/keys/rotate\""))
                 && form.contains("method=\"post\""),
