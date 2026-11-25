@@ -71,6 +71,39 @@ when there is no tag to check out.
 release logs anybody out.** The settings file goes from version 1 to version 3, which needs an
 edit before the binaries land: see "Upgrading" below.
 
+### Changed: the console and `/account` wear one header, and it names who is signed in
+
+* **One bar, both surfaces.** The console's bar is factored out as `top_bar` and the
+  self-service page wears it: the operator's logo and brand name (not a link, since this page
+  is the only one its visitor came to the estate for), an empty tabs nav, the identity, the
+  Preferences menu and Sign out. Two copies of one bar is how two surfaces drift a pixel at a
+  time, each editor changing the file in front of them.
+* **The bar says who is signed in.** The console said it only in its footer, below the fold on
+  a long page. It sits with the session controls now: the forwarded `given_name` claim when the
+  deployment configures that claim, then the first address of `X-Auth-Email` ("Bot ·
+  `bot@example.com`", the address alone when there is no name), in `nav.acct` and as the first
+  line of the Preferences menu, which is where it survives on a phone. The footer keeps the
+  version and says nothing else, because one fact gets one home.
+* **Preferences and Sign out are icons**, the estate's shared `pill ico` component (sliders,
+  and an arrow leaving a bracket), each named by text a screen reader reads and no browser
+  shows, with the same words as the pointer tooltip.
+* **The theme and language form at the foot of `/account` is gone: it is the header's
+  Preferences menu.** The menu is the console's as a browser with scripting off sees it, with
+  **no handler at all** and the Apply button always present, because here that button is not a
+  fallback, it is the only way. The write is what it was: one submit, one `302` setting the
+  `theme` and `lang` cookies, the same names the console writes.
+* **On `/account` the Sign out link is `BB_AUTH_WEB_LOGOUT_URL` with its `rd` parameter
+  dropped.** That `rd` is the console's round trip, so a person who is not an administrator
+  followed it to a `403` on the console. The link can only lose a parameter, never gain one, so
+  it names no landing place the operator did not already write, and the gate's `safe_rd` still
+  decides where a logout lands: the person signs out and stops on the sign-in page. The
+  console's pill keeps the URL as written, and an unset variable is no pill on either surface.
+* **Each `/account` confirmation page carries one `h1`**, naming the action ("Rotate key",
+  "Revoke key"), where it read "Your account" and then the action. The bar answers "whose
+  account is this" above the page, as it already does on the console.
+
+No cookie, access-file or settings-file format changes, and nothing here logs anybody out.
+
 ### Changed: a key's duration is one of five, `/account` is a key table, and an empty `duration` is refused
 
 * **A key's duration is now chosen from five, on both editors.** The console's mint and edit

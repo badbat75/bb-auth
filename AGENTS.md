@@ -167,11 +167,19 @@ One crate, four targets, and the split is load-bearing:
   The `denied` veto is answered with a `403` ahead of everything the page would otherwise say
   about the caller, and a stranger and an administrator with no roster row see the same page.
   It wears the `ui` section per request as the console does (brand name and logo, the operator's
-  stylesheet, `ui.theme` as the default theme stamped as `data-theme`), in a centred card, and
-  the person chooses only the theme (light, dark, system) and the language (English, Italian,
-  auto) from a selector form with a submit button and **no handler at all**, not even the
+  stylesheet, `ui.theme` as the default theme stamped as `data-theme`), in a centred card, under
+  the console's own header (`top_bar`, one function for both surfaces): the operator's brand as
+  a `span` and not a link, since this page is the only one its visitor came to the estate for,
+  an empty tabs nav, the identity, the Preferences menu and Sign out. The person chooses only
+  the theme (light, dark, system) and the language (English, Italian, auto) from that menu, as a
+  `GET` back to the page with an always-present Apply and **no handler at all**, not even the
   Settings menu's one: one submit answers one `302` that sets the `theme` and `lang` cookies,
   the same names the console writes, so a choice carries between the two surfaces on one host.
+  Its Sign out is the console's `BB_AUTH_WEB_LOGOUT_URL` with its `rd` parameter dropped
+  (`logout_without_rd`, derived once at startup into `Config::account_logout_url`), because that
+  `rd` is the console's round trip and a person who is not an administrator following it lands on
+  a `403` there: the link can only lose a parameter, never gain one, so it names no landing place
+  the operator did not write.
   The keys' writes are there: mint, rotate and revoke of the caller's **own** keys, each a
   `POST` to a path under the account prefix (`/account/keys`, `/account/keys/rotate`,
   `/account/keys/remove`), each carrying the file's `rev` so a stale form is a `409` that writes

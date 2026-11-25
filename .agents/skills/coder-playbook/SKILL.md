@@ -43,6 +43,12 @@ Rules are in `AGENTS.md`. Format of this file: `AGENTS.md`, under "Skills".
 - A `hidden` attribute is only a presentational hint, so a server-rendered "not shown" control needs
   a CSS rule of its own (`.secret button[hidden]{display:none}` in `admin.css`): the operator's
   stylesheet loads after ours and a plain `button{display:…}` there shows the dead button.
+- The action word of an account key operation is `op.title()` (`AccountKeyOp::title`), already the
+  refusal page's heading and the confirmation's shell `h1`/`<title>`: a page that needs the word
+  reuses it, never re-matches the op, so the pill, the button, the heading and the refusal cannot
+  drift. The account shell emits `h1 { (title) }` on **every** page under the prefix, so a card
+  rendered inside it (`confirm_card`, the heading-less half of `page_confirm_at`) must carry no
+  heading of its own and the caller passes the word as the title.
 - `rotate_api_key` mints a **new** secret on every call, so a rotate is exactly one call: keep the
   `SealedKey` it returns, commit, then `reveal(&written)`. A "check it exists, then rotate" pair
   mints two secrets and shows the second. The ownership check comes free: `key_mut` resolves the
@@ -51,10 +57,12 @@ Rules are in `AGENTS.md`. Format of this file: `AGENTS.md`, under "Skills".
 
 ## Pitfalls
 
-- A new `Config` field breaks the test module's `cfg_for` struct literal (the only one), and the
-  tester's staged tests never add it. When the task forbids editing the test module, that one
-  line (`workers: DEFAULT_WORKERS,`) is a blocker to report, not a licence to edit: production
-  code is still checkable with `cargo check --bin bb-auth-web` and `cargo clippy --lib --bins`.
+- A new `Config` field breaks the test module's `cfg_for` struct literal (the only one). Check the
+  staged test first: when the staged test reads the new field it has usually added the line itself
+  (8b-3's `account_logout_url`), and the task is clear. When it has not and the task forbids editing
+  the test module, that one line (`workers: DEFAULT_WORKERS,`) is a blocker to report, not a licence
+  to edit: production code is still checkable with `cargo check --bin bb-auth-web` and
+  `cargo clippy --lib --bins`.
 - `pkill -f PATTERN` also matches the shell running it, and killed that shell. Use the task's own stop
   control, or a pattern that cannot match itself.
 - A shade seam on a page is not the palette's doing: the two dark arms of `theme.css` are token-for-token

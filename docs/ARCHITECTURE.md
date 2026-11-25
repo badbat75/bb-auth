@@ -274,7 +274,9 @@ The admin GUI is a separate service with a separate env file
 (`deploy/bb-auth-web.env.example`, installed as `etc/bb-auth-web.env`): `BB_AUTH_ACCESS_FILE`
 and `BB_AUTH_SETTINGS_FILE`, the same names for the same files, plus `BB_AUTH_WEB_LISTEN`,
 `BB_AUTH_WEB_BASE_PATH`, `BB_AUTH_WEB_DEFAULT_LANG`, `BB_AUTH_WEB_LOGOUT_URL` (unset means
-the header carries no Sign out control at all), `BB_AUTH_WEB_ALLOW_NONLOOPBACK` (a
+the header carries no Sign out control at all, and on `/account` the same value is worn with
+its `rd` parameter dropped, so a person who is not an administrator signs out to the sign-in
+page rather than to a `403` on the console: §13.17), `BB_AUTH_WEB_ALLOW_NONLOOPBACK` (a
 non-loopback listen address is otherwise a fatal startup, because this service's only
 credential is a header nginx sets) and `BB_AUTH_WEB_WORKERS` (request threads, default `8`,
 1 to 64, anything else a fatal startup naming the variable: §13.13). It holds no secret at all, and its

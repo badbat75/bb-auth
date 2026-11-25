@@ -2572,6 +2572,12 @@ struct Config {
     /// destination for someone who just ended their session and is the right default for a
     /// deployment that has not said otherwise.
     logout_url: Option<String>,
+    /// [`Self::logout_url`] with its `rd` query parameter removed, derived once at startup by
+    /// [`logout_without_rd`] and `None` exactly when `logout_url` is. The self-service page's
+    /// Sign out pill carries this (docs/ARCHITECTURE.md §13.17): the `rd` is the console's round
+    /// trip to the administrator surface, and on `/account/` it would land a person who is not
+    /// an administrator on a `403`.
+    account_logout_url: Option<String>,
     /// `BB_AUTH_AUDIT_FILE`, the authentication audit the gate appends to and this GUI reads.
     /// Default [`DEFAULT_AUDIT_FILE`], and **empty means there is no Audit tab at all**.
     ///
@@ -2860,6 +2866,10 @@ impl Config {
             eprintln!("[bb-auth-web] FATAL: {e}");
             std::process::exit(1);
         });
+        // The self-service page's Sign out: the same link with only its `rd` removed (§13.17),
+        // derived once here beside the value it comes from, so no page parses the operator's
+        // value per request and the two surfaces cannot disagree about what was cut.
+        let account_logout_url = logout_url.as_deref().map(logout_without_rd);
         // Required, and fatal here: a GUI that starts with no secret is a GUI whose check is
         // not running, and the one thing it is asked to protect is the header it trusts.
         let proxy_secret = compile_proxy_secret(&env_or("BB_AUTH_WEB_PROXY_SECRET", ""))
@@ -2893,11 +2903,48 @@ impl Config {
             workers,
             default_lang,
             logout_url,
+            account_logout_url,
             proxy_secret,
             audit_path: env_or("BB_AUTH_AUDIT_FILE", DEFAULT_AUDIT_FILE)
                 .trim()
                 .to_string(),
         }
+    }
+}
+
+/// The operator's logout URL with its `rd` query parameter removed, and everything else exactly
+/// as written: scheme, host, port, path, the other parameters in their order, and the fragment.
+///
+/// The `rd` on `BB_AUTH_WEB_LOGOUT_URL` is the console's round trip, the page a signed out
+/// administrator comes back to, and it is written for the administrator surface. On `/account/`
+/// that destination is a `403` for anybody who is not an administrator, so the self-service page
+/// renders the same link with only that parameter dropped (docs/ARCHITECTURE.md §13.17). The
+/// link can therefore only lose a parameter, never gain one: it names no landing place the
+/// operator did not already write, and the gate's `safe_rd` against `gate.authorized_hosts`
+/// still decides where any logout may land.
+///
+/// Textual, and deliberately: this program knows neither its scheme nor its host (the reason the
+/// variable exists), so the value is cut, never parsed. A parameter goes when its name is
+/// exactly `rd`, so `ord` and `rdx` stay; a percent-encoded value goes whole, because splitting
+/// on `&` sees an encoded `&` as `%26` and not as a separator; the fragment is split off first,
+/// so a `#` inside a value, which must be encoded, cannot be read as one; and the `?` leaves
+/// with the last parameter, since a URL ending in `?` is a URL with an empty query.
+fn logout_without_rd(url: &str) -> String {
+    let (url, fragment) = match url.find('#') {
+        Some(i) => (&url[..i], &url[i..]),
+        None => (url, ""),
+    };
+    let Some((head, query)) = url.split_once('?') else {
+        return format!("{url}{fragment}");
+    };
+    let kept: Vec<&str> = query
+        .split('&')
+        .filter(|pair| pair.split('=').next().unwrap_or_default() != "rd")
+        .collect();
+    if kept.is_empty() {
+        format!("{head}{fragment}")
+    } else {
+        format!("{head}?{}{fragment}", kept.join("&"))
     }
 }
 
@@ -4663,9 +4710,10 @@ fn page_confirm(
     )
 }
 
-/// [`page_confirm`] on values instead of a [`View`], so the self-service page renders the
-/// console's card. `fields` is what the form carries besides the `rev`: nothing on the console,
-/// whose route names the key, and the key's id on `/account/`, whose two paths do not.
+/// [`page_confirm`] on values instead of a [`View`]: the console's heading above the
+/// [`confirm_card`] the self-service page renders on its own. `fields` is what the form carries
+/// besides the `rev`: nothing on the console, whose route names the key, and the key's id on
+/// `/account/`, whose two paths do not.
 #[allow(clippy::too_many_arguments)]
 fn page_confirm_at(
     action: &str,
@@ -4682,6 +4730,31 @@ fn page_confirm_at(
 ) -> Markup {
     html! {
         h1 { (heading) }
+        (confirm_card(
+            action, rev, cancel, cancel_label, what, why, fields, button, err, danger,
+        ))
+    }
+}
+
+/// The card a confirmation is made of: what is about to go, what that means, and the `POST`
+/// that does it. Split out of [`page_confirm_at`] for the self-service page (§13.17), whose
+/// shell already wears the action word as the page's one `h1`, so the card arrives with no
+/// heading of its own and the confirmation reads the way the console's does: the bar says where
+/// you are, the `h1` says what is about to happen.
+#[allow(clippy::too_many_arguments)]
+fn confirm_card(
+    action: &str,
+    rev: &str,
+    cancel: &str,
+    cancel_label: &str,
+    what: Markup,
+    why: &str,
+    fields: Markup,
+    button: &str,
+    err: Option<&Refusal>,
+    danger: bool,
+) -> Markup {
+    html! {
         p class="lede" { (why) }
         div class="panel bad" {
             (what)
@@ -8397,9 +8470,9 @@ struct AccountPrefs<'a> {
     /// `given_name` and the first address, or the address alone. `None` on the pages answered
     /// before any identity exists (the `401`), where there is nobody to name.
     who: Option<String>,
-    /// Where Sign out points: [`Config::logout_url`], and no control at all when the operator
-    /// named no destination. The console's own pill, the same setting, unchanged here (the `rd`
-    /// question is 8b-3's).
+    /// Where Sign out points: [`Config::account_logout_url`], the operator's link with its `rd`
+    /// dropped, and no control at all when the operator named no destination. The console's own
+    /// pill is the same setting unchanged (§13.17).
     logout: Option<&'a str>,
 }
 
@@ -8983,8 +9056,10 @@ fn account_key_line(
     }
 }
 
-/// The confirmation a row's rotate or revoke link opens: the console's [`page_confirm_at`] card
-/// in this page's words, with the key's id in a hidden field because the two paths do not name it.
+/// The confirmation a row's rotate or revoke link opens: the console's [`confirm_card`] card
+/// in this page's words, with the key's id in a hidden field because the two paths do not name
+/// it. **No heading**: the shell's one `h1` carries the action word, which is why the caller
+/// passes `op.title()` as the page title (§13.17).
 ///
 /// A rotate is not marked destructive: it keeps the name and the restriction, and a red button on
 /// it would teach the person to read the revoke's red as one more routine thing.
@@ -9005,12 +9080,11 @@ fn page_account_confirm(
         ),
         _ => ("remove", K::AccountKeyRemove, K::AccountKeyRemoveWarn, true),
     };
-    page_confirm_at(
+    confirm_card(
         &format!("{keys_path}/{verb}"),
         rev,
         page,
         t(lang, K::Cancel),
-        html! { (t(lang, word)) },
         html! { p { code { (id) } } },
         t(lang, warn),
         html! { input type="hidden" name="id" value=(id); },
@@ -9229,7 +9303,7 @@ fn handle_account(
         theme,
         page: &page,
         who: None,
-        logout: cfg.logout_url.as_deref(),
+        logout: cfg.account_logout_url.as_deref(),
     };
     // Below the prefix, only the page and the three key mutations exist. A path that is nothing
     // is a `404` for every caller alike, administrator included, because a page that answers a
@@ -9465,7 +9539,9 @@ fn handle_account(
             req,
             200,
             &prefs,
-            t(lang, K::AccountTitle),
+            // The action word as the page title, so the shell's one `h1` and the `<title>` both
+            // name what is about to happen, as the console's confirmation does (§13.17).
+            t(lang, op.title()),
             page_account_confirm(lang, &page, &keys, &rev, &id, op),
             look,
             false,
@@ -9504,8 +9580,9 @@ enum AccountKeyOp {
 }
 
 impl AccountKeyOp {
-    /// The heading the refusal page carries: the verb the form's own button used, so the page
-    /// a refusal lands on is headed by the word the reader just clicked.
+    /// The word this operation is named by: the verb the form's own button used, so the page a
+    /// refusal lands on is headed by the word the reader just clicked, and the confirmation a
+    /// row's link opens is headed by the word the reader is about to click (§13.17).
     fn title(self) -> K {
         match self {
             AccountKeyOp::Mint => K::AccountKeyAdd,
@@ -10883,6 +10960,8 @@ mod tests {
             // Configured, so the control renders and the tests below see the shape a real
             // deployment has. The unset case is its own test.
             logout_url: Some("/auth/logout".to_string()),
+            // What startup derives from the line above: with no `rd` in it, the same value.
+            account_logout_url: Some("/auth/logout".to_string()),
             // Beside the access file, so a test that wants an audit writes one there and a
             // test that does not gets an empty page rather than another test's rows.
             audit_path: format!("{path}.audit"),
@@ -21436,5 +21515,147 @@ mod tests {
             account_readable(&g.body)
         );
         cleanup(&apath);
+    }
+
+    /// 8b-3 (§13.17, "Sign out on /account/"): the account page's Sign out link is the
+    /// operator's logout URL with only its `rd` query parameter removed. Pure, so every shape
+    /// of URL is a case here.
+    ///
+    /// Red until the coder adds `fn logout_without_rd(url: &str) -> String`: it does not
+    /// exist, so the test module does not compile (E0425).
+    #[test]
+    fn logout_without_rd_keeps_everything_else() {
+        let rd = "rd=https%3A%2F%2Fa.x.com%2Fadmin%2F";
+        let cases: [(String, &str); 12] = [
+            (format!("/auth/logout?{rd}"), "/auth/logout"),
+            (
+                format!("https://a.x.com/auth/logout?{rd}&x=1&y=2"),
+                "https://a.x.com/auth/logout?x=1&y=2",
+            ),
+            (
+                format!("https://a.x.com/auth/logout?x=1&{rd}&y=2"),
+                "https://a.x.com/auth/logout?x=1&y=2",
+            ),
+            (
+                format!("https://a.x.com/auth/logout?x=1&y=2&{rd}"),
+                "https://a.x.com/auth/logout?x=1&y=2",
+            ),
+            ("/auth/logout".into(), "/auth/logout"),
+            (
+                "https://a.x.com/auth/logout?x=1".into(),
+                "https://a.x.com/auth/logout?x=1",
+            ),
+            // A name that merely contains or starts with `rd` is somebody else's parameter.
+            (
+                "/auth/logout?ord=1&rdx=2".into(),
+                "/auth/logout?ord=1&rdx=2",
+            ),
+            (
+                format!("/auth/logout?ord=1&{rd}&rdx=2"),
+                "/auth/logout?ord=1&rdx=2",
+            ),
+            // The percent-encoded value goes whole, `%26` inside it included.
+            (
+                "/auth/logout?rd=https%3A%2F%2Fa.x.com%2F%3Fa%3D1%26b%3D2&x=1".into(),
+                "/auth/logout?x=1",
+            ),
+            // Scheme, host, path and the fragment survive.
+            (
+                format!("https://a.x.com:8443/p/auth/logout?{rd}#top"),
+                "https://a.x.com:8443/p/auth/logout#top",
+            ),
+            (
+                format!("https://a.x.com/auth/logout?x=1&{rd}#top"),
+                "https://a.x.com/auth/logout?x=1#top",
+            ),
+            // Two `rd` parameters: both are the console's round trip.
+            (format!("/auth/logout?{rd}&x=1&rd=y"), "/auth/logout?x=1"),
+        ];
+        for (input, want) in &cases {
+            assert_eq!(&logout_without_rd(input), want, "input: {input}");
+        }
+    }
+
+    /// 8b-3: with `BB_AUTH_WEB_LOGOUT_URL` carrying an `rd`, the console's Sign out keeps it
+    /// and `/account/`'s drops it (an `rd` to the console would bring a non-administrator to a
+    /// 403). Every other parameter of the URL stays.
+    #[test]
+    fn the_account_sign_out_carries_no_rd() {
+        let path = account_scratch_full("signout-no-rd");
+        let operator = "/auth/logout?x=1&rd=https%3A%2F%2Fa.x.com%2Fadmin%2F";
+        let mut cfg = cfg_for(&path, ADMIN_BASE);
+        cfg.logout_url = Some(operator.to_string());
+        cfg.account_logout_url = Some(logout_without_rd(operator));
+        let server = Server::http("127.0.0.1:0").expect("bind an ephemeral port");
+        let port = server.server_addr().to_ip().expect("an ip address").port();
+        std::thread::spawn(move || {
+            for req in server.incoming_requests() {
+                handle(req, &cfg);
+            }
+        });
+
+        let logout_links = |body: &str| -> Vec<String> {
+            anchors_to(&account_readable(body), "/auth/logout")
+                .into_iter()
+                .filter_map(|a| attr(&a, "href"))
+                .collect()
+        };
+
+        let g = account_call(
+            &format!("http://127.0.0.1:{port}{ACCOUNT_PATH}/"),
+            Some("bob@x.com"),
+        );
+        assert_eq!(g.status, 200, "{}", account_readable(&g.body));
+        let links = logout_links(&g.body);
+        assert_eq!(
+            links,
+            vec!["/auth/logout?x=1".to_string()],
+            "the account page's pill is the operator's link without its rd: {}",
+            account_readable(&g.body)
+        );
+
+        let c = console_get(port, "admin@x.com", &[]);
+        assert_eq!(c.status, 200, "{}", account_readable(&c.body));
+        let links = logout_links(&c.body);
+        assert_eq!(
+            links,
+            vec!["/auth/logout?x=1&amp;rd=https%3A%2F%2Fa.x.com%2Fadmin%2F".to_string()],
+            "the console keeps the value as written: {}",
+            account_readable(&c.body)
+        );
+        cleanup(&path);
+    }
+
+    /// 8b-3 (§13.17, "One h1 on the account's confirmation"): the rotate and the revoke
+    /// confirmation are the shell's one `<h1>`, and it names the action, as does the `<title>`.
+    ///
+    /// Red until `page_account_confirm` returns only the card and its caller passes the action
+    /// word as the shell title: today the page has two `<h1>`s ("Your account", then the
+    /// action).
+    #[test]
+    fn the_account_confirmation_has_one_h1() {
+        let path = account_scratch_full("confirm-one-h1");
+        let base = account_serve(&path);
+        for (route, key) in [
+            ("rotate", K::AccountKeyRotate),
+            ("remove", K::AccountKeyRemove),
+        ] {
+            let g = account_call(&format!("{base}keys/{route}?id=laptop"), Some("bob@x.com"));
+            assert_eq!(g.status, 200, "{route}: {}", account_readable(&g.body));
+            let page = account_readable(&g.body);
+            let word = t(Lang::En, key);
+            let h1s = elements(&page, "<h1", "</h1>");
+            assert_eq!(h1s.len(), 1, "{route}: exactly one h1: {page}");
+            assert_eq!(visible_text(&h1s[0]).trim(), word, "{route}: {page}");
+            let titles = elements(&page, "<title>", "</title>");
+            assert_eq!(titles.len(), 1, "{route}: {page}");
+            assert!(
+                visible_text(&titles[0]).trim().ends_with(word),
+                "{route}: the title names the action: {}",
+                titles[0]
+            );
+            assert!(page.contains("laptop"), "{route}: still names the key");
+        }
+        cleanup(&path);
     }
 }
