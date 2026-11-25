@@ -37,6 +37,29 @@ async function iconBoxes(page) {
   }));
 }
 
+/** The Preferences menu closes on a click outside it (docs/ARCHITECTURE.md section 13.20).
+ *  `apply` submits the chosen theme the way that surface does (a change on the console with
+ *  scripting on, the Apply button otherwise) and resolves once the navigation it causes ends. */
+async function menuClosesOutside(t, page, who, apply) {
+  const isOpen = () => page.$eval('details.settings', (d) => d.open);
+  const open = () => page.click('details.settings > summary');
+  await open();
+  t.eq(`${who}: the trigger opens the menu`, await isOpen(), true);
+  await page.mouse.click(4, 896);
+  t.eq(`${who}: a click at the bottom-left of the viewport closes it`, await isOpen(), false);
+
+  await open();
+  await page.click('.menu select[name=theme]');
+  t.eq(`${who}: a click on a list box inside leaves it open`, await isOpen(), true);
+  await page.keyboard.press('Escape');
+
+  const before = await page.locator('html').getAttribute('data-theme');
+  const pick = before === 'dark' ? 'light' : 'dark';
+  await apply(pick);
+  t.eq(`${who}: submitting a theme still applies it`,
+    await page.locator('html').getAttribute('data-theme'), pick);
+}
+
 async function run(ctx, t) {
   const { context, page } = await newPage(ctx);
   try {
@@ -352,6 +375,13 @@ async function run(ctx, t) {
     t.eq('the button applies the language', await page.locator('html').getAttribute('lang'), 'it');
     t.eq('and the theme, both in one trip',
       await page.locator('html').getAttribute('data-theme'), 'dark');
+
+    // The cover is CSS, so light dismiss works with scripting off too (section 13.20).
+    await page.goto(ctx.base + '/users');
+    await menuClosesOutside(t, page, 'console, scripting off', async (pick) => {
+      await page.selectOption('.menu select[name=theme]', pick);
+      await Promise.all([page.waitForNavigation(), page.click('.menu button')]);
+    });
 
     // Every other page shape is unchanged by scripting: a mutation still goes through.
     const beforeSave = bytes(ctx);

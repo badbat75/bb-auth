@@ -250,6 +250,17 @@ details.settings{display:flex;position:relative}
    does it in Firefox, and the pseudo-element in WebKit. */
 details.settings > summary{list-style:none}
 details.settings > summary::-webkit-details-marker{display:none}
+/* Light dismiss, in CSS and with no script (ARCHITECTURE section 13.20): while the menu is
+   open its trigger grows a transparent box over the whole viewport, so a click anywhere
+   outside the panel lands on the `summary` itself and the browser closes the `details` the way
+   it always closes one. `.menu` keeps `z-index:10`, one above this cover, so everything inside
+   the panel is hit first. The cover is `position:fixed` and stays the size of the viewport
+   only while no ancestor of the trigger sets `transform`, `filter`, `perspective` or
+   `will-change`, which is what the Rust test pins. */
+details.settings[open]>summary::before{content:"";position:fixed;inset:0;z-index:9;cursor:default}
+/* With the cover up, the pointer is over the trigger everywhere, so the open trigger wears the
+   look of a control that is being used for as long as it is open. */
+details.settings[open]>summary{background:var(--chip);border-color:var(--accent);color:var(--accent)}
 .menu{position:absolute;right:0;top:calc(100% + 8px);z-index:10;min-width:230px;
   background:var(--card);border:1px solid var(--card-border);border-radius:var(--r-box);
   padding:14px 16px;box-shadow:var(--shadow-md)}

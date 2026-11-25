@@ -135,8 +135,9 @@ settings                        the OTHER file: what takes effect with no restar
   settings show                 what the gate and the GUI read from it
   settings set [--claims LIST] [--identity LIST] [--session-ttl SECS]
                [--unverified-social true|false] [--providers LIST] [--no-providers]
-               [--issuer URL] [--login-url URL] [--denied-url URL] [--client-id ID]
-               [--cookie-domain DOMAIN] [--authorized-hosts LIST] [--no-authorized-hosts]
+               [--issuer URL] [--login-url URL] [--denied-url URL] [--landing-url URL]
+               [--client-id ID] [--cookie-domain DOMAIN] [--authorized-hosts LIST]
+               [--no-authorized-hosts]
                [--oauth-domain HOST] [--social-callback-url URL]
                [--social-buttons IDP=APPCLIENT,...] [--no-social-buttons]
                [--client-ip-header HEADER] [--request-id-header HEADER]
@@ -168,6 +169,11 @@ settings                        the OTHER file: what takes effect with no restar
   value costs them a page and nobody a door. Empty is the gate's own /auth/denied. An
   application may override it with `app set NAME --denied-url`, which is how one gate
   fronting several hosts gives each host its own refusal page.
+  --landing-url is where a sign-in lands when nothing named a place (no rd, no Referer), and
+  it is not one of the five either: empty is the caller's root, so a wrong value costs a
+  landing and nobody a door. A value must sit on one of --authorized-hosts, because `safe_rd`
+  refuses a landing page outside them at every login, and every sign-in with no rd then falls
+  back to the sign-in page, which is the loop this setting was added to end.
   --client-ip-header and --request-id-header are what the audit reads the client's address
   and nginx's request id out of (X-Real-IP and X-Request-ID in the README's recipe). Both
   are off until named, because naming one is a promise that nginx OVERWRITES that header on
@@ -773,6 +779,13 @@ fn cmd_settings_show(ctx: Ctx) -> Result<ExitCode, String> {
         }
     );
     println!(
+        "  landing_url             {}",
+        match s.landing_url.as_str() {
+            "" => "(caller's root)",
+            url => url,
+        }
+    );
+    println!(
         "  client_id               {}",
         match s.client_id.as_str() {
             "" => "(none: no login can complete)",
@@ -896,6 +909,7 @@ fn cmd_settings_set(mut ctx: Ctx) -> Result<ExitCode, String> {
     let providers = ctx.flags.take_many("providers")?;
     let login_url = ctx.flags.take_one("login-url")?;
     let denied_url = ctx.flags.take_one("denied-url")?;
+    let landing_url = ctx.flags.take_one("landing-url")?;
     let client_id = ctx.flags.take_one("client-id")?;
     let issuer = ctx.flags.take_one("issuer")?;
     let cookie_domain = ctx.flags.take_one("cookie-domain")?;
@@ -938,6 +952,7 @@ fn cmd_settings_set(mut ctx: Ctx) -> Result<ExitCode, String> {
         && !no_providers
         && login_url.is_none()
         && denied_url.is_none()
+        && landing_url.is_none()
         && client_id.is_none()
         && issuer.is_none()
         && cookie_domain.is_none()
@@ -1003,6 +1018,18 @@ fn cmd_settings_set(mut ctx: Ctx) -> Result<ExitCode, String> {
                 .map_err(|e| e.replace("denied_url", "--denied-url"))?;
         }
         doc.gate.denied_url = u.trim().to_string();
+    }
+    // The page a sign-in lands on when nothing named a place. Not one of the five that ask
+    // first either: it is where somebody who is already in is put down, so a wrong value
+    // costs a landing and not a door. Its cross-check with `--authorized-hosts` is left to
+    // the write, because the library's sentence names both settings and says why the pair
+    // matters, and this tool has nothing to add to it.
+    if let Some(u) = landing_url {
+        if !u.trim().is_empty() {
+            compile_page_url("landing_url", &u)
+                .map_err(|e| e.replace("landing_url", "--landing-url"))?;
+        }
+        doc.gate.landing_url = u.trim().to_string();
     }
     if let Some(id) = client_id {
         doc.gate.client_id = compile_app_client_id("--client-id", &id)?;
@@ -2794,6 +2821,78 @@ mod tests {
             flags.take("note").unwrap(),
             Taken::Valued("--base".to_string())
         );
+    }
+
+    // --- `settings set --landing-url` ------------------------------------------
+
+    /// A settings file of its own under the temp directory (tests run in parallel), and the
+    /// `Ctx` that `settings set LINE` would get for it.
+    fn landing_ctx(name: &str, line: &str) -> (Ctx, String) {
+        let p = std::env::temp_dir().join(format!("bb-auth-adm-landing-{name}.json"));
+        std::fs::write(
+            &p,
+            r#"{ "version": 3, "gate": { "authorized_hosts": ["auth.x.com"] } }"#,
+        )
+        .unwrap();
+        let path = p.to_string_lossy().into_owned();
+        let (_, flags) = args(line);
+        let ctx = Ctx {
+            path: String::new(),
+            settings_path: path.clone(),
+            dry_run: false,
+            flags,
+        };
+        (ctx, path)
+    }
+
+    #[test]
+    fn settings_set_landing_url_writes_and_an_empty_value_unsets() {
+        let (ctx, path) = landing_ctx(
+            "set",
+            "settings set --landing-url https://auth.x.com/account/",
+        );
+        assert!(cmd_settings_set(ctx).is_ok());
+        let on_disk = std::fs::read_to_string(&path).unwrap();
+        assert!(on_disk.contains("https://auth.x.com/account/"), "{on_disk}");
+
+        // An empty value is how it is unset, and the key leaves the file.
+        let (_, flags) = args("settings set --landing-url=");
+        let ctx = Ctx {
+            path: String::new(),
+            settings_path: path.clone(),
+            dry_run: false,
+            flags,
+        };
+        assert!(cmd_settings_set(ctx).is_ok());
+        let on_disk = std::fs::read_to_string(&path).unwrap();
+        assert!(!on_disk.contains("landing_url"), "{on_disk}");
+        let _ = std::fs::remove_file(&path);
+    }
+
+    #[test]
+    fn settings_set_landing_url_off_the_authorized_hosts_is_refused() {
+        let (ctx, path) = landing_ctx(
+            "off",
+            "settings set --landing-url https://evil.example.org/",
+        );
+        let before = std::fs::read_to_string(&path).unwrap();
+        let e = cmd_settings_set(ctx).unwrap_err();
+        assert!(
+            e.contains("landing_url") && e.contains("authorized_hosts"),
+            "{e}"
+        );
+        assert_eq!(
+            std::fs::read_to_string(&path).unwrap(),
+            before,
+            "nothing written"
+        );
+
+        // Not an absolute https URL: refused naming the flag that was typed.
+        let (ctx, path2) = landing_ctx("bad", "settings set --landing-url /account/");
+        let e = cmd_settings_set(ctx).unwrap_err();
+        assert!(e.contains("landing"), "{e}");
+        let _ = std::fs::remove_file(&path);
+        let _ = std::fs::remove_file(&path2);
     }
 
     #[test]

@@ -14,6 +14,11 @@ Rules are in `AGENTS.md`. Format of this file: `AGENTS.md`, under "Skills".
   entry: the veto is still in force, under the email. `user_rm_report` is the CLI's answer;
   the GUI's removal needs the same split.
 
+- A settings refusal the **library** makes on the whole file is attributed to a field at the
+  `SettingsWrite::prepare` call site in `mutate`: `From<String>` gives `field: None`, so the
+  message is matched there and turned into `Refusal::on(field, ..)`, which is what marks the
+  box `f-<name> invalid` and opens its group. `settings_group_of` sends every name it does not
+  list to `signin`, so a new gate field needs no entry there.
 - A library function that restates `decide` as a set must ask what `decide` asks, never a copy of
   its logic. For an identifier that means the helpers (`vetoes_identifier`, `excludes_identifier`,
   `uuid_of`); for a uuid (a key's owner, as `key_scopes_for` takes) it means the raw fields the
@@ -160,3 +165,9 @@ Rules are in `AGENTS.md`. Format of this file: `AGENTS.md`, under "Skills".
   exclusive with any edit to that rule; the tester's fix is the one character (`.bar .pill{`
   matches the desktop rule and the intent). Grep the Rust suite for the selector string before
   editing a rule a test reads by `CSS.contains`.
+- The Preferences menu's light dismiss (§13.20) is **CSS**: `details.settings[open]>summary::before`
+  is a `position:fixed;inset:0` cover at `z-index:9`, one under `.menu`'s 10, so an outside click
+  lands on the `summary` and closes the `details`. A `position:relative` ancestor does not shrink
+  that box, but `transform`, `filter`, `perspective` or `will-change` on `header.top`, `.bar`,
+  `nav.acct` or `details.settings` does, quietly and only in a browser. `an_open_menu_closes_on_a_click_outside_it`
+  is where that lands red; keep any such property off those four selectors.

@@ -1036,6 +1036,8 @@ enum K {
     GlobalLoginUrlHelp,
     GlobalDeniedUrl,
     GlobalDeniedUrlHelp,
+    GlobalLandingUrl,
+    GlobalLandingUrlHelp,
     OauthDomain,
     OauthDomainHelp,
     SocialCallback,
@@ -1277,6 +1279,12 @@ fn t(lang: Lang, key: K) -> &'static str {
             lang,
             "Where a 403 sends people: somebody who is signed in and is not admitted here. Empty means the gate's own /auth/denied, which it builds out of the look below. It cannot shut a door, only decide what the person already shut out is shown. An application can override it for its own area, which is how one gate gives each host its own page.",
             "Dove un 403 manda le persone: qualcuno che ha fatto l'accesso e qui non e' ammesso. Vuoto significa la /auth/denied del gate stesso, costruita con l'aspetto qui sotto. Non puo' chiudere nessuna porta: decide solo cosa vede chi e' gia' stato respinto. Una applicazione puo' sovrascriverla per la propria area, ed e' cosi' che un solo gate da' a ogni host la sua pagina.",
+        ),
+        K::GlobalLandingUrl => m(lang, "Landing page", "Pagina di arrivo"),
+        K::GlobalLandingUrlHelp => m(
+            lang,
+            "Where a sign-in lands when nothing named a place. Empty means the caller's root. It must be on one of the authorized hosts, or every sign-in falls back to the sign-in page.",
+            "Dove arriva un accesso quando nessuno ha indicato una pagina. Vuoto significa la radice del chiamante. Deve stare su uno degli host autorizzati, altrimenti ogni accesso ricade sulla pagina di accesso.",
         ),
         K::OauthDomain => m(lang, "Hosted UI domain", "Dominio della hosted UI"),
         K::OauthDomainHelp => m(
@@ -6897,6 +6905,10 @@ struct ConfigForm {
     /// `gate.denied_url`. Empty = the gate's own `/auth/denied`. The one URL on this page
     /// that can close nothing: it is only what somebody already refused is shown.
     denied_url: String,
+    /// `gate.landing_url`. Empty = the caller's root. It is refused off `gate.authorized_hosts`
+    /// for the reason the help line gives: `safe_rd` refuses a landing page outside them at
+    /// every login, so the setting would silently do nothing.
+    landing_url: String,
     /// `gate.issuer`, the Cognito user pool. This form refuses to write an empty one, for the
     /// reason it refuses an empty `client_id`: both mean no login can complete.
     issuer: String,
@@ -6945,6 +6957,7 @@ impl ConfigForm {
             client_id: doc.gate.client_id.clone(),
             login_url: doc.gate.login_url.clone(),
             denied_url: doc.gate.denied_url.clone(),
+            landing_url: doc.gate.landing_url.clone(),
             issuer: doc.gate.issuer.clone(),
             cookie_domain: doc.gate.cookie_domain.clone(),
             hosts: doc.gate.authorized_hosts.join("\n"),
@@ -6998,6 +7011,7 @@ impl ConfigForm {
             client_id: f.get("client_id").to_string(),
             login_url: f.get("login_url").to_string(),
             denied_url: f.get("denied_url").to_string(),
+            landing_url: f.get("landing_url").to_string(),
             issuer: f.get("issuer").to_string(),
             cookie_domain: f.get("cookie_domain").to_string(),
             hosts: f.get("hosts").to_string(),
@@ -7075,6 +7089,14 @@ impl ConfigForm {
         if !self.denied_url.trim().is_empty() {
             compile_page_url("denied_url", &self.denied_url)
                 .map_err(|e| Refusal::on("denied_url", &e))?;
+        }
+        // The landing page, syntax first. Its cross-check with the authorized hosts is the
+        // library's (`compile_settings`), and that refusal is attributed to this field where
+        // the write happens, because the message names both settings and only this page knows
+        // which input to mark.
+        if !self.landing_url.trim().is_empty() {
+            compile_page_url("landing_url", &self.landing_url)
+                .map_err(|e| Refusal::on("landing_url", &e))?;
         }
         // The pool, held to the same standard as the app client above and refused empty for
         // the same reason: this form should not be able to write a deployment where no login
@@ -7177,6 +7199,7 @@ impl ConfigForm {
         doc.gate.client_id = client_id;
         doc.gate.login_url = self.login_url.trim().to_string();
         doc.gate.denied_url = self.denied_url.trim().to_string();
+        doc.gate.landing_url = self.landing_url.trim().to_string();
         doc.gate.issuer = issuer;
         doc.gate.cookie_domain = cookie_domain;
         doc.gate.authorized_hosts = hosts;
@@ -7435,6 +7458,12 @@ fn page_config(
                 (text_field(v.t(K::GlobalDeniedUrl), "denied_url", &f.denied_url,
                             "https://auth.example.com/auth/denied",
                             Some(v.t(K::GlobalDeniedUrlHelp)), about("denied_url")))
+                // The third page of the trio, and the one that is not a refusal: where a
+                // sign-in puts a person down when nothing named a place. It is checked against
+                // the hosts below, which is why it sits directly above them.
+                (text_field(v.t(K::GlobalLandingUrl), "landing_url", &f.landing_url,
+                            "https://auth.example.com/account/",
+                            Some(v.t(K::GlobalLandingUrlHelp)), about("landing_url")))
                 // These two are neighbours because they are checked against each other: a
                 // host the cookie cannot reach is refused, and an operator told so has to be
                 // able to see both without scrolling.
@@ -7842,8 +7871,20 @@ fn mutate(v: &View, form: &Form) -> Outcome {
                 }
             }
             // The library is the only door here too: `prepare` compiles the exact bytes with
-            // the parser the gate uses, `commit` writes the bytes it compiled.
-            SettingsWrite::prepare(&doc)?.commit(path)?;
+            // the parser the gate uses, `commit` writes the bytes it compiled. Its one
+            // cross-setting refusal that has an input to blame (`landing_url` off the
+            // authorized hosts) is attributed to that field here: the library's sentence names
+            // both settings and says why the pair matters, and only this page knows which box
+            // the operator has to go back to.
+            SettingsWrite::prepare(&doc)
+                .map_err(|e| {
+                    if e.contains("landing_url") {
+                        Refusal::on("landing_url", e)
+                    } else {
+                        Refusal::from(e)
+                    }
+                })?
+                .commit(path)?;
             audit(v.admin.unwrap_or("?"), "settings set", path);
             Ok(None)
         })();
@@ -11463,6 +11504,82 @@ mod tests {
     }
 
     #[test]
+    fn the_settings_form_saves_the_landing_url() {
+        let path = scratch("cfg-landing", SAMPLE);
+        let cfg = cfg_for(&path, "");
+        let sp = cfg.settings_path.clone();
+        let got = post(
+            &cfg,
+            Route::Config,
+            &settings_fields(
+                &rev_of(&sp),
+                &[("landing_url", "  https://auth.badbat75.com/account/  ")],
+            ),
+        );
+        assert_eq!(got.location(), "/config?msg=settings-saved");
+        let (_, s) = open_settings_file(&sp).unwrap();
+        assert_eq!(
+            s.landing_url, "https://auth.badbat75.com/account/",
+            "trimmed"
+        );
+
+        // An empty field is the setting being unset, and the key leaves the file.
+        let got = post(
+            &cfg,
+            Route::Config,
+            &settings_fields(&rev_of(&sp), &[("landing_url", "")]),
+        );
+        assert_eq!(got.location(), "/config?msg=settings-saved");
+        assert_eq!(open_settings_file(&sp).unwrap().1.landing_url, "");
+        assert!(!read(&sp).contains("landing_url"), "{}", read(&sp));
+        cleanup(&path);
+    }
+
+    #[test]
+    fn the_settings_form_refuses_a_landing_url_off_the_authorized_hosts() {
+        let path = scratch("cfg-landing-off", SAMPLE);
+        let cfg = cfg_for(&path, "");
+        let sp = cfg.settings_path.clone();
+        let before = read(&sp);
+        // Syntactically fine, and a host `gate.authorized_hosts` does not cover: `safe_rd`
+        // would refuse it at every login, so the form must say so on the way to disk.
+        let got = post(
+            &cfg,
+            Route::Config,
+            &settings_fields(
+                &rev_of(&sp),
+                &[("landing_url", "https://evil.example.org/account/")],
+            ),
+        );
+        let (status, body) = got.page();
+        assert_eq!(status, 400, "{body}");
+        assert!(body.contains("landing_url"), "{body}");
+        assert!(
+            body.contains(r#"class="f-landing_url invalid""#),
+            "the refusal must point at the field: {body}"
+        );
+        // The field is on the page, labelled in the reader's language, with its help line.
+        assert!(body.contains(t(Lang::En, K::GlobalLandingUrl)), "{body}");
+        assert!(body.contains("name=\"landing_url\""), "{body}");
+        assert_eq!(read(&sp), before, "nothing written");
+
+        // A malformed one is refused the same way, by the same field.
+        let got = post(
+            &cfg,
+            Route::Config,
+            &settings_fields(
+                &rev_of(&sp),
+                &[("landing_url", "http://auth.badbat75.com/")],
+            ),
+        );
+        let (status, body) = got.page();
+        assert_eq!(status, 400, "{body}");
+        assert!(body.contains(r#"class="f-landing_url invalid""#), "{body}");
+        assert_eq!(read(&sp), before, "nothing written");
+        cleanup(&path);
+    }
+
+    #[test]
     fn the_look_is_the_palette_the_components_the_layout_then_the_operator() {
         let path = scratch("look-order", SAMPLE);
         let cfg = cfg_for(&path, "");
@@ -12521,6 +12638,139 @@ mod tests {
         assert!(csp.starts_with("default-src 'none';"), "{csp}");
         assert!(csp.contains("frame-ancestors 'none'"), "{csp}");
         assert!(csp.contains("form-action 'self';"), "{csp}");
+    }
+
+    /// `admin.css` as `(selector, declarations)` pairs, comments gone and whitespace squeezed
+    /// out, so a rule is matched by what it says and not by how it is indented. Nested blocks
+    /// (`@media`) yield their inner rules too.
+    fn css_rules() -> Vec<(String, String)> {
+        let mut css = String::new();
+        let mut rest = CSS;
+        while let Some(a) = rest.find("/*") {
+            css.push_str(&rest[..a]);
+            let b = rest[a..].find("*/").expect("a closed comment") + a + 2;
+            rest = &rest[b..];
+        }
+        css.push_str(rest);
+        let css: String = css.chars().filter(|c| !c.is_whitespace()).collect();
+        let (mut rules, mut head, mut stack) = (Vec::new(), String::new(), Vec::new());
+        let mut body = String::new();
+        for c in css.chars() {
+            match c {
+                '{' => {
+                    stack.push(std::mem::take(&mut head));
+                    body.clear();
+                }
+                '}' => {
+                    let sel = stack.pop().unwrap_or_default();
+                    if !body.is_empty() {
+                        rules.push((sel, std::mem::take(&mut body)));
+                    }
+                    head.clear();
+                }
+                ';' if stack.is_empty() => head.clear(),
+                _ if stack.is_empty() => head.push(c),
+                _ => body.push(c),
+            }
+        }
+        rules
+    }
+
+    /// What `prop` is set to in a rule's declarations, if it is.
+    fn css_decl(body: &str, prop: &str) -> Option<String> {
+        body.split(';')
+            .filter_map(|d| d.split_once(':'))
+            .find(|(n, _)| *n == prop)
+            .map(|(_, v)| v.to_string())
+    }
+
+    /// Light dismiss in CSS (ARCHITECTURE section 13.20): while the Preferences menu is open
+    /// its trigger grows a transparent box over the whole viewport, so a click anywhere
+    /// outside the panel lands on the `summary` and toggles the `details` shut. The three
+    /// things that can silently break it are all pinned here: the cover itself, the panel
+    /// standing above it, and an ancestor that would become the cover's containing block.
+    #[test]
+    fn an_open_menu_closes_on_a_click_outside_it() {
+        let rules = css_rules();
+        let rule = |sel: &str| -> String {
+            rules
+                .iter()
+                .find(|(s, _)| s.split(',').any(|one| one == sel))
+                .unwrap_or_else(|| panic!("admin.css has no rule for {sel}"))
+                .1
+                .clone()
+        };
+
+        // The cover: a fixed box over the viewport, on the summary and not on the details,
+        // since a click on the details itself toggles nothing.
+        let cover = rule("details.settings[open]>summary::before");
+        assert_eq!(
+            css_decl(&cover, "content").as_deref(),
+            Some(r#""""#),
+            "{cover}"
+        );
+        assert_eq!(
+            css_decl(&cover, "position").as_deref(),
+            Some("fixed"),
+            "{cover}"
+        );
+        assert_eq!(css_decl(&cover, "inset").as_deref(), Some("0"), "{cover}");
+        let cover_z: i32 = css_decl(&cover, "z-index")
+            .unwrap_or_else(|| panic!("the cover has no z-index: {cover}"))
+            .parse()
+            .expect("a numeric z-index");
+
+        // The panel stays above it, or the list boxes inside would hit the cover first.
+        let menu_z: i32 = css_decl(&rule(".menu"), "z-index")
+            .expect(".menu has a z-index")
+            .parse()
+            .expect("a numeric z-index");
+        assert!(
+            menu_z > cover_z,
+            "menu {menu_z} must be above the cover {cover_z}"
+        );
+
+        // With the cover up the pointer is "on" the trigger everywhere, so the open trigger
+        // wears the hover look for as long as it is open.
+        let open = rule("details.settings[open]>summary");
+        assert_eq!(
+            css_decl(&open, "background").as_deref(),
+            Some("var(--chip)"),
+            "{open}"
+        );
+        assert_eq!(
+            css_decl(&open, "border-color").as_deref(),
+            Some("var(--accent)"),
+            "{open}"
+        );
+        assert_eq!(
+            css_decl(&open, "color").as_deref(),
+            Some("var(--accent)"),
+            "{open}"
+        );
+
+        // A fixed box is placed against the viewport only while no ancestor of the trigger
+        // establishes a containing block for it.
+        let ancestors = ["header.top", ".bar", "nav.acct", "details.settings"];
+        for (sel, body) in &rules {
+            for one in sel.split(',') {
+                let last = one.rsplit(['>', '+', '~']).next().unwrap_or(one);
+                let is_ancestor = ancestors.iter().any(|a| {
+                    last.strip_prefix(a).is_some_and(|tail| {
+                        !tail.starts_with(|c: char| c.is_alphanumeric() || c == '-' || c == '_')
+                    })
+                });
+                if !is_ancestor {
+                    continue;
+                }
+                for prop in ["transform", "filter", "perspective", "will-change"] {
+                    assert!(
+                        css_decl(body, prop).is_none(),
+                        "{one} sets {prop}, which would shrink the menu's click cover to its box"
+                    );
+                }
+            }
+        }
     }
 
     /// The estate's rule, in its 13.14 shape: **no page may need a script**, and exactly one

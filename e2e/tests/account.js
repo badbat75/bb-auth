@@ -111,6 +111,29 @@ const readable = (html) => words(html
   .replace(/<style\b[\s\S]*?<\/style>/gi, ' ')
   .replace(/<script\b[\s\S]*?<\/script>/gi, ' '));
 
+/** The Preferences menu closes on a click outside it (docs/ARCHITECTURE.md section 13.20).
+ *  `apply` submits the chosen theme the way that surface does (a change on the console with
+ *  scripting on, the Apply button otherwise) and resolves once the navigation it causes ends. */
+async function menuClosesOutside(t, page, who, apply) {
+  const isOpen = () => page.$eval('details.settings', (d) => d.open);
+  const open = () => page.click('details.settings > summary');
+  await open();
+  t.eq(`${who}: the trigger opens the menu`, await isOpen(), true);
+  await page.mouse.click(4, 896);
+  t.eq(`${who}: a click at the bottom-left of the viewport closes it`, await isOpen(), false);
+
+  await open();
+  await page.click('.menu select[name=theme]');
+  t.eq(`${who}: a click on a list box inside leaves it open`, await isOpen(), true);
+  await page.keyboard.press('Escape');
+
+  const before = await page.locator('html').getAttribute('data-theme');
+  const pick = before === 'dark' ? 'light' : 'dark';
+  await apply(pick);
+  t.eq(`${who}: submitting a theme still applies it`,
+    await page.locator('html').getAttribute('data-theme'), pick);
+}
+
 async function run(ctx, t) {
   const url = ctx.origin + PAGE;
   const noJs = await ctx.browser.newContext({
@@ -502,6 +525,13 @@ async function run(ctx, t) {
   t.check('the stale tab minted nothing', !idsOf(ctx).includes('stale-tab'), JSON.stringify(idsOf(ctx)));
   t.check('the two mints that were current both landed',
     idsOf(ctx).includes('first-tab') && idsOf(ctx).includes('third-tab'), JSON.stringify(idsOf(ctx)));
+
+  // The same menu on this page, scripting off, applied with the Apply button it always has.
+  await page.goto(url);
+  await menuClosesOutside(t, page, 'account', (pick) => Promise.all([
+    page.waitForNavigation(),
+    page.selectOption('.menu select[name=theme]', pick).then(() => page.click('.menu button')),
+  ]));
 
   await page.close();
   await tabA.close();
