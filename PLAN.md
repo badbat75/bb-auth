@@ -258,7 +258,9 @@ tabs move into the panel at whatever width they would otherwise wrap, measured b
 rather than a side rail, which five tabs do not justify. Slice L, the logo in the console's bar,
 is folded into H for the same reason (the user, 2026-11-25). The console's **Settings** tab moves into the panel as well
 (the user, 2026-11-25), as a link kept apart from Preferences, so the bar keeps four tabs: Dashboard,
-Applications, Users, Audit; its URL does not change. On
+Applications, Users, Audit; its URL does not change. It is named "System settings" / "Impostazioni di sistema"
+everywhere, the menu entry and the page's title alike (the user, 2026-11-25). Designed in §13.28
+(revised the same day, measured: one row at every width, tabs into the panel at 800px). On
 desktop the console's tabs stay visible in the bar, because they are the primary navigation; at
 phone width they move into that panel too. The user agreed to this compromise over "tabs always in
 the menu". It works with scripting off, replaces the separate Preferences menu (so it absorbs M),
