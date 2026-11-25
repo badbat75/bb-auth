@@ -45,7 +45,7 @@ files carry no model, to stay readable by both harnesses.
 Command, from the repo root (flags checked against `opencode run --help` on OpenCode 2.4.0; the roles
 are the files in `.opencode/agents/`):
 
-    opencode run --standalone --agent <tester|coder|docs> -m llama.cpp/Swift-Qwen3.8-Flash-Next \
+    opencode run --agent <tester|coder|docs> -m llama.cpp/Swift-Qwen3.8-Flash-Next \
       --auto --archived --title <task-name> "$(cat <prompt-file>)" > <task-name>.out 2>&1
 
 Run it as a background command and read `<task-name>.out` when it ends. Keep the prompt and `.out`
@@ -99,8 +99,16 @@ files outside the repo.
   `opencode serve --service` and keeps editing the tree (s8a-coder went on for 3 hours after its
   client was killed, and clobbered another agent's work). Check `opencode session export <id>`
   (`info.time.updated`) after stopping one. The HTTP routes need auth; stopping the service stops
-  every project's agents, so ask the user and tell the llama.cpp-framework coordinator. Always pass `--standalone`
-  (a private server per run, `opencode run --help`), so a `kill` of the run stops its session.
+  every project's agents, so ask the user and tell the llama.cpp-framework coordinator. **Never pass `--standalone`** (the
+  user's rule, 2026-11-25): its private server writes the same `~/.local/share/opencode/opencode.db` as
+  the service, the two collide (`database is locked`), and a run dies with "Failed to execute
+  statement" (s8h-coder did). So a stopped client leaves its session running: stop one only by
+  asking the user, and check the tree before relaunching. Server logs are in
+  `~/.local/share/opencode/log/opencode.log`.
+- To see or stop a run on the service (verified by IT-Admin on 2.4.1): `opencode api session.active`, then
+  `opencode api session.get --param sessionID=<id>` (title, last update), then `opencode api
+  session.interrupt --param sessionID=<id> --param resume=false`. A crashed run can leave a ghost
+  that the service lists as `running`: interrupt ours by title, never another project's.
 - cargo can keep a stale test binary after an agent's edit (a tester saw 191 green while the repo
   build kept failing on the old assertion). When an agent's green run and yours disagree on
   unchanged files, `touch` the edited source and rerun before sending the work back.
