@@ -180,6 +180,42 @@ async function run(ctx, t) {
     }
     await page.setViewportSize({ width: 1280, height: 900 });
 
+    // §13.18 (8d-2), the arrangement as the layout engine made it. The header's brand starts
+    // where the page's h1 starts (the console's `main` and the account's 620px column), at
+    // both widths; a pill beside a button is as tall as the button; the six dashboard tiles
+    // share one row at desktop width.
+    const left = (p, sel) => p.locator(sel).first().evaluate((el) => el.getBoundingClientRect().left);
+    const person8d = await ctx.browser.newContext({
+      viewport: { width: 1280, height: 900 },
+      extraHTTPHeaders: { 'X-Auth-Email': 'you@example.com' },
+    });
+    const acct8d = await person8d.newPage();
+    for (const width of [1280, 360]) {
+      await page.setViewportSize({ width, height: 900 });
+      await acct8d.setViewportSize({ width, height: 900 });
+      await page.goto(ctx.base + '/');
+      t.check(`the console's brand shares the h1's left edge at ${width}`,
+        Math.abs((await left(page, 'header .brand')) - (await left(page, 'main h1'))) <= 1,
+        `${await left(page, 'header .brand')} vs ${await left(page, 'main h1')}`);
+      await acct8d.goto(`${ctx.origin}/account/`);
+      t.check(`the account's brand shares the h1's left edge at ${width}`,
+        Math.abs((await left(acct8d, 'header .brand')) - (await left(acct8d, 'main h1'))) <= 1,
+        `${await left(acct8d, 'header .brand')} vs ${await left(acct8d, 'main h1')}`);
+    }
+    await person8d.close();
+    await page.setViewportSize({ width: 1280, height: 900 });
+    await page.goto(ctx.base + '/groups/admins/edit');
+    const heights = await page.evaluate(() => ({
+      pill: document.querySelector('.actions .pill').getBoundingClientRect().height,
+      button: document.querySelector('.actions button').getBoundingClientRect().height,
+    }));
+    t.check('a pill beside a button is as tall as the button (within 1px)',
+      Math.abs(heights.pill - heights.button) <= 1, JSON.stringify(heights));
+    await page.goto(ctx.base + '/');
+    const tops = await page.$$eval('.cards .card', (els) => els.map((el) => Math.round(el.getBoundingClientRect().top)));
+    t.check('the dashboard has six tiles', tops.length === 6, JSON.stringify(tops));
+    t.check('and they share one top at 1280', new Set(tops).size === 1, JSON.stringify(tops));
+
     // PRG: save, land on the msg page, reload it — a GET, so nothing can repeat.
     await page.goto(ctx.base + '/groups/admins/edit');
     const members = await page.locator('textarea[name=members]').inputValue();

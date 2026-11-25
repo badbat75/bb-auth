@@ -14,13 +14,19 @@
    The header
    --------------------------------------------------------------------------- */
 
-header.top{background:var(--card);border-bottom:1px solid var(--card-border);padding:10px 16px}
+header.top{background:var(--card);border-bottom:1px solid var(--card-border);padding:10px 0}
 /* The gap between the header's three parts (the brand, the tabs, the Settings menu). It has
    to beat the tabs' own 4px by enough to be read as a boundary: every control in the row
    looks the same on purpose, so space is the only thing left that says where one group ends,
    and separating them with a rule or a tint would put back exactly the differentiating trait
    the pill object exists to remove. */
-.bar{max-width:1000px;margin:0 auto;display:flex;flex-wrap:wrap;gap:20px;align-items:center}
+.bar{max-width:1000px;margin:0 auto;display:flex;flex-wrap:wrap;gap:20px;align-items:center;
+  padding:0 16px}
+/* The side padding lives on the bar, not on the header, and that is the whole of a fix: the
+   header is full-bleed so its fill reaches both edges, and the bar is the same centred,
+   padded column as `main` (same max-width, same 16px), so the brand starts exactly where the
+   page's `h1` starts instead of 16px to the left of it. A person scanning down meets one
+   left edge, which is what a column is. */
 /* Two lines: the name, and the version under it. Beside it the version read as part of the
    name, and it is not: it is what this binary happens to be, which matters when a deploy has
    just happened and matters not at all the rest of the time. */
@@ -43,13 +49,23 @@ nav.acct{flex:0 0 auto;align-items:center;gap:6px;margin-left:auto}
    what kept going wrong: the nav's tabs, the Settings trigger (a `details`' own summary) and
    Sign out (a direct child of the bar) are three different structures, and a rule that named
    them one by one was a rule that could miss one, and did. A descendant selector cannot: put
-   anything in the header and it is the same object as everything already there. */
-.bar .pill,p.primary .pill,.actions .pill{font-size:1rem;padding:7px 15px}
-.bar .pill.ico{padding:7px}
+   anything in the header and it is the same object as everything already there.
+   The bar holds tabs and a pair of icons, not buttons, so it sits one step below body size: a
+   header at body size with 7px by 15px padding is a row of controls louder than the page under
+   it. The measure a pill beside a button needs is the other rule below, and the two are kept
+   apart because a header pill has no business being the height of a form's action. */
+.bar .pill{font-size:.95rem;padding:6px 12px}
+.bar .pill.ico{padding:6px}
 /* An icon in the bar is square at the bar's height. It cannot be excluded from the rule
    above with `:not` since that would drop the bar's font size too and make the glyph
    smaller than its neighbours. The note follows its rule for the same reason as in
    `base.css`: the test reads the rule by its exact selector. */
+/* The page's one action, and the way out beside it, are one object and must be one height:
+   `cancel` next to `Create key` at three quarters the height reads as a caption of the button
+   rather than as its peer. So the pill takes the button's measure exactly, from `base.css`
+   (`font-size:inherit`, the body's line-height, `9px 16px`), and the pair is one comma list
+   because they are one rule with two names. */
+p.primary .pill,.actions .pill{font-size:inherit;line-height:1.55;padding:9px 16px}
 
 /* ---------------------------------------------------------------------------
    The page
@@ -128,7 +144,11 @@ ol.scopes > li{margin:0 0 14px}
    The dashboard's count tiles
    --------------------------------------------------------------------------- */
 
-.cards{display:grid;grid-template-columns:repeat(auto-fit,minmax(110px,160px));gap:10px;
+/* `auto-fill` with a 140px floor and `1fr` above it: the six counts sit on one row at desktop
+   width and stretch to fill it, and wrap evenly on a phone. The pair it replaces,
+   `auto-fit,minmax(110px,160px)`, could not stretch (a 160px ceiling) and collapsed the empty
+   tracks (auto-fit), so five tiles went on the first line and one stood alone under them. */
+.cards{display:grid;grid-template-columns:repeat(auto-fill,minmax(140px,1fr));gap:10px;
   margin:0 0 18px}
 a.card{display:block;color:inherit;text-decoration:none}
 a.card:hover{border-color:var(--accent)}
@@ -277,6 +297,13 @@ details.settings > summary::-webkit-details-marker{display:none}
 /* Narrower than the console's `main`, which needs width for tables: this page is a list of
    names, and a list of names reads as a column, not as a sheet. */
 .selfserve{max-width:620px;margin:0 auto;padding:28px 16px 48px}
+/* The bar over this column is the column: the console's bar is 1000px wide, so on a page whose
+   content is 620px the brand floated far to the left of everything under it (8b's review). One
+   value, and the brand lands on the same left edge as the `h1`, because the bar is already the
+   same centred, 16px-padded column as `main`. `:has` is Baseline 2023
+   (https://developer.mozilla.org/en-US/docs/Web/CSS/:has); a browser without it keeps the brand
+   where it was, which costs the alignment and nothing else. */
+body:has(.selfserve) .bar{max-width:620px}
 /* The ground on this page is flat. `--bg-grad` is a decorative glow painted over `--bg` that
    reaches its outer stop at 60% of a 1200x600 ellipse, so it goes flat about a quarter of the
    way down the viewport: on the console, a wide sheet, that is a ground, but this page is one
@@ -311,7 +338,7 @@ body:has(.selfserve){background:var(--bg)}
    --------------------------------------------------------------------------- */
 
 @media (max-width:640px){
-  header.top{padding:6px 10px}
+  header.top{padding:6px 0}
   .bar{gap:6px 8px}
   .brand{order:1}
   /* The account row keeps the brand company on the first line, at the right edge, and the
@@ -335,6 +362,9 @@ body:has(.selfserve){background:var(--bg)}
   /* The self-service column has no table to fit, so the only thing a phone costs it is the
      side padding, and 16px of it is a third of the width of a small screen. */
   .selfserve{padding:16px 12px 32px}
+  /* The bar's side padding goes with the column's, by the same rule and for the same reason:
+     the brand has to start where the page's `h1` starts, and on a phone that is 12px. */
+  body:has(.selfserve) .bar{padding:0 12px}
   table{min-width:0}
   table,thead,tbody,tr,td{display:block}
   /* The audit's two column shares are about a table competing for width, and there is no

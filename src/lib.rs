@@ -9165,6 +9165,113 @@ mod tests {
             .any(|(s, d)| s == ".menu" && d.contains("box-shadow:var(--shadow-md)")));
     }
 
+    /// The declarations of every rule whose selector list names `selector` (whitespace-free,
+    /// as [`flat_rules`] spells it), in file order. A rule inside a `@media` block counts.
+    #[cfg(test)]
+    fn rules_named(css: &str, selector: &str) -> Vec<String> {
+        flat_rules(css)
+            .into_iter()
+            .filter(|(sel, _)| sel.split(',').any(|s| s == selector))
+            .map(|(_, d)| d)
+            .collect()
+    }
+
+    /// §13.18 (8d-2): the secondary pill is neutral. Text `--text`, a 3:1 `--input-border` box,
+    /// and the accent fill belongs to `.pill.on` alone.
+    #[test]
+    fn the_secondary_pill_is_neutral() {
+        let pill = rules_named(BASE_CSS, ".pill");
+        assert_eq!(pill.len(), 1, "one `.pill` rule");
+        assert!(pill[0].contains("color:var(--text)"), "text: {}", pill[0]);
+        assert!(
+            pill[0].contains("var(--input-border)"),
+            "border: {}",
+            pill[0]
+        );
+        assert!(!pill[0].contains("currentColor"), "border: {}", pill[0]);
+        assert!(
+            !pill[0].contains("color:var(--accent)"),
+            "text: {}",
+            pill[0]
+        );
+        for (sel, decls) in flat_rules(BASE_CSS) {
+            if sel.contains(".pill") && decls.contains("background:var(--accent)") {
+                assert_eq!(sel, ".pill.on,.pill.on:hover", "only .pill.on fills accent");
+            }
+        }
+        let hover = rules_named(BASE_CSS, ".pill:hover");
+        assert!(
+            hover.iter().any(|d| d.contains("background:var(--chip)")
+                && d.contains("border-color:var(--accent)")
+                && d.contains("color:var(--accent)")),
+            "hover: {hover:?}"
+        );
+    }
+
+    /// §13.18 (8d-2): a pill in a `nav` is a tab, with no visible box at rest.
+    #[test]
+    fn a_pill_in_a_nav_is_a_tab() {
+        let tab = rules_named(BASE_CSS, "nav.pill");
+        assert_eq!(tab.len(), 1, "a `nav .pill` rule in BASE_CSS");
+        assert!(tab[0].contains("var(--card)"), "box: {}", tab[0]);
+        assert!(!tab[0].contains("var(--card-border)"), "box: {}", tab[0]);
+        assert!(tab[0].contains("color:var(--muted)"), "text: {}", tab[0]);
+        let hover = rules_named(BASE_CSS, "nav.pill:hover");
+        assert!(
+            hover.iter().any(|d| d.contains("background:var(--chip)")),
+            "hover: {hover:?}"
+        );
+    }
+
+    /// §13.18 (8d-2): links in a table cell or a list item are plain at rest and underlined
+    /// on hover.
+    #[test]
+    fn table_links_underline_on_hover() {
+        for at_rest in ["tda", "lia"] {
+            let rest = rules_named(BASE_CSS, at_rest);
+            assert!(
+                rest.iter().any(|d| d.contains("text-decoration:none")),
+                "`{at_rest}` has no text-decoration:none rule"
+            );
+            let hover = rules_named(BASE_CSS, &format!("{at_rest}:hover"));
+            assert!(
+                hover
+                    .iter()
+                    .any(|d| d.contains("text-decoration:underline")),
+                "`{at_rest}:hover` has no underline rule"
+            );
+        }
+    }
+
+    /// §13.18 (8d-2), `admin.css`: the bar shares `main`'s column, the header's pills are
+    /// tabs and not buttons, a pill beside a button has the button's measure, and the tiles
+    /// fill one row.
+    #[test]
+    fn the_header_shares_the_content_column() {
+        let admin = include_str!("assets/admin.css");
+        let has = |sel: &str, want: &str| {
+            let rules = rules_named(admin, sel);
+            assert!(
+                rules.iter().any(|d| d.contains(want)),
+                "`{sel}` lacks `{want}` (rules: {rules:?})"
+            );
+        };
+        has("header.top", "padding:10px0");
+        has("header.top", "padding:6px0");
+        has(".bar", "padding:016px");
+        has("body:has(.selfserve).bar", "max-width:620px");
+        has("body:has(.selfserve).bar", "padding:012px");
+        has(".bar.pill", "font-size:.95rem");
+        has(".bar.pill", "padding:6px12px");
+        has(".bar.pill.ico", "padding:6px");
+        has("p.primary.pill", "font-size:inherit");
+        has("p.primary.pill", "line-height:1.55");
+        has("p.primary.pill", "padding:9px16px");
+        has(".actions.pill", "line-height:1.55");
+        has(".actions.pill", "padding:9px16px");
+        has(".cards", "repeat(auto-fill,minmax(140px,1fr))");
+    }
+
     /// A surface owns its padding, so its first child's top margin and its last child's bottom
     /// margin do not add an empty band inside it.
     #[test]

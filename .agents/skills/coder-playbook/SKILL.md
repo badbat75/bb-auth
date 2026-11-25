@@ -128,6 +128,11 @@ Rules are in `AGENTS.md`. Format of this file: `AGENTS.md`, under "Skills".
   name it as the string to assert the absence **of** (the footer's `SignedInAs`): that is a
   `dead_code` warning in the bin, and the repo has no `#[allow(dead_code)]` to borrow. Report it
   for the tester to remove the key and its assertions together; do not silence it.
+- A `<button>` sits on the UA sheet's `line-height:normal`, not the body's 1.55, so a pill and a
+  button with identical padding measure 43.25px against 37px and no padding arithmetic on the pill
+  closes that gap. An author `line-height` does reach a button (Chromium's UA value is not
+  `!important`, verified on a blank page), so the fix is the third name of the inherit trio,
+  `line-height:inherit`, on the shared `button{}` rule in `base.css`.
 - Replacing a visible control with a hidden input breaks the **e2e** that reads the control's
   attributes, not just the Rust test: `e2e/tests/account.js` §2 asserts the single
   `input[name=restrict]` is `checked`, and 8c-2's `type=hidden name=restrict value=all` carries no

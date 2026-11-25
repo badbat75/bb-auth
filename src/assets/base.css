@@ -38,6 +38,14 @@ body{min-height:100%;margin:0;background:var(--bg-grad) no-repeat,var(--bg);colo
    window carries a hard band of a second shade across its content. Painted once, the glow
    sits at the top and the flat --bg it fades into carries the rest of the page. */
 a{color:var(--accent)}
+/* A link in a table cell or a list item is one entry in a column, not a link inside a block of
+   text. Underlined, a roster of emails is a column of blue rules; the underline is what says a
+   word is a link when there are sentences around it to say it against. It arrives on hover,
+   which is one of the cues WCAG 2.2 SC 1.4.1 accepts for a link told apart by colour alone (a
+   change of presentation on the pointer), and a keyboard user gets the focus ring either way.
+   A link in running text keeps its underline, and `.link` keeps its own rule. */
+td a,li a{text-decoration:none}
+td a:hover,li a:hover{text-decoration:underline}
 :focus-visible{outline:2px solid var(--accent);outline-offset:2px}
 code,.mono{font-family:var(--font-mono);font-size:.92em}
 
@@ -142,8 +150,13 @@ label.fld,.lbl{display:block;font-size:.82rem;color:var(--muted);font-weight:600
    most visibly says the sign-in page and the admin interface are one product.
    --------------------------------------------------------------------------- */
 
-button{font-family:inherit;font-size:inherit;padding:9px 16px;border:1px solid var(--accent);
-  border-radius:var(--r-ctl);background:var(--accent);color:var(--on-accent);cursor:pointer;
+/* The third of the inherit trio: the UA sheet gives a button `line-height:normal`, which is not
+   the body's 1.55, so a button sits on a shorter line box than the words and the pills around
+   it. That is why a `cancel` pill measured taller than the action beside it even after taking
+   the button's padding: the pill inherits the body's line-height and the button never did. */
+button{font-family:inherit;font-size:inherit;line-height:inherit;padding:9px 16px;
+  border:1px solid var(--accent);border-radius:var(--r-ctl);background:var(--accent);
+  color:var(--on-accent);cursor:pointer;
   transition:background .15s,border-color .15s,transform .05s}
 button:hover{background:var(--accent-hover);border-color:var(--accent-hover)}
 button:active{transform:translateY(1px)}
@@ -165,21 +178,27 @@ button.danger:hover{background:var(--error);border-color:var(--error);filter:bri
    (selected, hovered, disabled) and the one case where the click's consequence differs in
    kind (rm). */
 .pills{display:inline-flex;flex-wrap:wrap;gap:6px;align-items:center}
-/* The resting box is currentColor, not --card-border: a --card-border hairline measures about
-   1.3 to 1 against the panel, which is not enough contrast for these to read as controls at
-   all. Every pill carries the box, with no exception. */
+/* The resting box is --input-border, the same 3:1 boundary a text field carries, because SC
+   1.4.11 asks 3:1 of the indicator that shows a control is a control. It used to be
+   currentColor, which is the accent at full strength, so a screen of the users page carried a
+   dozen equally loud blue boxes and nothing led; --card-border, the other candidate, measures
+   about 1.3:1 against the panel and reads as no box at all. The text is --text for the same
+   reason: the accent is left to what deserves it, which is the primary button, the selected
+   tab, a link and the focus ring. Every pill carries the box, with no exception. */
 .pill{display:inline-flex;align-items:center;font:inherit;font-size:var(--fs-sm);
-  line-height:1.45;padding:4px 11px;border:1px solid currentColor;border-radius:var(--r-ctl);
-  background:none;color:var(--accent);text-decoration:none;cursor:pointer;white-space:nowrap}
-/* The one destructive member: quieter than the rest at rest (--muted, and the border follows
-   since it is currentColor) and only turns --error on hover, so the consequence is legible
+  line-height:1.45;padding:4px 11px;border:1px solid var(--input-border);
+  border-radius:var(--r-ctl);background:none;color:var(--text);text-decoration:none;
+  cursor:pointer;white-space:nowrap}
+/* The one destructive member: quieter than the rest at rest (--muted text, and the box stays
+   the shared --input-border, since a border that follows the text colour is the very thing the
+   rule above exists to stop) and only turns --error on hover, so the consequence is legible
    right before the click without making the row alarming at rest. */
 .pill.rm{color:var(--muted)}
 /* Has to read on every surface a pill can sit on: the plain panel, a hovered row tinted --bg,
-   a coloured state panel. --card-border is one step off all of them, and the accent border is
-   the half none of those surfaces can cancel out; without both halves a row action's hover is
-   invisible on at least one of them. */
-.pill:hover{background:var(--card-border);border-color:var(--accent)}
+   a coloured state panel. The --chip fill is the quiet half; the accent border and the accent
+   text are the half none of those surfaces can cancel out, and a hover that is visible on only
+   some of them is a hover nobody learns to trust. */
+.pill:hover{background:var(--chip);border-color:var(--accent);color:var(--accent)}
 .pill.rm:hover{color:var(--error);border-color:var(--error)}
 .pill[disabled]{color:var(--muted);border-color:var(--card-border);background:none;
   cursor:default}
@@ -207,13 +226,29 @@ button.danger:hover{background:var(--error);border-color:var(--error);filter:bri
    which WCAG 2.5.8 asks of a pointer target and which no call site may be left to remember.
 
    .pill.ico svg: the glyph is the pill's line height, sized in `em` so it follows the pill's
-   own text size. No colour is named: the glyph is an outline in `currentColor` so it takes the
-   palette's resting and hover colour exactly as the pill's border does, and `THEME_CSS` stays
-   the only file that names one.
+   own text size. No colour is named: the glyph is an outline in `currentColor` so it follows the
+   pill's text, which is the palette's resting word colour and its hover colour, and
+   `THEME_CSS` stays the only file that names one.
 
    .vh: the name of an icon control. Spoken by a reader. Shown by no browser. Clipped by
    geometry rather than by hiding the element, which would remove it from the accessibility tree
    and take the name away from exactly the technology the whole mechanism exists to feed. */
+
+/* A pill inside a `nav` is a TAB, and a tab is not a button (Nielsen 4: a control should look
+   like what it does). At rest it has no visible box, so a row of five reads as a row of labels
+   with one of them in use, which is the choice a person is actually making, instead of five
+   outlined buttons competing with the page's one real action. The border is --card, the
+   header's own fill, so the box keeps its exact size across the states and nothing shifts when
+   the pointer arrives; the text is --muted, 6:1 on that fill. SC 1.4.11 asks 3:1 of a boundary
+   only where the boundary is what identifies the control, and here the words do
+   (https://www.w3.org/WAI/WCAG22/Understanding/non-text-contrast.html), and the focus ring is
+   untouched. The selected tab keeps the accent fill: `.pill.on:hover` carries three classes and
+   outranks this rule's hover, two classes and an element, so hovering the tab in use cannot
+   wash out the one state that matters. The two header icons sit in `nav.acct` and get this too,
+   which is intended: an icon in a bar needs no box, and its glyph in --muted is legible. The
+   auth pages carry no `nav`, so this paints nothing on them. */
+nav .pill{border-color:var(--card);color:var(--muted)}
+nav .pill:hover{background:var(--chip)}
 
 /* ---------------------------------------------------------------------------
    Tags, and the one thing that is a pill shape
