@@ -25,8 +25,8 @@ Versions are the crate's (`Cargo.toml`); packages add a Debian revision
 **Due out as the next release, and every build until then says 1.99.8.** A deploy no longer
 bumps the version (plan W11, changed on 2026-11-25): what tells two deploys apart is the build
 string, `v1.99.8-g<commit>`. 1.99.9 was a package installed on rpi-01 on 2026-11-25 from
-`gb9d7100`, before that rule, which carried everything below; the next 1.99.8 package installed
-there is a downgrade by number and not by content. Before that, 1.99.8 was installed by a deploy on
+`gb9d7100`, before that rule, which carried everything below, and was replaced the same morning
+by a 1.99.8 package of the same code (`g75f788a`), a downgrade by number only. Before that, 1.99.8 was installed by a deploy on
 2026-11-24 from `gc1a9fd8`, which carried everything below except the first five sections, from
 removing a user down to a key's duration being one of five. 1.99.7 was spent by a deploy on
 2026-10-17 from `g4041845`, which carried everything below except the two sections above the

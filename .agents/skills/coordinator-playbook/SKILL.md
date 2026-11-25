@@ -14,9 +14,7 @@ Rules are in `AGENTS.md` and `PLAN.md`. Format of this file: `AGENTS.md`, under 
 - Do not ask the user whether to go on to the next step or slice: go on, and ask only what the rules
   require (ambiguity, real effects, a requirement change).
 - The version stays 1.99.8 until the release (W11): never bump it for a deploy. Two deploys
-  differ by the build string (`v1.99.8-g<commit>`). rpi-01 got a 1.99.9-1 package on 2026-11-25
-  before this rule, so the next `dpkg -i` of 1.99.8-1 there is a downgrade, which dpkg does with
-  a warning: say so to the user when asking for that deploy.
+  differ by the build string (`v1.99.8-g<commit>`).
 - Ask the user for real runs one at a time, with the exact command and the expected result.
 
 ### Who runs each role
