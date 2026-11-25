@@ -76,6 +76,39 @@ process that writes both files, so two gaps found the same day are closed **firs
 GUI is opened to anyone who is not an administrator: `bb-auth-web` can read the HMAC key, and it
 believes `X-Auth-Email` from any local process. The design is `docs/ARCHITECTURE.md` §13.
 
+### 9. The Preferences menu closes on a click outside it (first, by the user's order)
+
+Asked by the user on 2026-11-25. Today the menu (a `details`) closes only from its own trigger.
+A click anywhere outside it must close it, on `/account` and in the console (one `top_bar`),
+with no script: the "no page needs JavaScript" invariant and `/account`'s "no handler at all"
+both stand, so the designer specifies a CSS-only way (an open `details`' summary covering the
+page behind the menu) and its accessibility.
+
+- Done when: a test that failed first pins the rule, an e2e check clicks outside the open menu
+  on both surfaces and finds it closed (scripting on and off), the menu's own controls still
+  work, and the designer passes the screenshots.
+
+### 10. A default landing, so a logout never ends on the sign-in page in a loop
+
+Asked by the user on 2026-11-25: the account page is the default `rd`. Today a Sign out on
+`/account` reaches `/auth/logout` with no `rd`, the browser lands on the sign-in page with none,
+and after signing in `safe_rd` lands on the caller's root, which can be the sign-in page again.
+The architect designs it (a setting, or not) in `docs/ARCHITECTURE.md`; rpi-01 is configured
+afterwards with the user's go-ahead.
+
+- Done when: tests that failed first show a login and a logout with no `rd` landing on the
+  default, still behind `rd_url_allowed`; a sign-out from `/account` on rpi-01 followed by a
+  sign-in lands on `/account`.
+
+### 11. Release v1.99.8
+
+The user's decision, 2026-11-25: after steps 9 and 10, `CHANGELOG.md`'s "Unreleased" becomes
+`## 1.99.8`, the tag `v1.99.8` is created, `main` is pushed to GitHub with the tag, and the
+packages are installed on rpi-01. The tester runs the whole board on `main` first.
+
+- Done when: the tag is on GitHub at the commit that was tested and installed, rpi-01 reports
+  `v1.99.8-g<that commit>`, and `verify.sh` is green.
+
 ### 4. Self-service API keys
 
 Covers: R1.
