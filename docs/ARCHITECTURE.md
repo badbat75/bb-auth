@@ -757,8 +757,12 @@ file-level veto does not reach that kind: the scope grants with no credential at
 excluded client would simply send none.
 
 `user_refs` and `user_group_refs` count an exclusion as a reference, marked `(excluded)`,
-and `remove_user` sweeps what they list, so
-`remove_user` sweeps it and `remove_user_group` refuses while one still names the group.
+so `remove_user_group` refuses while one still names the group. `remove_user` does **not**
+sweep a uuid exclusion: it rewrites it to the row's primary email, as it already does for
+`denied`, because dropping a veto lifts it and the same person re-registering on Cognito
+under that email walks back into the scope they were just shut out of. A row with no email
+has no stranger spelling to leave behind, so its entry goes, and a `@group` entry stays a
+group reference.
 
 ### A scope names people, and that is the only place a grant is written
 
@@ -1530,10 +1534,14 @@ opinion about it):
 - **`Access::key_scopes_for(uuid)`**, beside `scopes_reached` (built): the `restricted` scopes
   whose members include the uuid, whose `credentials` admit a key, and whose `excluded` does not
   name it. Tests drive `decide` on a URL inside each returned scope and require a grant.
-- **`remove_user` rewrites a uuid in a scope's `excluded` to the primary email**, as it already
-  does for `denied`, instead of dropping it: the same person re-registering is the walk-back-in
-  that rewrite exists to prevent, and self-deletion would otherwise be a veto lifted by the
-  person it vetoes. One sweep, so `bb-auth-adm` and the admin pages change too (decided, 13.12).
+- **`remove_user` rewrites a uuid in a scope's `excluded` to the primary email** (built,
+  step 6), as it already does for `denied`, instead of dropping it: the same person
+  re-registering is the walk-back-in that rewrite exists to prevent, and self-deletion would
+  otherwise be a veto lifted by the person it vetoes. One sweep, so `bb-auth-adm` and the
+  admin pages change too (decided, 13.12). Built as step 6: the CLI's report names the
+  rewrite, "still kept out of APP/SCOPE by email EMAIL" and "still denied by email EMAIL"
+  for the veto (`user_rm_report`); the admin pages go through the same call and say nothing
+  about exclusions, so they did not change.
 
 Nothing else moves. The presentation contract is already shared, and the merge removes the one
 place it was copied: `bb-auth-me`'s private copies of `Lang`, `LangPref`, `negotiate_lang`,

@@ -148,20 +148,6 @@ serving the next request.
   user changes an editable attribute in a browser against the real pool (with the user's
   go-ahead), and it shows in their next token's profile claims.
 
-### 6. `remove_user` keeps an exclusion as an email
-
-Covers: R4 (prerequisite), and changes `bb-auth-adm` and the admin pages too, as decided.
-
-Today `remove_user` drops the removed uuid from every scope's `excluded`; it must rewrite it to
-the row's primary email, as it already does for `denied`, so a removed person who re-registers is
-still kept out (§13.8). Library change, test first.
-
-- Done when: a library test that failed first shows a scope that excluded the uuid now excludes
-  the primary email, a row with no email leaves nothing behind, and the written file compiles;
-  `bb-auth-adm user rm` and the GUI's removal show the same result. Note for the docs agent:
-  AGENTS.md's `excluded` invariant ("`remove_user` and `user_group_refs` count an exclusion as a
-  reference") and the comment on the sweep must say the exclusion is rewritten, not swept.
-
 ### 7. Delete my account
 
 Covers: R4.
@@ -190,21 +176,13 @@ then asked for a **header** with the person's identity, the settings (theme, lan
 out, the usual pattern, replacing the preferences form at the foot of the page; the designer adds
 it to §13.17.
 
-Slices, in order: (8d) the theme itself, which the user finds unsightly (2026-11-24): the designer
-reviews the palette, type and spacing, and says what belongs in our built-in theme and what in the
-operator's `tokens.css`, which this repository does not hold. The user's constraint (2026-11-24):
-the theme contract (the custom properties `THEME_CSS` defines and an operator stylesheet may
-redefine) does not change. If a new token turns out to be needed, it is added with a fallback so an
-existing `tokens.css` still renders correctly, no token is renamed or removed, and any such
-addition ships with a short migration guide for theme authors (CHANGELOG and README). From the designer's reviews of 8b
-and 8c (2026-11-25), for 8d: the brand aligned with the content column on `/account`, and the two
-surfaces' brands agreeing (the console says "bb-auth-web v…", the account page "bb-auth"); the
-empty space at the top of the confirmation card; the days box, which shows even when a preset is
-chosen and whose pale fill can read as disabled (the cost of no JavaScript, so its look and not
-its presence); the Name hint repeating the refusal while one shows; the account id wrapping at a
-hyphen on a phone; one look at a background shade change on the phone dashboard; and a
-screenshot scene with a caller who has a scope to narrow to, so the scope radios get a visual
-review. Steps 5 and 7 add their forms into this layout later (Profile, a last panel).
+Slices 8a to 8d are done (8d, the theme, within the same token contract: §13.18). Left, in order:
+(8e) §13.18's type scale, which did not ship with 8d (h1 1.5rem/650, h2 1.0625rem/600 in
+`base.css`, still 1.25rem and 1rem); then, from the designer's review of 8d (2026-11-25), as nits:
+table row rules stopping short of the column of buttons (`td.pills`, older than 8d), three sizes of
+secondary control in one section, and radios and checkboxes in the browser's blue rather than
+`accent-color`. The logo in the console's brand is its own later step, since it widens the
+console's CSP `img-src`. Steps 5 and 7 add their forms into this layout later (Profile, a last panel).
 
 - Done when: the user approves screenshots of the page in both themes and both languages, at
   desktop and phone width, with the forms of steps 4, 5 and 7 on it; e2e and the scripting-off
@@ -234,6 +212,12 @@ review. Steps 5 and 7 add their forms into this layout later (Profile, a last pa
     brand becomes `ui.brand_name` with an "Administration" line, the version only in the footer;
     header tabs and icons lose their boxes; secondary pills become neutral; light fields white;
     uppercase table headings kept. Before and after images: /tmp/d8d/shots/{before,after}/.
+    The logo in the console brand left for a later step (it widens the CSP); the cancel pill on a
+    phone fixed in 8d rather than later.
+  - 6: the CLI's `user rm` report says "still kept out of APP/SCOPE by email EMAIL" (and "still
+    denied by email") where it used to say "also removed from ... (excluded)", which the new
+    behaviour made false. The admin GUI says nothing about exclusions on removal, so it is
+    unchanged, though §13.8 had said the admin pages would change too.
 
 - Before step 5: a read-only check of the real pool (`aws cognito-idp describe-user-pool` and
   `describe-user-pool-client`): email sign-in, `ALLOW_USER_AUTH`, `WriteAttributes`,

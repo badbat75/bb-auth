@@ -54,7 +54,7 @@ use bb_auth_core::{
     user_group_refs, user_label, user_pos, version_line, well_formed_uuid, Access, AccessFile,
     AccessWrite, ApiKeySpec, AppSpec, AuditLimit, Decision, GateSettings, GuardedSetting,
     KeyDecision, ScopeSpec, SealedKey, SettingsFile, SettingsWrite, SocialButtonSpec, Subject,
-    UiTheme, UserSpec, WiredButton, Written, ACCESS_FILE_VERSION, SETTINGS_VERSION,
+    UiTheme, UserSpec, WiredButton, Written, ACCESS_FILE_VERSION, EXCLUDED_REF, SETTINGS_VERSION,
 };
 
 const USAGE: &str = "\
@@ -2280,6 +2280,48 @@ fn cmd_user_email_rm(ctx: Ctx, who: &str, email: &str) -> Result<ExitCode, Strin
     Ok(ExitCode::SUCCESS)
 }
 
+/// The lines `user rm` prints about the sweep, without the `[bb-auth-adm] ` prefix.
+///
+/// A scope's `excluded` entry, and the `denied` veto, are **rewritten** to the row's primary
+/// email rather than dropped, because dropping a veto lifts it: the person re-registers with
+/// Cognito under that same email and walks back into the place they were just shut out of. So
+/// the report must not say they were "removed from" one of those: the entry is still there and
+/// still holds, under the email. `primary` is the email the rewrite wrote (`None` for a row
+/// that had no email, whose entries really do go, exactly as they always did), and `swept` is
+/// the marked list [`remove_user`] returns.
+fn user_rm_report(label: &str, primary: Option<&str>, swept: &[String]) -> Vec<String> {
+    if swept.is_empty() {
+        return Vec::new();
+    }
+    let mark = format!(" ({EXCLUDED_REF})");
+    let marker = mark.as_str();
+    let Some(email) = primary else {
+        return vec![format!("{label}: also removed from {}", swept.join(", "))];
+    };
+    let marks = |excluded: bool| {
+        swept
+            .iter()
+            .map(String::as_str)
+            .filter(move |s| s.ends_with(marker) == excluded)
+    };
+    let mut lines = Vec::new();
+    let grants = marks(false).collect::<Vec<_>>();
+    if !grants.is_empty() {
+        lines.push(format!("{label}: also removed from {}", grants.join(", ")));
+    }
+    for s in marks(true) {
+        let place = &s[..s.len() - marker.len()];
+        if place == "denied" {
+            lines.push(format!("{label}: still denied by email {email}"));
+        } else {
+            lines.push(format!(
+                "{label}: still kept out of {place} by email {email}"
+            ));
+        }
+    }
+    lines
+}
+
 /// `user rm` — the row goes, and with it every key it owned and **every reference to it**.
 /// The sweep is the point: with grants written on the side of the place, a row can be named
 /// by any number of scopes and groups, and a leftover reference is a member who does not
@@ -2300,11 +2342,15 @@ fn cmd_user_rm(ctx: Ctx, who: &str) -> Result<ExitCode, String> {
                 .join(", ")
         );
     }
-    if !swept.is_empty() {
-        eprintln!(
-            "[bb-auth-adm] {label}: also removed from {}",
-            swept.join(", ")
-        );
+    // The email `remove_user` leaves behind in a rewritten exclusion, taken the way the
+    // library takes it: the row's first non-empty email, trimmed and lowercased.
+    let primary = u
+        .emails
+        .iter()
+        .map(|e| norm_email(e))
+        .find(|e| !e.is_empty());
+    for line in user_rm_report(&label, primary.as_deref(), &swept) {
+        eprintln!("[bb-auth-adm] {line}");
     }
     if access.any_authenticated_scope() {
         eprintln!(
@@ -2797,5 +2843,67 @@ mod tests {
         let scopes = [broad, narrow];
         assert_eq!(shadowing_scope(&scopes[..1], &scopes[1].urls), Some(0));
         assert_eq!(shadowing_scope(&scopes[..0], &scopes[0].urls), None);
+    }
+
+    // --- what `user rm` reports ---------------------------------------------
+    //
+    // `remove_user` rewrites an exclusion to the row's primary email instead of dropping it,
+    // so the report may not say the person was "removed from" that scope: they are still
+    // kept out of it, now as a stranger. `user_rm_report(label, primary, swept)` returns the
+    // lines to print (each without the `[bb-auth-adm] ` prefix); `primary` is the email
+    // `remove_user` wrote in, `None` for a row that had none.
+
+    fn swept(items: &[&str]) -> Vec<String> {
+        items.iter().map(|s| s.to_string()).collect()
+    }
+
+    #[test]
+    fn an_exclusion_that_became_an_email_is_reported_as_still_in_force() {
+        let lines = user_rm_report(
+            "bob@x.com",
+            Some("bob@x.com"),
+            &swept(&["mpa/admin", "mpa/onb (excluded)", "@staff"]),
+        );
+        let all = lines.join("\n");
+        assert!(
+            all.contains("bob@x.com: also removed from mpa/admin, @staff"),
+            "grants keep the old wording, without the exclusion: {all}"
+        );
+        let kept = lines
+            .iter()
+            .find(|l| l.contains("mpa/onb"))
+            .unwrap_or_else(|| panic!("the exclusion is reported: {all}"));
+        assert!(!kept.contains("removed from"), "{kept}");
+        assert!(kept.contains("still kept out"), "{kept}");
+        assert!(kept.contains("by email bob@x.com"), "{kept}");
+        assert!(!kept.contains("(excluded)"), "{kept}");
+    }
+
+    #[test]
+    fn a_row_with_no_email_keeps_the_removed_from_wording_for_exclusions() {
+        let uuid = "11111111-2222-4333-8444-555555555555";
+        let lines = user_rm_report(uuid, None, &swept(&["mpa/onb (excluded)", "@staff"]));
+        assert_eq!(
+            lines,
+            [format!(
+                "{uuid}: also removed from mpa/onb (excluded), @staff"
+            )]
+        );
+    }
+
+    #[test]
+    fn nothing_swept_reports_nothing() {
+        assert!(user_rm_report("bob@x.com", Some("bob@x.com"), &[]).is_empty());
+    }
+
+    #[test]
+    fn only_exclusions_leave_no_removed_from_line_at_all() {
+        let lines = user_rm_report(
+            "bob@x.com",
+            Some("bob@x.com"),
+            &swept(&["mpa/onb (excluded)"]),
+        );
+        assert_eq!(lines.len(), 1, "{lines:?}");
+        assert!(!lines[0].contains("removed from"), "{lines:?}");
     }
 }

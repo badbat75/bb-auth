@@ -875,8 +875,15 @@ the unit creates through `LogsDirectory` precisely so that the gate's own prefix
   so an excluded client would simply send none, and a field that reads like a defence while
   defending nothing is worse than no field. Both editors resolve people to uuids and keep an
   unknown email as itself (`to_exclusions`, `parse_exclusions`), and `remove_user` and
-  `user_group_refs` count an exclusion as a reference like any other — marked `(excluded)`,
-  because a sweep that reported the two alike would read as if the user had been let in there.
+  `user_group_refs` count an exclusion as a reference like any other, marked `(excluded)`.
+  The mark is what lets the report tell the two apart, and they must be told apart: an
+  exclusion is **not swept**, it is rewritten to the row's primary email, as `denied`
+  already is, because dropping a veto lifts it and the same person re-registering on Cognito
+  under that email walks back into the scope they were just shut out of. A row with no email
+  has no stranger spelling to leave behind, so its entry is dropped as it always was, and a
+  `@group` entry stays a group reference. `bb-auth-adm user rm` says "still kept out of
+  APP/SCOPE by email EMAIL" where a grant says "also removed from" (`user_rm_report`); the
+  GUI's removal goes through the same library call and says nothing about exclusions.
 
 - **A scope names people, and that is the only place a grant is written.** The rule is against
   **duplication**: a user removed from the roster must not still walk in through a place. Since

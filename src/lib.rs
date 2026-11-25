@@ -2745,17 +2745,48 @@ pub fn remove_user(doc: &mut AccessFile, key: &str) -> Result<(UserSpec, Vec<Str
     let i = user_pos(doc, key).ok_or_else(|| format!("no user '{}'", key.trim()))?;
     let uuid = doc.users[i].uuid.trim().to_ascii_lowercase();
     let swept = user_refs(doc, &uuid);
+    // The primary email, taken before anything is swept, because both rewrites below need it:
+    // it is the spelling this file uses for an identity the roster does not know, and the
+    // identity being removed is about to become exactly that.
+    let primary = doc.users[i]
+        .emails
+        .iter()
+        .map(|e| norm_email(e))
+        .find(|e| !e.is_empty());
     for a in &mut doc.applications {
         for s in &mut a.scopes {
             if let Some(list) = s.users.as_mut() {
                 list.retain(|u| norm_email(u) != uuid);
             }
-            // Swept too, though a stale exclusion fails closed rather than open. Uuids are
-            // random and never reused, so it could not come back to bite the next person;
-            // it would simply be a line naming nobody, in the one file where a line naming
-            // nobody is what an operator must never have to wonder about.
+            // An exclusion is REWRITTEN to that email, not swept, for the reason `denied`
+            // below gives: it is a veto, and dropping it lifts it. The sequence is ordinary
+            // housekeeping (keep somebody out of one area, tidy the roster afterwards), and
+            // with an `authenticated` scope anywhere in the file that person re-registers on
+            // Cognito under the same email and walks straight back into the scope they were
+            // just shut out of. A row with no email has no stranger spelling to leave behind,
+            // so its entry is dropped as it always was.
             if let Some(list) = s.excluded.as_mut() {
-                list.retain(|u| norm_email(u) != uuid);
+                match &primary {
+                    Some(email) => {
+                        // In place, so the entry keeps its position, and only once: a list
+                        // that already names this email, or a second uuid entry, keeps one
+                        // line, since two strings naming one identity is the look a stale
+                        // reference must not have.
+                        let mut written = list.iter().any(|u| norm_email(u) == *email);
+                        list.retain_mut(|u| {
+                            if norm_email(u) != uuid {
+                                return true;
+                            }
+                            if written {
+                                return false;
+                            }
+                            written = true;
+                            *u = email.clone();
+                            true
+                        });
+                    }
+                    None => list.retain(|u| norm_email(u) != uuid),
+                }
             }
         }
     }
@@ -2774,11 +2805,6 @@ pub fn remove_user(doc: &mut AccessFile, key: &str) -> Result<(UserSpec, Vec<Str
     // So a user veto becomes a stranger veto for the same person: their primary email, which
     // is the spelling `denied` uses for an identity the file has never heard of, and which is
     // exactly what this identity is about to become.
-    let primary = doc.users[i]
-        .emails
-        .iter()
-        .map(|e| norm_email(e))
-        .find(|e| !e.is_empty());
     if let Some(email) = primary {
         for d in doc.denied.iter_mut() {
             if norm_email(d) == uuid {
@@ -7347,7 +7373,7 @@ mod tests {
     // --- editing the document -----------------------------------------------
 
     #[test]
-    fn removing_a_user_sweeps_the_exclusions_that_named_them() {
+    fn removing_a_user_rewrites_the_exclusions_that_named_them_to_their_email() {
         let mut doc = doc_of(&with_exclusion(
             "https://app.x.com/mpa/*",
             &format!("\"{BOB}\""),
@@ -7359,11 +7385,81 @@ mod tests {
         );
         let (_, swept) = remove_user(&mut doc, "bob@x.com").unwrap();
         assert!(swept.iter().any(|r| r.contains("excluded")), "{swept:?}");
-        assert!(doc.applications[0].scopes[2]
-            .excluded
+        // The exclusion is a veto, so dropping it would lift it: it becomes the primary
+        // email, the spelling an exclusion uses for an identity the roster does not know.
+        assert_eq!(
+            doc.applications[0].scopes[2].excluded.as_deref(),
+            Some(&["bob@x.com".to_string()][..])
+        );
+        // The file that comes out compiles, and keeps the person out as a stranger.
+        let w = AccessWrite::prepare(&doc).unwrap();
+        assert_eq!(
+            decide(
+                w.access(),
+                &Subject::Identifier("bob@x.com"),
+                Some("https://app.x.com/mpa/anything")
+            ),
+            Decision::Excluded {
+                app: "mpa".into(),
+                scope: "onboarding".into()
+            }
+        );
+    }
+
+    #[test]
+    fn removing_a_user_with_no_email_leaves_nothing_behind_in_excluded() {
+        let mut doc = doc_of(&with_exclusion(
+            "https://app.x.com/mpa/*",
+            &format!("\"{BOB}\""),
+        ));
+        doc.users[0].emails.clear();
+        remove_user(&mut doc, BOB).unwrap();
+        let left = doc.applications[0].scopes[2].excluded.clone();
+        assert!(
+            left.iter()
+                .flatten()
+                .all(|e| e.trim().is_empty() || norm_email(e) != BOB),
+            "{left:?}"
+        );
+        assert!(
+            left.iter().flatten().all(|e| !e.trim().is_empty()),
+            "no blank entry either: {left:?}"
+        );
+    }
+
+    #[test]
+    fn a_uuid_excluded_in_several_scopes_is_rewritten_in_each() {
+        let mut doc = doc_of(&with_exclusion(
+            "https://app.x.com/mpa/*",
+            &format!("\"{BOB}\""),
+        ));
+        doc.applications[1].scopes[0].excluded = Some(vec![BOB.to_string()]);
+        doc.applications[0].scopes[1].excluded = Some(vec![BOB.to_string()]);
+        remove_user(&mut doc, "bob@x.com").unwrap();
+        for (a, s) in [(0, 1), (0, 2), (1, 0)] {
+            assert_eq!(
+                doc.applications[a].scopes[s].excluded.as_deref(),
+                Some(&["bob@x.com".to_string()][..]),
+                "scope {a}/{s}"
+            );
+        }
+        AccessWrite::prepare(&doc).unwrap();
+    }
+
+    #[test]
+    fn an_exclusion_through_a_group_stays_a_group_reference() {
+        let mut doc = doc_of(&with_exclusion("https://app.x.com/mpa/*", "\"@admins\""));
+        remove_user(&mut doc, "bob@x.com").unwrap();
+        // The group is swept as it always was, and the scope still names the group: the
+        // rewrite is for uuids only, so no email is added behind the group's back.
+        assert!(doc.user_groups["admins"]
             .iter()
-            .flatten()
-            .all(|e| e != BOB));
+            .all(|m| norm_email(m) != BOB));
+        assert_eq!(
+            doc.applications[0].scopes[2].excluded.as_deref(),
+            Some(&["@admins".to_string()][..])
+        );
+        AccessWrite::prepare(&doc).unwrap();
     }
 
     #[test]

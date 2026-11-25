@@ -7,6 +7,13 @@ Rules are in `AGENTS.md`. Format of this file: `AGENTS.md`, under "Skills".
 
 ## How to
 
+- A swept reference from `user_refs` is **marked**: a scope exclusion is `app/scope (excluded)`
+  and the veto is `denied (excluded)`, both built from `EXCLUDED_REF`. `remove_user`
+  **rewrites** an exclusion and the veto to the row's primary email (it drops them only for a
+  row with no email), so a report that prints that list may not say "removed from" a marked
+  entry: the veto is still in force, under the email. `user_rm_report` is the CLI's answer;
+  the GUI's removal needs the same split.
+
 - A library function that restates `decide` as a set must ask what `decide` asks, never a copy of
   its logic. For an identifier that means the helpers (`vetoes_identifier`, `excludes_identifier`,
   `uuid_of`); for a uuid (a key's owner, as `key_scopes_for` takes) it means the raw fields the

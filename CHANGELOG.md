@@ -71,6 +71,21 @@ when there is no tag to check out.
 release logs anybody out.** The settings file goes from version 1 to version 3, which needs an
 edit before the binaries land: see "Upgrading" below.
 
+### Changed: removing a user keeps them out of the scopes that excluded them
+
+* **`remove_user` rewrites a uuid in a scope's `excluded` to the row's primary email**
+  instead of dropping it, exactly as it already does for a `denied` entry: an exclusion is a
+  veto, and dropping it lifts it. The sequence is ordinary housekeeping (keep somebody out
+  of one area, tidy the roster afterwards), and with an `authenticated` scope anywhere in
+  the file that person re-registers on Cognito under the same email and walks back into the
+  scope they were just shut out of. This changes what `bb-auth-adm user rm` and the admin
+  GUI write. A row with no email has no email to leave behind, so its entry is dropped as
+  it always was, and a `@group` entry stays a group reference.
+* `bb-auth-adm user rm` reports the rewrite as what it is: "LABEL: still kept out of
+  APP/SCOPE by email EMAIL", and "still denied by email EMAIL" for the veto, where a swept
+  grant keeps the old "also removed from" line. The old wording said the person was removed
+  from the very scope that was keeping them out.
+
 ### Changed: the theme, reviewed: fields carry a border, and only what floats casts a shadow
 
 * **A field's border carries the field.** Three *values* in the built-in `theme.css` move, and no
