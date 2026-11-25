@@ -35,6 +35,9 @@ Rules are in `AGENTS.md`. Format of this file: `AGENTS.md`, under "Skills".
 - A switch only a test harness may flip is a cargo feature plus `compile_error!` under
   `not(debug_assertions)`, plus a `grep -aq` of the env var name over `dist/` in `package.sh`:
   env var names survive `strip` and LTO in the release binary (measured, §13.24).
+- A new field for the session cookie goes in the claims JSON segment under a key whose derived
+  header `compile_profile_claims` reserves: old cookies still verify and a rollback binary still
+  accepts new ones, so it is no `COOKIE_VERSION` bump (§13.25). A new positional segment is one.
 - The real pool's facts are in `PLAN.md` step 5 (read 2026-11-25); its changes go through the
   OpenTofu repository named there, never the AWS CLI.
 
@@ -72,3 +75,5 @@ Rules are in `AGENTS.md`. Format of this file: `AGENTS.md`, under "Skills".
   client together with its first use.
 - `DescribeUserPoolClient` omits `ReadAttributes`/`WriteAttributes` when they are the default,
   which is every attribute writable: an absent list is not "none".
+- The rpi-01 pool has unlinked native and federated users sharing one email: `USERNAME` = email
+  reaches the native one. Act on a session's Cognito user by its `cognito:username`, never its email.

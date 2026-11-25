@@ -161,7 +161,18 @@ Slices (§13.22-§13.24): 5a to 5d are done (the library move, the form up to th
 the code step and the save, the e2e fake Cognito with the profile's walks and 11 scenes, cf9109b).
 Installed on rpi-01 on 2026-11-25 as `v1.99.9-gcf9109b`, verify green, the unit's IP filter gone
 and the listener still on 127.0.0.1. Left: **5e**, a real edit in a browser against the real pool
-(the user's), including a Google-only account's case, then the docs. From the designer's review of
+(the user's), including a Google-only account's case, then the docs.
+
+The real run on 2026-11-25 found a bug: signed in through MicrosoftPersonal, the user's edit
+reached a separate **native** Cognito user with the same email (confirmed read-only by the IT-Admin
+session: two unlinked users, only the native one modified), because the re-authentication looks
+the user up by email. The Google-only case answered correctly. The fix is designed in §13.25 and
+comes before 5e: **5f**, the gate forwards `X-Auth-Native-Username` (the token's
+`cognito:username`, only for a native sign-in; a new key in the cookie's JSON claims, no
+`COOKIE_VERSION` bump; an older cookie fails closed); **5g**, `bb-auth-web` offers the edit only
+with that header, asks Cognito for that username, and requires the same username after the code
+(`the_rpi01_twin_is_never_written`); 5f and 5g ship together; **5h**, the nginx change on rpi-01
+first (the user's go-ahead), then the deploy and the real run. From the designer's review of
 5b-5d (no WCAG failure): the code page's change list should read "Given name: Augusta (was Ada)"
 (the Italian `AccountProfileWas` becomes "prima") and the code field wants `max-width:14ch`;
 later, the date hint order, a gap under the read-only phone line, browser defaults for

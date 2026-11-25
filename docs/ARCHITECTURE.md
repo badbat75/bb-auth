@@ -3739,20 +3739,25 @@ with whatever claims a test chooses, and uses distinctive token strings (`FAKEAC
 a plain `TcpListener` that accepts and holds the socket without a byte. The tests set
 `cognito_timeout` to 300 ms so the silent test is fast, and never reach the real pool.
 
-**The identity is bound twice: before Cognito, and after.**
+**The identity is bound twice: before Cognito, and after.** (Changed by §13.25: the binding key
+is the session's own Cognito username, forwarded by the gate, and no longer the email.)
 
 1. *Before*, on both `POST`s, against the live files: the identity header, the `denied` veto,
    the one-row rule (§13.5), and the chosen email **among the header's own values**
    (`norm_email` on both sides). A chosen email that is not the caller's is a `400` and **no**
    Cognito call is made. Every hidden field the code step carries back (email, values, the
-   challenge username, the `Session`) is re-validated there as if new.
+   challenge username, the `Session`) is re-validated there as if new. (Changed by §13.25: no
+   chosen email and no challenge username any more; a session with no `X-Auth-Native-Username`
+   is refused here with no call.)
 2. *After*, between `RespondToAuthChallenge` and `UpdateUserAttributes`, the returned `IdToken`
    must have `token_use` = `id`, `iss` = `gate.issuer`, `aud` = `gate.client_id`, `exp` in the
    future, a truthy `email_verified`, and an `email` equal (`norm_email`) to the chosen email.
    Anything else is a `403`, the `AccessToken` is dropped unused, and the journal says a token
    named another account (without that account's email). This is what makes a `Session`
    obtained for some other address (one the caller also reads mail for) unable to act here,
-   whatever Cognito does with a mismatched `USERNAME`.
+   whatever Cognito does with a mismatched `USERNAME`. (Changed by §13.25: the email comparison
+   is replaced by `cognito:username` equal to the session's; on rpi-01 the email check passed for
+   a native twin of a federated session, which is the bug §13.25 fixes.)
 
    The `sub` is not compared: nginx hands `bb-auth-web` no Cognito `sub` (the identity
    attributes are `email` and the roster's `uuid`), so the email is the only identity the two
@@ -3761,7 +3766,8 @@ a plain `TcpListener` that accepts and holds the socket without a byte. The test
    derived from `gate.issuer`, so a forger would have to be the endpoint, and a party that can
    answer as the endpoint can answer `UpdateUserAttributes` too. Verifying would need the JWKS,
    a third call. The AWS page's "verify before you trust" is about a token a client *hands* an
-   application, which is the gate's case and not this one.
+   application, which is the gate's case and not this one. (Changed by §13.25: the gate now
+   forwards the session's Cognito username, so the email is no longer the only shared identity.)
 
 **Editable is an allowlist, intersected with the settings.** An attribute is editable iff it is
 in `gate.profile_claims` **and** in the `oidc:profile` list minus `preferred_username`
@@ -3784,12 +3790,15 @@ account prefix and both `no-store`:
   email with the sentence that an administrator changes it; "Send code to" as a `select` over
   the header's emails, or a hidden field when there is one; a line saying a person who signs in
   only through a social provider has their profile from that provider and cannot change it here.
+  (Changed by §13.25: no "Send code to" at all, the code goes to the session's own Cognito user;
+  a session that is not a native sign-in gets no form, only the provider sentence.)
   The read-only panel gains an Edit pill to this page when the edit is offered.
 - `POST <prefix>/profile`: validate (above), call `InitiateAuth` (`USER_AUTH`,
   `PREFERRED_CHALLENGE=EMAIL_OTP`, `USERNAME` = chosen email, `ClientId` = `gate.client_id`), and
   answer the code page: one code field, a Save button, a Start-again link to `GET
   <prefix>/profile` (changed by §13.23: a "Send a new code" form re-posting the values instead), and hidden fields for the `Session`, `ChallengeParameters.USERNAME`, the
-  chosen email and the changed values. An answer that is not an `EMAIL_OTP` challenge (tokens
+  chosen email and the changed values (changed by §13.25: `USERNAME` is the session's
+  `X-Auth-Native-Username`, the hidden fields are the `Session` and the values only). An answer that is not an `EMAIL_OTP` challenge (tokens
   straight away, another challenge) is a refusal: nothing acts without a code.
 - `POST <prefix>/profile/code`: re-check (above), `RespondToAuthChallenge`, bind, then
   `UpdateUserAttributes` with the changed values, and drop every token. Success is a `200` page
@@ -3799,7 +3808,7 @@ account prefix and both `no-store`:
 | Cognito says | The person sees | Status |
 |---|---|---|
 | no answer within the bound | the service did not answer, nothing changed (changed by §13.23: on `UpdateUserAttributes` it says the change may have been made) | `504` |
-| `UserNotFoundException` (start) | this account does not sign in with an email code, so its profile is its provider's | `400` |
+| `UserNotFoundException` (start) | this account does not sign in with an email code, so its profile is its provider's (changed by §13.25: a federated session never reaches Cognito; this now means the session's user was deleted since sign-in) | `400` |
 | `CodeMismatchException` | the code form again, "wrong code", with the answer's new `Session` if it carried one, else the same | `400` |
 | `ExpiredCodeException`, `NotAuthorizedException` (code step) | the code has expired, start again | `400` |
 | `TooManyRequestsException` | too many attempts, try later | `502` |
@@ -3815,7 +3824,9 @@ the same person would get a code form and no email, and the code form's line "No
 account that signs in only through a social provider cannot change its profile here" covers that
 case too, so the design does not depend on which value the pool holds. A person with both a
 native and an unlinked social user under one email edits the native one; the success page names
-the email the change was made for.
+the email the change was made for. (Changed by §13.25: that last sentence was the rpi-01 bug of
+2026-11-25. A federated session is now told before any call, by the gate's
+`X-Auth-Native-Username` being absent, and edits nothing, whichever twin exists.)
 
 **Who may edit**: anybody the page already serves, roster row or not, since the Cognito profile
 is the person's whatever the access file says and §13.12 (2) opens the page to strangers. The
@@ -4404,3 +4415,274 @@ exports `startFakeCognito()` resolving to `{ url, script(list), calls, close() }
 
 About 15 lines of Rust behind the feature, one `grep` in `package.sh`, about 80 lines of Node.
 The harness's first build compiles the crate once more into `target/e2e`. No new dependency.
+
+### 13.25 The profile edit acts on the session's own Cognito user (plan step 5, designed 2026-11-25)
+
+A bug found on rpi-01 on 2026-11-25 (`v1.99.9-gcf9109b`), and its fix. It changes §13.22, which
+carries "(Changed by §13.25 ...)" where it does.
+
+What was read to write it: `AGENTS.md` ("What a 204 hands nginx", the profile-claims and
+identity invariants, the cookie wire-format invariant, the audit's `sub` sentence), §13.2,
+§13.22 to §13.24, `src/bin/bb-auth.rs` (`UserIdentity`, `Claims`, `validate_id_token`,
+`make_session`, `verify_session`, `decode_claims_segment`, `authorized_response`), `src/lib.rs`
+(`RESERVED_CLAIMS`, `IDENTITY_ATTRS`, `claim_name_ok`, `derive_profile_header`,
+`compile_profile_claims`, `LOGIN_URL_HEADER`, `IDENTITY_HEADER`, `default_session_ttl`),
+`src/bin/bb-auth-web.rs` (`account_profile_post`, `id_token_email`, the start and code calls and
+their tests), the README's `location /admin/` recipe, and `PLAN.md` step 5.
+
+#### What happened, and how it is known
+
+**Measured on rpi-01** (the user's run, and the IT-Admin session's read-only `list-users`): a
+person signed in through `MicrosoftPersonal`, opened `/account/profile`, received the email code,
+entered it and read "Profile saved", and nothing they see changed. The pool holds two users with
+that email: a **native** one (a UUID username, `CONFIRMED`, no `identities`), modified at 13:06 CET
+by that edit, and a **federated** one (`MicrosoftPersonal_...`, `EXTERNAL_PROVIDER`, primary
+identity `MicrosoftPersonal`, not linked to the native one), untouched since June. With a Google
+account that has no native twin the page answered `UserNotFoundException` and showed the
+social-only page, as designed.
+
+So `InitiateAuth` with `USERNAME` = the email resolved to the native user, every check of
+§13.22 (2) passed (same email, this client, this issuer), and `UpdateUserAttributes` changed the
+native user. The code proved control of the **mailbox**, and the native user is the account that
+mailbox signs into, so nobody gained anything they could not already do on the sign-in page: the
+bug is that the edit acted on a Cognito user **other than the session's**, and said it had saved
+the session's profile. §13.22 accepted that case in a sentence ("edits the native one"); it was
+the wrong call, because the person cannot tell which twin they are.
+
+**Read in a source:**
+
+- An ID token carries `cognito:username` ("the username of your user in your user pool"), and a
+  federated user's carries `identities`, with a username of the form `<ProviderName>_<id>`;
+  `identities` also describes a federated profile **linked** to a local one
+  ([ID token](https://docs.aws.amazon.com/cognito/latest/developerguide/amazon-cognito-user-pools-using-the-id-token.html)).
+- With email as a username attribute, the email is unique among the pool's own users, `SignUp`
+  sets `username` to a UUID equal to `sub`, a username is unique in the pool and cannot change,
+  and the email may be used **in place of** the username in every API but `ListUsers`, so the
+  username itself is always accepted
+  ([user attributes](https://docs.aws.amazon.com/cognito/latest/developerguide/user-pool-settings-attributes.html)).
+- `USER_AUTH` takes `USERNAME`; the documented `EMAIL_OTP` answer carries
+  `ChallengeParameters` `CODE_DELIVERY_DELIVERY_MEDIUM` and `CODE_DELIVERY_DESTINATION` (a masked
+  address such as `t***@e***`); `InitiateAuth` cannot sign a federated user in
+  ([InitiateAuth](https://docs.aws.amazon.com/cognito-user-identity-pools/latest/APIReference/API_InitiateAuth.html)).
+- "When a user signs in through an IdP, Amazon Cognito updates the mapped attributes with the
+  latest information from the IdP" (only when the value changed)
+  ([attribute mapping](https://docs.aws.amazon.com/cognito/latest/developerguide/cognito-user-pools-specifying-attribute-mapping.html)).
+- nginx passes no header whose `proxy_set_header` value is empty, and a location that sets any
+  `proxy_set_header` of its own inherits none from the server level
+  ([proxy_set_header](https://nginx.org/en/docs/http/ngx_http_proxy_module.html#proxy_set_header)).
+
+**Assumed, to be confirmed by the real run (5h):** that `InitiateAuth` with `USERNAME` = the UUID
+username behaves exactly as with the email (it follows from the second source, no run has shown
+it); that its `ChallengeParameters.USERNAME` is that same username; that every native user in this
+pool has a printable-ASCII username (the source says UUID for `SignUp`; an `AdminCreateUser` user
+was not checked); that the pool's case-insensitivity does not make the token's `cognito:username`
+differ in case from the one the session carries (both come from Cognito for the same user).
+
+#### Decision: the session's own user
+
+**The gate tells `bb-auth-web` which Cognito user a session is, and only for a native sign-in.**
+One new response header on an authorized `204`, `X-Auth-Native-Username`, carrying the token's
+`cognito:username`, present **iff** the credential is an id_token (bearer, or the cookie it minted)
+whose `identities` claim is empty or absent. A federated sign-in, an API key, an anonymous grant,
+and a cookie minted before this change send none. `bb-auth-web` then:
+
+1. offers the edit only when the header is present (the Edit pill and the form). Without it,
+   `GET <prefix>/profile` shows the read-only panel and one sentence (the designer's wording):
+   the profile of an account that signs in through a provider comes from that provider, and a
+   session started before this release has to sign in again to edit. Both `POST`s refuse it
+   with no Cognito call: a `400` naming the same sentence.
+2. asks for the code with `USERNAME` = that header's value. The code goes to that user's own
+   email, whichever of the roster's emails `X-Auth-Email` lists, so the "Send code to" choice and
+   the posted `email` field disappear, and a posted `email` is a non-editable name like any other
+   (refused before Cognito). The code page names `ChallengeParameters.CODE_DELIVERY_DESTINATION`
+   (escaped), or says "your email address" when the answer carries none. A
+   `ChallengeParameters.USERNAME` that is present and differs from the header is a refusal
+   (`403`, nothing further sent): the pool answered for somebody else.
+3. answers the code with `USERNAME` = the header's value **as it arrives on the code step**
+   (no hidden username field to re-validate), and binds the returned `IdToken` by
+   `cognito:username` equal to that value, with the other checks of §13.22 (2) kept
+   (`token_use`, `iss`, `aud`, `exp`, `email_verified`). The email comparison goes: the username
+   is the stronger key, unique and immutable, and the email equality is exactly what let the
+   native twin through. A mismatch is the existing `403` "a token for another account", the
+   `AccessToken` dropped unused.
+
+**A federated session's profile is its provider's, so it is refused, not re-proved.** The
+IT-Admin session suggested two ways to let it edit: redo the provider sign-in, or an
+administrator call on the session's own username after a proof bound to that session. Both are
+rejected. The source above says a federated user's mapped attributes are rewritten from the
+provider at every sign-in that changes them, so an edit would last until the provider next
+disagreed, and the success page would be a promise the pool breaks. The first needs an OAuth leg
+in `bb-auth-web` (a second redirect flow, `state`, PKCE) for that; the second needs IAM
+credentials (`AdminUpdateUserAttributes` evaluates IAM) in the process that writes both files,
+which §13.7 refused. An attribute the provider does not map would survive, but no such attribute
+is editable today and the social client cannot run any flow that yields the federated user's
+access token. Refusing costs nothing and is what R2 can honestly offer such a person.
+
+**Where the value rides in the cookie: inside the claims segment, under a gate-owned key, and
+this is not a `COOKIE_VERSION` bump.** The invariant says to bump when the serialization or the
+signed-message bytes change. They do not: the cookie is still `bb1.<kid>.<exp>.<email>.<claims>.<sig>`,
+and the claims segment is still "a JSON object of strings whose every key passes `claim_name_ok`
+and every value `claim_value_ok`", which is the grammar `decode_claims_segment` checks. A native
+session's object gains one entry, `"native_username": "<cognito:username>"`. Both directions are
+safe, and the tests pin both:
+
+- **an old cookie under the new binary** verifies, carries no `native_username`, and its holder
+  is refused the edit (fail closed, below);
+- **a new cookie under an older binary** (a rollback) verifies too, because the key and value
+  pass the old grammar, and the old `profile_headers` emits only configured claims, which this
+  key cannot be (next point). Nobody is logged out either way.
+
+The key cannot collide with a profile claim: `compile_profile_claims` already refuses any claim
+whose derived header collides with a reserved one, and `X-Auth-Native-Username` joins
+`LOGIN_URL_HEADER` in that reserved set, so `native_username`, `native:username` and
+`native-username` are all refused as claims (`derive_profile_header` maps all three to it). An
+older binary could have stored that key only if an operator had configured such a claim **and**
+Cognito had issued such a token claim; Cognito issues none (custom attributes are `custom:`), so
+no cookie in the wild carries it. `verify_session` splits the key out of the map into
+`UserIdentity.native_username` before anything reads `claims`, so the profile path never sees
+it. The value is read in `validate_id_token` from `Claims::extra`, the way `sub` already is, and
+**not** as a typed field: a typed field would hide `cognito:username` from `flatten` and would
+force it into `RESERVED_CLAIMS`, refusing a settings file that configures it as a profile claim
+today. It is kept only when it passes `claim_value_ok` and is printable ASCII with no space;
+otherwise the header is omitted and the edit is not offered (fail closed).
+
+This deliberately does **not** sign `cred` or `sub` into the cookie: the audit's account stays
+"from a validated token and from nothing else". The reason `UserIdentity`'s comments and
+`AGENTS.md` give for that ("would be a `COOKIE_VERSION` bump") is not true of a key in the claims
+object, and the docs step should say the real reason (the audit records what the login proved,
+once) rather than leave a wrong one standing.
+
+**Old cookies fail closed: no edit until a fresh sign-in.** Treating an absent header as native
+would keep the bug alive for every federated cookie minted before the deploy, for up to
+`gate.session_ttl_secs` (default 30 days). Refusing costs a native person one sign-out and
+sign-in, which the sentence above tells them, on a page they open rarely.
+
+**What kind of header it is: a reserved one, code-defined, not an identity attribute and not a
+profile claim.** It is not an `IDENTITY_ATTRS` member: those are chosen by the operator in
+`gate.identity_attrs`, derived from the roster, and multi-valued, while this one is a fact of the
+credential, single-valued, and something `bb-auth-web`'s correctness depends on, so an operator
+switch that could turn it off would silently turn the edit off with it. It is not a profile claim:
+those are self-asserted decoration nothing may key on, while this value is set by Cognito, cannot
+be edited by the user, and is carried under the cookie's HMAC. It is the third header the gate's
+contract names in code, beside `X-Auth-Login-URL` and `X-Auth-Email`: the string is a library
+constant, `NATIVE_USERNAME_HEADER`, because the gate emits it, `bb-auth-web` reads it, and
+`compile_profile_claims` reserves it, three uses and one spelling.
+
+**nginx's duty, and why it is mandatory on `/account/`.** `bb-auth-web` believes the header only
+because nginx overwrites it, exactly as for `X-Auth-Email`. If `/account/` did not overwrite it, a
+client could name another user's username: the code would go to **that** user's mailbox (a
+nuisance email, never a takeover, since the code step needs that code), and a native person's
+header would never arrive (no edit). So `location /account/` gains
+
+```nginx
+auth_request_set $bb_native $upstream_http_x_auth_native_username;
+proxy_set_header X-Auth-Native-Username $bb_native;   # empty for federated: not passed
+```
+
+and every other gated location of the recipe clears it (`proxy_set_header
+X-Auth-Native-Username "";`) beside `X-Auth-Uuid`, by the rule that every name the gate can
+emit is cleared where it is not set. On rpi-01 only `/account/` is required for this fix; the
+admin location and the applications read no such header. Order on rpi-01: **nginx first, then
+the packages**. The nginx line is harmless under today's binaries (an empty variable passes
+nothing and overrides whatever a client sent), while the packages before the line would leave a
+window in which `/account/` believes a client-supplied header. rpi-01's auth vhost gates at
+server level (`snippets/bb-auth.conf`): read `sudo nginx -T` before placing the lines.
+
+**What this costs.** One header, one cookie key, one reserved name, about forty lines over
+three files; no new dependency, no new call, no new setting. One Cognito round trip fewer of
+uncertainty on the page (no address choice). A native person with a pre-deploy cookie signs in
+once more before editing. A native user **linked** to a provider (none today, measured) would
+carry `identities` on every token and be refused too; if linking is ever set up, this decision
+is revisited, not patched.
+
+**Rejected:**
+
+- **Bind by `sub` alone** (option b without a sign-in kind): it stops the wrong write but only
+  after the code was sent to the twin's mailbox, and the federated person still types a code to
+  be refused. The username does both jobs: it is the `USERNAME` to ask with and the key to bind
+  by, and for this pool's native users it equals `sub` (source above).
+- **Forward the sign-in kind and keep the email as `USERNAME`**: a roster row may list several
+  emails, each possibly another native user, so the "Send code to" choice could still reach a
+  user other than the session's. The username removes the choice.
+- **A three-call start** (`USER_AUTH` with no preferred challenge, compare
+  `ChallengeParameters.USERNAME` before choosing `EMAIL_OTP`): it would detect the twin without a
+  gate change, but adds a Cognito call, depends on a username comparison against a value the page
+  does not have (the federated session's own username), and still needs the gate to know it.
+- **Configure `cognito:username` as a profile claim** (no gate change at all): profile claims are
+  decoration nothing may key on, an operator editing the list would silently change the edit,
+  and it says nothing about federation.
+- **An identity attribute `native_username`** in `IDENTITY_ATTRS`: an operator switch on a value
+  the edit depends on, and a roster-shaped mechanism for a credential fact.
+- **A new positional cookie segment**: a format change, a `bb1` to `bb2` bump, everybody logged out,
+  for a value the self-describing segment already holds.
+- **Treat a missing header as native**: the bug for up to 30 days of old federated cookies.
+
+#### How each part is shown to hold
+
+Gate (`bb-auth.rs`), red first:
+
+- `a_native_token_names_its_username_on_the_204` (bearer id_token with no `identities` and a
+  `cognito:username`: the header carries it);
+- `a_federated_token_names_no_native_username` (`identities` present: no header, login still
+  `204`);
+- `the_cookie_carries_the_native_username_and_gives_it_back` (`/auth/session` then
+  `/auth/validate` with the cookie: the header);
+- `a_cookie_without_it_still_verifies_and_names_none` (a `bb1` cookie whose claims segment lacks
+  the key, signed with the test key: `204`, no header): this is the "no bump" test;
+- `the_new_claims_segment_passes_the_old_grammar` (every key of a native session's segment passes
+  `claim_name_ok`, every value `claim_value_ok`, so a rollback binary verifies it);
+- `the_native_username_is_never_a_profile_header` (a session with profile claims configured
+  emits no `X-Auth-Native-...` profile header);
+- `an_unsafe_username_is_omitted_not_emitted` (a username with a space or non-ASCII: no header);
+- `an_api_key_names_no_native_username`.
+
+Library: `the_native_username_header_is_reserved` (`native_username`, `native:username`,
+`native-username` refused by `compile_profile_claims`, naming the header); the constant's
+spelling pinned where `IDENTITY_HEADER`'s is.
+
+`bb-auth-web`, red first, with `FakeCognito`:
+
+- `a_session_with_no_native_username_gets_no_form_and_no_code` (`GET` shows the sentence and no
+  form; both `POST`s `400`; zero calls): the federated and the old-cookie case;
+- `the_code_is_asked_for_the_sessions_own_username` (`USERNAME` = the header, no `email` posted);
+- `a_posted_email_field_is_refused_before_cognito`;
+- `the_rpi01_twin_is_never_written` (the regression test: header username `U1`, the fake's
+  `IdToken` has the **same email** and `cognito:username` `U2`: `403`, no `UpdateUserAttributes`
+  recorded);
+- `a_challenge_for_another_username_is_refused` (`ChallengeParameters.USERNAME` `U2`: `403`, one
+  call only);
+- `the_code_step_uses_the_header_not_a_form_field` (a header changed between the steps: the
+  code step answers with the new value and the bind fails, `403`, no update);
+- `the_code_page_names_cognitos_masked_destination` (escaped; absent: the generic sentence);
+- the tests that asserted `USERNAME` = the chosen email and the "Send code to" `select` are
+  rewritten, not kept beside.
+
+e2e: the harness sends `X-Auth-Native-Username` for the native walks; one walk and one scene
+(`provider`) without it. The designer reviews the sentence and the code page's lede (§13.23's
+"Where the code goes" and the code page lede are superseded by this section).
+
+Real (5h): `sudo nginx -T | grep -n X-Auth-Native-Username` shows both lines in `/account/`; the
+`MicrosoftPersonal` session (after a fresh sign-in) sees the provider sentence and receives **no**
+email; a native account edits `given_name`, signs out and in, and sees it; the native twin's
+`UserLastModifiedDate` does not move on the federated attempt (read-only `admin-get-user` by the
+IT-Admin session).
+
+#### Slices of the fix
+
+- **5f. The gate names a native session's Cognito user.** Library constant and reservation,
+  `validate_id_token`, the cookie key, the `204` header; the gate tests above. Nothing reads the
+  header yet, so it ships safely alone, and no cookie is invalidated.
+- **5g. `bb-auth-web` acts only on that user.** Steps 1 to 3 of the decision, the `K` changes
+  (the designer's sentence; `AccountProfileSendTo` goes), the web tests and the e2e walk. Without
+  5f deployed it offers no edit at all (fail closed), so the order between them is free, but
+  they ship together.
+- **5h. Real, with the user's go-ahead**: the nginx lines on rpi-01 first, then the packages,
+  then the checks above. Then 5e (the real edit) resumes on this design.
+
+#### For the user
+
+- the nginx change on rpi-01 and the deploy, in that order (each a real-effect change);
+- whether the native twin modified at 13:06 should get its old values back (only the IT-Admin
+  session can read what they were, from the pool, and only the user can say to restore them);
+- whether the duplicate native user should stay, be linked to the federated one, or be deleted:
+  a pool change through the OpenTofu repository or an administrator action, outside this step.
