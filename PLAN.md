@@ -246,7 +246,9 @@ ground goes, so it wears the console's ground and cards (the user, 2026-11-25); 
 logo in the console's bar too, widening the console's CSP `img-src` (the user, 2026-11-25); **H**
 one **account menu** in the shared header (the user, 2026-11-25, to slim the header): the bar shows
 the person's name (`given_name`, else the email) as a `details/summary` that opens a panel with the
-full email, the Preferences (theme, language) expanding inside it, and Sign out at the foot. On
+full email, the Preferences (theme, language) expanding inside it, Sign out at the foot, and,
+kept clearly apart from it, "Delete account and all its data", the entry point to step 7 (the user,
+2026-11-25), a link to a confirmation page and never a one-click action. On
 desktop the console's tabs stay visible in the bar, because they are the primary navigation; at
 phone width they move into that panel too. The user agreed to this compromise over "tabs always in
 the menu". It works with scripting off, replaces the separate Preferences menu (so it absorbs M),
