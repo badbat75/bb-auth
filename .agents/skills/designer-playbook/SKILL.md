@@ -37,6 +37,9 @@ Rules are in `AGENTS.md`. Format of this file: `AGENTS.md`, under "Skills".
   `getComputedStyle()` of every control in `main` at 1280 and 390 (example: `/tmp/d8f/m2.js`), before
   and after the injected rule.
 
+- The profile flow against the fake Cognito, outside `shots.js`: `/tmp/d5r/check.js` (boot, write
+  `profileSettingsBytes()` to `ctx.settingsFile`, send `PROFILE_HEADERS` plus `X-Auth-Email`), which
+  reads `scrollWidth`, the `#err` wiring and the change list's text at 320.
 - A mockup of a whole account flow with no server: `/tmp/d5b/gen.js` writes pages from the real CSS and a
   copied bar, `/tmp/d5b/shot.js <names>` shoots them light/dark/360 and reports any sideways scroll.
 
@@ -56,3 +59,4 @@ Rules are in `AGENTS.md`. Format of this file: `AGENTS.md`, under "Skills".
 - At 360 the Preferences panel covers the middle of the screen: a "click outside" in a phone check must aim at a corner (bottom-left), not the centre.
 - A prefilled field must not use `type="date"` or `type="url"`: the browser blanks or refuses a stored value it cannot parse, and on the profile form a blank posts as a deletion.
 - The `K` table has no placeholders: a sentence around a value is two keys (`…Lead`/`…Tail`), so plan copy that way.
+- A review by screenshot misses small markup the design named (the change list's `(was …)` parentheses and `span.muted`, the one-rule `input.f-code` width): read the rendered `textContent` and computed widths too.
