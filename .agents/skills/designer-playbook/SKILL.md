@@ -47,6 +47,7 @@ Rules are in `AGENTS.md`. Format of this file: `AGENTS.md`, under "Skills".
   argument: the account page copies those because it has no `View`, so the fix is a `View`-free
   core (`form_shell_at`, `page_confirm_at` are the precedent), not a third copy.
 - A mockup of a whole account flow with no server: `/tmp/d5b/gen.js` writes pages from the real CSS and a
+- A mockup of a sign-in step with no server: `/tmp/d6/gen.js` fills `login.html` with the three real stylesheets, strips the script, makes one step `.active` and shoots it light/dark at 1280/360/320.
   copied bar, `/tmp/d5b/shot.js <names>` shoots them light/dark/360 and reports any sideways scroll.
 
 ## Pitfalls
@@ -68,3 +69,5 @@ Rules are in `AGENTS.md`. Format of this file: `AGENTS.md`, under "Skills".
 - A review by screenshot misses small markup the design named (the change list's `(was …)` parentheses and `span.muted`, the one-rule `input.f-code` width): read the rendered `textContent` and computed widths too.
 - The gate cannot tell a federated session from a pre-5f native cookie (both send no `X-Auth-Native-Username`): copy for that state must cover both cases.
 - `node e2e/shots.js <filter>` deletes all of `e2e/artifacts/visual/` first: shooting a console scene for comparison wipes the shots under review. Copy them to `/tmp` before, or rerun their filter after.
+- `docs/ARCHITECTURE.md` fails markdownlint MD024 on a repeated heading ("8. Open questions for the user" already exists twice): give a new section's `####` headings a suffix naming it.
+- The sign-in page's social buttons live inside the email step, so they are hidden on the registration and code steps: anything that points at "your provider" on a later step must render them there too.

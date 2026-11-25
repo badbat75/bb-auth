@@ -4957,3 +4957,164 @@ new `account-profile-provider` (`/account/` with the profile settings and no nat
    only the account page does, and it is the one visible difference left in the bar.
 2. Slice F drops the account page's flat ground, which §13.18 chose for a narrow column. Drop it
    (one ground for the estate), or keep it on the account page alone?
+
+### 13.27 The sign-in page warns before a duplicate account (plan step 6, R5, designed 2026-11-25)
+
+The problem, measured on rpi-01 on 2026-11-25: a person who normally signs in with Google or
+Microsoft types the same address into the email-code form. Cognito has no native user with it,
+answers `UserNotFoundException`, and `/auth/login` moves to its registration step, where
+"Create account" makes a native user beside the federated one. The user chose to say so on the
+page, with no Cognito change and no new setting.
+
+What was looked at: `src/assets/login.html` (the three steps, the inline script's `I18N` tables,
+`applyLang`, the `UserNotFoundException` branch of the email step's submit handler, the
+`[data-idp]` binding loop), `src/assets/auth.css` and `src/assets/base.css` (`.hint`, `.panel`,
+`.warn`, `.divider`, `.social`, `button.social-btn`), and in `src/bin/bb-auth.rs` `social_block`,
+`login_page`, `render_page` and the page tests (`every_button_carries_its_own_app_client`,
+`with_no_social_wiring_the_page_has_no_social_markup_at_all`). Mockup: `/tmp/d6/gen.js` fills
+the real template with the three real stylesheets and the registration step active, shot in
+Edge as `/tmp/d6/reg-{en,it}-{light,dark}-{1280,360}.png` and `reg-{en,it}-light-320.png`; no
+sideways scroll at 320, 360 or 1280 (`scrollWidth` equals the viewport).
+
+#### 1. Where, and how the page knows
+
+On the **registration step only**, between its intro sentence and the name fields, and only on a
+deployment that has social buttons. The page does not decide that at run time: the gate does,
+the same way it already decides the social section of the email step. `social_block` returns
+nothing when `gate.social_buttons` is empty, and a new sibling of it does the same for the
+registration step, so on a deployment with no buttons the notice is simply not in the document.
+That is the precedent `social_block`'s rustdoc names ("one way for the section to be absent"),
+and it is what lets a unit test on the rendered HTML show the absence.
+
+The step reads, top to bottom:
+
+1. the existing intro (`#register-intro`, "No account yet for {email}. Finish signing up.");
+2. the notice, a `warn` panel;
+3. the deployment's social buttons again, the same buttons the email step shows;
+4. the existing divider with "or";
+5. the name and phone fields and "Create account", unchanged;
+6. "Use a different email", unchanged.
+
+The buttons are repeated **on this step** because the email step's buttons are hidden here
+(`.step{display:none}`), and a notice that says "use your provider" while the only way to do so
+is two clicks back is recall over recognition (heuristic 6). Repeating them costs no script: the
+page binds every `[data-idp]` it finds, and a step that is `display:none` is out of the
+accessibility tree, so a screen reader meets one set at a time.
+
+#### 2. The words
+
+| Key | English | Italian |
+| --- | --- | --- |
+| `dup_note` | Do you usually sign in with one of the buttons below? Use it instead: signing up with a code creates a second, separate account. | Di solito accedi con uno dei pulsanti qui sotto? Usa quello: registrarti con un codice crea un secondo account, separato. |
+
+Why these words. It is a question, not a statement about the person, so a genuinely new visitor
+reads it as not about them and moves on, and the twin recognises themself in it. It names **no
+provider**: the buttons directly below name them, from the gate's own labels, so the sentence can
+never mention one the deployment lacks and needs no `{name}` argument (the `K`-style rule that a
+sentence around a value is two keys does not arise). It says what to do ("use it instead") and
+the one consequence that matters ("a second, separate account") without the words "duplicate",
+"error" or "wrong". "Below" is literally true on every width, because the buttons follow the
+panel in the same column.
+
+#### 3. The markup
+
+No new class and no CSS change. The notice is `<p class="panel warn" id="dup-note"
+data-i18n="dup_note">` with the English sentence as its text, so it reads correctly before the
+script runs and `applyLang` replaces it as it does every other `data-i18n` element. `.panel` and
+`.warn` are `BASE_CSS`'s surface and state (the tint, the 4px bar in `--warn`), already used by
+the console; the colour lives in `theme.css` only. The buttons are the existing `div.social`
+holding the existing `button.social-btn` markup, and the divider is the existing `div.divider`
+with `<span data-i18n="or">`. `auth.css` does not restyle `.panel`, so its `margin:0 0 16px`
+spaces it from the buttons. `.msg.warn` was tried and rejected: `auth.css` hides `.msg` until
+`.show`, and `#msg` is the page's `role="alert"` live region, which a static note is not.
+
+The panel carries no ARIA role and no live region: it is part of the step, not an event. Since
+the script moves focus to `#given_name` when the step opens, a screen-reader user would land
+after the notice and never hear it, so `#given_name` carries
+`aria-describedby="register-intro dup-note"` in the static template. On a deployment with no
+buttons `dup-note` does not exist, and an IDREF that matches no element is ignored when the
+description is computed (WAI-ARIA 1.2, `aria-describedby`:
+<https://www.w3.org/TR/wai-aria-1.2/#aria-describedby>; Accessible Name and Description
+Computation 1.2, step 2B: <https://www.w3.org/TR/accname-1.2/#computation-steps>), so the one
+template serves both. This also gives the intro sentence, which had the same problem, to that
+user for the first time.
+
+WCAG 2.2 AA: the state is carried by the words, not by the tint (1.4.1 Use of Color,
+<https://www.w3.org/WAI/WCAG22/Understanding/use-of-color.html>); the panel's text is `--text`
+on `--warn-bg`, the pair the console already uses; the reading order equals the visual order
+(1.3.2 Meaningful Sequence, <https://www.w3.org/WAI/WCAG22/Understanding/meaningful-sequence.html>).
+
+#### 4. Registration stays open
+
+The notice asks; it does not block. The fields and "Create account" are where they were, under
+"or", with no checkbox and no confirmation: a separate account is a legitimate wish, signing up
+is not destructive, and a confirmation on a non-destructive action is one people learn to click
+through. The trade is heuristic 5 (error prevention) against heuristic 7 (efficiency for the
+person who meant it), settled toward the lighter touch the user chose.
+
+#### 5. What changes, file by file
+
+- `src/assets/login.html`: a new placeholder `__BB_SOCIAL_REGISTER__` on its own line directly
+  after `<p class="hint" id="register-intro"></p>`; `aria-describedby="register-intro dup-note"`
+  on `#given_name`; and one entry per dictionary in the inline script's `I18N`, `dup_note`, with
+  the two sentences above. That is data in the existing script, not logic: no new function, no
+  new listener, no new script element, and the nonce CSP is unchanged.
+- `src/bin/bb-auth.rs`: factor the per-button loop out of `social_block` (its output stays byte
+  for byte the same), and add its sibling for the registration step, which returns the empty
+  string for an empty list and otherwise the panel, `<div class="social">` with the same buttons,
+  then the divider, in that order. `login_page` adds `("__BB_SOCIAL_REGISTER__", ...)` beside
+  `__BB_SOCIAL_BUTTONS__`. The rustdoc of both says why the buttons appear twice.
+- No change to `auth.css`, `base.css`, `theme.css`, any setting, or Cognito.
+
+This differs from the plan's wording in two places, which the coordinator should know: the gate
+(`bb-auth.rs`) changes, because a static template cannot be absent on one deployment and present
+on another, and the inline script gains two strings, because that is where the page's words
+live.
+
+#### 6. Tests for the notice
+
+Gate unit tests (`src/bin/bb-auth.rs`, on `login_page`'s output):
+
+- With buttons (`settings_with_buttons(&[("Google", ..), ("Okta", ..)])`): the page contains
+  `id="dup-note"` with `data-i18n="dup_note"`; its position is after `id="register-form"` and
+  before `id="given_name"`; `data-idp="Google"` occurs **twice**, the second occurrence inside the
+  registration step (after `id="register-form"`, before `id="code-form"`), followed by
+  `class="divider"` before `id="given_name"`.
+- In both languages: the script carries the exact English and Italian `dup_note` strings
+  (`dup_note: "Do you usually sign in ..."` and `dup_note: "Di solito accedi ..."`), and the
+  panel's own text is the English one.
+- Without buttons (`social_settings("", &[])`, and a domain with an empty list): no
+  `id="dup-note"`, no `data-i18n="dup_note"` attribute, `data-idp=` absent, and no `__BB_` left
+  anywhere on the page. Assert on the element, not the string: the `I18N` table carries the
+  sentence on every deployment.
+- `#given_name` carries `aria-describedby="register-intro dup-note"` on both.
+- The email step is unchanged: the first `class="divider"` still precedes the first
+  `data-idp=` inside `id="email-form"`, and the existing ordering test still holds.
+
+No e2e walk covers `/auth/login` (the browser suites drive `bb-auth-web`). The designer reviews
+the rendered page in a browser with the registration step active, light and dark, at 1280 and
+360, in both languages, before the slice closes, as the plan's "Done when" says.
+
+#### 7. Alternatives rejected
+
+- **The notice alone, pointing back to the email step**: the action is two clicks away and the
+  person has to remember which button; the buttons beside the sentence are the instruction.
+- **Naming the providers in the sentence**: needs names derived from the buttons and a `{name}`
+  list in two word orders; the buttons below already say them, in the gate's labels.
+- **A static notice hidden by CSS `:has()` when there is no `.social`**: the sentence would be
+  in every document, and a unit test could not show its absence.
+- **Moving the social section out of the steps and showing the notice with a sibling selector**:
+  restructures the email step for a second purpose, and puts the notice under the form, after
+  the person has typed their names.
+- **The notice on the email step, before anyone types**: it would speak to everybody who signs
+  in, almost all of whom are not the case, and teach people to ignore the card.
+- **A checkbox or a confirmation before "Create account"**: friction on a legitimate,
+  non-destructive choice (section 4).
+
+#### 8. Open questions for the user on the notice
+
+1. The intro just above the notice says "No account yet for {email}", which is not true for the
+   person this notice is for (they have a provider account). Leave it, since the notice sits
+   right under it, or soften it for every deployment to "No account signs in with a code for
+   {email} yet"?
+2. The email step's own hint promises "No account yet? We'll create one on the fly." Leave it?
