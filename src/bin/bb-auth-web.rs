@@ -1108,7 +1108,10 @@ enum K {
     AccountKeyRotate,
     AccountKeyRemove,
     AccountKeyNotYours,
-    AccountKeyBound,
+    // The mint form's refusals, one per fact (§13.17): the one that replaced
+    // `AccountKeyBound` says which of the two fields is wrong, not both.
+    AccountKeyIdBad,
+    AccountKeyTooShort,
     AccountKeyFull,
     AccountKeyDup,
     AccountKeyUnknownScope,
@@ -1125,6 +1128,7 @@ enum K {
     KeyScopesOnly,
     KeyScopeGone,
     KeyScopesWithoutOnly,
+    KeyScopesChoose,
     // The five duration choices (§13.15), the custom box, and the three refusals
     // `duration_from_form` answers with.
     DurOneYear,
@@ -2300,37 +2304,46 @@ fn t(lang: Lang, key: K) -> &'static str {
         ),
         // The mint form's two field labels. The **field names** stay `id` and `duration`,
         // because the handler reads those and the file stores those; the label is the page's
-        // word for the thing, and a label is displayed text. The Italian nouns are the ones
-        // this page's own refusals already use (`AccountKeyBound` says "l'id di una chiave",
-        // "una durata è"), so the form and the refusal name the field alike.
+        // word for the thing, and a label is displayed text. The Italian noun is the one this
+        // page's own refusals use (`AccountKeyIdBad` says "Il nome di una chiave", `AccountKeyDup`
+        // "quel nome"), so the form and the refusal name the field alike, and the file's word
+        // `id` never appears on this page.
         // The two forms every key of the caller's carries. The verbs are this page's, not the
         // console's (`K::Rotate` / `K::Remove` are an operator's lowercase command words): a
         // person with no administrator in the room is clicking a button that says what it does.
         K::AccountKeyRotate => m(lang, "Rotate key", "Rigenera la chiave"),
         K::AccountKeyRemove => m(lang, "Revoke key", "Revoca la chiave"),
         // The refusals this form answers with. Each names what to write instead, because a
-        // person with no administrator at hand has to fix it themselves.
-        K::AccountKeyBound => m(
+        // person with no administrator at hand has to fix it themselves, and each says **one**
+        // fact: the `AccountKeyBound` these replaced named the id and the window in the same
+        // sentence, so a person who typed `My Laptop` read about durations (WCAG 3.3.1 and
+        // 3.3.3: identify the error in text, name the fix).
+        K::AccountKeyIdBad => m(
             lang,
-            "a key id is lowercase letters, digits and dashes, up to 32, and a key lasts at \
-             least a day.",
-            "l'id di una chiave è lettere minuscole, cifre e trattini, fino a 32, e una chiave \
-             dura almeno un giorno.",
+            "A key name is lowercase letters, digits and dashes, up to 32 characters, such as \
+             laptop.",
+            "Il nome di una chiave è fatto di lettere minuscole, cifre e trattini, fino a 32 \
+             caratteri, per esempio laptop.",
+        ),
+        K::AccountKeyTooShort => m(
+            lang,
+            "A key must last at least a day; choose a longer duration.",
+            "Una chiave deve durare almeno un giorno; scegli una durata più lunga.",
         ),
         K::AccountKeyFull => m(
             lang,
-            "this account has ten keys, which is the most this page mints.",
-            "questo account ha dieci chiavi, il massimo che questa pagina crea.",
+            "This account has ten keys, which is the most this page mints.",
+            "Questo account ha dieci chiavi, il massimo che questa pagina crea.",
         ),
         K::AccountKeyDup => m(
             lang,
-            "this account already has a key with that id.",
-            "questo account ha già una chiave con quell'id.",
+            "This account already has a key with that name.",
+            "Questo account ha già una chiave con quel nome.",
         ),
         K::AccountKeyUnknownScope => m(
             lang,
-            "a scope you picked is not one a key of yours can reach.",
-            "uno degli scope scelti non è uno che una tua chiave può raggiungere.",
+            "A scope you picked is not one a key of yours can reach.",
+            "Uno degli ambiti scelti non è uno che una tua chiave può raggiungere.",
         ),
         // The keys table and its `+ New key` row (§13.16). The two column words are the
         // table's headings **and** the mint form's field labels, so a field and the column
@@ -2371,6 +2384,14 @@ fn t(lang: Lang, key: K) -> &'static str {
             "You ticked scopes; choose 'only these', or untick them.",
             "Hai spuntato degli ambiti; scegli 'solo questi', o togli la spunta.",
         ),
+        // The answer to a `restrict` that is neither of the two the form sends, which only a
+        // hand-written `POST` achieves. No field is marked: the request chose nothing, and the
+        // honest fix names the two choices it could have chosen.
+        K::KeyScopesChoose => m(
+            lang,
+            "Choose 'all scopes' or 'only these'.",
+            "Scegli 'tutti gli ambiti' o 'solo questi'.",
+        ),
         // The five duration choices (§13.15). The words are the person's; the values the
         // control posts are the file's (`365d`, `182d`, `91d`, `custom`, `never`), so the
         // stored string is the spelling `bb-auth-adm show` prints.
@@ -2379,14 +2400,14 @@ fn t(lang: Lang, key: K) -> &'static str {
         K::DurThreeMonths => m(lang, "in 3 months", "tra 3 mesi"),
         K::DurCustom => m(lang, "after a number of days", "dopo un numero di giorni"),
         K::DurNever => m(lang, "never", "mai"),
-        K::DurDaysLabel => m(
-            lang,
-            "Custom duration, in days",
-            "Durata personalizzata, in giorni",
-        ),
+        // The box's own name. It echoes the option the person picked ("after a number of
+        // days") and contains the placeholder's word, where "Custom duration" named nothing
+        // on screen (WCAG 2.5.3, label in name).
+        K::DurDaysLabel => m(lang, "Number of days", "Numero di giorni"),
         K::DurDaysHint => m(lang, "days", "giorni"),
         // The three refusals `duration_from_form` answers with, each naming its own fix,
-        // because the person reading them has no administrator in the room.
+        // because the person reading them has no administrator in the room. They sit beside
+        // `KeyDurationRequired`, already a sentence, in the same box.
         K::KeyDurationRequired => m(
             lang,
             "Choose how long the key lasts.",
@@ -2394,13 +2415,13 @@ fn t(lang: Lang, key: K) -> &'static str {
         ),
         K::KeyDaysWithoutCustom => m(
             lang,
-            "you typed a number of days; choose Custom, or clear it",
-            "hai scritto un numero di giorni; scegli Personalizzata, o cancellalo",
+            "You typed a number of days; choose 'after a number of days', or clear it.",
+            "Hai scritto un numero di giorni; scegli 'dopo un numero di giorni', o cancellalo.",
         ),
         K::KeyDaysInvalid => m(
             lang,
-            "a whole number of days, at least 1",
-            "un numero intero di giorni, almeno 1",
+            "Write a whole number of days, at least 1.",
+            "Scrivi un numero intero di giorni, almeno 1.",
         ),
         // One sentence for "no such key" and "that key belongs to somebody else", because a
         // page that answered the two differently is an enumeration oracle for anybody with an
@@ -2408,7 +2429,7 @@ fn t(lang: Lang, key: K) -> &'static str {
         K::AccountKeyNotYours => m(
             lang,
             "that key is not one of yours, so this page cannot rotate it or revoke it.",
-            "quella chiave non è una delle tue, quindi questa pagina non può ruotarla né \
+            "quella chiave non è una delle tue, quindi questa pagina non può rigenerarla né \
              revocarla.",
         ),
         K::AccountVetoTitle => m(lang, "You are refused", "Sei escluso"),
@@ -4587,12 +4608,23 @@ fn text_field(
 /// `choice` is one of the five values, `days` what the box shows; [`duration_of_stored`] and
 /// [`duration_of_posted`] are what put a file's bytes, or a person's submission, into that
 /// shape, and they always name one of the five, so exactly one option is picked.
+///
+/// The box's two words are the surfaces' own, because the two boxes take different grammars.
+/// `placeholder` is what the empty box says: `/account/` passes "days", since its box takes a
+/// number and nothing else. The console passes nothing, because its box takes the whole
+/// grammar (`12h` is a legal value there) and a placeholder of "days" would be a lie about it.
+/// `hint` is the line under the row, and is `None` where the placeholder already says the
+/// same thing: a bare word alone on the line below reads as a caption of the whole row. The
+/// box keeps its own name as an `aria-label` either way, since a placeholder is not a label
+/// (WCAG 3.3.2) and the wrapping `label` labels only its first labelable descendant, the
+/// select.
 fn duration_choice(
     lang: Lang,
     label: &str,
     choice: &str,
     days: &str,
-    hint: &str,
+    placeholder: Option<&str>,
+    hint: Option<&str>,
     invalid: bool,
 ) -> Markup {
     html! {
@@ -4613,9 +4645,12 @@ fn duration_choice(
                 }
                 input type="text" inputmode="numeric" name="days" size="6" value=(days)
                       class="f-days"
+                      placeholder=[placeholder]
                       aria-label=(t(lang, K::DurDaysLabel));
             }
-            span class="hint" { (hint) }
+            @if let Some(hint) = hint {
+                span class="hint" { (hint) }
+            }
         }
     }
 }
@@ -6557,7 +6592,9 @@ fn page_key_form(
                     "duration",
                     &f.duration,
                     &f.days,
-                    "<n>d · <n>h",
+                    // No placeholder: this box takes the whole grammar, and the hint says so.
+                    None,
+                    Some("<n>d · <n>h"),
                     about("duration"),
                 ))
                 label {
@@ -8969,8 +9006,9 @@ fn account_key_id_field(lang: Lang, value: &str, invalid: bool) -> Markup {
 /// file stores. A hand-written form can still name a pair that is not on the list, and the handler
 /// answers that with a `400`: a pair the gate would refuse mints a key that fails on its very
 /// first request. That list is **empty** for a caller whose scopes take `login` only, and then the
-/// narrowing radio is absent with it: a choice with nothing to choose is a control that can only
-/// be answered wrong, and `restrict=some` with no pair writes a key narrowed to nothing.
+/// whole block is absent, a hidden `restrict=all` in its place: a lone checked radio beside a
+/// "Scopes" heading is a choice of one, a control that can only be answered wrong, and
+/// `restrict=some` with no pair writes a key narrowed to nothing.
 ///
 /// No URL appears. The restriction is named by application and scope, never by the pattern behind
 /// it (§13.6): a URL from the file is information about the estate, and this page is about the
@@ -8999,17 +9037,26 @@ fn account_key_row(
             t(lang, K::KeyColExpires),
             row.choice,
             row.days,
-            t(lang, K::DurDaysHint),
+            // This box takes a number and nothing else, so the placeholder can name the unit;
+            // the console's takes `12h` too and keeps its hint line instead (§13.17).
+            Some(t(lang, K::DurDaysHint)),
+            None,
             about("duration"),
         ))
-        div {
-            span class="lbl" { (t(lang, K::Scopes)) }
-            label class="radio" {
-                input type="radio" name="restrict" value="all" checked[!row.some];
-                span { (t(lang, K::KeyScopesAll)) }
-            }
-            // The narrowing choice, and only when there is something to narrow **to**.
-            @if !apps.is_empty() {
+        @if apps.is_empty() {
+            // Nothing to narrow to, so there is no choice to show, not even a checked radio
+            // beside a "Scopes" heading: a choice of one is a control that can only be
+            // answered wrong. The restriction the owner reaches is carried unseen, so the
+            // handler is unchanged and still refuses a request that chose nothing.
+            input type="hidden" name="restrict" value="all";
+        } @else {
+            div {
+                span class="lbl" { (t(lang, K::Scopes)) }
+                label class="radio" {
+                    input type="radio" name="restrict" value="all" checked[!row.some];
+                    span { (t(lang, K::KeyScopesAll)) }
+                }
+                // The narrowing choice, and only when there is something to narrow **to**.
                 label class="radio" {
                     input type="radio" name="restrict" value="some" checked[row.some];
                     span { (t(lang, K::KeyScopesOnly)) ":" }
@@ -9782,13 +9829,14 @@ fn account_key_post(
                 duration_from_form(&form).map_err(|k| Refusal::on("duration", t(lang, k)))?;
             let restrict = form.get("restrict").trim().to_string();
             let pairs = form.all("scope");
-            // The bound names the field it is about, because the row it re-renders marks that
-            // field and not the other.
+            // Each refusal names the field it is about, because the row it re-renders marks that
+            // field and not the other, and says one fact: the sentence a person reads has to be
+            // the sentence about what they got wrong.
             if !account_key_id_ok(&id) {
-                return Err(Refusal::on("id", t(lang, K::AccountKeyBound)));
+                return Err(Refusal::on("id", t(lang, K::AccountKeyIdBad)));
             }
             if !account_key_window_ok(&duration) {
-                return Err(Refusal::on("duration", t(lang, K::AccountKeyBound)));
+                return Err(Refusal::on("duration", t(lang, K::AccountKeyTooShort)));
             }
             // The row's keys, read off the **document**, not the compiled table: the bound is on
             // how many credentials one identity carries, and a key whose hash the gate skipped is
@@ -9831,8 +9879,9 @@ fn account_key_post(
                 }
                 // Neither of the two the form can send. Refused rather than read as `all`: a key
                 // with no restriction is the widest credential this page mints, and a request
-                // that did not choose it must not get it by default.
-                _ => return Err(t(lang, K::AccountKeyBound).to_string().into()),
+                // that did not choose it must not get it by default. No field is marked: the
+                // request chose nothing, so the fix is to name the two it could choose.
+                _ => return Err(t(lang, K::KeyScopesChoose).to_string().into()),
             };
             let sealed = add_api_key(
                 &mut doc,
@@ -21409,9 +21458,10 @@ mod tests {
             account_readable(&g.body)
         );
         let err = element_containing(&g.body, "class=\"err\"", "</div>");
-        assert!(
-            !visible_text(&err).is_empty(),
-            "the refusal is a sentence, not a colour: {err}"
+        assert_eq!(
+            visible_text(&err),
+            t(Lang::En, K::AccountKeyIdBad),
+            "a bad name is refused with the name's own sentence (8c-2): {err}"
         );
         let id = tag_containing(&g.body, "name=\"id\"");
         assert_eq!(
@@ -21494,6 +21544,287 @@ mod tests {
             "the contradictory choice wrote nothing"
         );
 
+        cleanup(&path);
+    }
+
+    /// 8c-2 (§13.17): a refused key name says one fact, and it is the name's. The old
+    /// `AccountKeyBound` also spoke about durations, so a person who typed `My Laptop` read
+    /// about days. The marked field is the name, and the select is not marked.
+    #[test]
+    fn a_bad_key_name_is_refused_without_naming_the_duration() {
+        let path = account_scratch_access("keys-bad-name", &account_access_keys());
+        let base = account_serve(&path);
+        let before = read(&path);
+        let rev = sha256_hex(&before);
+        let g = account_post(
+            &format!("{base}keys"),
+            Some("bob@x.com"),
+            &[
+                ("rev", rev.as_str()),
+                ("id", "My Laptop"),
+                ("duration", "30d"),
+                ("restrict", "all"),
+            ],
+        );
+        assert_eq!(g.status, 400, "{}", account_readable(&g.body));
+        let err = visible_text(&element_containing(&g.body, "class=\"err\"", "</div>"));
+        assert_eq!(err, t(Lang::En, K::AccountKeyIdBad), "{err}");
+        let low = err.to_lowercase();
+        assert!(
+            !low.contains("day") && !low.contains("giorn") && !low.contains("last"),
+            "a bad name is not a sentence about durations: {err}"
+        );
+        assert_eq!(
+            attr(&tag_containing(&g.body, "name=\"id\""), "aria-invalid").as_deref(),
+            Some("true"),
+            "the name field is the marked one"
+        );
+        assert_eq!(
+            attr(
+                &tag_containing(&g.body, "name=\"duration\""),
+                "aria-invalid"
+            ),
+            None,
+            "the select is not"
+        );
+        assert_eq!(read(&path), before, "the refusal wrote nothing");
+        cleanup(&path);
+    }
+
+    /// 8c-2 (§13.17): a window under a day (`12h` in the custom box) is the duration's
+    /// refusal, on the select, and says nothing about the name.
+    #[test]
+    fn a_too_short_key_is_refused_without_naming_the_name() {
+        let path = account_scratch_access("keys-too-short", &account_access_keys());
+        let base = account_serve(&path);
+        let before = read(&path);
+        let rev = sha256_hex(&before);
+        let g = account_post(
+            &format!("{base}keys"),
+            Some("bob@x.com"),
+            &[
+                ("rev", rev.as_str()),
+                ("id", "phone"),
+                ("duration", "custom"),
+                ("days", "12h"),
+                ("restrict", "all"),
+            ],
+        );
+        assert_eq!(g.status, 400, "{}", account_readable(&g.body));
+        let err = visible_text(&element_containing(&g.body, "class=\"err\"", "</div>"));
+        assert_eq!(err, t(Lang::En, K::AccountKeyTooShort), "{err}");
+        let low = err.to_lowercase();
+        assert!(
+            !low.contains("name") && !low.contains("lowercase") && !low.contains("dash"),
+            "a short window is not a sentence about the name: {err}"
+        );
+        assert_eq!(
+            attr(
+                &tag_containing(&g.body, "name=\"duration\""),
+                "aria-invalid"
+            )
+            .as_deref(),
+            Some("true"),
+            "the select is the marked field"
+        );
+        assert_eq!(
+            attr(&tag_containing(&g.body, "name=\"id\""), "aria-invalid"),
+            None,
+            "the name field is not"
+        );
+        assert_eq!(read(&path), before, "the refusal wrote nothing");
+        cleanup(&path);
+    }
+
+    /// 8c-2 (§13.17): the account form's refusals and the three duration ones are sentences,
+    /// in both languages (a capital, a full stop), and the texts are the design's.
+    /// `AccountKeyNotYours` is Italian for "rigenerare", the button's own verb.
+    #[test]
+    fn the_account_refusals_are_sentences() {
+        let all = [
+            ("AccountKeyIdBad", K::AccountKeyIdBad),
+            ("AccountKeyTooShort", K::AccountKeyTooShort),
+            ("KeyScopesChoose", K::KeyScopesChoose),
+            ("KeyDurationRequired", K::KeyDurationRequired),
+            ("KeyDaysWithoutCustom", K::KeyDaysWithoutCustom),
+            ("KeyDaysInvalid", K::KeyDaysInvalid),
+            ("AccountKeyFull", K::AccountKeyFull),
+            ("AccountKeyDup", K::AccountKeyDup),
+            ("AccountKeyUnknownScope", K::AccountKeyUnknownScope),
+        ];
+        for lang in [Lang::En, Lang::It] {
+            for (name, k) in &all {
+                let s = t(lang, *k);
+                assert!(
+                    s.chars().next().is_some_and(char::is_uppercase) && s.ends_with('.'),
+                    "{name} in {}: a sentence has a capital and a full stop: {s:?}",
+                    lang.code()
+                );
+            }
+        }
+        for (k, en, it) in [
+            (
+                K::AccountKeyIdBad,
+                "A key name is lowercase letters, digits and dashes, up to 32 characters, such as laptop.",
+                "Il nome di una chiave \u{e8} fatto di lettere minuscole, cifre e trattini, fino a 32 caratteri, per esempio laptop.",
+            ),
+            (
+                K::AccountKeyTooShort,
+                "A key must last at least a day; choose a longer duration.",
+                "Una chiave deve durare almeno un giorno; scegli una durata pi\u{f9} lunga.",
+            ),
+            (
+                K::KeyScopesChoose,
+                "Choose 'all scopes' or 'only these'.",
+                "Scegli 'tutti gli ambiti' o 'solo questi'.",
+            ),
+            (
+                K::KeyDaysWithoutCustom,
+                "You typed a number of days; choose 'after a number of days', or clear it.",
+                "Hai scritto un numero di giorni; scegli 'dopo un numero di giorni', o cancellalo.",
+            ),
+            (
+                K::KeyDaysInvalid,
+                "Write a whole number of days, at least 1.",
+                "Scrivi un numero intero di giorni, almeno 1.",
+            ),
+            (
+                K::AccountKeyFull,
+                "This account has ten keys, which is the most this page mints.",
+                "Questo account ha dieci chiavi, il massimo che questa pagina crea.",
+            ),
+            (
+                K::AccountKeyDup,
+                "This account already has a key with that name.",
+                "Questo account ha gi\u{e0} una chiave con quel nome.",
+            ),
+            (
+                K::AccountKeyUnknownScope,
+                "A scope you picked is not one a key of yours can reach.",
+                "Uno degli ambiti scelti non \u{e8} uno che una tua chiave pu\u{f2} raggiungere.",
+            ),
+        ] {
+            assert_eq!(t(Lang::En, k), en);
+            assert_eq!(t(Lang::It, k), it);
+        }
+        let it = t(Lang::It, K::AccountKeyNotYours);
+        assert!(
+            it.contains("rigenerarla") && !it.contains("ruotarla"),
+            "the Italian refusal uses the button's verb: {it}"
+        );
+    }
+
+    /// 8c-2 (§13.17): on `/account/` the days box has a placeholder and its own accessible
+    /// name and the form has no hint line; on the console the box has no placeholder and the
+    /// hint `<n>d · <n>h` stays, because that box takes the whole grammar.
+    #[test]
+    fn the_days_box_has_a_placeholder_and_its_own_name() {
+        let path = account_scratch_access("keys-days-box", &account_access_keys());
+        let base = account_serve(&path);
+        for (lang, cookie, hint, label) in [
+            (Lang::En, "lang=en", "days", "Number of days"),
+            (Lang::It, "lang=it", "giorni", "Numero di giorni"),
+        ] {
+            let g = account_call_pref(
+                &format!("{base}keys/new"),
+                Some("bob@x.com"),
+                Some(cookie),
+                None,
+            );
+            assert_eq!(g.status, 200, "{}", account_readable(&g.body));
+            let s = account_section(&g.body, "keys");
+            let days = tag_containing(&s, "name=\"days\"");
+            assert_eq!(attr(&days, "placeholder").as_deref(), Some(hint), "{days}");
+            assert_eq!(attr(&days, "aria-label").as_deref(), Some(label), "{days}");
+            assert_eq!(t(lang, K::DurDaysLabel), label);
+            for h in elements(&s, "<span class=\"hint\"", "</span>") {
+                assert_ne!(
+                    visible_text(&h),
+                    hint,
+                    "the bare word under the row is gone: {h}"
+                );
+            }
+        }
+        cleanup(&path);
+
+        let path = scratch("console-days-box", SAMPLE);
+        let cfg = cfg_for(&path, "");
+        let v = view(&cfg, Route::KeyAdd(BOB.to_string()), "REV");
+        let f = KeyForm {
+            duration: "365d".to_string(),
+            ..Default::default()
+        };
+        let page = page_key_form(&v, "bob", None, "2026-01-01", &f, None).into_string();
+        let days = tag_containing(&page, "name=\"days\"");
+        assert_eq!(attr(&days, "placeholder"), None, "no placeholder: {days}");
+        assert_eq!(
+            attr(&days, "aria-label").as_deref(),
+            Some("Number of days"),
+            "the reworded name is on both surfaces: {days}"
+        );
+        assert!(
+            page.contains("&lt;n&gt;d \u{b7} &lt;n&gt;h"),
+            "the console keeps its hint: {page}"
+        );
+        cleanup(&path);
+    }
+
+    /// 8c-2 (§13.17): with nothing to narrow to there is no choice to show, and the form
+    /// carries `restrict=all` hidden; with pairs it offers both radios as before.
+    #[test]
+    fn a_key_with_nothing_to_narrow_has_no_scope_choice() {
+        let path = account_scratch_access(
+            "keys-no-choice",
+            &ACCOUNT_ACCESS_NO_NARROW.replace("__DAVE__", ACCOUNT_DAVE),
+        );
+        let base = account_serve(&path);
+        let g = account_call(&format!("{base}keys/new"), Some("dave@x.com"));
+        assert_eq!(g.status, 200, "{}", account_readable(&g.body));
+        let s = account_section(&g.body, "keys");
+        assert!(
+            !s.contains("type=\"radio\""),
+            "no radio at all, not a choice of one: {s}"
+        );
+        assert!(
+            !s.contains(t(Lang::En, K::KeyScopesAll)),
+            "and no \"all scopes\" in the form: {s}"
+        );
+        assert_eq!(s.matches("name=\"restrict\"").count(), 1, "{s}");
+        let hidden = tag_containing(&s, "name=\"restrict\"");
+        assert!(
+            hidden.contains("type=\"hidden\"") && attr(&hidden, "value").as_deref() == Some("all"),
+            "one hidden restrict=all stands in: {hidden}"
+        );
+        let rev = sha256_hex(&read(&path));
+        let g = account_post(
+            &format!("{base}keys"),
+            Some("dave@x.com"),
+            &[
+                ("rev", rev.as_str()),
+                ("id", "phone"),
+                ("duration", "30d"),
+                ("restrict", "all"),
+            ],
+        );
+        assert_eq!(g.status, 200, "{}", account_readable(&g.body));
+        assert!(
+            account_key_json(&read(&path), 0, "phone")
+                .get("scopes")
+                .is_none(),
+            "the form as rendered mints a key with no scopes"
+        );
+        cleanup(&path);
+
+        let path = account_scratch_access("keys-with-choice", &account_access_keys());
+        let base = account_serve(&path);
+        let g = account_call(&format!("{base}keys/new"), Some("bob@x.com"));
+        let s = account_section(&g.body, "keys");
+        assert_eq!(s.matches("type=\"radio\"").count(), 2, "{s}");
+        assert!(
+            s.contains("value=\"all\"") && s.contains("value=\"some\""),
+            "{s}"
+        );
+        assert!(!s.contains("type=\"hidden\" name=\"restrict\""), "{s}");
         cleanup(&path);
     }
 

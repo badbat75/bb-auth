@@ -118,3 +118,9 @@ Rules are in `AGENTS.md`. Format of this file: `AGENTS.md`, under "Skills".
   name it as the string to assert the absence **of** (the footer's `SignedInAs`): that is a
   `dead_code` warning in the bin, and the repo has no `#[allow(dead_code)]` to borrow. Report it
   for the tester to remove the key and its assertions together; do not silence it.
+- Replacing a visible control with a hidden input breaks the **e2e** that reads the control's
+  attributes, not just the Rust test: `e2e/tests/account.js` §2 asserts the single
+  `input[name=restrict]` is `checked`, and 8c-2's `type=hidden name=restrict value=all` carries no
+  `checked`. The staged Rust test demands the hidden input, so the pair is mutually exclusive and
+  the e2e is the tester's to update. Grep `e2e/tests` for the control's name before shipping the
+  swap, and report the label (`restrict=all is on offer and checked`).

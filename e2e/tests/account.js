@@ -208,8 +208,8 @@ async function run(ctx, t) {
   const restrict = page.locator(`${MINT} input[name=restrict]`);
   const offered = [];
   for (let i = 0, n = await restrict.count(); i < n; i++) offered.push(await restrict.nth(i).getAttribute('value'));
-  t.eq('restrict=all is on offer and checked',
-    offered.length === 1 && offered[0] === 'all' && (await restrict.getAttribute('checked')) !== null, true);
+  t.eq('with nothing to narrow to, restrict=all is sent hidden and no scope choice is shown',
+    offered.length === 1 && offered[0] === 'all' && (await restrict.getAttribute('type')) === 'hidden', true);
   t.eq('the mint page carries no script', tags(await page.content(), /<script/i).length, 0);
   t.eq('and does not offer to open itself again', await page.locator(`a[href="${NEW}"]`).count(), 0);
   t.check('it carries the way back out', (await page.locator(`${MINT} a.pill`).innerText()).includes('cancel'),
