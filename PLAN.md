@@ -143,6 +143,20 @@ request. Editable: `gate.profile_claims` minus `email`, `phone_number`, `preferr
 `IPAddressAllow=localhost`, which block the call to Cognito (cost in §13.7). Tests use a fake
 Cognito endpoint and never the real pool; the first real edit needs the user's go-ahead.
 
+The real pool, read on 2026-11-25 (read-only `describe-user-pool` and `describe-user-pool-client`,
+run by the IT-Admin session at the user's request; nothing changed): email is the username
+(`UsernameAttributes: [email]`), `AllowedFirstAuthFactors` has `EMAIL_OTP` and `PASSWORD`, MFA off,
+self-signup open, no custom attributes, `DeletionProtection` inactive. The native client
+`39c7grfrau8i7tvqqkej86sh98` (`gate.client_id`) allows `ALLOW_USER_AUTH` with
+`AuthSessionValidity` 3 minutes, no secret, and `ReadAttributes`/`WriteAttributes` unset (Cognito's
+default, all writable standard attributes; unverified). The social client
+`jsahvqjbm5v8idb6kj577ggbh` allows only `ALLOW_REFRESH_TOKEN_AUTH`, so a person who signed in only
+through Google or Microsoft cannot re-authenticate by email code there. Two consequences for the
+design: `AttributesRequireVerificationBeforeUpdate` is empty, so an email change would apply
+unconfirmed (moot while `email` stays read-only, which it does); and the pool and both clients
+are managed in OpenTofu (the itadmin repository, `infra/tofu/stacks/aws/production/cognito.tf`),
+so any change to them goes through that repository's plan and apply, never the AWS CLI.
+
 Inherited from §13.13: every Cognito call carries `timeout_global` of 5 s (assumed, not measured),
 no retry, at most two calls per request, so a slow Cognito cannot pin the workers; a test with a
 fake endpoint that never answers shows the handler answering within the bound and the worker
@@ -228,7 +242,3 @@ look by hand at the native "Preferences" tooltip while the open menu's cover is 
     behaviour made false. The admin GUI says nothing about exclusions on removal, so it is
     unchanged, though §13.8 had said the admin pages would change too.
 
-- Before step 5: a read-only check of the real pool (`aws cognito-idp describe-user-pool` and
-  `describe-user-pool-client`): email sign-in, `ALLOW_USER_AUTH`, `WriteAttributes`,
-  `AuthSessionValidity`, `AttributesRequireVerificationBeforeUpdate`. The user runs it, or
-  approves it being run.
