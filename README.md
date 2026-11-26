@@ -629,17 +629,21 @@ its `root:bb-auth 0640` ownership. Then reload — see below.
 
 ### Editing it in a browser — `bb-auth-web`
 
-The same file in a browser: a server-rendered admin GUI that needs no JavaScript. Three tabs
-about the access file, a fourth over what the gate has recorded, and a fifth for the settings
-file.
+The same file in a browser: a server-rendered admin GUI that needs no JavaScript. The bar is
+one row at every width: the deployment's logo, its name, three tabs about the access file, a
+fourth over what the gate has recorded, and a pill showing your given name (or your first
+address) that opens the **account menu**: **System settings**, "Go to your account", Preferences
+(theme and language) and Sign out. At 800px and below the tabs move into that menu too, so the
+bar never wraps.
 **Users** holds the three sections about people, in the order they nest: the user groups and
 who references each one, then the roster, then the `denied` veto. **Applications** lists each
 one with its area, its scope count and which credential classes get in anywhere inside it,
 and each application's page shows its scopes **numbered in file order** (the number is the
 meaning — first match wins) with their members, their credentials and their `excluded`.
 Every key's expiry is on its owner's page. **Audit** is the one tab that edits nothing: see
-[The audit](#the-audit) below. **Settings** is the odd one out and reads like it:
-it edits the other file (see [Config](#config)), which is why it is last.
+[The audit](#the-audit) below. **System settings** is not a tab and reads like it:
+it edits the other file (see [Config](#config)), which is why it is a row of the account menu
+rather than a fifth thing the bar has to find room for.
 
 The **access check** (`can EMAIL URL` in the browser, answered by the gate's own decision
 function) has no tab, because every tab is a place and it is a question. It is a section of
@@ -693,7 +697,7 @@ serving anyone.
 | `BB_AUTH_WEB_ALLOW_NONLOOPBACK` | no | *(unset)* | `1` to allow a non-loopback `BB_AUTH_WEB_LISTEN`. Without it that bind is a fatal startup: the service's only credential is a header nginx sets, so anything that can reach the port could edit the access file |
 
 Who may use it is **not** an env var: it is `web.admins` in the settings file, read fresh on
-every request and editable from the GUI's own Settings tab, because this is the one service
+every request and editable from the GUI's own System settings page, because this is the one service
 that can edit it and a change that needed a restart would be a change it could make and not
 see. It is required and never empty: the binary refuses to serve without one, and both
 editors refuse to write an empty list.
@@ -1155,9 +1159,9 @@ the social callback, the error page and the refusal page the gate serves, and ev
 | Setting | What it does |
 |---|---|
 | `stylesheet_url` | a stylesheet loaded **after** the built-in one, so it wins by source order. Absolute `https://`, or a path starting with `/` on this host |
-| `logo_url` | shown on the sign-in page above the name. Same two shapes. Empty = the name alone |
+| `logo_url` | shown on the sign-in page above the name, and in the bar of both `bb-auth-web` surfaces beside it. Same two shapes. Empty = the name alone |
 | `brand_name` | what the estate calls this deployment: the sign-in page, and the bar of both `bb-auth-web` surfaces (the console's and `/account`'s). Empty = `bb-auth` |
-| `theme` | `system` (default), `light` or `dark`: which palette a page starts in. In `bb-auth-web` it is only the default, and each administrator's own Settings menu overrides it |
+| `theme` | `system` (default), `light` or `dark`: which palette a page starts in. In `bb-auth-web` it is only the default, and each administrator's own Preferences box (in the account menu) overrides it, where the automatic choice reads "Auto (system)" |
 
 Both binaries already carry a **complete** stylesheet, so an unset `stylesheet_url` is a fully
 styled deployment and an unreachable one costs a page its palette and nothing else. That is

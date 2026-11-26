@@ -33,6 +33,9 @@ Rules are in `AGENTS.md`. Format of this file: `AGENTS.md`, under "Skills".
 ## Pitfalls
 
 - A source about something similar looks like a source, but is only a hint.
+- Rewriting a Markdown table row brings its existing em-dash into the `+` side of the diff, so the
+  `grep -c '—'` check counts it as new. Keep the dash only where it is data (a `—` cell); in prose,
+  replace it.
 - A scope pattern must match its application's base **including the scheme**: `*://host/*` is
   refused as outside base `https://host`. So a documented catch-all is `https://host/*`, and a
   recipe that runs `scope add … --user X` needs `user add X` first, since a name not in the

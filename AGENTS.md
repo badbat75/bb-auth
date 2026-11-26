@@ -76,25 +76,34 @@ One crate, four targets, and the split is load-bearing:
   refusal page a `403` lands on and the error page a failed `/auth/session` lands on. A page
   is HTML, and HTML is edited, diffed and reviewed as HTML; the two small ones were built in a
   `format!` until somebody had to change one. Still **one file**
-  (about 7,000 lines), still read top to bottom. The GUI is about 14,600 and is navigated by
+  (about 8,000 lines), still read top to bottom. The GUI is about 29,300 and is navigated by
   its section order rather than by that slogan.
 - **[src/bin/bb-auth-adm.rs](src/bin/bb-auth-adm.rs)** — the access-file admin CLI: CRUD over
   `applications` / `scopes` / `user_groups` / `denied` / `users` / `api_keys`, key minting,
   and `can EMAIL URL` (would this credential get in?). It links the library, none of the gate.
 - **[src/bin/bb-auth-web.rs](src/bin/bb-auth-web.rs)** — the access-file admin GUI
   (server-rendered, `maud`): the same CRUD as the CLI, made **only** through the library's
-  editing core, plus a **Settings** tab over the settings file, in that file's own four
+  editing core, plus a **System settings** page over the settings file, in that file's own four
   sections: what the gate answers with, what the audit records and for how long, who
   administers this, and how the pages look (the last one being the gate's pages and the
   self-service page too, which is why one save restyles both programs), each a group that
   folds to its heading with no script and that the page opens folded, and an **Audit** tab over
-  the file the gate writes. Five
-  tabs, and none of them
-  is `denied` or `user_groups`: those two are **sections of the users
+  the file the gate writes. The bar is **one row at every width** (`flex-wrap:nowrap`,
+  §13.28): the operator's logo (`ui.logo_url`, and the console's `img-src` admits it, as the
+  self-service page's already did), the brand, **four tabs** (Dashboard, Applications, Users,
+  Audit) and one pill, the person's given name or else their first address, which opens the
+  **account menu**. That menu is a `details`, so it opens with markup and closes when a row
+  navigates away, and its rows are the caller's name and every address, then the places (System
+  settings, and "Go to your account" on the console only), then Preferences nested and closed,
+  then Sign out. At 800px and below the tabs ride in it too, which is the compromise the user
+  accepted on 2026-11-25: one tap away, never a second row. None of the tabs is `denied` or
+  `user_groups`: those two are **sections of the users
   page**, groups above the roster, because a group only means anything in terms of the roster
   and both are about people. Audit comes after them because it is about the same people one
-  step later: `users` says who may get in, the audit says who did. Settings is last because it
-  is the only tab that is not about who reaches what at all.
+  step later: `users` says who may get in, the audit says who did. System settings is not a tab
+  at all, for the reason it read as the odd one out while it was one: it is the only thing here
+  that is not about who reaches what, so it is a row of the account menu, where the bar has room
+  for it at every width, and its URL is unchanged (`/config`).
   **Every tab is a noun**, a place that owns a section of a file, and
   that is what says where the **access check** goes: it is a verb, it owns nothing, and it was
   the odd item out for as long as it was a fifth tab. It is now a section of the application
@@ -122,8 +131,9 @@ One crate, four targets, and the split is load-bearing:
   its response's CSP by hash or nonce, never loaded from another host, and no framework. What a
   page is for (reading it, submitting its form) should still work with scripting off wherever
   that costs little, which `nojs.js` checks by running the whole GUI with scripting disabled.
-  Two scripts exist today. One is `SETTINGS_ONCHANGE`, one inline handler that applies a
-  Settings list box the moment it is picked, with a `<noscript>` submit button behind it. The
+  Two scripts exist today. One is `SETTINGS_ONCHANGE`, one inline handler that applies one of
+  the account menu's two Preferences list boxes (theme, language) the moment it is picked, with
+  a `<noscript>` submit button behind it. The
   other is `COPY_SCRIPT`, carried only by the page that reveals a freshly minted or rotated key
   and allowed only by that response's CSP, by its hash; it reveals a hidden copy button, and with
   scripting off no button shows and one click still selects the whole key.
@@ -183,13 +193,16 @@ One crate, four targets, and the split is load-bearing:
   It wears the `ui` section per request as the console does (brand name and logo, the operator's
   stylesheet, `ui.theme` as the default theme stamped as `data-theme`), on the console's own
   `main` column, one width for both surfaces with prose capped at 75ch (§13.26), under
-  the console's own header (`top_bar`, one function for both surfaces): the operator's brand as
-  a `span` and not a link, since this page is the only one its visitor came to the estate for,
-  an empty tabs nav, the identity, the Preferences menu and Sign out. The person chooses only
-  the theme (light, dark, system) and the language (English, Italian, auto) from that menu, as a
-  `GET` back to the page with an always-present Apply and **no handler at all**, not even the
-  Settings menu's one: one submit answers one `302` that sets the `theme` and `lang` cookies,
-  the same names the console writes, so a choice carries between the two surfaces on one host.
+  the console's own header (`top_bar`, one function for both surfaces): the operator's brand,
+  mark and name, worn as a `span` and not a link, since this page is the only one its visitor
+  came to the estate for, an empty tabs nav, and the console's one account menu with **no
+  places** in it (this page has no tabs to move and offers no console page), so its panel is who
+  the caller is in full, the Preferences box nested and closed, and Sign out. The person chooses
+  only the theme (light, dark, "Auto (system)") and the language (English, Italian, auto) from
+  that box, as a `GET` back to the page with an always-present Apply and **no handler at all**,
+  not even the console's one: one submit answers one `302` that sets the `theme` and `lang`
+  cookies, the same names the console writes, so a choice carries between the two surfaces on
+  one host.
   Its Sign out is the console's `BB_AUTH_WEB_LOGOUT_URL` with its `rd` parameter dropped
   (`logout_without_rd`, derived once at startup into `Config::account_logout_url`), because that
   `rd` is the console's round trip and a person who is not an administrator following it lands on
@@ -369,8 +382,9 @@ passed, on code untouched since it passed, tells you nothing you did not already
 `cargo doc --no-deps` earns its place when an intra-doc link could have moved, which is a
 real risk when a type or a function is renamed and no risk at all when a border-radius
 changes. `node e2e/shots.js` takes a scene-name filter for the same reason: the full walk is
-168 screenshots across seven views (39 scenes, plus the 13 interaction states in the two views
-that run them), and a change to one page needs one of them.
+243 shots at most across seven views (58 scenes, plus the 13 interaction states in the two views
+that run them; a scene that cannot run in a view is reported `SKIPPED`), and a change to one
+page needs one of them.
 
 Markdown is linted with markdownlint (`.markdownlint.jsonc`, which documents its own
 invocation): `npx markdownlint-cli2 "**/*.md" "#target" "#dist" "#e2e/node_modules"`.

@@ -33,6 +33,27 @@ upgrade: the `/account/` location forwards `X-Auth-Native-Username` and every ot
 location clears it. The packages need no order. Without that line the page shows the profile
 list and the sentence where the edit pill would be, to everybody, native accounts included.
 
+### Changed: one account menu in the header, on one row, with the logo
+
+* **The bar is one row at every width.** It used to wrap onto a second row below about 820px
+  (measured in docs/ARCHITECTURE.md §13.28 §0). The bar now shows the deployment's logo
+  (`ui.logo_url`, which the sign-in page already wore and `/account`'s bar already showed, and
+  the console's `img-src` admits it), the brand, **four** tabs (Dashboard, Applications, Users,
+  Audit) and one pill: your given name, or your first address where the deployment forwards no
+  name. Nothing wraps, so a long name, and then a long brand, are cut with an ellipsis, and the
+  pill's tooltip carries the whole name.
+* **The pill opens one panel**, a `details`, so it opens with no script and closes itself when a
+  row navigates away. In it: your name and every address of your roster row, the System settings
+  page, "Go to your account", then Preferences (theme and language) nested and closed by default,
+  then Sign out. At 800px and below the four tabs ride in that panel too, which is the price of
+  one row: the tabs are one tap away rather than on a second line.
+* **The Settings tab is now "System settings"**, a row of that panel, and the page's own heading
+  says the same. Its URL is unchanged (`/config`), so a bookmark still lands, and nothing on disk
+  is renamed: the file, the `bb-auth-adm settings` commands and the settings keys are as they were.
+* **The theme's automatic choice is labelled "Auto (system)"** ("Auto (sistema)"): the bare word
+  "System" read as the settings page beside it.
+* **No new script**, and every page still works with scripting off.
+
 ### New: the sign-in page warns before a duplicate account
 
 * **The registration step opens with a warning.** When Cognito answers that no native user has
