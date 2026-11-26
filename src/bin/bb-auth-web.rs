@@ -326,7 +326,7 @@ const LOCALTIME_FILE: &str = "/etc/localtime";
 /// [`respond_preference_redirect`].
 const PREFERENCE_COOKIE_MAX_AGE: i64 = 31_536_000;
 
-/// **The only inline handler this GUI emits**, on the two Settings list boxes and nowhere else.
+/// **The only inline handler this GUI emits**, on the two Preferences list boxes and nowhere else.
 ///
 /// A `<select>` has no native way to say "I changed, act on it", so applying a preference the
 /// moment it is picked needs a script — one expression of it. It is an *enhancement*: with
@@ -357,7 +357,7 @@ const SETTINGS_ONCHANGE: &str = "this.form.submit()";
 /// before, the key selectable by hand and no control that does nothing.
 ///
 /// `addEventListener` and not an `on…` attribute, so the handler allowlist
-/// (`no_page_but_the_reveal_carries_a_script`) stays exactly the two Settings list boxes, and
+/// (`no_page_but_the_reveal_carries_a_script`) stays exactly the two Preferences list boxes, and
 /// `/account`'s policy needs no `'unsafe-hashes'` to run it.
 ///
 /// `Navigator.clipboard` and `Clipboard.writeText` are "available only in secure contexts
@@ -3878,7 +3878,7 @@ fn respond_page(
 ///
 /// Hashes and not a nonce, because everything this program executes or styles is a
 /// compile-time constant: the `<style>` block is [`THEME_CSS`] + [`BASE_CSS`] + [`CSS`], the
-/// handler on the Settings list boxes is [`SETTINGS_ONCHANGE`], and the one `<script>`, the
+/// handler on the Preferences list boxes is [`SETTINGS_ONCHANGE`], and the one `<script>`, the
 /// reveal's [`COPY_SCRIPT`], is a constant too. So the policy is derived from the same `&str`s
 /// the page is, and the two cannot disagree.
 ///
@@ -3902,7 +3902,7 @@ fn respond_page(
 ///
 /// `reveal` is the bearer reveal and nothing else (§13.14): the one page allowed a `<script>`,
 /// so its policy names that script's hash beside the Settings handler's. The console's shell
-/// carries the Settings list boxes on every page including this one, so both hashes ride the
+/// carries the Preferences list boxes on every page including this one, so both hashes ride the
 /// same `'unsafe-hashes'` source, and every other page's policy is byte for byte what it was.
 fn admin_csp(look: &Look, reveal: bool) -> String {
     admin_csp_logo(look, None, reveal)
@@ -5292,27 +5292,49 @@ fn urls_text(urls: Option<&Vec<String>>) -> String {
     urls.map(|l| l.join("\n")).unwrap_or_default()
 }
 
+/// A pill: the estate's small control, as a link. Declared once because **nothing at a call
+/// site is allowed to say how a pill looks**: the class list is what the stylesheets style, so
+/// a call site that spelled one out would repaint that page and leave every other standing,
+/// which is drift no file in front of an editor can show. A link and not a button, because it
+/// navigates and changes nothing; a pill and not body prose, because it sits in the same row as
+/// `edit` and `remove` and is the same kind of thing.
+///
+/// These three helpers are that one home, and they take an `href` and a label as values rather
+/// than a [`View`] for the same reason [`confirm_card`] takes a heading and a `rev`: the pages
+/// under `/account` have no `View` at all (no route, no `rev`, no bar), so they reach the
+/// console's pill through them, and the console's [`act`], [`act_rm`] and [`back`] are wrappers
+/// over them. A second pill spelled for the self-service page is the drift this ends.
+fn pill_link(href: &str, label: &str) -> Markup {
+    html! { a class="pill" href=(href) { (label) } }
+}
+
+/// A pill marked as the destructive member of its `.pills` group (CSS `.pill.rm`): the action
+/// that removes a row, not one that just changes it. See [`pill_link`] for why the markup is
+/// here and not at a call site.
+fn pill_link_rm(href: &str, label: &str) -> Markup {
+    html! { a class="pill rm" href=(href) { (label) } }
+}
+
+/// The way back out of a page, in the reader's language: an arrow and [`K::Back`] on the pill
+/// every other small control wears. See [`pill_link`] for why the markup is here.
+fn back_link(lang: Lang, href: &str) -> Markup {
+    html! { a class="pill" href=(href) { "\u{2190} " (t(lang, K::Back)) } }
+}
+
 /// A small `add` / `edit` / `remove` pill beside the thing it acts on.
 fn act(v: &View, at: &Route, label: &str) -> Markup {
-    html! { a class="pill" href=(v.href(at)) { (label) } }
+    pill_link(&v.href(at), label)
 }
 
-/// The way back out of a detail page, as a pill like every other small control.
-///
-/// A link and not a button, because it navigates and changes nothing; a pill and not body
-/// prose, because it sits in the same row as `edit` and `remove` and is the same kind of
-/// thing. Declared once here for the same reason [`act`] is: nothing at a call site is
-/// allowed to say how a pill looks.
+/// The way back out of a detail page, taking its language and href from the view.
 fn back(v: &View, to: &Route) -> Markup {
-    html! { a class="pill" href=(v.href(to)) { "\u{2190} " (v.t(K::Back)) } }
+    back_link(v.lang, &v.href(to))
 }
 
-/// Same as [`act`], marked as the destructive member of its `.pills` group (CSS `.pill.rm`):
-/// the one action here that removes a row, not just changes it. `rotate` replaces a credential
-/// rather than deleting anything, so it stays plain [`act`]; only an actual `Rm` route earns
-/// this.
+/// Same as [`act`], marked destructive. `rotate` replaces a credential rather than deleting
+/// anything, so it stays plain [`act`]; only an actual `Rm` route earns this.
 fn act_rm(v: &View, at: &Route, label: &str) -> Markup {
-    html! { a class="pill rm" href=(v.href(at)) { (label) } }
+    pill_link_rm(&v.href(at), label)
 }
 
 /// A confirmation page: what is about to go, what that means, and a `POST` that does it.
@@ -9164,7 +9186,7 @@ struct AccountPrefs<'a> {
 /// one of them is edited.
 ///
 /// `script-src` is `'none'`, because this page carries no script and no handler of any kind. The
-/// console bends the estate's no-script rule once for the Settings list box; this page has no
+/// console bends the estate's no-script rule once for the Preferences list box; this page has no
 /// reason to bend it at all, so its policy says so and needs no fallback.
 ///
 /// `reveal` is the bearer reveal and nothing else (§13.14): the one page under this prefix that
@@ -9194,7 +9216,7 @@ fn account_csp(look: &AccountLook, reveal: bool) -> String {
 ///
 /// The bar is the console's, from [`top_bar`], and the three slots say what the two surfaces are
 /// for: the operator's brand where the console names the tool, an empty `nav` where the console's
-/// five tabs are (this page is one page, so there is nothing to switch between), and the account
+/// four tabs are (this page is one page, so there is nothing to switch between), and the account
 /// end with the identity, the Preferences menu and Sign out. The menu is the console's menu as a
 /// browser with scripting off sees it: **no handler of any kind** (the estate's rule for this
 /// page), and the Apply button always present in `div.actions` rather than behind a `noscript`,
@@ -9265,7 +9287,7 @@ fn account_shell(prefs: &AccountPrefs, title: &str, content: Markup, look: Accou
 /// One HTML page under the prefix, with the estate's shared headers and this page's own policy.
 ///
 /// It does not go through [`respond_page`], because that answers with the console's policy, and
-/// the console's names the Settings list boxes' handler in `script-src` on every page. This page
+/// the console's names the Preferences list boxes' handler in `script-src` on every page. This page
 /// carries no handler at all, so its policy permits no script beyond the reveal's (§13.17).
 fn respond_account(
     req: Request,
@@ -9895,7 +9917,7 @@ fn page_account(
                 @if own.profile_edit {
                     @if own.native {
                         p class="primary" {
-                            a class="pill" href=(own.profile_path) { (t(lang, K::AccountProfileEdit)) }
+                            (pill_link(own.profile_path, t(lang, K::AccountProfileEdit)))
                         }
                     } @else {
                         p class="muted" { (t(lang, K::AccountProfileNotNative)) }
@@ -9940,9 +9962,10 @@ fn page_account(
                     p class="muted" { (t(lang, K::AccountKeyFullRow)) }
                 } @else if row.is_none() {
                     p class="primary" {
-                        a class="pill" href=(format!("{}/new", own.keys_path)) {
-                            (t(lang, K::AccountKeyNew))
-                        }
+                        (pill_link(
+                            &format!("{}/new", own.keys_path),
+                            t(lang, K::AccountKeyNew),
+                        ))
                     }
                 }
             }
@@ -10636,7 +10659,7 @@ fn profile_form(lang: Lang, f: &ProfileForm, action: &str, page: &str) -> Markup
             p class="muted" { (t(lang, K::AccountProfileEmailFixed)) }
             p class="actions" {
                 button type="submit" { (t(lang, K::AccountProfileSendCode)) }
-                a class="pill" href=(page) { (t(lang, K::Cancel)) }
+                (pill_link(page, t(lang, K::Cancel)))
             }
         }
     }
@@ -10773,7 +10796,7 @@ fn page_profile_code(
                 }
                 div class="actions" {
                     button type="submit" { (t(lang, K::AccountProfileSave)) }
-                    a class="pill" href=(page) { (t(lang, K::Cancel)) }
+                    (pill_link(page, t(lang, K::Cancel)))
                 }
             }
         }
@@ -10809,7 +10832,7 @@ fn page_profile_saved(lang: Lang, changes: &[ProfileChange], page: &str) -> Mark
             (t(lang, K::AccountProfileSavedBody))
         }
         p class="primary" {
-            a class="pill" href=(page) { "← " (t(lang, K::Back)) }
+            (back_link(lang, page))
         }
     }
 }
@@ -10841,12 +10864,12 @@ fn page_profile_outcome(
                 }
                 div class="actions" {
                     button type="submit" { (t(lang, K::AccountProfileSendNew)) }
-                    a class="pill" href=(page) { "← " (t(lang, K::Back)) }
+                    (back_link(lang, page))
                 }
             }
         } @else {
             p class="primary" {
-                a class="pill" href=(page) { "← " (t(lang, K::Back)) }
+                (back_link(lang, page))
             }
         }
     }
@@ -15656,6 +15679,85 @@ mod tests {
             msg: None,
             identity: vec![IDENTITY_HEADER.to_string()],
         }
+    }
+
+    /// §13.26 P: a pill's markup has one home. The `/account` pages have no [`View`] (no
+    /// route, no rev, no bar), so they reach that one home through three free functions, and
+    /// the console's `act`, `act_rm` and `back` are wrappers over them. Pinned byte for byte
+    /// because the class list and the arrow are what the stylesheets style: a helper that
+    /// spelled them differently would repaint the self-service page while every console page
+    /// stayed put, which is exactly the drift no file in front of an editor can show.
+    #[test]
+    fn the_pill_helpers_emit_the_pill_markup() {
+        assert_eq!(
+            pill_link("/account/keys/new", "New key").into_string(),
+            r#"<a class="pill" href="/account/keys/new">New key</a>"#
+        );
+        assert_eq!(
+            pill_link_rm("/account/keys/remove?id=laptop", "Remove").into_string(),
+            r#"<a class="pill rm" href="/account/keys/remove?id=laptop">Remove</a>"#
+        );
+        // Both languages, spelled as the `K` table spells them, so a helper that reached for
+        // another key, or an implementation that paraphrased the Italian, is caught here.
+        assert_eq!(
+            back_link(Lang::En, "/account/").into_string(),
+            "<a class=\"pill\" href=\"/account/\">\u{2190} back</a>"
+        );
+        assert_eq!(
+            back_link(Lang::It, "/account/").into_string(),
+            "<a class=\"pill\" href=\"/account/\">\u{2190} indietro</a>"
+        );
+    }
+
+    /// The helpers take a caller's strings, not a literal: an href on the account page is built
+    /// from a key id an operator typed, and a label is translated text. The escaped bytes are
+    /// the pin that says the helper emits an attribute and a text node, and not markup.
+    #[test]
+    fn the_pill_helpers_escape_the_href_and_the_label() {
+        let href = r#"/account/keys/remove?id=a&b="<c"#;
+        let label = r#""Q" & <b"#;
+        assert_eq!(
+            pill_link(href, label).into_string(),
+            r#"<a class="pill" href="/account/keys/remove?id=a&amp;b=&quot;&lt;c">&quot;Q&quot; &amp; &lt;b</a>"#
+        );
+        assert_eq!(
+            pill_link_rm(href, label).into_string(),
+            r#"<a class="pill rm" href="/account/keys/remove?id=a&amp;b=&quot;&lt;c">&quot;Q&quot; &amp; &lt;b</a>"#
+        );
+    }
+
+    /// The refactor moves no byte: `act`, `act_rm` and `back` are one-line wrappers over the
+    /// three helpers, so each pair answers the same string for the same href and label. This is
+    /// the pin that says every console page renders as it did.
+    #[test]
+    fn act_act_rm_and_back_are_the_helpers() {
+        let cfg = cfg_for("x.json", "/admin");
+        let v = view(&cfg, Route::Apps, "REV");
+        let at = Route::App("mpa".to_string());
+        let href = v.href(&at);
+        // The href is the view's, base included, so the comparison below is about the markup
+        // and not about two empty strings.
+        assert_eq!(href, "/admin/apps/mpa");
+        assert_eq!(
+            act(&v, &at, "edit").into_string(),
+            pill_link(&href, "edit").into_string()
+        );
+        assert_eq!(
+            act_rm(&v, &at, "remove").into_string(),
+            pill_link_rm(&href, "remove").into_string()
+        );
+        assert_eq!(
+            back(&v, &at).into_string(),
+            back_link(v.lang, &href).into_string()
+        );
+        // `back` takes the language from the view, and that is the one thing the wrapper adds
+        // over `back_link`, so pin it on a view that is not English.
+        let mut it = view(&cfg, Route::Apps, "REV");
+        it.lang = Lang::It;
+        assert_eq!(
+            back(&it, &at).into_string(),
+            back_link(Lang::It, &href).into_string()
+        );
     }
 
     /// Render one read-only page of `SAMPLE` and hand back the HTML.

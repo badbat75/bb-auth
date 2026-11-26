@@ -238,8 +238,7 @@ out, the usual pattern, replacing the preferences form at the foot of the page; 
 it to §13.17.
 
 Slices 8a to 8f are done (8f, §13.21: row rules, one control size, ticks in the accent). Then the
-shared front end (W13), designed in §13.26 §6 as small slices after 5g: **P** one `pill_link` /
-`pill_link_rm` / `back_link` with the console's `act`/`act_rm`/`back` as wrappers; **D** one `page_document` skeleton; **T** `text_field` with
+shared front end (W13), designed in §13.26 §6 as small slices after 5g (**P**, the pill links, is done): **D** one `page_document` skeleton; **T** `text_field` with
 `FieldOpts`, absorbing `account_key_id_field` and the profile inputs; **F** the account page's flat
 ground goes, so it wears the console's ground and cards (the user, 2026-11-25). **H** is done (§13.28, with **L**, the console's logo, folded in and **M** absorbed): one account menu
 in the shared header, asked by the user on 2026-11-25. The bar holds one row at every width: logo, brand,
@@ -266,6 +265,9 @@ native "Preferences" tooltip while the open menu's cover is up. Steps 5 and 7 ad
     review fixes. At 640px and below, with a logo, the brand's tag line is hidden like its name. The
     phone panel's tab rows lose their gap. Esc does not close the menu, since that would need a new
     script.
+  - P (same night): the key rows' rotate pill (it has an aria-label) and remove icon pill stay
+    written by hand. `pill_link` takes only an href and a label, and options used by one caller
+    would be speculative.
   - 8b: on `/account` the Sign out link is `BB_AUTH_WEB_LOGOUT_URL` with its `rd` removed
     (`logout_without_rd`), so a person who is not an administrator lands on the sign-in page
     instead of a `403` on the console; no new setting (§13.17).
