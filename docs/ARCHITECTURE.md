@@ -7724,12 +7724,14 @@ One paragraph, the same for a roster user and a stranger, since one code reflect
 who arrived:
 
 - **English** (the text in the element): "Your account is being deleted: this browser is signed
-  out, and your sign-in accounts are queued for deletion. If you can still sign in later without
-  signing up again, tell an administrator. Other browsers where you signed in stay signed in until
+  out, and your sign-in accounts are queued for deletion. Signing in again later creates a new
+  account; if you use an email code and are not asked to sign up first, tell an administrator.
+  Other browsers where you signed in stay signed in until
   you sign out there or the session ends."
 - **Italian** (`i18n.it.notice_account_deleted`): "Il tuo account è in fase di eliminazione:
-  questo browser è disconnesso e i tuoi account di accesso sono in coda per l'eliminazione. Se più
-  avanti riesci ancora ad accedere senza registrarti di nuovo, avvisa un amministratore. Gli altri
+  questo browser è disconnesso e i tuoi account di accesso sono in coda per l'eliminazione. Se
+  accedi di nuovo più avanti viene creato un nuovo account; se usi un codice via email e non ti
+  viene chiesto prima di registrarti, avvisa un amministratore. Gli altri
   browser in cui avevi effettuato l'accesso restano connessi finché non esci da lì o la sessione
   non termina."
 
@@ -7743,6 +7745,12 @@ Why these words:
   for an email it does not know, so after a deletion typing the same email *should* succeed, as a
   registration. Only the old account signing straight in means the deletion service did not act,
   and that is the case the administrator must hear of.
+- **"if you use an email code"** narrows that check to the one kind of account it fits (slice
+  14e, 2026-11-26). A Google or Microsoft sign-in recreates the Cognito user at once, which is no
+  fault, and the page cannot say which kind was deleted (one fixed code, no request data), so the
+  first clause is true for both ("creates a new account") and only the second, conditional on the
+  email code, asks for an administrator. "Asked to sign up" names what the person sees, the
+  page's own `register_intro` step, rather than what Cognito did.
 - **The gap's sentence** is the last one, because it is the least likely to matter (§13.32 §2,
   accepted by the user on 2026-11-26). It names what the person can do about it (sign out there)
   and carries **no session length**: the number is per deployment, would be a substitution into a
