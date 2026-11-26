@@ -93,6 +93,9 @@ const W = {
   startAgain: 'Start again',
   changedTitle: 'Your account changed',
   changed: 'Your account changed after you opened this page, so nothing was deleted. Start again to see what would be deleted now.',
+  // Retired by plan step 13 (2026-11-26), which deleted `K::AccountNoRow` with this sentence.
+  // It is kept here, as the string of the assert at the end of the success walk, to pin that
+  // the sentence never comes back on the page of a person who has no row.
   noRow: 'bb-auth has no roster row for you.',
   csrf: 'this POST did not come from a page of this site.',
 };

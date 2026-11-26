@@ -80,34 +80,6 @@ process that writes both files, so two gaps found the same day are closed **firs
 GUI is opened to anyone who is not an administrator: `bb-auth-web` can read the HMAC key, and it
 believes `X-Auth-Email` from any local process. The design is `docs/ARCHITECTURE.md` §13.
 
-### 13. Loose ends of step 8
-
-Covers: R3. Left over when the user approved step 8's screenshots on 2026-11-26: the module rustdoc of
-`bb-auth-web.rs` (about line 253) still calls the account page's arrangement a centred card and
-names a Settings menu; and one look by hand at the native "Preferences" tooltip while the open
-menu's cover is up.
-
-Added by the user on 2026-11-26: when the caller has no roster row, `/account` writes **nothing**
-in its place, neither in the lede (today "bb-auth has no roster row for you." under the
-addresses, where a row shows "Account id") nor on 7b's deletion page; the line and its `br`
-simply go. `K::AccountNoRow` goes if nothing else uses it, and AGENTS.md's self-service paragraph
-("where a caller with no row is told there is none") is corrected. To do after 7b, which touches
-the same file.
-
-Added by the user on 2026-11-26 ("riduciamo i click"): on `/account` the Preferences box applies
-the theme and the language the moment one is picked, as the console's already does, with no Apply
-button. It reuses the console's one handler (`SETTINGS_ONCHANGE`) allowed by its hash in
-`/account`'s CSP (with `'unsafe-hashes'`), and keeps a `<noscript>` Apply so the page still works
-with scripting off. This retires the "no handler at all" rule for the account page (AGENTS.md's
-self-service paragraph, §13.17 and §13.26), so those and `no_page_but_the_reveal_carries_a_script`
-change with it.
-
-- Done when: the rustdoc says what the page is (the console's column and one account menu); a
-  test shows a stranger's `/account` (and the deletion page) carries no no-row sentence and no
-  empty line where the id would be; tests show `/account`'s list boxes carry the handler, its CSP
-  allows exactly that hash, and Apply is inside `<noscript>`, with `nojs.js` still passing; and the tooltip has been looked at in a browser, or the look
-  is reported as not done.
-
 ### 14. Deleting the account signs the person out
 
 Covers: R4. Asked by the user on 2026-11-26, after deleting the test account for real on rpi-01:

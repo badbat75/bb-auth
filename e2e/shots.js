@@ -56,7 +56,8 @@ const VIEWS = [
       'settings-menu-prefs', 'config-menu', 'forbidden-menu', 'account-menu-prefs',
       // The self-service page is prose a person reads in their own language, so the copy of
       // the table's headings and the refusal is worth reading in Italian too.
-      'account', 'account-new', 'account-new-scopes', 'account-error', 'account-rm', 'account-menu',
+      'account', 'account-stranger', 'account-new', 'account-new-scopes', 'account-error',
+      'account-rm', 'account-menu',
       // The profile edit is all prose (section 13.23, and §13.25 and §13.26 for what it acts
       // on): every shape of it is read in Italian too.
       'account-profile', 'account-profile-edit', 'account-profile-nothing',
@@ -308,6 +309,20 @@ const SCENES = [
     await page.goto(acct(ctx, '/'));
     await asAdmin(page);
   }],
+  // The same page for a caller the roster has no row for: `friend@example.com` is in no
+  // `users` entry of the fixture, only admitted by app1's `authenticated` scope. The lede
+  // carries the addresses they sign in with and stops there, because the line under them
+  // names an account id, and with no row there is no id to name: no line, no `br`, nothing
+  // standing in for a row the file does not have (plan step 13, 2026-11-26). It is the one
+  // shape of this page a roster caller's scene cannot show.
+  ['account-stranger', async (page, ctx) => {
+    await page.setExtraHTTPHeaders({ 'X-Auth-Email': 'friend@example.com' });
+    try {
+      await page.goto(acct(ctx, '/'));
+    } finally {
+      await asAdmin(page);
+    }
+  }],
   // The account menu, open: the panel that carries the Preferences box on the surface a person
   // who is not an administrator reaches.
   ['account-menu', async (page, ctx) => {
@@ -316,8 +331,11 @@ const SCENES = [
     await page.click('details.settings > summary');
     await asAdmin(page);
   }],
-  // The same panel with its Preferences box open: this surface shows its Apply always, and
-  // the box is the only thing that hides it from a review.
+  // The same panel with its Preferences box open. Since plan step 13 this surface is the
+  // console's own form: a pick applies through the inline handler, and the Apply is the
+  // `<noscript>` way in for a browser running no code. So every scripted view here shows the
+  // two list boxes and no button at all, and the `noscript` view, which runs only the
+  // console's panel, is the one place the button is photographed.
   ['account-menu-prefs', async (page, ctx) => {
     await asPerson(page);
     await page.goto(acct(ctx, '/'));
