@@ -181,7 +181,82 @@ async function panelWalk(t, page, ctx) {
   t.eq('the brand text is the configured one', g.text, 'BadBat75 Operations Console');
   t.check('and it is the piece that is cut, not the bar', g.clipped, JSON.stringify(g));
   await t.shot(page, 'settings-bar-wide');
+  // The width the review found broken, with the name the roster can hand the bar.
+  await barAtTheWorstWidth(t, ctx, wideLook);
   writeSettings(ctx, barLook);
+}
+
+/**
+ * The bar at the width the 2026-11-26 review found broken: 804px, where the tabs are still in
+ * the bar (the breakpoint is 800) and a long brand, a logo and a long given name together leave
+ * the strip too little room.
+ *
+ * `barStaysOneRow` counts the vertical centres of the bar's **children**, and a strip that wraps
+ * inside its own `nav` leaves all three children centred on one line, so the wrap is invisible to
+ * it. This reads the strip's own rows and the bar's height, which is what a person sees grow, and
+ * the Sign out glyph, which is the panel's unsized one (an `svg` with no box is 300x150, and the
+ * review measured 170x170 in a 230px panel).
+ *
+ * The given name needs the claim configured, because the header is read only where the deployment
+ * says the proxy fills it, and it is the piece that pushes the trigger to its 16rem cap. Both
+ * languages: the Italian tab words are the longer ones, so the bar's worst case is Italian.
+ */
+async function barAtTheWorstWidth(t, ctx, look) {
+  const withName = JSON.parse(JSON.stringify(look));
+  withName.gate = { ...(withName.gate || {}), profile_claims: ['given_name'] };
+  writeSettings(ctx, withName);
+  const context = await ctx.browser.newContext({
+    viewport: { width: 804, height: 720 },
+    extraHTTPHeaders: {
+      'X-Auth-Email': 'admin@example.com',
+      // Percent-encoded, as the gate sends a profile claim, and long enough to sit the trigger
+      // at its cap: a short name leaves the bar room and the wrap never happens.
+      'X-Auth-Given-Name': 'Christopher%20Maximilian',
+    },
+  });
+  const page = await context.newPage();
+  try {
+    for (const lang of ['en', 'it']) {
+      await page.goto(`${ctx.base}/users?lang=${lang}`);
+      // The glyph is measured where it is visible: a closed `details` renders no box, and a
+      // 0x0 box passes any "at most 24px" check without measuring anything.
+      await page.click('details.settings > summary');
+      const opened = await page.$eval('details.settings', (d) => d.open).catch(() => false);
+      t.eq(`at 804 ${lang}: the panel opens`, opened, true);
+      const g = await page.evaluate(() => {
+        const box = (el) => (el ? el.getBoundingClientRect() : null);
+        const bar = document.querySelector('header .bar');
+        const nav = document.querySelector('header .bar > nav:not(.acct)');
+        // Distinct vertical centres of a box's children: 1 means one row.
+        const rows = (el) => new Set(
+          [...el.children]
+            .filter((c) => getComputedStyle(c).display !== 'none')
+            .map((c) => {
+              const r = c.getBoundingClientRect();
+              return Math.round(r.top + r.height / 2);
+            })
+        ).size;
+        const icon = box(document.querySelector('details.settings .menu a.pill svg.i-out'));
+        const name = document.querySelector('details.settings > summary .who-name');
+        return {
+          barH: Math.round(box(bar).height),
+          navRows: nav ? rows(nav) : -1,
+          icon: icon ? [Math.round(icon.width), Math.round(icon.height)] : null,
+          name: name ? name.textContent.trim() : '',
+          logo: !!document.querySelector('header a.brand img'),
+        };
+      });
+      // The setup, so a bar that quietly dropped the name or the mark cannot pass by being narrow.
+      t.check(`at 804 ${lang}: the bar carries the given name and the mark`,
+        g.name.startsWith('Christopher') && g.logo, JSON.stringify(g));
+      t.check(`at 804 ${lang}: the bar is one row tall`, g.barH <= 40, `bar height ${g.barH}px`);
+      t.eq(`at 804 ${lang}: the tab strip is one row`, g.navRows, 1);
+      t.check(`at 804 ${lang}: the Sign out glyph is at most 24px`,
+        Array.isArray(g.icon) && Math.max(...g.icon) <= 24, JSON.stringify(g.icon));
+    }
+  } finally {
+    await context.close();
+  }
 }
 
 async function run(ctx, t) {

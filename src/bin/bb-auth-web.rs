@@ -28060,6 +28060,23 @@ mod tests {
             .clone()
     }
 
+    /// The declarations of the rule inside at-rule `at` (`""` for the top level) whose selector
+    /// list carries `sel` as one of its comma-parts, with a panic that says what is missing.
+    ///
+    /// A rule is written by its **whole** selector list, and this stylesheet spells a shared
+    /// declaration as one rule with two names (`.bar .who svg,.menu svg`,
+    /// `p.primary .pill,.actions .pill`). A reader that demanded the list equal one of those names
+    /// goes red on the spelling the design asked for, so every lookup the §13.28 glyph and bar
+    /// rules make matches a comma-part.
+    fn rule_named(scoped: &[(String, String, String)], at: &str, sel: &str) -> String {
+        scoped
+            .iter()
+            .find(|(a, s, _)| a == at && s.split(',').any(|part| part.trim() == sel))
+            .unwrap_or_else(|| panic!("admin.css has no rule naming {sel} inside {at:?}"))
+            .2
+            .clone()
+    }
+
     /// The rules of `scoped` inside at-rule `at` that set `prop` to `want`, as `(selector, body)`.
     ///
     /// A design that names a selector ("the bar's tab `nav` gets `display:none`") states a
@@ -29081,6 +29098,143 @@ mod tests {
         for (a, sel, body) in &scoped {
             if sel.split(',').any(|p| p.ends_with("nav.acct .who")) {
                 panic!("{sel} in {a} is the rule §13.28 deletes: {body}");
+            }
+        }
+    }
+
+    /// §13.28 §2: the panel's glyphs are the bar's glyphs, and the bar's rule does not reach
+    /// them. `.bar .who svg` sizes the caret in the trigger; the panel's own rows (the sliders on
+    /// the Preferences row, the door on Sign out) sit inside `details.settings`, so they are
+    /// `.menu svg` and nothing else. An `svg` with no box is 300x150: the 2026-11-26 review
+    /// measured the Sign out glyph at 170x170, which pushes every row of a 230px panel out of the
+    /// viewport, and the sliders and the caret, drawn with `fill` and no `stroke`, answer as a
+    /// black dot and a black triangle. The declarations are the base sheet's `.pill.ico svg`, at
+    /// the panel's own size.
+    #[test]
+    fn the_panel_glyphs_are_sized_and_stroked() {
+        let scoped = css_scoped(CSS);
+        let rule = rule_named(&scoped, "", ".menu svg");
+        for (prop, want) in [
+            ("width", "1em"),
+            ("height", "1em"),
+            ("fill", "none"),
+            ("stroke", "currentColor"),
+            // A stroke with no width paints nothing, and the outline is the whole drawing: the
+            // glyph names no colour, so `currentColor` at width 2 is all there is to see.
+            ("stroke-width", "2"),
+            // The panel's rows are flex boxes; a glyph with no `flex` is squeezed by a long row.
+            ("flex", "none"),
+        ] {
+            assert_eq!(
+                css_decl(&rule, prop).as_deref(),
+                Some(want),
+                ".menu svg sets {prop}:{want}: {rule}"
+            );
+        }
+        // The glyph rides beside the row's word, so it needs the gap the word's own box does not
+        // give it. The panel's rows are full-width blocks, so the space has to be a margin.
+        let pill = rule_named(&scoped, "", ".menu .pill svg");
+        assert_eq!(
+            css_decl(&pill, "margin-right").as_deref(),
+            Some(".5em"),
+            "the glyph sits off the word it names: {pill}"
+        );
+    }
+
+    /// §13.28 §4: the tab strip never wraps and never shrinks, and the bar's give is at the other
+    /// end. `nav{flex-wrap:wrap}` is the base row's rule and is right for the account end (two
+    /// controls, room to spare); the strip is the piece the design says is never cut, and a
+    /// wrapped strip is a strip whose second row hangs under the bar's height. The 2026-11-26
+    /// review measured exactly that from 804 to 900px: a long brand, a logo and a long given name
+    /// leave the strip too little room, `wrap` makes it two rows, and the bar is 76px tall.
+    /// `min-width:max-content` is the half that makes `nowrap` cost anything: a flex item's floor
+    /// is its content, so without it the strip is squeezed and its pills overflow their box in
+    /// silence, which is a cut tab nobody can read.
+    #[test]
+    fn the_tab_strip_never_wraps_and_never_shrinks() {
+        let scoped = css_scoped(CSS);
+        let tabs = rule_named(&scoped, "", "nav:not(.acct)");
+        assert_eq!(
+            css_decl(&tabs, "flex-wrap").as_deref(),
+            Some("nowrap"),
+            "the strip cannot make a second row: {tabs}"
+        );
+        assert_eq!(
+            css_decl(&tabs, "min-width").as_deref(),
+            Some("max-content"),
+            "the strip is never squeezed below what its tabs need: {tabs}"
+        );
+
+        // The room has to come from somewhere, and it is the account end's: a flex item with no
+        // `min-width` cannot give an inch, so the trigger's 16rem cap is a cap the box never goes
+        // under while the tabs wrap. `flex:0 1 auto` is the row's own half of that (the tabs are
+        // `flex:1 1 auto`, which takes the space that is left; this row never should).
+        //
+        // These two rules are read with [`the_rule`] and not `css_scoped`: the scoped reader
+        // strips a declaration body's whitespace, and a `flex` shorthand's three numbers survive
+        // that only as `01auto`, which is not a value anything can check.
+        let acct = the_rule(CSS, "nav.acct").expect("admin.css styles the account end of the bar");
+        assert!(
+            acct.contains("flex:0 1 auto"),
+            "the account end shrinks, so the tabs do not have to: {acct}"
+        );
+        assert!(
+            acct.contains("min-width:0"),
+            "the account end can shrink below its content: {acct}"
+        );
+        let settings = the_rule(CSS, "details.settings").expect("admin.css styles the panel box");
+        assert!(
+            settings.contains("min-width:0"),
+            "the box that holds the trigger gives room too: {settings}"
+        );
+    }
+
+    /// §13.28 §4: with a mark in the bar the brand's words go, and the 2026-11-26 review found
+    /// the tag line left standing. `.brand:has(img) .t` hides the name; `.brand .v`, the line
+    /// under it, stayed, so a 320px bar showed a mark, an empty name and the label. The hiding is
+    /// **visual**, by the clip pattern `.vh` uses, and not `display:none` or `visibility:hidden`:
+    /// the words are the name a reader hears while the image carries `alt=""`, so a rule that
+    /// takes them out of the accessibility tree takes the name away from the one technology the
+    /// whole mechanism feeds.
+    ///
+    /// And the panel's tab rows need no gap (§13.28 §2): `.menu .pill` carries
+    /// `margin-bottom:4px`, so a `gap` on the row stacks a second space between rows and the
+    /// panel's rows stop reading as the one list they are.
+    #[test]
+    fn the_tag_line_hides_with_the_words_and_the_panel_rows_need_no_gap() {
+        let scoped = css_scoped(CSS);
+        let at = "@media(max-width:640px)";
+        let words = rule_named(&scoped, at, ".brand:has(img) .t");
+        let tag = rule_named(&scoped, at, ".brand:has(img) .v");
+        for prop in ["position", "clip-path", "width"] {
+            assert!(
+                css_decl(&tag, prop).is_some(),
+                "the tag line is visually hidden by {prop}, as the name is: {tag}"
+            );
+            // The same mechanism, not a second one: two ways of hiding the same two lines are two
+            // rules to keep in step, and one of them drifts.
+            assert_eq!(
+                css_decl(&tag, prop).as_deref(),
+                css_decl(&words, prop).as_deref(),
+                "the tag line hides the way the name does: {tag} / {words}"
+            );
+        }
+        for prop in ["display", "visibility"] {
+            assert!(
+                css_decl(&tag, prop).is_none(),
+                "the tag line is hidden visually, not from the accessibility tree: {tag}"
+            );
+        }
+
+        // No `.menu-tabs` rule, at any width, stacks a gap on top of the rows' own margin.
+        for (a, sel, body) in &scoped {
+            if sel.split(',').any(|part| part.trim() == ".menu-tabs") {
+                if let Some(gap) = css_decl(body, "gap") {
+                    assert_eq!(
+                        gap, "0",
+                        "{sel} in {a} adds a second space between the panel's rows: {body}"
+                    );
+                }
             }
         }
     }

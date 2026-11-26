@@ -73,10 +73,20 @@ a.brand:hover{text-decoration:underline}
    That is a control's click area silently depending on which container it is in, which is the
    opposite of them being one object. */
 nav{display:flex;flex-wrap:wrap;align-items:center;gap:4px;flex:1 1 auto}
+/* The tab strip is the piece the design says is never cut, so it is the one row that must not
+   wrap: `nav{flex-wrap:wrap}` is right for the account end (two controls, room to spare) and
+   wrong here, where a wrapped strip leaves its second row hanging under the bar's height.
+   `min-width:max-content` is the half that makes `nowrap` cost anything: a flex item's floor is
+   its content, so without it the strip is squeezed and its pills overflow their box in silence,
+   which is a cut tab nobody can read. The room it demands comes from the account end below. */
+nav:not(.acct){flex-wrap:nowrap;min-width:max-content}
 /* The account end of the bar: the same flex row as the tabs, so its two controls are flex
-   items exactly as the five tabs are. `flex:0 0 auto` because, unlike the tabs, this row
-   never takes the space that is left; `margin-left:auto` is what pushes it to the far edge. */
-nav.acct{flex:0 0 auto;align-items:center;gap:6px;margin-left:auto}
+   items exactly as the five tabs are. `flex:0 1 auto` because, unlike the tabs, this row
+   never takes the space that is left, and it is the bar's give; `min-width:0` is what lets it
+   actually give, since a flex item with no `min-width` cannot shrink below its content at all,
+   which is how the strip's tabs got squeezed before. `margin-left:auto` pushes it to the far
+   edge. */
+nav.acct{flex:0 1 auto;min-width:0;align-items:center;gap:6px;margin-left:auto}
 /* The trigger is the bar's first give (§13.28 §4), and the cap is what makes it one: a name is
    as long as the longest address in the roster, which is a fact about the file and not a measure
    this file can take. 16rem is the longest label worth reading in a bar whose job is to say
@@ -90,12 +100,16 @@ nav.acct{flex:0 0 auto;align-items:center;gap:6px;margin-left:auto}
    Nothing is lost by the cut: the trigger's `title` carries the whole label, and the panel's
    first block prints every address whole. */
 .who-name{min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
-/* The caret, sized. An inline `svg` with no box is 300x150, which in a one row bar is the
-   widest thing in it, and in the panel pushes every row below out of the viewport. 1em keeps
-   it the size of the word it sits beside. The panel's glyphs ride the same rule: they are the
-   base sheet's `.pill.ico svg`, and this is the caret in the Preferences summary, which is a
-   pill with no `ico` class because it carries a word as well as the glyph. */
-.bar .who svg,.prefs summary svg{width:1em;height:1em;flex:none}
+/* The bar's caret and the panel's glyphs, sized and stroked. An inline `svg` with no box is
+   300x150, and the 2026-11-26 review measured the panel's Sign out glyph at 170x170, which
+   pushed every row of a 230px panel out of the viewport; the sliders and the caret, drawn with
+   `fill` and no `stroke`, answered at the same time as a black dot and a black triangle. The
+   declarations are the base sheet's `.pill.ico svg` at the panel's own size, and `.menu` is the
+   whole panel, so the rows, the nested Preferences box and its caret are all covered by one
+   rule and no row is left to size itself. `flex:none` is what keeps a glyph from being squeezed
+   by a long row, and the negative `vertical-align` sits it on the row's baseline. */
+.bar .who svg,.menu svg{width:1em;height:1em;flex:none;fill:none;stroke:currentColor;
+  stroke-width:2;stroke-linecap:round;stroke-linejoin:round;vertical-align:-.125em}
 /* The size step: body-size pills wherever one sits next to body text or a button. It is
    `.bar .pill` and not a list of the places inside the bar, which is what it used to be and
    what kept going wrong: the nav's tabs, the Settings trigger (a `details`' own summary) and
@@ -116,8 +130,10 @@ nav.acct{flex:0 0 auto;align-items:center;gap:6px;margin-left:auto}
    exist twice, once in the bar and once in the panel, because moving an element out of a closed
    `details` and into a bar is not a thing CSS can do: the markup carries both and exactly one is
    displayed, which is also why the panel's rows are `.pill`s, so the copy that appears is the
-   same object as the copy it replaces. */
-.menu-tabs{display:none;gap:6px}
+   same object as the copy it replaces. `gap:0` because those rows are `.menu .pill`s and each
+   carries its own `margin-bottom:4px`: a gap on the row stacks a second space between them, and
+   the panel's rows stop reading as the one list they are. */
+.menu-tabs{display:none;gap:0}
 /* The one breakpoint for the tabs, and the number is the bar's width and not a device: at 800px
    the brand, four tabs, a person's name and the trigger stop fitting on a row that cannot wrap,
    and the thing a bar must never do is cut a tab. Below it the bar's strip is hidden and the
@@ -331,8 +347,11 @@ p.primary{margin:16px 0 20px}
    a nav tab, instead of an inline-flex box sitting on a text baseline inside a block. An
    inline box's hit area is its line box, which is what made this control answer over a strip
    rather than over the rectangle a person can see. `position:relative` is for `.menu` below,
-   which hangs off it absolutely and so takes no part in this. */
-details.settings{display:flex;position:relative}
+   which hangs off it absolutely and so takes no part in this. `min-width:0` is this box's part
+   in the bar's give (§13.28 §4): it is the trigger's own box, and a flex item with no
+   `min-width` cannot shrink below its content, so the name's cap would be a number the bar
+   never goes under while the tab strip needs the room. */
+details.settings{display:flex;position:relative;min-width:0}
 /* Two ways of saying the same thing, because browsers disagree on which one they read: the
    pill's own display:inline-flex already drops the marker triangle in Chromium, list-style
    does it in Firefox, and the pseudo-element in WebKit. */
@@ -363,6 +382,9 @@ details.settings[open]>summary{background:var(--chip);border-color:var(--accent)
    base.css), and `text-align:left` undoes the centring a block box gives text, so the labels
    and the `.on` fill start at the edge the eye enters at. */
 .menu .pill{display:block;width:100%;text-align:left;margin-bottom:4px}
+/* The glyph rides beside the row's word, and a full-width block row gives it none of the gap a
+   compact pill's own padding does, so the space has to be a margin on the glyph. */
+.menu .pill svg{margin-right:.5em}
 /* The rule between the panel's groups (§13.28 §2): places to go, what this looks like, and who
    is leaving are three kinds of row, and space alone was too quiet to say so in a list this
    dense. It is a border, not a tint, so it is the same object as the card's own edge. */
@@ -479,8 +501,13 @@ body:has(.selfserve){background:var(--bg)}
   /* With a mark in the bar, the brand's words are the part that can go: the logo says which
      deployment this is, and a mark plus a name plus a trigger does not fit a 320px row. The
      words are visually hidden, not removed, which is why the image keeps `alt=""`: a reader
-     hears the name the eye no longer has. Without a logo the text stays, and truncates. */
+     hears the name the eye no longer has. Without a logo the text stays, and truncates. The
+     tag line goes with the name: the 2026-11-26 review found a 320px bar showing a mark, an
+     empty name and the label standing under it. The two rules below are **one mechanism
+     spelled twice**, and the test compares their declarations property by property, so a
+     change to one is a change to the other. */
   .brand:has(img) .t{position:absolute;width:1px;height:1px;overflow:hidden;clip-path:inset(50%)}
+  .brand:has(img) .v{position:absolute;width:1px;height:1px;overflow:hidden;clip-path:inset(50%)}
   /* The id keeps its `nowrap` here, so this is where it pays for it: at .85em the 36 characters
      fit the width a 320px screen leaves once `main`'s padding is gone, which is what makes it
      move whole to a line of its own instead of pushing the page sideways. */

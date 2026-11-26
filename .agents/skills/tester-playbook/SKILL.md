@@ -176,6 +176,20 @@ Rules are in `AGENTS.md`. Format of this file: `AGENTS.md`, under "Skills".
   selector's spaces **collapsed to one each** and a declaration body's whitespace **removed**. So
   write the selector the way the stylesheet spells it (`.brand img`, not `.brandimg`) and compare a
   declaration against the whitespace-free text (`max-width:16rem`).
+- Look a rule up by a **comma-part**, never by whole-selector equality: `admin.css` spells a shared
+  declaration as one rule with two names (`.bar .who svg,.menu svg`, `p.primary .pill,.actions .pill`),
+  so a reader demanding the list equal `.menu svg` is red on the spelling the design asked for.
+  `rule_named(scoped, at, sel)` does that; `the_rule(CSS, sel)` already does it and **keeps the
+  whitespace**, which is the only way to read a multi-token shorthand (`flex:0 1 auto` reaches
+  `css_scoped` as `01auto`, and `css_decl` on that answers `01auto`, a value nothing can assert).
+- A bar-geometry check belongs beside `barStaysOneRow`, not inside it: that helper counts the
+  vertical centres of `.bar`'s **children**, so a tab strip that wraps inside its own `nav` leaves
+  all three children centred on one line and the wrap is invisible. Read the strip's own rows
+  (`nav:not(.acct)` children) and `bar.getBoundingClientRect().height` (one row measures 36px, a
+  wrapped strip measures 76).
+- A long **given name** in the bar needs `gate.profile_claims: ['given_name']` written into the
+  settings file: the header is read only where the deployment says the proxy fills it, so a walk
+  that sends `X-Auth-Given-Name` alone measures the bar's easy case and passes on a broken layout.
 - The `admin.css` **field-measure** assertions (`input.f-*` `max-width`) live in `src/lib.rs`'s test
   module (`the_header_shares_the_content_column`), not in `bb-auth-web`, because that test
   already reads the stylesheet. To prove a new arm satisfiable without touching the
