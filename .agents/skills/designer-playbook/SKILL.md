@@ -76,7 +76,7 @@ Rules are in `AGENTS.md`. Format of this file: `AGENTS.md`, under "Skills".
 - A desktop rule that sizes `.pill` is undone on a phone by the `@media` block in `admin.css` (line `.bar .pill,p.primary .pill,.actions .pill`): check every size change in the `phone` view too.
 - At 360 the Preferences panel covers the middle of the screen: a "click outside" in a phone check must aim at a corner (bottom-left), not the centre.
 - A prefilled field must not use `type="date"` or `type="url"`: the browser blanks or refuses a stored value it cannot parse, and on the profile form a blank posts as a deletion.
-- The `K` table has no placeholders: a sentence around a value is two keys (`…Lead`/`…Tail`), so plan copy that way.
+- The `K` table had no placeholders (a sentence around a value was two keys, `…Lead`/`…Tail`); §13.31 adds `fill` with positional `{0}`, `{1}`, so check which a key uses.
 - A review by screenshot misses small markup the design named (the change list's `(was …)` parentheses and `span.muted`, the one-rule `input.f-code` width): read the rendered `textContent` and computed widths too.
 - The gate cannot tell a federated session from a pre-5f native cookie (both send no `X-Auth-Native-Username`): copy for that state must cover both cases.
 - `node e2e/shots.js <filter>` deletes all of `e2e/artifacts/visual/` first: shooting a console scene for comparison wipes the shots under review. Copy them to `/tmp` before, or rerun their filter after.
@@ -89,3 +89,5 @@ Rules are in `AGENTS.md`. Format of this file: `AGENTS.md`, under "Skills".
 - `shots.js`'s `phone` view is light only: there is no dark phone screenshot to show, so shoot one with a scratch script if a review needs it.
 - `ul.plain` has no margin, so a second `p.lbl` after it sits against the last item: a second group of facts in one card reads better as `p.muted` sentences than as a second labelled list.
 - Every row of the header panel carries a glyph with a `.5em` margin, so a row without one starts its word left of the others: a new panel row needs a glyph too.
+- The settings page's older refusal keys (`SessionTtlBad`, `IssuerNeeded`, `DefaultThemeBad`…) are label-less lowercase fragments shown above the form, not beside the field: a new refusal key names the label first, and reusing an old one keeps that gap.
+- A library refusal's English can be narrower than its check (`url_not_printable` said "spaces and control characters" for a printable-ASCII test, so an accented letter got the wrong reason): read the check's code, not its sentence, before wording the `K` key.

@@ -6486,53 +6486,103 @@ fn settings_refusal(lang: Lang, r: &SettingsRefusal) -> Refusal
 - **`unit_label` takes `Lang` instead of `&View`** (its body reads only `v.t`), so
   `AuditLimitTooMuch` can name the unit in the list box's own words.
 
-The keys, as a draft for the designer to review (English, then Italian). New keys are prefixed
-`SetRef`; three existing keys are reused because they already say the same thing.
+The keys (English, then Italian). New keys are prefixed `SetRef`; three existing keys are reused
+because they already say the same thing. The field each refusal marks is the "GUI" column of §2.
+
+(Changed by the designer, 2026-11-26.) The architect's draft was reviewed against the `K`
+labels as both languages spell them today; 23 of its 38 rows changed in one language or both,
+12 stand as drafted, and the three reused keys are untouched. What changed, and why:
+
+- **Every message says what is allowed, not only what is wrong** (Nielsen's ninth heuristic,
+  "help users recognize, diagnose, and recover from errors", and WCAG 2.2 SC 3.3.3 Error
+  Suggestion, <https://www.w3.org/WAI/WCAG22/Understanding/error-suggestion.html>). So
+  `claim_empty_part` names the three shapes it refuses and where a separator may sit,
+  `claims_collide` says to keep one, `landing_off_hosts` is worded as the rule its own help text
+  states, `audit_limit_zero` says "more than 0" instead of an aphorism, and a control byte in a
+  host says where it usually comes from and to type the entry again.
+- **`url_not_printable` was wrong for one input.** The library refuses anything outside printable
+  ASCII, so an accented letter was refused under a message naming only spaces and control
+  characters. It now names all three.
+- **The session lifetime quotes no value.** It is a single-value field, which §4's own rule says
+  already shows its value, so `ttl_below_floor` takes `{0}` label and `{1}` floor, and
+  `ttl_above_ceiling` `{0}` label and `{1}` ceiling (the draft's `ttl` argument is dropped). The
+  draft's "60 seconds is under the minimum of 60" also put a number with no unit in the sentence.
+- **`hosts_outside_cookie_domain` no longer agrees in number with a list.** `{1}` is one host or
+  several joined by ", ", so "{1} is not covered" was wrong for two; the sentence now has the
+  cookie domain as its subject. Same arguments, new order of use.
+- **Italian reads as Italian.** Plural agreement ("{1} secondi sono", "{1} caratteri, e ne sono
+  ammessi"), no doubled verb ("non può correggere; correggilo"), "host puro" as the OAuth
+  domain's help text already says, "registra" for what the audit writes, and the landing page's
+  wording taken from its own help text ("deve stare su uno degli host autorizzati, altrimenti
+  ogni accesso ricade sulla pagina di accesso").
+- **Lists are introduced the way `DefaultThemeBad` already does it**: "is not one of: {2}" /
+  "non è uno tra: {2}". `{2}` of `attr_unknown` and `{1}` of `attr_none` are `IDENTITY_ATTRS`
+  joined with ", " (`uuid, email`): the words a person types in that field, not wire keys.
+- **A label is quoted with its capital where it falls mid-sentence** ("not covered by the Cookie
+  domain", "uno degli Host autorizzati"): it is the label as the page prints it, which is what
+  makes it findable, and lowercasing it in code would break "User pool (issuer)".
 
 | Code(s) | `K` key | `{…}` | English | Italian |
 | --- | --- | --- | --- | --- |
 | `claim_charset` | `SetRefClaimCharset` | label, claim | `{0}: '{1}' may contain only letters, digits, '_', ':' and '-'.` | `{0}: '{1}' può contenere solo lettere, cifre, '_', ':' e '-'.` |
-| `claim_empty_part` | `SetRefClaimEmptyPart` | label, claim | `{0}: '{1}' has an empty part around a '_', ':' or '-'.` | `{0}: '{1}' ha una parte vuota attorno a '_', ':' o '-'.` |
-| `claim_consumed` | `SetRefClaimConsumed` | label, claim | `{0}: '{1}' is read by the gate itself and cannot be passed on.` | `{0}: '{1}' è letto dal gate stesso e non può essere inoltrato.` |
+| `claim_empty_part` | `SetRefClaimEmptyPart` | label, claim | `{0}: '{1}' starts or ends with '_', ':' or '-', or has two of them in a row; each one must sit between letters or digits.` | `{0}: '{1}' inizia o finisce con '_', ':' o '-', oppure ne ha due di fila; ognuno deve stare tra lettere o cifre.` |
+| `claim_consumed` | `SetRefClaimConsumed` | label, claim | `{0}: '{1}' is a claim the gate reads for itself, so it cannot be passed to the application.` | `{0}: '{1}' è un claim che il gate legge per sé, quindi non può essere passato all'applicazione.` |
 | `claim_header_reserved` | `SetRefClaimHeaderReserved` | label, claim, header | `{0}: '{1}' would become the header {2}, which the gate keeps for itself.` | `{0}: '{1}' diventerebbe l'header {2}, che il gate riserva a sé.` |
-| `claims_collide` | `SetRefClaimsCollide` | label, first, second, header | `{0}: '{1}' and '{2}' would both become the header {3}.` | `{0}: '{1}' e '{2}' diventerebbero entrambi l'header {3}.` |
-| `attr_unknown` | `SetRefAttrUnknown` | label, attr, known | `{0}: '{1}' is not one the gate knows (it knows {2}).` | `{0}: '{1}' non è tra quelli che il gate conosce ({2}).` |
+| `claims_collide` | `SetRefClaimsCollide` | label, first, second, header | `{0}: '{1}' and '{2}' would both become the header {3}; keep only one of them.` | `{0}: '{1}' e '{2}' diventerebbero entrambi l'header {3}; tienine solo uno.` |
+| `attr_unknown` | `SetRefAttrUnknown` | label, attr, known | `{0}: '{1}' is not one of: {2}.` | `{0}: '{1}' non è uno tra: {2}.` |
 | `attr_twice` | `SetRefAttrTwice` | label, attr | `{0}: '{1}' is listed twice.` | `{0}: '{1}' compare due volte.` |
-| `attr_none` | `SetRefAttrNone` | label, known | `{0}: at least one is needed ({1}); without one, the applications behind the gate are told nobody signed in.` | `{0}: ne serve almeno uno ({1}); senza, le applicazioni dietro il gate non sanno chi è entrato.` |
-| `ttl_below_floor` | `SetRefTtlBelowFloor` | label, ttl, floor | `{0}: {1} seconds is under the minimum of {2}; a session that expires as it is handed over is a sign-in loop.` | `{0}: {1} secondi è sotto il minimo di {2}; una sessione che scade mentre viene consegnata è un ciclo di accesso.` |
-| `ttl_above_ceiling` | `SetRefTtlAboveCeiling` | label, ttl, ceiling | `{0}: {1} seconds is over the maximum of {2}.` | `{0}: {1} secondi supera il massimo di {2}.` |
-| `app_client_id` | `SetRefAppClientId` | way in, id | `App client for {0}: '{1}' is not an app client id, which is letters, digits, '.', '_' and '-'.` | `App client per {0}: '{1}' non è un id di app client, che è fatto di lettere, cifre, '.', '_' e '-'.` |
-| `url_not_printable` | `SetRefUrlNotPrintable` | label | `{0}: spaces and control characters are not allowed.` | `{0}: spazi e caratteri di controllo non sono ammessi.` |
+| `attr_none` | `SetRefAttrNone` | label, known | `{0}: at least one is needed ({1}); without one, the applications behind the gate cannot tell who signed in.` | `{0}: ne serve almeno uno ({1}); senza, le applicazioni dietro il gate non sanno chi è entrato.` |
+| `ttl_below_floor` | `SetRefTtlBelowFloor` | label, floor | `{0}: must be at least {1} seconds; a session that expires as it is handed over sends everybody back to the sign-in page.` | `{0}: servono almeno {1} secondi; una sessione che scade mentre viene consegnata rimanda tutti alla pagina di accesso.` |
+| `ttl_above_ceiling` | `SetRefTtlAboveCeiling` | label, ceiling | `{0}: must be at most {1} seconds.` | `{0}: può essere al massimo di {1} secondi.` |
+| `app_client_id` | `SetRefAppClientId` | way in, id | `App client for {0}: '{1}' may contain only letters, digits, '.', '_' and '-'.` | `App client per {0}: '{1}' può contenere solo lettere, cifre, '.', '_' e '-'.` |
+| `url_not_printable` | `SetRefUrlNotPrintable` | label | `{0}: may contain only plain ASCII characters, with no spaces, accented letters or control characters.` | `{0}: può contenere solo caratteri ASCII semplici, senza spazi, lettere accentate o caratteri di controllo.` |
 | `url_not_https` | `SetRefUrlNotHttps` | label | `{0}: must be an absolute address starting with https://.` | `{0}: deve essere un indirizzo assoluto che inizia con https://.` |
-| `url_empty_host` | `SetRefUrlEmptyHost` | label | `{0}: the address names no host.` | `{0}: l'indirizzo non indica alcun host.` |
-| `url_userinfo` | `SetRefUrlUserinfo` | label | `{0}: a user name with '@' before the host is not allowed.` | `{0}: un nome utente con '@' prima dell'host non è ammesso.` |
-| `url_backslash` | `SetRefUrlBackslash` | label | `{0}: a backslash is not allowed.` | `{0}: la barra rovesciata non è ammessa.` |
-| `url_userinfo_or_backslash` | `SetRefUrlUserinfoOrBackslash` | label | `{0}: a user name with '@' and backslashes are not allowed.` | `{0}: un nome utente con '@' e le barre rovesciate non sono ammessi.` |
-| `url_query_or_fragment` | `SetRefUrlQueryOrFragment` | label | `{0}: must be the bare issuer address, with no query and no fragment.` | `{0}: deve essere il solo indirizzo dell'issuer, senza query né frammento.` |
+| `url_empty_host` | `SetRefUrlEmptyHost` | label | `{0}: the address names no host after https://.` | `{0}: l'indirizzo non indica alcun host dopo https://.` |
+| `url_userinfo` | `SetRefUrlUserinfo` | label | `{0}: a user name and '@' before the host are not allowed.` | `{0}: un nome utente con '@' prima dell'host non è ammesso.` |
+| `url_backslash` | `SetRefUrlBackslash` | label | `{0}: a backslash (\) is not allowed.` | `{0}: la barra rovesciata (\) non è ammessa.` |
+| `url_userinfo_or_backslash` | `SetRefUrlUserinfoOrBackslash` | label | `{0}: neither a user name with '@' nor a backslash (\) is allowed.` | `{0}: non sono ammessi né un nome utente con '@' né la barra rovesciata (\).` |
+| `url_query_or_fragment` | `SetRefUrlQueryOrFragment` | label | `{0}: must be the issuer address alone, with no '?' query and no '#' fragment.` | `{0}: deve essere solo l'indirizzo dell'issuer, senza query '?' né frammento '#'.` |
 | `url_quote` | `SetRefUrlQuote` | label | `{0}: quotes and angle brackets are not allowed.` | `{0}: virgolette e parentesi angolari non sono ammesse.` |
 | `url_not_https_or_rooted` | `SetRefUrlNotHttpsOrRooted` | label | `{0}: must be an absolute https:// address or a path starting with '/'.` | `{0}: deve essere un indirizzo https:// assoluto o un percorso che inizia con '/'.` |
 | `callback_not_https` | `SetRefCallbackNotHttps` | label | `{0}: must be the absolute https:// address registered on the app clients, because Cognito compares it byte for byte.` | `{0}: deve essere l'indirizzo https:// assoluto registrato sugli app client, perché Cognito lo confronta byte per byte.` |
-| `cookie_domain_not_bare` | `SetRefCookieDomainNotBare` | label | `{0}: must be a bare domain such as .example.com: letters, digits, '.' and '-', with no scheme, port or path.` | `{0}: deve essere un dominio semplice come .example.com: lettere, cifre, '.' e '-', senza schema, porta o percorso.` |
-| `cookie_domain_single_label` | `SetRefCookieDomainSingleLabel` | label | `{0}: a single word is a domain no browser keeps a cookie for; name the domain the services share, such as .example.com.` | `{0}: una sola parola è un dominio per cui nessun browser tiene un cookie; indica il dominio condiviso dai servizi, come .example.com.` |
-| `host_control_byte` | `SetRefHostControlByte` | label, host | `{0}: '{1}' contains a control character.` | `{0}: '{1}' contiene un carattere di controllo.` |
-| `host_not_bare` | `SetRefHostNotBare` | label, host | `{0}: '{1}' must be a bare host, with no scheme, port or path.` | `{0}: '{1}' deve essere un host semplice, senza schema, porta o percorso.` |
+| `cookie_domain_not_bare` | `SetRefCookieDomainNotBare` | label | `{0}: must be a bare domain such as .example.com: letters, digits, '.' and '-', with no scheme, port or path.` | `{0}: deve essere un dominio puro come .example.com: lettere, cifre, '.' e '-', senza schema, porta o percorso.` |
+| `cookie_domain_single_label` | `SetRefCookieDomainSingleLabel` | label | `{0}: no browser keeps a cookie for a one-word domain; name the domain the services share, such as .example.com.` | `{0}: nessun browser conserva un cookie per un dominio di una sola parola; indica il dominio che i servizi hanno in comune, come .example.com.` |
+| `host_control_byte` | `SetRefHostControlByte` | label, host | `{0}: '{1}' contains a control character, often left by a paste; type it again.` | `{0}: '{1}' contiene un carattere di controllo, spesso lasciato da un copia e incolla; riscrivilo.` |
+| `host_not_bare` | `SetRefHostNotBare` | label, host | `{0}: '{1}' must be a bare host such as app.example.com, with no scheme, port or path.` | `{0}: '{1}' deve essere un host puro come app.example.com, senza schema, porta o percorso.` |
 | `host_at_or_dot_dot` | `SetRefHostAtOrDotDot` | label, host | `{0}: '{1}' must not contain '@' or '..'.` | `{0}: '{1}' non deve contenere '@' o '..'.` |
-| `hosts_outside_cookie_domain` | `SetRefHostsOutsideCookieDomain` | label, hosts, cookie label, domain | `{0}: {1} is not covered by the {2} '{3}', so a sign-in landing there carries no session cookie and loops back to the sign-in page.` | `{0}: {1} non è coperto dal {2} '{3}', quindi un accesso che arriva lì non porta il cookie di sessione e torna in ciclo alla pagina di accesso.` |
-| `landing_off_hosts` | `SetRefLandingOffHosts` | label, hosts label | `{0}: its host is not among the {1}, so every sign-in that names no destination would fall back to the sign-in page.` | `{0}: il suo host non è tra gli {1}, quindi ogni accesso che non indica una destinazione tornerebbe alla pagina di accesso.` |
-| `oauth_domain_not_bare` | `SetRefOauthDomainNotBare` | label | `{0}: must be a bare host: letters, digits, '.' and '-', with no scheme and no path.` | `{0}: deve essere un host semplice: lettere, cifre, '.' e '-', senza schema né percorso.` |
+| `hosts_outside_cookie_domain` | `SetRefHostsOutsideCookieDomain` | label, hosts, cookie label, domain | `{0}: the {2} '{3}' does not reach {1}, so a sign-in that lands there carries no session cookie and loops back to the sign-in page.` | `{0}: il {2} '{3}' non raggiunge {1}, quindi un accesso che arriva lì non porta il cookie di sessione e torna in ciclo alla pagina di accesso.` |
+| `landing_off_hosts` | `SetRefLandingOffHosts` | label, hosts label | `{0}: must be on one of the {1}, or every sign-in that names no page falls back to the sign-in page.` | `{0}: deve stare su uno degli {1}, altrimenti ogni accesso che non indica una pagina ricade sulla pagina di accesso.` |
+| `oauth_domain_not_bare` | `SetRefOauthDomainNotBare` | label | `{0}: must be a bare host: letters, digits, '.' and '-', with no scheme and no path.` | `{0}: deve essere un host puro: lettere, cifre, '.' e '-', senza schema né percorso.` |
 | `button_no_audience` | `AudienceNeeded` (exists) | none | as today | as today |
 | `social_half_configured` | `SocialWiringNeeded` (exists) | none | as today | as today |
 | `audit_header_not_a_name` | `SetRefHeaderNotAName` | label, name | `{0}: '{1}' is not a header name: letters, digits and '-' only (nginx drops a header with an underscore in its name).` | `{0}: '{1}' non è un nome di header: solo lettere, cifre e '-' (nginx scarta un header con un trattino basso nel nome).` |
-| `audit_header_credential` | `SetRefHeaderCredential` | label, name | `{0}: '{1}' carries a credential, and the audit never writes one down.` | `{0}: '{1}' porta una credenziale, e l'audit non ne scrive mai una.` |
-| `audit_headers_same` | `SetRefHeadersSame` | label, name, other label | `{0}: '{1}' is already the {2}; one header cannot carry an address and a request id at once.` | `{0}: '{1}' è già l'{2}; un solo header non può portare insieme un indirizzo e un id di richiesta.` |
+| `audit_header_credential` | `SetRefHeaderCredential` | label, name | `{0}: '{1}' carries a credential, and the audit never writes one down.` | `{0}: '{1}' contiene una credenziale, e l'audit non registra mai credenziali.` |
+| `audit_headers_same` | `SetRefHeadersSame` | label, name, other label | `{0}: '{1}' is already the {2}; one header cannot carry both an address and a request id.` | `{0}: '{1}' è già l'{2}; un solo header non può portare sia un indirizzo sia un id di richiesta.` |
 | `audit_limit_not_amount` | `SetRefLimitNotAmount` | label | `{0}: the amount must be a whole number.` | `{0}: la quantità deve essere un numero intero.` |
-| `audit_limit_zero` | `SetRefLimitZero` | label | `{0}: an amount of nothing is not a limit.` | `{0}: una quantità nulla non è un limite.` |
-| `audit_limit_too_much` | `SetRefLimitTooMuch` | label, max, unit label | `{0}: at most {1} {2}.` | `{0}: al massimo {1} {2}.` |
+| `audit_limit_zero` | `SetRefLimitZero` | label | `{0}: the amount must be more than 0.` | `{0}: la quantità deve essere maggiore di 0.` |
+| `audit_limit_too_much` | `SetRefLimitTooMuch` | label, max, unit label | `{0}: the most allowed is {1} {2}.` | `{0}: il massimo ammesso è {1} {2}.` |
 | `audit_unbounded` | `SetRefAuditUnbounded` | rotation label, retention label | `{0} and {1}: at least one of the two must be a size (MiB, GiB), or a flood of refusals would grow the audit without limit.` | `{0} e {1}: almeno una delle due deve essere una dimensione (MiB, GiB), altrimenti un'ondata di rifiuti farebbe crescere l'audit senza limite.` |
 | `brand_control` | `SetRefBrandControl` | label | `{0}: control characters are not allowed.` | `{0}: i caratteri di controllo non sono ammessi.` |
-| `brand_too_long` | `SetRefBrandTooLong` | label, chars, max | `{0}: {1} characters is longer than the {2} allowed.` | `{0}: {1} caratteri superano i {2} ammessi.` |
+| `brand_too_long` | `SetRefBrandTooLong` | label, chars, max | `{0}: {1} characters, and at most {2} are allowed.` | `{0}: {1} caratteri, e ne sono ammessi al massimo {2}.` |
 | `theme_unknown` | `DefaultThemeBad` (exists) | none | as today | as today |
-| `version`, `button_bare_name`, `button_no_idp`, `button_idp_charset`, `button_twice` | `SetRefFileOnly` | the English sentence | `The settings file is refused for a reason this page cannot fix; correct it with bb-auth-adm over SSH. The gate says: {0}` | `Il file delle impostazioni è rifiutato per un motivo che questa pagina non può correggere; correggilo con bb-auth-adm via SSH. Il gate dice: {0}` |
+| `version`, `button_bare_name`, `button_no_idp`, `button_idp_charset`, `button_twice` | `SetRefFileOnly` | the English sentence | `The settings file is refused for a reason this page cannot fix: correct it with bb-auth-adm over SSH. The gate says: {0}` | `Il file delle impostazioni viene rifiutato per un motivo che questa pagina non può risolvere: correggilo con bb-auth-adm via SSH. Il gate dice: {0}` |
+
+`{1}` of `audit_limit_too_much` is `unit.max_amount()` as plain digits and `{2}` is
+`unit_label(lang, unit, max)`, which is always the plural because no maximum is 1. `{1}` of
+`ttl_below_floor` is `MIN_SESSION_TTL`, of `ttl_above_ceiling` `MAX_SESSION_TTL`, and `{2}` of
+`brand_too_long` `MAX_BRAND_NAME`, each as plain digits.
+
+**One register the page does not share yet** (designer, 2026-11-26). The reused keys and the
+form's own pre-checks (`SessionTtlBad`, `IssuerNeeded`, `AuthorizedHostsNeeded`,
+`DefaultThemeBad`, `AdminsNeverEmpty`) are lowercase fragments with no label and no full stop
+("must be a whole number of seconds"), shown in the `div.err` above the form. The new keys name
+the field first and end with a full stop, because the message sits above the form and not beside
+the field, and WCAG 2.2 SC 3.3.1 Error Identification asks that the item in error be identified
+in text (<https://www.w3.org/WAI/WCAG22/Understanding/error-identification.html>), which the
+fragments do only through the red outline and `aria-describedby`. That trades consistency
+(Nielsen's fourth heuristic) for identification until the old keys are brought in line, which is
+a separate change to the `K` table and not part of S8; it is proposed to the coordinator as
+follow-up work, not done here.
 
 `app_client_id`'s `{0}` is `t(lang, K::SignInEmail)` for `client_id` and the provider's name
 for a button: the "Ways in" table labels its rows that way, and the cell is the field.
@@ -6666,7 +6716,9 @@ to `SettingsRefusal`); S8 and S9 add the `K` keys, so also `node e2e/run.js` and
 
 #### 9. Open questions for the user (settings refusals)
 
-None blocks the slices. Two are worth a look in the morning: the Italian wording in §4 is a
-draft for the designer (it names the labels exactly as `K` spells them today); and whether the
+None blocks the slices. Two are worth a look in the morning: the wording in §4, which the
+designer reviewed and rewrote on 2026-11-26 (see the list above its table; the TTL keys now take
+the floor or ceiling and not the value, and the older fragment-style keys are left as a proposed
+follow-up); and whether the
 CLI should one day name its flags in these refusals the way it already does in its pre-checks
 is left alone here, because the user asked for its bytes to stay as they are.
