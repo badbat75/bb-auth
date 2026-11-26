@@ -97,7 +97,7 @@ Designed in §13.29 W1 to W12 (2026-11-26, on the user's choice (a)); the pages 
 strings the redesign made untrue are listed in its §5 for the designer. The intake's shared secret
 (`BB_AUTH_WEB_DELETE_SECRET`) is optional for now (the user); W8 lists proposals for itadmin, at the
 owner's word. Slices: **7a** the configuration and the menu row (done); **7b** the confirmation page (done);
-**7c** the stranger's deletion and a fake intake; **7d** the roster row removed first; **7e** the
+**7c** the stranger's deletion and a fake intake (done); **7d** the roster row removed first; **7e** the
 partial outcomes; **7f** the browser suite; **7g** the real run on rpi-01, the worker in dry run
 first, each step with the user's go-ahead. §13.30 was reworded for the worker on 2026-11-26 (mockups in /tmp/d7w/).
 

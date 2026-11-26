@@ -1302,6 +1302,24 @@ enum K {
     AccountDeleteTypeLabel,
     AccountDeleteTypeHintMany,
     AccountDeleteConfirm,
+    // The pages a deletion request answers with (§13.30 §4). The words are here, never in a
+    // handler: the handler picks a key, and the key's words are the reader's language's.
+    AccountDeleteQueuedTitle,
+    AccountDeleteQueued,
+    AccountDeletedSignOut,
+    AccountDeletedClose,
+    AccountDeleteNotQueued,
+    AccountDeleteUnsureTitle,
+    AccountDeleteMaybeQueued,
+    AccountDeleteNotDoneTitle,
+    AccountDeleteProtected,
+    AccountDeleteNoCheck,
+    AccountDeleteRetry,
+    AccountDeleteStartAgain,
+    AccountDeleteChangedTitle,
+    AccountDeleteChanged,
+    AccountDeleteTypedWrong,
+    AccountDeleteTooMany,
 }
 
 /// Pick one of a key's two spellings.
@@ -3124,6 +3142,103 @@ fn t(lang: Lang, key: K) -> &'static str {
             lang,
             "Delete my account",
             "Elimina il mio account",
+        ),
+        // The words of every outcome a deletion request answers with, verbatim from §13.30 §5.
+        // "Queued" and never "deleted": the page cannot read the worker's outcome (§13.29 W6).
+        K::AccountDeleteQueuedTitle => m(
+            lang,
+            "Your account is being deleted",
+            "Il tuo account è in fase di eliminazione",
+        ),
+        K::AccountDeleteQueued => m(
+            lang,
+            "Your sign-in accounts are queued for deletion. This page cannot tell when that \
+             happens; if you can still sign in later, tell an administrator.",
+            "I tuoi account di accesso sono in coda per l'eliminazione. Questa pagina non può \
+             dire quando avverrà; se più avanti riesci ancora ad accedere, avvisa un \
+             amministratore.",
+        ),
+        K::AccountDeletedSignOut => m(
+            lang,
+            "This browser stays signed in until you sign out, so sign out now.",
+            "Questo browser resta connesso finché non esci, quindi esci adesso.",
+        ),
+        K::AccountDeletedClose => m(
+            lang,
+            "This browser stays signed in until the session ends: close your browser to end it.",
+            "Questo browser resta connesso finché la sessione non termina: chiudi il browser per \
+             terminarla.",
+        ),
+        K::AccountDeleteNotQueued => m(
+            lang,
+            "Your sign-in accounts could not be queued for deletion, so they still exist. Try \
+             again later; if it fails again, tell an administrator.",
+            "Non è stato possibile mettere in coda l'eliminazione dei tuoi account di accesso, \
+             che quindi esistono ancora. Riprova più tardi; se non funziona di nuovo, avvisa un \
+             amministratore.",
+        ),
+        K::AccountDeleteUnsureTitle => m(
+            lang,
+            "Your account may not be fully deleted",
+            "Il tuo account potrebbe non essere stato eliminato del tutto",
+        ),
+        K::AccountDeleteMaybeQueued => m(
+            lang,
+            "The deletion service did not answer, so your sign-in accounts may or may not be \
+             queued for deletion. Trying again is safe, even if they were.",
+            "Il servizio di eliminazione non ha risposto, quindi i tuoi account di accesso \
+             potrebbero essere in coda per l'eliminazione oppure no. Riprovare non crea problemi, \
+             anche se lo erano già.",
+        ),
+        K::AccountDeleteNotDoneTitle => m(
+            lang,
+            "Your account was not deleted",
+            "Il tuo account non è stato eliminato",
+        ),
+        K::AccountDeleteProtected => m(
+            lang,
+            "This account cannot be deleted from this page, and nothing was deleted. If you want \
+             it deleted, ask an administrator.",
+            "Questo account non può essere eliminato da questa pagina, e non è stato eliminato \
+             nulla. Se vuoi eliminarlo, chiedi a un amministratore.",
+        ),
+        K::AccountDeleteNoCheck => m(
+            lang,
+            "The deletion service did not answer as expected, so nothing was deleted and you can \
+             still sign in. Try again in a minute; if it fails again, tell an administrator.",
+            "Il servizio di eliminazione non ha risposto come previsto, quindi non è stato \
+             eliminato nulla e puoi ancora accedere. Riprova tra un minuto; se non funziona di \
+             nuovo, avvisa un amministratore.",
+        ),
+        K::AccountDeleteRetry => m(lang, "Try again", "Riprova"),
+        K::AccountDeleteStartAgain => m(lang, "Start again", "Ricomincia"),
+        K::AccountDeleteChangedTitle => m(
+            lang,
+            "Your account changed",
+            "Il tuo account è cambiato",
+        ),
+        K::AccountDeleteChanged => m(
+            lang,
+            "Your account changed after you opened this page, so nothing was deleted. Start again \
+             to see what would be deleted now.",
+            "Il tuo account è cambiato dopo che hai aperto questa pagina, quindi non è stato \
+             eliminato nulla. Ricomincia per vedere cosa verrebbe eliminato adesso.",
+        ),
+        K::AccountDeleteTypedWrong => m(
+            lang,
+            "The email address typed is not one of this account's, so nothing was deleted. Type \
+             it as it is shown above.",
+            "L'indirizzo email scritto non è uno di quelli di questo account, quindi non è stato \
+             eliminato nulla. Scrivilo come appare qui sopra.",
+        ),
+        K::AccountDeleteTooMany => m(
+            lang,
+            "This account has more email addresses than this page can delete at once, so it \
+             cannot be deleted here, and nothing was deleted. If you want it deleted, ask an \
+             administrator.",
+            "Questo account ha più indirizzi email di quanti questa pagina ne possa eliminare in \
+             una volta, quindi non può essere eliminato qui, e non è stato eliminato nulla. Se \
+             vuoi eliminarlo, chiedi a un amministratore.",
         ),
     }
 }
@@ -10885,6 +11000,10 @@ fn page_account_confirm(
 /// the confirmation stays the person's own act, a deliberate exception to WCAG 1.3.5. Nothing on
 /// the page is focused, because Enter must not be one keystroke from a deletion, and an empty
 /// `required` field stops a stray Enter in the browser anyway.
+///
+/// `typed` and `err` are the `400` (§13.30 §2): the page that asked for the address is the page a
+/// typo is answered on, with what was typed kept in the field, so a typo is seen and fixed rather
+/// than retyped (forgiving input, WCAG 3.3.1 and 3.3.3). A `GET` renders the same page empty.
 #[allow(clippy::too_many_arguments)]
 fn page_account_delete(
     lang: Lang,
@@ -10895,7 +11014,13 @@ fn page_account_delete(
     ids: &[String],
     own: &AccountOwn<'_>,
     audit: &AuditPolicy,
+    typed: &str,
+    err: Option<&Refusal>,
 ) -> Markup {
+    // The one field this form has, so the refusal on it is what marks the field: the class,
+    // `aria-invalid` and the link to the message box above the fields are one decision, made by
+    // [`text_field_with`], and this page does not get to make it differently.
+    let invalid = err.is_some_and(|e| e.is("confirm_email"));
     // Two addresses is the case that needs the hint, because the field asks for one of them and a
     // person with one has nothing to pick.
     let many = ids.len() > 1;
@@ -10954,10 +11079,10 @@ fn page_account_delete(
             (text_field_with(
                 t(lang, K::AccountDeleteTypeLabel),
                 "confirm_email",
-                "",
+                typed,
                 "",
                 &hints,
-                false,
+                invalid,
                 FieldOpts {
                     required: true,
                     inputmode: Some("email"),
@@ -10967,9 +11092,426 @@ fn page_account_delete(
             ))
         },
         t(lang, K::AccountDeleteConfirm),
-        None,
+        err,
         true,
     )
+}
+
+/// The most addresses one deletion request queues (§13.29 W3).
+///
+/// Named after the worker's own `MAX_PER_RUN`: it takes ten addresses per run and refuses the
+/// **whole** run above that, so a caller with more is refused here, before anything is sent,
+/// rather than leaving nine queued and the tenth not.
+const DELETE_MAX_ADDRESSES: usize = 10;
+
+/// The intake's two paths, hard-coded on **its** side (§13.29 W1), which is why
+/// `BB_AUTH_WEB_DELETE_INTAKE` names only an origin: a path an operator can set is a path the
+/// intake may not answer.
+const INTAKE_WHOAMI_PATH: &str = "/account/whoami";
+const INTAKE_DELETE_PATH: &str = "/account/delete";
+
+/// The header the shared secret travels in (§13.29 W8 §1), on both calls and only where the
+/// deployment set one.
+const INTAKE_SECRET_HEADER: &str = "X-BB-Delete-Secret";
+
+/// What one `GET /account/whoami` answered (§13.29 W3 step 4).
+enum Whoami {
+    /// The intake will take this address.
+    Open,
+    /// The intake will not (§13.29 W5). The protected list is its own, and this page never names
+    /// it, the address that matched, or the intake's word for it (§13.30 §7).
+    Protected,
+    /// It gave no HTTP answer at all: the timeout, or a socket that will not carry the request.
+    NoAnswer,
+    /// It answered, in a way the contract does not read: not a `200`, not this address, no
+    /// `protected` it is willing to state.
+    Unusable,
+}
+
+/// What one `POST /account/delete` answered (§13.29 W3 step 6).
+enum Queued {
+    /// `202` with `"ok": true`, the only acceptance the contract has (§13.29 W1).
+    Accepted,
+    /// An HTTP answer that is not an acceptance, with the status that said so. A `403` is the
+    /// intake's protected list, and for a caller with no roster row that is the same page
+    /// `whoami` would have given (§13.30 §4).
+    Refused(u16),
+    /// No HTTP answer at all, so the record may or may not be queued and the page says exactly
+    /// that (§13.29 W6).
+    NoAnswer,
+}
+
+/// The intake's HTTP client: the same three settings as [`cognito_post`], for the same reasons.
+///
+/// `timeout_global` is the bound the caller waits on (§13.29 W2), because `tiny_http` runs a
+/// fixed pool of handler threads and a call that hangs forever is a worker that never serves
+/// anybody again. `http_status_as_error(false)`, so a `403` and a `503` arrive as the answers
+/// they are and not as errors. `max_redirects` **0**, because ureq's own default is 10 and a
+/// `3xx` from the intake would hand the identity header, written here, to whatever host the
+/// intake named.
+fn intake_agent(cfg: &Config) -> ureq::Agent {
+    ureq::Agent::new_with_config(
+        ureq::config::Config::builder()
+            .timeout_global(Some(cfg.intake_timeout))
+            .http_status_as_error(false)
+            .max_redirects(0)
+            .build(),
+    )
+}
+
+/// Ask the intake whether one address may be deleted (§13.29 W3 step 4).
+///
+/// **One address per call**, as `X-Auth-Email`: the intake reads the whole header as one address,
+/// so the gate's joined header (every email of one roster row) would queue an address no Cognito
+/// user has and report it accepted. `X-Real-IP` is sent by nobody here: the intake records the
+/// address of the socket that asked, and this client is not the proxy that knows the caller's.
+///
+/// The answer counts only from a `200` that echoes the address sent and states `protected` as a
+/// boolean; anything else is [`Whoami::Unusable`]. Guessing "not protected" from an answer that
+/// did not say so is the one guess this walk may not make, because the price of that guess is a
+/// queued deletion.
+fn intake_whoami(agent: &ureq::Agent, cfg: &Config, origin: &str, email: &str) -> Whoami {
+    let mut request = agent
+        .get(&format!("{origin}{INTAKE_WHOAMI_PATH}"))
+        .header(IDENTITY_HEADER, email);
+    if let Some(secret) = cfg.delete_secret.as_deref() {
+        request = request.header(INTAKE_SECRET_HEADER, secret);
+    }
+    let response = match request.call() {
+        Ok(r) => r,
+        Err(ureq::Error::Timeout(_)) => return Whoami::NoAnswer,
+        Err(_) => return Whoami::Unusable,
+    };
+    if response.status().as_u16() != 200 {
+        return Whoami::Unusable;
+    }
+    let mut body = response.into_body();
+    let text = body.read_to_string().unwrap_or_default();
+    let value = serde_json::from_str::<serde_json::Value>(&text).unwrap_or_default();
+    if value.get("email").and_then(|v| v.as_str()) != Some(email) {
+        return Whoami::Unusable;
+    }
+    match value.get("protected").and_then(|v| v.as_bool()) {
+        Some(true) => Whoami::Protected,
+        Some(false) => Whoami::Open,
+        None => Whoami::Unusable,
+    }
+}
+
+/// Queue one address with the intake (§13.29 W3 step 6).
+///
+/// The body carries `confirm_email` equal to the header's address: the intake refuses a
+/// `confirm_email` that differs from `X-Auth-Email` (`confirm_mismatch`), and the two are one
+/// fact stated twice, so a request that means one address says it twice.
+fn intake_delete(agent: &ureq::Agent, cfg: &Config, origin: &str, email: &str) -> Queued {
+    let mut request = agent
+        .post(&format!("{origin}{INTAKE_DELETE_PATH}"))
+        .header(IDENTITY_HEADER, email);
+    if let Some(secret) = cfg.delete_secret.as_deref() {
+        request = request.header(INTAKE_SECRET_HEADER, secret);
+    }
+    let response = match request.send_form([("confirm_email", email)]) {
+        Ok(r) => r,
+        // A timeout and a socket that refuses the request are one fact to the person: the intake
+        // did not say. "May or may not be queued" is the honest page for both, and the page's
+        // own advice, try again, is safe in the case where it was queued.
+        Err(_) => return Queued::NoAnswer,
+    };
+    let status = response.status().as_u16();
+    let mut body = response.into_body();
+    let text = body.read_to_string().unwrap_or_default();
+    let value = serde_json::from_str::<serde_json::Value>(&text).unwrap_or_default();
+    if status == 202 && value.get("ok").and_then(|v| v.as_bool()) == Some(true) {
+        Queued::Accepted
+    } else {
+        Queued::Refused(status)
+    }
+}
+
+/// The page a deletion request ends on (§13.30 §4): the profile outcome's shape, one `h1` that
+/// states the result, one `p.lede`, one row of pills.
+fn page_account_delete_outcome(lede: Markup, pills: Vec<Markup>) -> Markup {
+    html! {
+        p class="lede" { (lede) }
+        @if !pills.is_empty() {
+            p class="primary" {
+                @for pill in &pills { (pill) }
+            }
+        }
+    }
+}
+
+/// Answer the delete `POST` (§13.29 W3).
+///
+/// The order is W3's, and every step that can refuse refuses **before** the intake is asked,
+/// because a `202` is the one answer this page cannot take back:
+///
+/// 1. the same-origin door, before the body is read, the door every `/account` `POST` goes
+///    through;
+/// 2. the page is the current one: the posted `uuid` is the live row's (`""` for a caller the
+///    file has no row for) and the posted `rev` is the file's exact bytes. A person who opened
+///    the page as a stranger and gained a row before pressing is refused, because the page they
+///    hold says the file names nobody, and acting on that deletes a record they were never shown;
+/// 3. the typed address is one of the caller's own, normalised as the header's are;
+/// 4. no more than [`DELETE_MAX_ADDRESSES`] addresses;
+/// 5. `whoami` for **every** address, ahead of any `POST`. The protected list is the intake's, and
+///    a caller whose second address is protected must not leave a record queued behind the first,
+///    which is why this is a loop of its own and not a check inside the write loop;
+/// 6. `POST` each address, stopping at the first that is not accepted;
+/// 7. the journal line (§13.29 W7), then the page (§13.30 §4).
+///
+/// This is the stranger's half: it writes nothing to the access file, and the roster write that
+/// goes ahead of the first `POST` for a caller who has a row is the next slice.
+#[allow(clippy::too_many_arguments)]
+fn account_delete_post(
+    mut req: Request,
+    cfg: &Config,
+    prefs: &mut AccountPrefs,
+    lang: Lang,
+    look: AccountLook,
+    ids: &[String],
+    uuid: Option<&str>,
+    own: &AccountOwn<'_>,
+    settings: &Settings,
+    intake: Option<&str>,
+    delete_path: &str,
+    page: &str,
+    rev: &str,
+) {
+    // (1) The door, and the console's strict policy: `same-origin` and nothing else.
+    if !csrf_ok(
+        header_value(&req, "Sec-Fetch-Site"),
+        header_value(&req, "Origin"),
+        header_value(&req, "Host"),
+    ) {
+        respond_account(
+            req,
+            403,
+            prefs,
+            t(lang, K::CsrfTitle),
+            html! { p { (t(lang, K::CsrfBody)) } },
+            look,
+            false,
+        );
+        return;
+    }
+    let form = Form::parse(&read_body(&mut req));
+    // Every page below carries its own `p.lede`, as the confirmation page does (§13.23 §4).
+    prefs.page_lede = true;
+    let typed = norm_email(form.get("confirm_email").trim());
+    // (2) The page is the current one. The `rev` alone is not the check: a page rendered after
+    // the row landed carries the current `rev` and no uuid, and is refused by the uuid.
+    if form.get("rev").trim() != rev || form.get("uuid").trim() != uuid.unwrap_or("") {
+        respond_account(
+            req,
+            409,
+            prefs,
+            t(lang, K::AccountDeleteChangedTitle),
+            page_account_delete_outcome(
+                html! { (t(lang, K::AccountDeleteChanged)) },
+                vec![
+                    pill_link(delete_path, t(lang, K::AccountDeleteStartAgain)),
+                    back_link(lang, page),
+                ],
+            ),
+            look,
+            false,
+        );
+        return;
+    }
+    // (3) The typed address **is** the confirmation, so a typo is refused here, with the page
+    // that asked for it kept on screen and the typo kept in the field, and nothing sent.
+    if !ids.contains(&typed) {
+        let refusal = Refusal::on("confirm_email", t(lang, K::AccountDeleteTypedWrong));
+        respond_account(
+            req,
+            400,
+            prefs,
+            t(lang, K::AccountDeleteTitle),
+            page_account_delete(
+                lang,
+                delete_path,
+                page,
+                rev,
+                uuid,
+                ids,
+                own,
+                &settings.audit_policy,
+                &typed,
+                Some(&refusal),
+            ),
+            look,
+            false,
+        );
+        return;
+    }
+    // (4) The worker's bound, checked before the first call: nine addresses queued and a tenth
+    // refused is a half-deleted account, which is the one outcome this page cannot explain.
+    if ids.len() > DELETE_MAX_ADDRESSES {
+        respond_account(
+            req,
+            400,
+            prefs,
+            t(lang, K::AccountDeleteNotDoneTitle),
+            page_account_delete_outcome(
+                html! { (t(lang, K::AccountDeleteTooMany)) },
+                vec![back_link(lang, page)],
+            ),
+            look,
+            false,
+        );
+        return;
+    }
+    // The intake, and the walk starts here. The path is dispatched only where an intake is
+    // wired (§13.29 W2), so this is the same fact the `404` above already answered.
+    let Some(origin) = intake else {
+        respond_account(
+            req,
+            404,
+            prefs,
+            t(lang, K::NotFoundTitle),
+            html! { p { (t(lang, K::NotFoundBody)) } },
+            look,
+            false,
+        );
+        return;
+    };
+    let agent = intake_agent(cfg);
+    // (5) Every address is asked before any is posted.
+    for id in ids {
+        match intake_whoami(&agent, cfg, origin, id) {
+            Whoami::Open => {}
+            Whoami::Protected => {
+                audit(
+                    &format!("{typed} (self)"),
+                    "delete-request",
+                    "refused protected",
+                );
+                respond_account(
+                    req,
+                    403,
+                    prefs,
+                    t(lang, K::AccountDeleteNotDoneTitle),
+                    page_account_delete_outcome(
+                        html! { (t(lang, K::AccountDeleteProtected)) },
+                        vec![back_link(lang, page)],
+                    ),
+                    look,
+                    false,
+                );
+                return;
+            }
+            who => {
+                // No answer is a 504 and an unusable answer a 502, and both say the same thing:
+                // nothing was deleted, and the caller can still sign in. Try again is the way
+                // forward, because the confirmation page this link renders is still true.
+                let (status, journal) = match who {
+                    Whoami::NoAnswer => (504, "no answer"),
+                    _ => (502, "refused no check"),
+                };
+                audit(&format!("{typed} (self)"), "delete-request", journal);
+                respond_account(
+                    req,
+                    status,
+                    prefs,
+                    t(lang, K::AccountDeleteNotDoneTitle),
+                    page_account_delete_outcome(
+                        html! { (t(lang, K::AccountDeleteNoCheck)) },
+                        vec![
+                            pill_link(delete_path, t(lang, K::AccountDeleteRetry)),
+                            back_link(lang, page),
+                        ],
+                    ),
+                    look,
+                    false,
+                );
+                return;
+            }
+        }
+    }
+    // (6) The records, one address per request, stopping at the first that is not accepted: a
+    // later address is asked about on the partial page, which is the roster's case.
+    for id in ids {
+        match intake_delete(&agent, cfg, origin, id) {
+            Queued::Accepted => {}
+            Queued::Refused(status) => {
+                audit(
+                    &format!("{typed} (self)"),
+                    "delete-request",
+                    &format!("refused {status}"),
+                );
+                // A `403` is the intake's protected list answering where `whoami` did not, and
+                // for a caller with no row nothing has changed, so the protected page is true.
+                let (status, title, lede) = if status == 403 {
+                    (403, K::AccountDeleteNotDoneTitle, K::AccountDeleteProtected)
+                } else {
+                    (502, K::AccountDeleteNotDoneTitle, K::AccountDeleteNotQueued)
+                };
+                respond_account(
+                    req,
+                    status,
+                    prefs,
+                    t(lang, title),
+                    page_account_delete_outcome(
+                        html! { (t(lang, lede)) },
+                        vec![
+                            pill_link(delete_path, t(lang, K::AccountDeleteRetry)),
+                            back_link(lang, page),
+                        ],
+                    ),
+                    look,
+                    false,
+                );
+                return;
+            }
+            Queued::NoAnswer => {
+                audit(&format!("{typed} (self)"), "delete-request", "no answer");
+                respond_account(
+                    req,
+                    504,
+                    prefs,
+                    t(lang, K::AccountDeleteUnsureTitle),
+                    page_account_delete_outcome(
+                        html! { (t(lang, K::AccountDeleteMaybeQueued)) },
+                        vec![
+                            pill_link(delete_path, t(lang, K::AccountDeleteRetry)),
+                            back_link(lang, page),
+                        ],
+                    ),
+                    look,
+                    false,
+                );
+                return;
+            }
+        }
+    }
+    // (7) Every address is queued, which is all this page knows (§13.29 W6): the worker's
+    // outcome is not readable from here, so the page says "being deleted" and never "deleted",
+    // and its one action is the sign out, because the cookie outlives the deletion.
+    audit(
+        &format!("{typed} (self)"),
+        "delete-request",
+        &format!("{} queued", ids.len()),
+    );
+    let (tail, logout) = match prefs.logout {
+        Some(url) => (t(lang, K::AccountDeletedSignOut), Some(url)),
+        None => (t(lang, K::AccountDeletedClose), None),
+    };
+    respond_account(
+        req,
+        200,
+        prefs,
+        t(lang, K::AccountDeleteQueuedTitle),
+        page_account_delete_outcome(
+            html! { (t(lang, K::AccountDeleteQueued)) " " (tail) },
+            logout
+                .map(|url| pill_link(url, t(lang, K::SignOut)))
+                .into_iter()
+                .collect(),
+        ),
+        look,
+        false,
+    );
 }
 
 /// The values one delete line names, each in `code` and joined by `", "`: an address, a key id, a
@@ -11464,18 +12006,24 @@ fn handle_account(
             );
             return;
         }
-        // The confirmation is a `GET` until 7c wires its `POST` (§13.29 W3), and the guard is not
-        // tidiness: every path this branch does not claim is the mint below, so a submission to
-        // the delete URL would mint an API key on the page that asks to delete the row.
+        // The delete `POST` is claimed here for the same reason the mint guard was: every path
+        // this branch does not claim is the mint below, and a submission to the delete URL that
+        // fell through would mint an API key on the page that asks to delete the row.
         if delete_path.as_deref() == Some(path) {
-            respond_account(
+            account_delete_post(
                 req,
-                404,
-                &prefs,
-                t(lang, K::NotFoundTitle),
-                html! { p { (t(lang, K::NotFoundBody)) } },
+                cfg,
+                &mut prefs,
+                lang,
                 look,
-                false,
+                &ids,
+                uuid,
+                &own,
+                &settings,
+                cfg.delete_intake.as_deref(),
+                path,
+                &page,
+                &rev,
             );
             return;
         }
@@ -11563,6 +12111,8 @@ fn handle_account(
                 &ids,
                 &own,
                 &settings.audit_policy,
+                "",
+                None,
             ),
             look,
             false,
@@ -32718,6 +33268,1181 @@ mod tests {
                 !g.body
                     .contains(&format!("action=\"{ACCOUNT_PATH}/delete\"")),
                 "{who}: a 404 carries no delete form: {}",
+                account_readable(&g.body)
+            );
+        }
+        let _ = std::fs::remove_file(&path);
+    }
+
+    // ---------------------------------------------------------------------
+    // The stranger's deletion, slice 7c (docs/ARCHITECTURE.md §13.29 W10, §13.30 §4 §5):
+    // `account_delete_post`'s steps 1 to 4 and 6, `intake_whoami`, `intake_delete`, and the
+    // done page. W3's step 5, the roster write, is 7d's, so every caller here is one the page
+    // writes nothing for, and the access file's bytes are the proof of that.
+    //
+    // Everything talks to `FakeIntake`, a socket on this host. No test reaches the real worker,
+    // and none starts `FakeCognito`: this path touches Cognito not at all (§13.29 W11).
+    // ---------------------------------------------------------------------
+
+    // The words §13.30 §5 pins for this slice, verbatim, in both languages. They are consts
+    // and not `K` keys because the keys do not exist yet: a test that wrote `t(lang,
+    // K::AccountDeleteQueued)` would not compile, and the red this slice wants is the missing
+    // behaviour, not a missing symbol.
+    const DELETE_TYPED_EN: &str = "The email address typed is not one of this account's, so \
+                                   nothing was deleted. Type it as it is shown above.";
+    const DELETE_TYPED_IT: &str = "L'indirizzo email scritto non è uno di quelli di questo \
+                                   account, quindi non è stato eliminato nulla. Scrivilo come \
+                                   appare qui sopra.";
+    const DELETE_NOT_DONE_EN: &str = "Your account was not deleted";
+    const DELETE_NOT_DONE_IT: &str = "Il tuo account non è stato eliminato";
+    const DELETE_PROTECTED_EN: &str = "This account cannot be deleted from this page, and \
+                                       nothing was deleted. If you want it deleted, ask an \
+                                       administrator.";
+    const DELETE_PROTECTED_IT: &str = "Questo account non può essere eliminato da questa \
+                                       pagina, e non è stato eliminato nulla. Se vuoi \
+                                       eliminarlo, chiedi a un amministratore.";
+    const DELETE_TOO_MANY_EN: &str = "This account has more email addresses than this page can \
+                                      delete at once, so it cannot be deleted here, and nothing \
+                                      was deleted. If you want it deleted, ask an administrator.";
+    const DELETE_TOO_MANY_IT: &str = "Questo account ha più indirizzi email di quanti questa \
+                                      pagina ne possa eliminare in una volta, quindi non può \
+                                      essere eliminato qui, e non è stato eliminato nulla. Se \
+                                      vuoi eliminarlo, chiedi a un amministratore.";
+    const DELETE_NO_CHECK_EN: &str = "The deletion service did not answer as expected, so \
+                                      nothing was deleted and you can still sign in. Try again \
+                                      in a minute; if it fails again, tell an administrator.";
+    const DELETE_NO_CHECK_IT: &str = "Il servizio di eliminazione non ha risposto come previsto, \
+                                      quindi non è stato eliminato nulla e puoi ancora accedere. \
+                                      Riprova tra un minuto; se non funziona di nuovo, avvisa un \
+                                      amministratore.";
+    const DELETE_QUEUED_TITLE_EN: &str = "Your account is being deleted";
+    const DELETE_QUEUED_TITLE_IT: &str = "Il tuo account è in fase di eliminazione";
+    const DELETE_QUEUED_EN: &str = "Your sign-in accounts are queued for deletion. This page \
+                                    cannot tell when that happens; if you can still sign in \
+                                    later, tell an administrator.";
+    const DELETE_QUEUED_IT: &str = "I tuoi account di accesso sono in coda per l'eliminazione. \
+                                    Questa pagina non può dire quando avverrà; se più avanti \
+                                    riesci ancora ad accedere, avvisa un amministratore.";
+    const DELETE_NOW_GONE_EN: &str = "Your API keys and every access an administrator gave you \
+                                      by name are gone.";
+    const DELETE_NOW_GONE_IT: &str = "Le tue chiavi API e ogni accesso che un amministratore ti \
+                                      ha dato per nome non ci sono più.";
+    const DELETE_SIGN_OUT_EN: &str = "This browser stays signed in until you sign out, so sign \
+                                      out now.";
+    const DELETE_SIGN_OUT_IT: &str = "Questo browser resta connesso finché non esci, quindi esci \
+                                      adesso.";
+    const DELETE_CLOSE_EN: &str = "This browser stays signed in until the session ends: close \
+                                   your browser to end it.";
+    const DELETE_CLOSE_IT: &str = "Questo browser resta connesso finché la sessione non \
+                                   termina: chiudi il browser per terminarla.";
+    const DELETE_CHANGED_TITLE_EN: &str = "Your account changed";
+    const DELETE_CHANGED_TITLE_IT: &str = "Il tuo account è cambiato";
+    const DELETE_CHANGED_EN: &str = "Your account changed after you opened this page, so nothing \
+                                     was deleted. Start again to see what would be deleted now.";
+    const DELETE_CHANGED_IT: &str = "Il tuo account è cambiato dopo che hai aperto questa \
+                                     pagina, quindi non è stato eliminato nulla. Ricomincia per \
+                                     vedere cosa verrebbe eliminato adesso.";
+    const DELETE_RETRY_EN: &str = "Try again";
+    const DELETE_RETRY_IT: &str = "Riprova";
+    const DELETE_START_EN: &str = "Start again";
+    const DELETE_START_IT: &str = "Ricomincia";
+
+    /// The intake's two paths, hard-coded by the worker's contract (§13.29 W1), so a script
+    /// names them and nothing else, and the config value names only the origin.
+    const WHOAMI_PATH: &str = "GET /account/whoami";
+    const DELETE_PATH: &str = "POST /account/delete";
+
+    /// The answer a healthy intake gives `whoami` for the address it was sent: not protected.
+    /// `__EMAIL__` is the fake's echo (see [`FakeIntake::answering`]), because the contract
+    /// reads a `whoami` only when its `email` is the address the request carried, and a script
+    /// that named one address could not answer a walk over two.
+    fn whoami_ok() -> Reply {
+        reply(200, r#"{"ok":true,"email":"__EMAIL__","protected":false}"#)
+    }
+
+    /// The same, for an address on the intake's protected list (§13.29 W5).
+    fn whoami_protected() -> Reply {
+        reply(200, r#"{"ok":true,"email":"__EMAIL__","protected":true}"#)
+    }
+
+    /// The intake accepted the record. A `202` with `"ok":true` is the **only** acceptance
+    /// (§13.29 W2), which is why the accepted case is worth naming.
+    fn delete_accepted() -> Reply {
+        reply(202, r#"{"ok":true,"status":"accepted"}"#)
+    }
+
+    /// What the fake intake recorded for one request: the two headers the contract is about,
+    /// the body's `confirm_email`, and the `X-Real-IP` it must **never** see (§13.29 W2:
+    /// bb-auth-web vouches for no client address, so an address in the owner's record would be
+    /// one this gate copied out of a request header).
+    #[derive(Debug, Clone)]
+    struct IntakeCall {
+        method: String,
+        path: String,
+        email: Option<String>,
+        secret: Option<String>,
+        real_ip: Option<String>,
+        confirm_email: Option<String>,
+    }
+
+    /// The fake intake: a `tiny_http` server on an ephemeral loopback port, shaped as
+    /// [`FakeCognito`]. It records each request's method, path, `X-Auth-Email`,
+    /// `X-BB-Delete-Secret`, `X-Real-IP` and `confirm_email`, answers each path from a script,
+    /// and in `silent` mode holds the accepted sockets so the caller waits out its timeout on a
+    /// live connection rather than being refused. A path nobody scripted answers `400`, which
+    /// the page reads as "not accepted": a test that forgot to script a path fails as a
+    /// refusal, and never as a hang.
+    struct FakeIntake {
+        port: u16,
+        calls: std::sync::Arc<std::sync::Mutex<Vec<IntakeCall>>>,
+        // Silent mode keeps the accepted sockets open, so the caller waits on a live connection
+        // rather than being refused.
+        _held: std::sync::Arc<std::sync::Mutex<Vec<std::net::TcpStream>>>,
+    }
+
+    impl FakeIntake {
+        fn answering(script: Vec<(&'static str, Reply)>) -> FakeIntake {
+            let calls = std::sync::Arc::new(std::sync::Mutex::new(Vec::new()));
+            let server = Server::http("127.0.0.1:0").expect("bind the fake intake");
+            let port = server.server_addr().to_ip().expect("an ip address").port();
+            let seen = std::sync::Arc::clone(&calls);
+            std::thread::spawn(move || {
+                // A reply with status 0 is a request the fake takes and never answers, for the
+                // one path a test wants to time out while the others work.
+                let mut parked = Vec::new();
+                for mut req in server.incoming_requests() {
+                    let header = |n: &str| {
+                        req.headers()
+                            .iter()
+                            .find(|h| h.field.as_str().as_str().eq_ignore_ascii_case(n))
+                            .map(|h| h.value.as_str().to_string())
+                    };
+                    // Every header is read before the body: the closure borrows the request,
+                    // and `as_reader` needs it to itself.
+                    // Upper-cased: `tiny_http`'s `Debug` for its method is the Rust variant
+                    // name (`Get`), and the contract's paths are spelled the HTTP way.
+                    let method = fmt_method(req.method()).to_uppercase();
+                    let path = req.url().to_string();
+                    let email = header("X-Auth-Email");
+                    let secret = header("X-BB-Delete-Secret");
+                    let real_ip = header("X-Real-IP");
+                    let mut raw = String::new();
+                    let _ = req.as_reader().read_to_string(&mut raw);
+                    let confirm = form_urlencoded::parse(raw.as_bytes())
+                        .find(|(k, _)| k == "confirm_email")
+                        .map(|(_, v)| v.into_owned());
+                    seen.lock().unwrap().push(IntakeCall {
+                        method: method.clone(),
+                        path: path.clone(),
+                        email: email.clone(),
+                        secret,
+                        real_ip,
+                        confirm_email: confirm,
+                    });
+                    let at = format!("{method} {path}");
+                    let (status, body, location) = script
+                        .iter()
+                        .find(|(p, _)| *p == at)
+                        .map(|(_, r)| (r.status, r.body.clone(), r.location.clone()))
+                        .unwrap_or((400, r#"{"error":"not_scripted"}"#.into(), None));
+                    if status == 0 {
+                        parked.push(req);
+                        continue;
+                    }
+                    let body = match &email {
+                        Some(e) => body.replace("__EMAIL__", e),
+                        None => body,
+                    };
+                    let mut resp = Response::from_string(body).with_status_code(StatusCode(status));
+                    if let Some(l) = location {
+                        resp = resp.with_header(
+                            Header::from_bytes(&b"Location"[..], l.as_bytes()).unwrap(),
+                        );
+                    }
+                    let _ = req.respond(resp);
+                }
+            });
+            FakeIntake {
+                port,
+                calls,
+                _held: Default::default(),
+            }
+        }
+
+        /// A listener that accepts and says nothing, ever.
+        fn silent() -> FakeIntake {
+            let listener =
+                std::net::TcpListener::bind("127.0.0.1:0").expect("bind the silent fake intake");
+            let port = listener.local_addr().unwrap().port();
+            let held: std::sync::Arc<std::sync::Mutex<Vec<std::net::TcpStream>>> =
+                Default::default();
+            let keep = std::sync::Arc::clone(&held);
+            std::thread::spawn(move || {
+                for s in listener.incoming().flatten() {
+                    keep.lock().unwrap().push(s);
+                }
+            });
+            FakeIntake {
+                port,
+                calls: Default::default(),
+                _held: held,
+            }
+        }
+
+        /// The **origin** and nothing more: the intake's paths are its own, which is why
+        /// `compile_delete_intake` refuses a value that carries one (§13.29 W2).
+        fn endpoint(&self) -> String {
+            format!("http://127.0.0.1:{}", self.port)
+        }
+
+        fn calls(&self) -> Vec<IntakeCall> {
+            self.calls.lock().unwrap().clone()
+        }
+
+        /// Each request as `METHOD path`, in the order they arrived: the order is part of the
+        /// contract (every `whoami` before the first `POST`), so it is what a test compares.
+        fn at(&self) -> Vec<String> {
+            self.calls()
+                .iter()
+                .map(|c| format!("{} {}", c.method, c.path))
+                .collect()
+        }
+
+        /// The recording from `seen` on, spelled as [`FakeIntake::at`]. The fake keeps every
+        /// request it has ever been sent, so a test that drives it more than once (one request
+        /// in two languages) asserts on what one drive added, not on the whole journal.
+        fn at_since(&self, seen: usize) -> Vec<String> {
+            self.at()[seen..].to_vec()
+        }
+    }
+
+    /// The GUI served with the intake pointing at a live listener **and** the logout URL given.
+    /// The done page's two variants (§13.30 §4: a Sign out pill, or the sentence that says to
+    /// close the browser) are the same walk on two configs.
+    fn account_port_intake_logout(path: &str, intake: &str, logout: Option<&str>) -> u16 {
+        let mut cfg = cfg_for(path, ADMIN_BASE);
+        cfg.delete_intake = Some(intake.to_string());
+        cfg.delete_secret = Some(TEST_SECRET.to_string());
+        cfg.logout_url = logout.map(str::to_string);
+        cfg.account_logout_url = logout.map(str::to_string);
+        let server = Server::http("127.0.0.1:0").expect("bind an ephemeral port");
+        let port = server.server_addr().to_ip().expect("an ip address").port();
+        std::thread::spawn(move || {
+            for req in server.incoming_requests() {
+                handle(req, &cfg);
+            }
+        });
+        port
+    }
+
+    /// The page's own column: `<main>`, with the bar cut out. The bar's account menu names the
+    /// caller in full and carries its own Sign out row, so a "this page says no X" or a "one
+    /// action only" assertion has to look at the page, not at the chrome around it.
+    fn the_main(body: &str) -> String {
+        nested_block(&account_readable(body), "<main>", "main")
+    }
+
+    /// The words a person reads on the page itself.
+    fn the_page_words(body: &str) -> String {
+        visible_text(&the_main(body))
+    }
+
+    /// The outcome page's one `p.lede` (§13.23 §4's shape, which §13.30 §4 reuses).
+    fn the_page_lede(body: &str) -> String {
+        let ledes = controls_with_class(&the_main(body), "p", "lede");
+        assert_eq!(
+            ledes.len(),
+            1,
+            "the outcome page is one heading and one lede: {}",
+            account_readable(body)
+        );
+        visible_text(&ledes[0])
+    }
+
+    /// The page's rows of actions: `p.primary` on an outcome page, `div.actions` inside a form.
+    /// Both, because §13.30 §4 names the row and not the tag.
+    fn the_page_actions(body: &str) -> Vec<String> {
+        let main = the_main(body);
+        let mut out = controls_with_class(&main, "p", "primary");
+        out.extend(controls_with_class(&main, "div", "actions"));
+        out
+    }
+
+    /// The back pill's words. [`back_link`] puts an arrow in front of the key, so the pill's
+    /// text is not the key alone, and an assertion that compared `t(lang, K::Back)` would be
+    /// comparing a string the page never shows.
+    fn back_words(lang: Lang) -> String {
+        format!("\u{2190} {}", t(lang, K::Back))
+    }
+
+    /// The delete `POST` in a chosen language: the same request [`account_post`] sends, plus
+    /// the `lang` cookie the page negotiates its words from.
+    ///
+    /// It asserts the `<html lang>` it got, because every caller of it compares the page's
+    /// words against one language's strings. A cookie the page ignored would make each of
+    /// those assertions fail on the Italian side, and the failure would read as a wrong
+    /// translation rather than as the request that never asked.
+    fn account_post_lang(
+        url: &str,
+        identity: &str,
+        fields: &[(&str, &str)],
+        lang: Lang,
+    ) -> AccountGot {
+        let req = account_client()
+            .post(url)
+            .header("Sec-Fetch-Site", "same-origin")
+            .header(SECRET_HEADER, TEST_SECRET)
+            .header(IDENTITY_HEADER, identity)
+            .header("Cookie", format!("{LANG_COOKIE}={}", lang.code()));
+        // Held across the request: see [`WRITE_PERMIT`].
+        let _permit = WRITE_PERMIT.lock().unwrap_or_else(|e| e.into_inner());
+        let mut r = req
+            .send_form(fields.iter().copied())
+            .expect("a POST response");
+        let out = AccountGot {
+            status: r.status().as_u16(),
+            headers: r
+                .headers()
+                .iter()
+                .map(|(k, v)| (k.as_str().to_string(), v.to_str().unwrap_or("").to_string()))
+                .collect(),
+            body: r.body_mut().read_to_string().expect("a body"),
+        };
+        assert!(
+            account_html_tag(&out.body).contains(&format!("lang=\"{}\"", lang.code())),
+            "the request asked for {} and the page is not in it: {}",
+            lang.code(),
+            account_html_tag(&out.body)
+        );
+        out
+    }
+
+    /// The pills of the page's actions, in document order.
+    fn the_action_pills(body: &str) -> Vec<String> {
+        the_page_actions(body)
+            .iter()
+            .flat_map(|a| controls_with_class(a, "a", "pill"))
+            .collect()
+    }
+
+    /// §13.29 W3 steps 4 and 6: a caller with no roster row is asked, then posted, and the
+    /// access file's bytes are the proof that this slice writes nothing. The order is the
+    /// contract: `whoami` for every address **before** the first `POST`, so a protected address
+    /// never has a record queued behind it.
+    #[test]
+    fn a_strangers_deletion_posts_each_address_and_leaves_the_file_unchanged() {
+        let intake = FakeIntake::answering(vec![
+            (WHOAMI_PATH, whoami_ok()),
+            (DELETE_PATH, delete_accepted()),
+        ]);
+        let path = account_scratch_full("delete-7c-walk");
+        let port = account_port_intake_at(&path, &intake.endpoint());
+        let url = format!("http://127.0.0.1:{port}{ACCOUNT_PATH}/delete");
+        let before = read(&path);
+        let settings = read(&settings_path(&path));
+
+        let rev = rev_of(&path);
+        let fields = [
+            ("rev", rev.as_str()),
+            ("uuid", ""),
+            ("confirm_email", "stranger@elsewhere.com"),
+        ];
+        let g = account_post(&url, Some("stranger@elsewhere.com"), &fields);
+        assert_eq!(
+            g.status,
+            200,
+            "a stranger's walk, queued: {}",
+            account_readable(&g.body)
+        );
+        assert_eq!(
+            intake.at(),
+            vec![WHOAMI_PATH.to_string(), DELETE_PATH.to_string()],
+            "asked first, then posted, once each"
+        );
+        assert_eq!(
+            read(&path),
+            before,
+            "no row, so nothing to write: the file's bytes are the file's"
+        );
+        assert_eq!(
+            read(&settings_path(&path)),
+            settings,
+            "and the settings file beside it is untouched"
+        );
+        let _ = std::fs::remove_file(&path);
+    }
+
+    /// §13.29 W3 "Which addresses": `X-Auth-Email` is every address of the caller joined by a
+    /// space, and the intake reads the **whole** header as one address, so a joined header sent
+    /// as is queues an address no Cognito user has and says it was accepted. Each request
+    /// carries exactly one, as `X-Auth-Email` and as `confirm_email` (the intake's
+    /// `confirm_mismatch` check is the same rule from the other side); the secret is on every
+    /// one, and `X-Real-IP` is on none.
+    #[test]
+    fn each_request_carries_one_address_and_the_secret_never_the_joined_header() {
+        let intake = FakeIntake::answering(vec![
+            (WHOAMI_PATH, whoami_ok()),
+            (DELETE_PATH, delete_accepted()),
+        ]);
+        let path = account_scratch_full("delete-7c-two");
+        let port = account_port_intake_at(&path, &intake.endpoint());
+        let url = format!("http://127.0.0.1:{port}{ACCOUNT_PATH}/delete");
+
+        // Two addresses, and no roster row: the plural is the header's, and 7c writes nothing
+        // for this caller, so the walk is the stranger's.
+        let identity = "one@x.com two@x.com";
+        let rev = rev_of(&path);
+        let fields = [
+            ("rev", rev.as_str()),
+            ("uuid", ""),
+            ("confirm_email", "one@x.com"),
+        ];
+        let g = account_post(&url, Some(identity), &fields);
+        assert_eq!(
+            g.status,
+            200,
+            "a two-address walk, queued: {}",
+            account_readable(&g.body)
+        );
+        assert_eq!(
+            intake.at(),
+            vec![
+                WHOAMI_PATH.to_string(),
+                WHOAMI_PATH.to_string(),
+                DELETE_PATH.to_string(),
+                DELETE_PATH.to_string()
+            ],
+            "every address is asked before any is posted"
+        );
+        let calls = intake.calls();
+        for c in &calls {
+            assert!(
+                matches!(c.email.as_deref(), Some("one@x.com") | Some("two@x.com")),
+                "one address per request, never the joined header: {c:?}"
+            );
+            assert_eq!(
+                c.secret.as_deref(),
+                Some(TEST_SECRET),
+                "the deployment set a secret, so every call carries it: {c:?}"
+            );
+            assert_eq!(c.real_ip, None, "no client address is invented: {c:?}");
+        }
+        for c in calls.iter().filter(|c| c.method == "POST") {
+            assert_eq!(
+                c.confirm_email.as_deref(),
+                c.email.as_deref(),
+                "the confirmation names this request's own address: {c:?}"
+            );
+        }
+        let _ = std::fs::remove_file(&path);
+    }
+
+    /// §13.30 §2 §4: the typed address **is** the confirmation, so a typo is refused before
+    /// anything is sent, and the page is the same page with the typo kept in the field
+    /// (forgiving input, WCAG 3.3.1 and 3.3.3). An empty submission is the same refusal.
+    #[test]
+    fn a_typed_address_that_is_not_the_callers_sends_nothing() {
+        let intake = FakeIntake::answering(vec![
+            (WHOAMI_PATH, whoami_ok()),
+            (DELETE_PATH, delete_accepted()),
+        ]);
+        let path = account_scratch_full("delete-7c-typo");
+        let port = account_port_intake_at(&path, &intake.endpoint());
+        let url = format!("http://127.0.0.1:{port}{ACCOUNT_PATH}/delete");
+        let before = read(&path);
+        let rev = rev_of(&path);
+
+        for typed in ["someone@elsewhere.com", ""] {
+            for lang in [Lang::En, Lang::It] {
+                let at = format!("{} typed {typed:?}", lang.code());
+                let fields = [
+                    ("rev", rev.as_str()),
+                    ("uuid", ""),
+                    ("confirm_email", typed),
+                ];
+                let g = account_post_lang(&url, "stranger@elsewhere.com", &fields, lang);
+                assert_eq!(g.status, 400, "{at}: {}", account_readable(&g.body));
+                assert_eq!(
+                    account_heading(&g.body, "h1"),
+                    m(lang, DELETE_TITLE_EN, DELETE_TITLE_IT),
+                    "{at}: the confirmation page again, not an outcome page"
+                );
+                let form = the_delete_form(&g.body, "", &at);
+                let errs = elements(
+                    &form,
+                    &format!("<div class=\"err\" id=\"{ERR_ID}\">"),
+                    "</div>",
+                );
+                assert_eq!(
+                    errs.len(),
+                    1,
+                    "{at}: the refusal sits above the fields it is about: {form}"
+                );
+                assert_eq!(
+                    visible_text(&errs[0]),
+                    m(lang, DELETE_TYPED_EN, DELETE_TYPED_IT),
+                    "{at}: the words are a fact about the address, never about the person: {form}"
+                );
+                let i = input_named(&form, "confirm_email");
+                assert_eq!(
+                    attr(&i, "value").as_deref(),
+                    Some(typed),
+                    "{at}: what was typed is kept, so a typo is seen and fixed rather than \
+                     retyped: {i}"
+                );
+                assert!(
+                    attr(&i, "class").is_some_and(|c| c.split_whitespace().any(|w| w == "invalid")),
+                    "{at}: the field is marked in the class as well as the colour: {i}"
+                );
+                assert_eq!(
+                    attr(&i, "aria-invalid").as_deref(),
+                    Some("true"),
+                    "{at}: {i}"
+                );
+                assert_eq!(
+                    attr(&i, "aria-describedby").as_deref(),
+                    Some(ERR_ID),
+                    "{at}: the message is this field's description: {i}"
+                );
+                assert!(
+                    !i.contains("autofocus"),
+                    "{at}: Enter must not be one keystroke from a deletion: {i}"
+                );
+            }
+        }
+        assert!(
+            intake.calls().is_empty(),
+            "a refusal at the typed address sends nothing at all: {:?}",
+            intake.calls()
+        );
+        assert_eq!(read(&path), before, "and it writes nothing");
+        let _ = std::fs::remove_file(&path);
+    }
+
+    /// §13.29 W5: the protected list is the intake's, and `whoami` is asked for every address
+    /// **before** anything is posted, so a protected caller leaves nothing anywhere. The page
+    /// says what cannot happen here, and never names a list, the address that matched, or the
+    /// intake's own word for it (§13.30 §7).
+    #[test]
+    fn a_protected_address_is_refused_before_anything_is_posted() {
+        let intake = FakeIntake::answering(vec![
+            (WHOAMI_PATH, whoami_protected()),
+            (DELETE_PATH, delete_accepted()),
+        ]);
+        let path = account_scratch_full("delete-7c-protected");
+        let port = account_port_intake_at(&path, &intake.endpoint());
+        let url = format!("http://127.0.0.1:{port}{ACCOUNT_PATH}/delete");
+        let before = read(&path);
+        let rev = rev_of(&path);
+        let fields = [
+            ("rev", rev.as_str()),
+            ("uuid", ""),
+            ("confirm_email", "stranger@elsewhere.com"),
+        ];
+
+        for lang in [Lang::En, Lang::It] {
+            // The fake records every request it is sent, so each language is measured on what
+            // that language added: the recording as it stood before this request is the baseline.
+            let seen = intake.calls().len();
+            let g = account_post_lang(&url, "stranger@elsewhere.com", &fields, lang);
+            assert_eq!(
+                g.status,
+                403,
+                "{}: a protected address is refused: {}",
+                lang.code(),
+                account_readable(&g.body)
+            );
+            assert_eq!(
+                account_heading(&g.body, "h1"),
+                m(lang, DELETE_NOT_DONE_EN, DELETE_NOT_DONE_IT),
+                "{}: the heading states the result, in the reader's words",
+                lang.code()
+            );
+            assert_eq!(
+                the_page_lede(&g.body),
+                m(lang, DELETE_PROTECTED_EN, DELETE_PROTECTED_IT),
+                "{}: the lede",
+                lang.code()
+            );
+            let pills = the_action_pills(&g.body);
+            assert_eq!(
+                pills.len(),
+                1,
+                "{}: back is the only action, there is nothing here to retry: {}",
+                lang.code(),
+                account_readable(&g.body)
+            );
+            assert_eq!(
+                visible_text(&pills[0]),
+                back_words(lang),
+                "{}: {}",
+                lang.code(),
+                pills[0]
+            );
+            assert_eq!(
+                attr(open_tag(&pills[0]), "href").as_deref(),
+                Some(ACCOUNT_PAGE),
+                "{}: back goes to the account page: {}",
+                lang.code(),
+                pills[0]
+            );
+            let words = the_page_words(&g.body);
+            assert!(
+                !words.to_lowercase().contains("protected"),
+                "{}: the intake's word is not the page's, and no list is named: {words}",
+                lang.code()
+            );
+            assert!(
+                !words.contains("stranger@elsewhere.com"),
+                "{}: the address that matched is not named: {words}",
+                lang.code()
+            );
+            // One `whoami` for this language's request, and no `POST`: the refusal happens
+            // before anything is sent, so a protected caller leaves nothing anywhere.
+            let asked = intake.at_since(seen);
+            assert_eq!(
+                asked,
+                vec![WHOAMI_PATH.to_string()],
+                "{}: asked, refused, posted nothing: {asked:?}",
+                lang.code()
+            );
+        }
+        assert_eq!(read(&path), before, "and wrote nothing");
+        let _ = std::fs::remove_file(&path);
+    }
+
+    /// §13.29 W3 step 4, §13.30 §4: an intake that does not answer, or answers in a way the
+    /// contract does not read, is "not accepted" and never a guess. Nothing has been touched, so
+    /// the page says so and offers Try again, and the caller is not left waiting on a socket
+    /// that will never answer: the client's timeout is the bound.
+    #[test]
+    fn whoami_with_no_answer_changes_nothing_within_the_bound() {
+        // --- no answer at all: the fake takes the connection and says nothing --------------
+        let silent = FakeIntake::silent();
+        let path = account_scratch_full("delete-7c-silent");
+        let port = account_port_intake_at(&path, &silent.endpoint());
+        let url = format!("http://127.0.0.1:{port}{ACCOUNT_PATH}/delete");
+        let before = read(&path);
+        let rev = rev_of(&path);
+        let fields = [
+            ("rev", rev.as_str()),
+            ("uuid", ""),
+            ("confirm_email", "stranger@elsewhere.com"),
+        ];
+        let started = std::time::Instant::now();
+        let g = account_post(&url, Some("stranger@elsewhere.com"), &fields);
+        let took = started.elapsed();
+        assert_eq!(
+            g.status,
+            504,
+            "an intake that never answers is a 504: {}",
+            account_readable(&g.body)
+        );
+        assert!(
+            took < 4 * COGNITO_TIMEOUT,
+            "the bound is the client's timeout, not the socket's: {took:?}"
+        );
+        assert_eq!(
+            account_heading(&g.body, "h1"),
+            DELETE_NOT_DONE_EN,
+            "the heading: {}",
+            account_readable(&g.body)
+        );
+        assert_eq!(the_page_lede(&g.body), DELETE_NO_CHECK_EN, "the lede");
+        let pills = the_action_pills(&g.body);
+        let texts: Vec<String> = pills.iter().map(|p| visible_text(p)).collect();
+        assert_eq!(
+            texts,
+            vec![DELETE_RETRY_EN.to_string(), back_words(Lang::En)],
+            "try again, then back: {pills:?}"
+        );
+        assert!(
+            pills.iter().any(|p| attr(open_tag(p), "href").as_deref()
+                == Some(&format!("{ACCOUNT_PATH}/delete")[..])),
+            "Try again is the confirmation page, which after the write is the stranger's: \
+             {pills:?}"
+        );
+        assert_eq!(
+            read(&path),
+            before,
+            "nothing was changed while the intake was silent"
+        );
+        let _ = std::fs::remove_file(&path);
+
+        // --- an answer the contract does not read: a 200 whose `email` is not the address sent
+        let odd = FakeIntake::answering(vec![
+            (
+                WHOAMI_PATH,
+                reply(
+                    200,
+                    r#"{"ok":true,"email":"other@x.com","protected":false}"#,
+                ),
+            ),
+            (DELETE_PATH, delete_accepted()),
+        ]);
+        let path = account_scratch_full("delete-7c-odd");
+        let port = account_port_intake_at(&path, &odd.endpoint());
+        let url = format!("http://127.0.0.1:{port}{ACCOUNT_PATH}/delete");
+        let before = read(&path);
+        let rev = rev_of(&path);
+        let fields = [
+            ("rev", rev.as_str()),
+            ("uuid", ""),
+            ("confirm_email", "stranger@elsewhere.com"),
+        ];
+        for lang in [Lang::En, Lang::It] {
+            let g = account_post_lang(&url, "stranger@elsewhere.com", &fields, lang);
+            assert_eq!(
+                g.status,
+                502,
+                "{}: an answer that is not the one asked for is not accepted: {}",
+                lang.code(),
+                account_readable(&g.body)
+            );
+            assert_eq!(
+                account_heading(&g.body, "h1"),
+                m(lang, DELETE_NOT_DONE_EN, DELETE_NOT_DONE_IT),
+                "{}: the heading: {}",
+                lang.code(),
+                account_readable(&g.body)
+            );
+            assert_eq!(
+                the_page_lede(&g.body),
+                m(lang, DELETE_NO_CHECK_EN, DELETE_NO_CHECK_IT),
+                "{}: the lede says nothing was deleted and that signing in still works",
+                lang.code()
+            );
+            let pills = the_action_pills(&g.body);
+            let texts: Vec<String> = pills.iter().map(|p| visible_text(p)).collect();
+            assert_eq!(
+                texts,
+                vec![
+                    m(lang, DELETE_RETRY_EN, DELETE_RETRY_IT).to_string(),
+                    back_words(lang)
+                ],
+                "{}: try again, then back: {pills:?}",
+                lang.code()
+            );
+            assert!(
+                pills.iter().any(|p| attr(open_tag(p), "href").as_deref()
+                    == Some(&format!("{ACCOUNT_PATH}/delete")[..])),
+                "{}: Try again goes back to the confirmation, which is still the person's: \
+                 {pills:?}",
+                lang.code()
+            );
+        }
+        assert_eq!(
+            odd.at(),
+            vec![WHOAMI_PATH.to_string(); 2],
+            "the unusable answer stops the walk before the first POST, every time: {:?}",
+            odd.calls()
+        );
+        assert_eq!(read(&path), before, "and nothing was written");
+        let _ = std::fs::remove_file(&path);
+    }
+
+    /// §13.29 W1: ureq follows redirects by default (`max_redirects: 10` in its own defaults),
+    /// so an intake that answered `3xx` would be handed the identity header, by the client's own
+    /// code, to wherever it pointed. The client sets 0, and a redirect is "not accepted".
+    #[test]
+    fn a_redirect_from_the_intake_is_not_followed() {
+        let (trap, seen) = intake_listener();
+        let intake = FakeIntake::answering(vec![
+            (
+                WHOAMI_PATH,
+                Reply {
+                    status: 302,
+                    body: String::new(),
+                    location: Some(format!("http://127.0.0.1:{trap}/carried")),
+                },
+            ),
+            (DELETE_PATH, delete_accepted()),
+        ]);
+        let path = account_scratch_full("delete-7c-redirect");
+        let port = account_port_intake_at(&path, &intake.endpoint());
+        let url = format!("http://127.0.0.1:{port}{ACCOUNT_PATH}/delete");
+        let before = read(&path);
+        let rev = rev_of(&path);
+        let fields = [
+            ("rev", rev.as_str()),
+            ("uuid", ""),
+            ("confirm_email", "stranger@elsewhere.com"),
+        ];
+        let g = account_post(&url, Some("stranger@elsewhere.com"), &fields);
+        assert_eq!(
+            g.status,
+            502,
+            "a 3xx is not a 202, and is not a guess: {}",
+            account_readable(&g.body)
+        );
+        assert_eq!(
+            account_heading(&g.body, "h1"),
+            DELETE_NOT_DONE_EN,
+            "the heading: {}",
+            account_readable(&g.body)
+        );
+        assert_eq!(the_page_lede(&g.body), DELETE_NO_CHECK_EN, "the lede");
+        assert_eq!(
+            intake.at(),
+            vec![WHOAMI_PATH.to_string()],
+            "the walk stops at the redirect: {:?}",
+            intake.calls()
+        );
+        assert!(
+            seen.lock().unwrap().is_empty(),
+            "the identity header went nowhere else: {seen:?}"
+        );
+        assert_eq!(read(&path), before, "and nothing was written");
+        let _ = std::fs::remove_file(&path);
+    }
+
+    /// §13.29 W3: the worker takes ten addresses per run and refuses the **whole** run above
+    /// that, so a caller with more is refused before anything is sent. Prevention before the
+    /// message (Nielsen 5): the `GET` offers no form (§13.30 §2), and this is the same refusal
+    /// on the way in, so a client that posts anyway is refused too.
+    #[test]
+    fn more_addresses_than_one_worker_run_takes_are_refused() {
+        let intake = FakeIntake::answering(vec![
+            (WHOAMI_PATH, whoami_ok()),
+            (DELETE_PATH, delete_accepted()),
+        ]);
+        let path = account_scratch_full("delete-7c-many");
+        let port = account_port_intake_at(&path, &intake.endpoint());
+        let url = format!("http://127.0.0.1:{port}{ACCOUNT_PATH}/delete");
+        let before = read(&path);
+        let rev = rev_of(&path);
+
+        let many: Vec<String> = (0..11).map(|i| format!("person{i}@x.com")).collect();
+        let identity = many.join(" ");
+        for lang in [Lang::En, Lang::It] {
+            let fields = [
+                ("rev", rev.as_str()),
+                ("uuid", ""),
+                ("confirm_email", many[0].as_str()),
+            ];
+            let g = account_post_lang(&url, &identity, &fields, lang);
+            assert_eq!(
+                g.status,
+                400,
+                "{}: eleven addresses are refused: {}",
+                lang.code(),
+                account_readable(&g.body)
+            );
+            assert_eq!(
+                account_heading(&g.body, "h1"),
+                m(lang, DELETE_NOT_DONE_EN, DELETE_NOT_DONE_IT),
+                "{}: the heading states the result",
+                lang.code()
+            );
+            assert_eq!(
+                the_page_lede(&g.body),
+                m(lang, DELETE_TOO_MANY_EN, DELETE_TOO_MANY_IT),
+                "{}: the lede says why, and who to ask",
+                lang.code()
+            );
+            let pills = the_action_pills(&g.body);
+            assert_eq!(
+                pills.len(),
+                1,
+                "{}: back is the only action: {}",
+                lang.code(),
+                account_readable(&g.body)
+            );
+            assert_eq!(
+                visible_text(&pills[0]),
+                back_words(lang),
+                "{}: {}",
+                lang.code(),
+                pills[0]
+            );
+            assert!(
+                !the_main(&g.body).contains("<form"),
+                "{}: a form whose every submission is refused is not offered: {}",
+                lang.code(),
+                account_readable(&g.body)
+            );
+        }
+        assert!(
+            intake.calls().is_empty(),
+            "the count is checked before the first call: {:?}",
+            intake.calls()
+        );
+        assert_eq!(read(&path), before, "and the refusal wrote nothing");
+        let _ = std::fs::remove_file(&path);
+    }
+
+    /// §13.29 W3 step 1: the door every `/account` `POST` goes through, unchanged by this
+    /// route. A form on another site pressing Delete is the same login CSRF the mint and the
+    /// revoke tests name, and a client that says nothing about where it came from is refused
+    /// with it.
+    #[test]
+    fn a_cross_site_delete_is_refused() {
+        let intake = FakeIntake::answering(vec![
+            (WHOAMI_PATH, whoami_ok()),
+            (DELETE_PATH, delete_accepted()),
+        ]);
+        let path = account_scratch_full("delete-7c-csrf");
+        let port = account_port_intake_at(&path, &intake.endpoint());
+        let url = format!("http://127.0.0.1:{port}{ACCOUNT_PATH}/delete");
+        let before = read(&path);
+        let rev = rev_of(&path);
+        let fields = [
+            ("rev", rev.as_str()),
+            ("uuid", ""),
+            ("confirm_email", "stranger@elsewhere.com"),
+        ];
+
+        for site in ["cross-site", "none", ""] {
+            let g = account_post_as(&url, Some("stranger@elsewhere.com"), &fields, site, true);
+            assert_eq!(
+                g.status,
+                403,
+                "a {site:?} delete is not this estate's form: {}",
+                account_readable(&g.body)
+            );
+        }
+        assert!(
+            intake.calls().is_empty(),
+            "the door closes before the intake is asked: {:?}",
+            intake.calls()
+        );
+        assert_eq!(read(&path), before, "and the door's refusal wrote nothing");
+        let _ = std::fs::remove_file(&path);
+    }
+
+    /// §13.29 W3 step 2: the posted `uuid` is the live row's, both empty for a caller with no
+    /// row. A person who opened the page as a stranger and gained a row before pressing Delete
+    /// is the case that check exists for: the page they hold says the file names nobody, and
+    /// acting on that would delete a record they were never shown. `409`, the changed page, and
+    /// nothing posted.
+    #[test]
+    fn a_stranger_who_gained_a_row_between_steps_is_refused() {
+        let intake = FakeIntake::answering(vec![
+            (WHOAMI_PATH, whoami_ok()),
+            (DELETE_PATH, delete_accepted()),
+        ]);
+        let path = account_scratch("delete-7c-grew", ACCOUNT_SETTINGS);
+        let port = account_port_intake_at(&path, &intake.endpoint());
+        let url = format!("http://127.0.0.1:{port}{ACCOUNT_PATH}/delete");
+
+        let g = account_call(&url, Some("stranger@elsewhere.com"));
+        assert_eq!(
+            g.status,
+            200,
+            "the page opens as the stranger's: {}",
+            account_readable(&g.body)
+        );
+        let form = the_delete_form(&g.body, "", "the stranger's page");
+        let rev = hidden_value(&form, "rev").expect("the form carries the rev");
+
+        // The row arrives, as an administrator's `bb-auth-adm user add` leaves it.
+        let grew = read(&path).replace(
+            "\"emails\": [\"carol@x.com\"] }",
+            "\"emails\": [\"carol@x.com\"] }, { \"uuid\": \
+             \"33333333-3333-4333-8333-333333333333\", \"emails\": [\"stranger@elsewhere.com\"] }",
+        );
+        assert_ne!(
+            grew,
+            read(&path),
+            "the fixture has the row this test adds beside"
+        );
+        std::fs::write(&path, &grew).expect("add the row");
+
+        for lang in [Lang::En, Lang::It] {
+            // The page's own rev and the page's own empty uuid: the walk the person takes.
+            let fields = [
+                ("rev", rev.as_str()),
+                ("uuid", ""),
+                ("confirm_email", "stranger@elsewhere.com"),
+            ];
+            let g = account_post_lang(&url, "stranger@elsewhere.com", &fields, lang);
+            assert_eq!(
+                g.status,
+                409,
+                "{}: the page is stale: {}",
+                lang.code(),
+                account_readable(&g.body)
+            );
+            assert_eq!(
+                account_heading(&g.body, "h1"),
+                m(lang, DELETE_CHANGED_TITLE_EN, DELETE_CHANGED_TITLE_IT),
+                "{}: the heading says the account changed, not that it was deleted",
+                lang.code()
+            );
+            assert_eq!(
+                the_page_lede(&g.body),
+                m(lang, DELETE_CHANGED_EN, DELETE_CHANGED_IT),
+                "{}: the lede",
+                lang.code()
+            );
+            let pills = the_action_pills(&g.body);
+            let texts: Vec<String> = pills.iter().map(|p| visible_text(p)).collect();
+            assert_eq!(
+                texts,
+                vec![
+                    m(lang, DELETE_START_EN, DELETE_START_IT).to_string(),
+                    back_words(lang)
+                ],
+                "{}: start again, then back: {pills:?}",
+                lang.code()
+            );
+            assert!(
+                pills.iter().any(|p| attr(open_tag(p), "href").as_deref()
+                    == Some(&format!("{ACCOUNT_PATH}/delete")[..])),
+                "{}: Start again re-renders the confirmation, which now shows the row: \
+                 {pills:?}",
+                lang.code()
+            );
+            assert!(
+                !the_page_words(&g.body).contains(t(lang, K::ConflictBody)),
+                "{}: the console's conflict sentence is not this page's: {}",
+                lang.code(),
+                the_page_words(&g.body)
+            );
+        }
+
+        // The rev alone is not the check. A page rendered from the file **after** the row
+        // landed, still carrying no uuid, is refused by the uuid.
+        let rev_now = rev_of(&path);
+        let fields = [
+            ("rev", rev_now.as_str()),
+            ("uuid", ""),
+            ("confirm_email", "stranger@elsewhere.com"),
+        ];
+        let g = account_post(&url, Some("stranger@elsewhere.com"), &fields);
+        assert_eq!(
+            g.status,
+            409,
+            "a matching rev does not make an empty uuid current: {}",
+            account_readable(&g.body)
+        );
+
+        assert!(
+            intake.calls().is_empty(),
+            "a 409 sends nothing: {:?}",
+            intake.calls()
+        );
+        assert_eq!(read(&path), grew, "and the 409 wrote nothing");
+        let _ = std::fs::remove_file(&path);
+    }
+
+    /// §13.29 W6, §13.30 §4: the page can only say what bb-auth-web did and what the intake
+    /// accepted. A `202` is "queued", never "deleted"; a stranger's page says nothing about keys
+    /// and named access, because a stranger has none; and its one action is Sign out, because
+    /// the cookie outlives the deletion. With no logout URL the page says what the person can do
+    /// and offers no pill.
+    #[test]
+    fn the_done_page_says_queued_and_links_to_sign_out() {
+        let intake = FakeIntake::answering(vec![
+            (WHOAMI_PATH, whoami_ok()),
+            (DELETE_PATH, delete_accepted()),
+        ]);
+        let path = account_scratch_full("delete-7c-done");
+        let port = account_port_intake_at(&path, &intake.endpoint());
+        let url = format!("http://127.0.0.1:{port}{ACCOUNT_PATH}/delete");
+        let rev = rev_of(&path);
+        let fields = [
+            ("rev", rev.as_str()),
+            ("uuid", ""),
+            ("confirm_email", "stranger@elsewhere.com"),
+        ];
+
+        for lang in [Lang::En, Lang::It] {
+            let g = account_post_lang(&url, "stranger@elsewhere.com", &fields, lang);
+            assert_eq!(
+                g.status,
+                200,
+                "{}: every POST answered 202: {}",
+                lang.code(),
+                account_readable(&g.body)
+            );
+            assert_eq!(
+                account_heading(&g.body, "h1"),
+                m(lang, DELETE_QUEUED_TITLE_EN, DELETE_QUEUED_TITLE_IT),
+                "{}: being deleted, not deleted",
+                lang.code()
+            );
+            assert_eq!(
+                the_page_lede(&g.body),
+                format!(
+                    "{} {}",
+                    m(lang, DELETE_QUEUED_EN, DELETE_QUEUED_IT),
+                    m(lang, DELETE_SIGN_OUT_EN, DELETE_SIGN_OUT_IT)
+                ),
+                "{}: queued, then the sentence that says why to sign out",
+                lang.code()
+            );
+            let words = the_page_words(&g.body);
+            assert!(
+                !words.contains(m(lang, DELETE_NOW_GONE_EN, DELETE_NOW_GONE_IT)),
+                "{}: a stranger has no keys and no access given by name: {words}",
+                lang.code()
+            );
+            let pills = the_action_pills(&g.body);
+            assert_eq!(
+                pills.len(),
+                1,
+                "{}: one action, and it is the one that ends the session: {}",
+                lang.code(),
+                account_readable(&g.body)
+            );
+            assert_eq!(
+                visible_text(&pills[0]),
+                t(lang, K::SignOut),
+                "{}: {}",
+                lang.code(),
+                pills[0]
+            );
+            assert_eq!(
+                attr(open_tag(&pills[0]), "href").as_deref(),
+                Some("/auth/logout"),
+                "{}: the sign-out link is the config's, with the console's `rd` dropped: \
+                 {}",
+                lang.code(),
+                pills[0]
+            );
+            assert!(
+                !the_main(&g.body).contains(&format!("href=\"{ACCOUNT_PAGE}\"")),
+                "{}: the page offers no way back to a page about an account that is \
+                 going: {}",
+                lang.code(),
+                account_readable(&g.body)
+            );
+        }
+
+        // No logout URL: the page says what the person can do, and offers no pill.
+        let path = account_scratch_full("delete-7c-done-nologout");
+        let port = account_port_intake_logout(&path, &intake.endpoint(), None);
+        let url = format!("http://127.0.0.1:{port}{ACCOUNT_PATH}/delete");
+        let rev = rev_of(&path);
+        let fields = [
+            ("rev", rev.as_str()),
+            ("uuid", ""),
+            ("confirm_email", "stranger@elsewhere.com"),
+        ];
+        for lang in [Lang::En, Lang::It] {
+            let g = account_post_lang(&url, "stranger@elsewhere.com", &fields, lang);
+            assert_eq!(
+                g.status,
+                200,
+                "{}: no logout URL changes nothing about the walk: {}",
+                lang.code(),
+                account_readable(&g.body)
+            );
+            assert_eq!(
+                the_page_lede(&g.body),
+                format!(
+                    "{} {}",
+                    m(lang, DELETE_QUEUED_EN, DELETE_QUEUED_IT),
+                    m(lang, DELETE_CLOSE_EN, DELETE_CLOSE_IT)
+                ),
+                "{}: the close sentence stands where the sign-out sentence was",
+                lang.code()
+            );
+            assert!(
+                controls_with_class(&the_main(&g.body), "a", "pill").is_empty(),
+                "{}: no URL, so no pill: {}",
+                lang.code(),
                 account_readable(&g.body)
             );
         }

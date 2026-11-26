@@ -217,6 +217,9 @@ Rules are in `AGENTS.md`. Format of this file: `AGENTS.md`, under "Skills".
 
 ## Pitfalls
 
+- Never `find /`: on aorus it walked into a hung mount and sat in state D for 11 minutes. A
+  dependency's source is under `~/.cargo/registry/src/*/<crate>-<version>/` (tiny_http is
+  `tiny_http-*`, with an underscore).
 - `npx prettier --check e2e/tests/*.js` fails on the **committed** files: the repo carries no
   prettier config, so the defaults (printWidth 80) judge a suite written at ~100. It is not a gate,
   and `--write` would reformat the whole area. Match the file's own shape (2-space indent, the
