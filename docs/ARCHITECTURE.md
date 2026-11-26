@@ -3601,9 +3601,16 @@ and `'config-landing-refused'` added to the `it` view's `only` list. The fixture
 400 with the field marked `invalid`. A scratch run is at
 `/tmp/d8f/shots/config-landing-refused-{en,it}.png`: in both languages the sentence reads
 "refusing to write: landing_url: its host is not covered by authorized_hosts, …", which is the
-next item.
+next item. (Changed by §13.31, built 2026-11-26: the page now answers in the reader's language,
+opening with the field's visible label; the sentence quoted above is what `bb-auth-adm` prints,
+byte for byte as it always did.)
 
 #### Not in this slice: library refusals in the page's words and language
+
+(Built by §13.31, 2026-11-26, so the present tense below is the state at this slice: the page now
+maps every refusal code to a sentence in the reader's language that opens with the field's visible
+label and marks that field, and `bb-auth-adm` and `bb-auth --check-settings` print the library's
+sentence unchanged.)
 
 The Settings tab shows `compile_settings`' error string as it comes from the library, so it names
 the file's keys (`landing_url`, `authorized_hosts`) in English on an Italian page, against the

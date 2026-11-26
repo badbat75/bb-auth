@@ -66,7 +66,7 @@ The gate, the CLI (`bb-auth-adm`) and the admin GUI (`bb-auth-web`) are built an
 `AGENTS.md` and `CHANGELOG.md` say what they do. The agent structure (roles, skills, this plan) was added
 on 2026-11-23; the work before it is in `git log`. The self-service page is the `/account` section of `bb-auth-web`, live on rpi-01 since
 2026-11-24, with its key writes, header and theme since 2026-11-25. `v1.99.8` (g978eca8) is tagged, on GitHub as a
-pre-release; rpi-01 runs `v1.99.9-gfb2bd75` (the profile edit bound to the session's native user, and the sign-in page's duplicate-account notice) with `gate.landing_url` set to its `/account/` page; self-service account deletion is missing there until step 7.
+pre-release; rpi-01 runs `v1.99.9-gfb2bd75` (the profile edit bound to the session's native user, and the sign-in page's duplicate-account notice) with `gate.landing_url` set to its `/account/` page; self-service account deletion is missing there until step 7. Built since and not yet deployed: the one-row account menu and step 8's later items, and settings refusals in the page's language (step 12, 2026-11-26).
 
 ## Next steps
 
@@ -266,28 +266,6 @@ native "Preferences" tooltip while the open menu's cover is up. Steps 5 and 7 ad
 - Done when: the user approves screenshots of the page in both themes and both languages, at
   desktop and phone width, with the forms of steps 4, 5 and 7 on it; e2e and the scripting-off
   walk still pass.
-
-### 12. Settings refusals in the page's words and language
-
-Covers: R3 (the GUI's displayed text rule). A later item of step 8, split out on 2026-11-26 because
-it reaches every settings refusal. The System settings page shows `compile_settings`'s English
-sentence verbatim, so it names wire keys (`landing_url`) on an Italian page. Designed in §13.31:
-a `SettingsRefusal` enum in the library (46 codes in 37 variants), whose `Display` is today's
-exact English for `bb-auth-adm` and `--check-settings`, and one exhaustive GUI match onto `K` keys
-naming the visible labels. Slices S0 to S9 are done (the goldens, the enum, every family of
-codes, the GUI's `SetRef*` keys and exhaustive `settings_refusal`, and `apply` keeping only its
-own stricter checks). Left: **S10** (the designer, 2026-11-26): reword the page's older refusal
-keys (`SessionTtlBad`, `IssuerNeeded`, `DefaultThemeBad` and the rest), which are lowercase
-fragments with no label, so that every refusal on the page starts with its field's label as the
-new ones do (WCAG 3.3.1); in the same pass, the Italian accents written as apostrophes (`puo'`,
-`E'`, `c'e'`, `ne'`) in `AudienceNeeded`, `SocialWiringNeeded` and the help texts near
-`bb-auth-web.rs:1590`, `1596` and `1636`, and the refused `POST`'s page title, which reads
-"settings" where the `GET` says "System settings". The designer words it first, then a tester and
-a coder; then docs.
-
-- Done when: every refusal reads in the page's language and names the visible label (a test walks
-  every code in both languages); the CLI's and the gate's sentences are byte for byte today's (S0's
-  goldens, unedited); and a look at the System settings page with an Italian refusal.
 
 ## Waiting for the user
 

@@ -26,12 +26,42 @@ Builds say 1.99.9 and their commit until the next release (plan W11).
 
 **The cookie format stays `bb1` and the access-file format is untouched, so this upgrade logs
 nobody out.** The claims segment gains a key of the gate's own, and that segment names its keys,
-which is what makes it a no-logout change: see the first section below.
+which is what makes it a no-logout change: see the section named "the gate names the session's
+native Cognito user to nginx" below.
 
 **One nginx change is needed for the new profile edit to appear**, and it is the whole of the
 upgrade: the `/account/` location forwards `X-Auth-Native-Username` and every other gated
 location clears it. The packages need no order. Without that line the page shows the profile
 list and the sentence where the edit pill would be, to everybody, native accounts included.
+
+### Changed: the settings page says why it refused, in the reader's language
+
+* **A refused save names the field, in the language the page is read in.** Every reason the
+  settings file can be refused is now a code (`SettingsRefusal` in the library, the 46 of
+  `SETTINGS_REFUSAL_CODES`), and the page maps each code to a sentence in English and in Italian
+  that opens with the field's visible label: "Landing page: must be on one of the Authorized
+  hosts, …" / "Pagina di arrivo: deve stare su uno degli Host autorizzati, …". The input refused
+  is the one marked, the group it sits in opens itself, and the message is the first thing in the
+  page. It used to print the library's sentence, so an Italian page answered
+  "refusing to write: landing_url: its host is not covered by authorized_hosts, …", naming keys
+  nobody types into that form (docs/ARCHITECTURE.md §13.31).
+* **The page's own refusals read the same way** (a lifetime that is not a number, an empty
+  administrator list, a missing app client, a theme the list box does not offer), and a refused
+  save keeps the page's title: every response to `/config` is titled "System settings" /
+  "Impostazioni di sistema", as the `GET` is, so the browser tab does not change language after a
+  save.
+* **`bb-auth-adm` and `bb-auth --check-settings` print exactly what they printed before**, byte
+  for byte, in English: the sentence is the refusal's `Display`, kept in the library because two
+  programs print it, and three golden tests pin it (`settings_refusals_read_as_they_always_have`,
+  `settings_leaf_refusals_read_as_they_always_have`, `a_refused_write_reads_as_it_always_has`).
+  Checked here by running `bb-auth-adm settings set --landing-url https://evil.example.org/x` on a
+  scratch file: it printed that sentence and left the file byte for byte as it was.
+* **Five refusals this form cannot produce** (the file's `version`, and four about a social
+  button's identity provider) answer with a translated lead naming `bb-auth-adm` over SSH and then
+  the gate's own English sentence, because the operator who meets one of those reads it at a
+  shell, where those are the words they will see.
+* **Italian accents are letters** (`può`, `è`, `perché`), not apostrophes: 22 occurrences in five
+  strings were fixed, and `italian_k_strings_write_accents_as_letters` keeps them out.
 
 ### Changed: one account menu in the header, on one row, with the logo
 
