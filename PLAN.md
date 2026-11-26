@@ -239,32 +239,15 @@ it to §13.17.
 
 Slices 8a to 8f are done (8f, §13.21: row rules, one control size, ticks in the accent). Then the
 shared front end (W13), designed in §13.26 §6 as small slices after 5g: **P** one `pill_link` /
-`pill_link_rm` / `back_link` with the console's `act`/`act_rm`/`back` as wrappers; **M** one
-`prefs_menu` for both shells; **D** one `page_document` skeleton; **T** `text_field` with
+`pill_link_rm` / `back_link` with the console's `act`/`act_rm`/`back` as wrappers; **D** one `page_document` skeleton; **T** `text_field` with
 `FieldOpts`, absorbing `account_key_id_field` and the profile inputs; **F** the account page's flat
-ground goes, so it wears the console's ground and cards (the user, 2026-11-25); **L** the brand's
-logo in the console's bar too, widening the console's CSP `img-src` (the user, 2026-11-25); **H**
-one **account menu** in the shared header (the user, 2026-11-25, to slim the header): the bar shows
-the person's name (`given_name`, else the email) as a `details/summary` that opens a panel with the
-full email, the Preferences (theme, language) expanding inside it, Sign out at the foot, and,
-kept clearly apart from it, "Delete account and all its data", the entry point to step 7 (the user,
-2026-11-25), a link to a confirmation page and never a one-click action. Designed in §13.28. The
-user decided on 2026-11-25 that Delete is on `/account`'s menu only and is built by step 7, not by H,
-and that the console's menu carries "Go to your account" instead. The theme's automatic choice is labelled
-like the language's (the user, 2026-11-25): `K::ThemeSystem` becomes "Auto (system)" / "Auto
-(sistema)", beside `K::LangAuto`'s "Auto (browser)"; it ships with H. The bar stays on **one row at every width** (the user,
-2026-11-25, having seen the live console wrap user, settings and sign out onto a second row): the
-tabs move into the panel at whatever width they would otherwise wrap, measured by the designer,
-rather than a side rail, which five tabs do not justify. Slice L, the logo in the console's bar,
-is folded into H for the same reason (the user, 2026-11-25). The console's **Settings** tab moves into the panel as well
-(the user, 2026-11-25), as a link kept apart from Preferences, so the bar keeps four tabs: Dashboard,
-Applications, Users, Audit; its URL does not change. It is named "System settings" / "Impostazioni di sistema"
-everywhere, the menu entry and the page's title alike (the user, 2026-11-25). Designed in §13.28
-(revised the same day, measured: one row at every width, tabs into the panel at 800px). On
-desktop the console's tabs stay visible in the bar, because they are the primary navigation; at
-phone width they move into that panel too. The user agreed to this compromise over "tabs always in
-the menu". It works with scripting off, replaces the separate Preferences menu (so it absorbs M),
-and the designer designs it before any test. Kept
+ground goes, so it wears the console's ground and cards (the user, 2026-11-25). **H** is done (§13.28, with **L**, the console's logo, folded in and **M** absorbed): one account menu
+in the shared header, asked by the user on 2026-11-25. The bar holds one row at every width: logo, brand,
+four tabs (Dashboard, Applications, Users, Audit) and a pill with the person's name. The pill opens a
+panel, which holds, in order:
+the tabs (at 800px and below), "System settings" / "Impostazioni di sistema", and "Go to your account"
+(console only); then Preferences; then Sign out. The theme reads "Auto (system)" / "Auto (sistema)".
+"Delete account and all its data" goes on `/account`'s menu only, built by step 7. Kept
 apart on purpose, with reasons in §13.26: the section pattern and the mint row's missing owner
 field. Left,
 as later items: base.css's accent-color rule sits above a note whose "above" meant the field
@@ -279,6 +262,10 @@ native "Preferences" tooltip while the open menu's cover is up. Steps 5 and 7 ad
 ## Waiting for the user
 
 - Decisions taken without the user, to review (the user asked for autonomy on 2026-11-25):
+  - H (night of 2026-11-25, the user asleep): two of the designer's later items went in with the
+    review fixes. At 640px and below, with a logo, the brand's tag line is hidden like its name. The
+    phone panel's tab rows lose their gap. Esc does not close the menu, since that would need a new
+    script.
   - 8b: on `/account` the Sign out link is `BB_AUTH_WEB_LOGOUT_URL` with its `rd` removed
     (`logout_without_rd`), so a person who is not an administrator lands on the sign-in page
     instead of a `403` on the console; no new setting (§13.17).
