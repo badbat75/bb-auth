@@ -60,6 +60,8 @@ Rules are in `AGENTS.md`. Format of this file: `AGENTS.md`, under "Skills".
 - A mockup over the real account shell with no handler work: `/tmp/d7/mock.js` boots the e2e server, takes
   `page.content()` of `/account/`, replaces `<main>…</main>` per variant, `setContent`s it with `data-theme`
   stamped on `<html>`, and injects a menu row with `insertAdjacentHTML` into `.menu` before opening it.
+- A mockup with no server and no Edge: `/tmp/d7w/mock.js` inlines the three real stylesheets in a `<style>` and
+  launches Playwright's chromium with `executablePath` set to the cached `chromium_headless_shell-1255` binary.
 
 ## Pitfalls
 
@@ -91,3 +93,6 @@ Rules are in `AGENTS.md`. Format of this file: `AGENTS.md`, under "Skills".
 - Every row of the header panel carries a glyph with a `.5em` margin, so a row without one starts its word left of the others: a new panel row needs a glyph too.
 - The settings page's older refusal keys (`SessionTtlBad`, `IssuerNeeded`, `DefaultThemeBad`…) are label-less lowercase fragments shown above the form, not beside the field: a new refusal key names the label first, and reusing an old one keeps that gap.
 - A library refusal's English can be narrower than its check (`url_not_printable` said "spaces and control characters" for a printable-ASCII test, so an accented letter got the wrong reason): read the check's code, not its sentence, before wording the `K` key.
+- `boot()`'s Edge can time out at launch while other agents' Edge processes run, and Playwright's own chromium
+  asks for a build the cache lacks: pass `executablePath`. A `<link href="file://…">` in `setContent` is blocked,
+  so a mockup shot that way is unstyled: inline the CSS.

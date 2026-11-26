@@ -228,7 +228,7 @@ strings the redesign made untrue are listed in its §5 for the designer. The int
 owner's word. Slices: **7a** the configuration and the menu row; **7b** the confirmation page;
 **7c** the stranger's deletion and a fake intake; **7d** the roster row removed first; **7e** the
 partial outcomes; **7f** the browser suite; **7g** the real run on rpi-01, the worker in dry run
-first, each step with the user's go-ahead. Before 7b, the designer rewords §13.30's untrue strings.
+first, each step with the user's go-ahead. §13.30 was reworded for the worker on 2026-11-26 (mockups in /tmp/d7w/).
 
 - Done when: tests show a protected address changes nothing, a failed write posts nothing, the row
   is gone before the first `POST`, a refused or unanswered `POST` says so with a retry the person
@@ -285,6 +285,9 @@ naming the visible labels. Slices **S0** (golden tests of today's strings, green
 
 - Step 7 (§13.29 W12): whether a deleted administrator may stay in `web.admins`, and which test
   account 7g uses.
+- Step 7 (§13.30, the designer): keep `autocomplete="email"` on the typed-address field (WCAG
+  1.3.5 asks for it, but a browser can then fill the confirmation in), or leave it off; and whether
+  it is enough that the places a person reaches are not listed among what is deleted.
 - Decisions taken without the user, to review (the user asked for autonomy on 2026-11-25):
   - H (night of 2026-11-25, the user asleep): two of the designer's later items went in with the
     review fixes. At 640px and below, with a logo, the brand's tag line is hidden like its name. The
