@@ -10662,4 +10662,526 @@ mod tests {
             "the address families stay restricted: {directives:?}"
         );
     }
+
+    // -----------------------------------------------------------------
+    // Settings refusals as golden strings (plan step 12, slice S0,
+    // docs/ARCHITECTURE.md §13.31 §6).
+    //
+    // These are characterization tests: green by design on the day they land. They pin the
+    // exact sentence every refusal prints today, copied from the source literal in this file
+    // (not from the design doc), so that when §3 turns `compile_settings`' `String` into the
+    // `SettingsRefusal` enum the CLI (`bb-auth-adm`, which prints `From<PrepareError> for
+    // String`) and the gate (`--check-settings`, which prints `read_settings`' `{path}: {e}`)
+    // keep printing byte-for-byte the same words. Every later slice keeps these green
+    // unedited; that is the byte-identity guarantee. `format!("{}", …)` compiles against both
+    // today's `String` and the future enum, so the test is not edited when the type changes.
+    // -----------------------------------------------------------------
+
+    /// The refusal `compile_settings` prints for a document, formatted the way the CLI and the
+    /// gate print it. `format!("{}", …)` is the whole point: it compiles against the `String`
+    /// of today and the `SettingsRefusal` of the later slices alike.
+    #[allow(clippy::useless_format)]
+    fn golden_settings(json: &str) -> String {
+        let f: SettingsFile = serde_json::from_str(json).expect("fixture parses");
+        format!("{}", compile_settings(&f).expect_err("refused"))
+    }
+
+    /// The refusal a `String` leaf wrapper prints, formatted the same way. The leaves keep
+    /// `Result<_, String>` through every slice (§3), so this stays valid.
+    #[allow(clippy::useless_format)]
+    fn golden_leaf<T>(r: Result<T, String>) -> String {
+        format!("{}", r.err().expect("refused"))
+    }
+
+    /// One bad `SettingsFile` per refusal `compile_settings` can produce, each built by
+    /// mutating a valid `{ "version": 3 }` document, asserting the printed sentence equals the
+    /// source literal exactly. The §2 table's 46 codes, plus the doubled `login_url:` prefix
+    /// the leaf's own name keeps.
+    #[test]
+    fn settings_refusals_read_as_they_always_have() {
+        let brand_too_long = "a".repeat(65);
+        let cases: Vec<(&str, String, &str)> = vec![
+            (
+                "version 1",
+                r#"{ "version": 1 }"#.into(),
+                "\"version\": 1 was written before the app clients moved into this file (expected 3). Set gate.client_id, gate.oauth_domain and gate.social_callback_url, give every gate.social_buttons entry its own audience, and bump the version; see the CHANGELOG",
+            ),
+            (
+                "version 2",
+                r#"{ "version": 2 }"#.into(),
+                "\"version\": 2 was written before the pool, the cookie domain and the authorized hosts moved into this file (expected 3). Copy BB_AUTH_COGNITO_ISSUER into gate.issuer, BB_AUTH_COOKIE_DOMAIN into gate.cookie_domain and BB_AUTH_AUTHORIZED_HOSTS into gate.authorized_hosts (as a list), bump the version, and take all three out of bb-auth.env; see the CHANGELOG",
+            ),
+            (
+                "version 99",
+                r#"{ "version": 99 }"#.into(),
+                "\"version\": 99 is not this format (expected 3)",
+            ),
+            (
+                "claim charset",
+                r#"{ "version": 3, "gate": { "profile_claims": ["a b"] } }"#.into(),
+                "profile_claims: claim 'a b' must be non-empty and contain only [A-Za-z0-9_:-]",
+            ),
+            (
+                "claim empty part",
+                r#"{ "version": 3, "gate": { "profile_claims": ["a::b"] } }"#.into(),
+                "profile_claims: claim 'a::b' has an empty part around a '_', ':' or '-'",
+            ),
+            (
+                "claim consumed",
+                r#"{ "version": 3, "gate": { "profile_claims": ["email"] } }"#.into(),
+                "profile_claims: claim 'email' is consumed by the gate itself and cannot be propagated",
+            ),
+            (
+                "claim header reserved",
+                r#"{ "version": 3, "gate": { "profile_claims": ["native_username"] } }"#.into(),
+                "profile_claims: claim 'native_username' derives 'X-Auth-Native-Username', which is reserved",
+            ),
+            (
+                "claims collide",
+                r#"{ "version": 3, "gate": { "profile_claims": ["a_b", "a:b"] } }"#.into(),
+                "profile_claims: claims 'a_b' and 'a:b' both derive 'X-Auth-A-B'",
+            ),
+            (
+                "attr unknown",
+                r#"{ "version": 3, "gate": { "identity_attrs": ["nope"] } }"#.into(),
+                "identity_attrs: unknown identity attribute 'nope' (known: uuid, email)",
+            ),
+            (
+                "attr twice",
+                r#"{ "version": 3, "gate": { "identity_attrs": ["email", "email"] } }"#.into(),
+                "identity_attrs: identity attribute 'email' is listed twice",
+            ),
+            (
+                "attr none",
+                r#"{ "version": 3, "gate": { "identity_attrs": [] } }"#.into(),
+                "identity_attrs: at least one identity attribute is required (known: uuid, email); a 204 that names nobody breaks every application behind this gate, in silence",
+            ),
+            (
+                "ttl below floor",
+                r#"{ "version": 3, "gate": { "session_ttl_secs": 30 } }"#.into(),
+                "session_ttl_secs: 30 is below the 60s floor; a session that expires as it is handed over is a login loop, not a short login",
+            ),
+            (
+                "ttl above ceiling",
+                r#"{ "version": 3, "gate": { "session_ttl_secs": 3153600001 } }"#.into(),
+                "session_ttl_secs: 3153600001 is past the 3153600000s ceiling; a lifetime that does not fit the arithmetic mints a cookie that is already expired",
+            ),
+            (
+                "app client id (gate)",
+                r#"{ "version": 3, "gate": { "client_id": "bad id" } }"#.into(),
+                "client_id: 'bad id' is not an app client id, which is letters, digits, '.', '_' and '-'",
+            ),
+            (
+                "app client id (button)",
+                r#"{ "version": 3, "gate": { "oauth_domain": "auth.x.com", "social_callback_url": "https://auth.x.com/cb", "social_buttons": [ { "idp": "Google", "audience": "bad id" } ] } }"#.into(),
+                "social_buttons 'Google': audience: 'bad id' is not an app client id, which is letters, digits, '.', '_' and '-'",
+            ),
+            (
+                "url not printable",
+                r#"{ "version": 3, "gate": { "denied_url": "https://x.com/a b" } }"#.into(),
+                "denied_url 'https://x.com/a b': must be printable ASCII (no spaces, no control bytes)",
+            ),
+            (
+                "url not https",
+                r#"{ "version": 3, "gate": { "denied_url": "http://x.com" } }"#.into(),
+                "denied_url 'http://x.com': must be an absolute https:// URL",
+            ),
+            (
+                "url empty host",
+                r#"{ "version": 3, "gate": { "denied_url": "https://" } }"#.into(),
+                "denied_url 'https://': empty host",
+            ),
+            (
+                "url userinfo",
+                r#"{ "version": 3, "gate": { "denied_url": "https://a@x.com" } }"#.into(),
+                "denied_url 'https://a@x.com': userinfo '@' is not allowed in the host",
+            ),
+            (
+                "url backslash",
+                r#"{ "version": 3, "gate": { "denied_url": "https://x.com\\a" } }"#.into(),
+                "denied_url 'https://x.com\\a': backslash is not allowed",
+            ),
+            (
+                "login url keeps its doubled prefix",
+                r#"{ "version": 3, "gate": { "login_url": "http://x.com" } }"#.into(),
+                "login_url: login_url 'http://x.com': must be an absolute https:// URL",
+            ),
+            (
+                "issuer userinfo and backslash",
+                r#"{ "version": 3, "gate": { "issuer": "https://a@x.com" } }"#.into(),
+                "issuer 'https://a@x.com': userinfo '@' and backslashes are not allowed",
+            ),
+            (
+                "issuer query or fragment",
+                r#"{ "version": 3, "gate": { "issuer": "https://x.com?q" } }"#.into(),
+                "issuer 'https://x.com?q': must be the bare issuer URL: no query, no fragment",
+            ),
+            (
+                "asset quote",
+                r#"{ "version": 3, "ui": { "stylesheet_url": "https://x.com/\"a\"" } }"#.into(),
+                "stylesheet_url 'https://x.com/\"a\"': must not contain a quote or an angle bracket",
+            ),
+            (
+                "asset not https or rooted",
+                r#"{ "version": 3, "ui": { "logo_url": "ftp://x.com" } }"#.into(),
+                "logo_url 'ftp://x.com': must be an absolute https:// URL or a root-relative path starting with '/'",
+            ),
+            (
+                "callback not https",
+                r#"{ "version": 3, "gate": { "social_callback_url": "/cb" } }"#.into(),
+                "social_callback_url: must be the absolute https:// URL registered on the app client, because Cognito compares it byte for byte",
+            ),
+            (
+                "cookie domain not bare",
+                r#"{ "version": 3, "gate": { "cookie_domain": "https://x.com" } }"#.into(),
+                "cookie_domain 'https://x.com': is not a bare domain: letters, digits, '.' and '-', an optional leading dot, and no scheme, port or path",
+            ),
+            (
+                "cookie domain single label",
+                r#"{ "version": 3, "gate": { "cookie_domain": "example" } }"#.into(),
+                "cookie_domain 'example': is a single label, which a browser stores for nothing: name the registrable domain the services share, such as '.example.com'",
+            ),
+            (
+                "host control byte",
+                r#"{ "version": 3, "gate": { "authorized_hosts": ["ho\tst"] } }"#.into(),
+                "authorized_hosts: host pattern 'ho\tst': contains a control byte",
+            ),
+            (
+                "host not bare",
+                r#"{ "version": 3, "gate": { "authorized_hosts": ["https://x.com"] } }"#.into(),
+                "authorized_hosts: host pattern 'https://x.com': must be a bare host — no scheme, port or path",
+            ),
+            (
+                "host at or dot dot",
+                r#"{ "version": 3, "gate": { "authorized_hosts": ["a..b"] } }"#.into(),
+                "authorized_hosts: host pattern 'a..b': must not contain '@' or '..'",
+            ),
+            (
+                "hosts outside cookie domain",
+                r#"{ "version": 3, "gate": { "cookie_domain": ".example.com", "authorized_hosts": ["other.com"] } }"#.into(),
+                "authorized_hosts: other.com outside cookie_domain '.example.com', so a login would redirect there and the browser would send no session cookie: a 401, a bounce back to the sign-in page, and a loop",
+            ),
+            (
+                "landing off hosts",
+                r#"{ "version": 3, "gate": { "landing_url": "https://nowhere.example/x" } }"#.into(),
+                "landing_url: its host is not covered by authorized_hosts, so every sign-in with no rd would fall back to the sign-in page",
+            ),
+            (
+                "oauth domain not bare",
+                r#"{ "version": 3, "gate": { "oauth_domain": "https://x.com" } }"#.into(),
+                "oauth_domain: 'https://x.com' is not a bare host, which is letters, digits, '.' and '-' with no scheme and no path",
+            ),
+            (
+                "button bare name",
+                r#"{ "version": 3, "gate": { "social_buttons": ["Google"] } }"#.into(),
+                "social_buttons: 'Google' is a bare provider name, which was the shape before each button carried its own app client. Write it as { \"idp\": \"Google\", \"audience\": \"<app client id>\" }",
+            ),
+            (
+                "button no idp",
+                r#"{ "version": 3, "gate": { "social_buttons": [ { "idp": "", "audience": "abc" } ] } }"#.into(),
+                "social_buttons: an entry names no identity_provider",
+            ),
+            (
+                "button idp charset",
+                r#"{ "version": 3, "gate": { "social_buttons": [ { "idp": "a b", "audience": "abc" } ] } }"#.into(),
+                "social_buttons 'a b': a Cognito identity_provider name is letters, digits, '.', '_' and '-'",
+            ),
+            (
+                "button twice",
+                r#"{ "version": 3, "gate": { "social_buttons": [ { "idp": "Google", "audience": "abc" }, { "idp": "Google", "audience": "def" } ] } }"#.into(),
+                "social_buttons: 'Google' is listed twice",
+            ),
+            (
+                "button no audience",
+                r#"{ "version": 3, "gate": { "social_buttons": [ { "idp": "Google", "audience": "" } ] } }"#.into(),
+                "social_buttons 'Google': names no app client, so no button could be drawn for it. Cognito federates per app client, so this is the one that offers Google",
+            ),
+            (
+                "social half configured",
+                r#"{ "version": 3, "gate": { "social_buttons": [ { "idp": "Google", "audience": "abc123" } ] } }"#.into(),
+                "social_buttons: 1 button(s) configured, but oauth_domain or social_callback_url is empty, so there is nowhere to send a visitor and nowhere for them to come back to",
+            ),
+            (
+                "audit header not a name",
+                r#"{ "version": 3, "audit": { "client_ip_header": "X_Real_IP" } }"#.into(),
+                "audit.client_ip_header: 'X_Real_IP' is not a header name, which is letters, digits and '-' (nginx drops a request header with an underscore in its name)",
+            ),
+            (
+                "audit header credential",
+                r#"{ "version": 3, "audit": { "request_id_header": "Authorization" } }"#.into(),
+                "audit.request_id_header: 'Authorization' carries a credential, and the audit never writes one down",
+            ),
+            (
+                "audit headers same",
+                r#"{ "version": 3, "audit": { "client_ip_header": "X-Real-IP", "request_id_header": "x-real-ip" } }"#.into(),
+                "audit.client_ip_header and audit.request_id_header both name 'X-Real-IP'; one header cannot carry an address and a request id at once",
+            ),
+            (
+                "audit limit not an amount",
+                r#"{ "version": 3, "audit": { "rotation": "4" } }"#.into(),
+                "audit.rotation: '4' is not an amount and a unit: write it as, say, '4 MiB', '1 GiB', '26 weeks', '6 months' or '1 year'",
+            ),
+            (
+                "audit limit zero",
+                r#"{ "version": 3, "audit": { "rotation": "0 MiB" } }"#.into(),
+                "audit.rotation: '0 MiB': an amount of nothing is not a limit",
+            ),
+            (
+                "audit limit too much",
+                r#"{ "version": 3, "audit": { "rotation": "2048 GiB" } }"#.into(),
+                "audit.rotation: '2048 GiB': at most 1024 GiB, which is already more than any disk or any audit needs",
+            ),
+            (
+                "audit unbounded with retention",
+                r#"{ "version": 3, "audit": { "rotation": "1 year", "retention": "2 years" } }"#.into(),
+                "audit: rotation '1 year' with retention '2 years' bounds how old the audit gets and not how big: a flood of refusals would grow the live file without limit. Rotate on a size (MiB, GiB) or give the retention one",
+            ),
+            (
+                "audit unbounded no retention",
+                r#"{ "version": 3, "audit": { "rotation": "1 year" } }"#.into(),
+                "audit: rotation '1 year' with no retention bounds how old the audit gets and not how big: a flood of refusals would grow the live file without limit. Rotate on a size (MiB, GiB) or give the retention one",
+            ),
+            (
+                "brand control",
+                r#"{ "version": 3, "ui": { "brand_name": "Bad\u0007Bat" } }"#.into(),
+                "brand_name 'Bad\u{7}Bat': contains a control character",
+            ),
+            (
+                "brand too long",
+                format!(r#"{{ "version": 3, "ui": {{ "brand_name": "{brand_too_long}" }} }}"#),
+                "brand_name: 65 characters is longer than the 64 allowed",
+            ),
+            (
+                "theme unknown",
+                r#"{ "version": 3, "ui": { "theme": "sepia" } }"#.into(),
+                "theme: 'sepia' is not one of system, light, dark",
+            ),
+        ];
+        for (label, json, want) in cases {
+            assert_eq!(golden_settings(&json), want, "{label}");
+        }
+    }
+
+    /// Each `String` leaf wrapper, called with the CLI's own flag names (the names
+    /// `bb-auth-adm` passes), printing each of its faults exactly. This includes the two
+    /// `empty` sentences `compile_settings` can never produce (a blank value is skipped before
+    /// the leaf is called), which is why they live in the wrappers and not the enum.
+    #[test]
+    fn settings_leaf_refusals_read_as_they_always_have() {
+        // compile_page_url, the field the CLI names "denied_url", every fault incl. `empty`.
+        assert_eq!(
+            golden_leaf(compile_page_url("denied_url", "")),
+            "denied_url '': empty"
+        );
+        assert_eq!(
+            golden_leaf(compile_page_url("denied_url", "https://x.com/a b")),
+            "denied_url 'https://x.com/a b': must be printable ASCII (no spaces, no control bytes)"
+        );
+        assert_eq!(
+            golden_leaf(compile_page_url("denied_url", "http://x.com")),
+            "denied_url 'http://x.com': must be an absolute https:// URL"
+        );
+        assert_eq!(
+            golden_leaf(compile_page_url("denied_url", "https://")),
+            "denied_url 'https://': empty host"
+        );
+        assert_eq!(
+            golden_leaf(compile_page_url("denied_url", "https://a@x.com")),
+            "denied_url 'https://a@x.com': userinfo '@' is not allowed in the host"
+        );
+        assert_eq!(
+            golden_leaf(compile_page_url("denied_url", "https://x.com\\a")),
+            "denied_url 'https://x.com\\a': backslash is not allowed"
+        );
+        // compile_login_url is compile_page_url under its own field name.
+        assert_eq!(
+            golden_leaf(compile_login_url("http://x.com")),
+            "login_url 'http://x.com': must be an absolute https:// URL"
+        );
+        // compile_issuer, every fault.
+        assert_eq!(
+            golden_leaf(compile_issuer("https://x.com/a b")),
+            "issuer 'https://x.com/a b': must be printable ASCII (no spaces, no control bytes)"
+        );
+        assert_eq!(
+            golden_leaf(compile_issuer("http://x.com")),
+            "issuer 'http://x.com': must be an absolute https:// URL"
+        );
+        // "https://" trims its trailing slashes to "https:", so it fails the https-prefix
+        // check, not the empty-host check. The empty host is reached by "https:///nohost".
+        assert_eq!(
+            golden_leaf(compile_issuer("https://")),
+            "issuer 'https://': must be an absolute https:// URL"
+        );
+        assert_eq!(
+            golden_leaf(compile_issuer("https:///nohost")),
+            "issuer 'https:///nohost': empty host"
+        );
+        assert_eq!(
+            golden_leaf(compile_issuer("https://x.com\\p")),
+            "issuer 'https://x.com\\p': userinfo '@' and backslashes are not allowed"
+        );
+        assert_eq!(
+            golden_leaf(compile_issuer("https://x.com#frag")),
+            "issuer 'https://x.com#frag': must be the bare issuer URL: no query, no fragment"
+        );
+        // compile_asset_url, the field the CLI names "--stylesheet", every fault.
+        assert_eq!(
+            golden_leaf(compile_asset_url("--stylesheet", "https://x.com/a b")),
+            "--stylesheet 'https://x.com/a b': must be printable ASCII (no spaces, no control bytes)"
+        );
+        assert_eq!(
+            golden_leaf(compile_asset_url("--stylesheet", "https://x.com/<a>")),
+            "--stylesheet 'https://x.com/<a>': must not contain a quote or an angle bracket"
+        );
+        assert_eq!(
+            golden_leaf(compile_asset_url("--stylesheet", "https://x.com\\p")),
+            "--stylesheet 'https://x.com\\p': backslash is not allowed"
+        );
+        assert_eq!(
+            golden_leaf(compile_asset_url("--stylesheet", "https://")),
+            "--stylesheet 'https://': empty host"
+        );
+        assert_eq!(
+            golden_leaf(compile_asset_url("--stylesheet", "https://a@x.com")),
+            "--stylesheet 'https://a@x.com': userinfo '@' is not allowed in the host"
+        );
+        assert_eq!(
+            golden_leaf(compile_asset_url("--stylesheet", "ftp://x.com")),
+            "--stylesheet 'ftp://x.com': must be an absolute https:// URL or a root-relative path starting with '/'"
+        );
+        // compile_app_client_id, the CLI's flag.
+        assert_eq!(
+            golden_leaf(compile_app_client_id("--client-id", "bad id")),
+            "--client-id: 'bad id' is not an app client id, which is letters, digits, '.', '_' and '-'"
+        );
+        // compile_audit_header, both CLI flags and both faults.
+        assert_eq!(
+            golden_leaf(compile_audit_header("--client-ip-header", "X_Real_IP")),
+            "--client-ip-header: 'X_Real_IP' is not a header name, which is letters, digits and '-' (nginx drops a request header with an underscore in its name)"
+        );
+        assert_eq!(
+            golden_leaf(compile_audit_header("--request-id-header", "Cookie")),
+            "--request-id-header: 'Cookie' carries a credential, and the audit never writes one down"
+        );
+        // compile_cookie_domain, both faults.
+        assert_eq!(
+            golden_leaf(compile_cookie_domain("https://x.com")),
+            "cookie_domain 'https://x.com': is not a bare domain: letters, digits, '.' and '-', an optional leading dot, and no scheme, port or path"
+        );
+        assert_eq!(
+            golden_leaf(compile_cookie_domain("example")),
+            "cookie_domain 'example': is a single label, which a browser stores for nothing: name the registrable domain the services share, such as '.example.com'"
+        );
+        // compile_oauth_domain.
+        assert_eq!(
+            golden_leaf(compile_oauth_domain("https://x.com")),
+            "oauth_domain: 'https://x.com' is not a bare host, which is letters, digits, '.' and '-' with no scheme and no path"
+        );
+        // compile_brand_name, both faults.
+        assert_eq!(
+            golden_leaf(compile_brand_name("Bad\u{7}Bat")),
+            "brand_name 'Bad\u{7}Bat': contains a control character"
+        );
+        assert_eq!(
+            golden_leaf(compile_brand_name(&"a".repeat(65))),
+            "brand_name: 65 characters is longer than the 64 allowed"
+        );
+        // compile_host_pattern, every fault incl. `empty`.
+        assert_eq!(
+            golden_leaf(compile_host_pattern("")),
+            "host pattern '': empty"
+        );
+        assert_eq!(
+            golden_leaf(compile_host_pattern("ho\tst")),
+            "host pattern 'ho\tst': contains a control byte"
+        );
+        assert_eq!(
+            golden_leaf(compile_host_pattern("https://x.com")),
+            "host pattern 'https://x.com': must be a bare host — no scheme, port or path"
+        );
+        assert_eq!(
+            golden_leaf(compile_host_pattern("a..b")),
+            "host pattern 'a..b': must not contain '@' or '..'"
+        );
+        // AuditLimit::parse, every fault.
+        assert_eq!(
+            golden_leaf(AuditLimit::parse("4")),
+            "'4' is not an amount and a unit: write it as, say, '4 MiB', '1 GiB', '26 weeks', '6 months' or '1 year'"
+        );
+        assert_eq!(
+            golden_leaf(AuditLimit::parse("0 MiB")),
+            "'0 MiB': an amount of nothing is not a limit"
+        );
+        assert_eq!(
+            golden_leaf(AuditLimit::parse("2048 GiB")),
+            "'2048 GiB': at most 1024 GiB, which is already more than any disk or any audit needs"
+        );
+        // AuditPolicy::new, the unbounded pair, both arms.
+        assert_eq!(
+            golden_leaf(AuditPolicy::new(
+                AuditLimit::parse("1 year").unwrap(),
+                Some(AuditLimit::parse("2 years").unwrap())
+            )),
+            "rotation '1 year' with retention '2 years' bounds how old the audit gets and not how big: a flood of refusals would grow the live file without limit. Rotate on a size (MiB, GiB) or give the retention one"
+        );
+        assert_eq!(
+            golden_leaf(AuditPolicy::new(
+                AuditLimit::parse("1 year").unwrap(),
+                None
+            )),
+            "rotation '1 year' with no retention bounds how old the audit gets and not how big: a flood of refusals would grow the live file without limit. Rotate on a size (MiB, GiB) or give the retention one"
+        );
+        // compile_profile_claims, every fault.
+        assert_eq!(
+            golden_leaf(compile_profile_claims(&claims("a b"))),
+            "claim 'a b' must be non-empty and contain only [A-Za-z0-9_:-]"
+        );
+        assert_eq!(
+            golden_leaf(compile_profile_claims(&claims("a::b"))),
+            "claim 'a::b' has an empty part around a '_', ':' or '-'"
+        );
+        assert_eq!(
+            golden_leaf(compile_profile_claims(&claims("email"))),
+            "claim 'email' is consumed by the gate itself and cannot be propagated"
+        );
+        assert_eq!(
+            golden_leaf(compile_profile_claims(&claims("native_username"))),
+            "claim 'native_username' derives 'X-Auth-Native-Username', which is reserved"
+        );
+        assert_eq!(
+            golden_leaf(compile_profile_claims(&claims("a_b,a:b"))),
+            "claims 'a_b' and 'a:b' both derive 'X-Auth-A-B'"
+        );
+        // compile_identity_attrs, every fault.
+        assert_eq!(
+            golden_leaf(compile_identity_attrs(&claims("nope"))),
+            "unknown identity attribute 'nope' (known: uuid, email)"
+        );
+        assert_eq!(
+            golden_leaf(compile_identity_attrs(&claims("email,email"))),
+            "identity attribute 'email' is listed twice"
+        );
+        assert_eq!(
+            golden_leaf(compile_identity_attrs(&claims(""))),
+            "at least one identity attribute is required (known: uuid, email); a 204 that names nobody breaks every application behind this gate, in silence"
+        );
+    }
+
+    /// `SettingsWrite::prepare` prefixes a compile refusal with `refusing to write:` and a
+    /// space, and the CLI prints exactly that string, so the bytes are the operator's contract.
+    #[test]
+    #[allow(clippy::useless_format)]
+    fn a_refused_write_reads_as_it_always_has() {
+        let doc: SettingsFile = serde_json::from_str(
+            r#"{ "version": 3, "gate": { "landing_url": "https://nowhere.example/x" } }"#,
+        )
+        .expect("fixture parses");
+        let got = format!("{}", SettingsWrite::prepare(&doc).err().expect("refused"));
+        assert!(got.starts_with("refusing to write: "), "{got}");
+        assert_eq!(
+            got,
+            "refusing to write: landing_url: its host is not covered by authorized_hosts, so every sign-in with no rd would fall back to the sign-in page"
+        );
+    }
 }

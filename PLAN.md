@@ -269,7 +269,7 @@ it reaches every settings refusal. The System settings page shows `compile_setti
 sentence verbatim, so it names wire keys (`landing_url`) on an Italian page. Designed in §13.31:
 a `SettingsRefusal` enum in the library (46 codes in 37 variants), whose `Display` is today's
 exact English for `bb-auth-adm` and `--check-settings`, and one exhaustive GUI match onto `K` keys
-naming the visible labels. Slices **S0** (golden tests of today's strings, green from the start) to
+naming the visible labels. Slices **S0** (golden tests of today's strings, green from the start; done) to
 **S9** (`ConfigForm::apply` drops its duplicate checks), each with its red tests named in §13.31 §7.
 
 - Done when: every refusal reads in the page's language and names the visible label (a test walks
