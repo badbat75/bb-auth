@@ -1487,7 +1487,8 @@ request that obtained them.** Three requests, no JavaScript, no state on the ser
 2. It renders a code form carrying, as hidden fields, Cognito's `Session`, the chosen email, the
    action and its values (and the `rev`, for a deletion). `Cache-Control: no-store`. (Changed by §13.29
    for the deletion: no email is chosen; the code goes to the session's own Cognito user, and the
-   form carries `Session`, `rev`, `uuid` and `kind`.)
+   form carries `Session`, `rev`, `uuid` and `kind`. Changed again by §13.29 W4: a deletion asks for
+   no code at all; it is handed to the owner's worker, and only the profile edit runs this flow.)
 3. The code `POST` re-checks everything against the live files (identity, veto, the email still
    among the caller's, the attributes still editable), calls `RespondToAuthChallenge`, then the
    action with the `AccessToken`, and drops all three tokens. None is logged, stored, or put in
@@ -1593,7 +1594,9 @@ reaches only `authenticated` scopes and holds no key; the other order, on a fail
 leave a row with live API keys and every grant waiting for the same person to re-register. If
 step 1 fails (`409`, I/O), nothing has changed. If step 2 fails, the page says the row is gone and
 the Cognito account is not, and offers the retry, which the person still reaches as a stranger. (Changed by §13.29 §4: the
-retry is the stranger's code walk on the same link, and `WRITE_LOCK` is released before step 2.)
+retry is the stranger's code walk on the same link, and `WRITE_LOCK` is released before step 2.
+Changed again by §13.29 W3: step 2 is a request queued at the owner's worker, one per address,
+after the row is gone, and the retry is the stranger's walk with no code.)
 
 A `denied` entry is never lifted. A **stranger's** deletion does not touch the access file. The
 audit is not edited; the confirmation page says their lines are kept until `audit.retention`
@@ -5563,7 +5566,382 @@ from every table on a phone. The problem it would solve is solved.
    Recommended yes, one row above Sign out; it is a new item nobody has asked for yet.
 3. "System settings" / "Impostazioni di sistema" as the page's new name everywhere (§2)?
 
-### 13.29 Delete my account (plan step 7, designed 2026-11-26)
+### 13.29 Delete my account (plan step 7, designed 2026-11-26; redone the same day on the owner's worker)
+
+R4 as the user changed it on 2026-11-26 (option a): bb-auth-web removes the roster row itself and
+hands every Cognito deletion to the owner's existing deletion worker (`bb-account-delete`, in the
+itadmin repository), so bb-auth-web holds no AWS credential and makes no Cognito call for a
+deletion. A social-only person's Cognito account is now deleted too. Sections W1 to W12 are the
+design; the overnight design for a direct `DeleteUser` is kept after them, under "The direct
+DeleteUser design", each part marked where it is superseded or still holds. IT-Admin was reachable
+only through the coordinator, so every change on the itadmin side is a **proposal for the owner**
+(W8), never a step of this plan.
+
+What was read for the redo: `AGENTS.md` (the invariants, the self-service paragraph, "Actions with
+real effects"), `PLAN.md` R4 and step 7 as changed on 2026-11-26, §13.3, §13.7, §13.9, §13.13,
+§13.29 and §13.30 as written overnight; `deploy/bb-auth-web.service` (no `IPAddressDeny`,
+`RestrictAddressFamilies` with `AF_INET`, one `ReadWritePaths`); in `src/bin/bb-auth-web.rs`
+`Config` (`cognito_timeout`, `account_logout_url`), `handle_account`, `account_uuid_of`,
+`native_user`, `cognito_post` (its `timeout_global`), `WRITE_LOCK`, `csrf_ok`, `audit()`, the
+tests' `FakeCognito`; in `src/bin/bb-auth.rs` `authorized_response` (the identity headers are
+derived per request from the live file); ureq 3.4.0's `src/config.rs` in the cargo registry.
+
+#### W1. The worker's contract, as read (worker)
+
+**Read, not by this role:** the coordinator and IT-Admin read itadmin's
+`infra/rpi-01/bb-delete-request/` and rpi-01's installed copies on 2026-11-26, read-only. The intake
+is `bb-delete-request.py` v2.0.0, the worker `bb-account-delete.py` v1.0.0, rpi-01's copies are
+byte-identical to the repository's, and no environment override is set there. This role has not
+read the itadmin source; the facts below are theirs, as relayed.
+
+- **Intake.** A `DynamicUser` service listening on `127.0.0.1:8480`, spool in
+  `/var/lib/private/bb-delete-request` (0750). Two hard-coded paths: `GET /account/whoami` answers
+  `{email, protected}` for the `X-Auth-Email` it is sent; `POST /account/delete` takes a
+  form-urlencoded body of at most 4096 bytes with `confirm_email`. Checks in this order: no header
+  `401`; `confirm_email` differs from the header `400` (`confirm_mismatch`); the address is in
+  `BBDR_PROTECTED` (default the operator's address) `403` (`protected`); the spool file is at its
+  2 MiB cap `503` (`unavailable`); else it appends `{"ts","email","remote_addr"}` to
+  `selfdelete.jsonl` (0640, fsync) and answers `202 {"ok":true,"status":"accepted"}`.
+  `remote_addr` is `X-Real-IP`; the worker needs only `email`. It reads the **whole** header,
+  lowercased and stripped, as one address. It checks no secret: any local process that reaches the
+  port is believed.
+- **Worker.** `root`, oneshot, started by a path unit on `selfdelete.jsonl`, with
+  `AWS_SHARED_CREDENTIALS_FILE=/etc/bb-privacy.aws` and `ReadWritePaths=/opt/bb-auth/var/lib`. Per
+  record: an address in `BBAD_PROTECTED` (its own list, default the operator's address) is refused
+  and an SNS mail sent; else `list-users` with the filter `email = "..."`, an exact re-check, and
+  `admin-delete-user` for every match, federated twins included; then `bb-auth-adm user show EMAIL`,
+  and on failure it logs "not in the roster" and goes on, else `user rm EMAIL` and
+  `systemctl reload bb-auth`. It records `done.jsonl` in its own 0700 `StateDirectory`, keeps a
+  cursor, and takes at most `MAX_PER_RUN=10` records: **above ten pending, the whole run is
+  refused**. There is no timer: a run happens only when the spool changes. A failed run keeps the
+  cursor and sends an SNS "FAILED" mail. `BBAD_DRY_RUN` exists.
+- **The race IT-Admin named.** The worker runs `user show` before `user rm`; a row removed between
+  the two makes `rm` fail, the run counts as failed (cursor kept, SNS "FAILED", no retry until the
+  next spool change), and the Cognito deletion has already happened. A row already gone when
+  `show` runs is the tolerated "not in the roster" path.
+- **State on rpi-01.** The path has never run: `selfdelete.jsonl` does not exist and the worker's
+  `StateDirectory` was never created. nginx no longer routes `/account/delete` to the intake
+  (bb-auth-web took `/account/` on 2026-11-24), so nothing reaches it today, except a local process.
+- **IT-Admin's notes.** The email-code sign-in fires the pool's `post_authentication` Lambda, which
+  mails the administrator a "login". A deleted person's session cookie keeps its `authenticated`
+  grants until it expires or they sign out (the stateless-session invariant says the same).
+
+**Read in a source by this role:** ureq 3.4.0 follows redirects by default (`max_redirects: 10`
+in `Config::default`, `src/config.rs`), so the intake client must set it to 0, or a `3xx` would
+carry an identity header to wherever it pointed.
+
+**Assumed, to be shown by 7g:** that a record whose address no Cognito user has is zero
+`admin-delete-user` calls and not an error (the contract says "for each match"); that the worker
+removes the row through the same `remove_user` the CLI uses (it calls `bb-auth-adm user rm`, which
+does); how long a record takes from the `202` to the deletion (no number is promised anywhere until
+7g measures one).
+
+#### W2. Decision: bb-auth-web calls the intake on loopback, and its unit does not change (worker)
+
+bb-auth-web calls the intake's two paths itself, over plain HTTP on loopback, with the identity it
+already holds for this request: `GET {intake}/account/whoami` and
+`POST {intake}/account/delete`, each with `X-Auth-Email: <one address>` and the proposed
+`X-BB-Delete-Secret` (W8 §1). The intake is the only interface the worker has, and using it keeps
+every check the owner wrote (protected list, spool cap, confirmation) in force.
+
+- **Configuration, in `bb-auth-web.env`, restart-only:** `BB_AUTH_WEB_DELETE_INTAKE`, the intake's
+  **origin** (`http://127.0.0.1:8480`), because the intake hard-codes its paths. Validated at
+  startup by a new `compile_delete_intake`: `http`, a loopback IP literal (`127.0.0.0/8` or
+  `[::1]`), a port, and nothing else (no path, no query, no userinfo, no name); anything else is a
+  fatal startup naming the variable. Loopback only because the request carries an identity in clear
+  to a service whose one check is that header: to any other host it is an identity sent unencrypted
+  to something that deletes accounts on it. **Unset turns the feature off**: no menu row, and
+  `{account}/delete` is the `404` every unknown path gets, which is how `BB_AUTH_WEB_LOGOUT_URL`
+  unset already behaves. An env variable and not a setting because it is the GUI's own, read once,
+  and decides where an identity is sent: the settings file is editable from the console, and a
+  field there would let a console session point every future deletion at another port.
+- **`BB_AUTH_WEB_DELETE_SECRET`**, required when the intake is set (fatal otherwise), with
+  `compile_proxy_secret`'s rules (32 or more of `[A-Za-z0-9_-]`, never printed), sent on both
+  calls. Today's intake ignores the header, so bb-auth ships its half once and the owner can start
+  enforcing it with no bb-auth release; requiring it means nobody turns deletion on and forgets the
+  gap. Not generated by the postinst, unlike the proxy secret: the same value must reach a file the
+  owner's unit reads, so the operator generates it once (the proxy secret's command) and writes it
+  to both. Open question 3.
+- **The client:** a ureq agent with `timeout_global` 5 s (a new `Config::intake_timeout`, which
+  tests shorten as they do `cognito_timeout`), `http_status_as_error(false)`, `max_redirects(0)`.
+  A `202` with `"ok":true` is the only acceptance; `whoami` is read only from a `200` whose `email`
+  equals the address sent and whose `protected` is a boolean. Anything else, including a body that
+  does not parse, is "not accepted", never a guess.
+- **No `X-Real-IP`.** The worker needs only `email`, and bb-auth-web has no client address it can
+  vouch for: one copied from a request header would put a client-chosen address into the owner's
+  record, which is what the audit's "believes a header only when an operator has named it" refuses.
+- **The unit is unchanged.** It has no `IPAddressDeny` (removed for Cognito, §13.22), allows
+  `AF_INET`, and needs no new path: the call is an outbound loopback connection. **The spool is not
+  given to it**: the spool belongs to a `DynamicUser`, whose uid is allocated at each start, so
+  there is no stable owner or group to share; and writing it directly would skip the protected
+  list, the cap and the confirmation, which are the owner's checks and the only ones the worker's
+  input passes.
+
+#### W3. Decision: one request per address, and the row goes before the first request (worker)
+
+**Which addresses.** `X-Auth-Email` holds every email of the caller's row, joined by a space, and
+the intake reads the whole header as one address. Sent as is, a two-address row would queue the
+address `"a@x b@y"`, which no Cognito user has and no row names: a deletion that does nothing and
+says it was accepted. So bb-auth-web splits the header exactly as `handle_account` already does
+(`split_ascii_whitespace`, `norm_email`) and sends **one `whoami` and one `POST` per address**, in
+the header's order, each with that one address as `X-Auth-Email` and as `confirm_email`. Every
+address goes because the row says all of them are this person, and R4 says every Cognito user with
+their address. More than ten addresses is refused before anything is sent (a constant
+`DELETE_MAX_ADDRESSES = 10`, named after the worker's `MAX_PER_RUN`), since that many records would
+make every run of the worker refuse until somebody intervenes.
+
+**The order of one deletion**, each refusal ending the request with nothing changed after it:
+
+1. what every `/account` `POST` checks: the proxy secret, the same-origin door (`csrf_ok`, strict),
+   the identity, the `denied` veto (`handle_account`, before anything else);
+2. the posted `uuid` equals the live row's (both empty for a stranger), and for a roster user the
+   posted `rev` equals the live file's sha256 (a pre-check without the lock, so a stale page sends
+   nothing);
+3. the typed address (W4) equals one of the caller's addresses, and there are at most ten;
+4. `whoami` for every address: any `protected: true` is the protected page (W5); any other answer
+   than a usable `200`, or none in 5 s, is "not deleted" (`502`, `504`). Nothing has changed yet;
+5. for a roster user: `WRITE_LOCK`, `rev` again under the lock, `open_access_file`,
+   `remove_user(doc, uuid)`, `AccessWrite::prepare(..)?.commit(..)`, the lock released at the
+   commit (§13.13: never held across a network call). A `409` or an I/O error ends the request
+   with nothing changed and **nothing posted**;
+6. `POST` for every address, stopping at the first that is not a `202`;
+7. the journal lines (W7) and the outcome page (W6).
+
+**Why the row goes first, and not after a `202`.** IT-Admin's race (W1): the worker runs `user show`
+then `user rm`, and a row that disappears between the two fails the run, keeps the cursor and stops
+every later deletion until the spool changes again. A row removed **before** the record exists is
+the tolerated path: `show` finds nothing, the worker logs "not in the roster" and goes on, which
+the contract states. Removing it after the `202` races the worker by construction, however short
+our write is. The other reasons are §13.9's, unchanged: whatever the queue then does, no live key
+is left waiting, and R4 says the row, keys and references go at once (the keys stop at the gate's
+next reload, which `bb-auth-reload.path` sends after our write).
+
+**What a failure after the row costs.** If the first `POST` is refused (`503` full, or anything
+else) or unanswered, the row is gone and the sign-in accounts may not be queued. That is §13.9's
+partial state, and it is chosen over its opposite for the same reason. The page says so and offers
+"Try again", which is the same link: the person is now a stranger, and the stranger's walk (no
+file write) posts again. A second record for an address already deleted is harmless (W1: no user
+matches, no row). The cost to state: with the row gone, the gate sends only the address the session
+signed in with, so a retry reaches that address alone, and the other addresses of a multi-address
+row are left to an administrator; the partial page says so in one clause.
+
+#### W4. Decision: one confirmation for everyone, the typed address, and no email code (worker)
+
+**The email code goes, for every caller.** It existed to obtain the `AccessToken` `DeleteUser` asks
+for; nothing needs that token now. Kept only for native sessions, it would guard half of the
+callers of an operation whose effect is the same for all of them (every Cognito user with the
+address, twins included), and the unguarded half would set the real bar. It also fires the
+`post_authentication` Lambda, mailing the administrator a "login" for every deletion attempt, and
+it is most of the old design's moving parts (the `Session`, the twin binding of §13.25, two Cognito
+calls and fifteen outcomes). `native_user` is not read by the deletion at all, and the four
+variants of the overnight design become two: a **roster** caller (the row and the sign-in accounts)
+and a **stranger** (the sign-in accounts only).
+
+**The proof is the session plus a typed address.** The confirmation page carries one text field,
+the person's email address, which must equal one of the caller's addresses after `norm_email`; a
+mismatch is a `400` with nothing sent. One press now deletes every sign-in account with that
+address, at every provider, irreversibly, so the page asks for something a slip cannot produce;
+and it is the intake's own `confirm_email` contract, so what goes in is the person's confirmation
+and not a value bb-auth-web made up (for a multi-address row bb-auth-web supplies the others, which
+the page lists). This overturns §13.29 §8's rejection of a typed word for B: that deletion removed
+a row an administrator could re-add, this one cannot be undone by anybody.
+
+**The cost, stated:** a signed-in browser left unattended can delete the account; the code would
+have stopped that, for native sessions only. Typing the address does not stop it, since the bar
+shows the address. Open question 1.
+
+#### W5. Decision: the protected list is asked first, through `whoami`, and relayed (worker)
+
+bb-auth-web cannot read either protected list, and does not need to: the intake's `whoami` answers
+`protected` for one address, so step 4 of W3 asks it for every address **before** the row is
+touched. A protected caller changes nothing anywhere. The page (`403`) says the account cannot be
+deleted from this page, that nothing was deleted, and to ask an administrator; it never names a
+list or the address that matched. A `403` from the `POST` itself (the list changed between the two
+calls) is the same page when nothing was posted yet, and the partial page otherwise.
+
+The two lists (`BBDR_PROTECTED`, `BBAD_PROTECTED`) both default to the operator's address today. If
+they ever differ, the worker refuses a record the intake accepted, after our row is gone, and mails
+the owner; the person's page has already said "queued". W8 §3 proposes one list.
+
+#### W6. Decision: what the page can honestly say (worker)
+
+No page can read the outcome: the only per-request result is the worker's private `done.jsonl` and
+an SNS mail to the owner. So the page reports what bb-auth-web did and what the intake accepted,
+never that a sign-in account **is** deleted. A `202` means queued.
+
+| Where it stops | Status | What is true | What the page offers |
+|---|---|---|---|
+| refusals in W3 steps 1 to 3 (door, veto, `uuid`, `rev`, typed address, too many addresses) | 400 / 403 / 409 | nothing changed | start again, or back |
+| `whoami`: protected | 403 | nothing changed | back |
+| `whoami`: no answer, or not usable | 504 / 502 | nothing changed | try again, back |
+| the write (step 5) | 409 / 500 | nothing changed, nothing posted | start again |
+| every `POST` `202` (roster) | 200 | the row is gone; the sign-in accounts are queued | sign out |
+| every `POST` `202` (stranger) | 200 | the sign-in accounts are queued; the file is untouched | sign out |
+| the first `POST` refused (`503` or other), roster | 502 | the row is gone; nothing is queued | try again, sign out |
+| the first `POST` unanswered, roster | 504 | the row is gone; maybe queued, and a retry is harmless | try again, sign out |
+| the first `POST` refused or unanswered, stranger | 502 / 504 | nothing changed, or maybe queued | try again, back |
+| a later `POST` refused or unanswered | 502 / 504 | the row is gone (roster); some addresses queued | try again, sign out |
+
+- **The done page** says the API keys and every access an administrator gave by name are gone now
+  (roster), that the sign-in accounts with the address, whichever way the person signs in, are
+  queued and will be deleted by a separate process, that no message says when, and that if they
+  can still sign in later they should tell an administrator. It promises no duration until 7g
+  measures one.
+- **The cookie.** bb-auth cannot end it (stateless sessions), and it keeps any `authenticated`
+  grant until it expires, even after the Cognito user is gone. The done page's one action is Sign
+  out (`Config::account_logout_url`, as the menu's), with the sentence that says why; where that
+  URL is unset, the "close your browser" sentence instead, as §13.30 §4 already decided.
+- **How the person learns the result:** by not being able to sign in. A status page was rejected
+  (W9). W8 §4 proposes that the worker tell the person.
+
+#### W7. The veto, strangers, administrators and the journal (worker)
+
+- **The `denied` veto** is answered first, on the `GET` and every `POST` (`handle_account`,
+  unchanged), so a vetoed identity never reaches the intake. `remove_user` rewrites a `denied` or
+  `excluded` entry naming the uuid to the row's primary email, which is also what the worker's
+  `user rm` would do, so the veto survives the deletion either way.
+- **A stranger** reaches the same page with the row lines left out, and the access file is never
+  opened for writing. The social-only stranger, who had nothing to delete overnight (variant D), now
+  queues their sign-in accounts like anybody else (R4 as changed).
+- **`web.admins`** is not read and not touched, as §13.29 §6 decided (it still holds).
+- **The journal**, through the existing `audit()` helper, one line per effect:
+  `{email} (self): user rm {uuid}` after the commit, and
+  `{email} (self): delete-request {n} queued` or `... refused {status}` / `... no answer` after the
+  `POST`s. No audit-file event, for §13.29 §5's reason (it still holds). The secret is never in a
+  line.
+- **`gate.allow_unverified_social` multiplies with this.** The worker deletes by address. With that
+  setting on, a federated identity whose address nobody verified gets that address in
+  `X-Auth-Email`, and could queue the deletion of every Cognito user with it, a verified native one
+  included. bb-auth-web cannot tell. The example file ships it `false`; 7g reads the live value
+  first, and if it is on, open question 4 decides before deletion is turned on.
+
+#### W8. Proposals for the itadmin owner (worker)
+
+Each is the owner's to accept; bb-auth does not depend on any of them to work, only to be safe
+against a local caller.
+
+1. **The intake believes any local caller, today.** Any process on rpi-01 can `POST` an address to
+   `127.0.0.1:8480/account/delete` and queue the irreversible deletion of every Cognito user with
+   it (the protected address excepted). This exists now, before step 7, since nginx no longer routes
+   the path and nothing legitimate calls it. Proposal: the intake requires `X-BB-Delete-Secret` on
+   both paths, compared in constant time, its value read through `LoadCredential=` (which works
+   with `DynamicUser`) from a root-only file, the same value as `BB_AUTH_WEB_DELETE_SECRET`. Until
+   the owner decides, stopping the intake costs nothing, since nothing uses it. A Unix socket with
+   a fixed group was the alternative; it changes the intake's listener and its unit more.
+2. **A backlog of more than ten stops every deletion.** With no timer and the whole run refused
+   above `MAX_PER_RUN`, eleven pending records (a flood through the gap above, or retries) stop the
+   worker until somebody acts. Proposal: process the first ten and leave the cursor on the rest, a
+   timer to retry a failed run, and pending records deduplicated by address.
+3. **One protected list.** The intake and the worker each have one; proposal: one file both read.
+4. **Tell the person.** Optional: on completion the worker emails the address it deleted, which is
+   the only way the person learns the result.
+5. **One address per header.** The intake takes `"a@x b@y"` as one address. bb-auth-web never sends
+   that (W3), but the intake could refuse a header with a space (`400`), so no caller can queue a
+   deletion that does nothing.
+
+#### W9. Alternatives rejected (worker)
+
+- **Write the spool from bb-auth-web**: a `DynamicUser`'s directory has no stable owner to share, a
+  new hole in the unit, and it skips the owner's three checks.
+- **Remove the row after the `202`**: the worker's `show`/`rm` race (W1, W3).
+- **Keep the email code for native sessions**: W4.
+- **Send the joined header**: a no-op deletion reported as accepted (W3).
+- **Route `/account/delete` from nginx straight to the intake** (as before 2026-11-24): no `rev`, no
+  row first, the joined header, and bb-auth-web owns `/account/`.
+- **A status page reading `done.jsonl`**: that file is the worker's, 0700, and a readable status
+  is a new interface between two repositories for a page a person visits once.
+- **`AdminDeleteUser` in bb-auth-web**: an AWS credential in the process that writes both files;
+  the user chose (a) instead.
+- **Pass `X-Real-IP`**: W2.
+
+#### W10. Slices (worker)
+
+They replace 7a to 7h. Each is one red-green pass; tests in `src/bin/bb-auth-web.rs` unless named.
+A `FakeIntake` (7c) is a `tiny_http` server on `127.0.0.1:0` in the test module, shaped as
+`FakeCognito`: it records each request's method, path, `X-Auth-Email`, `X-BB-Delete-Secret` and
+`confirm_email`, answers from a script per path, can stay silent past the timeout, and can be given
+the access file's path to record whether a uuid was still in it when each `POST` arrived.
+
+- **7a. Configuration and the menu row.** `compile_delete_intake`, both variables in `from_env`,
+  `Config::{delete_intake, delete_secret, intake_timeout}`, the example env file's comment; and
+  `account_menu`'s delete row (§13.30 §1, unchanged) shown only when the intake is set, so the
+  fields have a production reader in the same slice. Tests:
+  `delete_intake_accepts_a_loopback_http_origin`,
+  `delete_intake_refuses_a_non_loopback_host_a_name_https_a_path_or_userinfo`,
+  `delete_intake_without_a_secret_is_fatal_and_names_the_variable`,
+  `the_account_menu_ends_with_delete_after_sign_out`, `the_console_menu_has_no_delete_row`,
+  `no_delete_row_when_the_intake_is_unset`.
+- **7b. The confirmation page.** The route, `page_account_delete` in its two variants, hidden `rev`
+  and `uuid`, the typed-address field, the audit sentence (`limit_text` taking a `Lang`). Tests:
+  `delete_page_for_a_roster_user_lists_what_goes_and_asks_for_the_address`,
+  `delete_page_for_a_stranger_lists_only_the_sign_in_accounts`,
+  `delete_page_says_how_long_the_audit_keeps_lines`, `delete_page_refuses_a_denied_identity`,
+  `delete_page_never_names_the_veto`, `delete_page_changes_nothing_and_calls_nothing`,
+  `delete_page_is_a_404_when_the_intake_is_unset`.
+- **7c. The stranger's deletion.** `account_delete_post` without the write: steps 1 to 4 and 6 of
+  W3, `intake_whoami`, `intake_delete`, the journal line, the done page; and `FakeIntake`. Tests:
+  `a_strangers_deletion_posts_each_address_and_leaves_the_file_unchanged`,
+  `each_request_carries_one_address_and_the_secret_never_the_joined_header`,
+  `a_typed_address_that_is_not_the_callers_sends_nothing`,
+  `a_protected_address_is_refused_before_anything_is_posted`,
+  `whoami_with_no_answer_changes_nothing_within_the_bound`, `a_redirect_from_the_intake_is_not_followed`,
+  `more_addresses_than_one_worker_run_takes_are_refused`, `a_cross_site_delete_is_refused`,
+  `a_stranger_who_gained_a_row_between_steps_is_refused`,
+  `the_done_page_says_queued_and_links_to_sign_out`.
+- **7d. The roster row, first.** Step 5 of W3 in the same handler. Tests:
+  `a_roster_deletion_removes_the_row_before_the_first_post` (the fake reports the uuid absent at
+  the `POST`), `keys_scope_and_group_references_go_and_exclusions_become_the_email`,
+  `a_stale_rev_is_a_409_and_posts_nothing`, `a_protected_roster_user_keeps_the_row`,
+  `a_failed_write_posts_nothing` (`cfg(unix)`, the directory read-only; run under WSL).
+- **7e. The partial outcomes.** Tests: `a_refused_post_after_the_row_says_partly_and_offers_the_retry`
+  (`503`), `an_unanswered_post_says_maybe_and_the_retry_is_harmless`,
+  `the_retry_reaches_the_stranger_path_and_posts_again`,
+  `a_second_address_refused_says_some_are_queued`, `each_delete_outcome_states_its_result_in_the_h1`
+  (one case per row of W6), `no_secret_reaches_a_response_or_a_log`.
+- **7f. The browser suite.** `e2e/lib/intake.js` (the same fake in Node), the e2e server started
+  with `BB_AUTH_WEB_DELETE_INTAKE` pointing at it, `e2e/tests/delete.js` (the menu row, the roster
+  walk to the done page with the row gone, the stranger walk, protected, the `503` then Try again),
+  the `nojs.js` pass, and the scenes of §13.30 §7 as amended there.
+- **7g. The real run, each step with the user's go-ahead**, the first use the path has ever had:
+  1. read-only: the live `gate.allow_unverified_social` (`sudo bb-auth-adm -s
+     /opt/bb-auth/var/lib/settings.json settings show`) and the intake listening
+     (`sudo ss -ltnp 'sport = :8480'`);
+  2. the owner sets `BBAD_DRY_RUN=1` on the worker, as its README says (the owner's command);
+  3. the operator adds both variables to `/opt/bb-auth/etc/bb-auth-web.env` and deploys;
+  4. a test account that signs in by email code (with a federated twin if one can be made), with a
+     row, a key, a scope reference and an `excluded` entry elsewhere, deletes itself in a browser.
+     Expected: the row gone and an exclusion now the email (`bb-auth-adm show`), the key a `401` at
+     once, one `selfdelete.jsonl` record per address, the worker's journal naming the users it
+     would delete and "not in the roster", no Cognito change (IT-Admin's read-only
+     `admin-get-user` still finds it), no SNS "FAILED";
+  5. the owner removes the dry run; the test account, now a stranger, deletes again from the page.
+     Expected: `admin-get-user` reports no user for every match, an email-code sign-in fails, and
+     the time from the `202` to the deletion is measured and written into W6.
+
+#### W11. How each decision is shown to hold (worker)
+
+The loopback-only client: 7a's refusals and 7c's redirect test. One address per request: 7c's
+request record. Row first: 7d's "uuid absent at the `POST`", and in 7g the absence of a "FAILED"
+run. Protected first: 7c and 7d's protected tests (nothing posted, row kept). No code: no Cognito
+action in any 7c to 7e test (`FakeCognito` not started). The honest outcome: 7e's per-row h1 test.
+The worker's tolerance of a missing row and the zero-match record: only 7g.
+
+#### W12. Questions for the user (worker)
+
+1. **No email code (W4).** Recommended: drop it for everyone, the typed address as the confirmation.
+   Or keep it in front of native sessions only, at the cost W4 states?
+2. **Every address of the row (W3).** Accept that a multi-address row queues every address, or
+   send only the one the person types?
+3. **The delete secret (W2, W8 §1).** Require it in bb-auth-web now, before the owner enforces it?
+   And should the operator stop the intake until then?
+4. **`gate.allow_unverified_social` (W7)**, if 7g finds it on: turn it off, or not ship deletion?
+5. **`web.admins`** (§13.29 §6, unchanged): accept that a deleted administrator stays listed.
+6. **7g:** which test account, and the go-ahead for each step, the dry run first.
+
+#### The direct DeleteUser design (Superseded by §13.29 W1 to W12, 2026-11-26)
+
+The overnight design, kept as the record of why the code step, the twin binding and the four
+variants existed. Each part below says where it still holds.
 
 R4, rebuilt on what §13.25 changed. §13.7 and §13.9 were written before the deletion could act on
 the session's own Cognito user, and both carry "(Changed by §13.29 ...)" where they are now wrong.
@@ -5582,7 +5960,7 @@ is never read there), `PLAN.md` step 5 (the real pool, read 2026-11-25) and step
 `signed_in`, `PROFILE_HEADERS`; `src/lib.rs`: `remove_user`, `user_refs`, `AccessWrite`,
 `AuditPolicy`; `e2e/lib/cognito.js`.
 
-#### 1. Cognito facts this rests on
+##### 1. Cognito facts this rests on (Superseded by §13.29 W1: a deletion makes no Cognito call)
 
 **Read in a source (AWS API reference and developer guide, read 2026-11-26):**
 
@@ -5621,7 +5999,7 @@ that gates `DeleteUser` and none was found, which is an absence, not a statement
 `UserNotFoundException` from `DeleteUser` is what a second call for an already deleted user
 returns (the error is documented, the circumstance is not).
 
-#### 2. Decision: the four callers
+##### 2. Decision: the four callers (Superseded by §13.29 W4: two callers, roster and stranger, and no code)
 
 Who the caller is decides what is deleted, and it is decided **per request from the live
 request and the live file**, never from a form field: the row is `account_uuid_of` over
@@ -5684,7 +6062,7 @@ pool that the caller holds that account, and the only call that could delete it 
 own token (`AdminDeleteUser`) evaluates IAM, which §13.7 refused for this process. R4's accepted
 answer is the sentence.
 
-#### 3. Decision: the binding
+##### 3. Decision: the binding (Superseded by §13.29 W2 and W3)
 
 Routes, all under the account prefix, beside the key routes:
 
@@ -5728,7 +6106,7 @@ At most two Cognito calls in the code request (`RespondToAuthChallenge`, `Delete
 §13.13's bound. The `rev` is not checked for C, because C writes no file and a stranger's form
 should not fail on an unrelated edit; step 4 is what pins C to "still a stranger".
 
-#### 4. Decision: partial failure, and the retry
+##### 4. Decision: partial failure, and the retry (Changed by §13.29 W3 and W6: the row still goes first and the retry is still the stranger's walk, but the second half is a queued request)
 
 The order is §13.9's and its reason stands: the row first, because a failed `DeleteUser` then
 leaves a Cognito user with no row (a stranger who reaches only `authenticated` scopes and holds no
@@ -5758,7 +6136,7 @@ stateless" invariant forbids a revocation list): for A and B it now names a stra
 Cognito user that no longer exists. Where that URL is unset the menu has no Sign out either, and
 the page says to close the browser instead of linking nowhere.
 
-#### 5. Decision: what is recorded, and where
+##### 5. Decision: what is recorded, and where (still holds; the Cognito line becomes the delete-request line of §13.29 W7)
 
 **No audit-file event.** The audit file is the gate's, and records authentication (sign-ins,
 sign-outs, refusals); `bb-auth-web` writes none, and no edit of the access file by either editor
@@ -5774,7 +6152,7 @@ recorded twice.
 
 The audit file is **not edited** (R4): the confirmation page says how long their lines last.
 
-#### 6. What `remove_user` does (built in step 6)
+##### 6. What `remove_user` does (built in step 6) (still holds)
 
 One call, `remove_user(doc, uuid)` in `src/lib.rs`, the same one `bb-auth-adm user rm` and the
 console use:
@@ -5798,7 +6176,7 @@ administrator", and writing the settings file from here would also risk the refu
 An administrator who deletes their account stays named there by email until another administrator
 removes them. Question 2 below.
 
-#### 7. The pool and OpenTofu
+##### 7. The pool and OpenTofu (Superseded by §13.29 W2: no self-service `DeleteUser`; the worker deletes with the owner's credential)
 
 **Nothing in the app client needs to change, as far as the sources say**: the access token from the
 API sign-in carries the one scope `DeleteUser` requires, the native client already allows
@@ -5809,7 +6187,7 @@ setting this design does not know) would stop or should accompany a self-service
 whether the estate wants self-deletion of Cognito users at all (it is irreversible by the source
 above). No change is proposed to that repository.
 
-#### 8. Alternatives rejected
+##### 8. Alternatives rejected (Changed by §13.29 W9; the typed confirmation is taken up in W4)
 
 - **The email as `USERNAME`** (§13.7 as written): the §13.25 bug, on an irreversible call.
 - **Delete the Cognito user first**: §13.9's reason, a failed write would leave live keys behind.
@@ -5826,7 +6204,7 @@ above). No change is proposed to that repository.
 - **The menu row hidden for D**: the page explains better than an absent row, and showing the row
   to everyone keeps the menu one shape.
 
-#### 9. Slices
+##### 9. Slices (Superseded by §13.29 W10)
 
 Each is one red-green pass over a few functions; tests in `src/bin/bb-auth-web.rs` with
 `FakeCognito` unless named otherwise, and "no call" means `fake.actions()` is empty.
@@ -5886,7 +6264,7 @@ Each is one red-green pass over a few functions; tests in `src/bin/bb-auth-web.r
   names it except as an email in any `excluded`/`denied` entry, its key gets a `401`, and its
   sign-in by email code fails (the IT-Admin session can confirm with a read-only `admin-get-user`).
 
-#### 10. How each decision is shown to hold
+##### 10. How each decision is shown to hold (Superseded by §13.29 W11)
 
 The binding: 7d's username test, 7e's twin test, `the_code_step_uses_the_header_not_a_form_field`
 carried over as `a_header_changed_between_steps_deletes_nothing`. The order: 7e's actions list and
@@ -5894,7 +6272,7 @@ the `cfg(unix)` write failure. The kinds: 7a's four pages, 7c's zero calls, 7f's
 The veto: 7a's refusal (and `handle_account`'s existing test). The partial failure: 7e's `502` and
 `504` and 7f's retry. No tokens out: 7e. The pool facts: only 7h.
 
-#### 11. Questions for the user and the IT-Admin session
+##### 11. Questions for the user and the IT-Admin session (Superseded by §13.29 W8 and W12; question 2 is W12 question 5)
 
 1. **itadmin's OpenTofu** (§7): anything in `cognito.tf` that would stop a self-service
    `DeleteUser`, or that should change with it? Is irreversible self-deletion of Cognito users
@@ -5934,6 +6312,18 @@ menu's Sign out and Delete rows are 36px tall at 1280 and 30px at 360 and 320, a
 24px, and their glyphs share one left edge. Read in a source: each WCAG fact, cited where used.
 Assumed: none of the Cognito facts are this section's; they are §13.29 §1's.
 
+(Changed by §13.29 W4 and W6, 2026-11-26, when the user handed the Cognito half to the owner's
+worker. **Still holds:** §1, the menu row, whole; the page's shape, `confirm_card`, the `h1`, no
+`autofocus`, the audit sentence, the record, keys and groups lines, the places and the uuid not
+listed, the veto never named; §4's principles (the done page offers only Sign out, the `409` is
+the deletion's own page, no blame, Cognito not named); §6's heuristics where they do not name the
+code. **No longer holds:** the four variants become two (roster, stranger), since nothing depends
+on a native session any more; §3, the code page, goes, and the confirmation page gains the typed
+address of W4 and a `danger` button that sends the request; §4's table is replaced by W6's, and
+nothing may say a sign-in account **is** deleted, because a `202` only means queued. The strings
+that now promise something untrue are listed after §5's table; the designer rewords them and words
+the new facts W6 names.)
+
 **No new CSS.** Every element below is an existing component: `a.pill.rm`, `div.sep`, `p.lede`,
 `div.panel.bad` with `form.edit` (through `confirm_card`), `p.lbl`, `ul.plain`, `p.muted`,
 `div.card`, `input.f-code`, `div.err`, `button.danger`, `p.primary > a.pill`. The one new piece
@@ -5960,7 +6350,7 @@ of markup is a trash glyph's three paths in the menu row, sized and stroked by t
   than what happens; the page it opens says exactly what goes, before anything does. Open
   question 1.
 
-#### 2. The confirmation page, four variants (delete design)
+#### 2. The confirmation page, four variants (delete design) (Changed by §13.29 W4: two variants, A and B merged as the roster one and C and D as the stranger one, one `danger` button, the typed address, `kind` gone)
 
 `GET {account}/delete`, `account_shell` with the `h1` `K::AccountDeleteTitle` ("Delete your
 account") on all four, so the heading echoes the row that was clicked (Nielsen 4). A, B and C are
@@ -6025,7 +6415,7 @@ D: `p.lede` `K::AccountDeleteNothing`, then `p.primary` with `back_link` to the 
 `200`. It covers the social-only stranger and the native one whose cookie predates §13.25, so it
 names both cases, as `AccountProfileNotNative` does (the skill's pitfall).
 
-#### 3. The code page (A and C) (delete design)
+#### 3. The code page (A and C) (delete design) (Superseded by §13.29 W4: no code)
 
 The profile's code page (§13.23 §3, §13.26 §4) with the deletion's content; the coder may share
 its skeleton with `page_profile_code`.
@@ -6059,7 +6449,7 @@ one-time-code step within WCAG 3.3.8 Accessible Authentication (Minimum)
 (<https://www.w3.org/WAI/WCAG22/Understanding/timing-adjustable.html>), made humane by a resend
 that keeps everything.
 
-#### 4. Every outcome (delete design)
+#### 4. Every outcome (delete design) (Changed by §13.29 W6: its table replaces this one; the principles under "Why these shapes" still hold)
 
 One shape, the profile's (§13.23 §4): `account_shell`, an `h1` that states the result, one
 `p.lede`, one row of actions. "Sign out" is `pill_link(account_logout_url, K::SignOut)`; where
@@ -6166,6 +6556,36 @@ The Italian "dati in bb-auth" for "bb-auth record" is chosen over *riga* (the co
 roster row) because a person has no roster; "account di accesso" is "sign-in account" on every
 page of the flow, so the two things deleted keep two fixed names in both languages.
 
+**Strings now untrue or unused (Changed by §13.29 W4 and W6), for the designer to reword:**
+
+- `AccountDeleteLeadCode`, `AccountDeleteCodeUntil` and the reused `AccountProfileSendCode` on this
+  page: there is no code. `AccountDeleteLeadRow` is the one lede left, and its button name holds.
+- `AccountDeleteSignIn` ("Your sign-in account. You will not be able to sign in with your email
+  address again."): the worker deletes **every** sign-in account with the address, provider ones
+  included, and later, not on the press; the line must say both.
+- `AccountDeleteSocialTwin` and `AccountDeleteRowWhy`: false now; a Google or Microsoft account with
+  the same address is deleted too, and the sign-in account no longer stays.
+- `AccountDeleteNothing`: false; a social-only stranger now has sign-in accounts to delete. Unused.
+- `AccountDeletedTitle` ("Your account is deleted") and `AccountDeletedBody` ("Your sign-in
+  account is deleted ..."): untrue at the moment the page is shown; the request is queued. Needs a
+  "being deleted" title and a body saying the keys and access are gone now and the sign-in accounts
+  are queued, with no duration until 7g measures one, and what to do if sign-in still works later.
+- `AccountRowDeletedTitle` / `AccountRowDeletedBody` ("Your sign-in account still exists: to delete
+  it, ask an administrator"): false; unused.
+- `AccountDeletePartial`, `AccountDeleteRefused`, `AccountDeleteUnsure`,
+  `AccountDeleteUnsureStranger`, `AccountDeleteGone`, `AccountDeleteGoneTitle`: they speak of the
+  sign-in service refusing or not answering a deletion; the cases are now "the request was not
+  received" (the row may already be gone), "maybe received, a retry is harmless", and "some
+  addresses queued, not all" (W6).
+- `AccountDeleteWriteFailed` holds as written: the write now comes before any request, so
+  "nothing was deleted and you can still sign in" is true.
+- `AccountDeleteKeysLead` ("stop working within seconds") holds: the row still goes at once.
+- New facts with no key yet (W4 to W6): the typed-address field, its label and its refusal; the
+  protected refusal (cannot be deleted from this page, nothing deleted, ask an administrator, no
+  list named); the queue being full (`503`, try later); too many addresses on one row (ask an
+  administrator); for a multi-address row, the list of addresses that will be sent, and the partial
+  page's clause that a retry reaches only the address used to sign in.
+
 #### 6. Heuristics and WCAG, and where they trade (delete design)
 
 - Visibility (1): every outcome's `h1` says whether, and how much, was deleted. Match (2): "sign-in
@@ -6186,7 +6606,7 @@ page of the flow, so the two things deleted keep two fixed names in both languag
 - Scripting off: every step is a `GET` link or a `POST` form; nothing in the flow carries a script
   or a handler, and the menu row is a link inside the existing `details`.
 
-#### 7. Tests and scenes (delete design)
+#### 7. Tests and scenes (delete design) (Changed by §13.29 W10: the tests of the code page, the four variants and the Cognito outcomes go; the menu row's, the audit sentence's, the veto's, the Italian and the no-script tests carry over; the scenes become `account-menu-delete`, `account-delete` (roster), `account-delete-stranger`, `account-delete-typed-wrong`, `account-delete-protected`, `account-delete-queued`, `account-delete-partial`, `account-delete-unsure`, `account-delete-changed`)
 
 Unit and socket tests in `src/bin/bb-auth-web.rs`, in addition to §13.29 §9's (which they extend
 where the name matches):
@@ -6260,7 +6680,7 @@ group), `account-delete-row` (B), `account-delete-stranger` (C), `account-delete
 `account-delete-gone`, `account-delete-changed`. Thirteen; the designer's review of 7a to 7g looks
 at these.
 
-#### 8. Open questions for the user (delete design)
+#### 8. Open questions for the user (delete design) (Changed by §13.29 W4: question 1 loses most of its point, since B and D no longer exist; question 2 is settled by there being one press, which is red; question 3 stands)
 
 1. The menu row says "Delete account and all its data" to everyone, though for B the sign-in
    account stays and for D nothing goes. Keep it (one menu shape; the page is exact), or shorten

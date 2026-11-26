@@ -82,6 +82,13 @@ Rules are in `AGENTS.md`. Format of this file: `AGENTS.md`, under "Skills".
   client together with its first use.
 - `DescribeUserPoolClient` omits `ReadAttributes`/`WriteAttributes` when they are the default,
   which is every attribute writable: an absent list is not "none".
+- The owner's deletion worker (itadmin `infra/rpi-01/bb-delete-request/`) runs `user show` then
+  `user rm`: a row removed between the two fails the run with no retry timer, so remove a row
+  before queueing its deletion, never after (§13.29 W3).
+- An intake reading `X-Auth-Email` whole takes a multi-address header as one address: split it and
+  send one request per address.
+- ureq 3 follows 10 redirects by default: a client that sends an identity header sets
+  `max_redirects(0)`.
 - The rpi-01 pool has unlinked native and federated users sharing one email: `USERNAME` = email
   reaches the native one. Act on a session's Cognito user by its `cognito:username`, never its email.
 - A GUI test's `body.contains("landing_url")` passes on the input's `name=`: assert on the
