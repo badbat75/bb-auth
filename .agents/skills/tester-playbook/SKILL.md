@@ -370,3 +370,5 @@ Rules are in `AGENTS.md`. Format of this file: `AGENTS.md`, under "Skills".
 - A test written against a `Result<_, String>` with `.err().expect(…)` trips clippy's `err_expect`
   the day the error becomes a `Debug` enum (step 12 S1). Write `.expect_err(…)` from the start;
   it compiles against both.
+- A mutation harness that restores the file with `cp -a` keeps the older mtime, so cargo reuses the
+  mutated build and the next run reports the mutant's result. Restore with plain `cp`, or `touch` after.

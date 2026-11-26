@@ -3449,6 +3449,15 @@ pub struct ProfileClaim {
 /// [`NATIVE_USERNAME_HEADER`], or with another entry's (which also catches a repeated claim,
 /// and spellings that differ only in case or separator).
 pub fn compile_profile_claims(list: &[String]) -> Result<Vec<ProfileClaim>, String> {
+    profile_claims_core(list).map_err(|r| r.sentence())
+}
+
+/// [`compile_profile_claims`]'s checks, answering the typed refusal so `compile_settings` can
+/// hand one to the GUI as a code (§13.31 §3). The `String` wrapper is what the access file's
+/// parser and the CLI's flag-named pre-checks call, and it prints the variant's own sentence,
+/// byte for byte as before: the prefix `profile_claims` belongs to the settings file, and a
+/// caller that names the value differently has no opinion about it.
+fn profile_claims_core(list: &[String]) -> Result<Vec<ProfileClaim>, SettingsRefusal> {
     let mut out: Vec<ProfileClaim> = Vec::new();
     for raw in list {
         let claim = raw.trim();
@@ -3456,19 +3465,19 @@ pub fn compile_profile_claims(list: &[String]) -> Result<Vec<ProfileClaim>, Stri
             continue;
         }
         if !claim_name_ok(claim) {
-            return Err(format!(
-                "claim '{claim}' must be non-empty and contain only [A-Za-z0-9_:-]"
-            ));
+            return Err(SettingsRefusal::ClaimCharset {
+                claim: claim.to_string(),
+            });
         }
         if claim.replace([':', '_'], "-").split('-').any(str::is_empty) {
-            return Err(format!(
-                "claim '{claim}' has an empty part around a '_', ':' or '-'"
-            ));
+            return Err(SettingsRefusal::ClaimEmptyPart {
+                claim: claim.to_string(),
+            });
         }
         if RESERVED_CLAIMS.contains(&claim) {
-            return Err(format!(
-                "claim '{claim}' is consumed by the gate itself and cannot be propagated"
-            ));
+            return Err(SettingsRefusal::ClaimConsumed {
+                claim: claim.to_string(),
+            });
         }
         let header = derive_profile_header(claim);
         // Every *possible* identity header is reserved, not merely the ones this installation
@@ -3485,16 +3494,18 @@ pub fn compile_profile_claims(list: &[String]) -> Result<Vec<ProfileClaim>, Stri
             );
         for r in reserved {
             if header.eq_ignore_ascii_case(&r) {
-                return Err(format!(
-                    "claim '{claim}' derives '{header}', which is reserved"
-                ));
+                return Err(SettingsRefusal::ClaimHeaderReserved {
+                    claim: claim.to_string(),
+                    header,
+                });
             }
         }
         if let Some(prev) = out.iter().find(|p| p.header.eq_ignore_ascii_case(&header)) {
-            return Err(format!(
-                "claims '{}' and '{claim}' both derive '{header}'",
-                prev.claim
-            ));
+            return Err(SettingsRefusal::ClaimsCollide {
+                first: prev.claim.clone(),
+                second: claim.to_string(),
+                header,
+            });
         }
         out.push(ProfileClaim {
             claim: claim.to_string(),
@@ -3541,6 +3552,13 @@ pub struct IdentityAttr {
 /// mode this gate does not accept. Unknown names are rejected against [`IDENTITY_ATTRS`] rather
 /// than passed through, so a typo cannot quietly turn an attribute off.
 pub fn compile_identity_attrs(list: &[String]) -> Result<Vec<IdentityAttr>, String> {
+    identity_attrs_core(list).map_err(|r| r.sentence())
+}
+
+/// [`compile_identity_attrs`]'s checks, answering the typed refusal (§13.31 §3), with the same
+/// split as [`compile_profile_claims`]: the settings file adds the `identity_attrs` prefix, the
+/// leaf's other callers print this sentence alone.
+fn identity_attrs_core(list: &[String]) -> Result<Vec<IdentityAttr>, SettingsRefusal> {
     // The one place the derivation and the documented constant are checked against each other.
     // Every application behind this gate reads `X-Auth-Email`, and every nginx snippet in the
     // README names it literally, so a change to the derivation must not be allowed to rename it
@@ -3553,13 +3571,14 @@ pub fn compile_identity_attrs(list: &[String]) -> Result<Vec<IdentityAttr>, Stri
             continue;
         }
         if !IDENTITY_ATTRS.contains(&attr) {
-            return Err(format!(
-                "unknown identity attribute '{attr}' (known: {})",
-                IDENTITY_ATTRS.join(", ")
-            ));
+            return Err(SettingsRefusal::AttrUnknown {
+                attr: attr.to_string(),
+            });
         }
         if out.iter().any(|a| a.attr == attr) {
-            return Err(format!("identity attribute '{attr}' is listed twice"));
+            return Err(SettingsRefusal::AttrTwice {
+                attr: attr.to_string(),
+            });
         }
         out.push(IdentityAttr {
             attr: attr.to_string(),
@@ -3567,11 +3586,7 @@ pub fn compile_identity_attrs(list: &[String]) -> Result<Vec<IdentityAttr>, Stri
         });
     }
     if out.is_empty() {
-        return Err(format!(
-            "at least one identity attribute is required (known: {}); a 204 that names nobody \
-             breaks every application behind this gate, in silence",
-            IDENTITY_ATTRS.join(", ")
-        ));
+        return Err(SettingsRefusal::AttrNone);
     }
     Ok(out)
 }
@@ -5980,6 +5995,48 @@ pub enum SettingsRefusal {
     /// The file declares a version this format is not: 1 predates the app clients, 2 predates
     /// the pool, and anything else is not this format at all.
     Version { found: u32 },
+    /// A claim name outside `[A-Za-z0-9_:-]`. That charset is what lets
+    /// [`derive_profile_header`] build a header from the name at all, so a name with a space, a
+    /// quote or a control byte derives a header nginx cannot carry. The file is refused rather
+    /// than the entry skipped because a silently skipped claim is a header an application waits
+    /// for in silence.
+    ClaimCharset { claim: String },
+    /// A claim with an empty part around a separator (`:dept`, `dept:`, `a--b`), which would
+    /// derive a header with an empty component: the same defect as a name outside the charset,
+    /// reached by a different typo.
+    ClaimEmptyPart { claim: String },
+    /// A claim in [`RESERVED_CLAIMS`], which the gate's `Claims` reads into a typed field,
+    /// so `#[serde(flatten)]` never sees the key it names. Configuring one propagates nothing,
+    /// forever, and the operator would keep seeing the claim listed as captured on a page that
+    /// shows it empty.
+    ClaimConsumed { claim: String },
+    /// A claim whose derived header is one the gate writes itself: any possible identity header,
+    /// [`LOGIN_URL_HEADER`], [`NATIVE_USERNAME_HEADER`]. A self-asserted claim arriving on
+    /// `X-Auth-Email` would be an identity the caller typed, and one arriving on
+    /// `X-Auth-Native-Username` would be a pool name for the profile edit to act on. The check
+    /// runs against every **possible** identity header, not the enabled ones, because turning an
+    /// attribute on tomorrow must not discover a collision with a claim configured yesterday, on
+    /// a header an application already trusts.
+    ClaimHeaderReserved { claim: String, header: String },
+    /// Two claims that derive one header, which would make that header carry whichever of the two
+    /// the emitter reached first. This is also what catches a repeated claim and spellings that
+    /// differ only in case or a separator: all three are the same ambiguity.
+    ClaimsCollide {
+        first: String,
+        second: String,
+        header: String,
+    },
+    /// An identity attribute outside [`IDENTITY_ATTRS`]. Passing an unknown name through instead
+    /// of refusing it would let a typo quietly turn an attribute off, and the set of possible
+    /// header names has to stay finite and code-defined so nginx can clear every one of them.
+    AttrUnknown { attr: String },
+    /// The same attribute listed twice, which would emit one header twice.
+    AttrTwice { attr: String },
+    /// An empty identity attribute list: the one refusal here that names no value, because the
+    /// problem is that nothing is left. An authorized `204` that names nobody breaks every
+    /// application behind this gate, in silence, which is why an empty list refuses the file
+    /// rather than falling back to a default.
+    AttrNone,
     /// `session_ttl_secs` under [`MIN_SESSION_TTL`]: a session that expires as it is handed
     /// over is a login loop, not a short login.
     TtlBelowFloor { ttl: u64 },
@@ -6019,6 +6076,14 @@ impl SettingsRefusal {
     pub fn code(&self) -> &'static str {
         match self {
             Self::Version { .. } => "version",
+            Self::ClaimCharset { .. } => "claim_charset",
+            Self::ClaimEmptyPart { .. } => "claim_empty_part",
+            Self::ClaimConsumed { .. } => "claim_consumed",
+            Self::ClaimHeaderReserved { .. } => "claim_header_reserved",
+            Self::ClaimsCollide { .. } => "claims_collide",
+            Self::AttrUnknown { .. } => "attr_unknown",
+            Self::AttrTwice { .. } => "attr_twice",
+            Self::AttrNone => "attr_none",
             Self::TtlBelowFloor { .. } => "ttl_below_floor",
             Self::TtlAboveCeiling { .. } => "ttl_above_ceiling",
             Self::HostsOutsideCookieDomain { .. } => "hosts_outside_cookie_domain",
@@ -6030,24 +6095,40 @@ impl SettingsRefusal {
             Self::Other(_) => "other",
         }
     }
-}
 
-impl std::fmt::Display for SettingsRefusal {
-    /// Today's sentence, byte for byte, pinned by the S0 goldens. The variants converted so far
-    /// spell it here; the rest arrive already spelled, in [`SettingsRefusal::Other`].
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+    /// The key `compile_settings` used to write in front of the leaf's own sentence, as a
+    /// `map_err(|e| format!("…: {e}"))`: `profile_claims` and `identity_attrs` for the leaves
+    /// whose parser knows nothing of the file's keys, and nothing at all for a refusal the
+    /// settings function spells itself, whose sentence already names its key (§13.31 §3).
+    /// `Other` carries today's prefixed sentence whole, so it has no prefix of its own.
+    fn prefix(&self) -> Option<&'static str> {
+        match self {
+            Self::ClaimCharset { .. }
+            | Self::ClaimEmptyPart { .. }
+            | Self::ClaimConsumed { .. }
+            | Self::ClaimHeaderReserved { .. }
+            | Self::ClaimsCollide { .. } => Some("profile_claims"),
+            Self::AttrUnknown { .. } | Self::AttrTwice { .. } | Self::AttrNone => {
+                Some("identity_attrs")
+            }
+            _ => None,
+        }
+    }
+
+    /// The refusal's own words, without [`Self::prefix`]: what a `String` leaf wrapper returns,
+    /// since the access file's parser and the CLI's flag-named pre-checks call that leaf for a
+    /// value the file's keys say nothing about, and what `Display` puts after the prefix.
+    fn sentence(&self) -> String {
         match self {
             // Explanatory for the one version that exists in the wild, terse for anything else.
             Self::Version { found } => match *found {
-                1 => write!(
-                    f,
+                1 => format!(
                     "\"version\": 1 was written before the app clients moved into this file \
                      (expected {SETTINGS_VERSION}). Set gate.client_id, gate.oauth_domain and \
                      gate.social_callback_url, give every gate.social_buttons entry its own \
                      audience, and bump the version; see the CHANGELOG"
                 ),
-                2 => write!(
-                    f,
+                2 => format!(
                     "\"version\": 2 was written before the pool, the cookie domain and the \
                      authorized hosts moved into this file (expected {SETTINGS_VERSION}). Copy \
                      BB_AUTH_COGNITO_ISSUER into gate.issuer, BB_AUTH_COOKIE_DOMAIN into \
@@ -6055,56 +6136,85 @@ impl std::fmt::Display for SettingsRefusal {
                      (as a list), bump the version, and take all three out of bb-auth.env; see \
                      the CHANGELOG"
                 ),
-                v => write!(
-                    f,
-                    "\"version\": {v} is not this format (expected {SETTINGS_VERSION})"
-                ),
+                v => format!("\"version\": {v} is not this format (expected {SETTINGS_VERSION})"),
             },
-            Self::TtlBelowFloor { ttl } => write!(
-                f,
+            Self::ClaimCharset { claim } => {
+                format!("claim '{claim}' must be non-empty and contain only [A-Za-z0-9_:-]")
+            }
+            Self::ClaimEmptyPart { claim } => {
+                format!("claim '{claim}' has an empty part around a '_', ':' or '-'")
+            }
+            Self::ClaimConsumed { claim } => {
+                format!("claim '{claim}' is consumed by the gate itself and cannot be propagated")
+            }
+            Self::ClaimHeaderReserved { claim, header } => {
+                format!("claim '{claim}' derives '{header}', which is reserved")
+            }
+            Self::ClaimsCollide {
+                first,
+                second,
+                header,
+            } => format!("claims '{first}' and '{second}' both derive '{header}'"),
+            Self::AttrUnknown { attr } => format!(
+                "unknown identity attribute '{attr}' (known: {})",
+                IDENTITY_ATTRS.join(", ")
+            ),
+            Self::AttrTwice { attr } => format!("identity attribute '{attr}' is listed twice"),
+            Self::AttrNone => format!(
+                "at least one identity attribute is required (known: {}); a 204 that names \
+                 nobody breaks every application behind this gate, in silence",
+                IDENTITY_ATTRS.join(", ")
+            ),
+            Self::TtlBelowFloor { ttl } => format!(
                 "session_ttl_secs: {ttl} is below the {MIN_SESSION_TTL}s floor; a session that \
                  expires as it is handed over is a login loop, not a short login"
             ),
-            Self::TtlAboveCeiling { ttl } => write!(
-                f,
+            Self::TtlAboveCeiling { ttl } => format!(
                 "session_ttl_secs: {ttl} is past the {MAX_SESSION_TTL}s ceiling; a lifetime that \
                  does not fit the arithmetic mints a cookie that is already expired"
             ),
             Self::HostsOutsideCookieDomain {
                 hosts,
                 cookie_domain,
-            } => write!(
-                f,
+            } => format!(
                 "authorized_hosts: {} outside cookie_domain '{cookie_domain}', so a login would \
                  redirect there and the browser would send no session cookie: a 401, a bounce \
                  back to the sign-in page, and a loop",
                 hosts.join(", ")
             ),
-            Self::LandingOffHosts => write!(
-                f,
-                "landing_url: its host is not covered by authorized_hosts, so every sign-in \
-                 with no rd would fall back to the sign-in page"
-            ),
-            Self::CallbackNotHttps => write!(
-                f,
-                "social_callback_url: must be the absolute https:// URL registered on the app \
-                 client, because Cognito compares it byte for byte"
-            ),
-            Self::SocialHalfConfigured { buttons } => write!(
-                f,
+            Self::LandingOffHosts => "landing_url: its host is not covered by authorized_hosts, \
+                 so every sign-in with no rd would fall back to the sign-in page"
+                .to_string(),
+            Self::CallbackNotHttps => "social_callback_url: must be the absolute https:// URL \
+                 registered on the app client, because Cognito compares it byte for byte"
+                .to_string(),
+            Self::SocialHalfConfigured { buttons } => format!(
                 "social_buttons: {buttons} button(s) configured, but oauth_domain or \
                  social_callback_url is empty, so there is nowhere to send a visitor and \
                  nowhere for them to come back to"
             ),
-            Self::AuditHeadersSame { name } => write!(
-                f,
+            Self::AuditHeadersSame { name } => format!(
                 "audit.client_ip_header and audit.request_id_header both name '{name}'; one \
                  header cannot carry an address and a request id at once"
             ),
             Self::ThemeUnknown { raw } => {
-                write!(f, "theme: '{raw}' is not one of system, light, dark")
+                format!("theme: '{raw}' is not one of system, light, dark")
             }
-            Self::Other(s) => f.write_str(s),
+            // Carries today's prefixed sentence whole, so it is the sentence and nothing more.
+            Self::Other(s) => s.clone(),
+        }
+    }
+}
+
+impl std::fmt::Display for SettingsRefusal {
+    /// Today's sentence, byte for byte, pinned by the S0 goldens: `prefix`, a `": "`, then
+    /// `sentence`, which is exactly how `compile_settings` spelled a leaf's refusal through its
+    /// `map_err` before this type existed. A refusal not yet converted arrives already spelled,
+    /// in [`SettingsRefusal::Other`], and carries no prefix of its own.
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self.prefix() {
+            Some(p) => write!(f, "{p}: {}", self.sentence()),
+            None => f.write_str(&self.sentence()),
         }
     }
 }
@@ -6163,10 +6273,8 @@ pub fn compile_settings(file: &SettingsFile) -> Result<Settings, SettingsRefusal
             found: file.version,
         });
     }
-    let profile_claims = compile_profile_claims(&file.gate.profile_claims)
-        .map_err(|e| SettingsRefusal::Other(format!("profile_claims: {e}")))?;
-    let identity_attrs = compile_identity_attrs(&file.gate.identity_attrs)
-        .map_err(|e| SettingsRefusal::Other(format!("identity_attrs: {e}")))?;
+    let profile_claims = profile_claims_core(&file.gate.profile_claims)?;
+    let identity_attrs = identity_attrs_core(&file.gate.identity_attrs)?;
 
     let ttl = file.gate.session_ttl_secs;
     if ttl < MIN_SESSION_TTL {
@@ -11428,14 +11536,187 @@ mod tests {
             assert_eq!(r.code(), code, "{label}: {r}");
         }
         // The temporary arm, pinned on its own because it is deleted in S7: today's sentence,
-        // prefix included, and the code §3 fixes for it.
-        let r = settings_refusal_of(r#"{ "version": 3, "gate": { "profile_claims": ["a b"] } }"#);
+        // prefix included, and the code §3 fixes for it. The fixture is a leaf this slice does
+        // not convert (the app client id is S4's), so the probe survives S2; each slice moves it
+        // to a leaf it has not converted yet.
+        let r = settings_refusal_of(r#"{ "version": 3, "gate": { "client_id": "bad id" } }"#);
         assert!(matches!(&r, SettingsRefusal::Other(_)), "{r:?}");
         assert_eq!(r.code(), "other");
         assert_eq!(
             r.to_string(),
-            "profile_claims: claim 'a b' must be non-empty and contain only [A-Za-z0-9_:-]"
+            "client_id: 'bad id' is not an app client id, which is letters, digits, '.', '_' and '-'"
         );
+    }
+
+    /// S2 (§13.31 §2, §3, §7): the eight claim and attribute refusals are variants of
+    /// `SettingsRefusal`, not sentences riding in `Other`. Each row is the S0 golden's own
+    /// fixture for that sentence, so the refusal is known reachable and reaches the arm under
+    /// test, and each row asserts four things: the variant carries the §2 arguments; `code()` is
+    /// the §2 `snake_case` name S8 maps to a `K` key; the private `prefix()`/`sentence()` pair
+    /// splits today's sentence the way §3 says, the prefix being the key `compile_settings` used
+    /// to add and the sentence the leaf's own words; and `Display` joins them with ": ", which is
+    /// what the CLI and the gate print (the S0 golden pins those joined bytes, this pins the
+    /// join). The block after the table pins the two `String` wrappers as thin: each returns
+    /// exactly its variant's `sentence()`, so the access file's parser and the CLI's pre-checks
+    /// keep their bytes and each sentence has exactly one home.
+    #[test]
+    fn claim_and_attribute_refusals_are_codes() {
+        type Row<'a> = (
+            &'a str,
+            &'a str,
+            &'a str,
+            &'a str,
+            &'a str,
+            fn(&SettingsRefusal) -> bool,
+        );
+        let cases: Vec<Row> = vec![
+            (
+                "claim charset",
+                r#"{ "version": 3, "gate": { "profile_claims": ["a b"] } }"#,
+                "claim_charset",
+                "profile_claims",
+                "claim 'a b' must be non-empty and contain only [A-Za-z0-9_:-]",
+                |r| {
+                    matches!(r, SettingsRefusal::ClaimCharset { claim } if claim == "a b")
+                },
+            ),
+            (
+                "claim empty part",
+                r#"{ "version": 3, "gate": { "profile_claims": ["a::b"] } }"#,
+                "claim_empty_part",
+                "profile_claims",
+                "claim 'a::b' has an empty part around a '_', ':' or '-'",
+                |r| {
+                    matches!(r, SettingsRefusal::ClaimEmptyPart { claim } if claim == "a::b")
+                },
+            ),
+            (
+                "claim consumed",
+                r#"{ "version": 3, "gate": { "profile_claims": ["email"] } }"#,
+                "claim_consumed",
+                "profile_claims",
+                "claim 'email' is consumed by the gate itself and cannot be propagated",
+                |r| {
+                    matches!(r, SettingsRefusal::ClaimConsumed { claim } if claim == "email")
+                },
+            ),
+            (
+                "claim header reserved",
+                r#"{ "version": 3, "gate": { "profile_claims": ["native_username"] } }"#,
+                "claim_header_reserved",
+                "profile_claims",
+                "claim 'native_username' derives 'X-Auth-Native-Username', which is reserved",
+                |r| {
+                    matches!(
+                        r,
+                        SettingsRefusal::ClaimHeaderReserved {
+                            claim,
+                            header
+                        } if claim == "native_username" && header == "X-Auth-Native-Username"
+                    )
+                },
+            ),
+            (
+                "claims collide",
+                r#"{ "version": 3, "gate": { "profile_claims": ["a_b", "a:b"] } }"#,
+                "claims_collide",
+                "profile_claims",
+                "claims 'a_b' and 'a:b' both derive 'X-Auth-A-B'",
+                |r| {
+                    matches!(
+                        r,
+                        SettingsRefusal::ClaimsCollide {
+                            first,
+                            second,
+                            header
+                        } if first == "a_b" && second == "a:b" && header == "X-Auth-A-B"
+                    )
+                },
+            ),
+            (
+                // The known list is `IDENTITY_ATTRS` joined, in the file's order.
+                "attr unknown",
+                r#"{ "version": 3, "gate": { "identity_attrs": ["nope"] } }"#,
+                "attr_unknown",
+                "identity_attrs",
+                "unknown identity attribute 'nope' (known: uuid, email)",
+                |r| matches!(r, SettingsRefusal::AttrUnknown { attr } if attr == "nope"),
+            ),
+            (
+                "attr twice",
+                r#"{ "version": 3, "gate": { "identity_attrs": ["email", "email"] } }"#,
+                "attr_twice",
+                "identity_attrs",
+                "identity attribute 'email' is listed twice",
+                |r| matches!(r, SettingsRefusal::AttrTwice { attr } if attr == "email"),
+            ),
+            (
+                "attr none",
+                r#"{ "version": 3, "gate": { "identity_attrs": [] } }"#,
+                "attr_none",
+                "identity_attrs",
+                "at least one identity attribute is required (known: uuid, email); a 204 that names nobody breaks every application behind this gate, in silence",
+                |r| matches!(r, SettingsRefusal::AttrNone),
+            ),
+        ];
+        for row in cases.iter() {
+            let (label, json, code, prefix, sentence, is_variant) = *row;
+            let r = settings_refusal_of(json);
+            assert!(is_variant(&r), "{label}: got {r:?}");
+            assert_eq!(r.code(), code, "{label}: {r:?}");
+            assert_eq!(r.prefix(), Some(prefix), "{label}: {r:?}");
+            assert_eq!(r.sentence(), sentence, "{label}: {r:?}");
+            assert_eq!(
+                r.to_string(),
+                format!("{prefix}: {sentence}"),
+                "{label}: Display is not prefix + \": \" + sentence"
+            );
+        }
+        // The wrappers, called the way the access file's parser and the CLI's pre-checks call
+        // them, each answering its variant's own sentence.
+        let leaves: Vec<(&str, String)> = vec![
+            (
+                "claim charset",
+                refusal(compile_profile_claims(&claims("a b"))),
+            ),
+            (
+                "claim empty part",
+                refusal(compile_profile_claims(&claims("a::b"))),
+            ),
+            (
+                "claim consumed",
+                refusal(compile_profile_claims(&claims("email"))),
+            ),
+            (
+                "claim header reserved",
+                refusal(compile_profile_claims(&claims("native_username"))),
+            ),
+            (
+                "claims collide",
+                refusal(compile_profile_claims(&claims("a_b,a:b"))),
+            ),
+            (
+                "attr unknown",
+                refusal(compile_identity_attrs(&claims("nope"))),
+            ),
+            (
+                "attr twice",
+                refusal(compile_identity_attrs(&claims("email,email"))),
+            ),
+            ("attr none", refusal(compile_identity_attrs(&claims("")))),
+        ];
+        for (label, leaf) in leaves {
+            let json = cases
+                .iter()
+                .find(|c| c.0 == label)
+                .map(|c| c.1)
+                .expect("the label is one of the rows above");
+            assert_eq!(
+                leaf,
+                settings_refusal_of(json).sentence(),
+                "{label}: the String wrapper's sentence is not the variant's"
+            );
+        }
     }
 
     /// S1: `From<PrepareError> for String` is the one thing that lets `bb-auth-adm` print these

@@ -105,6 +105,10 @@ Rules are in `AGENTS.md`. Format of this file: `AGENTS.md`, under "Skills".
   test demands the opposite (`a` with class `ico`, name in a `span.vh`). The pair is mutually
   exclusive, so no production code turns both green: the old test is the tester's to update. Report
   it by name; editing it is out of a task that forbids touching the test module.
+- `cargo doc --no-deps` counts a link from a **public** doc comment to a private item (a `Display`
+  impl linking `SettingsRefusal::prefix`): name a private helper as a code span, not a link. And
+  `Claims` is in the gate's bin, not the library, so a library doc cannot link it. A `format!` with
+  no arguments is clippy's `useless_format`: a constant sentence is `"…".to_string()`.
 - A clippy warning can land in the tester's test module (its `map.get(x).is_none()` assertion trips
   `unnecessary_get_then_check`), where a task's edit limit forbids touching it. Clippy exits 0 on a
   warning, so report the line and leave the test alone.
