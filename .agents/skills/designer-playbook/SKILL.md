@@ -57,6 +57,9 @@ Rules are in `AGENTS.md`. Format of this file: `AGENTS.md`, under "Skills".
   the registration step). An empty issuer leaves `connect-src` empty, so the context needs `bypassCSP: true`.
 - A mockup of the shared header and its account menu (§13.28): `/tmp/d8h/{console,account}-{light,dark}.html` over the real CSS plus `/tmp/d8h/proposed.css`, shot by `/tmp/d8h/shot.js` (logs `scrollWidth`, the panel's box and the trigger's size). Whether the real console's bar stays one row across widths: `/tmp/d8h/wrap/v4.js <breakpoint>` (boots the e2e server, injects the header rules, walks 320 to 1400).
 - To check the ground for a band, scan one gutter column of a full-page shot with PIL and list every row where a channel steps by more than 3 (example in the 8F review: only the header border at 112-114 device px should show); the glow's outer stop equals `--bg`, so a smooth fade into a flat run is correct.
+- A mockup over the real account shell with no handler work: `/tmp/d7/mock.js` boots the e2e server, takes
+  `page.content()` of `/account/`, replaces `<main>…</main>` per variant, `setContent`s it with `data-theme`
+  stamped on `<html>`, and injects a menu row with `insertAdjacentHTML` into `.menu` before opening it.
 
 ## Pitfalls
 
@@ -84,3 +87,5 @@ Rules are in `AGENTS.md`. Format of this file: `AGENTS.md`, under "Skills".
 - An inline `svg` outside `.pill.ico` gets no size and no stroke (300x150, filled black): a glyph in a worded pill needs its own `width/height/fill:none/stroke:currentColor` rule. The 8H panel shipped that way, and `shots.js menu` showed it but no test did.
 - The "one row" check must use a long given name with a long brand (`X-Auth-Given-Name` plus `profile_claims:['given_name']`), measuring `.bar` height and not only item midpoints: as built, the tab `nav` wrapped inside itself from 804 to 900px (`/tmp/d8h-review/probe/r.js`).
 - `shots.js`'s `phone` view is light only: there is no dark phone screenshot to show, so shoot one with a scratch script if a review needs it.
+- `ul.plain` has no margin, so a second `p.lbl` after it sits against the last item: a second group of facts in one card reads better as `p.muted` sentences than as a second labelled list.
+- Every row of the header panel carries a glyph with a `.5em` margin, so a row without one starts its word left of the others: a new panel row needs a glyph too.

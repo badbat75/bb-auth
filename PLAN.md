@@ -220,7 +220,9 @@ A social-only user, who cannot re-authenticate by email code, gets the access-fi
 the page says an administrator must delete their Cognito account. `denied` is never lifted. The
 final page links to `/auth/logout`.
 
-Designed in §13.29 (2026-11-26, the user asleep; decisions listed under "Waiting for the user").
+Designed in §13.29 and, as a person sees it, §13.30 (2026-11-26, the user asleep; decisions listed under
+"Waiting for the user", and §13.30 §8's open questions). Both assume choice (b) below; choice (a) keeps the
+pages and replaces the code step's `DeleteUser` with the worker's intake.
 Slices: **7a** the confirmation page in its four variants; **7b** the menu row (`K::AccountDelete`);
 **7c** a social-only roster user's row deletion; **7d** the code start; **7e** the roster code step and
 `cognito_delete`; **7f** the stranger's code step and the retry; **7g** the fake Cognito answering

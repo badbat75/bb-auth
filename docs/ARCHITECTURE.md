@@ -5377,7 +5377,10 @@ trigger is not marked, because a marked trigger would look open.
   the first rows a person reaches; the rule plus the row gap (12px between the two targets) keeps
   a slip off Sign out from landing on it.
 - **Style.** `a.pill.rm`, the console's remove component: muted text, the error colour on hover
-  and focus, no new colour. The words say what it does; there is no icon.
+  and focus, no new colour. The words say what it does; there is no icon. (Changed by §13.30 §1:
+  the row carries a trash glyph, because every row of the panel as H built it has one and a row
+  without it starts its word a glyph's width left of the words above; and the error colour is on
+  hover only, as `base.css` has it, while focus shows the estate's one accent ring.)
 - **A link, never a form.** A plain `GET` to `{account}/delete` (`Config::account_path` +
   `delete`), which renders step 7's confirmation page and changes nothing; only that page's
   `POST` deletes. A prefetch or a misclick costs nothing. This is the confirmation-before-
@@ -5633,7 +5636,10 @@ page and is never lifted (R4, §13.9).
 | C. stranger, native | no | yes | the Cognito user only; the access file is not written | the email code |
 | D. stranger, social-only | no | no | nothing | none: no form |
 
-What each page says (the wording is the designer's; these are the facts each page must carry):
+What each page says (the wording is the designer's; these are the facts each page must carry;
+changed by §13.30 §2: the places are not listed, the record's line says "every access an
+administrator gave you by name" instead, because for B an `authenticated` scope stays reachable
+through the provider sign-in that remains):
 
 - **A.** What goes: the API keys (their count), the groups and the places the page already lists
   (`account_own`), and the sign-in account. That the audit keeps their lines until
@@ -5695,7 +5701,9 @@ The code step, in order, every refusal writing nothing and calling nothing after
 1. the same-origin door (`csrf_ok`, the console's strict policy);
 2. what `handle_account` re-checks for every request against the live files: the proxy secret, the
    identity, the veto, the row resolution;
-3. the header is present (else the profile's "not native" refusal, no call), and the posted `kind`
+3. the header is present (else the profile's "not native" refusal, no call; changed by §13.30 §4:
+   the status stays `400` but the words are the deletion's "your sign-in changed" page, since the
+   profile's sentence talks about editing a profile), and the posted `kind`
    equals the computed one;
 4. the posted `uuid` equals the live row's uuid (both empty for a stranger). A stranger who gained
    a row between the steps, a row whose uuid changed, and a row removed by an administrator are all
@@ -5869,7 +5877,8 @@ Each is one red-green pass over a few functions; tests in `src/bin/bb-auth-web.r
 - **7g. The browser suite.** `e2e/lib/cognito.js`'s `defaultReply` answers `DeleteUser` with
   `200 {}` (today it is `UnknownOperationException`); a walk per kind in a new
   `e2e/tests/delete.js` (A to the done page, B with zero Cognito calls, the `502` then the retry,
-  D with no form), the `nojs.js` pass over them, and scenes `account-delete`, `-row`, `-stranger`,
+  D with no form), the `nojs.js` pass over them, and scenes (changed by §13.30 §7: the full list
+  is there) `account-delete`, `-row`, `-stranger`,
   `-nothing`, `-code`, `-done`, `-partial` in `shots.js` for the designer's review.
 - **7h. Real, with the user's go-ahead**: a test account on rpi-01 that signs in by email code,
   with a row, a key and a scope reference; deleted in a browser; then `bb-auth-adm show` no longer
@@ -5896,3 +5905,367 @@ The veto: 7a's refusal (and `handle_account`'s existing test). The partial failu
    `POST` with no re-authentication, as their keys already can be?
 4. **The real run (7h)**: which test account, and the go-ahead for an irreversible deletion on the
    real pool.
+
+### 13.30 Delete my account, as a person sees it (plan step 7, slices 7a to 7g, designed 2026-11-26)
+
+The interface of §13.29: the menu row, the confirmation page in its four variants, the code page
+and every outcome, with every word in English and Italian. §13.29 decides what is called, checked
+and written; this section decides what a person sees and does. Where it changes §13.29 or
+§13.28 §5 the change is marked there. Decided overnight on the user's delegation; each decision
+says why.
+
+What was looked at: §13.9, §13.23, §13.26 §3 to §5, §13.28 §2, §3 and §5, §13.29 whole;
+`account_menu`, `account_shell`, `confirm_card`, `form_shell_at`, `page_account_confirm`,
+`page_profile_code`, `page_profile_saved`, `page_profile_outcome`, `limit_text`, `size_text`,
+the account page's `409` and the `K` keys `Account*`, `AccountProfile*`, `Conflict*`, `Unit*`,
+`SignOut`, `Cancel`, `Back` in `src/bin/bb-auth-web.rs`; `.pill.rm`, `button.danger`, `.panel.bad`,
+`.menu .pill`, `.menu svg`, `ul.plain` in `src/assets/{base,admin}.css`; the built menu,
+`node e2e/shots.js account-menu` (light, dark, phone, it). Mockups: `/tmp/d7/mock.js` boots the
+e2e server, takes the real `/account/` page and replaces its `main` with each mockup (the bar, the
+CSS and the menu are the real ones), and injects the menu row; shots in
+`/tmp/d7/<page>-{light,dark}-{1280,360,320}.png` for `delete`, `delete-row`, `delete-stranger`,
+`delete-nothing`, `delete-code`, `delete-code-wrong`, `delete-done`, `delete-row-done`,
+`delete-partial`, `delete-changed`, and `/tmp/d7/menu-{light,dark}-{1280,360}.png`,
+`menu-light-320.png`, `menu-focus-{light,dark}-1280.png`.
+
+Measured (the mockups, Edge): no page scrolls sideways at 1280, 360 or 320 (`scrollWidth`); the
+menu's Sign out and Delete rows are 36px tall at 1280 and 30px at 360 and 320, above WCAG 2.5.8's
+24px, and their glyphs share one left edge. Read in a source: each WCAG fact, cited where used.
+Assumed: none of the Cognito facts are this section's; they are §13.29 §1's.
+
+**No new CSS.** Every element below is an existing component: `a.pill.rm`, `div.sep`, `p.lede`,
+`div.panel.bad` with `form.edit` (through `confirm_card`), `p.lbl`, `ul.plain`, `p.muted`,
+`div.card`, `input.f-code`, `div.err`, `button.danger`, `p.primary > a.pill`. The one new piece
+of markup is a trash glyph's three paths in the menu row, sized and stroked by the existing
+`.menu svg` rule.
+
+#### 1. The menu row (§13.28 §5, as built in H) (delete design)
+
+- **Where.** The last child of `div.menu` on `/account/` only: `div.sep`, then
+  `a.pill.rm href="{account}/delete"`. After Sign out's own rule, so the panel reads: who, then
+  Preferences, rule, Sign out, rule, Delete. Where `account_logout_url` is unset there is no Sign
+  out, and the row follows Preferences behind its own `div.sep`. The console's panel has no row
+  (§13.28 §5, unchanged).
+- **Look, both themes.** `nav .pill` gives it the quiet muted text of the rows above;
+  `.pill.rm:hover` (specificity 0,3,0 beats `nav .pill:hover`'s 0,2,1) turns text and border
+  `--error` on hover; keyboard focus shows the estate's one accent ring (`:focus-visible`), as on
+  every row. Seen in `/tmp/d7/menu-light-1280.png` and `menu-dark-360.png`.
+- **A glyph, changed from §13.28 §5.** H built every row with a glyph and a `.5em` margin, so the
+  words form a column; a row without one starts its word about 22px left of "Sign out". The glyph
+  is a trash can (`M3 6h18`, `M8 6V4h8v2`, `M6 6l1 14h10l1-14`), `aria-hidden`, beside the visible
+  word `K::AccountDelete`, which is the accessible name. Not the keys table's `×`: at the bottom of
+  a panel an `×` reads as "close this panel".
+- **The words stay "Delete account and all its data"** (§13.28's key). For B and D it is wider
+  than what happens; the page it opens says exactly what goes, before anything does. Open
+  question 1.
+
+#### 2. The confirmation page, four variants (delete design)
+
+`GET {account}/delete`, `account_shell` with the `h1` `K::AccountDeleteTitle` ("Delete your
+account") on all four, so the heading echoes the row that was clicked (Nielsen 4). A, B and C are
+`confirm_card`: the `p.lede` (its `why`), then `div.panel.bad` holding the facts (its `what`) and
+the `form.edit` posting to `{account}/delete` with hidden `rev`, `uuid`, `kind`, the submit and
+the `K::Cancel` pill back to the account page. **No `autofocus`** on any of the four: Enter must
+not be one keystroke from a deletion.
+
+The facts inside the panel, in this order, each present only where it applies:
+
+1. `p.lbl` `K::AccountDeleteGoes` ("What is deleted"), then one `ul.plain`:
+   - `K::AccountDeleteSignIn` (A, C);
+   - `K::AccountDeleteRecord` (A, B);
+   - `K::AccountDeleteKeysLead` + `" "` + each key's id in `code`, joined by `", "` (A, B, only
+     with one key or more);
+   - `K::AccountDeleteGroupsLead` + `" "` + each group's name in `code`, joined by `", "` (A, B,
+     only with one group or more).
+2. C only: `p.muted` `K::AccountNoRow` (the page's existing sentence), the fact that only the
+   sign-in account goes.
+3. `p.muted`, the audit: with a retention, `K::AccountDeleteAuditKept` + `" "` +
+   `limit_text(lang, retention)` + `K::AccountDeleteAuditTail` ("... is kept for 6 months, then
+   dropped."); with none, `K::AccountDeleteAuditSize` + `" "` + `size_text(max_bytes)` + `"."`
+   ("... keeps at most 8 MiB."). `limit_text` takes a `Lang` (§13.29 slice 7a) so the unit is
+   Italian on an Italian page.
+4. A, C: `p.muted` `K::AccountDeleteSocialTwin`. B: `p.muted` `K::AccountDeleteRowWhy`.
+
+**The places are not listed** (changed from §13.29 §2). For B the provider sign-in stays, so any
+`authenticated` scope stays reachable, and "Where you reach" listed under "What is deleted" would
+be false for B; "every access an administrator gave you by name" is true for A and B alike, and
+for A the first line already says the sign-in goes, which takes every place with it. The uuid is
+not shown either: a person does not know it, and the record line says what it means.
+
+**What stays is sentences, not a second list.** `ul.plain` has no margin, so a second `p.lbl`
+("What stays") sat against the last item in the first mockup; full `p.muted` sentences carry
+their own spacing and their own subject, need no CSS, and read as the quieter half they are.
+
+**The veto is never named.** A vetoed identity never reaches the page (§13.29 §2); `remove_user`
+keeps `denied` and `excluded` entries as the email, and the page says nothing about them, to
+anyone.
+
+| Variant | `p.lede` | Facts | Button | `kind` |
+|---|---|---|---|---|
+| A. roster, native | `AccountDeleteLeadCode` | SignIn, Record, keys, groups; audit; SocialTwin | `AccountProfileSendCode` ("Send code"), plain | `code` |
+| B. roster, social-only | `AccountDeleteLeadRow` | Record, keys, groups; audit; RowWhy | `AccountDeleteConfirm` ("Delete my account"), `danger` | `row` |
+| C. stranger, native | `AccountDeleteLeadCode` | SignIn; NoRow; audit; SocialTwin | `AccountProfileSendCode`, plain | `code` |
+| D. stranger, social-only | `AccountDeleteNothing` | none, no panel, no form | `p.primary` back link | none |
+
+**`danger` marks the press that deletes, not the page.** B's button deletes, so it is red; A's
+and C's send an email, and the red button is the code page's "Delete my account" (§3). Two red
+presses in a row would teach that red is decoration, which is the reason the key rotate is not
+red (§13.15). The panel is `.panel.bad` on all three, so the subject reads as destructive from
+the first step. This departs from the brief's "primary button (danger)" for A and C; open
+question 2.
+
+**The irreversibility statement is the lede's first sentence**, "This cannot be undone", the same
+words as the key revoke's warning (`AccountKeyRemoveWarn`), followed by what stands between the
+person and the deletion (the code, or the button by name). With the code page, that is WCAG 3.3.4's
+"Confirmed" for a submission that deletes user data
+(<https://www.w3.org/WAI/WCAG22/Understanding/error-prevention-legal-financial-data.html>).
+
+D: `p.lede` `K::AccountDeleteNothing`, then `p.primary` with `back_link` to the account page;
+`200`. It covers the social-only stranger and the native one whose cookie predates §13.25, so it
+names both cases, as `AccountProfileNotNative` does (the skill's pitfall).
+
+#### 3. The code page (A and C) (delete design)
+
+The profile's code page (§13.23 §3, §13.26 §4) with the deletion's content; the coder may share
+its skeleton with `page_profile_code`.
+
+- `h1` `K::AccountProfileCodeTitle` ("Enter the code").
+- `p.lede`: `K::AccountProfileCodeSent` + `" "` + `code` masked `CODE_DELIVERY_DESTINATION` +
+  `"." " "` + `K::AccountProfileCodeLasts` + `" "` + `K::AccountDeleteCodeUntil`; with no usable
+  destination, `K::AccountProfileCodeSentNoDest` + `" "` + `CodeLasts` + `" "` + `CodeUntil`.
+- `div.card`: the refusal (`div.err#err`) when there is one, then the same "What is deleted"
+  `p.lbl` and `ul.plain` as the confirmation page (recognition over recall, Nielsen 6: the person
+  confirms the list they are about to lose, not one they saw a page ago), then the `form.edit`
+  posting to `{account}/delete/code` with hidden `Session`, `rev`, `uuid`, `kind`, the field
+  `K::AccountProfileCodeLabel` (the profile's `input.f-code` exactly: `type="text"`,
+  `inputmode="numeric"`, `autocomplete="one-time-code"`, `required`, `maxlength`, no `pattern`,
+  `autofocus` only when there is no error), and `div.actions` with `button.danger`
+  `K::AccountDeleteConfirm` and the `K::Cancel` pill. A `div.card` and not `.panel.bad` because
+  the wrong-code `.err` must stand out from its ground (red on red does not), and the danger
+  button carries the warning.
+- After the card, the resend: a `form.edit` posting `rev`, `uuid`, `kind` (never the `Session`)
+  to `{account}/delete`, `p.muted` `K::AccountProfileNoCode`, `button.pill`
+  `K::AccountProfileSendNew`. Resend is starting over, as on the profile.
+- **Wrong code** (`CodeMismatchException`): the same page, `400`, `div.err#err`
+  `K::AccountProfileWrongCode` at the top of the card, the field empty with `aria-invalid="true"
+  aria-describedby="err"`, no `autofocus`, the list kept.
+
+Enter in the code field submits Delete (its own form), which is the intended confirmation: the
+code is the second check. The code is pasteable and fillable, which is what keeps a
+one-time-code step within WCAG 3.3.8 Accessible Authentication (Minimum)
+(<https://www.w3.org/WAI/WCAG22/Understanding/accessible-authentication-minimum.html>), and the
+3-minute limit is Cognito's security limit, the essential exception of WCAG 2.2.1
+(<https://www.w3.org/WAI/WCAG22/Understanding/timing-adjustable.html>), made humane by a resend
+that keeps everything.
+
+#### 4. Every outcome (delete design)
+
+One shape, the profile's (§13.23 §4): `account_shell`, an `h1` that states the result, one
+`p.lede`, one row of actions. "Sign out" is `pill_link(account_logout_url, K::SignOut)`; where
+that URL is unset there is no pill and the lede's last sentence is `K::AccountDeletedClose`
+instead of `K::AccountDeletedSignOut`. "Try again" is `pill_link({account}/delete,
+K::AccountDeleteRetry)`, which renders C's page (§13.29 §4). "Start again" is
+`pill_link({account}/delete, K::AccountDeleteStartAgain)`. "Resend" is the code page's resend
+form with the button primary, as on the profile. "Back" is `back_link` to the account page.
+
+| Case | Status | `h1` | `p.lede` | Actions |
+|---|---|---|---|---|
+| A done (`DeleteUser` ok or `UserNotFoundException`) | 200 | `AccountDeletedTitle` | `AccountDeletedBody` + SignOut/Close | Sign out |
+| C done | 200 | `AccountDeletedTitle` | `AccountDeletedBody` + SignOut/Close | Sign out |
+| B done (row only) | 200 | `AccountRowDeletedTitle` | `AccountRowDeletedBody` + SignOut/Close | Sign out |
+| A, row gone, `DeleteUser` refused | 502 | `AccountDeletePartialTitle` | `AccountDeletePartial` | Try again, Sign out |
+| A, row gone, `DeleteUser` no answer | 504 | `AccountDeleteUnsureTitle` | `AccountDeleteUnsure` | Try again, Sign out |
+| C, `DeleteUser` refused | 502 | `AccountDeleteNotDoneTitle` | `AccountDeleteRefused` | Try again, back |
+| C, `DeleteUser` no answer | 504 | `AccountDeleteUnsureTitle` | `AccountDeleteUnsureStranger` | Try again, Sign out |
+| C start, `InitiateAuth` `UserNotFoundException` (the retry after a deletion that happened) | 200 | `AccountDeleteGoneTitle` | `AccountDeleteGone` + SignOut/Close | Sign out |
+| A start, `UserNotFoundException` | 400 | `AccountDeleteNotDoneTitle` | `AccountProfileNoUser` | back |
+| code expired, or `NotAuthorizedException` | 400 | `AccountDeleteNotDoneTitle` | `AccountProfileExpired` | Resend, back |
+| no answer at `InitiateAuth` or `RespondToAuthChallenge` | 504 | `AccountDeleteNotDoneTitle` | `AccountProfileNoAnswer` | Resend, back |
+| `TooManyRequestsException` | 502 | `AccountDeleteNotDoneTitle` | `AccountProfileTooMany` | back |
+| a challenge or a token for another username | 403 | `AccountDeleteNotDoneTitle` | `AccountProfileNotYours` | back |
+| any other refusal before `DeleteUser` | 502 | `AccountDeleteNotDoneTitle` | `AccountProfileRefused` | back |
+| stale `rev` (before the code, or under the lock), `kind` or `uuid` differs | 409 | `AccountDeleteChangedTitle` | `AccountDeleteChanged` | Start again, back |
+| `kind=code` with no header | 400 | `AccountDeleteChangedTitle` | `AccountDeleteChanged` | Start again, back |
+| the write fails (I/O) | 500 | `AccountDeleteNotDoneTitle` | `AccountDeleteWriteFailed` | Start again, back |
+| cross-site `POST` | 403 | the existing door's answer, unchanged | | |
+
+Why these shapes:
+
+- **The done pages offer only Sign out.** It is the one thing left to do: the cookie still names
+  them (stateless sessions), and "back" would land on an account page saying bb-auth has no row,
+  which reads as a fault (Nielsen 8). The lede says why signing out matters, in the words the
+  menu uses.
+- **The partial pages say first what did happen.** "Your API keys ... are gone" before "but", so
+  the person knows the keys are safe and the remaining step is one try away (Nielsen 9). The
+  `504` page cannot claim the sign-in account survived, so it says "may or may not" and promises
+  that the retry will tell, which it does (the gone row).
+- **The `409` page is the deletion's own, not the console's `ConflictBody`.** That text names
+  `bb-auth-adm` over SSH and "the access file", an operator's words. A person needs: nothing was
+  deleted, something changed, start again to see what would go now. One page serves the stale
+  `rev`, the changed `uuid`, the changed `kind` and the lost header (§13.29 §3 steps 3 to 5 and
+  8), because for the person each is "my account or my sign-in changed", and splitting them would
+  tell an attacker which check fired. Changed from §13.29 §3 step 3 (the profile's "not native"
+  sentence is about editing a profile).
+- **No blame anywhere.** Every refusal names what happened and the next step; nothing says
+  "invalid" or "you".
+- **Cognito is not named**, as on the profile: "the sign-in service" and "your sign-in account".
+
+#### 5. The `K` keys (delete design)
+
+37 new keys. Reused unchanged: `Cancel`, `Back`, `SignOut`, `AccountNoRow`, `AccountProfileSendCode`,
+`AccountProfileCodeTitle`, `AccountProfileCodeSent`, `AccountProfileCodeSentNoDest`,
+`AccountProfileCodeLasts`, `AccountProfileCodeLabel`, `AccountProfileNoCode`,
+`AccountProfileSendNew`, `AccountProfileWrongCode`, `AccountProfileExpired`,
+`AccountProfileNoAnswer`, `AccountProfileTooMany`, `AccountProfileNotYours`,
+`AccountProfileNoUser`, `AccountProfileRefused`, and the `Unit*` words through `limit_text`. Each of
+the reused profile sentences is true of a deletion as written ("nothing was changed", "no code was
+sent"); renaming them to a shared prefix is the coder's choice and changes no text.
+
+| Key | English | Italian |
+|---|---|---|
+| `AccountDelete` (§13.28) | Delete account and all its data | Elimina l'account e tutti i suoi dati |
+| `AccountDeleteTitle` | Delete your account | Elimina il tuo account |
+| `AccountDeleteLeadCode` | This cannot be undone. To make sure it is you, we will email you a code, and nothing is deleted until you enter it. | Non si può annullare. Per essere sicuri che sia tu, ti mandiamo un codice per email, e nulla viene eliminato finché non lo inserisci. |
+| `AccountDeleteLeadRow` | This cannot be undone: what is listed below is deleted as soon as you press Delete my account. | Non si può annullare: ciò che è elencato qui sotto viene eliminato appena premi Elimina il mio account. |
+| `AccountDeleteGoes` | What is deleted | Cosa viene eliminato |
+| `AccountDeleteSignIn` | Your sign-in account. You will not be able to sign in with your email address again. | Il tuo account di accesso. Non potrai più accedere con il tuo indirizzo email. |
+| `AccountDeleteRecord` | Your bb-auth record, and every access an administrator gave you by name. | I tuoi dati in bb-auth, e ogni accesso che un amministratore ti ha dato per nome. |
+| `AccountDeleteKeysLead` | Your API keys, which stop working within seconds: | Le tue chiavi API, che smettono di funzionare in pochi secondi: |
+| `AccountDeleteGroupsLead` | Your place in these groups: | Il tuo posto in questi gruppi: |
+| `AccountDeleteAuditKept` | The record of your sign-ins and refusals is kept for | Il registro dei tuoi accessi e dei rifiuti è conservato per |
+| `AccountDeleteAuditTail` | , then dropped. | , poi viene eliminato. |
+| `AccountDeleteAuditSize` | The record of your sign-ins and refusals is kept until newer entries replace it; this deployment keeps at most | Il registro dei tuoi accessi e dei rifiuti resta finché voci più recenti non lo sostituiscono; questa installazione ne conserva al massimo |
+| `AccountDeleteSocialTwin` | If you also sign in with a social account such as Google, that is a separate account: this page cannot delete it, an administrator can. | Se accedi anche con un account social come Google, quello è un account separato: questa pagina non può eliminarlo, un amministratore sì. |
+| `AccountDeleteRowWhy` | Your sign-in account stays. If you signed in with a social account such as Google, only an administrator can delete it. If you sign in with your email address, sign out and sign in again first, and this page will delete your sign-in account too. | Il tuo account di accesso resta. Se hai effettuato l'accesso con un account social come Google, solo un amministratore può eliminarlo. Se accedi con il tuo indirizzo email, prima esci e accedi di nuovo, e questa pagina eliminerà anche il tuo account di accesso. |
+| `AccountDeleteNothing` | bb-auth keeps no record of you, so there is nothing here to delete. If you signed in with a social account such as Google, only an administrator can delete that account. If you sign in with your email address, sign out and sign in again, then come back. | bb-auth non conserva dati su di te, quindi qui non c'è nulla da eliminare. Se hai effettuato l'accesso con un account social come Google, solo un amministratore può eliminare quell'account. Se accedi con il tuo indirizzo email, esci e accedi di nuovo, poi torna qui. |
+| `AccountDeleteConfirm` | Delete my account | Elimina il mio account |
+| `AccountDeleteCodeUntil` | Nothing is deleted until you enter it. | Nulla viene eliminato finché non lo inserisci. |
+| `AccountDeleteNotDoneTitle` | Your account was not deleted | Il tuo account non è stato eliminato |
+| `AccountDeleteChangedTitle` | Your account changed | Il tuo account è cambiato |
+| `AccountDeleteChanged` | Your account or your sign-in changed after you opened this page, so nothing was deleted. Start again to see what would be deleted now. | Il tuo account o il tuo accesso è cambiato dopo che hai aperto questa pagina, quindi non è stato eliminato nulla. Ricomincia per vedere cosa verrebbe eliminato adesso. |
+| `AccountDeleteStartAgain` | Start again | Ricomincia |
+| `AccountDeleteWriteFailed` | bb-auth could not save the change, so nothing was deleted and you can still sign in. Try again in a minute; if it fails again, tell an administrator. | bb-auth non è riuscito a salvare la modifica, quindi non è stato eliminato nulla e puoi ancora accedere. Riprova tra un minuto; se non funziona di nuovo, avvisa un amministratore. |
+| `AccountDeletedTitle` | Your account is deleted | Il tuo account è stato eliminato |
+| `AccountDeletedBody` | Your sign-in account is deleted, and bb-auth holds nothing for you any more. | Il tuo account di accesso è stato eliminato, e bb-auth non conserva più nulla per te. |
+| `AccountDeletedSignOut` | This browser stays signed in until you sign out, so sign out now. | Questo browser resta connesso finché non esci, quindi esci adesso. |
+| `AccountDeletedClose` | This browser stays signed in until the session ends: close your browser to end it. | Questo browser resta connesso finché la sessione non termina: chiudi il browser per terminarla. |
+| `AccountRowDeletedTitle` | Your bb-auth record is deleted | I tuoi dati in bb-auth sono stati eliminati |
+| `AccountRowDeletedBody` | Your API keys and every access an administrator gave you by name are gone. Your sign-in account still exists: to delete it, ask an administrator. | Le tue chiavi API e ogni accesso che un amministratore ti ha dato per nome non ci sono più. Il tuo account di accesso esiste ancora: per eliminarlo, chiedi a un amministratore. |
+| `AccountDeletePartialTitle` | Your account is only partly deleted | Il tuo account è stato eliminato solo in parte |
+| `AccountDeletePartial` | Your API keys and every access an administrator gave you by name are gone, but the sign-in service refused to delete your sign-in account. Try again: you will be asked for a new code. If it is refused again, ask an administrator. | Le tue chiavi API e ogni accesso che un amministratore ti ha dato per nome non ci sono più, ma il servizio di accesso ha rifiutato di eliminare il tuo account di accesso. Riprova: ti verrà chiesto un nuovo codice. Se viene rifiutato di nuovo, chiedi a un amministratore. |
+| `AccountDeleteRefused` | The sign-in service refused to delete your sign-in account, so it still exists. Try again in a minute; if it is refused again, ask an administrator. | Il servizio di accesso ha rifiutato di eliminare il tuo account di accesso, che quindi esiste ancora. Riprova tra un minuto; se viene rifiutato di nuovo, chiedi a un amministratore. |
+| `AccountDeleteRetry` | Try again | Riprova |
+| `AccountDeleteUnsureTitle` | Your account may not be fully deleted | Il tuo account potrebbe non essere stato eliminato del tutto |
+| `AccountDeleteUnsure` | Your API keys and every access an administrator gave you by name are gone. The sign-in service did not answer within 5 seconds, so your sign-in account may or may not be deleted. Try again to make sure: if it is already gone, the page will say so. | Le tue chiavi API e ogni accesso che un amministratore ti ha dato per nome non ci sono più. Il servizio di accesso non ha risposto entro 5 secondi, quindi il tuo account di accesso potrebbe essere stato eliminato oppure no. Riprova per esserne sicuro: se non c'è più, la pagina lo dirà. |
+| `AccountDeleteUnsureStranger` | The sign-in service did not answer within 5 seconds, so your sign-in account may or may not be deleted. Try again to make sure: if it is already gone, the page will say so. | Il servizio di accesso non ha risposto entro 5 secondi, quindi il tuo account di accesso potrebbe essere stato eliminato oppure no. Riprova per esserne sicuro: se non c'è più, la pagina lo dirà. |
+| `AccountDeleteGoneTitle` | There is nothing left to delete | Non resta nulla da eliminare |
+| `AccountDeleteGone` | The sign-in service has no account for this session any more, so there is nothing left to delete. | Il servizio di accesso non ha più un account per questa sessione, quindi non resta nulla da eliminare. |
+
+The Italian "dati in bb-auth" for "bb-auth record" is chosen over *riga* (the console's word for a
+roster row) because a person has no roster; "account di accesso" is "sign-in account" on every
+page of the flow, so the two things deleted keep two fixed names in both languages.
+
+#### 6. Heuristics and WCAG, and where they trade (delete design)
+
+- Visibility (1): every outcome's `h1` says whether, and how much, was deleted. Match (2): "sign-in
+  account", "bb-auth record", no Cognito, no veto. Control (3): Cancel on both steps, no
+  `autofocus` on the confirmation. Consistency (4): the profile's code page and outcome shape, the
+  key revoke's "This cannot be undone". Error prevention (5): two steps for A and C, the list
+  restated at the code. Recognition (6): the list on the code page. Minimalism (8): done pages
+  carry one action; the places and the uuid are not listed. Recovery (9): partial and unsure
+  pages lead with what happened and offer the retry.
+- WCAG 3.3.4 (AA): the confirmation page and the code are the check; 3.3.1: the wrong code is
+  named in text, `aria-describedby`; 1.4.1: the danger button says what it does in words; 2.5.3:
+  every button's accessible name is its visible text; 2.5.8: the menu rows measure 30px at phone
+  width; 3.3.8 and 2.2.1 as in §3.
+- **Trade 1:** the menu row's wording promises "all its data" to B and D, kept for one menu shape
+  (§13.29 §8) at the cost of a promise the page then narrows (open question 1).
+- **Trade 2:** A and C's first button is not red, so the brief's "danger" is spent once per flow,
+  on the press that deletes (open question 2).
+- Scripting off: every step is a `GET` link or a `POST` form; nothing in the flow carries a script
+  or a handler, and the menu row is a link inside the existing `details`.
+
+#### 7. Tests and scenes (delete design)
+
+Unit and socket tests in `src/bin/bb-auth-web.rs`, in addition to §13.29 §9's (which they extend
+where the name matches):
+
+- 7a `delete_page_for_a_native_roster_user_lists_what_goes_and_asks_for_a_code`: `h1`
+  `AccountDeleteTitle`; lede starts with `AccountDeleteLeadCode`; inside `div.panel.bad` a `p.lbl`
+  `AccountDeleteGoes` and `ul.plain` whose `li`s are SignIn, Record, the keys line with each id in
+  `code`, the groups line; `p.muted` audit and `AccountDeleteSocialTwin`; one `form.edit` posting
+  to `{account}/delete` with hidden `rev`, `uuid`, `kind=code`; its button is `AccountProfileSendCode`
+  **without** `class="danger"`; a `K::Cancel` pill to the page; no `autofocus` attribute anywhere.
+- 7a `delete_page_for_a_social_roster_user_deletes_the_row_and_names_the_administrator`: lede
+  `AccountDeleteLeadRow`; no SignIn `li`; `AccountDeleteRowWhy`; `kind=row`; button
+  `AccountDeleteConfirm` with `class="danger"`.
+- 7a `delete_page_for_a_native_stranger_says_the_file_is_untouched`: `li`s are SignIn only;
+  `AccountNoRow`; empty `uuid`; `kind=code`.
+- 7a `delete_page_for_a_social_stranger_has_no_form`: `200`, `AccountDeleteNothing`, no `form`, a
+  `back_link` to the page.
+- 7a `delete_page_omits_empty_key_and_group_lines`: a row with no keys and no groups lists SignIn
+  and Record only.
+- 7a `delete_page_says_how_long_the_audit_keeps_lines`: retention `6 months` gives `AuditKept`
+  "6 months" `AuditTail`; Italian gives "6 mesi"; no retention gives `AuditSize` and
+  `size_text(max_bytes)`.
+- 7a `delete_page_never_names_the_veto`: a row named in an `excluded` entry: the page text has no
+  `excluded`, `denied`, "veto" or `AccountVeto*` text.
+- 7a `delete_page_is_in_italian`: the four variants with `lang=it` carry the Italian of every key
+  above (the 2.5.3 pitfall: button text and accessible name agree in `it`).
+- 7b `the_account_menu_ends_with_delete_after_sign_out`: the last child of `div.menu` is
+  `a.pill.rm` with `href` `{account}/delete`, its previous sibling `div.sep`, containing one
+  `svg[aria-hidden=true]` and the text `AccountDelete`; with no logout URL the row is still last,
+  after Preferences and its own `div.sep`. `the_console_menu_has_no_delete_row` as §13.29.
+- 7c `the_row_done_page_offers_only_sign_out`: `AccountRowDeletedTitle`, `AccountRowDeletedBody`
+  then `AccountDeletedSignOut`, one pill whose `href` is `account_logout_url`, no back link;
+  with no logout URL, `AccountDeletedClose` and no pill.
+- 7c/7e `a_stale_rev_is_a_409_and_writes_nothing` also asserts `AccountDeleteChangedTitle`,
+  `AccountDeleteChanged`, a Start again pill to `{account}/delete`, and that `ConflictBody`
+  (the console's text) is absent. The same assertion on `a_kind_that_no_longer_matches_is_refused`,
+  `a_changed_uuid_is_refused` and `kind_code_with_no_header_is_refused_with_no_call` (status `400`).
+- 7d `the_delete_code_page_restates_what_goes`: `h1` `AccountProfileCodeTitle`; the lede holds
+  the masked destination in `code`, `CodeLasts` and `AccountDeleteCodeUntil`; `div.card` holds
+  the same `li`s as the confirmation; the code field is the profile's (`inputmode`,
+  `autocomplete="one-time-code"`, no `pattern`, `autofocus`); the submit is `button.danger`
+  `AccountDeleteConfirm`; the resend form posts `rev`, `uuid`, `kind` and no `Session` to
+  `{account}/delete`.
+- 7e `a_wrong_delete_code_writes_nothing` also asserts `400`, `div.err#err`
+  `AccountProfileWrongCode` inside the card, the field empty with `aria-invalid`, no
+  `autofocus`, the list kept.
+- 7e `each_delete_outcome_states_its_result_in_the_h1`: one case per row of §4's table: status,
+  `h1` key, lede key(s), and exactly the actions named (Sign out, Try again to `{account}/delete`,
+  Start again, Resend form, back).
+- 7e `the_partial_page_says_the_keys_are_gone_and_offers_the_retry` (`502`) and
+  `delete_user_with_no_answer_says_unsure_and_offers_the_retry` (`504`, `AccountDeleteUnsureTitle`,
+  `AccountDeletedTitle` absent).
+- 7f `the_retry_reaches_the_stranger_path_and_finishes` also asserts the `GET` after the `502`
+  renders C's variant; `a_retry_after_the_user_is_gone_says_there_is_nothing_left` asserts `200`,
+  `AccountDeleteGoneTitle` and a Sign out pill.
+- `the_delete_flow_carries_no_script`: every page of §2 to §4 has no `script` and no `on…=`
+  (extends `no_page_but_the_reveal_carries_a_script`).
+
+e2e (7g, `e2e/tests/delete.js`): the walk menu row, A's page, Send code, the code page, a wrong
+code, the right code, the done page, Sign out's `href`; Cancel from each step returns to
+`/account/`; B with zero Cognito calls; the `502` then Try again then C's walk; D with no form;
+keyboard only: from the menu trigger, Tab reaches Delete last, Enter opens the confirmation, Tab
+order is Send code then cancel, nothing focused on load; all of it again in `nojs.js`; `scrollWidth
+== clientWidth` at 320 on every page.
+
+`shots.js` scenes (light, dark, phone, `it`; all prose): `account-menu-delete` (the panel open
+with the row; replaces looking at `account-menu` for it), `account-delete` (A, with two keys and a
+group), `account-delete-row` (B), `account-delete-stranger` (C), `account-delete-nothing` (D),
+`account-delete-code`, `account-delete-code-wrong`, `account-delete-done`,
+`account-delete-row-done`, `account-delete-partial`, `account-delete-unsure`,
+`account-delete-gone`, `account-delete-changed`. Thirteen; the designer's review of 7a to 7g looks
+at these.
+
+#### 8. Open questions for the user (delete design)
+
+1. The menu row says "Delete account and all its data" to everyone, though for B the sign-in
+   account stays and for D nothing goes. Keep it (one menu shape; the page is exact), or shorten
+   to "Delete account" for all?
+2. A and C's first button ("Send code") is plain and the red button is the code page's "Delete
+   my account"; the brief asked for danger on the confirmation page. Keep one red press per flow
+   (recommended), or make both red?
+3. The places reached are not listed among what is deleted (§2): enough, or should A's page list
+   them as the architect drafted?
