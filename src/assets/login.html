@@ -28,7 +28,7 @@ __BB_LOGO__
          auth.css (placed after `.msg.show`, equal specificity) is what closes the box.
          Nothing here is built out of the query: the code selects this element, and the
          dictionary entry below is the translation, never a rendered value. -->
-    <p id="notice" class="msg ok show" role="status" data-i18n="notice_account_deleted"__BB_NOTICE_HIDDEN__>Your account is being deleted: this browser is signed out, and your sign-in accounts are queued for deletion. If you can still sign in later without signing up again, tell an administrator. Other browsers where you signed in stay signed in until you sign out there or the session ends.</p>
+    <p id="notice" class="msg ok show" role="status" data-i18n="notice_account_deleted"__BB_NOTICE_HIDDEN__>Your account is being deleted: this browser is signed out, and your sign-in accounts are queued for deletion. Signing in again later creates a new account; if you use an email code and are not asked to sign up first, tell an administrator. Other browsers where you signed in stay signed in until you sign out there or the session ends.</p>
 
     <div id="msg" class="msg" role="alert" aria-live="polite"></div>
 
@@ -162,7 +162,7 @@ __BB_SOCIAL_REGISTER__
     var I18N = {
       it: {
         brand_sub: "Accedi a " + BRAND,
-        notice_account_deleted: "Il tuo account è in fase di eliminazione: questo browser è disconnesso e i tuoi account di accesso sono in coda per l'eliminazione. Se più avanti riesci ancora ad accedere senza registrarti di nuovo, avvisa un amministratore. Gli altri browser in cui avevi effettuato l'accesso restano connessi finché non esci da lì o la sessione non termina.",
+        notice_account_deleted: "Il tuo account è in fase di eliminazione: questo browser è disconnesso e i tuoi account di accesso sono in coda per l'eliminazione. Se accedi di nuovo più avanti viene creato un nuovo account; se usi un codice via email e non ti viene chiesto prima di registrarti, avvisa un amministratore. Gli altri browser in cui avevi effettuato l'accesso restano connessi finché non esci da lì o la sessione non termina.",
         label_email: "Email",
         ph_email: "nome@esempio.com",
         btn_continue: "Continua",
@@ -207,7 +207,7 @@ __BB_SOCIAL_REGISTER__
       },
       en: {
         brand_sub: "Sign in to " + BRAND,
-        notice_account_deleted: "Your account is being deleted: this browser is signed out, and your sign-in accounts are queued for deletion. If you can still sign in later without signing up again, tell an administrator. Other browsers where you signed in stay signed in until you sign out there or the session ends.",
+        notice_account_deleted: "Your account is being deleted: this browser is signed out, and your sign-in accounts are queued for deletion. Signing in again later creates a new account; if you use an email code and are not asked to sign up first, tell an administrator. Other browsers where you signed in stay signed in until you sign out there or the session ends.",
         label_email: "Email",
         ph_email: "name@example.com",
         btn_continue: "Continue",

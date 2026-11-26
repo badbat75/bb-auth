@@ -5862,9 +5862,22 @@ mod tests {
     /// after the words land and reads like a broken implementation, and the Italian is the
     /// half a stub gets away with paraphrasing when only the English is asserted. The words
     /// say `queued` and never `deleted`, because that is all this estate can claim (§13.29
-    /// W6), and the last sentence is the accepted gap of §13.32 §2.
-    const NOTICE_EN: &str = "Your account is being deleted: this browser is signed out, and your sign-in accounts are queued for deletion. If you can still sign in later without signing up again, tell an administrator. Other browsers where you signed in stay signed in until you sign out there or the session ends.";
-    const NOTICE_IT: &str = "Il tuo account è in fase di eliminazione: questo browser è disconnesso e i tuoi account di accesso sono in coda per l'eliminazione. Se più avanti riesci ancora ad accedere senza registrarti di nuovo, avvisa un amministratore. Gli altri browser in cui avevi effettuato l'accesso restano connessi finché non esci da lì o la sessione non termina.";
+    /// W6), and the last sentence is the accepted gap of §13.32 §2. The middle sentence is
+    /// the slice 14e narrowing (2026-11-26): signing in again *does* create an account here,
+    /// so only an email-code sign-in that skips registration is the failure an administrator
+    /// must hear of, and a Google or Microsoft sign-in recreates the user at once.
+    const NOTICE_EN: &str = "Your account is being deleted: this browser is signed out, and your sign-in accounts are queued for deletion. Signing in again later creates a new account; if you use an email code and are not asked to sign up first, tell an administrator. Other browsers where you signed in stay signed in until you sign out there or the session ends.";
+    const NOTICE_IT: &str = "Il tuo account è in fase di eliminazione: questo browser è disconnesso e i tuoi account di accesso sono in coda per l'eliminazione. Se accedi di nuovo più avanti viene creato un nuovo account; se usi un codice via email e non ti viene chiesto prima di registrarti, avvisa un amministratore. Gli altri browser in cui avevi effettuato l'accesso restano connessi finché non esci da lì o la sessione non termina.";
+
+    /// The clause slice 14e retired, in both languages: "If you can still sign in later
+    /// without signing up again, tell an administrator". It is false for a federated account,
+    /// which is recreated on the fly, so it blamed the deletion service for a normal
+    /// sign-in (§13.33 §1). Pinned as an absence, one spelling per language, so a page that
+    /// moved the element's text but left the old sentence in a dictionary arm is red.
+    const NOTICE_RETIRED: [(&str, &str); 2] = [
+        ("en", "without signing up again"),
+        ("it", "senza registrarti di nuovo"),
+    ];
 
     /// The dictionary key the element names. One key for both arms, since the notice cannot
     /// tell a roster caller from a stranger (§13.32 §3): one code, one key, one sentence.
@@ -6043,6 +6056,22 @@ mod tests {
                 dict.contains(&format!(r#"{NOTICE_KEY}: "{words}""#)),
                 "the `{arm}` arm must carry the §13.33 sentence verbatim, and it says: {}",
                 dict_entry(&dict, NOTICE_KEY)
+            );
+        }
+        // Slice 14e: the retired clause is gone from the two texts and from every byte of
+        // the served page. The const check keeps a paste of the old wording out of this
+        // test, where it would make each assert above vacuous; the page check is the one
+        // that bites, because the sentence lives in three places (the element's text and
+        // both dictionary arms) and an edit of one leaves the others standing.
+        for (arm, retired) in NOTICE_RETIRED {
+            assert!(
+                !NOTICE_EN.contains(retired) && !NOTICE_IT.contains(retired),
+                "the §13.33 §1 texts must not carry the retired {arm} clause {retired:?}"
+            );
+            assert!(
+                !page.contains(retired),
+                "the page served for the deletion notice still carries the retired {arm} \
+                 clause {retired:?}"
             );
         }
         // One entry per dictionary, as the page's one other translated notice is pinned: a
