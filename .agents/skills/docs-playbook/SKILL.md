@@ -69,3 +69,10 @@ Rules are in `AGENTS.md`. Format of this file: `AGENTS.md`, under "Skills".
   names, in the working tree **and** in `git show HEAD:src/bin/…`, since an uncommitted slice
   (staged, not committed) has its tests only in the tree. Amend a false sentence with the file's
   own marker, "(Changed by §13.x …)" / "(Superseded by §13.x …)", so the design stays the record.
+  When the change came from a plan step that has no §13.x of its own, mark it "(Changed by plan
+  step N, YYYY-MM-DD: …)" and name what is true now, not only what was removed.
+- A §13 bullet that names **several** tests is usually moved by only some of them. Read each
+  test's body, and `git show <commit> -- src/bin/<target> | grep -n '^@@'` to see which hunks
+  moved, before writing "(Changed by …)" on it: a note about "the assertion is now a constant"
+  belongs on the test whose assertion moved, and a step that widened the self-service page left
+  the console-route walk of `no_page_but_the_reveal_carries_a_script` byte for byte as it was.

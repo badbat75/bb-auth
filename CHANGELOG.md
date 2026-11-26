@@ -34,6 +34,27 @@ upgrade: the `/account/` location forwards `X-Auth-Native-Username` and every ot
 location clears it. The packages need no order. Without that line the page shows the profile
 list and the sentence where the edit pill would be, to everybody, native accounts included.
 
+### Changed: `/account` applies a preference on selection, and writes nothing about a missing row
+
+* **Picking a theme or a language in the account menu applies it the moment it is picked**, on
+  `/account` as in the console: the two list boxes carry the console's one handler
+  (`SETTINGS_ONCHANGE`), and the Apply button is the way in for a browser running no code, inside
+  a `<noscript>`, which is what it already was in the console. The self-service page had refused
+  any handler at all, so its Apply was always shown and a choice took two clicks. One form
+  (`prefs_form`) now serves both surfaces, and one function (`page_script_src`) builds both
+  response policies, so what may run is one answer: that handler's hash, plus the copy script's
+  hash on the bearer reveal and nowhere else. The write is untouched: one `GET` to the page, one
+  `302` setting the `theme` and `lang` cookies.
+* **A caller with no roster row sees nothing** where a row shows "Account id" / "Id
+  dell'account": the line and its `br` are gone in both languages, and the sentence that said
+  "bb-auth has no roster row for you" is deleted with its key (`K::AccountNoRow`). That line
+  names an id, and with no id to name there is nothing to stand under the addresses. The page's
+  four sections, their empty states and the refusals a key write gets from a caller with no row
+  (`AccountNoRowTitle` / `AccountNoRowBody`) all read as before.
+
+Nothing to do to upgrade: no cookie, access-file or settings-file format is touched, no env var
+and no nginx line is involved, and the nginx change above is the whole of this upgrade.
+
 ### New: a person can delete their own account from `/account`
 
 * **The account menu ends with "Delete account and all its data" / "Elimina l'account e tutti i
@@ -359,7 +380,9 @@ three stylesheets are emitted by both HTML programs, so the gate's four pages, t
   because the header has named the person since the section above, and one fact in two places is
   one fact that starts disagreeing with itself. A caller with no roster row is told so in that
   same place: this URL is an `authenticated` scope, so "bb-auth has no roster row for you" is a
-  page a real person reaches, not a defensive one.
+  page a real person reaches, not a defensive one. (That last half is history: plan step 13,
+  2026-11-26, took that sentence out of the lede and deleted its key, so a caller with no row
+  now reads the addresses alone. See the Unreleased entry above.)
 * **Each of the four sections says what it is for**, in a sub-line under its heading, and each
   empty state names what is missing ("You are in no group.", "Your sign-in opens no application
   yet.") where a bare "None." said only that something was absent. A profile claim the

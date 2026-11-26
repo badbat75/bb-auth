@@ -133,7 +133,9 @@ One crate, four targets, and the split is load-bearing:
   that costs little, which `nojs.js` checks by running the whole GUI with scripting disabled.
   Two scripts exist today. One is `SETTINGS_ONCHANGE`, one inline handler that applies one of
   the account menu's two Preferences list boxes (theme, language) the moment it is picked, with
-  a `<noscript>` submit button behind it. The
+  a `<noscript>` submit button behind it. The menu is one form (`prefs_form`), so that handler
+  runs on the console **and** on the self-service page (plan step 13, 2026-11-26), and both
+  policies admit it by the same hash (`page_script_src`). The
   other is `COPY_SCRIPT`, carried only by the page that reveals a freshly minted or rotated key
   and allowed only by that response's CSP, by its hash; it reveals a hidden copy button, and with
   scripting off no button shows and one click still selects the whole key.
@@ -172,7 +174,10 @@ One crate, four targets, and the split is load-bearing:
   account" pill to this page, because the console has no page that person may open and this one
   is theirs by design. What the page shows is one lede with the caller's addresses (every email
   of one roster row, space-joined, as the gate sends them) and, on the line below, the uuid they
-  resolve to under the label "Account id", where a caller with no row is told there is none.
+  resolve to under the label "Account id". A caller with **no** roster row gets the addresses
+  alone: that second line names an id, and with no id to name there is no line and no `br`,
+  nothing standing in for a row the file does not have (plan step 13, 2026-11-26, which deleted
+  the `K::AccountNoRow` sentence).
   Then four sections, in the order a person reads them, each with a sub-line saying what it is
   for and each empty state a sentence naming what is missing: *Profile* (each configured
   `gate.profile_claims` claim and the value nginx forwarded, percent-decoded, where a configured
@@ -199,8 +204,11 @@ One crate, four targets, and the split is load-bearing:
   places** in it (this page has no tabs to move and offers no console page), so its panel is who
   the caller is in full, the Preferences box nested and closed, and Sign out. The person chooses
   only the theme (light, dark, "Auto (system)") and the language (English, Italian, auto) from
-  that box, as a `GET` back to the page with an always-present Apply and **no handler at all**,
-  not even the console's one: one submit answers one `302` that sets the `theme` and `lang`
+  that box, which is the console's own form: its two list boxes carry the console's one
+  `SETTINGS_ONCHANGE` handler, so a choice applies the moment it is picked, and the Apply sits
+  inside `<noscript>` as the way in for a browser running no code (plan step 13, 2026-11-26,
+  which replaced the page's "no handler at all" and its always-present Apply). The form is a
+  `GET` back to the page, and one submit answers one `302` that sets the `theme` and `lang`
   cookies, the same names the console writes, so a choice carries between the two surfaces on
   one host.
   Its Sign out is the console's `BB_AUTH_WEB_LOGOUT_URL` with its `rd` parameter dropped

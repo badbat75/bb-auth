@@ -71,7 +71,7 @@ the gate is the gate's, and stays in one file.
 | `src/lib.rs` (`bb_auth_core`) | **The access file.** Schema (`AccessFile`), parser (`compile_access`), URL matcher (`glob_match` / `UrlScope`), the two-level resolution (`Access::resolve`, `base_covers`), the grant model (`decide`, `decide_api_key`), identity and key minting (`mint_uuid`, `mint_api_key`), and how a file is edited and written (`open_access_file`, `AccessWrite`, the document mutations). Plus the settings file, and **the presentation contract** (`THEME_CSS` from `src/assets/theme.css`, `BASE_CSS` from `src/assets/base.css`, `UiTheme`, `stylesheet_link`, `html_escape`, `compile_asset_url`): the palette two programs paint from **and the components they build out of it**, on the same membership rule as everything else here. A thing (a button, a field, a card, a tag, a message) is defined once for all of them; how a page arranges those things is not. Reads no env, opens no socket, holds no HTTP, prints nothing. |
 | `src/bin/bb-auth.rs` (`bb-auth`) | **The gate**, still a single file read top to bottom: HTTP, config, the session cookie, id_token validation, the nginx contract, and the four pages it serves out of `src/assets/` (sign-in, social callback, refusal, error). |
 | `src/bin/bb-auth-adm.rs` (`bb-auth-adm`) | **The access-file admin CLI.** CRUD over `applications` / `scopes` / `user_groups` / `denied` / `users` / `api_keys`, key minting and rotation, and `can EMAIL URL` — which calls the library's `decide`, so it answers the question the gate will answer. Every edit and every write is a library call (`AccessWrite`), so it cannot save a file the gate would reject; what is left here is flags, warnings and the wording of a verdict. See §12. |
-| `src/bin/bb-auth-web.rs` (`bb-auth-web`) | **The access-file admin GUI**: server-rendered (`maud`; no page needs JavaScript, the one inline handler is the account menu's Preferences shortcut with a `<noscript>` submit behind it) over the library, read *and* write; CRUD through `AccessWrite` alone, `POST`-only mutations behind a same-origin check and a `rev` (sha256-of-file) concurrency check. Both surfaces wear one header (`top_bar`), one row at every width: the deployment's logo, its name, the console's **four** tabs, and a pill (given name, else the first address) that opens the **account menu**, whose rows are the caller's addresses, the System settings page, "Go to your account" on the console only, Preferences nested and closed, and Sign out; at 800px and below the tabs ride in that menu too (§13.28). Loopback behind nginx `auth_request`, identity from the `X-Auth-Email` nginx injects plus its own administrator allowlist (`web.admins` in the settings file, read fresh on every request and editable from its own System settings page). The **self-service page** at `BB_AUTH_WEB_ACCOUNT_PATH` (`/account`) is the one part of it a person who is not an administrator reaches: dispatched *ahead of* `web.admins`, since an administrator there is one more person acting on their own account, with four sections about the caller (reach, groups and profile read-only, the API keys section carrying the caller's own mint, rotate and revoke), the `denied` veto answered ahead of them, the `ui` look in a centred card, and a theme and language selector answered by one `302` setting the console's own cookies. The two prefixes are siblings, and `compile_account_path` refuses at startup a page equal to, inside or containing the console's base, which is what makes an empty `BB_AUTH_WEB_BASE_PATH` a fatal startup. See §13. Links the library, none of the gate. |
+| `src/bin/bb-auth-web.rs` (`bb-auth-web`) | **The access-file admin GUI**: server-rendered (`maud`; no page needs JavaScript, the one inline handler is the account menu's Preferences shortcut with a `<noscript>` submit behind it) over the library, read *and* write; CRUD through `AccessWrite` alone, `POST`-only mutations behind a same-origin check and a `rev` (sha256-of-file) concurrency check. Both surfaces wear one header (`top_bar`), one row at every width: the deployment's logo, its name, the console's **four** tabs, and a pill (given name, else the first address) that opens the **account menu**, whose rows are the caller's addresses, the System settings page, "Go to your account" on the console only, Preferences nested and closed, and Sign out; at 800px and below the tabs ride in that menu too (§13.28). Loopback behind nginx `auth_request`, identity from the `X-Auth-Email` nginx injects plus its own administrator allowlist (`web.admins` in the settings file, read fresh on every request and editable from its own System settings page). The **self-service page** at `BB_AUTH_WEB_ACCOUNT_PATH` (`/account`) is the one part of it a person who is not an administrator reaches: dispatched *ahead of* `web.admins`, since an administrator there is one more person acting on their own account, with four sections about the caller (reach, groups and profile read-only, the API keys section carrying the caller's own mint, rotate and revoke), the `denied` veto answered ahead of them, the `ui` look on the console's own column (§13.26), and a theme and language selector in the account menu, answered by one `302` setting the console's own cookies. The two prefixes are siblings, and `compile_account_path` refuses at startup a page equal to, inside or containing the console's base, which is what makes an empty `BB_AUTH_WEB_BASE_PATH` a fatal startup. See §13. Links the library, none of the gate. |
 
 Inside `src/bin/bb-auth.rs`, in file order:
 
@@ -1911,9 +1911,16 @@ hash to it, and only that block: "you can create hashes from your inline scripts
   The first two are today's, because the console's shell carries the Settings list boxes on
   every page, this one included. `'unsafe-hashes'` then also lets an *attribute* whose body is
   exactly `COPY_SCRIPT` run; that is our own constant, so it grants nothing new.
-- `/account/` reveal: `script-src <hash(COPY_SCRIPT)>`, and nothing else.
+- `/account/` reveal: `script-src <hash(COPY_SCRIPT)>`, and nothing else. (Changed by plan
+  step 13, 2026-11-26: it is `'unsafe-hashes' <hash(SETTINGS_ONCHANGE)> <hash(COPY_SCRIPT)>`
+  now, the console's own, because the reveal wears the account menu, which carries the
+  Preferences list boxes on this surface too.)
 - **Every other response keeps the policy it has**: the console's `'unsafe-hashes'` plus the
-  one handler, `/account/`'s `'none'`.
+  one handler, `/account/`'s `'none'`. (Changed by plan step 13, 2026-11-26: `/account/`'s is
+  not `'none'`. Both policies are built by one `page_script_src(reveal)`, so the two surfaces
+  allow exactly the same thing to run: the handler's hash, plus the copy script's on a reveal
+  and on nothing else. `only_the_reveal_policy_names_the_copy_script` compares the two
+  directives and so pins the sharing.)
 
 The widening is a distinct response path rather than a flag every page passes: `admin_csp`
 and `account_csp` each take a `reveal: bool`, and the only callers that pass `true` are the
@@ -1948,7 +1955,10 @@ reveal is a button that never appears, which the e2e walk below catches.
   every route of `every_route()` still has no `<script` and only the two Settings handlers; the
   console's mint and rotate `POST` responses and `/account/`'s mint and rotate responses each
   carry **exactly one** `<script>`, whose content's `csp_hash` is in that response's
-  `Content-Security-Policy`, and no `on…` attribute beyond the console's two.
+  `Content-Security-Policy`, and no `on…` attribute beyond the console's two. (Changed by plan
+  step 13, 2026-11-26: "the console's two" is now "the shell's two" on **both** surfaces, and the
+  assertion is a constant `2` where it used to be `2` for the console and `0` for
+  `/account/`.)
 - `the_reveal_shows_only_the_key`: on all four reveal responses, the text of `code id="bearer"`
   equals the bearer exactly, the body contains no `Authorization`, the bearer occurs once in the
   body and that occurrence is inside the `code` element, and the button is `type="button"` and
@@ -1956,7 +1966,10 @@ reveal is a button that never appears, which the e2e walk below catches.
 - `only_the_reveal_policy_names_the_copy_script`: `admin_csp(_, false)` and `account_csp(_, false)`
   do not contain `csp_hash(COPY_SCRIPT)`, and `account_csp(_, false)` still says
   `script-src 'none'`; the `true` variants contain it. A failed mint (the `400` key form) and the
-  `409` carry no script.
+  `409` carry no script. (Changed by plan step 13, 2026-11-26: no policy says `script-src 'none'`
+  any more, and the test compares the two surfaces' `script-src` directives for equality, on the
+  `false` and the `true` variants alike, so the copy hash stays the only difference a reveal
+  makes.)
 
 E2E: `nojs.js` keeps its zero-script list and adds the console reveal twice, with scripting on
 (one `script`, the button visible, a click shows `K::CopyDone`, and in Chromium with
@@ -2539,7 +2552,7 @@ enough, for both surfaces at once, then required that the operator's theme keep 
 | brand | `a.brand` "bb-auth-web" plus version, links home. (Changed by §13.18: `ui.brand_name`, else `bb-auth`, over `K::ConsoleTag` ("Administration" / "Amministrazione"), still a link; the version is the footer's alone) | `span.brand.selfserve-brand`: the `ui.logo_url` image (when set) and `ui.brand_name`, where the page shows them today; not a link, since the page is the only one |
 | tabs | the five `nav` pills | an empty `nav`, which is what the console's own `403` page already renders |
 | identity | **new**: `span.who.muted` in `nav.acct`, the address | the same: the given name and the first address ("Bot · `bot@example.com`"), or the address alone |
-| Preferences | `details.settings` "Preferences" (`K::Settings`), Language then Theme, `onchange` applies, `noscript` Apply | the same `details` and `.menu` and order, **no `onchange`**, and the Apply `button` in `div.actions` always present |
+| Preferences | `details.settings` "Preferences" (`K::Settings`), Language then Theme, `onchange` applies, `noscript` Apply | the same `details` and `.menu` and order, **no `onchange`**, and the Apply `button` in `div.actions` always present (Changed by plan step 13, 2026-11-26: the same `onchange` and the same `noscript` Apply, both shells emitting one `prefs_form`) |
 | Sign out | `a.pill` to `BB_AUTH_WEB_LOGOUT_URL`, absent when unset | the same pill and the same setting, with its `rd` dropped (below) |
 
 **Where they differ, and why.** The account page carries no handler at all (AGENTS.md, the
@@ -2551,7 +2564,12 @@ names the console writes. The form's `action` is the account page. The brand slo
 operator's brand because this page is the operator's estate seen by a person, while the
 console names the tool to its administrators. (Changed by §13.18: the console's bar names the
 deployment the same way, over a line saying what that surface is, so the sentence's second half
-no longer holds; the reason for the first half stands.)
+no longer holds; the reason for the first half stands.) (Changed by plan step 13, 2026-11-26:
+the first sentence describes what was built then, not the page as it stands. The user asked for
+fewer clicks, so the account menu carries the console's handler, its policy admits that handler
+by the same hash (`page_script_src` is one function for both surfaces), and Apply is the
+`noscript` fallback here exactly as it is there. The write is unchanged: one `GET`, one `302`,
+the same two cookie names, and the page still works with scripting off through that button.)
 
 **The identity, added to the console too.** Today the console says who is signed in only in
 its footer, below the fold on a long page; Nielsen's first heuristic (visibility of system
@@ -2636,7 +2654,11 @@ text is the action word, and the `<title>` ends with it).
 
 - `h1` `K::AccountTitle`, then one `p.lede`: every address in `code`, and on a second line
   `K::AccountIdLabel` ("Account id") and the uuid (approved by the user). A stranger's
-  `p.lede` carries the address and `K::AccountNoRow` instead of the uuid.
+  `p.lede` carries the address and `K::AccountNoRow` instead of the uuid. (Changed by plan
+  step 13, 2026-11-26: a caller with no roster row gets the addresses alone. The second line
+  names an id, so with no id to name the line and its `br` go, in both languages, and
+  `K::AccountNoRow` is deleted with its sentence: the page writes no words standing in for a
+  row the file does not have.)
 - (Changed by §13.26: the order is now `#profile`, `#keys`, `#groups`, `#reach`, the user's
   decision of 2026-11-25, and the profile sub-line is reworded.) The four sections keep their
   ids and order (`#reach`, `#groups`, `#keys`, `#profile`): each
@@ -2665,7 +2687,9 @@ applications about you." (Italian in the `K` table.)
 
 - The lede: `p.lede` holding each address as `code`, separated by one space, then `br`, then
   `K::AccountIdLabel` `": "` and the uuid in `code`; for a stranger, after the `br`,
-  `K::AccountNoRow` as plain text. The old `p` "signed in as" and the separate uuid `p` go:
+  `K::AccountNoRow` as plain text. (Changed by plan step 13, 2026-11-26: the `br` travels with
+  the id, so a caller with no row gets the `code` addresses and nothing after them.) The old
+  `p` "signed in as" and the separate uuid `p` go:
   the bar already says "signed in as" (§13.17 header), and the lede says which addresses and
   which account.
 - Each section: `section#<id>.panel` > `h2` > `p.lede.sub` > content.
@@ -2692,7 +2716,10 @@ gruppo."; `AccountProfileNone` "Questa installazione non condivide dettagli del 
 
 Tests (8c-1): `the_lede_names_the_addresses_and_the_account_id` (a row with two addresses:
 one `p.lede` before the first section, both addresses in `code`, `Account id: <uuid>`; a
-stranger: the address and `AccountNoRow`, no uuid; no "signed in as" in `main`);
+stranger: the address and `AccountNoRow`, no uuid; no "signed in as" in `main`). (Changed by
+plan step 13, 2026-11-26: the stranger's half is now the address, no `<br` anywhere in the
+lede, no `code class="uid"`, and neither language's old no-row sentence; the words of that
+sentence live in the test as constants, since the key they used to read is deleted.);
 `each_section_says_what_it_is_for` (each of the four sections has exactly one `p.lede.sub`
 right after its `h2`, with its key's text, in both languages); `empty_sections_name_what_is_missing`
 (a stranger with no groups and a deployment with no claims: the three `*None` sentences in
@@ -2818,7 +2845,11 @@ whose text is `NotAdminToAccount`, in both languages; the `nav` before `nav.acct
 list. It is the one place the account menu's always-present Apply is seen in review. The phone
 view runs it with no change, since that view takes every scene. Check: `node e2e/shots.js
 account-menu` writes `{light,dark,phone,it}/account-menu.png`, and the image shows the menu
-open with the identity line, both list boxes and Apply.
+open with the identity line, both list boxes and Apply. (Changed by plan step 13, 2026-11-26:
+the Apply is behind `noscript` on this surface as it is in the console, so a scripting view
+shows the identity line and the two list boxes and no button, and the scene's own comment says
+as much; the `noscript` view is where the button is seen in review, and `nojs.js` is where
+pressing it is checked on both surfaces.)
 
 #### Icons instead of words: one component (asked 2026-11-24)
 
@@ -2950,7 +2981,11 @@ the account body to the menu's first line; `AccountUuid` is replaced by `Account
 (no `onchange` anywhere under the prefix, an Apply button in the menu, the form a `GET` to the
 page); `the_console_footer_no_longer_names_the_identity`; `each_section_says_what_it_is_for`;
 `empty_sections_name_what_is_missing`. The existing shell tests asserting the footer's "signed
-in as" change.
+in as" change. (Changed by plan step 13, 2026-11-26: `the_account_menu_has_no_handler` is
+deleted with the rule it pinned. What stands in its place asserts the sharing and its bound:
+`the_preferences_form_is_scripted_on_both_surfaces`,
+`the_account_policy_admits_the_preferences_handler`, and
+`account_every_look_and_preference_page_carries_no_script_and_only_the_menu_handler`.)
 
 **Slices.** 8a: §13.16 (the table, the + row, the confirmations through a shared
 `page_confirm`, the `td.pills` fix, the duration select on both surfaces). 8c: the body's lede,
@@ -2976,7 +3011,10 @@ functions:
   the bar needs (the identity once it is read, and the Sign out `href`), so `account_shell`'s
   callers do not change. The pill still uses `Config::logout_url` here. Green:
   `both_surfaces_share_one_header`, `the_account_menu_has_no_handler`, and
-  `icon_controls_are_named_by_hidden_text` extended to the account page.
+  `icon_controls_are_named_by_hidden_text` extended to the account page. (Changed by plan step
+  13, 2026-11-26: the menu here is the console's, `onchange` and all, and that test is gone with
+  the rule it pinned, `the_preferences_form_is_scripted_on_both_surfaces` and
+  `the_account_policy_admits_the_preferences_handler` standing in.)
 - **8b-3, the two decisions above.** `logout_without_rd` and `Config::account_logout_url`, fed
   to the account's pill; `confirm_card` split out of `page_confirm_at` and used by
   `page_account_confirm`, whose caller passes the action word as the title. Green:
@@ -3388,7 +3426,9 @@ viewport. A click anywhere outside the menu lands on that box, which *is* the `s
 browser does what activating a summary always does: it toggles the `details` shut. `.menu`
 keeps `z-index:10`, one above the cover, so everything inside the panel (the list boxes, Apply,
 the console's `SETTINGS_ONCHANGE` submit) is hit first and works as it does today. No markup
-changes and no script is added, so the account page keeps "no handler at all".
+changes and no script is added, so the account page keeps "no handler at all". (Changed by plan
+step 13, 2026-11-26: that half held until then, when the page gained the console's handler; the
+cover rule itself is untouched, and the two list boxes it protects are the ones that submit.)
 
 Why not a script, under "JavaScript is used sparingly": markup and CSS do this one well, and a
 script would buy only Escape-to-close. Escape is not owed here. The control is a disclosure (a
@@ -4898,7 +4938,11 @@ small enough for one red-green pass, in order (W comes with 5g):
   `onchange` and the `noscript` Apply) and `account_shell` (`scripted: false`: no handler, Apply
   always shown, `who` omitted when the page has its own lede). Deletes the second copy of the
   two `select`s and their option lists in `account_shell`. The `scripted` flag is the one real
-  difference (the account page carries no script, §13.17).
+  difference (the account page carries no script, §13.17). (Changed by §13.28 §7, which shipped
+  it as `prefs_form`, the `who` and the logout slot moving to `account_menu`. Changed by plan
+  step 13, 2026-11-26: the flag is deleted, and both shells call one `prefs_form(lang,
+  lang_pref, theme, action, hidden)` with the same arguments, because the user asked for the
+  theme to apply on selection on this page too. There is no second shape of the form left.)
 - **D. One document skeleton.** New `page_document(lang, theme_attr, title, stylesheet,
   body)`: `DOCTYPE`, `html lang data-theme`, the `head` with the three raw styles and
   `stylesheet_link`; both shells pass their own title string ("bb-auth-web · ..." versus
@@ -4927,7 +4971,11 @@ Kept different, with the reason:
   inert `span` with the operator's logo, because it is the only page its visitor came for
   (§13.17). Whether the console should show the logo too is open question 1.
 - **`account_csp`.** The account page shows the logo, so its `img-src` is not the console's
-  `'none'`.
+  `'none'`. (Changed by §13.28 §6: `admin_csp` passes the logo to `page_csp` too, so that
+  difference went. Changed by plan step 13, 2026-11-26: `script-src` is shared as well, through
+  `page_script_src`, so the two policies are one function's output for one `reveal`; what is
+  left of this bullet is that the logo reaches the two policies by separate arguments,
+  `admin_csp_logo`'s own and `AccountLook::logo`.)
 - **The keys' mint row.** No owner field and no `released` (the owner is the caller): that is a
   rule, not a style.
 
@@ -5360,8 +5408,10 @@ preference (Nielsen 7, efficiency), accepted because it is rare.
 - **Scripting off.** Everything is HTML: both disclosures open, the links navigate, and the
   Preferences form submits with its button. The console keeps its one handler as it is
   (`onchange=SETTINGS_ONCHANGE` on both `select`s, `noscript` Apply); `/account/` has no handler
-  and its Apply is always shown in `div.actions`. The form is the same `GET` to the page and the
-  same `302` that sets `theme` and `lang`.
+  and its Apply is always shown in `div.actions`. (Changed by plan step 13, 2026-11-26: that
+  handler is on both surfaces, so the button is the `noscript` fallback on each, and "scripting
+  off" means that button here exactly as it does in the console.) The form is the same `GET` to
+  the page and the same `302` that sets `theme` and `lang`.
 - **Size.** The panel gets `max-height:calc(100dvh - 80px); overflow-y:auto`, so a short phone in
   landscape can still reach the last row (`dvh`:
   <https://developer.mozilla.org/en-US/docs/Web/CSS/length#dynamic_viewport_units>), and
@@ -5477,13 +5527,16 @@ both shells, so no menu markup is written twice.
 - `prefs_form(lang, lang_pref, theme, action, hidden: &[(String, String)], scripted: bool) ->
   Markup`: the `form.edit` with the two `select`s; `scripted` adds the `onchange` and wraps
   Apply in `noscript`, else Apply is plain in `div.actions`. Deletes the second copy in
-  `account_shell`.
+  `account_shell`. (Changed by plan step 13, 2026-11-26: the `scripted` argument is deleted, and
+  one shape ships for both surfaces, the two `select`s carrying
+  `onchange=SETTINGS_ONCHANGE` and Apply inside `noscript`.)
 - `account_menu(lang, who: Option<&Who>, places: Option<Markup>, prefs: Markup, logout:
   Option<&str>) -> Markup`: the `details.settings` with the trigger and the panel in §2's order.
   Step 7 adds a `delete: Option<&str>` argument. `shell_named` passes `Some(div.menu-tabs from
   tab_links(v) + the System settings row)` when `v.admin` is set, `Config::logout_url`,
   `scripted: true`; `account_shell` passes `None`, `Config::account_logout_url`,
-  `scripted: false`.
+  `scripted: false`. (Changed by plan step 13, 2026-11-26: those two are the `prefs_form` flag's
+  call sites, and the flag is gone from both; `account_menu`'s own signature is untouched.)
 - `brand_block(name, tag: Option<&str>, logo: Option<&str>, href: Option<&str>) -> Markup` for
   the brand slot of both shells (link or `span`, the logo, `span.t`), so slice L is not written
   twice either.
@@ -5525,11 +5578,18 @@ Unit and socket tests in `src/bin/bb-auth-web.rs`:
   new text in both languages.
 - The preference handlers: the console's two `select`s carry `onchange="this.form.submit()"` and
   Apply is inside `noscript`; the account's carry no `on…` attribute and Apply is in
-  `div.actions`. `no_page_but_the_reveal_carries_a_script` unchanged.
+  `div.actions`. `no_page_but_the_reveal_carries_a_script` unchanged. (Changed by plan step 13,
+  2026-11-26: the account's two carry the same handler and the same `noscript` Apply, and that
+  test now asserts exactly two handler attributes on every page of **both** surfaces, each one
+  the shell's; `nojs.js` allows the same two, and runs the self-service page with scripting on
+  to show a pick submits.)
 - `the_console_shows_the_logo_and_permits_it`: with `ui.logo_url` set, the console's `a.brand`
   holds `img[alt=""]` with that `src` before `span.t`, and `admin_csp`'s `img-src` is that
   source followed by `data:`; without it, no `img` and `img-src data:` exactly as today. The
-  account page's policy is byte for byte what it was.
+  account page's policy is byte for byte what it was. (Changed by plan step 13, 2026-11-26: what
+  that test compares across the two surfaces is `img-src`, and it still passes; the account
+  page's whole policy is not what it was, since its `script-src` gained the handler's hash, so
+  the sentence's "byte for byte" is the logo's half only.)
 - CSS, parsed as `an_open_menu_closes_on_a_click_outside_it` does: `.bar` has
   `flex-wrap:nowrap`; outside the media blocks `.menu-tabs{display:none}`, the trigger's
   `max-width:16rem` and `min-width:0`, `.who-name` and `.brand .t` with
@@ -6459,7 +6519,9 @@ The facts inside the panel, in this order, each present only where it applies:
    A sentence after the list rather than a second `p.lbl` ("Deleted later"), for the reason the
    overnight mockup found: `ul.plain` has no margin, and a second label sits against the last item.
 3. Stranger only: **nothing**. (Changed by the user, 2026-11-26: the page's existing
-   `K::AccountNoRow` sentence is not written here, and no line stands in its place.) A person who
+   `K::AccountNoRow` sentence is not written here, and no line stands in its place. Plan step 13,
+   the same day, took that sentence out of the account page as well and deleted the key, so the
+   sentence this bullet declined to write exists nowhere now.) A person who
    came to delete is being told what goes, and a line about what is not there is not a fact about
    the deletion, so the stranger's list is the sign-in accounts and the page stops there.
 4. `p.muted`, the audit: with a retention, `K::AccountDeleteAuditKept` + `" "` +
@@ -6603,7 +6665,9 @@ Why these shapes:
 
 Reworded on 2026-11-26: **18 added, 1 changed (`AccountDeleteChanged`), 17 removed**, 19 kept
 from the overnight table, 38 in all. Reused unchanged from elsewhere: `Cancel`, `Back`, `SignOut`,
-`AccountNoRow`, and the `Unit*` words through `limit_text`. No `AccountProfile*` key is used by
+`AccountNoRow` (the last deleted by plan step 13, 2026-11-26, with the account page's no-row
+sentence; the deletion never wrote it, so the removal costs this design nothing), and the `Unit*`
+words through `limit_text`. No `AccountProfile*` key is used by
 the deletion any more.
 
 | Key | English | Italian |
@@ -7416,3 +7480,209 @@ consistency).
   from a scratch probe on plain `/config` (the `config-*` scenes force every group open), plus
   the help texts of the sign-in group in Italian, before the slice closes. No new `shots.js`
   scene: `config-landing-refused` already shows the register on screen.
+
+### 13.32 Deleting the account signs the person out (plan step 14, designed 2026-11-26)
+
+Asked by the user on 2026-11-26, after the first real self-service deletion on rpi-01: the
+roster row and the key went (the key answered `401`), the owner's worker deleted the Cognito
+user, and the done page then said "This browser stays signed in until you sign out, so sign out
+now." Confirming the deletion should sign the person out by itself. A second finding from the
+same run: the session cookie is stateless and lives `gate.session_ttl_secs` (30 days there), so
+any `authenticated` scope keeps admitting the deleted identity, in every browser that holds such
+a cookie, until it expires.
+
+**What was read.** `account_delete_post` and `page_account_delete_outcome`
+(`src/bin/bb-auth-web.rs`), `logout_without_rd` and `Config::account_logout_url`; the gate's
+`handle_logout`, `logout_target`, `safe_rd`, `rd_candidate`, `build_cookie`, `make_session` /
+`verify_session`, `handle_login` / `login_rd` / `login_page` and `src/assets/login.html`; the
+README's logout recipe (`location = /auth/logout`, `X-Original-URL` needed only for a relative
+`rd`); `e2e/lib/server.js` (`BB_AUTH_WEB_LOGOUT_URL: '/auth/logout'`) and the `account-delete-*`
+scenes; §13.29 W3 and W6, §13.30 §4. rpi-01's nginx and settings were **not** read (no SSH host
+key in this session): what they must hold is listed under 14d as a read for the coordinator.
+
+#### 1. Decision for this browser: the success answer is a `303` through the gate's logout
+
+On the one outcome where every address was queued (§13.29 W6, the `200` rows of §13.30 §4), and
+only where `BB_AUTH_WEB_LOGOUT_URL` is set, the `POST` answers
+
+```text
+303 See Other
+Location: <account_logout_url> ? or & rd=%2Fauth%2Flogin%3Fnotice%3Daccount-deleted
+```
+
+and renders no page. The browser follows with a `GET` (RFC 9110 §15.4.4, not re-read this
+session; the console's preference write already relies on a redirect after a submit), the gate's
+`/auth/logout` clears the cookie with the same `(name, Domain, Path)` it was minted with
+(`build_cookie`), records the sign-out in the audit as every logout does, and sends the browser to
+its own sign-in page with a notice that says what was queued. The person never sees a page that
+asks them to sign out, because by the time a page is drawn they are signed out.
+
+- **Why the gate clears it, not bb-auth-web.** The gate is the only program that knows the
+  cookie's name and the only one that builds the clearing `Set-Cookie`; a second builder is the
+  drift `build_cookie`'s rustdoc warns about (a clear whose `Domain` or `Path` differs from the
+  mint's "silently succeeds at nothing").
+- **Why `rd` names the gate's own page, always, and not `gate.login_url`.** Only the gate's page
+  understands the notice, and it is a page every deployment already routes ungated (AGENTS.md:
+  "nginx must leave all three page locations ungated"). An operator's own sign-in page would land
+  the person signed out with nothing said.
+- **Why relative.** bb-auth-web knows neither its scheme nor its host (`logout_without_rd`'s
+  rustdoc). The logout's `safe_rd` resolves a relative `rd` against `X-Original-URL` on the logout
+  location, which the README's recipe sets. Without it the gate falls back to the login page
+  (`logout_target`): the person is still signed out and only the notice is lost, which is
+  fail-soft and is what 14d checks on rpi-01.
+- **Why only on full success.** Every partial outcome (§13.30 §4: the first `POST` refused or
+  unanswered, some queued) offers "Try again", and the retry is the stranger's walk over the
+  header's addresses, which needs the session. Those pages keep their "Sign out" pill and their
+  words. With no logout URL configured the done page stays what it is (`K::AccountDeletedClose`,
+  no pill): there is nowhere to send the browser.
+- **The notice is a closed set of one.** `/auth/login?notice=account-deleted` shows one fixed
+  paragraph from `login.html`; any other value, or none, shows nothing, and no byte of the query
+  reaches the page. That keeps AGENTS.md's "request data reaches a page in exactly one place,
+  `data-rd`" true in substance (a code selects a fixed element, nothing is reflected), and the
+  sentence there gains that clause (docs, 14c). The page itself is unchanged otherwise: the form
+  is there, since a person whose Cognito user is not yet deleted can still sign in, and the notice
+  says so.
+- **What both programs must agree on**, by the library's membership rule: the path
+  `/auth/login` and the code `account-deleted`. Two `pub const`s in `bb_auth_core`
+  (`GATE_LOGIN_PATH`, `LOGIN_NOTICE_ACCOUNT_DELETED`); the gate's `OWN_LOGIN_PATH` becomes the
+  library's, and bb-auth-web builds the `rd` from both.
+
+Alternatives rejected:
+
+| Option | What it costs | Why not |
+|---|---|---|
+| (b) bb-auth-web clears the cookie itself | the cookie's name in a second env file, and a second builder of the clearing `Set-Cookie` | two copies of `BB_AUTH_COOKIE_NAME` drift with nothing to catch it; a clear that differs in `Domain`/`Path` does nothing and says nothing; bb-auth-web is "just another app bb-auth fronts", and no app touches the gate's cookie |
+| (c) the done page with `<meta http-equiv="refresh">` to the logout | no code in the gate | with a delay it fails WCAG 2.2.1, 2.2.4 and 3.2.5 (F41: the page changes under a person reading it); with no delay nobody reads the page, so it is (a) with an extra hop; and it is still a page asking a browser to do what an HTTP answer can |
+| a script on the done page | one more inline script | W12 ("JavaScript is used sparingly"), and it does what (c) does |
+| a hidden `img`/`iframe` loading `/auth/logout` | a CSP widening | a sign-out nobody can see happen, relying on a subresource's `Set-Cookie`; obscure for no gain over (a) |
+| `rd` to a bb-auth-web page after the logout | an ungated route in bb-auth-web | every bb-auth-web request needs `X-Auth-Email` ("a missing header is a 401"); a signed-out person has none, and opening a route without it changes the trust model for one sentence |
+| `rd` to `gate.landing_url` | nothing | on rpi-01 it is `/account/`, which is gated: a signed-out browser lands on the sign-in page with no notice |
+
+#### 2. Decision for other browsers: accept the gap, and say so
+
+Recommended: **accept it, state it in AGENTS.md and on the notice**, and build nothing, because
+while self-signup is open the stale cookie grants nothing a stranger cannot get in a minute.
+
+The argument, from what the gate decides with a cookie after the row is gone:
+
+- `restricted` scopes admit nobody: the cookie's email resolves to no roster row, so it is a
+  member of nothing (`ScopeRecord::members` are references to rows, and `remove_user` swept them).
+- `excluded` entries naming the row were rewritten to its primary email, and `denied` matches a
+  bare email, so every veto still applies to the stale cookie.
+- The API keys went with the row (`401` measured on rpi-01).
+- What is left is `anonymous` and `authenticated` scopes. `authenticated` admits any identity
+  Cognito vouches for, and with self-signup open (AGENTS.md; `AllowAdminCreateUserOnly` false
+  means "users can register themselves", Cognito API reference, AdminCreateUserConfigType) the
+  deleted person can register the same email again at once and walk into exactly the same
+  scopes. The stale cookie is therefore no wider than the front door.
+- An id_token bearer works until its own `exp`, which is the pool's ID-token validity (not read
+  here); the same argument covers it.
+
+The premise is the one thing to watch: **if the pool becomes admin-create-only**, or an
+`authenticated` scope starts to mean "people we once knew", the gap becomes real and the
+tombstone below is the design to build.
+
+Alternatives weighed:
+
+| Option | What it costs | Verdict |
+|---|---|---|
+| a revocation the gate checks per request (session ids in a store) | a server-side store, its writer, its backup; breaks "Sessions are stateless" (any worker validates any cookie, a restart logs nobody out) | rejected: an invariant traded for a gap no wider than self-signup |
+| the email into `denied` | nothing to build | rejected: `denied` is permanent and blocks a re-registration with that email for ever, and is never lifted by design (§13.29) |
+| **a tombstone**: a time-bounded section of the access file, `{email, at}`, written by `remove_user`'s self-service caller; the gate refuses a cookie for that email minted before `at` (an `iat` key added to the cookie's claims object, which is no `COOKIE_VERSION` bump, §13.25), and a cookie with no `iat` for that email; editors drop entries older than `at + session_ttl` | a schema change (version 2 of the access file or a tolerated top-level key, read by three programs), an `iat` in every cookie, a check on the validate path, pruning in both editors, and its tests | stateless (it is the access file, re-read per request like `denied`), so no invariant breaks; **the design to build if the premise above fails**, not now |
+| a shorter `gate.session_ttl_secs` on rpi-01 | more sign-ins for everybody; no code | narrows the gap, closes nothing; an operator's choice, not a fix |
+| accept, and say so | one AGENTS.md paragraph, one sentence on the notice | **recommended** |
+
+#### 3. What changes for the designer
+
+- **The success page of §13.30 §4 is gone** where a logout URL is set: the two `200` rows
+  (roster, stranger) become "`303` to the logout, then the sign-in page with the notice". Their
+  words move to the notice, in `login.html` (English in the element, Italian in the page's
+  `i18n` dictionary under one key, e.g. `notice_account_deleted`), not in `K`.
+- **One sentence for both rows.** The notice cannot tell a roster caller from a stranger (one
+  code, nothing reflected), so it says what is true for both: the sign-in accounts are queued
+  for deletion, this browser is signed out, and if signing in still works later, tell an
+  administrator. `K::AccountDeleteNowGone` (keys and named access gone) is not on it; the
+  confirmation page already said what goes. If the designer wants the roster half back, a second
+  code is cheap and is the only change; say so before 14a.
+- **The gap's sentence**: other browsers where the person signed in stay signed in until they
+  sign out there or the session ends. Whether it carries the session length is the designer's
+  call (the gate knows `session_ttl`; a number means formatting days in two languages).
+- `K::AccountDeletedSignOut` goes (nothing renders it); `K::AccountDeletedClose` stays for the
+  no-logout-URL page. The partial pages' wording is unchanged.
+- The notice is a status message on a page whose job is a form: `role="status"`, above the form,
+  the components `BASE_CSS` already has for a message. It is hidden with the `hidden` attribute,
+  so `AUTH_CSS` needs a `[hidden]{display:none}` rule (the operator's stylesheet loads later and
+  can override `hidden` with a `display` rule).
+
+#### 4. Slices and tests
+
+**14a. The gate's notice** (`src/lib.rs`, `src/bin/bb-auth.rs`, `src/assets/login.html`,
+`src/assets/auth.css`). Red first:
+
+- `the_sign_in_page_shows_the_deletion_notice_only_for_its_code` (gate, over `login_page`): with
+  `notice=account-deleted` the notice element has no `hidden`; with no `notice`, `notice=other`,
+  `notice=` and `notice=<script>x</script>` it carries `hidden`, and in every case the page bytes
+  contain no part of the query beyond the fixed element.
+- `the_deletion_notice_speaks_both_languages` (gate): the element's `data-i18n` key is in both
+  arms of the page's dictionary, and the English text in the element equals the `en` arm.
+- `the_login_path_is_the_librarys` (gate): `global_login` of an empty `gate.login_url` equals
+  `bb_auth_core::GATE_LOGIN_PATH` (pins the move of `OWN_LOGIN_PATH`).
+- `a_logout_with_the_deletion_rd_clears_and_lands_on_the_notice` (gate, router over a socket):
+  `GET /auth/logout?rd=%2Fauth%2Flogin%3Fnotice%3Daccount-deleted` with `X-Original-URL` on an
+  authorized host and `Sec-Fetch-Site: same-origin` answers `302` to
+  `https://<host>/auth/login?notice=account-deleted` and a `Set-Cookie` with `Max-Age=0`, the
+  configured `Domain` and `Path=/`; without `X-Original-URL` it still clears and lands on the
+  login page (the fail-soft half).
+- Checks: `cargo test`, clippy, fmt, and a look at `/auth/login?notice=account-deleted` in a
+  browser, both languages (AGENTS.md: `src/assets/*.html` and `auth.css`).
+
+**14b. The `303`** (`src/bin/bb-auth-web.rs`). Red first:
+
+- `a_complete_deletion_answers_with_the_gates_logout` (web, router, fake intake): roster and
+  stranger, both languages: status `303`, `Location` equals
+  `/auth/logout?rd=%2Fauth%2Flogin%3Fnotice%3Daccount-deleted`, built from the two library
+  constants; the roster's row is gone from the file and the journal still carries `user rm` and
+  `N queued`.
+- `the_deletion_rd_is_added_to_the_operators_query` (web, unit over the builder): an operator URL
+  `https://auth.x.com/auth/logout?x=1&rd=/admin#f` gives
+  `https://auth.x.com/auth/logout?x=1&rd=%2Fauth%2Flogin%3Fnotice%3Daccount-deleted#f` (the
+  console's `rd` dropped by `logout_without_rd`, ours added once).
+- `with_no_logout_url_the_done_page_stays` (web): `account_logout_url = None`, every `POST` `202`:
+  `200`, the queued title, `Queued` + `AccountDeletedClose`, no pill. This replaces
+  `the_done_page_says_queued_and_links_to_sign_out`, whose logout-set half becomes the first test.
+- `a_partial_deletion_does_not_sign_out` (web): first `POST` `503` after the row went: `502`, no
+  `Location`, pills "Try again" and "Sign out" (the existing 7e table test's partial rows already
+  pin the words; this pins the absence of the redirect).
+- The 7e `h1` table test's two done rows move to the `303` assertion; `DELETE_SIGN_OUT_*` and
+  `K::AccountDeletedSignOut` go.
+- Checks: `cargo test`, clippy, fmt, `node e2e/run.js`.
+
+**14c. Browser suite and docs.** `e2e/run.js` (delete area): the queued walk ends on a request
+to `/auth/logout?rd=…` (the suite runs bb-auth-web alone, so assert the navigation's URL, not the
+gate's page). `e2e/shots.js`: `account-delete-queued` is retired for the logout-set view, or kept
+by starting that scene with no logout URL (the `Close` page), the designer's choice; the notice
+itself is reviewed by hand on `/auth/login`. Docs: AGENTS.md's self-service paragraph (the
+deletion answers with the gate's logout), the `data-rd` sentence (the closed-set notice), and a
+paragraph under "Sessions are stateless" stating the accepted gap and its premise; §13.30 §4's two
+`200` rows marked changed by this section.
+
+**14d. On rpi-01**, each with the user's go-ahead. Reads first, for the coordinator to hand over:
+`sudo nginx -T | grep -n -A8 'auth/logout'` (does the logout location set `X-Original-URL`?),
+`sudo grep LOGOUT_URL /opt/bb-auth/etc/bb-auth-web.env`, `sudo bb-auth-adm settings show`
+(`gate.login_url`, `gate.cookie_domain`, `gate.session_ttl_secs`), and the pool's
+`AllowAdminCreateUserOnly` through the OpenTofu repository named in step 5 (the premise of §2).
+Then a new test account deleted in a browser: it lands on the sign-in page with the notice, and
+the browser's next request to an `authenticated` scope goes to the sign-in page.
+
+#### 5. The user's answers (2026-11-26)
+
+The user chose the recommended answers ("applica solo il raccomandato"):
+
+1. **The stale cookies in other browsers: the gap is accepted**, stated in AGENTS.md and on the
+   notice, and valid while self-signup is open. The tombstone of §2 stays a design for the day that
+   premise fails.
+2. **`gate.session_ttl_secs` on rpi-01 stays at 30 days.**
+
+The success answer through the gate's logout (§1) is the recommended one too. The line in rpi-01's
+nginx that makes the notice show (`X-Original-URL` on `location = /auth/logout`) is part of 14d,
+with the user's go-ahead.

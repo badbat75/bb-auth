@@ -47,8 +47,15 @@ Rules are in `AGENTS.md`. Format of this file: `AGENTS.md`, under "Skills".
 - A library refusal the GUI must translate is an enum whose `Display` is today's English (for the
   CLI and the gate) and an exhaustive GUI match to `K`; keep the `String` leaf functions as
   wrappers, because `compile_access` and the CLI's flag-named pre-checks call them (§13.31).
+- bb-auth-web signs a browser out only by redirecting it through `BB_AUTH_WEB_LOGOUT_URL` with an
+  `rd`: it cannot clear the gate's cookie (no cookie name), and any page it serves after the
+  logout is gated, so the landing page must be the gate's own (§13.32).
 
 ## Pitfalls
+
+- A stale session cookie after a user is deleted reaches only `anonymous` and `authenticated`
+  scopes, which with self-signup open is no wider than re-registering: check that premise before
+  proposing session revocation (§13.32 §2).
 
 - `ureq` 3 has no timeout by default (`Timeouts::default`, `config.rs`): every outbound call needs
   `timeout_global` on its agent, or a slow peer pins a worker for ever.
