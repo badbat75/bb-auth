@@ -8098,7 +8098,7 @@ built there, `top_bar`'s new first argument and both call sites, `name="bar-menu
    settings" / "Impostazioni di sistema", and the breakpoint is the measured 941px with no
    margin (§0, §2).
 
-#### 10. Step 17: the brand without the tag, and why it stays a link (designed 2026-11-26)
+#### 10. Step 17: the brand without the tag, and why it stays a link (designed 2026-11-26; the link overruled in §11)
 
 The user, at desktop width on rpi-01: beside "BadBat75" and its logo the bar shows the grey tag
 "Amministrazione" cut to "Amministrazio…", then the tabs; remove it. And: why is the brand a
@@ -8230,9 +8230,13 @@ e2e:
   and `account-menu` (one run, all filters; the designer reviews light, dark, phone and `it`),
   and by hand the console at 884 and 883 in `it` with the long brand, logo and long name.
 
-#### 11. Open questions for the user (step 17)
+#### 11. The user's answers (step 17, 2026-11-26)
 
-1. The breakpoint is 883px, the measured smallest width, with no margin, as in §2. Confirm.
-2. The console's brand stays a link to the dashboard (the convention, §10); the alternative is a
-   `span` as on `/account/`, which removes the one-tap way home on a phone. Confirm or choose the
-   `span`.
+1. The breakpoint is 883px, the measured smallest width, with no margin, as in §2. Accepted (the
+   user raised no objection to it).
+2. **The console's brand becomes a `span`, as on `/account/` and on the `403`: the user's
+   decision, against §10's recommendation.** The user's reason: it leads to the page the
+   Dashboard tab already names, so it adds no destination. That overrides §10's paragraph "The
+   brand stays a link on the console": `brand_block` emits a `span.brand` on every surface, with
+   no `href`, and `both_bars_name_the_deployment` pins a `span` (no `a.brand`) on the console too.
+   The cost the designer named stands and is accepted: on a phone, home is the ☰ then Dashboard.
