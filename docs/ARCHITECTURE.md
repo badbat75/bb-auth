@@ -5444,7 +5444,7 @@ operator's slightly wider font; the existing 640 is not enough (§0: brand text 
 to about 770). It means a tablet in portrait (768) gets the tabs in the panel, which is the
 compromise the user accepted for narrow widths. Today's sideways-scrolling tab strip in the phone
 block goes (`nav:not(.acct){order:3;…overflow-x:auto…}`), and with it the clipped fifth tab §13.17
-named. (Changed by plan step 15, 2026-11-26: the breakpoint is 940px, measured for five tabs, and
+named. (Changed by plan step 15, 2026-11-26: the breakpoint is 941px, measured for five tabs, and
 below it the tabs go into `details.navmenu`, not into this panel: §13.34 §2.)
 
 **The phone block (640) keeps two header rules of its own**: delete `nav.acct .who{display:none}`
@@ -7810,7 +7810,9 @@ sense. Then, the same day, option B: **split the two jobs the account menu does.
 menu holds only the person's own things and is the same on both surfaces; the console's
 navigation is all in the tab list, and at narrow widths it moves into a navigation menu of its
 own, never into the account menu. And: the account menu is a different size on `/account/` and
-on the console, against W13.
+on the console, against W13. Later the same day the user chose the tab's label: "Impostazioni"
+in Italian, so "Settings" in English, replacing the "Sistema" / "System" first proposed here;
+the breakpoint was remeasured for it (§0).
 
 Kept from §13.28: one row at every width, `details` and no script, one header function for both
 surfaces (`top_bar`), `/account/` with no navigation at all.
@@ -7834,8 +7836,8 @@ Width of the tab strip: four tabs 349 EN / 340 IT (as §13.28 §0); plus "System
 "Impostazioni di sistema" 486 / 528; plus "Settings" / "Impostazioni" 434 / 455; plus "System" /
 "Sistema" 430 / 425.
 
-Narrowest width with the brand whole, worst of {default brand, long brand with logo} × {"Ada",
-"Bartholomew-Alexander Montgomery"}:
+First run, in 4px steps. Narrowest width with the brand whole, worst of {default brand, long
+brand with logo} × {"Ada", "Bartholomew-Alexander Montgomery"}:
 
 | Fifth tab | EN | IT |
 |---|---|---|
@@ -7849,38 +7851,63 @@ capped at 1000px: the full label leaves no room at any width. With "Sistema" and
 breakpoint, every combination fits from 320 to 1400 with no fault, in both languages, light and
 dark, the ☰ trigger included below 940.
 
+**Remeasured for the chosen label, "Settings" / "Impostazioni"** (`/tmp/d15b/edge.js`: the same
+real console, the same callers and the same test, walking 1100 down to 641 in **1px** steps, in
+light and in dark, with the strip forced visible). Widest width at which the test still fails:
+
+| Brand | Name | EN | IT |
+|---|---|---|---|
+| default, no logo | "Ada" | 722 | 759 |
+| default, no logo | "Bartholomew-Alexander Montgomery" | 905 | **941** |
+| "BadBat75 Estate Services" + logo | "Ada" | 798 | 821 |
+| "BadBat75 Estate Services" + logo | "Bartholomew-Alexander Montgomery" | 875 | 892 |
+
+Light and dark give the same figures. The strip is 436px in English and 459px in Italian. The
+worst case is Italian, default brand, long name: whole from **942px**, so the breakpoint is
+`max-width:941px`, with no margin, as the user asked for the smallest width that holds. (The
+long brand is not the worst case because `.bar` is capped at 1000px, so that brand is already
+cut at 1400 and "whole" means as wide as there.) One row and no sideways scroll alone never
+fail above 641: the brand and the name truncate first, which is why the test is the brand whole
+and the name pill at least 128px. With the ☰ rules and the 941 breakpoint injected
+(`/tmp/d15b/ham.js`), every combination is one row with no sideways scroll from 320 to 1400, in
+both languages, light and dark.
+
 The account menu's size, same caller, same viewport: console `.menu` 230px wide at 1280 and 360;
 `/account/` 286px at 1280 and 257px at 360. Same element, same classes, same ancestors
 (`div.menu < details.settings < nav.acct < div.bar < header.top`).
 
 Mockups (proposed rules injected into the real console; the panel rows there show the full pill
 border because the mockup's ☰ sits outside a `nav`, which §2 corrects):
-`/tmp/d15/ham-{en,it}-light-{1280-none,941-none,940-navmenu,940-acct,360-navmenu,360-acct,320-navmenu,320-acct}.png`
-and `/tmp/d15/ham-{en,it}-dark-{1280-none,360-navmenu,360-acct}.png`.
+`/tmp/d15b/ham-{en,it}-light-{1280-none,942-none,941-navmenu,941-acct,360-navmenu,360-acct,320-navmenu,320-acct}.png`
+and `/tmp/d15b/ham-{en,it}-dark-{1280-none,360-navmenu,360-acct}.png` (the chosen label; the
+first run's "Sistema" shots are under `/tmp/d15/`).
 
-#### 1. The tab list: five tabs, System last, labelled "System" / "Sistema"
+#### 1. The tab list: five tabs, Settings last, labelled "Settings" / "Impostazioni"
 
-- **Order**: Dashboard, Applications, Users, Audit, **System**. Last, where it was before
+- **Order**: Dashboard, Applications, Users, Audit, **Settings**. Last, where it was before
   §13.28, and for the reason AGENTS.md already gives: the first four are about who reaches what,
   and the system's configuration is the one place that is not.
-- **Label**: a new key `K::ConfigTab`, "System" / "Sistema". `K::Config` ("System settings" /
-  "Impostazioni di sistema") stays the page's `h1` and title. The tab drops the word "settings"
-  because the bar needs it: the full Italian label costs 103px over "Sistema" and leaves the
-  brand cut at every width (§0). A noun like the other four tabs, and the `h1` it opens spells
-  it out (Nielsen 4, consistency: the tab and the heading share their first word). "Settings" /
-  "Impostazioni", the old label, is rejected: it is as wide in English, wider in Italian, and it
-  says less than "System" about whose settings they are, beside the account menu's
-  "Preferences".
+- **Label**: a new key `K::ConfigTab`, "Settings" / "Impostazioni", the user's choice of
+  2026-11-26 (it was the tab's label before §13.28). `K::Config` ("System settings" /
+  "Impostazioni di sistema") stays the page's `h1` and title. The tab drops "system" / "di
+  sistema" because the bar needs it: the full Italian label leaves the brand cut at every width
+  (§0). A noun like the other four tabs, and the `h1` it opens spells it out (Nielsen 4,
+  consistency: the tab's word is in the heading). It costs 34px in Italian over "Sistema", which
+  moves the breakpoint from 908 measured to 941 (§0). What "Settings" says less than "System"
+  (whose settings) is said by the heading and by the account menu calling the person's own
+  choices "Preferences", a different word.
 - **Current**: `Route::tab` already returns `Route::Config` for the Settings page, so the strip
-  marks System `.pill.on` with `aria-current="page"` there, which §13.28 §4 could not do.
+  marks Settings `.pill.on` with `aria-current="page"` there, which §13.28 §4 could not do.
 - **One loop**: the five come from the one `tabs` array in `shell_named`, emitted in the strip
   and in the navigation menu (§2) by the existing `tab_links` markup.
 
 #### 2. Narrow widths: a navigation menu of its own
 
-- **Breakpoint**: `@media (max-width:940px)` replaces `(max-width:800px)`: 908px is the measured
-  worst case with "Sistema" (§0), plus a margin for an operator's slightly wider font, as 773 to
-  800 was. A 960px window (half of a 1920 screen) keeps the tabs in the bar.
+- **Breakpoint**: `@media (max-width:941px)` replaces `(max-width:800px)`: 942px is the narrowest
+  width at which the measured worst case with "Impostazioni" keeps the brand whole (§0). No
+  margin, by the user's choice of the smallest width that holds, so an operator's stylesheet with
+  a wider font can cut the brand just above 941 (it truncates; the bar stays one row with no
+  sideways scroll). A 960px window (half of a 1920 screen) keeps the tabs in the bar.
 - **Markup**: a new first child of `.bar`, before the brand, on the console only (`v.admin`
   set): `nav class="navm"` holding `details class="settings navmenu" name="bar-menu"`, whose
   `summary class="pill ico"` holds the menu glyph (three lines, `svg aria-hidden="true"`), a
@@ -7892,7 +7919,7 @@ and `/tmp/d15/ham-{en,it}-dark-{1280-none,360-navmenu,360-acct}.png`.
 - **Order in the bar**: ☰, brand, (strip), account menu. Left because a navigation trigger at
   the start of a bar is the convention; first in the source too, so focus order follows what is
   seen (WCAG 2.4.3, <https://www.w3.org/WAI/WCAG22/Understanding/focus-order.html>).
-- **CSS**: top level `nav.navm{display:none}`; in the 940 block `nav.tabs{display:none}` and
+- **CSS**: top level `nav.navm{display:none}`; in the 941 block `nav.tabs{display:none}` and
   `nav.navm{display:flex}`. `details.navmenu .menu{left:0;right:auto}` so the panel opens under
   its trigger. `.menu-tabs` is always `display:flex;flex-direction:column` (its `display:none`
   rule and its line in the media block go: it now lives only in `nav.navm`, which the media rule
@@ -7944,19 +7971,19 @@ Unchanged apart from §3's width: no `nav.navm`, an empty strip, the same accoun
 
 | Key | English | Italian | Use |
 |---|---|---|---|
-| `ConfigTab` (new) | System | Sistema | the fifth tab, in the strip and in the navigation menu |
+| `ConfigTab` (new) | Settings | Impostazioni | the fifth tab, in the strip and in the navigation menu |
 | `NavMenu` (new) | Navigation menu | Menu di navigazione | the ☰ trigger's hidden name and `title` |
 
 `K::Config` keeps its text and is now the Settings page's `h1` and title only.
 
 #### 6. AGENTS.md sentences that change (bb-auth-web paragraph)
 
-- "**four tabs** (Dashboard, Applications, Users, Audit) and one pill" becomes five tabs, System
-  last, plus a navigation menu at 940px and below.
+- "**four tabs** (Dashboard, Applications, Users, Audit) and one pill" becomes five tabs, Settings
+  last, plus a navigation menu at 941px and below.
 - "its rows are the caller's name and every address, then the places (System settings, and "Go
   to your account" on the console only)" loses "System settings".
 - "At 800px and below the tabs ride in it too, which is the compromise the user accepted on
-  2026-11-25: one tap away, never a second row." becomes: at 940px and below the tabs ride in a
+  2026-11-25: one tap away, never a second row." becomes: at 941px and below the tabs ride in a
   navigation menu of their own, opened by a ☰ at the start of the bar, never in the account
   menu (the user's option B, 2026-11-26); the two are one exclusive `details` group.
 - "System settings is not a tab at all, for the reason it read as the odd one out while it was
@@ -7970,7 +7997,7 @@ Unchanged apart from §3's width: no `nav.navm`, an empty strip, the same accoun
 Unit and socket tests in `src/bin/bb-auth-web.rs`:
 
 - `the_bar_has_four_tabs` becomes `the_bar_has_five_tabs`: `nav.tabs` holds Dashboard,
-  Applications, Users, Audit, System in that order, the last one's `href` the Settings route,
+  Applications, Users, Audit, Settings in that order, the last one's `href` the Settings route,
   text `K::ConfigTab` in both languages.
 - `the_navigation_menu_holds_the_tabs` (new): on the console `nav.navm` comes before the brand
   in the bytes and holds one `details.settings.navmenu[name="bar-menu"]`; its summary is
@@ -7986,46 +8013,54 @@ Unit and socket tests in `src/bin/bb-auth-web.rs`:
   classed elements inside `.menu` is the same once `div.menu-places` (console) and the delete
   row (account) are removed.
 - `aria_current_names_the_page`: on `/admin/config` one `aria-current="page"` in `nav.tabs`
-  (System) and one in the navigation menu, none inside the account menu; on `/admin/users` the
+  (Settings) and one in the navigation menu, none inside the account menu; on `/admin/users` the
   same on Users.
-- `the_bar_stays_one_row_at_every_width` (the CSS test): the block is `@media(max-width:940px)`
+- `the_bar_stays_one_row_at_every_width` (the CSS test): the block is `@media(max-width:941px)`
   with `nav.tabs{display:none}` and `nav.navm{display:flex}`; top level `nav.navm{display:none}`,
   `.menu` with `width:20rem` and `max-width:calc(100vw - 32px)` and **no** `min-width`,
   `details.navmenu .menu` with `left:0` and `right:auto`; no `max-width:800px` block and no
   `.menu-tabs{display:none}` anywhere.
-- `K` test: `ConfigTab` and `NavMenu` read the strings of §5; `Config` unchanged.
+- `K` test: `ConfigTab` reads "Settings" / "Impostazioni" and `NavMenu` the strings of §5;
+  `Config` unchanged ("System settings" / "Impostazioni di sistema").
 - `no_page_but_the_reveal_carries_a_script` unchanged: no script is added.
 
 e2e:
 
-- `settings.js`: the one-row widths become 320, 360, 640, 641, 940, 941, 1024, 1280. At 360 and
-  940: `nav.tabs` hidden, the ☰ visible; open it, five links with `aria-current` on the current
-  one; "Applications" navigates; System reaches `/admin/config`. With the ☰ open, focus the
+- `settings.js`: the one-row widths become 320, 360, 640, 641, 941, 942, 1024, 1280. At 360 and
+  941: `nav.tabs` hidden, the ☰ visible; at 942 `nav.tabs` visible with all five tabs and the ☰
+  hidden. Open the ☰: five links with `aria-current` on the current one; "Applications"
+  navigates; Settings reaches `/admin/config`. At 942, with a long given name
+  (`X-Auth-Given-Name` plus `profile_claims:['given_name']`) in Italian, `.bar` is one row and
+  `scrollWidth` does not exceed the viewport. With the ☰ open, focus the
   account trigger and press Enter: the account menu is open and the navigation menu is closed.
   The account menu holds no `.menu-tabs` and no `/config` link (replace the selector on the
-  System row, line 82, with the strip's and the ☰'s).
+  System settings row, line 82, with the strip's and the ☰'s).
 - `settings.js` and `account.js`, **the menu is one size** (new): same caller
   (`admin@example.com`), at 1280 and 360, open the account menu on `/admin/users` and on
   `/account/`; the two `.menu` boxes have equal widths (within 0.5px), equal to
   `min(320, viewport − 32)`, and the same `className` on `details`, `summary` and `.menu`.
-- `nojs.js`: at 360 with scripting off, open the ☰, a tab and System navigate; the account
+- `nojs.js`: at 360 with scripting off, open the ☰, a tab and Settings navigate; the account
   panel carries no tabs (replace the checks at lines 502 to 509).
 - `account.js`: no `nav.navm`, no `.menu-tabs` (line 186 stays).
-- `e2e/shots.js`: `config-menu` becomes the ☰ open on `/config` at phone width (System
+- `e2e/shots.js`: `config-menu` becomes the ☰ open on `/config` at phone width (Settings
   current); new `nav-menu` (the ☰ open on `/admin/users`); `settings-menu` and `account-menu`
   stay (account menu open) and now show the same panel width; `header-logo` now shows five
-  tabs at 1280. The designer reviews light, dark, phone and `it`.
+  tabs at 1280, the last "Settings" / "Impostazioni". The designer reviews light, dark, phone
+  and `it`, and by hand the console at 942 and 941 in `it` with the long name.
 
 For the coder: `src/bin/bb-auth-web.rs` (`shell_named`'s `tabs` and `places`, a `nav.navm`
 built there, `top_bar`'s new first argument and both call sites, `name="bar-menu"` in
 `account_menu`, the two `K` keys); `src/assets/admin.css` (`nav.tabs`, `nav.navm`,
-`details.navmenu .menu`, `.menu` width, the 940 block replacing 800).
+`details.navmenu .menu`, `.menu` width, the 941 block replacing 800).
 
 #### 8. Alternatives rejected (two menus)
 
 - **"System settings" / "Impostazioni di sistema" as the tab**: the brand is cut at every width
   in Italian with a long name, and the breakpoint would sit at about 1000, sending a half-screen
   window to the ☰ (§0).
+- **"System" / "Sistema" as the tab**: first proposed here and 33px narrower in Italian (908
+  rather than 941); the user chose "Impostazioni" / "Settings".
+- **A margin above the measured 942**: the user asked for the smallest width that holds.
 - **System settings in the bar, the tabs still in the account menu below the breakpoint**: what
   the user turned down for option B.
 - **One trigger for both menus**: two jobs in one panel is the problem being solved.
@@ -8038,6 +8073,6 @@ built there, `top_bar`'s new first argument and both call sites, `name="bar-menu
 
 #### 9. Open questions for the user (two menus)
 
-1. The tab reads "System" / "Sistema" and the page it opens "System settings" / "Impostazioni di
-   sistema". Recommended, because the full words do not fit the bar in Italian (§0). Agree, or
-   keep the full words and accept the tabs moving behind ☰ below about 1000px?
+1. Answered 2026-11-26: the tab reads "Settings" / "Impostazioni", the page it opens "System
+   settings" / "Impostazioni di sistema", and the breakpoint is the measured 941px with no
+   margin (§0, §2).

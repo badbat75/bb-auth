@@ -67,6 +67,7 @@ Rules are in `AGENTS.md`. Format of this file: `AGENTS.md`, under "Skills".
 - The stranger's `/account/` (no roster row) has no `shots.js` scene: `/tmp/rev13/stranger.js` boots the e2e server and shoots it as `friend@example.com` in light, dark, 360 and `it`, menu open, listing any visible submit in the menu.
 - A notice on the sign-in page with the three real stylesheets: `/tmp/d14/gen.js` (§13.33).
 - How wide the bar's tabs need the viewport, per label and language: `/tmp/d15/probe.js` (injects a tab, walks 320 to 1400, reports the narrowest width with the brand whole); the two-menu bar with a ☰: `/tmp/d15/ham.js`; a panel's size on both surfaces: `/tmp/d15/size.js`.
+- The exact breakpoint for a bar label: `/tmp/d15b/edge.js` (strip forced visible, 1px steps 1100 to 641, light and dark, prints the widest failing width per brand, name and language). One row and no scroll alone never fail above 641, since the brand and name truncate: the binding test is the brand as wide as at 1400 and the name pill at least 128px.
 
 ## Pitfalls
 
