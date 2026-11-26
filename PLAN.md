@@ -102,15 +102,19 @@ fixed notice, the stale-cookie gap is accepted and stated, and the session TTL s
   was queued; the stale-cookie gap, accepted by the user on 2026-11-26, is stated in AGENTS.md
   and on the notice; and it has been tried on rpi-01 with the user's go-ahead.
 
-### 15. System settings back among the tabs
+### 15. Two menus: the person's own, and the console's navigation
 
 Covers: R3. Asked by the user on 2026-11-26: "System settings" belongs in the console's tab list
-beside Dashboard, Applications, Users and Audit, where it was before §13.28 moved it into the
-account menu; in the account menu it makes little sense. This reverses §13.28's choice (AGENTS.md
-gives its reason: the bar keeps one row at every width), so the designer weighs where it sits in
-the tab order and what happens at 800px and below, where the tabs already ride in the account
-menu, and the docs that state the old rule change with it.
+beside Dashboard, Applications, Users and Audit, where it was before §13.28; in the account menu
+it makes little sense. Asked next whether to refactor the menus, the user chose option B of
+three: the account menu holds only the person's own things (who they are, Preferences, "Go to
+your account" on the console, Sign out, Delete the account) and is the same on both surfaces; the
+console's navigation is all in the tab list, and at 800px and below it moves into a navigation
+menu of its own, never into the account menu. This reverses §13.28's placement, so the designer
+designs it, and the docs that state the old rule change with it.
 
-- Done when: tests show the console's tab list carries System settings (its URL unchanged,
-  `/config`) and the account menu no longer does; the bar keeps one row at 320px in both
-  languages; the designer has approved the screenshots; and AGENTS.md says the new rule.
+- Done when: tests show the tab list carries all five places (System settings' URL unchanged,
+  `/config`) and the account menu carries none of them on either surface; at 800px and below the
+  places are in the navigation menu, not the account menu; the bar keeps one row at 320px in both
+  languages, with scripting on and off; the designer has approved the screenshots; and AGENTS.md
+  says the new rule.
