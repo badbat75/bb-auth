@@ -41,6 +41,34 @@ async function iconBoxes(page) {
   }));
 }
 
+/** The handler rule of the self-service pages, for a page read with scripting off.
+ *
+ *  Step 13 (PLAN.md): the account menu's two Preferences list boxes carry the shell's one handler
+ *  on every page this surface serves, the profile's and the deletion's included, because they all
+ *  wear the same menu. So the check is not "no handler attribute", it is "those two and nothing
+ *  else": a third handler is a second script, and the rule this surface keeps is that every other
+ *  interaction is a link or a form, which is what a browser running no code can follow. The two
+ *  halves are the count and the identity of what was counted: a page with two handlers on a
+ *  `<button>` is red, and so is a Preferences select carrying a handler that is not the shell's.
+ *
+ *  Handlers are read out of tags, not out of the document: a script body carries `on…` sequences
+ *  of its own (`addEventListener`, string literals), so an allowlist scanned over raw bytes fails
+ *  on a page with no handler attribute at all. These pages carry no script, which the `no <script>`
+ *  check beside each call measures. */
+const TAG_WITH_HANDLER = /<[^>]*\son[a-z]+\s*=\s*"[^"]*"/gi;
+const SELECT_TAG = /<select\b[^>]*>/gi;
+const SHELL_HANDLER = 'onchange="this.form.submit()"';
+function prefHandlersOnly(t, label, html) {
+  const found = html.match(TAG_WITH_HANDLER) || [];
+  const prefs = (html.match(SELECT_TAG) || []).filter(
+    (tag) => /name="(lang|theme)"/.test(tag) && tag.includes(SHELL_HANDLER)
+  );
+  t.eq(`${label}: the two Preferences list boxes are the only handler attributes`, found.length, 2);
+  t.eq(`${label}: both are the shell's handler on a lang or theme select`, prefs.length, 2);
+  t.check(`${label}: and nothing carries a handler of its own`,
+    found.every((s) => s.endsWith(` ${SHELL_HANDLER}`)), JSON.stringify(found));
+}
+
 /** The Preferences menu closes on a click outside it (docs/ARCHITECTURE.md section 13.20).
  *  `apply` submits the chosen theme the way that surface does (a change on the console with
  *  scripting on, the Apply button otherwise) and resolves once the navigation it causes ends.
@@ -488,8 +516,8 @@ async function run(ctx, t) {
     }
     await page.setViewportSize({ width: 1280, height: 900 });
 
-    // The self-service page, where there is no handler at all, so scripting off is the
-    // normal case and the Apply button is the only path.
+    // The self-service page with scripting off. Its handler is inert here, so the `<noscript>`
+    // Apply the same form carries is the path, and it must still apply the theme.
     const acct = await ctx.browser.newContext({
       viewport: { width: 1280, height: 900 },
       extraHTTPHeaders: { 'X-Auth-Email': 'you@example.com' },
@@ -523,6 +551,38 @@ async function run(ctx, t) {
         await count(ap, 'details.settings .menu form[action*="delete"]'), 0);
     } finally {
       await acct.close();
+    }
+
+    // Step 13: the same menu with scripting **on** applies on selection, the console's way. The
+    // handler submits the form, the page answers the `302` that sets the cookie, and the theme
+    // arrives with no click on anything. The Apply is not in the DOM in this browser, which is
+    // the other half: a control the browser cannot see is not a control it has to click.
+    const acctOn = await ctx.browser.newContext({
+      viewport: { width: 1280, height: 900 },
+      extraHTTPHeaders: { 'X-Auth-Email': 'you@example.com' },
+    });
+    try {
+      const ap = await acctOn.newPage();
+      await ap.goto(ctx.origin + '/account/');
+      const opened = await openPreferences(ap);
+      const pick = await ap.locator('html').getAttribute('data-theme');
+      const want = pick === 'dark' ? 'light' : 'dark';
+      t.check('the page opens both disclosures with scripting on', opened, 'a details never opened');
+      t.eq('the Apply is not in the DOM', await count(ap, '.menu button'), 0);
+      if (opened) {
+        // A page with no handler never navigates, so the wait is raced and not awaited: the
+        // failure has to read as "the handler did not submit", not as a timeout that aborts
+        // the rest of the area.
+        const nav = ap.waitForNavigation({ timeout: 5000 }).then(() => true).catch(() => false);
+        await ap.selectOption('.menu select[name=theme]', want);
+        const moved = await nav;
+        t.check('picking a theme submits the form', moved, 'the list box carried no handler that navigates');
+        t.eq('and the theme arrives', await ap.locator('html').getAttribute('data-theme'), want);
+      } else {
+        t.check('picking a theme applies it, with nothing clicked', false, 'the panel never opened');
+      }
+    } finally {
+      await acctOn.close();
     }
 
     // Every other page shape is unchanged by scripting: a mutation still goes through.
@@ -574,8 +634,9 @@ async function run(ctx, t) {
   }
 
   // --- the profile edit with scripting off (§13.23: every step is a link or a form) -------
-  // Nothing in the flow may carry a script or a handler, and the whole walk has to work with
-  // none: the form, the code page, the saved page and an outcome page. With scripting off
+  // No page of the flow carries a script, and the only handler attributes on any of them are
+  // the account menu's two list boxes (step 13), so the whole walk has to work with scripting
+  // off: the form, the code page, the saved page and an outcome page. With scripting off
   // `page.evaluate` is unavailable, so the checks read the served bytes and the fake's log.
   const before = fs.readFileSync(ctx.settingsFile, 'utf8');
   fs.writeFileSync(ctx.settingsFile, profileSettingsBytes());
@@ -590,7 +651,7 @@ async function run(ctx, t) {
     const bare = async (what) => {
       const html = await page.content();
       t.eq(`profile, scripting off: ${what} carries no <script>`, (html.match(/<script/gi) || []).length, 0);
-      t.eq(`and no handler attribute`, (html.match(/<[^>]*\son[a-z]+\s*=/gi) || []).length, 0);
+      prefHandlersOnly(t, `profile, scripting off: ${what}`, html);
     };
     await page.goto(ctx.origin + '/account/');
     await Promise.all([page.waitForNavigation(), page.click('#profile a[href="/account/profile"]')]);
@@ -629,7 +690,9 @@ async function run(ctx, t) {
 // The walk that costs an account, run with no script anywhere. The row that opens it is a
 // plain link, the page that asks is a form like every other form on this estate, and the
 // outcome page is a plain response, so nothing in the most irreversible act on this surface
-// needs a script. The pages carry none, which is what `bare` measures at each step.
+// needs a script. The pages carry none, and their only handler attributes are the account
+// menu's two list boxes the deletion pages wear like every other page, which is what `bare`
+// measures at each step.
 
 const DEL_FORM = 'form[action="/account/delete"]';
 const DEL_FIELD = `${DEL_FORM} input[name=confirm_email]`;
@@ -649,7 +712,7 @@ async function deleteWalk(t, ctx) {
     const bare = async (what) => {
       const html = await page.content();
       t.eq(`delete, scripting off: ${what} carries no <script>`, (html.match(/<script/gi) || []).length, 0);
-      t.eq('and no handler attribute', (html.match(/<[^>]*\son[a-z]+\s*=/gi) || []).length, 0);
+      prefHandlersOnly(t, `delete, scripting off: ${what}`, html);
     };
     // The panel opens with markup, and its last row is a link: the door to the page that asks
     // is a GET, so a browser that prefetches it costs nobody their account.

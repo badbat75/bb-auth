@@ -4,12 +4,14 @@
 // this one drives the sibling prefix, which is the half of the binary a person who is not an
 // administrator reaches (docs/ARCHITECTURE.md §13).
 //
-// Scripting off is the point of the area and not a garnish: this page carries no handler at
-// all, not even the console's two list boxes, so every mutation here is a plain link to a
-// confirmation and a plain form `POST`, and the reveal-once bearer has to survive a Back
-// button and a reload in a browser running no code. The one page under the prefix that emits
-// a `<script>` is the bearer reveal (§13.14), and its script is the copy icon and nothing
-// else: with scripting off the key is still shown, in `#bearer`, and the icon is not shown.
+// Scripting off is the point of the area and not a garnish: every mutation here is a plain
+// link to a confirmation and a plain form `POST`, and the reveal-once bearer has to survive a
+// Back button and a reload in a browser running no code. The page's one script-shaped thing is
+// the shell's Preferences handler (step 13), which applies a theme or a language on selection;
+// with scripting off the `<noscript>` Apply in the same form is the way in, so the choice still
+// works. The one page under the prefix that emits a `<script>` is the bearer reveal (§13.14),
+// and its script is the copy icon and nothing else: with scripting off the key is still shown,
+// in `#bearer`, and the icon is not shown.
 //
 // The contract checked, in order: the keys table and its `+ New key` row (§13.16); the
 // duration chosen from five, each choice landing on the file as the file spells it (six
@@ -118,8 +120,10 @@ const readable = (html) => words(html
 /** The Preferences menu closes on a click outside it (docs/ARCHITECTURE.md section 13.20).
  *  `apply` submits the chosen theme the way that surface does (a change on the console with
  *  scripting on, the Apply button otherwise) and resolves once the navigation it causes ends.
- *  §13.28 §2 moved the list boxes into a box nested in the panel, closed by default, so the
- *  walk opens both before it touches one. */
+ *  Step 13: both surfaces apply on selection when the browser runs code, so the Apply is inside
+ *  the form's `noscript` and this area, which runs with scripting off, is the surface that
+ *  clicks it. §13.28 §2 moved the list boxes into a box nested in the panel, closed by default,
+ *  so the walk opens both before it touches one. */
 async function menuClosesOutside(t, page, who, apply) {
   const isOpen = () => page.$eval('details.settings', (d) => d.open);
   const open = () => page.click('details.settings > summary');
@@ -202,8 +206,9 @@ async function panelWalk(t, page, url, label) {
   t.eq(`${label}: and it is a link, never a submission`,
     await count(page, `${panel} form[action*="delete"]`), 0);
 
-  // The preferences are a box inside the panel, closed until asked for, and this surface
-  // applies them with a button it always shows (no handler of its own).
+  // The preferences are a box inside the panel, closed until asked for. Step 13: this surface
+  // applies a choice the way the console does, through the shell's one handler, and the Apply
+  // button is what a browser running no code sees, inside the form's `noscript`.
   t.eq(`${label}: the preferences box is closed by default`,
     await prop(page, 'details.prefs', (d) => d.open), false);
   if ((await count(page, 'details.prefs > summary')) === 1) {
@@ -214,11 +219,16 @@ async function panelWalk(t, page, url, label) {
     t.check(`${label}: its own row opens it`, false, 'no Preferences row in the panel');
   }
   t.eq(`${label}: two list boxes`, await count(page, 'details.prefs select'), 2);
-  t.eq(`${label}: the console handler is not here`,
+  t.eq(`${label}: both carry the console's handler`,
     await page.locator('details.prefs select').evaluateAll(
-      (els) => els.filter((e) => [...e.attributes].some((a) => a.name.startsWith('on'))).length
-    ).catch(() => -1), 0);
-  t.eq(`${label}: Apply is a row of its own`, await count(page, 'details.prefs div.actions button'), 1);
+      (els) => els.filter((e) => e.getAttribute('onchange') === 'this.form.submit()').length
+    ).catch(() => -1), 2);
+  // Scripting is off in this context, so the browser parses the `noscript` block and the button
+  // is the interaction; with scripting on it is not in the DOM at all.
+  t.eq(`${label}: Apply is the row the noscript shows`,
+    await count(page, 'details.prefs noscript div.actions button'), 1);
+  t.eq(`${label}: and it is the form's only actions block`,
+    await count(page, 'details.prefs div.actions'), 1);
 }
 
 async function run(ctx, t) {
@@ -253,7 +263,13 @@ async function run(ctx, t) {
   t.eq('the page answers 200 to a roster person who is not an administrator', open.status(), 200);
   const html = await page.content();
   t.eq('the page carries no <script> tag', tags(html, /<script/i).length, 0);
-  t.eq('and no handler of any kind', tags(html, /<[^>]*\son[a-z]+\s*=/gi).length, 0);
+  // Step 13: the page carries the shell's one handler, on the two Preferences list boxes, and
+  // nothing else carries one. The count is the assertion: a third handler is a second script,
+  // and this area's rule is that everything else is a link or a form.
+  const handlers = tags(html, /<[^>]*\son[a-z]+\s*=\s*"[^"]*"/gi);
+  t.eq('and exactly two inline handlers', handlers.length, 2);
+  t.check('both are the Preferences list boxes submitting',
+    handlers.every((s) => /onchange="this\.form\.submit\(\)"/.test(s)), JSON.stringify(handlers));
   t.eq('the keys section is on the page', await keys.count(), 1);
   t.eq('its heading is the page\'s own words', (await keys.locator('h2').first().innerText()).trim(), 'API keys');
   t.check('the keys list starts empty for this row', (await keys.innerText()).includes('No API keys'),
@@ -691,7 +707,9 @@ async function run(ctx, t) {
   await barStaysOneRow(t, page, ctx.origin, PAGE, 'account bar', false);
   writeSettings(ctx, settingsBefore);
 
-  // The same menu on this page, scripting off, applied with the Apply button it always has.
+  // The same menu on this page. This area runs with scripting off, so the page's handler is
+  // inert and the `<noscript>` Apply the form carries is the way a choice is applied (step 13
+  // moved the Apply there; with scripting on the list box submits itself, as the console's do).
   await page.goto(url);
   await menuClosesOutside(t, page, 'account', (pick) => Promise.all([
     page.waitForNavigation(),

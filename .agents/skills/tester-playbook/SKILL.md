@@ -111,6 +111,21 @@ Rules are in `AGENTS.md`. Format of this file: `AGENTS.md`, under "Skills".
 - Page-shape checks in `e2e/tests/account.js` parse `page.content()` with string helpers
   (`sectionOf`, `all`, `words`, `anchors`), because that area runs with scripting off. Anything
   that needs the **layout** (a bounding box) goes in `nojs.js`, which runs with scripting on.
+- A `<noscript>` block is **in the DOM and clickable** in a `javaScriptEnabled: false` context, and
+  `locator(...).evaluateAll` works there too (Playwright evaluates over CDP, not through the page's
+  JS setting). So a "the Apply is the scripting-off way round" pair is one assertion per browser:
+  `count('details.prefs noscript div.actions button') === 1` with scripting off,
+  `count('.menu button') === 0` with it on. Assert **both**: an Apply that never hides passes the
+  first and is the bug.
+- When a check asserts that a handler **exists** (a list box that must submit on selection), race
+  the navigation: `const nav = page.waitForNavigation({ timeout: 5000 }).then(() => true).catch(()
+  => false)` before the action, then `t.check('picking submits the form', await nav, …)`. A bare
+  `Promise.all([waitForNavigation, action])` on an unscripted control throws after 30 s, the runner
+  records the whole area as one failure, and the checks behind it vanish.
+- Assert a page's CSP `script-src` **equal to the other surface's** (`script_src(&csp) ==
+  script_src(&admin_csp(&Look::default(), reveal))`, the helper splits the policy on `;`), not
+  against a spelled-out string. One rule about what may run gets one answer, and the test does not
+  need editing every time the directive grows a source.
 - Measure a target's size where it is **visible**: the copy button carries `hidden` until the
   reveal's script unhides it, and a hidden element's box is 0×0, so a 24-by-24 check on the served
   bytes measures nothing.
@@ -242,6 +257,9 @@ Rules are in `AGENTS.md`. Format of this file: `AGENTS.md`, under "Skills".
   (S9 lost a pass to that). The library's `html_escape` gives `&#39;`, and only where it is called.
 - A displayed refusal is pinned twice, in a Rust test and in `e2e/tests/*.js`: when a slice changes
   what the page says, grep `e2e/tests` for the old sentence and update both in the same pass.
+- `docs/ARCHITECTURE.md` **names test functions** (as the pin for a rule), so renaming one strands a
+  doc reference: `grep -rn "<old_test_name>" --include="*.md" .` before the rename and hand the
+  hits to the docs agent in the report, since `docs/*.md` is not the tester's file to edit.
 - For a §13.31 refusal slice the stub in the rsync copy is the **whole** production change (the
   variants, `code()`, `sentence()`, the leaf's typed core plus its `String` wrapper,
   `SETTINGS_REFUSAL_CODES`, `settings_refusal_samples`): a partial stub leaves the codes-reached test
@@ -351,7 +369,8 @@ Rules are in `AGENTS.md`. Format of this file: `AGENTS.md`, under "Skills".
 - The same stylesheet trap as the Rust `account_readable` one, on the browser side: a "this refusal
   names nobody" check on `response.text()` fails on `ci`, because every page inlines the three
   stylesheets and their comments say `decide`, `specificity`, `opacity`. Strip the `<style>` and
-  `<script>` bodies, then the tags.
+  `<script>` bodies, then the tags. `delete.js`'s own `bodyOf` strips **tags only**, so it is a
+  word-presence reader and not an absence one: an absence assert through it is red on the palette.
 - `rules_named(css, sel)` (lib.rs) matches **one** comma-part of a selector list, so passing a whole
   list (`"a,b"`) finds nothing: look each part up on its own. `the_rule` (bb-auth-web) swallows the
   first rule inside an `@media` block and returns the first match in file order, so a phone-block
@@ -371,7 +390,11 @@ Rules are in `AGENTS.md`. Format of this file: `AGENTS.md`, under "Skills".
   every account page carries one in the Preferences menu (the caller's name). A page whose own
   sentence is a bare `<p>` therefore answers a "the page says X" assert with `Bob · bob@x.com`,
   which reads like a broken helper. Assert the page's lede **carries** `class="lede"` first, and
-  when a design changes that markup, say so in the test's comment.
+  when a design changes that markup, say so in the test's comment. For the account page's lede use
+  `account_lede_zone(body)`: the region between `</h1>` and the first `<section`, which is the
+  page's own paragraph, so the menu's lede cannot satisfy it. A "the page says **nothing** here"
+  assert belongs on that zone, because a body-wide absence check passes the moment the sentence
+  moves into the header.
 - The Rust `FakeCognito` scripts replies by **action lookup**, not as a queue: every request for
   `InitiateAuth` gets the same scripted reply, so one fake answers the same `POST` in two languages
   and `fake.calls().len()` counts both. Assert the count you expect from the number of requests.

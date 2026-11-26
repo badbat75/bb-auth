@@ -308,7 +308,8 @@ const SCENES = [
     await page.goto(acct(ctx, '/'));
     await asAdmin(page);
   }],
-  // The account menu, open: the one place its always-present Apply is seen in review.
+  // The account menu, open: the panel that carries the Preferences box on the surface a person
+  // who is not an administrator reaches.
   ['account-menu', async (page, ctx) => {
     await asPerson(page);
     await page.goto(acct(ctx, '/'));

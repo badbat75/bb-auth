@@ -365,9 +365,17 @@ module.exports = {
         t.eq('each POST names its address in the form as well as the header',
           ctx.intake.callsMade().filter((c) => c.method === 'POST').map((c) => c.form.confirm_email),
           [WHO, LEGACY]);
-        const after = await bodyOf(await api(ctx, PAGE, { email: TWO }));
-        t.check('the account page afterwards says the row is gone', after.includes(W.noRow),
-          after.slice(0, 400));
+        const rawAfter = await (await api(ctx, PAGE, { email: TWO })).text();
+        // Words the person reads, with the stylesheets stripped: the palette's own comments
+        // spell `decide` and `opacity`, so a check on the raw bytes is a check on the CSS.
+        const after = rawAfter.replace(/<style\b[\s\S]*?<\/style>/gi, ' ').replace(/<[^>]*>/g, ' ');
+        // Step 13: the page says nothing about a row it does not have. The deleted person reads
+        // the same shape of page as everybody else: the addresses they sign in with, and no
+        // sentence about the row, because the line under the addresses exists to name an account
+        // id and there is none left to name.
+        t.check('the account page afterwards says nothing about the row',
+          !after.includes(W.noRow), after.slice(0, 400));
+        t.check('and shows no account id', !after.includes('Account id'), after.slice(0, 400));
       } finally {
         await context.close();
       }

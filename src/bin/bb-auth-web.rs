@@ -250,12 +250,15 @@
 //! The prefix is a **sibling** of [`Config::base_path`] and not a child of it, and
 //! [`compile_account_path`] refuses a deployment where they overlap: the dispatch runs ahead of
 //! the allowlist, so a page nested inside the console's URLs would answer `/admin/…` URLs as
-//! the page. Its own arrangement is a centred card, in [`CSS`] beside the console's tables,
-//! because the palette and the objects are already shared; it carries **no handler at all**,
-//! not even the Settings menu's one, and its preference form is a `GET` form with a submit
-//! button, answered by one `302` that sets one cookie per recognised choice and redirects back
-//! to the page with the parameters gone. The cookie names are the console's own, so a choice
-//! carries between the two surfaces on one host.
+//! the page. Its arrangement is the **console's column**: the console's header bar (`top_bar`)
+//! with the operator's brand, an empty tabs `nav` and the one account menu, then a `main` of the
+//! console's width, in [`CSS`] beside the console's tables, because the palette, the objects and
+//! the layout are already shared (§13.26, §13.28). The menu's two list boxes carry the shell's
+//! one handler, so a theme or a language applies the moment it is picked here as it does in the
+//! console, with the Apply behind a `noscript` as the way in for a browser running no code
+//! (step 13); the form is a `GET` back to the page, answered by one `302` that sets one cookie
+//! per recognised choice and redirects back to the page with the parameters gone. The cookie
+//! names are the console's own, so a choice carries between the two surfaces on one host.
 //!
 //! It is a **prefix of this binary**, not a settings-file value: it decides which code answers
 //! a request, and the settings file is for what is read per request. `docs/ARCHITECTURE.md`
@@ -1167,7 +1170,6 @@ enum K {
     // so each has to say what to write instead.
     AccountTitle,
     AccountIdLabel,
-    AccountNoRow,
     AccountNoRowTitle,
     AccountNoRowBody,
     AccountReach,
@@ -2658,11 +2660,6 @@ fn t(lang: Lang, key: K) -> &'static str {
         // access file's vocabulary, which is never translated.
         K::AccountTitle => m(lang, "Your account", "Il tuo account"),
         K::AccountIdLabel => m(lang, "Account id", "Id dell'account"),
-        K::AccountNoRow => m(
-            lang,
-            "bb-auth has no roster row for you.",
-            "bb-auth non ha una tua riga nella lista.",
-        ),
         // The refusal a mint gets from a caller with no row. It says what is missing rather
         // than blaming the request, because the person reading it is the one who has to ask
         // for the row.
@@ -4657,14 +4654,16 @@ fn admin_csp(look: &Look, reveal: bool) -> String {
     admin_csp_logo(look, None, reveal)
 }
 
-/// [`admin_csp`] with the deployment's logo named in `img-src`: the policy of a page that shows
-/// it, which is every page served from a settings read that has one (§13.28 §6). The logo
-/// arrives as its own argument and not inside [`Look`] because the two consumers of it (the
-/// bar's `<img>` and this policy) are handed the same `Option` from one settings read, and a
-/// policy that named a source the bar cannot show, or the reverse, is the drift an argument
-/// shared by both cannot have.
-fn admin_csp_logo(look: &Look, logo: Option<&str>, reveal: bool) -> String {
-    let script = if reveal {
+/// The `script-src` sources **both surfaces** allow: the hash of [`SETTINGS_ONCHANGE`], which
+/// the two Preferences list boxes of the shared form carry, and beside it the hash of
+/// [`COPY_SCRIPT`] on the bearer reveal and on nothing else (§13.14).
+///
+/// One function because a rule about what may run cannot have two answers on two surfaces:
+/// step 13 (PLAN.md) gave the self-service page the console's handler, and its policy is
+/// asserted against this one (`only_the_reveal_policy_names_the_copy_script`), so the two
+/// policies cannot drift by one hash.
+fn page_script_src(reveal: bool) -> String {
+    if reveal {
         format!(
             "'unsafe-hashes' {} {}",
             csp_hash(SETTINGS_ONCHANGE),
@@ -4672,7 +4671,17 @@ fn admin_csp_logo(look: &Look, logo: Option<&str>, reveal: bool) -> String {
         )
     } else {
         format!("'unsafe-hashes' {}", csp_hash(SETTINGS_ONCHANGE))
-    };
+    }
+}
+
+/// [`admin_csp`] with the deployment's logo named in `img-src`: the policy of a page that shows
+/// it, which is every page served from a settings read that has one (§13.28 §6). The logo
+/// arrives as its own argument and not inside [`Look`] because the two consumers of it (the
+/// bar's `<img>` and this policy) are handed the same `Option` from one settings read, and a
+/// policy that named a source the bar cannot show, or the reverse, is the drift an argument
+/// shared by both cannot have.
+fn admin_csp_logo(look: &Look, logo: Option<&str>, reveal: bool) -> String {
+    let script = page_script_src(reveal);
     let style = csp_hash(&format!("{THEME_CSS}{BASE_CSS}{CSS}"));
     page_csp(&script, &style, "'self'", look.stylesheet, logo, &[])
 }
@@ -5196,20 +5205,20 @@ fn brand_block(
 
 /// The Preferences form, shared by both shells (§13.28 §3, §7).
 ///
-/// One function because the two surfaces differ by **one flag**, not by markup: `scripted` is
-/// the console, where the two list boxes submit themselves through the one allowed handler and
-/// Apply hides behind `noscript`; the self-service page emits no script at all, so there the
-/// button is the only way in and is always shown. Two copies of this form is how one list box
-/// gains a third option on one surface only, which is the drift this file keeps writing rules
-/// about. `action` is the page the `GET` returns to, and `hidden` re-carries the query the page
-/// was read with, so choosing a theme from a filtered list does not throw the filter away.
+/// One function because the two surfaces have **one** form: step 13 (PLAN.md) gave the
+/// self-service page the console's behaviour, so the two list boxes submit themselves through
+/// [`SETTINGS_ONCHANGE`] on both, and Apply rides in a `noscript` on both as the way in for a
+/// browser running no code. The flag that used to make the page's copy plain is gone, and with
+/// it the second shape of the form: two copies is how one list box gains a third option on one
+/// surface only, which is the drift this file keeps writing rules about. `action` is the page
+/// the `GET` returns to, and `hidden` re-carries the query the page was read with, so choosing
+/// a theme from a filtered list does not throw the filter away.
 fn prefs_form(
     lang: Lang,
     lang_pref: LangPref,
     theme: UiTheme,
     action: &str,
     hidden: &[(String, String)],
-    scripted: bool,
 ) -> Markup {
     // Both lead with the choice that follows something outside this GUI (the browser, the OS),
     // because that is where every session starts and what the other options are departures from.
@@ -5226,49 +5235,26 @@ fn prefs_form(
             }
             label {
                 span class="lbl" { (t(lang, K::SettingLanguage)) }
-                @if scripted {
-                    select name=(LANG_COOKIE) onchange=(SETTINGS_ONCHANGE) {
-                        @for p in langs {
-                            option value=(p.code()) selected[p == lang_pref] { (p.label(lang)) }
-                        }
-                    }
-                } @else {
-                    select name=(LANG_COOKIE) {
-                        @for p in langs {
-                            option value=(p.code()) selected[p == lang_pref] { (p.label(lang)) }
-                        }
+                select name=(LANG_COOKIE) onchange=(SETTINGS_ONCHANGE) {
+                    @for p in langs {
+                        option value=(p.code()) selected[p == lang_pref] { (p.label(lang)) }
                     }
                 }
             }
             label {
                 span class="lbl" { (t(lang, K::SettingTheme)) }
-                @if scripted {
-                    select name=(THEME_COOKIE) onchange=(SETTINGS_ONCHANGE) {
-                        @for th in themes {
-                            option value=(th.code()) selected[th == theme] {
-                                (t(lang, theme_label(th)))
-                            }
-                        }
-                    }
-                } @else {
-                    select name=(THEME_COOKIE) {
-                        @for th in themes {
-                            option value=(th.code()) selected[th == theme] {
-                                (t(lang, theme_label(th)))
-                            }
+                select name=(THEME_COOKIE) onchange=(SETTINGS_ONCHANGE) {
+                    @for th in themes {
+                        option value=(th.code()) selected[th == theme] {
+                            (t(lang, theme_label(th)))
                         }
                     }
                 }
             }
-            // The way in for a browser with scripting off. On the console the browser parses the
-            // `noscript` block as text, so with scripting on the button is not in the DOM at all
-            // and picking an option is the whole interaction; on the page with no handler the
-            // button is the interaction.
-            @if scripted {
-                noscript { div class="actions" { button { (t(lang, K::Apply)) } } }
-            } @else {
-                div class="actions" { button { (t(lang, K::Apply)) } }
-            }
+            // The way in for a browser with scripting off. The browser parses the `noscript`
+            // block as text, so with scripting on the button is not in the DOM at all and
+            // picking an option is the whole interaction.
+            noscript { div class="actions" { button { (t(lang, K::Apply)) } } }
         }
     }
 }
@@ -5563,7 +5549,6 @@ fn shell_named(
         v.theme,
         &v.href(&v.at),
         &preserved_query(v.query),
-        true,
     );
     // The account end of the bar, and it is a `nav` for the same reason the tabs are: it makes
     // these controls flex items of a flex row, exactly as the tabs are. One menu, opened by the
@@ -10412,18 +10397,17 @@ struct AccountPrefs<'a> {
 /// This page's `Content-Security-Policy`.
 ///
 /// The style hash is the **same** value [`admin_csp`] computes, because the `<style>` block is
-/// the same bytes: the palette, the components and [`CSS`]. That is why the card's arrangement
+/// the same bytes: the palette, the components and [`CSS`]. That is why the page's arrangement
 /// lives in `src/assets/admin.css` and not beside this code: a second stylesheet is a second
 /// hash, and a page whose policy is a list of hashes to keep in step is a page that breaks when
 /// one of them is edited.
 ///
-/// `script-src` is `'none'`, because this page carries no script and no handler of any kind. The
-/// console bends the estate's no-script rule once for the Preferences list box; this page has no
-/// reason to bend it at all, so its policy says so and needs no fallback.
-///
-/// `reveal` is the bearer reveal and nothing else (§13.14): the one page under this prefix that
-/// carries a `<script>`, so its policy names that one script's hash and nothing else. A policy
-/// that said `'none'` beside a hash would be a policy that runs nothing, so the two sources
+/// `script-src` is the console's, through [`page_script_src`]: the shared Preferences form
+/// carries the shell's one handler on **both** surfaces, so picking a theme or a language
+/// submits on this page exactly as it does in the console, and the `<noscript>` Apply is the
+/// way in for a browser running no code. `reveal` adds the copy script's hash and nothing
+/// else (§13.14): the bearer reveal is the one page under this prefix that carries a
+/// `<script>`, and a policy that said `'none'` beside a hash would run nothing, so the sources
 /// replace each other rather than joining.
 ///
 /// `form-action` is `'self'`: the selector is a `GET` back to this same page, which is the whole
@@ -10434,12 +10418,14 @@ struct AccountPrefs<'a> {
 /// its source, and neither names a second one (§13.28 §6).
 fn account_csp(look: &AccountLook, reveal: bool) -> String {
     let style = csp_hash(&format!("{THEME_CSS}{BASE_CSS}{CSS}"));
-    let script = if reveal {
-        csp_hash(COPY_SCRIPT)
-    } else {
-        "'none'".to_string()
-    };
-    page_csp(&script, &style, "'self'", look.stylesheet, look.logo, &[])
+    page_csp(
+        &page_script_src(reveal),
+        &style,
+        "'self'",
+        look.stylesheet,
+        look.logo,
+        &[],
+    )
 }
 
 /// The chrome every page under the prefix is wrapped in: the palette, the components built out of
@@ -10449,11 +10435,11 @@ fn account_csp(look: &AccountLook, reveal: bool) -> String {
 /// The bar is the console's, from [`top_bar`], and the three slots say what the two surfaces are
 /// for: the operator's brand where the console names the tool, an empty `nav` where the console's
 /// four tabs are (this page is one page, so there is nothing to switch between), and the account
-/// end with the identity, the Preferences menu and Sign out. The menu is the console's menu as a
-/// browser with scripting off sees it: **no handler of any kind** (the estate's rule for this
-/// page), and the Apply button always present in `div.actions` rather than behind a `noscript`,
-/// because here the button is not a fallback, it is the only way. The form is a plain `GET` back
-/// to the page, so the existing `302` that sets the `theme` and `lang` cookies keeps working.
+/// end with the identity, the Preferences menu and Sign out. The menu is the console's, worn
+/// here exactly as it is worn there: the two list boxes carry the shell's one handler, so a
+/// choice applies the moment it is picked, and the Apply sits behind a `noscript` as the way in
+/// for a browser running no code (step 13, PLAN.md). The form is a plain `GET` back to the page,
+/// so the existing `302` that sets the `theme` and `lang` cookies keeps working.
 fn account_shell(prefs: &AccountPrefs, title: &str, content: Markup, look: AccountLook) -> Markup {
     // The two list boxes' options, each in the order they are offered, both leading with the
     // choice that follows something outside this page (the browser, the OS), because that is
@@ -10465,14 +10451,7 @@ fn account_shell(prefs: &AccountPrefs, title: &str, content: Markup, look: Accou
     // The account end: one menu, built by the console's own function, so the two surfaces cannot
     // drift. No places: this page has no tabs to move and offers no console page (§13.28 §2), so
     // the panel is who the caller is, the Preferences box, and Sign out.
-    let prefs_box = prefs_form(
-        prefs.lang,
-        prefs.lang_pref,
-        prefs.theme,
-        prefs.page,
-        &[],
-        false,
-    );
+    let prefs_box = prefs_form(prefs.lang, prefs.lang_pref, prefs.theme, prefs.page, &[]);
     let acct = html! {
         nav class="acct" {
             (account_menu(
@@ -10502,9 +10481,13 @@ fn account_shell(prefs: &AccountPrefs, title: &str, content: Markup, look: Accou
 
 /// One HTML page under the prefix, with the estate's shared headers and this page's own policy.
 ///
-/// It does not go through [`respond_page`], because that answers with the console's policy, and
-/// the console's names the Preferences list boxes' handler in `script-src` on every page. This page
-/// carries no handler at all, so its policy permits no script beyond the reveal's (§13.17).
+/// It does not go through [`respond_page`], because that answers with the console's [`Look`],
+/// and this page's look is its own read of the `ui` section: it paints the operator's logo,
+/// which the console's shell carries as a separate argument, and a page rendered above the
+/// settings read has an `AccountLook::default()` of its own (§13.28 §6). What the two policies
+/// **allow to run** is not one of the differences: both surfaces wear the same Preferences form,
+/// so both admit the same handler through [`page_script_src`], and the only widening here is the
+/// reveal's (§13.17).
 fn respond_account(
     req: Request,
     status: u16,
@@ -11850,10 +11833,13 @@ fn page_account_minted(lang: Lang, page: &str, bearer: &str) -> Markup {
 /// The page a caller gets: who they are, as the header carried it, their uuid when the access file
 /// has a row for them, and the four sections about their own account.
 ///
-/// A stranger is named too, and told there is no row: the `authenticated` scope §13.4 chose for
-/// this URL admits any identity Cognito vouches for, so "bb-auth knows nothing about you" is a
-/// page a real caller reaches, not a defensive one. A stranger and an administrator with no roster
-/// row get the same page, because `web.admins` is not read here.
+/// A stranger is named too: the `authenticated` scope §13.4 chose for this URL admits any
+/// identity Cognito vouches for, so "bb-auth knows nothing about you" is a page a real caller
+/// reaches, not a defensive one. A stranger and an administrator with no roster row get the same
+/// page, because `web.admins` is not read here. Where there is **no** row the lede says nothing
+/// about it (the user, 2026-11-26, PLAN.md step 13): the line under the addresses exists to name
+/// an account id, so with no id to name the line and its `br` go, and the page writes no sentence
+/// standing in for a row it does not have.
 ///
 /// The sections are siblings, each a `.panel` whose `h2 class="tight"` is followed by one
 /// `p.lede.sub` saying what that section is for, and whose empty state is a `p.muted` naming what
@@ -11877,16 +11863,16 @@ fn page_account(
     html! {
         // One paragraph says who this page is about: every address of the row (as the gate sends
         // them), and on the line below the account these addresses resolve to. The bar already
-        // says who is signed in, so the body does not say it twice.
+        // says who is signed in, so the body does not say it twice. A caller with no row gets the
+        // addresses alone: the second line names an id, and with no id there is no line and no
+        // `br` to stand under it (step 13).
         p class="lede" {
             @for id in ids {
                 code { (id) } " "
             }
-            br;
             @if let Some(u) = uuid {
+                br;
                 (t(lang, K::AccountIdLabel)) ": " code class="uid" { (u) }
-            } @else {
-                (t(lang, K::AccountNoRow))
             }
         }
         section id="profile" class="panel" {
@@ -18227,9 +18213,9 @@ mod tests {
                 "{label}: the policy of this very response must name the script it carries: {csp}"
             );
 
-            // The handler rule is unchanged by the new script: the console's reveal keeps the
-            // shell's two list boxes, the self-service reveal carries no handler at all, and
-            // the copy button is wired with `addEventListener`, never an attribute.
+            // The handler rule is unchanged by the new script: both shells carry the shell's
+            // two list boxes, and the copy button is wired with `addEventListener`, never an
+            // attribute. Step 13 made the self-service shell the console's shell here too.
             let markup = markup_without_scripts(&g.body);
             let handlers = handlers_in(&markup);
             for h in handlers.iter() {
@@ -18239,12 +18225,11 @@ mod tests {
                     "{label}: the copy script is a script, not a handler, and {h} is a handler"
                 );
             }
-            let want = if label.starts_with("console") { 2 } else { 0 };
             assert_eq!(
                 handlers.len(),
-                want,
-                "{label}: the console's shell carries its two Settings handlers, the \
-                 self-service page carries none"
+                2,
+                "{label}: both shells carry the same two Settings handlers, and the copy \
+                 button adds no third"
             );
         }
         for p in paths {
@@ -18536,8 +18521,9 @@ mod tests {
     /// The copy script is allowed **on the reveal and nowhere else**.
     ///
     /// The widening is a response path, not a flag every page passes (13.14), so the
-    /// assertions go both ways: the `false` policies are byte-for-byte what they were (the
-    /// self-service page still says `script-src 'none'`), the `true` ones name the hash, and
+    /// assertions go both ways: the `false` policies name no copy hash at all (step 13 gave the
+    /// self-service page the Preferences handler's hash, and the copy script stays out), the
+    /// `true` ones name the copy hash, and
     /// over the wire no page in the estate names it except the four reveals. A policy that
     /// names a script the page does not carry is harmless to a browser and a slow rot: it is
     /// the page that gains a script later, by accident, that this pins shut.
@@ -18564,9 +18550,14 @@ mod tests {
             !plain.contains(&hash),
             "the self-service page's own rule is that it carries no script: {plain}"
         );
-        assert!(
-            plain.contains("script-src 'none'"),
-            "and the non-reveal policy says so exactly as it did before: {plain}"
+        // Step 13: the page's two list boxes submit through the shell's handler, so its policy
+        // admits that handler by hash, and the directive is the **console's**, because one rule
+        // about what may run cannot have two answers on two surfaces.
+        assert_eq!(
+            script_src(&plain),
+            script_src(&admin_csp(&Look::default(), false)),
+            "the page's script-src is the console's, and names the handler and nothing else: \
+             {plain}"
         );
         let reveal = account_csp(&AccountLook::default(), true);
         assert!(
@@ -18576,6 +18567,11 @@ mod tests {
         assert!(
             !reveal.contains("script-src 'none'"),
             "a policy that says `'none'` and names a hash is a policy that runs nothing: {reveal}"
+        );
+        assert_eq!(
+            script_src(&reveal),
+            script_src(&admin_csp(&Look::default(), true)),
+            "and the reveal's directive is the console's too: {reveal}"
         );
 
         // Over the wire: every console page, and the self-service page, carry a policy that
@@ -18768,6 +18764,17 @@ mod tests {
             out.push(format!("on{}=\"{value}\"", &rest[..name_len]));
         }
         out
+    }
+
+    /// The `script-src` directive of a policy, trimmed. A policy is `;`-separated directives,
+    /// and a claim about **what may run** is a claim about that one, so an assertion written
+    /// against the whole header passes when an unrelated directive changes.
+    fn script_src(csp: &str) -> String {
+        csp.split(';')
+            .map(str::trim)
+            .find(|d| d.starts_with("script-src"))
+            .unwrap_or("<no script-src>")
+            .to_string()
     }
 
     /// Does [`every_route`] still name every page there is?
@@ -21412,26 +21419,21 @@ mod tests {
         account_call_with(url, identity, &extra)
     }
 
-    /// Case-insensitive search for an inline event handler: a space, `on`, at least one ASCII
-    /// letter, `=`. That is the shape of `onclick=` and of every other `on…=` attribute, and
-    /// the self-service page may carry none: the estate's rule is that a page works with
-    /// scripting off, and unlike the console this page has no `<noscript>` behind a handler.
-    fn account_carries_inline_handler(document: &str) -> bool {
-        let lower = document.to_ascii_lowercase();
-        let bytes = lower.as_bytes();
-        for (i, b) in bytes.iter().enumerate() {
-            if *b != b' ' || !bytes[i + 1..].starts_with(b"on") {
-                continue;
-            }
-            let mut j = i + 2;
-            while j < bytes.len() && bytes[j].is_ascii_alphabetic() {
-                j += 1;
-            }
-            if j > i + 2 && bytes.get(j) == Some(&b'=') {
-                return true;
-            }
-        }
-        false
+    /// The inline event handlers on a self-service page **beyond the one the estate allows**.
+    ///
+    /// The estate allowed none here until 2026-11-26, when the user asked for the Preferences
+    /// list boxes to apply on selection on this page too (PLAN.md step 13), which is the
+    /// console's [`SETTINGS_ONCHANGE`] and nothing else. So this is an allowlist, not a
+    /// detector: the handler's *value* is compared, because an `onchange` that reads like the
+    /// allowed one and does something else is a second script. Everything the page does beyond
+    /// that stays a link or a form, because the rule this surface keeps is that it works with
+    /// scripting off, through the `<noscript>` Apply the same form renders.
+    fn account_extra_handlers(document: &str) -> Vec<String> {
+        let allowed = format!("onchange=\"{SETTINGS_ONCHANGE}\"");
+        handlers_in(document)
+            .into_iter()
+            .filter(|h| *h != allowed)
+            .collect()
     }
 
     /// The page with its inline stylesheets collapsed to a marker. `THEME_CSS` and `BASE_CSS`
@@ -21669,8 +21671,9 @@ mod tests {
                 "{who}: no script tag, the page works with scripting off"
             );
             assert!(
-                !account_carries_inline_handler(&g.body),
-                "{who}: no inline handler: {g:?}"
+                account_extra_handlers(&g.body).is_empty(),
+                "{who}: the only handler on the page is the Preferences one: {:?}",
+                account_extra_handlers(&g.body)
             );
         }
 
@@ -21977,10 +21980,11 @@ mod tests {
     }
 
     /// The estate's rule is that a page works with scripting off, and the identity page has
-    /// nothing to script. The rich page is the one that tempts a developer into a disclosure
-    /// toggle, so it is the one worth pinning.
+    /// nothing to script beyond the Preferences menu, whose one handler is the estate's own.
+    /// The rich page is the one that tempts a developer into a disclosure toggle, so it is the
+    /// one worth pinning.
     #[test]
-    fn account_the_rich_page_carries_no_script_and_no_inline_handler() {
+    fn account_the_rich_page_carries_no_script_and_only_the_menu_handler() {
         let path = account_scratch_full("nojs-full");
         let base = account_serve(&path);
 
@@ -21996,9 +22000,9 @@ mod tests {
             "no script tag: the page works with scripting off"
         );
         assert!(
-            !account_carries_inline_handler(&g.body),
-            "no inline handler of any kind: {}",
-            account_readable(&g.body)
+            account_extra_handlers(&g.body).is_empty(),
+            "the only handler on the page is the Preferences one: {:?}",
+            account_extra_handlers(&g.body)
         );
 
         cleanup(&path);
@@ -22574,9 +22578,21 @@ mod tests {
         after[..end].to_string()
     }
 
+    /// The page's old words for a caller with no roster row, spelled here in both languages.
+    ///
+    /// They were `K::AccountNoRow`. Step 13 (PLAN.md) took the sentence out of the page, so the
+    /// key has no caller left and is the coder's to delete, and the assertions that the page says
+    /// **nothing** about a missing row still need the words to look for: a test that compared with
+    /// a key would stop compiling, and one that dropped the comparison would quietly become an
+    /// English-only check of a page that is translated. Verbatim from the table, so a paraphrase
+    /// here is caught by the same assert as a paraphrase there.
+    const ACCOUNT_NO_ROW_EN: &str = "bb-auth has no roster row for you.";
+    const ACCOUNT_NO_ROW_IT: &str = "bb-auth non ha una tua riga nella lista.";
+
     /// The lede says which addresses and which account, in one paragraph: every address in
     /// `code`, a line break, then the label and the uuid. The bar already says "signed in as",
-    /// so the body must not.
+    /// so the body must not. A caller with **no** roster row gets the addresses and nothing
+    /// else, in either language: the second line names an id, and there is none to name.
     #[test]
     fn the_lede_names_the_addresses_and_the_account_id() {
         let path = account_scratch_full("lede");
@@ -22605,17 +22621,47 @@ mod tests {
             "the old paragraphs are gone, the bar says who is signed in: {zone}"
         );
 
+        // Step 13: a caller with no roster row is told **nothing** about it here. The line under
+        // the addresses exists to name an account id, so with no id to name there is no line, no
+        // label and no sentence: the page has nothing to say about a row it does not have, and a
+        // stranger reads the same shape of page as a person who has one.
         let g = account_call(&base, Some("stranger@elsewhere.com"));
         assert_eq!(g.status, 200, "{}", account_readable(&g.body));
         let zone = account_lede_zone(&g.body);
         assert!(
-            zone.contains("<code>stranger@elsewhere.com</code>")
-                && zone.contains("<br>bb-auth has no roster row for you."),
-            "a stranger's lede carries the address and the no-row sentence: {zone}"
+            zone.contains("<code>stranger@elsewhere.com</code>"),
+            "a stranger's lede is the address they signed in with: {zone}"
+        );
+        for words in [
+            m(Lang::En, ACCOUNT_NO_ROW_EN, ACCOUNT_NO_ROW_IT),
+            m(Lang::It, ACCOUNT_NO_ROW_EN, ACCOUNT_NO_ROW_IT),
+            t(Lang::En, K::AccountIdLabel),
+            t(Lang::It, K::AccountIdLabel),
+        ] {
+            assert!(
+                !zone.contains(words),
+                "the lede says none of this, in either language: {zone}"
+            );
+        }
+        assert!(
+            !zone.contains("<br"),
+            "the line break that separated the id from the addresses goes with the id: {zone}"
         );
         assert!(
-            !zone.contains("Account id") && !zone.contains("<code>1111"),
+            !zone.contains("<code class=\"uid\""),
             "a stranger has no account id to show: {zone}"
+        );
+
+        // The same caller in Italian: the sentence is a translation, so a check written in
+        // English only passes a page that dropped the English and kept the Italian.
+        let it = account_call_pref(&base, Some("stranger@elsewhere.com"), Some("lang=it"), None);
+        assert_eq!(it.status, 200, "{}", account_readable(&it.body));
+        let zone = account_lede_zone(&it.body);
+        assert!(
+            zone.contains("<code>stranger@elsewhere.com</code>")
+                && !zone.contains("<br")
+                && !zone.contains(m(Lang::It, ACCOUNT_NO_ROW_EN, ACCOUNT_NO_ROW_IT)),
+            "the Italian page says the same nothing: {zone}"
         );
 
         let it = account_call_pref(&base, Some("bob@x.com"), Some("lang=it"), None);
@@ -22775,10 +22821,11 @@ mod tests {
     }
 
     /// The estate's rule, on every page this step adds and on the refusals beside them: no
-    /// script tag, no handler of any kind. The preference form is the first thing here that a
-    /// script would be tempting to wire up, so the rule is walked across every variant.
+    /// script tag, and no handler beyond the Preferences menu's. The preference form is the
+    /// first thing here that a script would be tempting to wire up, so the rule is walked across
+    /// every variant.
     #[test]
-    fn account_every_look_and_preference_page_carries_no_script_and_no_handler() {
+    fn account_every_look_and_preference_page_carries_no_script_and_only_the_menu_handler() {
         let path = account_scratch("nojs-look", ACCOUNT_SETTINGS_THEME_DARK);
         let base = account_serve(&path);
         let brand = account_scratch("nojs-brand", ACCOUNT_SETTINGS_BRAND);
@@ -22814,9 +22861,9 @@ mod tests {
                     account_readable(&g.body)
                 );
                 assert!(
-                    !account_carries_inline_handler(&g.body),
-                    "{identity:?} at {url}: no inline handler, the selector uses a submit button: {}",
-                    account_readable(&g.body)
+                    account_extra_handlers(&g.body).is_empty(),
+                    "{identity:?} at {url}: the only handler is the Preferences one: {:?}",
+                    account_extra_handlers(&g.body)
                 );
             }
         }
@@ -24020,16 +24067,16 @@ mod tests {
     }
 
     /// The estate's standing rule, re-asserted on the page **with** the new
-    /// form: no `<script>` and no inline handler anywhere. The mint form is
-    /// plain fields and a submit button, because a page that needs scripting
-    /// to hand out a credential is the thing that must never ship.
+    /// form: no `<script>`, and no inline handler beyond the Preferences menu's.
+    /// The mint form is plain fields and a submit button, because a page that
+    /// needs scripting to hand out a credential is the thing that must never ship.
     ///
     /// Both pages are walked, because §13.16 split them: the page that lists the
     /// keys and the page that carries the form. A `<script>` added to make the +
     /// open the row is exactly the regression this test is for, and it would land
     /// on whichever of the two somebody edited.
     #[test]
-    fn account_the_page_with_the_mint_form_still_carries_no_script_and_no_handler() {
+    fn account_the_page_with_the_mint_form_carries_no_script_and_only_the_menu_handler() {
         let path = account_scratch_access("mint-noscript", &account_access_mint());
         let base = account_serve(&path);
 
@@ -24046,8 +24093,9 @@ mod tests {
                 "`{page}`: no script tag, the estate rule the form must not break"
             );
             assert!(
-                !account_carries_inline_handler(&g.body),
-                "`{page}`: no inline handler of any kind"
+                account_extra_handlers(&g.body).is_empty(),
+                "`{page}`: the only handler is the Preferences one: {:?}",
+                account_extra_handlers(&g.body)
             );
         }
 
@@ -24290,8 +24338,9 @@ mod tests {
             "no script tag: the estate rule these pages must not break"
         );
         assert!(
-            !account_carries_inline_handler(&g.body),
-            "no inline handler of any kind"
+            account_extra_handlers(&g.body).is_empty(),
+            "the only handler is the Preferences one: {:?}",
+            account_extra_handlers(&g.body)
         );
 
         cleanup(&path);
@@ -26018,27 +26067,32 @@ mod tests {
         cleanup(&path);
     }
 
-    /// 8b-2: `/account/` carries no handler at all, so its Preferences menu is the console's
-    /// menu as scripting-off sees it: no `onchange`, the Apply button always present (not
-    /// inside a `noscript`), and a plain `GET` to the page. The submit still answers the `302`
-    /// that sets both cookies.
+    /// 8b-2 and step 13: the page's **policy** admits the Preferences handler and nothing else.
+    /// The handler rides in an attribute, so the policy needs `'unsafe-hashes'` beside the hash
+    /// of [`SETTINGS_ONCHANGE`], and the copy script's hash must not appear: the bearer reveal is
+    /// the only page that carries that script, and a policy that admitted it everywhere under the
+    /// prefix would let any page there run it. The form is still a plain `GET` back to the page
+    /// and still answers the `302` that sets both cookies, and its Apply is the way in for a
+    /// browser running no code, so the scripting-off path is the one it always was.
     #[test]
-    fn the_account_menu_has_no_handler() {
-        let path = account_scratch_full("menu-no-handler");
+    fn the_account_policy_admits_the_preferences_handler() {
+        let path = account_scratch_full("menu-csp");
         let base = account_serve(&path);
 
         for cookie in ["lang=en", "lang=it"] {
             let g = account_call_pref(&base, Some("bob@x.com"), Some(cookie), None);
             assert_eq!(g.status, 200, "{}", account_readable(&g.body));
+            let csp = g.header("Content-Security-Policy").unwrap_or_default();
             assert!(
-                !account_carries_inline_handler(&g.body),
-                "{cookie}: no `on…=` attribute anywhere on /account/, the menu included: {}",
-                account_readable(&g.body)
+                csp.contains(&format!(
+                    "script-src 'unsafe-hashes' {}",
+                    csp_hash(SETTINGS_ONCHANGE)
+                )),
+                "{cookie}: the policy admits the one handler the page emits: {csp}"
             );
             assert!(
-                !g.body.to_ascii_lowercase().contains("<noscript"),
-                "{cookie}: nothing on /account/ hides behind a noscript: {}",
-                account_readable(&g.body)
+                !csp.contains(&csp_hash(COPY_SCRIPT)),
+                "{cookie}: the copy script is not on this page, and is not admitted: {csp}"
             );
             let top = the_header_bar(&g.body, cookie);
             let menu = elements(&top, "<div class=\"menu\"", "</form>");
@@ -26071,6 +26125,12 @@ mod tests {
                 t(lang, K::Apply),
                 "{}",
                 buttons[0]
+            );
+            assert!(
+                form[0].contains("<noscript>"),
+                "{cookie}: the Apply is the scripting-off way round, so it hides behind \
+                 noscript: {}",
+                form[0]
             );
         }
 
@@ -30492,14 +30552,23 @@ mod tests {
             assert!(visible_text(&label).contains(t(lang, K::AccountProfileCodeLabel)));
             assert!(form.contains(t(lang, K::AccountProfileSave)));
 
-            // Neither the script nor a handler: every step is a link or a form.
+            // Neither the script nor a handler beyond the menu's: every step of the profile
+            // edit is a link or a form.
             let doc = g.body.to_ascii_lowercase();
             assert!(!doc.contains("<script"), "{}", account_readable(&g.body));
-            assert!(!account_carries_inline_handler(&g.body));
+            assert!(
+                account_extra_handlers(&g.body).is_empty(),
+                "{:?}",
+                account_extra_handlers(&g.body)
+            );
         }
         let form = profile_get(&url, "bob@x.com", &[]);
         assert!(!form.body.to_ascii_lowercase().contains("<script"));
-        assert!(!account_carries_inline_handler(&form.body));
+        assert!(
+            account_extra_handlers(&form.body).is_empty(),
+            "{:?}",
+            account_extra_handlers(&form.body)
+        );
         cleanup(&path);
     }
 
@@ -32825,8 +32894,11 @@ mod tests {
     // The wording is spelled out below in both languages, verbatim from §13.30 §5's table,
     // because the `K` keys that carry it are the coder's to add and `K` has no `PartialEq`, so
     // the rendered words are what a test can compare. Where a key **already** exists (`Cancel`,
-    // `AccountNoRow`, `AccountVeto*`, the `Unit*` words) the assertion compares with
-    // `t(lang, K::…)` instead, and the veto's words are therefore never written here.
+    // `AccountVeto*`, the `Unit*` words) the assertion compares with `t(lang, K::…)` instead, and
+    // the veto's words are therefore never written here. The account page's "no roster row"
+    // sentence is spelled below as well (`ACCOUNT_NO_ROW_EN` / `_IT`): step 13 left that key with
+    // no caller in the page, so its words are something to look **for** now, and a test may not
+    // name a key the coder is deleting.
     // ===========================================================================================
 
     const DELETE_TITLE_EN: &str = "Delete your account";
@@ -33256,7 +33328,7 @@ mod tests {
                 account_readable(&g.body)
             );
             assert!(
-                !the_words(&g.body).contains(t(lang, K::AccountNoRow)),
+                !the_words(&g.body).contains(m(lang, ACCOUNT_NO_ROW_EN, ACCOUNT_NO_ROW_IT)),
                 "{at}: a roster row is not a stranger: {}",
                 the_words(&g.body)
             );
@@ -33268,7 +33340,8 @@ mod tests {
     /// by listing the one thing that is theirs: the sign-in accounts, and nothing else.
     ///
     /// The user's rule of 2026-11-26 (PLAN.md step 13): where there is no roster row the page
-    /// writes **nothing** in its place. The account page's `K::AccountNoRow` sentence is not
+    /// writes **nothing** in its place. The account page's old "no roster row" sentence
+    /// (`ACCOUNT_NO_ROW_EN` / `_IT`, spelled here because the key has no caller left) is not
     /// repeated here, because a person who came to delete is being told what goes, and a line
     /// about what is not there is not a fact about the deletion.
     #[test]
@@ -33325,7 +33398,7 @@ mod tests {
             // The rule of 2026-11-26: no row, so no sentence standing in for one. The account
             // page's own words for having no row must not reach this page.
             assert!(
-                !the_words(&g.body).contains(t(lang, K::AccountNoRow)),
+                !the_words(&g.body).contains(m(lang, ACCOUNT_NO_ROW_EN, ACCOUNT_NO_ROW_IT)),
                 "{at}: the page writes nothing where a roster row would be: {}",
                 the_words(&g.body)
             );
@@ -35007,11 +35080,13 @@ mod tests {
         let _ = std::fs::remove_file(&path);
     }
 
-    /// §13.28 §3: the console's Preferences form keeps its one handler and its `noscript` way
-    /// round; `/account/` has no handler at all and shows its Apply always. One form, two
-    /// settings, and the difference is a flag, not a second copy of the markup.
+    /// §13.28 §3 and step 13: the Preferences form is **one form on both surfaces**, handler and
+    /// all. The console's keeps its one handler and its `noscript` way round, and so does
+    /// `/account/`'s: picking a theme or a language submits, and the Apply is what a browser
+    /// running no code sees. The flag that used to make the page plain is gone, so the two
+    /// panels are asserted against each other rather than against two rules.
     #[test]
-    fn the_preferences_form_is_scripted_on_the_console_and_plain_on_the_page() {
+    fn the_preferences_form_is_scripted_on_both_surfaces() {
         let path = account_scratch_full("prefs-form");
         let port = account_port(&path);
         let base = format!("http://127.0.0.1:{port}{ACCOUNT_PATH}/");
@@ -35041,16 +35116,29 @@ mod tests {
             "<details class=\"prefs\">",
             "details",
         );
-        assert!(
-            handlers_in(&prefs).is_empty(),
-            "the page carries no handler at all: {prefs}"
+        assert_eq!(
+            handlers_in(&prefs),
+            vec![
+                format!("onchange=\"{SETTINGS_ONCHANGE}\""),
+                format!("onchange=\"{SETTINGS_ONCHANGE}\"")
+            ],
+            "the page's two list boxes carry the same one handler the console's do: {prefs}"
         );
         assert!(
-            !prefs.contains("<noscript"),
-            "its Apply is always shown: {prefs}"
+            prefs.contains("<noscript>"),
+            "and its Apply hides behind noscript, as the console's does: {prefs}"
         );
         let actions = controls_with_class(&prefs, "div", "actions");
-        assert_eq!(actions.len(), 1, "in div.actions: {prefs}");
+        assert_eq!(
+            actions.len(),
+            1,
+            "one actions block, inside the noscript: {prefs}"
+        );
+        assert!(
+            prefs.contains("<noscript>")
+                && prefs.find("<noscript>").unwrap() < prefs.find("div class=\"actions\"").unwrap(),
+            "the block is the noscript's: {prefs}"
+        );
         assert_eq!(
             visible_text(&actions[0]),
             t(Lang::En, K::Apply),
@@ -37008,10 +37096,16 @@ mod tests {
     }
 
     /// §13.30 §6, "Scripting off: every step is a `GET` link or a `POST` form; nothing in the
-    /// flow carries a script or a handler". The console's version of this
+    /// flow carries a script". The console's version of this
     /// (`no_page_but_the_reveal_carries_a_script`) walks `every_route()`, which is the console's
     /// `Route` enum: it never reaches a `/account/delete` outcome, so the deletion's pages were
     /// unpinned. Every page of §2 and §4 is walked here.
+    ///
+    /// Step 13 (PLAN.md) moved the handler rule: these pages wear the account menu, so they carry
+    /// the menu's two `onchange` list boxes like every other page under the prefix. The script
+    /// rule is untouched, and the handler rule is the page's own allowlist
+    /// (`account_extra_handlers`), so a step of the flow that gains a script of its own is still
+    /// red here.
     #[test]
     fn the_delete_flow_carries_no_script() {
         let intake = FakeIntake::answering(vec![
@@ -37126,9 +37220,10 @@ mod tests {
                 account_readable(&g.body)
             );
             assert!(
-                handlers_in(&g.body).is_empty(),
-                "{label}: no on…= handler, so every step is markup alone: {:?}",
-                handlers_in(&g.body)
+                account_extra_handlers(&g.body).is_empty(),
+                "{label}: the only handlers are the account menu's two list boxes, so every \
+                 step is markup alone: {:?}",
+                account_extra_handlers(&g.body)
             );
         }
         let _ = std::fs::remove_file(&path);
