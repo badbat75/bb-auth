@@ -5406,18 +5406,26 @@ fn asset_url_core(raw: &str) -> Result<Option<String>, (String, UrlFault)> {
 /// length is bounded because the value is laid out, not merely stored. Empty means unset,
 /// and each page falls back to whatever it calls itself.
 pub fn compile_brand_name(raw: &str) -> Result<Option<String>, String> {
+    brand_name_core(raw).map_err(|r| r.sentence())
+}
+
+/// [`compile_brand_name`]'s checks, answering the typed refusal (§13.31 §3). The refusal quotes
+/// the **trimmed** value, which is what today's sentence printed, and the length it names is a
+/// count of **characters**, because the bound is on what a page lays out and not on what the file
+/// stores. Empty is `Ok(None)`, the setting unset, so it is never a refusal.
+fn brand_name_core(raw: &str) -> Result<Option<String>, SettingsRefusal> {
     let n = raw.trim();
     if n.is_empty() {
         return Ok(None);
     }
     if n.chars().any(|c| c.is_control()) {
-        return Err(format!("brand_name '{n}': contains a control character"));
+        return Err(SettingsRefusal::BrandControl {
+            name: n.to_string(),
+        });
     }
-    if n.chars().count() > MAX_BRAND_NAME {
-        return Err(format!(
-            "brand_name: {} characters is longer than the {MAX_BRAND_NAME} allowed",
-            n.chars().count()
-        ));
+    let chars = n.chars().count();
+    if chars > MAX_BRAND_NAME {
+        return Err(SettingsRefusal::BrandTooLong { chars });
     }
     Ok(Some(n.to_string()))
 }
@@ -6291,9 +6299,9 @@ impl std::fmt::Display for HeaderFault {
 /// would be two copies of each. `code()` is the stable name the GUI maps to a `K` key in slice
 /// S8, so a page can say the same thing in the reader's language without sniffing English.
 ///
-/// `Other` is temporary: S1 converts nine of the §2 codes and every leaf not yet converted
-/// travels in it, holding today's prefixed sentence byte for byte, which is what keeps the S0
-/// goldens green from here to S7, where the variant is deleted.
+/// Every code §2 lists is named once in [`SETTINGS_REFUSAL_CODES`] and sampled once in
+/// [`settings_refusal_samples`], and §6's tests pin that the two line up with the variants of
+/// this enum, so a new variant arrives with a code, a sample and a settings file that reaches it.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum SettingsRefusal {
     /// The file declares a version this format is not: 1 predates the app clients, 2 predates
@@ -6576,19 +6584,33 @@ pub enum SettingsRefusal {
         rotation: String,
         retention: Option<String>,
     },
-
+    /// `ui.brand_name` carries a control character: the paste that arrived from a spreadsheet,
+    /// or a terminal that wrote an escape into the middle of the name.
+    ///
+    /// Refused because this value is **laid out and emitted**, not merely stored: it is the word
+    /// a sign-in page, the console and the self-service page print beside the logo, and the name
+    /// the browser tab carries. It is HTML-escaped on the way out, so a control byte is not a
+    /// hole in the page; it is a deployment whose name has an invisible character in it, which is
+    /// never what somebody typed and is invisible to fix, because nothing on the page shows it.
+    /// `name` is the **trimmed** value, which is what today's sentence quoted.
+    BrandControl { name: String },
+    /// `ui.brand_name` is longer than [`MAX_BRAND_NAME`] characters.
+    ///
+    /// Refused because the bound is on what a page lays out, not on what the file stores: the
+    /// name sits in one header row beside the logo and in a tab title, and a value of a thousand
+    /// characters pushes the rest of that row out of it. The count is of **characters**, so an
+    /// accented name is measured as a reader counts it, and the sentence prints that count, since
+    /// a byte count blames a name the layout does fit.
+    BrandTooLong { chars: usize },
     /// `ui.theme` is not one of `system`, `light`, `dark`.
     ThemeUnknown { raw: String },
-    /// TEMPORARY (S1 to S6, deleted in S7): a refusal not yet converted, carrying today's
-    /// sentence, prefix included, byte for byte.
-    Other(String),
 }
 
 impl SettingsRefusal {
     /// The stable `snake_case` name of this refusal, the one §13.31 §2 lists and the GUI maps
     /// to a `K` key. No production code branches on it: it is the refusal's name for the tests
-    /// and for the page, as [`Decision`]'s are for the audit. `Other` is `"other"`, and dies
-    /// with the variant.
+    /// and for the page, as [`Decision`]'s are for the audit. Every name it answers is listed
+    /// exactly once in [`SETTINGS_REFUSAL_CODES`].
     pub fn code(&self) -> &'static str {
         match self {
             Self::Version { .. } => "version",
@@ -6625,8 +6647,9 @@ impl SettingsRefusal {
             Self::AuditLimitZero { .. } => "audit_limit_zero",
             Self::AuditLimitTooMuch { .. } => "audit_limit_too_much",
             Self::AuditUnbounded { .. } => "audit_unbounded",
+            Self::BrandControl { .. } => "brand_control",
+            Self::BrandTooLong { .. } => "brand_too_long",
             Self::ThemeUnknown { .. } => "theme_unknown",
-            Self::Other(_) => "other",
         }
     }
 
@@ -6640,8 +6663,8 @@ impl SettingsRefusal {
     /// the key), and `audit` for the unbounded pair (the settings function prefixed the pair
     /// leaf's sentence with `audit:`, which is the prefix `bb-auth-adm` swaps for its own flags).
     /// Nothing at all for a refusal the settings function spells itself, whose sentence already
-    /// names its key, the two header refusals among them (§13.31 §3). `Other` carries
-    /// today's prefixed sentence whole, so it has no prefix of its own.
+    /// names its key: the two audit header refusals and the two brand refusals are among those,
+    /// because each sentence opens with the name of the setting it refuses (§13.31 §2).
     fn prefix(&self) -> Option<&'static str> {
         match self {
             Self::ClaimCharset { .. }
@@ -6819,11 +6842,15 @@ impl SettingsRefusal {
                     None => "no retention".to_string(),
                 }
             ),
+            Self::BrandControl { name } => {
+                format!("brand_name '{name}': contains a control character")
+            }
+            Self::BrandTooLong { chars } => format!(
+                "brand_name: {chars} characters is longer than the {MAX_BRAND_NAME} allowed"
+            ),
             Self::ThemeUnknown { raw } => {
                 format!("theme: '{raw}' is not one of system, light, dark")
             }
-            // Carries today's prefixed sentence whole, so it is the sentence and nothing more.
-            Self::Other(s) => s.clone(),
         }
     }
 }
@@ -6831,14 +6858,244 @@ impl SettingsRefusal {
 impl std::fmt::Display for SettingsRefusal {
     /// Today's sentence, byte for byte, pinned by the S0 goldens: `prefix`, a `": "`, then
     /// `sentence`, which is exactly how `compile_settings` spelled a leaf's refusal through its
-    /// `map_err` before this type existed. A refusal not yet converted arrives already spelled,
-    /// in [`SettingsRefusal::Other`], and carries no prefix of its own.
+    /// `map_err` before this type existed. Every refusal is spelled out of its own arguments, so
+    /// the GUI can say the same thing in the reader's language from the variant and its fields,
+    /// and this stays the one English the CLI and the gate print (§13.31 §3).
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self.prefix() {
             Some(p) => write!(f, "{p}: {}", self.sentence()),
             None => f.write_str(&self.sentence()),
         }
     }
+}
+
+/// Every [`SettingsRefusal::code`], exactly once, in the order docs/ARCHITECTURE.md §13.31 §2
+/// lists the refusals.
+///
+/// It exists for the tests (§13.31 §6): one asserts that the codes of
+/// [`settings_refusal_samples`] are exactly this list, each exactly once, and one asserts that the
+/// settings documents the golden test carries reach every code here and no code outside it. A new
+/// variant therefore has to be listed, sampled and given a fixture that reaches it, and the test
+/// names which of the three is missing. No production code reads it: the GUI matches on the
+/// variant, and the CLI and the gate print the sentence.
+pub const SETTINGS_REFUSAL_CODES: &[&str] = &[
+    "version",
+    "claim_charset",
+    "claim_empty_part",
+    "claim_consumed",
+    "claim_header_reserved",
+    "claims_collide",
+    "attr_unknown",
+    "attr_twice",
+    "attr_none",
+    "ttl_below_floor",
+    "ttl_above_ceiling",
+    "app_client_id",
+    "url_not_printable",
+    "url_not_https",
+    "url_empty_host",
+    "url_userinfo",
+    "url_backslash",
+    "url_userinfo_or_backslash",
+    "url_query_or_fragment",
+    "url_quote",
+    "url_not_https_or_rooted",
+    "callback_not_https",
+    "cookie_domain_not_bare",
+    "cookie_domain_single_label",
+    "host_control_byte",
+    "host_not_bare",
+    "host_at_or_dot_dot",
+    "hosts_outside_cookie_domain",
+    "landing_off_hosts",
+    "oauth_domain_not_bare",
+    "button_bare_name",
+    "button_no_idp",
+    "button_idp_charset",
+    "button_twice",
+    "button_no_audience",
+    "social_half_configured",
+    "audit_header_not_a_name",
+    "audit_header_credential",
+    "audit_headers_same",
+    "audit_limit_not_amount",
+    "audit_limit_zero",
+    "audit_limit_too_much",
+    "audit_unbounded",
+    "brand_control",
+    "brand_too_long",
+    "theme_unknown",
+];
+
+/// One refusal of every code in [`SETTINGS_REFUSAL_CODES`], in that order, built with neutral
+/// arguments.
+///
+/// It exists for the tests (§13.31 §3): the GUI's test walks every code and asserts its page says
+/// something about it in both languages, and a `cfg(test)` item is invisible across the crate
+/// boundary, so the samples are built here. The arguments avoid every wire key that test forbids
+/// in a translated message (`brand_name`, `login_url`, `client_id`, `audit.rotation`, …), so a
+/// message cannot pass it by quoting the setting's own name.
+#[doc(hidden)]
+pub fn settings_refusal_samples() -> Vec<SettingsRefusal> {
+    vec![
+        // A version that is neither of the two older formats, so the sentence is the terse one.
+        SettingsRefusal::Version { found: 4 },
+        SettingsRefusal::ClaimCharset {
+            claim: "a b".to_string(),
+        },
+        SettingsRefusal::ClaimEmptyPart {
+            claim: "a::b".to_string(),
+        },
+        SettingsRefusal::ClaimConsumed {
+            claim: "nickname".to_string(),
+        },
+        SettingsRefusal::ClaimHeaderReserved {
+            claim: "mail_alias".to_string(),
+            header: "X-Auth-Mail-Alias".to_string(),
+        },
+        SettingsRefusal::ClaimsCollide {
+            first: "a_b".to_string(),
+            second: "a:b".to_string(),
+            header: "X-Auth-A-B".to_string(),
+        },
+        SettingsRefusal::AttrUnknown {
+            attr: "nope".to_string(),
+        },
+        SettingsRefusal::AttrTwice {
+            attr: "mail".to_string(),
+        },
+        SettingsRefusal::AttrNone,
+        SettingsRefusal::TtlBelowFloor { ttl: 30 },
+        SettingsRefusal::TtlAboveCeiling { ttl: 3_153_600_001 },
+        SettingsRefusal::AppClientId {
+            button: None,
+            id: "bad id".to_string(),
+        },
+        // One of each URL fault, all on one setting: the code is the fault's, and the GUI's arm
+        // takes the setting from `key`, so nine settings would only repeat the fault nine times.
+        SettingsRefusal::Url {
+            key: SettingKey::DeniedUrl,
+            raw: "https://x.com/a b".to_string(),
+            fault: UrlFault::NotPrintable,
+        },
+        SettingsRefusal::Url {
+            key: SettingKey::DeniedUrl,
+            raw: "http://x.com".to_string(),
+            fault: UrlFault::NotHttps,
+        },
+        SettingsRefusal::Url {
+            key: SettingKey::DeniedUrl,
+            raw: "https://".to_string(),
+            fault: UrlFault::EmptyHost,
+        },
+        SettingsRefusal::Url {
+            key: SettingKey::DeniedUrl,
+            raw: "https://a@x.com".to_string(),
+            fault: UrlFault::Userinfo,
+        },
+        SettingsRefusal::Url {
+            key: SettingKey::DeniedUrl,
+            raw: "https://x.com\\a".to_string(),
+            fault: UrlFault::Backslash,
+        },
+        SettingsRefusal::Url {
+            key: SettingKey::Issuer,
+            raw: "https://a@x.com\\a".to_string(),
+            fault: UrlFault::UserinfoOrBackslash,
+        },
+        SettingsRefusal::Url {
+            key: SettingKey::Issuer,
+            raw: "https://x.com?q".to_string(),
+            fault: UrlFault::QueryOrFragment,
+        },
+        SettingsRefusal::Url {
+            key: SettingKey::StylesheetUrl,
+            raw: "https://x.com/\"a\"".to_string(),
+            fault: UrlFault::Quote,
+        },
+        SettingsRefusal::Url {
+            key: SettingKey::LogoUrl,
+            raw: "ftp://x.com".to_string(),
+            fault: UrlFault::NotHttpsOrRooted,
+        },
+        SettingsRefusal::CallbackNotHttps,
+        SettingsRefusal::CookieDomainNotBare {
+            raw: "https://x.com".to_string(),
+        },
+        SettingsRefusal::CookieDomainSingleLabel {
+            raw: "example".to_string(),
+        },
+        SettingsRefusal::HostControlByte {
+            raw: "ho\tst".to_string(),
+        },
+        SettingsRefusal::HostNotBare {
+            raw: "https://x.com".to_string(),
+        },
+        SettingsRefusal::HostAtOrDotDot {
+            raw: "a..b".to_string(),
+        },
+        SettingsRefusal::HostsOutsideCookieDomain {
+            hosts: vec!["other.com".to_string()],
+            cookie_domain: ".example.com".to_string(),
+        },
+        SettingsRefusal::LandingOffHosts,
+        SettingsRefusal::OauthDomainNotBare {
+            raw: "https://x.com".to_string(),
+        },
+        SettingsRefusal::ButtonBareName {
+            name: "Google".to_string(),
+        },
+        SettingsRefusal::ButtonNoIdp,
+        SettingsRefusal::ButtonIdpCharset {
+            idp: "a b".to_string(),
+        },
+        SettingsRefusal::ButtonTwice {
+            idp: "Google".to_string(),
+        },
+        SettingsRefusal::ButtonNoAudience {
+            idp: "Google".to_string(),
+        },
+        SettingsRefusal::SocialHalfConfigured { buttons: 1 },
+        SettingsRefusal::AuditHeader {
+            key: SettingKey::ClientIpHeader,
+            name: "X_Real_IP".to_string(),
+            fault: HeaderFault::NotAName,
+        },
+        SettingsRefusal::AuditHeader {
+            key: SettingKey::RequestIdHeader,
+            name: "Authorization".to_string(),
+            fault: HeaderFault::Credential,
+        },
+        SettingsRefusal::AuditHeadersSame {
+            name: "X-Real-IP".to_string(),
+        },
+        SettingsRefusal::AuditLimitNotAmount {
+            key: SettingKey::AuditRotation,
+            raw: "4".to_string(),
+        },
+        SettingsRefusal::AuditLimitZero {
+            key: SettingKey::AuditRotation,
+            raw: "0 MiB".to_string(),
+        },
+        SettingsRefusal::AuditLimitTooMuch {
+            key: SettingKey::AuditRotation,
+            raw: "2048 GiB".to_string(),
+            unit: AuditUnit::GiB,
+        },
+        SettingsRefusal::AuditUnbounded {
+            rotation: "1 year".to_string(),
+            retention: None,
+        },
+        SettingsRefusal::BrandControl {
+            name: "Bad\u{7}Bat".to_string(),
+        },
+        SettingsRefusal::BrandTooLong {
+            chars: MAX_BRAND_NAME + 1,
+        },
+        SettingsRefusal::ThemeUnknown {
+            raw: "sepia".to_string(),
+        },
+    ]
 }
 
 /// Why [`SettingsWrite::prepare`] will not put a settings document on the disk: the two serde
@@ -7070,7 +7327,7 @@ pub fn compile_settings(file: &SettingsFile) -> Result<Settings, SettingsRefusal
     let stylesheet_url =
         asset_url_core(&file.ui.stylesheet_url).map_err(url_refusal(SettingKey::StylesheetUrl))?;
     let logo_url = asset_url_core(&file.ui.logo_url).map_err(url_refusal(SettingKey::LogoUrl))?;
-    let brand_name = compile_brand_name(&file.ui.brand_name).map_err(SettingsRefusal::Other)?;
+    let brand_name = brand_name_core(&file.ui.brand_name)?;
     let theme = UiTheme::parse(&file.ui.theme).ok_or_else(|| SettingsRefusal::ThemeUnknown {
         raw: file.ui.theme.trim().to_string(),
     })?;
@@ -12093,9 +12350,10 @@ mod tests {
     /// the right string off the wrong arm would pass the code assert alone), and the code pins
     /// the name S8 maps to a `K` key in the GUI. Each fixture is the one the S0 golden uses for
     /// that sentence, so the refusal is known reachable and reaches the arm under test rather
-    /// than an earlier check. The last case is the temporary `Other`: a refusal S1 does not
-    /// convert keeps today's prefixed sentence byte for byte, which is what keeps the S0 goldens
-    /// green from S1 to S6, where `Other` is deleted.
+    /// than an earlier check. The last case is the brand name, the leaf S1 left as the temporary
+    /// `Other` and S7 converted: it is pinned here as well as in S7's own test because it is the
+    /// one case that shows the sequence working, a refusal that travelled as a sentence through
+    /// S1 to S6 and arrives as a variant with the same bytes.
     #[test]
     fn compile_settings_names_its_refusal() {
         type Row<'a> = (&'a str, &'a str, &'a str, fn(&SettingsRefusal) -> bool);
@@ -12157,13 +12415,15 @@ mod tests {
             assert!(is_variant(&r), "{label}: got {r:?}");
             assert_eq!(r.code(), code, "{label}: {r}");
         }
-        // The temporary arm, pinned on its own because it is deleted in S7: today's sentence,
-        // prefix included, and the code §3 fixes for it. The fixture is a leaf this slice does
-        // not convert (the brand name is S7's, so the probe survives S4 to S6); each slice moves
-        // it to a leaf it has not converted yet.
+        // The leaf S1 left as the temporary `Other`, pinned here as the survivor of the sequence:
+        // it kept today's sentence byte for byte through S1 to S6, and S7 made it a variant. The
+        // bytes are the S0 golden's, so the conversion is visible as a code, not as a rewording.
         let r = settings_refusal_of(r#"{ "version": 3, "ui": { "brand_name": "Bad\u0007Bat" } }"#);
-        assert!(matches!(&r, SettingsRefusal::Other(_)), "{r:?}");
-        assert_eq!(r.code(), "other");
+        assert!(
+            matches!(&r, SettingsRefusal::BrandControl { name } if name == "Bad\u{7}Bat"),
+            "{r:?}"
+        );
+        assert_eq!(r.code(), "brand_control");
         assert_eq!(
             r.to_string(),
             "brand_name 'Bad\u{7}Bat': contains a control character"
@@ -13310,6 +13570,283 @@ mod tests {
                 rotation: AuditLimit::new(8, AuditUnit::MiB),
                 retention: Some(AuditLimit::new(6, AuditUnit::Months)),
             }
+        );
+    }
+
+    /// S7 (§13.31 §2 rows 44 and 45, §3, §7): the two brand-name refusals are variants of
+    /// `SettingsRefusal`, the last two refusals that travelled as a sentence in the temporary
+    /// `Other`. `compile_brand_name` keeps its `String` signature as a thin wrapper, because
+    /// `bb-auth-adm settings set --brand` and the GUI's own pre-check call it with their own
+    /// field names. Each row is the S0 golden's own fixture for that sentence, so the refusal is
+    /// known reachable and reaches the arm under test, and each row asserts four things: the
+    /// variant carries the §2 argument; `code()` is the §2 `snake_case` name S8 maps to a `K`
+    /// key; `prefix()` is nothing, because `compile_settings` added no prefix to this leaf (its
+    /// sentence names `brand_name` itself, which is why the golden's bytes start there); and
+    /// `Display` is the golden's bytes. The blocks after the table pin what the table cannot:
+    /// that the name the control refusal carries is the **trimmed** value (the leaf trims before
+    /// it checks anything, so a padded brand is refused under the spelling the file means, and
+    /// the argument is the text the sentence quotes, as §2 says); that the length is a count of
+    /// **characters** and not of bytes (an accented name 65 characters long is 130 bytes, so a
+    /// refusal printing the byte count blames a name the layout does fit); and that the `String`
+    /// wrapper is thin, answering exactly its variant's `sentence()`, so the CLI's `--brand`
+    /// refusal and the GUI's pre-check keep their bytes and each sentence has one home.
+    #[test]
+    fn brand_refusals_are_codes() {
+        let long = "a".repeat(65);
+        let accented = "è".repeat(65);
+        type Row = (
+            &'static str,
+            String,
+            &'static str,
+            Option<&'static str>,
+            &'static str,
+            fn(&SettingsRefusal) -> bool,
+        );
+        let cases: Vec<Row> = vec![
+            (
+                "brand control",
+                r#"{ "version": 3, "ui": { "brand_name": "Bad\u0007Bat" } }"#.into(),
+                "brand_control",
+                None,
+                "brand_name 'Bad\u{7}Bat': contains a control character",
+                |r| matches!(r, SettingsRefusal::BrandControl { name } if name == "Bad\u{7}Bat"),
+            ),
+            (
+                // The padded spelling: the leaf trims first, so the refusal names the brand the
+                // file means, and the argument is the trimmed text the sentence quotes (§2).
+                "brand control padded",
+                r#"{ "version": 3, "ui": { "brand_name": "  Bad\u0007Bat  " } }"#.into(),
+                "brand_control",
+                None,
+                "brand_name 'Bad\u{7}Bat': contains a control character",
+                |r| matches!(r, SettingsRefusal::BrandControl { name } if name == "Bad\u{7}Bat"),
+            ),
+            (
+                "brand too long",
+                format!(r#"{{ "version": 3, "ui": {{ "brand_name": "{long}" }} }}"#),
+                "brand_too_long",
+                None,
+                "brand_name: 65 characters is longer than the 64 allowed",
+                |r| matches!(r, SettingsRefusal::BrandTooLong { chars: 65 }),
+            ),
+            (
+                // 65 characters, 130 bytes: the sentence counts characters, because the bound is
+                // on what the page lays out, not on what the file stores.
+                "brand too long in accented characters",
+                format!(r#"{{ "version": 3, "ui": {{ "brand_name": "{accented}" }} }}"#),
+                "brand_too_long",
+                None,
+                "brand_name: 65 characters is longer than the 64 allowed",
+                |r| matches!(r, SettingsRefusal::BrandTooLong { chars: 65 }),
+            ),
+        ];
+        for row in cases.iter() {
+            let (label, code, prefix, sentence, is_variant) = (row.0, row.2, row.3, row.4, row.5);
+            let r = settings_refusal_of(&row.1);
+            assert!(is_variant(&r), "{label}: got {r:?}");
+            assert_eq!(r.code(), code, "{label}: {r:?}");
+            assert_eq!(r.prefix(), prefix, "{label}: {r:?}");
+            assert_eq!(r.sentence(), sentence, "{label}: {r:?}");
+            let display = match prefix {
+                Some(p) => format!("{p}: {sentence}"),
+                None => sentence.to_string(),
+            };
+            assert_eq!(
+                r.to_string(),
+                display,
+                "{label}: Display is not prefix + \": \" + sentence"
+            );
+        }
+        // The wrapper, called the way the CLI's `--brand` and the GUI's pre-check call it.
+        let leaves: Vec<(&str, String)> = vec![
+            ("brand control", refusal(compile_brand_name("Bad\u{7}Bat"))),
+            ("brand too long", refusal(compile_brand_name(&long))),
+        ];
+        for (label, leaf) in leaves {
+            let json = cases
+                .iter()
+                .find(|c| c.0 == label)
+                .map(|c| &c.1)
+                .expect("the label is one of the rows above");
+            assert_eq!(
+                leaf,
+                settings_refusal_of(json).sentence(),
+                "{label}: the String wrapper's sentence is not the variant's"
+            );
+        }
+    }
+
+    /// S7 (§13.31 §2, §3, §6, §7): every code has a name, a sample and a sentence, checked off
+    /// one list. `SETTINGS_REFUSAL_CODES` is §2's list in §2's order, and the literal below
+    /// spells that list out here, so a code that arrives with a new spelling, or out of order,
+    /// is caught by the test rather than by whoever reads the file next.
+    /// `settings_refusal_samples()` is one refusal per code, built in the library so the GUI's
+    /// test can walk the codes across the crate boundary (a `cfg(test)` item is invisible to
+    /// another crate). The test then asserts the two line up in both directions and exactly
+    /// once: a code with no sample is a refusal the GUI's exhaustive match has to invent
+    /// arguments for, and a sample whose code is not listed is a refusal no page can name. Every
+    /// sample prints a non-empty sentence, which is what the CLI and the gate print and what the
+    /// GUI wraps verbatim for the five file-only codes (§5), and every code is `snake_case`,
+    /// which is the shape §2 fixes.
+    #[test]
+    fn every_refusal_has_a_code_a_sample_and_a_sentence() {
+        const EXPECTED: [&str; 46] = [
+            "version",
+            "claim_charset",
+            "claim_empty_part",
+            "claim_consumed",
+            "claim_header_reserved",
+            "claims_collide",
+            "attr_unknown",
+            "attr_twice",
+            "attr_none",
+            "ttl_below_floor",
+            "ttl_above_ceiling",
+            "app_client_id",
+            "url_not_printable",
+            "url_not_https",
+            "url_empty_host",
+            "url_userinfo",
+            "url_backslash",
+            "url_userinfo_or_backslash",
+            "url_query_or_fragment",
+            "url_quote",
+            "url_not_https_or_rooted",
+            "callback_not_https",
+            "cookie_domain_not_bare",
+            "cookie_domain_single_label",
+            "host_control_byte",
+            "host_not_bare",
+            "host_at_or_dot_dot",
+            "hosts_outside_cookie_domain",
+            "landing_off_hosts",
+            "oauth_domain_not_bare",
+            "button_bare_name",
+            "button_no_idp",
+            "button_idp_charset",
+            "button_twice",
+            "button_no_audience",
+            "social_half_configured",
+            "audit_header_not_a_name",
+            "audit_header_credential",
+            "audit_headers_same",
+            "audit_limit_not_amount",
+            "audit_limit_zero",
+            "audit_limit_too_much",
+            "audit_unbounded",
+            "brand_control",
+            "brand_too_long",
+            "theme_unknown",
+        ];
+        let listed: Vec<&str> = SETTINGS_REFUSAL_CODES.to_vec();
+        assert_eq!(
+            listed,
+            EXPECTED.to_vec(),
+            "SETTINGS_REFUSAL_CODES is not §2's 46 codes, spelled and ordered as §2 lists them"
+        );
+        let samples = settings_refusal_samples();
+        let mut got: Vec<&str> = samples.iter().map(|r| r.code()).collect();
+        got.sort_unstable();
+        let mut want = listed.clone();
+        want.sort_unstable();
+        assert_eq!(
+            got, want,
+            "the samples' codes are not exactly SETTINGS_REFUSAL_CODES, each exactly once"
+        );
+        for r in samples.iter() {
+            assert!(!r.code().is_empty(), "{r:?}: a refusal with no code");
+            assert!(
+                r.code()
+                    .chars()
+                    .all(|c| c.is_ascii_lowercase() || c.is_ascii_digit() || c == '_'),
+                "{r:?}: the code '{}' is not snake_case",
+                r.code()
+            );
+            assert!(
+                !r.to_string().trim().is_empty(),
+                "{r:?}: a refusal that prints an empty sentence"
+            );
+        }
+    }
+
+    /// S7 (§13.31 §6, §7): every code is reached by a real settings document, not only by a
+    /// hand-built sample. The fixtures below are the S0 golden's, copied verbatim: the golden
+    /// owns the **sentences** (its literals are never edited, which is the byte-identity
+    /// guarantee for `bb-auth-adm` and `--check-settings`), and this test owns the **codes**, so
+    /// a variant no file can produce goes red here while the goldens stay untouched. A new
+    /// variant therefore arrives with a fixture of its own, and a code that stops being
+    /// reachable (a check deleted, a leaf reordered behind another) fails loudly rather than
+    /// leaving the GUI with a `K` key for a sentence nobody can ever meet. The 51 fixtures cover
+    /// 46 codes, because `version` has three fixtures for the one variant, and `app_client_id`,
+    /// `url_not_https` and `audit_unbounded` each have one per spelling.
+    #[test]
+    fn the_golden_fixtures_reach_every_code() {
+        let brand_too_long = "a".repeat(65);
+        let fixtures: Vec<String> = vec![
+            r#"{ "version": 1 }"#.into(),
+            r#"{ "version": 2 }"#.into(),
+            r#"{ "version": 99 }"#.into(),
+            r#"{ "version": 3, "gate": { "profile_claims": ["a b"] } }"#.into(),
+            r#"{ "version": 3, "gate": { "profile_claims": ["a::b"] } }"#.into(),
+            r#"{ "version": 3, "gate": { "profile_claims": ["email"] } }"#.into(),
+            r#"{ "version": 3, "gate": { "profile_claims": ["native_username"] } }"#.into(),
+            r#"{ "version": 3, "gate": { "profile_claims": ["a_b", "a:b"] } }"#.into(),
+            r#"{ "version": 3, "gate": { "identity_attrs": ["nope"] } }"#.into(),
+            r#"{ "version": 3, "gate": { "identity_attrs": ["email", "email"] } }"#.into(),
+            r#"{ "version": 3, "gate": { "identity_attrs": [] } }"#.into(),
+            r#"{ "version": 3, "gate": { "session_ttl_secs": 30 } }"#.into(),
+            r#"{ "version": 3, "gate": { "session_ttl_secs": 3153600001 } }"#.into(),
+            r#"{ "version": 3, "gate": { "client_id": "bad id" } }"#.into(),
+            r#"{ "version": 3, "gate": { "oauth_domain": "auth.x.com", "social_callback_url": "https://auth.x.com/cb", "social_buttons": [ { "idp": "Google", "audience": "bad id" } ] } }"#.into(),
+            r#"{ "version": 3, "gate": { "denied_url": "https://x.com/a b" } }"#.into(),
+            r#"{ "version": 3, "gate": { "denied_url": "http://x.com" } }"#.into(),
+            r#"{ "version": 3, "gate": { "denied_url": "https://" } }"#.into(),
+            r#"{ "version": 3, "gate": { "denied_url": "https://a@x.com" } }"#.into(),
+            r#"{ "version": 3, "gate": { "denied_url": "https://x.com\\a" } }"#.into(),
+            r#"{ "version": 3, "gate": { "login_url": "http://x.com" } }"#.into(),
+            r#"{ "version": 3, "gate": { "issuer": "https://a@x.com" } }"#.into(),
+            r#"{ "version": 3, "gate": { "issuer": "https://x.com?q" } }"#.into(),
+            r#"{ "version": 3, "ui": { "stylesheet_url": "https://x.com/\"a\"" } }"#.into(),
+            r#"{ "version": 3, "ui": { "logo_url": "ftp://x.com" } }"#.into(),
+            r#"{ "version": 3, "gate": { "social_callback_url": "/cb" } }"#.into(),
+            r#"{ "version": 3, "gate": { "cookie_domain": "https://x.com" } }"#.into(),
+            r#"{ "version": 3, "gate": { "cookie_domain": "example" } }"#.into(),
+            r#"{ "version": 3, "gate": { "authorized_hosts": ["ho\tst"] } }"#.into(),
+            r#"{ "version": 3, "gate": { "authorized_hosts": ["https://x.com"] } }"#.into(),
+            r#"{ "version": 3, "gate": { "authorized_hosts": ["a..b"] } }"#.into(),
+            r#"{ "version": 3, "gate": { "cookie_domain": ".example.com", "authorized_hosts": ["other.com"] } }"#.into(),
+            r#"{ "version": 3, "gate": { "landing_url": "https://nowhere.example/x" } }"#.into(),
+            r#"{ "version": 3, "gate": { "oauth_domain": "https://x.com" } }"#.into(),
+            r#"{ "version": 3, "gate": { "social_buttons": ["Google"] } }"#.into(),
+            r#"{ "version": 3, "gate": { "social_buttons": [ { "idp": "", "audience": "abc" } ] } }"#.into(),
+            r#"{ "version": 3, "gate": { "social_buttons": [ { "idp": "a b", "audience": "abc" } ] } }"#.into(),
+            r#"{ "version": 3, "gate": { "social_buttons": [ { "idp": "Google", "audience": "abc" }, { "idp": "Google", "audience": "def" } ] } }"#.into(),
+            r#"{ "version": 3, "gate": { "social_buttons": [ { "idp": "Google", "audience": "" } ] } }"#.into(),
+            r#"{ "version": 3, "gate": { "social_buttons": [ { "idp": "Google", "audience": "abc123" } ] } }"#.into(),
+            r#"{ "version": 3, "audit": { "client_ip_header": "X_Real_IP" } }"#.into(),
+            r#"{ "version": 3, "audit": { "request_id_header": "Authorization" } }"#.into(),
+            r#"{ "version": 3, "audit": { "client_ip_header": "X-Real-IP", "request_id_header": "x-real-ip" } }"#.into(),
+            r#"{ "version": 3, "audit": { "rotation": "4" } }"#.into(),
+            r#"{ "version": 3, "audit": { "rotation": "0 MiB" } }"#.into(),
+            r#"{ "version": 3, "audit": { "rotation": "2048 GiB" } }"#.into(),
+            r#"{ "version": 3, "audit": { "rotation": "1 year", "retention": "2 years" } }"#.into(),
+            r#"{ "version": 3, "audit": { "rotation": "1 year" } }"#.into(),
+            r#"{ "version": 3, "ui": { "brand_name": "Bad\u0007Bat" } }"#.into(),
+            format!(r#"{{ "version": 3, "ui": {{ "brand_name": "{brand_too_long}" }} }}"#),
+            r#"{ "version": 3, "ui": { "theme": "sepia" } }"#.into(),
+        ];
+        let mut got: Vec<&str> = fixtures
+            .iter()
+            .map(|json| settings_refusal_of(json).code())
+            .collect();
+        got.sort_unstable();
+        got.dedup();
+        let mut want: Vec<&str> = SETTINGS_REFUSAL_CODES.to_vec();
+        want.sort_unstable();
+        assert_eq!(
+            got, want,
+            "the codes these fixtures produce are not SETTINGS_REFUSAL_CODES: a code no settings \
+             file reaches, or a fixture reaching a code §2 does not list"
         );
     }
 

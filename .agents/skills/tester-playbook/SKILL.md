@@ -199,6 +199,18 @@ Rules are in `AGENTS.md`. Format of this file: `AGENTS.md`, under "Skills".
 
 ## Pitfalls
 
+- For a §13.31 refusal slice the stub in the rsync copy is the **whole** production change (the
+  variants, `code()`, `sentence()`, the leaf's typed core plus its `String` wrapper,
+  `SETTINGS_REFUSAL_CODES`, `settings_refusal_samples`): a partial stub leaves the codes-reached test
+  red for the wrong reason. Keep it as a script that re-syncs `src/` from the repo first, so the repo's
+  test module stays the only copy of the tests. The mutations that prove this family of assertions:
+  rename a code, drop a sample, swap two neighbours in the list, hand the leaf's **raw** (untrimmed)
+  text to the variant, use `len()` where the bound counts `chars()`, give a prefix-less variant a
+  `prefix()`, and make a wrapper paraphrase (`format!("brand: {r}")` over `r.sentence()`).
+- A mutation anchor that appears in **both** the S0 golden's fixture list and a new test's is a false
+  green: removing it breaks the golden's 3-tuple, the target stops compiling, and a harness grepping
+  `... FAILED` reports nothing. Anchor with the leading `\n` plus the exact indent (the golden's rows
+  sit at 16 spaces, a plain `Vec<String>` at 12) and print the compile status.
 - A mutation harness that greps only `test tests::` lines reports a **compile failure as ALL GREEN**:
   print the compile status too. And prefer a statement-form mutation:
   `&f({ let mut v = two_buttons(); v.reverse(); &v })` compiled and left the assert green, while the
