@@ -17,7 +17,7 @@ as the column says. A requirement still open must be covered by a step.
 | R1 | Self-service API keys: a user mints, rotates and removes their own `bbk_` tokens, without an administrator | Done: live on rpi-01, checked in a browser by the user on 2026-11-26 (step 4 closed) |
 | R2 | Self-service profile: a user sees what bb-auth knows about them and edits their own Cognito profile attributes | Done: live on rpi-01, a real edit checked in a browser by the user on 2026-11-26 (step 5 closed); federated users see one sentence instead of the form, by design |
 | R3 | The self-service surface is a section of the admin GUI (`bb-auth-web`), served at its own prefix `/account/` (`BB_AUTH_WEB_ACCOUNT_PATH`) beside the admin pages at `/admin/`, open to any signed-in identity, never reading `web.admins` and acting only on the caller's own account, so further user-facing features have a home. Changed by the user on 2026-11-23 from "a fourth binary of its own", and that evening from `<base>/me/` to `/account/` so the administrators' URLs do not move | Design revised (`docs/ARCHITECTURE.md` §13); Read-only page live on rpi-01 at `/account/` since 2026-11-24; the writes are steps 4, 5 and 7 |
-| R4 | Self-service deletion: a user deletes their own account and its related data after a confirmation: the roster row, keys and references in scopes and groups at once, and every Cognito user with their address (federated twins included) through the owner's deletion worker (`bb-account-delete`, the user's choice on 2026-11-26). The audit is not edited: their lines expire with `audit.retention`, and the page says so | Step 7 (the step 6 it once named is done). Changed on 2026-11-26: the worker deletes a social-only user's Cognito account too, so the 2026-11-23 "left to an administrator" exception goes |
+| R4 | Self-service deletion: a user deletes their own account and its related data after a confirmation: the roster row, keys and references in scopes and groups at once, and every Cognito user with their address (federated twins included) through the owner's deletion worker (`bb-account-delete`, the user's choice on 2026-11-26). The audit is not edited: their lines expire with `audit.retention`, and the page says so | Done: live on rpi-01 since 2026-11-26 (`v1.99.9-gadf4556`), a real deletion of a test account checked in a browser by the user (step 7 closed); signing out on deletion and the stale-cookie gap are step 14 |
 | R5 | The sign-in page warns, where it offers registration, that registering by email code creates an account separate from a Google or Microsoft one with the same address, and points such a person at their provider's button (the user's choice on 2026-11-25, option 1 of three: no Cognito change; a pre-sign-up Lambda or linking accounts stay for later) | Met: live on rpi-01 since 2026-11-25 (`v1.99.9-gfb2bd75`), seen in a browser by the designer in both themes, both languages and at phone width |
 
 ### How we work
@@ -66,7 +66,7 @@ The gate, the CLI (`bb-auth-adm`) and the admin GUI (`bb-auth-web`) are built an
 `AGENTS.md` and `CHANGELOG.md` say what they do. The agent structure (roles, skills, this plan) was added
 on 2026-11-23; the work before it is in `git log`. The self-service page is the `/account` section of `bb-auth-web`, live on rpi-01 since
 2026-11-24, with its key writes, header and theme since 2026-11-25. `v1.99.8` (g978eca8) is tagged, on GitHub as a
-pre-release; rpi-01 runs `v1.99.9-g8a522b8` since 2026-11-26 (the one-row account menu, step 8's later items, settings refusals in the page's language, and 7a's configuration, off there) with `gate.landing_url` set to its `/account/` page; self-service account deletion is missing there until step 7.
+pre-release; rpi-01 runs `v1.99.9-gadf4556` since 2026-11-26 (self-service account deletion through the owner's worker, on; the account page applying preferences on selection) with `gate.landing_url` set to its `/account/` page and `gate.allow_unverified_social` off.
 
 ## Next steps
 
@@ -79,57 +79,6 @@ reversal's cost, stated in `docs/ARCHITECTURE.md` §13.12, is that strangers now
 process that writes both files, so two gaps found the same day are closed **first**, before the
 GUI is opened to anyone who is not an administrator: `bb-auth-web` can read the HMAC key, and it
 believes `X-Auth-Email` from any local process. The design is `docs/ARCHITECTURE.md` §13.
-
-### 7. Delete my account
-
-Covers: R4.
-
-A confirmation page (it says the audit keeps their lines until `audit.retention` drops them) where
-the person types their address; no email code (the user, 2026-11-26). bb-auth-web asks the owner's
-intake (`BB_AUTH_WEB_DELETE_INTAKE`, loopback only) whether any of the caller's addresses is
-protected, removes the roster row through `remove_user`, `AccessWrite` and `rev`, then queues every
-address of the row with the intake, which the `bb-account-delete` worker deletes from Cognito
-(federated twins included). A stranger queues only, and the access file is not touched. `denied`
-is never lifted. The final page says the Cognito half is queued, never deleted, and links to
-`/auth/logout`. bb-auth-web holds no AWS credential.
-
-Designed in §13.29 W1 to W12 (2026-11-26, on the user's choice (a)); the pages are §13.30, whose
-strings the redesign made untrue are listed in its §5 for the designer. The intake's shared secret
-(`BB_AUTH_WEB_DELETE_SECRET`) is optional for now (the user); W8 lists proposals for itadmin, at the
-owner's word. Slices: **7a** the configuration and the menu row (done); **7b** the confirmation page (done);
-**7c** the stranger's deletion and a fake intake (done); **7d** the roster row removed first (done); **7e** the
-partial outcomes (done); **7f** the browser suite (done); **7g** the real run on rpi-01, the worker in dry run
-first, each step with the user's go-ahead. §13.30 was reworded for the worker on 2026-11-26 (mockups in /tmp/d7w/).
-
-- Done when: tests show a protected address changes nothing, a failed write posts nothing, the row
-  is gone before the first `POST`, a refused or unanswered `POST` says so with a retry the person
-  reaches as a stranger, a denied user is refused, a stranger's deletion leaves the file's bytes
-  unchanged, each request carries one address (never the joined header), and no secret reaches a
-  response or a log; and a roster user deletes their own test account in a browser on rpi-01 (with
-  the user's go-ahead, the worker in dry run first and then for real): the access file no longer
-  names them where it named them (an exclusion now names their email), their key is refused at
-  once, and after the worker's run they can no longer sign in. If `gate.allow_unverified_social` is
-  on, it is turned off first (the user, 2026-11-26).
-
-### 14. Deleting the account signs the person out
-
-Covers: R4. Asked by the user on 2026-11-26, after deleting the test account for real on rpi-01:
-confirming the deletion should sign the person out at once, instead of a done page that asks
-them to ("This browser stays signed in until you sign out, so sign out now").
-
-A finding from the same run goes with it. Sessions are stateless (AGENTS.md), so a cookie minted
-before the deletion stays valid until `gate.session_ttl_secs` (30 days on rpi-01). Any
-`authenticated` scope (`mpa`, `auth/self-service` there) keeps admitting that identity, in every
-browser it signed in from, after its Cognito user is gone. A sign-out on the done page clears only
-the browser that pressed it. The architect weighs the options without breaking "Sessions are
-stateless" silently: the done page answered with the gate's logout, a revocation the gate can
-check, a shorter TTL, or accepting the gap and saying so on the page. The designer then words the
-done page for what is chosen.
-
-- Done when: a test shows that the deletion's success answer leaves that browser signed out
-  (the session cookie cleared, or the browser sent through `/auth/logout`) and still says what
-  was queued; the stale-cookie gap is either closed by a tested mechanism or accepted by the
-  user and stated in AGENTS.md; and it has been tried on rpi-01 with the user's go-ahead.
 
 ### 13. Loose ends of step 8
 
@@ -159,11 +108,22 @@ change with it.
   allows exactly that hash, and Apply is inside `<noscript>`, with `nojs.js` still passing; and the tooltip has been looked at in a browser, or the look
   is reported as not done.
 
-## Waiting for the user
+### 14. Deleting the account signs the person out
 
-- Step 7, answered by the user on 2026-11-26: a deleted administrator stays in `web.admins`; the
-  typed-address field has no `autocomplete` (the confirmation stays the person's own act, a
-  deliberate exception to WCAG 1.3.5); the places a person reaches are not listed among what is
-  deleted; 7g's test account is a new one, for which the coordinator prepares the commands. The
-  proposals for itadmin (§13.29 W8 §1 to §3 and §5) go to IT-Admin, which asks the owner before
-  applying them on rpi-01.
+Covers: R4. Asked by the user on 2026-11-26, after deleting the test account for real on rpi-01:
+confirming the deletion should sign the person out at once, instead of a done page that asks
+them to ("This browser stays signed in until you sign out, so sign out now").
+
+A finding from the same run goes with it. Sessions are stateless (AGENTS.md), so a cookie minted
+before the deletion stays valid until `gate.session_ttl_secs` (30 days on rpi-01). Any
+`authenticated` scope (`mpa`, `auth/self-service` there) keeps admitting that identity, in every
+browser it signed in from, after its Cognito user is gone. A sign-out on the done page clears only
+the browser that pressed it. The architect weighs the options without breaking "Sessions are
+stateless" silently: the done page answered with the gate's logout, a revocation the gate can
+check, a shorter TTL, or accepting the gap and saying so on the page. The designer then words the
+done page for what is chosen.
+
+- Done when: a test shows that the deletion's success answer leaves that browser signed out
+  (the session cookie cleared, or the browser sent through `/auth/logout`) and still says what
+  was queued; the stale-cookie gap is either closed by a tested mechanism or accepted by the
+  user and stated in AGENTS.md; and it has been tried on rpi-01 with the user's go-ahead.
