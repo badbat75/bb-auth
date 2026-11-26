@@ -252,52 +252,11 @@ menu's cover is up.
 
 ## Waiting for the user
 
-- Step 7 (§13.29 W12): whether a deleted administrator may stay in `web.admins`, and which test
-  account 7g uses.
-- Step 7 (§13.30, the designer): keep `autocomplete="email"` on the typed-address field (WCAG
-  1.3.5 asks for it, but a browser can then fill the confirmation in), or leave it off; and whether
-  it is enough that the places a person reaches are not listed among what is deleted.
-- Decisions taken without the user, to review (the user asked for autonomy on 2026-11-25):
-  - H (night of 2026-11-25, the user asleep): two of the designer's later items went in with the
-    review fixes. At 640px and below, with a logo, the brand's tag line is hidden like its name. The
-    phone panel's tab rows lose their gap. Esc does not close the menu, since that would need a new
-    script.
-  - 7 (§13.29 W1 to W11, 2026-11-26), open to change: the intake is called over loopback
-    (`whoami`, then `POST /account/delete`) and its origin is a restart-only env variable, so the
-    unit gets no new permission; more than 10 addresses on one row is refused, since the worker
-    refuses a whole run above 10; no `X-Real-IP` is sent. A deleted administrator stays in
-    `web.admins` by email. No audit-file event: the journal gets one line per effect.
-  - P (same night): the key rows' rotate pill (it has an aria-label) and remove icon pill stay
-    written by hand. `pill_link` takes only an href and a label, and options used by one caller
-    would be speculative.
-  - T (same night): `text_field` keeps its signature as a wrapper over the new `text_field_with`
-    and `FieldOpts`, so its 23 console callers are untouched. The profile's name fields are
-    `prose` (browser default capitalisation and spell check). The profile refusal box now uses the
-    console's id (`form-error`). An empty placeholder emits no attribute.
-  - 8b: on `/account` the Sign out link is `BB_AUTH_WEB_LOGOUT_URL` with its `rd` removed
-    (`logout_without_rd`), so a person who is not an administrator lands on the sign-in page
-    instead of a `403` on the console; no new setting (§13.17).
-  - 8b-1: the tester's part went to a Claude tester on Sonnet after two local runs failed (an
-    opencode error, then a run that lost its task after compaction), by extending the user's
-    Sonnet fallback rule from the coder to the tester.
-  - 8c (designer, §13.17): `K::AccountKeyBound` split into three `/account` refusals (bad name,
-    shorter than a day, scopes chosen by hand) worded "name" as the field is labelled;
-    `KeyDaysWithoutCustom` and `KeyDaysInvalid` reworded as sentences on both surfaces; a "days"
-    placeholder on `/account` only (the console's box also takes hours); the box named "Number
-    of days" on both; no scope block at all (a hidden `restrict=all`) when there is nothing to
-    narrow; the console's `403` keeps its Sign out with `rd` and gains "Go to your account",
-    shown even to a vetoed person, who then gets the account page's own `403`; the Italian
-    `AccountKeyNotYours` says "rigenerarla" to match the button.
-  - 8d (designer, §13.18): the theme contract is untouched (no token added, renamed or removed),
-    so no migration guide; three default values change (light `--input-border` and
-    `--input-bg`, dark `--input-border`), which the CHANGELOG lists for theme authors, and
-    rpi-01's `tokens.css` should set the same three to get the 3:1 field borders. The console's
-    brand becomes `ui.brand_name` with an "Administration" line, the version only in the footer;
-    header tabs and icons lose their boxes; secondary pills become neutral; light fields white;
-    uppercase table headings kept. Before and after images: /tmp/d8d/shots/{before,after}/.
-    The logo in the console brand left for a later step (it widens the CSP); the cancel pill on a
-    phone fixed in 8d rather than later.
-  - 6: the CLI's `user rm` report says "still kept out of APP/SCOPE by email EMAIL" (and "still
-    denied by email") where it used to say "also removed from ... (excluded)", which the new
-    behaviour made false. The admin GUI says nothing about exclusions on removal, so it is
-    unchanged, though §13.8 had said the admin pages would change too.
+- Step 7, answered by the user on 2026-11-26: a deleted administrator stays in `web.admins`; the
+  typed-address field has no `autocomplete` (the confirmation stays the person's own act, a
+  deliberate exception to WCAG 1.3.5); the places a person reaches are not listed among what is
+  deleted; 7g's test account is a new one, for which the coordinator prepares the commands. The
+  proposals for itadmin (§13.29 W8 §1 to §3 and §5) go to IT-Admin, which asks the owner before
+  applying them on rpi-01.
+- Steps 4 and 5e: the user does the browser checks after the next deploy, from a checklist the
+  coordinator prepares.
