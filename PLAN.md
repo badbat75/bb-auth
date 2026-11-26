@@ -213,27 +213,32 @@ serving the next request.
 
 Covers: R4.
 
-A confirmation page (it says the audit keeps their lines until `audit.retention` drops them),
-the re-authentication of step 5, the roster row through `remove_user`, `AccessWrite` and `rev`,
-then `DeleteUser`. A stranger deletes only their Cognito user and the access file is not touched.
-A social-only user, who cannot re-authenticate by email code, gets the access-file half only, and
-the page says an administrator must delete their Cognito account. `denied` is never lifted. The
-final page links to `/auth/logout`.
+A confirmation page (it says the audit keeps their lines until `audit.retention` drops them) where
+the person types their address; no email code (the user, 2026-11-26). bb-auth-web asks the owner's
+intake (`BB_AUTH_WEB_DELETE_INTAKE`, loopback only) whether any of the caller's addresses is
+protected, removes the roster row through `remove_user`, `AccessWrite` and `rev`, then queues every
+address of the row with the intake, which the `bb-account-delete` worker deletes from Cognito
+(federated twins included). A stranger queues only, and the access file is not touched. `denied`
+is never lifted. The final page says the Cognito half is queued, never deleted, and links to
+`/auth/logout`. bb-auth-web holds no AWS credential.
 
-Designed in §13.29 and, as a person sees it, §13.30 (2026-11-26, the user asleep; decisions listed under
-"Waiting for the user", and §13.30 §8's open questions). Both assume choice (b) below; choice (a) keeps the
-pages and replaces the code step's `DeleteUser` with the worker's intake.
-Slices: **7a** the confirmation page in its four variants; **7b** the menu row (`K::AccountDelete`);
-**7c** a social-only roster user's row deletion; **7d** the code start; **7e** the roster code step and
-`cognito_delete`; **7f** the stranger's code step and the retry; **7g** the fake Cognito answering
-`DeleteUser`, `e2e/tests/delete.js`, nojs and the scenes; **7h** the real run, with the user's go-ahead.
+Designed in §13.29 W1 to W12 (2026-11-26, on the user's choice (a)); the pages are §13.30, whose
+strings the redesign made untrue are listed in its §5 for the designer. The intake's shared secret
+(`BB_AUTH_WEB_DELETE_SECRET`) is optional for now (the user); W8 lists proposals for itadmin, at the
+owner's word. Slices: **7a** the configuration and the menu row; **7b** the confirmation page;
+**7c** the stranger's deletion and a fake intake; **7d** the roster row removed first; **7e** the
+partial outcomes; **7f** the browser suite; **7g** the real run on rpi-01, the worker in dry run
+first, each step with the user's go-ahead. Before 7b, the designer rewords §13.30's untrue strings.
 
-- Done when: tests show a failed write never calls `DeleteUser`, a failed `DeleteUser` leaves the
-  row gone and says so (with a retry the person reaches as a stranger), a denied user is refused,
-  a stranger's deletion leaves the file's bytes unchanged, and a social-only user's deletion
-  calls no Cognito operation; and a roster user deletes their own test account in a browser
-  against the real pool (with the user's go-ahead), the access file no longer names them where it
-  named them (an exclusion now names their email), and they can no longer sign in.
+- Done when: tests show a protected address changes nothing, a failed write posts nothing, the row
+  is gone before the first `POST`, a refused or unanswered `POST` says so with a retry the person
+  reaches as a stranger, a denied user is refused, a stranger's deletion leaves the file's bytes
+  unchanged, each request carries one address (never the joined header), and no secret reaches a
+  response or a log; and a roster user deletes their own test account in a browser on rpi-01 (with
+  the user's go-ahead, the worker in dry run first and then for real): the access file no longer
+  names them where it named them (an exclusion now names their email), their key is refused at
+  once, and after the worker's run they can no longer sign in. If `gate.allow_unverified_social` is
+  on, it is turned off first (the user, 2026-11-26).
 
 ### 8. The account page's look
 
@@ -278,19 +283,18 @@ naming the visible labels. Slices **S0** (golden tests of today's strings, green
 
 ## Waiting for the user
 
-- Step 7: the user chose (a) on 2026-11-26: the deletion goes through their existing worker
-  (`bb-account-delete`). §13.29 is being redone on it, with IT-Admin for the spool's contract.
+- Step 7 (§13.29 W12): whether a deleted administrator may stay in `web.admins`, and which test
+  account 7g uses.
 - Decisions taken without the user, to review (the user asked for autonomy on 2026-11-25):
   - H (night of 2026-11-25, the user asleep): two of the designer's later items went in with the
     review fixes. At 640px and below, with a logo, the brand's tag line is hidden like its name. The
     phone panel's tab rows lose their gap. Esc does not close the menu, since that would need a new
     script.
-  - 7 (same night, §13.29), open to change: a social-only roster user deletes their row on one
-    confirmed `POST`, without re-authenticating, since nothing can re-authenticate them and losing a
-    row can only remove access. A deleted administrator stays in `web.admins` by email, because the
-    self-service page must never read that list. No audit-file event: the journal gets one line per
-    effect, as the self-service key writes already do. IT-Admin is asked, read-only, whether
-    itadmin's `cognito.tf` has anything (a trigger, a WAF) that blocks a self-service `DeleteUser`.
+  - 7 (§13.29 W1 to W11, 2026-11-26), open to change: the intake is called over loopback
+    (`whoami`, then `POST /account/delete`) and its origin is a restart-only env variable, so the
+    unit gets no new permission; more than 10 addresses on one row is refused, since the worker
+    refuses a whole run above 10; no `X-Real-IP` is sent. A deleted administrator stays in
+    `web.admins` by email. No audit-file event: the journal gets one line per effect.
   - P (same night): the key rows' rotate pill (it has an aria-label) and remove icon pill stay
     written by hand. `pill_link` takes only an href and a label, and options used by one caller
     would be speculative.
