@@ -38,6 +38,10 @@ Rules are in `AGENTS.md`. Format of this file: `AGENTS.md`, under "Skills".
 - A new field for the session cookie goes in the claims JSON segment under a key whose derived
   header `compile_profile_claims` reserves: old cookies still verify and a rollback binary still
   accepts new ones, so it is no `COOKIE_VERSION` bump (§13.25). A new positional segment is one.
+- A Cognito self-service call (`UpdateUserAttributes`, `DeleteUser`) takes the `AccessToken` of the
+  server-side email-code sign-in as is: an API sign-in token carries only
+  `aws.cognito.signin.user.admin`, so no app-client OAuth scope is involved (access-token page).
+- The self-service page never reads `web.admins`: a design there cannot branch on "is an admin".
 - The real pool's facts are in `PLAN.md` step 5 (read 2026-11-25); its changes go through the
   OpenTofu repository named there, never the AWS CLI.
 

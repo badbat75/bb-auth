@@ -220,6 +220,12 @@ A social-only user, who cannot re-authenticate by email code, gets the access-fi
 the page says an administrator must delete their Cognito account. `denied` is never lifted. The
 final page links to `/auth/logout`.
 
+Designed in §13.29 (2026-11-26, the user asleep; decisions listed under "Waiting for the user").
+Slices: **7a** the confirmation page in its four variants; **7b** the menu row (`K::AccountDelete`);
+**7c** a social-only roster user's row deletion; **7d** the code start; **7e** the roster code step and
+`cognito_delete`; **7f** the stranger's code step and the retry; **7g** the fake Cognito answering
+`DeleteUser`, `e2e/tests/delete.js`, nojs and the scenes; **7h** the real run, with the user's go-ahead.
+
 - Done when: tests show a failed write never calls `DeleteUser`, a failed `DeleteUser` leaves the
   row gone and says so (with a retry the person reaches as a stranger), a denied user is refused,
   a stranger's deletion leaves the file's bytes unchanged, and a social-only user's deletion
@@ -263,6 +269,12 @@ native "Preferences" tooltip while the open menu's cover is up. Steps 5 and 7 ad
     review fixes. At 640px and below, with a logo, the brand's tag line is hidden like its name. The
     phone panel's tab rows lose their gap. Esc does not close the menu, since that would need a new
     script.
+  - 7 (same night, §13.29), open to change: a social-only roster user deletes their row on one
+    confirmed `POST`, without re-authenticating, since nothing can re-authenticate them and losing a
+    row can only remove access. A deleted administrator stays in `web.admins` by email, because the
+    self-service page must never read that list. No audit-file event: the journal gets one line per
+    effect, as the self-service key writes already do. IT-Admin is asked, read-only, whether
+    itadmin's `cognito.tf` has anything (a trigger, a WAF) that blocks a self-service `DeleteUser`.
   - P (same night): the key rows' rotate pill (it has an aria-label) and remove icon pill stay
     written by hand. `pill_link` takes only an href and a label, and options used by one caller
     would be speculative.

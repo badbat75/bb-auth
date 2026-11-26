@@ -1485,7 +1485,9 @@ request that obtained them.** Three requests, no JavaScript, no state on the ser
    `USERNAME` = that email and `ClientId` = `gate.client_id`, at the issuer's origin
    (`cognito_endpoint`, moved to the library: 13.8).
 2. It renders a code form carrying, as hidden fields, Cognito's `Session`, the chosen email, the
-   action and its values (and the `rev`, for a deletion). `Cache-Control: no-store`.
+   action and its values (and the `rev`, for a deletion). `Cache-Control: no-store`. (Changed by §13.29
+   for the deletion: no email is chosen; the code goes to the session's own Cognito user, and the
+   form carries `Session`, `rev`, `uuid` and `kind`.)
 3. The code `POST` re-checks everything against the live files (identity, veto, the email still
    among the caller's, the attributes still editable), calls `RespondToAuthChallenge`, then the
    action with the `AccessToken`, and drops all three tokens. None is logged, stored, or put in
@@ -1576,7 +1578,10 @@ place it was copied: `bb-auth-me`'s private copies of `Lang`, `LangPref`, `negot
 
 ### 13.9 Account deletion (R4): order and partial failure
 
-After the confirmation page and the email code of 13.7, in this order:
+After the confirmation page and the email code of 13.7, in this order: (Changed by §13.29: the
+code is asked for the session's own Cognito user, `USERNAME` = `X-Auth-Native-Username`, and its
+`IdToken` is bound by `cognito:username`; a roster user with no such header deletes the row only,
+on the confirmation page's `POST`; a stranger with none has nothing to delete here.)
 
 1. **The roster row**, through `AccessWrite` with the `rev` from the confirmation form:
    `remove_user` on the caller's uuid (keys, scope and group references, the `excluded` and
@@ -1587,7 +1592,8 @@ If step 2 fails, what is left is a Cognito user with no row, an `authenticated` 
 reaches only `authenticated` scopes and holds no key; the other order, on a failed write, would
 leave a row with live API keys and every grant waiting for the same person to re-register. If
 step 1 fails (`409`, I/O), nothing has changed. If step 2 fails, the page says the row is gone and
-the Cognito account is not, and offers the retry, which the person still reaches as a stranger.
+the Cognito account is not, and offers the retry, which the person still reaches as a stranger. (Changed by §13.29 §4: the
+retry is the stranger's code walk on the same link, and `WRITE_LOCK` is released before step 2.)
 
 A `denied` entry is never lifted. A **stranger's** deletion does not touch the access file. The
 audit is not edited; the confirmation page says their lines are kept until `audit.retention`
@@ -5552,3 +5558,341 @@ from every table on a phone. The problem it would solve is solved.
 2. If not there, should the console's panel carry "Go to your account" (a link to `/account/`)?
    Recommended yes, one row above Sign out; it is a new item nobody has asked for yet.
 3. "System settings" / "Impostazioni di sistema" as the page's new name everywhere (§2)?
+
+### 13.29 Delete my account (plan step 7, designed 2026-11-26)
+
+R4, rebuilt on what §13.25 changed. §13.7 and §13.9 were written before the deletion could act on
+the session's own Cognito user, and both carry "(Changed by §13.29 ...)" where they are now wrong.
+Every decision below was taken by the architect overnight on the user's delegation, and each says
+why, so the user can overturn any of them in the morning.
+
+What was read to write it: `AGENTS.md` (the invariants, above all "What lives where", the audit's
+four, the veto, `excluded` and API-key ones, and the self-service paragraph that says `web.admins`
+is never read there), `PLAN.md` step 5 (the real pool, read 2026-11-25) and step 7, §13.7, §13.9,
+§13.13, §13.22 to §13.25, §13.28 §5 and §7; `src/bin/bb-auth-web.rs`: `handle_account`,
+`account_uuid_of`, `account_own`, `native_user`, `cognito_post`, `cognito_call`,
+`cognito_answer`, `cognito_update`, `id_token_username`, `account_profile_post`,
+`account_profile_code_post`, `account_key_post` (its `WRITE_LOCK`, `rev` and journal line),
+`page_account_confirm`, `confirm_card`, `page_profile_code`, `account_menu`, the console's
+`audit()` journal helper and `limit_text`, and the tests' `FakeCognito`, `email_otp`,
+`signed_in`, `PROFILE_HEADERS`; `src/lib.rs`: `remove_user`, `user_refs`, `AccessWrite`,
+`AuditPolicy`; `e2e/lib/cognito.js`.
+
+#### 1. Cognito facts this rests on
+
+**Read in a source (AWS API reference and developer guide, read 2026-11-26):**
+
+- `DeleteUser` "deletes the profile of the currently signed-in user", which "can no longer be used
+  to sign in and can't be restored". It is authorized by the user's own access token, which "must
+  include the scope `aws.cognito.signin.user.admin`"; IAM is not evaluated. The request is
+  `{"AccessToken": ...}`; success is HTTP 200 with an empty body; the documented errors include
+  `NotAuthorizedException`, `UserNotFoundException`, `TooManyRequestsException`,
+  `InternalErrorException` (500) and `ForbiddenException` (a WAF web ACL)
+  ([DeleteUser](https://docs.aws.amazon.com/cognito-user-identity-pools/latest/APIReference/API_DeleteUser.html)).
+- "A token from Amazon Cognito API sign-in only contains the scope
+  `aws.cognito.signin.user.admin`" (the `scope` claim of
+  [the access token](https://docs.aws.amazon.com/cognito/latest/developerguide/amazon-cognito-user-pools-using-the-access-token.html)).
+  So the `AccessToken` the email-code sign-in of §13.22 already obtains is the token `DeleteUser`
+  asks for, with no OAuth scope to configure on the app client.
+- `InitiateAuth` with `USER_AUTH` takes `USERNAME` (required) and `PREFERRED_CHALLENGE`; its
+  `EMAIL_OTP` answer carries `ChallengeParameters` `CODE_DELIVERY_DELIVERY_MEDIUM` and
+  `CODE_DELIVERY_DESTINATION` and a `Session` of 20 to 4096 characters; "You can't sign in a user
+  with a federated IdP with `InitiateAuth`"; IAM is not evaluated
+  ([InitiateAuth](https://docs.aws.amazon.com/cognito-user-identity-pools/latest/APIReference/API_InitiateAuth.html)).
+- `RespondToAuthChallenge` answers `EMAIL_OTP` with `EMAIL_OTP_CODE` and `USERNAME`, returns an
+  `AuthenticationResult` with `AccessToken`, `IdToken` and `RefreshToken`, and lists
+  `CodeMismatchException`, `ExpiredCodeException` and `NotAuthorizedException`; IAM is not
+  evaluated
+  ([RespondToAuthChallenge](https://docs.aws.amazon.com/cognito-user-identity-pools/latest/APIReference/API_RespondToAuthChallenge.html)).
+
+**Measured (PLAN.md step 5, the IT-Admin session's read-only reads of 2026-11-25):** the native
+client `gate.client_id` allows `ALLOW_USER_AUTH`, `AuthSessionValidity` 3 minutes, no secret; the
+social client allows only `ALLOW_REFRESH_TOKEN_AUTH`; `DeletionProtection` is inactive (that
+setting protects the **pool**, not a user, and does not bear on `DeleteUser`).
+
+**Unverified, to be settled by the real run (7h):** that no pre-token-generation Lambda or WAF web
+ACL on the real pool strips the scope or refuses `DeleteUser` (none is in the reads above, but
+nobody looked for one with this question); that the documentation names no app-client setting
+that gates `DeleteUser` and none was found, which is an absence, not a statement; that a
+`UserNotFoundException` from `DeleteUser` is what a second call for an already deleted user
+returns (the error is documented, the circumstance is not).
+
+#### 2. Decision: the four callers
+
+Who the caller is decides what is deleted, and it is decided **per request from the live
+request and the live file**, never from a form field: the row is `account_uuid_of` over
+`X-Auth-Email` (as every `/account` request already computes it), and "native" is
+`native_user(&req)` (§13.25's header). The `denied` veto is answered first, by `handle_account`,
+on the `GET` and on every `POST` alike, before any of this, so a vetoed identity never sees the
+page and is never lifted (R4, §13.9).
+
+| Caller | Row | Header | What is deleted | Proof asked |
+|---|---|---|---|---|
+| A. roster, native | yes | yes | the row (`remove_user`), then the Cognito user (`DeleteUser`) | the email code |
+| B. roster, social-only (or a cookie from before §13.25) | yes | no | the row only | the confirmation page's `POST` |
+| C. stranger, native | no | yes | the Cognito user only; the access file is not written | the email code |
+| D. stranger, social-only | no | no | nothing | none: no form |
+
+What each page says (the wording is the designer's; these are the facts each page must carry):
+
+- **A.** What goes: the API keys (their count), the groups and the places the page already lists
+  (`account_own`), and the sign-in account. That the audit keeps their lines until
+  `audit.retention` drops them, or until the files' size bound does when there is no retention
+  (the facts `limit_text` and `size_text` already phrase on the Audit tab). That a Google or
+  Microsoft sign-in under the same address is a **separate** account this page cannot delete
+  (R5's fact: the pool holds unlinked native and federated users with one email). One button,
+  which asks for the code.
+- **B.** The same list, minus the sign-in account, and why: this session signed in through a
+  provider (or before the current release), nothing here can prove it is them to the sign-in
+  service, and an administrator must delete that account. Also, because bb-auth-web cannot tell a
+  federated session from an old native cookie (§13.25 "Old cookies fail closed"): a person who
+  signs in with an email code should sign out and in again first, so their sign-in account goes
+  too. One button, which deletes the row.
+- **C.** That bb-auth holds no record of them, so only the sign-in account goes, and the audit
+  sentence. One button, which asks for the code.
+- **D.** That there is nothing here to delete: bb-auth keeps no record of them, and their sign-in
+  account is held through their provider and only an administrator can delete it. No form, a
+  `200`, and the way back to the page.
+
+**Why B deletes on one `POST` with no re-authentication.** R4 accepted the access-file half for a
+social-only person on 2026-11-23, and nothing can re-authenticate them (§13.7: `InitiateAuth`
+cannot sign a federated user in, and the social client runs no flow this process can drive). The
+row-only deletion is the same authority the page already grants on one confirmed `POST`: revoking
+every key one by one is already possible that way (§13.15), and the scope and group references go
+with the row by construction. It writes nothing Cognito holds, and an administrator can re-add a
+row; the keys alone are unrecoverable, and they are exactly what a person deleting their account
+wants gone. Rejected: refusing B outright (R4 says otherwise); sending B a code by email
+(`USERNAME` would have to be an address, which is the §13.25 bug: it reaches a native twin, or
+nobody).
+
+**Why the kind is carried and compared.** Every form carries a hidden `kind` (`code` for A and C,
+`row` for B), and every `POST` refuses a `kind` that differs from the kind this request computes,
+with no write and no call (a `409`-class "the page changed, start again"). Without it, a person who
+clicked "Send code" under a native session and whose next request arrived without the header
+(another tab signed in through a provider) would have their row deleted without the code they were
+promised. The field chooses nothing: it is compared, never obeyed.
+
+**Why D has no form, and the social-only Cognito user is never deleted here.** Nothing proves to the
+pool that the caller holds that account, and the only call that could delete it without the user's
+own token (`AdminDeleteUser`) evaluates IAM, which §13.7 refused for this process. R4's accepted
+answer is the sentence.
+
+#### 3. Decision: the binding
+
+Routes, all under the account prefix, beside the key routes:
+
+- `GET {account}/delete`: the confirmation page of §2. Changes nothing, calls nothing. Carries, as
+  hidden fields, `rev` (the file's sha256 as rendered, as every form does), `uuid` (the caller's
+  row, empty for a stranger) and `kind`.
+- `POST {account}/delete`: for B, the deletion; for A and C, the start: `cognito_call(cfg,
+  settings, native)`, unchanged from §13.25, so `USERNAME` is the header's value, a
+  `ChallengeParameters.USERNAME` that names anybody else is the existing `403`, and the code page
+  names `CODE_DELIVERY_DESTINATION`. The code page carries `Session`, `rev`, `uuid` and `kind`.
+- `POST {account}/delete/code`: the code step, A and C only.
+
+The code step, in order, every refusal writing nothing and calling nothing after it:
+
+1. the same-origin door (`csrf_ok`, the console's strict policy);
+2. what `handle_account` re-checks for every request against the live files: the proxy secret, the
+   identity, the veto, the row resolution;
+3. the header is present (else the profile's "not native" refusal, no call), and the posted `kind`
+   equals the computed one;
+4. the posted `uuid` equals the live row's uuid (both empty for a stranger). A stranger who gained
+   a row between the steps, a row whose uuid changed, and a row removed by an administrator are all
+   refused here: the person confirmed a deletion of something else;
+5. for A only, the posted `rev` equals the live file's sha256 (a cheap pre-check, without the lock,
+   so a stale form never spends a code);
+6. `cognito_answer(cfg, settings, session, native, code)`, `USERNAME` = the header's value **on
+   this request**, never a field (§13.25 step 3);
+7. `id_token_username(IdToken, settings) == native`, or the existing `403` "a token for another
+   account", the `AccessToken` dropped unused. This is the regression the rpi-01 twin taught
+   (`the_rpi01_twin_is_never_written`), and it guards a call that cannot be undone;
+8. for A: `WRITE_LOCK`, `rev` again against the bytes under the lock, `open_access_file`,
+   `remove_user(doc, uuid)`, `AccessWrite::prepare(..)?.commit(..)`, the lock released at the
+   commit as §13.13 requires (never held across a Cognito call). A `409` or an I/O error here ends
+   the request: nothing in the file changed, and `DeleteUser` is **not** called;
+9. `cognito_delete(cfg, settings, access_token)`, a new function shaped as `cognito_update`
+   (`DeleteUser`, the same `cognito_post`, the same 5 s bound, no retry), and the tokens dropped at
+   the end of the request: none reaches a page, a header, a log line or a file.
+
+At most two Cognito calls in the code request (`RespondToAuthChallenge`, `DeleteUser`), which is
+§13.13's bound. The `rev` is not checked for C, because C writes no file and a stranger's form
+should not fail on an unrelated edit; step 4 is what pins C to "still a stranger".
+
+#### 4. Decision: partial failure, and the retry
+
+The order is §13.9's and its reason stands: the row first, because a failed `DeleteUser` then
+leaves a Cognito user with no row (a stranger who reaches only `authenticated` scopes and holds no
+key), while the other order on a failed write leaves a row with live keys waiting for the same
+person to re-register.
+
+| Where it stops | Status | What is true | What the page offers |
+|---|---|---|---|
+| any refusal in steps 1 to 7 | 400 / 403 / 409 | nothing changed | start again (`{account}/delete`) |
+| the write (step 8) | 409 / 500 | nothing changed, no `DeleteUser` | start again |
+| `DeleteUser` refused | 502 | the row is gone, the sign-in account is not | the retry |
+| `DeleteUser` no answer | 504 | the row is gone, the sign-in account may or may not be | the retry |
+| `DeleteUser` ok, or `UserNotFoundException` | 200 | both gone | sign out |
+
+**The retry is the C path, reached by the same link.** After the row went, the same session is a
+stranger with the header still present (the cookie still carries `native_username`), so
+`GET {account}/delete` now renders C's page, and C's code walk deletes the Cognito user. No new
+route, no stored state. A retry after a deletion that did happen (the `504` case) gets
+`UserNotFoundException` from `InitiateAuth`, and C's start answers with a deletion-specific
+sentence ("there is no sign-in account left to delete for this session; sign out") instead of the
+profile's. `UserNotFoundException` from `DeleteUser` itself counts as done: the goal is that the
+user does not exist.
+
+**The final page** links to `Config::account_logout_url`, the same link the menu's Sign out
+carries, because the cookie is stateless and stays valid until it expires (the "Sessions are
+stateless" invariant forbids a revocation list): for A and B it now names a stranger, for C a
+Cognito user that no longer exists. Where that URL is unset the menu has no Sign out either, and
+the page says to close the browser instead of linking nowhere.
+
+#### 5. Decision: what is recorded, and where
+
+**No audit-file event.** The audit file is the gate's, and records authentication (sign-ins,
+sign-outs, refusals); `bb-auth-web` writes none, and no edit of the access file by either editor
+is in it today. A self-deletion is an edit of the access file plus a Cognito call, not an
+authentication, so it has no place there. **One journal line per effect**, through the console's
+existing `audit()` helper, as `account_key_post` already logs a self-service key write:
+`{email} (self): user rm {uuid}` after the commit, and `{email} (self): cognito delete-user
+{ok|refused|no answer}` after the call, never the Cognito username (`native_user`'s doc: it is a
+personal identifier read only by the request that carries it). This is not a breach of "an event
+has exactly one home": that invariant divides the gate's request-path events between its audit
+file and the journal, and a GUI mutation line has only ever had the journal as its home. Nothing is
+recorded twice.
+
+The audit file is **not edited** (R4): the confirmation page says how long their lines last.
+
+#### 6. What `remove_user` does (built in step 6)
+
+One call, `remove_user(doc, uuid)` in `src/lib.rs`, the same one `bb-auth-adm user rm` and the
+console use:
+
+- the row goes, and with it every key it owned (keys live on the row, `UserSpec::api_keys`), so
+  every `bbk_` bearer of theirs stops at the gate's next reload (`bb-auth-reload.path`);
+- every scope's `users` list loses the uuid, and every `user_groups` entry loses it;
+- every scope's `excluded` entry naming the uuid is **rewritten** to the row's primary email, once,
+  in place (not swept: dropping a veto lifts it, and the same person re-registering would walk back
+  in);
+- every `denied` entry naming the uuid is rewritten to that email the same way, so the veto
+  survives the person who is vetoed (and such a person never reaches this far: §2);
+- a row with no email has no stranger spelling, so its exclusions are dropped as before.
+
+The swept list `user_refs` returns is not shown on the done page: the page already listed what
+goes before the person confirmed, and the console's removal says nothing about exclusions either.
+
+**`web.admins` is not touched and not mentioned.** The self-service page never reads it (AGENTS.md:
+an administrator here is one more person acting on their own account), so it cannot say "you are an
+administrator", and writing the settings file from here would also risk the refused empty list.
+An administrator who deletes their account stays named there by email until another administrator
+removes them. Question 2 below.
+
+#### 7. The pool and OpenTofu
+
+**Nothing in the app client needs to change, as far as the sources say**: the access token from the
+API sign-in carries the one scope `DeleteUser` requires, the native client already allows
+`ALLOW_USER_AUTH`, and `DeleteUser` is not an OAuth flow. **This is a question for the user and the
+IT-Admin session, not an assumption to build on**: whether anything in itadmin's
+`infra/tofu/stacks/aws/production/cognito.tf` (a Lambda trigger, a WAF association, a client
+setting this design does not know) would stop or should accompany a self-service `DeleteUser`, and
+whether the estate wants self-deletion of Cognito users at all (it is irreversible by the source
+above). No change is proposed to that repository.
+
+#### 8. Alternatives rejected
+
+- **The email as `USERNAME`** (§13.7 as written): the §13.25 bug, on an irreversible call.
+- **Delete the Cognito user first**: §13.9's reason, a failed write would leave live keys behind.
+- **Hold `WRITE_LOCK` across `DeleteUser`**: §13.13, a slow Cognito would block every writer.
+- **A server-side record of a half-done deletion to resume from**: state for a case the C path
+  already covers with none.
+- **`AdminDeleteUser` for social-only users**: IAM credentials in the process that writes both
+  files (§13.7).
+- **An audit-file event written by `bb-auth-web`**: a second writer of a file whose single writer
+  is part of its guarantee ("an audit an administrator can edit is not an audit"), and not an
+  authentication.
+- **A typed confirmation word for B**: the confirmation page is the WCAG 3.3.4 step (§13.28 §5),
+  and the key revoke already rests on the same.
+- **The menu row hidden for D**: the page explains better than an absent row, and showing the row
+  to everyone keeps the menu one shape.
+
+#### 9. Slices
+
+Each is one red-green pass over a few functions; tests in `src/bin/bb-auth-web.rs` with
+`FakeCognito` unless named otherwise, and "no call" means `fake.actions()` is empty.
+
+- **7a. The confirmation page.** `handle_account`'s route list gains `{account}/delete`; a
+  `DeleteKind` (`Code`, `Row`, `Nothing`) computed from `native_user` and the uuid;
+  `page_account_delete` (four variants, the hidden `rev`/`uuid`/`kind`, the audit sentence, which
+  needs `limit_text` to take a `Lang` instead of a console `View`). Tests:
+  `delete_page_for_a_native_roster_user_lists_what_goes_and_asks_for_a_code`,
+  `delete_page_for_a_social_roster_user_deletes_the_row_and_names_the_administrator`,
+  `delete_page_for_a_native_stranger_says_the_file_is_untouched`,
+  `delete_page_for_a_social_stranger_has_no_form`,
+  `delete_page_says_how_long_the_audit_keeps_lines` (a retention, and none),
+  `delete_page_refuses_a_denied_identity`, `delete_page_changes_nothing_and_calls_nothing`.
+- **7b. The menu row (§13.28 §5).** `account_menu` gains `delete: Option<&str>`;
+  `account_shell` passes `{account}/delete`, the console passes `None`; `K::AccountDelete`.
+  Tests: `the_account_menu_ends_with_delete_after_sign_out` (last row, behind the rule, an `a.pill.rm`,
+  a `GET` link), `the_console_menu_has_no_delete_row`, and the Italian string.
+- **7c. B: the row-only deletion.** `account_delete_post` for `kind=row`: door, kind, uuid,
+  `WRITE_LOCK`, `rev`, `remove_user`, `AccessWrite`, the journal line, the done page. Tests:
+  `a_social_roster_deletion_removes_the_row_and_calls_no_cognito` (keys, scope and group
+  references gone, an exclusion and a `denied` entry now the email, no call),
+  `a_stale_rev_is_a_409_and_writes_nothing`, `a_cross_site_delete_is_refused`,
+  `a_kind_that_no_longer_matches_is_refused`, `a_changed_uuid_is_refused`,
+  `the_done_page_links_to_sign_out`.
+- **7d. A and C: the start.** `account_delete_post` for `kind=code`: `cognito_call` on the header,
+  `page_delete_code` (the masked destination, the code field, the hidden fields). Tests:
+  `the_delete_code_is_asked_for_the_sessions_own_username`,
+  `a_delete_challenge_for_another_username_is_refused`,
+  `kind_code_with_no_header_is_refused_with_no_call`, `the_delete_start_writes_nothing`,
+  `a_stranger_with_a_header_is_offered_the_code`,
+  `a_retry_after_the_user_is_gone_says_there_is_nothing_left` (`InitiateAuth`
+  `UserNotFoundException`).
+- **7e. A: the code step.** `account_delete_code_post` (steps 1 to 9 of §3) and `cognito_delete`.
+  Tests: `the_whole_deletion_drops_the_row_then_deletes_the_user` (actions
+  `[RespondToAuthChallenge, DeleteUser]`, the `AccessToken` the fake issued, the row gone),
+  `the_delete_twin_is_never_deleted` (same email, other `cognito:username`: `403`, file unchanged,
+  no `DeleteUser`), `a_wrong_delete_code_writes_nothing`, `a_stale_rev_spends_no_code` (no call),
+  `a_failed_write_never_calls_delete_user` (`cfg(unix)`, the file's directory read-only: actions
+  `[RespondToAuthChallenge]` only, row still there; run under WSL),
+  `a_failed_delete_user_leaves_the_row_gone_and_offers_the_retry` (`502`),
+  `delete_user_with_no_answer_says_unsure_and_offers_the_retry` (status 0, `504`, within the bound),
+  `no_token_reaches_the_delete_response`, `a_header_changed_between_steps_deletes_nothing`.
+- **7f. C: the stranger's code step.** The same handler with no row: no `rev`, no write. Tests:
+  `a_strangers_deletion_leaves_the_files_bytes_unchanged`,
+  `a_stranger_who_gained_a_row_between_steps_is_refused`,
+  `the_retry_reaches_the_stranger_path_and_finishes` (a `502` at 7e, then the C walk on the same
+  headers deletes the user), `delete_user_not_found_counts_as_done`.
+- **7g. The browser suite.** `e2e/lib/cognito.js`'s `defaultReply` answers `DeleteUser` with
+  `200 {}` (today it is `UnknownOperationException`); a walk per kind in a new
+  `e2e/tests/delete.js` (A to the done page, B with zero Cognito calls, the `502` then the retry,
+  D with no form), the `nojs.js` pass over them, and scenes `account-delete`, `-row`, `-stranger`,
+  `-nothing`, `-code`, `-done`, `-partial` in `shots.js` for the designer's review.
+- **7h. Real, with the user's go-ahead**: a test account on rpi-01 that signs in by email code,
+  with a row, a key and a scope reference; deleted in a browser; then `bb-auth-adm show` no longer
+  names it except as an email in any `excluded`/`denied` entry, its key gets a `401`, and its
+  sign-in by email code fails (the IT-Admin session can confirm with a read-only `admin-get-user`).
+
+#### 10. How each decision is shown to hold
+
+The binding: 7d's username test, 7e's twin test, `the_code_step_uses_the_header_not_a_form_field`
+carried over as `a_header_changed_between_steps_deletes_nothing`. The order: 7e's actions list and
+the `cfg(unix)` write failure. The kinds: 7a's four pages, 7c's zero calls, 7f's unchanged bytes.
+The veto: 7a's refusal (and `handle_account`'s existing test). The partial failure: 7e's `502` and
+`504` and 7f's retry. No tokens out: 7e. The pool facts: only 7h.
+
+#### 11. Questions for the user and the IT-Admin session
+
+1. **itadmin's OpenTofu** (§7): anything in `cognito.tf` that would stop a self-service
+   `DeleteUser`, or that should change with it? Is irreversible self-deletion of Cognito users
+   wanted on this pool?
+2. **`web.admins`** (§6): an administrator who deletes their account stays in the list by email.
+   Accept that (recommended: the self-service page must not read the list), or should the console
+   flag admins with no row?
+3. **B's single `POST`** (§2): accept that a social-only person's row is deleted on a confirmed
+   `POST` with no re-authentication, as their keys already can be?
+4. **The real run (7h)**: which test account, and the go-ahead for an irreversible deletion on the
+   real pool.
