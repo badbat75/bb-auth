@@ -66,8 +66,12 @@ Rules are in `AGENTS.md`. Format of this file: `AGENTS.md`, under "Skills".
 - To find Italian accents typed as apostrophes in the `K` table, extract each `m(lang, en, it)`'s third string with Python and apply §13.31 §10a's rule (a `'` after a vowel, before a non-letter, not closing a quote opened after a space or `(`); a plain regex also flags `'chiunque'`.
 - The stranger's `/account/` (no roster row) has no `shots.js` scene: `/tmp/rev13/stranger.js` boots the e2e server and shoots it as `friend@example.com` in light, dark, 360 and `it`, menu open, listing any visible submit in the menu.
 - A notice on the sign-in page with the three real stylesheets: `/tmp/d14/gen.js` (§13.33).
+- How wide the bar's tabs need the viewport, per label and language: `/tmp/d15/probe.js` (injects a tab, walks 320 to 1400, reports the narrowest width with the brand whole); the two-menu bar with a ☰: `/tmp/d15/ham.js`; a panel's size on both surfaces: `/tmp/d15/size.js`.
 
 ## Pitfalls
+
+- `.menu` is shrink-to-fit (absolute, `min-width` only), so the same panel is a different width wherever its longest row differs: compare the computed width on both surfaces, not the classes.
+- A bar check that injects CSS with `addStyleTag` fails on the hash-only CSP: create the context with `bypassCSP: true`.
 
 - `shots.js` wipes `e2e/artifacts/visual/` on every run, so two runs leave only the second's shots: pass every filter to one run (`node e2e/shots.js account-delete account-menu-delete`).
 - Pills placed side by side straight in a `p.primary` touch (maud emits no whitespace between them): two or more actions belong in `div.actions`, which has the gap.
