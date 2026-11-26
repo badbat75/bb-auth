@@ -6633,6 +6633,15 @@ with one space. "Multi" means the row had two addresses or more.
 Short names in the table are `AccountDelete…` keys of §5. A stranger has one address (no row, so
 the gate sends only the session's), which is why the "later `POST`" row is a roster's.
 
+(Changed by §13.32 §1 and §13.33 §3, built 2026-11-26: the two `200` rows of "every `POST` `202`"
+are that page **only where `BB_AUTH_WEB_LOGOUT_URL` is unset**. Where it is set, both rows are one
+answer and no page: a `303` to that logout with `rd=/auth/login?notice=account-deleted`, the gate
+clears the cookie, and the person lands on the sign-in page's notice, which carries what those two
+ledes said. `K::AccountDeletedSignOut` is gone with the pill that rendered it, and
+`K::AccountDeletedClose` is reworded ("This browser stays signed in until the session ends."),
+because the cookie carries `Max-Age` and outlives a closed browser. Every partial row is
+unchanged, pills included.)
+
 **A `403` from the first `POST` is not one page** (a refinement of §13.29 W5). For a stranger
 nothing has changed, so the protected page is true. For a roster user the row is already gone, and
 "nothing was deleted" would be false, so it is the partial page: the keys are gone, the sign-in

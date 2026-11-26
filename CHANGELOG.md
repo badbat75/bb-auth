@@ -33,6 +33,70 @@ native Cognito user to nginx" below.
 upgrade: the `/account/` location forwards `X-Auth-Native-Username` and every other gated
 location clears it. The packages need no order. Without that line the page shows the profile
 list and the sentence where the edit pill would be, to everybody, native accounts included.
+**One more line decides one sentence**: `X-Original-URL` on `location = /auth/logout` is what
+lets a completed deletion land on the sign-in page's notice, because the `rd` it hands the logout
+is relative. Without it the person is signed out all the same and lands on the sign-in page with
+nothing said (see "a completed deletion signs this browser out" below).
+
+### Changed: two menus in the bar, and the settings page is a tab again
+
+* **The bar has five tabs, and the fifth is "Settings" / "Impostazioni"**, last after Dashboard,
+  Applications, Users and Audit. It opens the page that was the account menu's row: the URL is
+  unchanged (`/config`) and the page's heading is unchanged ("System settings" / "Impostazioni di
+  sistema"). It is last because the other four are about who reaches what and this one is not,
+  which is the same reason it left the tab list in 1.99.8 and is back now that the bar has a
+  place to put it without crowding the rest (docs/ARCHITECTURE.md §13.34 §1).
+* **The account menu holds only the person's own things**: their name and every address of their
+  roster row, "Go to your account" on the console, Preferences (theme and language) nested and
+  closed, Sign out, and on `/account` the delete row. The tabs and the settings row are out of it,
+  and the menu is the same object on both surfaces.
+* **At 941px and below the tabs move into a navigation menu of their own**, opened by a ☰ at the start of
+  the bar, never into the account menu: the user's option B of 2026-11-26, replacing the
+  1.99.8 compromise that rode them in the account panel. The two panels are one exclusive
+  `details` group (`name="bar-menu"`), so opening one closes the other with no script, and the bar
+  stays one row at every width, from 320 to 1400, in both languages (the breakpoint and the
+  measured widths are docs/ARCHITECTURE.md §13.34 §0 and §5).
+* **The account menu is one fixed width on both surfaces** (`width:20rem`, capped to the
+  viewport). It used to be shrink-to-fit, which measured 230px on the console and 286px on
+  `/account` (257px in Italian): the width of each surface's longest row, so the same panel was
+  two boxes. Now it is one box wherever it opens, and a long address wraps inside it.
+* **No new script**, and every page still works with scripting off: the ☰ is a `details`, so it
+  opens with markup and closes when a row navigates away, exactly as the account menu does.
+
+### Changed: a completed deletion signs this browser out
+
+* **The last press signs the browser out by itself.** Where every address was queued and
+  `BB_AUTH_WEB_LOGOUT_URL` is set, the delete `POST` answers no page: a `303` to that logout with
+  `rd=/auth/login?notice=account-deleted`. The gate clears the cookie, because it is the only
+  program that knows the cookie's name, `Domain` and `Path` and a clear that differs in either
+  silently does nothing, and the person lands on the sign-in page. No page asks anyone to sign out
+  any more, because by the time a page is drawn the browser is signed out; the account menu's own
+  Sign out row is as it was (docs/ARCHITECTURE.md §13.32 §1).
+* **The sign-in page's notice is a closed set of one.** The page compares its `notice` query
+  parameter with `account-deleted` and nothing else: a match shows one fixed paragraph (English in
+  the element, Italian in the page's dictionary) and names it as the email field's description,
+  any other value shows nothing, and no byte of the query is reflected on the page. Its words keep
+  the done page's claim, *queued* and never *deleted*, and add what only this page can say: if
+  signing in still works later without signing up again, tell an administrator.
+* **Only a full success signs out.** Every partial outcome keeps its page, its "Try again" and its
+  "Sign out", because the retry is the walk over the addresses and needs the session. Where the
+  logout URL is unset the done page stays as it was, with its last sentence reworded to "This
+  browser stays signed in until the session ends.": the cookie carries `Max-Age`, so it outlives a
+  closed browser, which is what the old sentence assumed.
+* **The gap this leaves is accepted, and it is named on the notice.** A session minted in
+  *another* browser before the deletion keeps verifying until it expires, `gate.session_ttl_secs`
+  after it was minted (30 days, kept there on 2026-11-26). Once the roster row is gone that cookie
+  reaches no `restricted` scope, every `denied` and `excluded` veto still matches its email, and
+  its API keys went with the row: what is left is `anonymous` and `authenticated`, and with
+  self-signup open the same email can be registered again within a minute and reach the same
+  scopes. The user accepted it on 2026-11-26. Its premise is open self-signup: if the pool becomes
+  admin-create-only, the tombstone of docs/ARCHITECTURE.md §13.32 §2 is the design to build.
+* **Nothing is asked of the operator for the sign-out, and one line for the notice**: the logout
+  location needs `X-Original-URL` for the relative `rd` to land on the notice. Without it the
+  person is signed out and lands on the sign-in page with nothing said, which is fail-soft by
+  design.
+* **No format is touched**: the cookie stays `bb1`, and the access and settings files are as they
+  were, so this changes nothing for anybody signed in.
 
 ### Changed: `/account` applies a preference on selection, and writes nothing about a missing row
 

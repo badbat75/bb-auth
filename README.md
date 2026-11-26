@@ -557,7 +557,9 @@ absolutely:
 ```nginx
 # On the auth vhost only. No auth_request here: a logged-out visitor must be able to
 # reach it. X-Original-URL is needed only to resolve a relative `rd`, and an absolute
-# one does not need it.
+# one does not need it. The self-service deletion signs out through here with a relative
+# `rd`, so on a location without that header the person is signed out all the same and
+# lands on the sign-in page with no notice (docs/ARCHITECTURE.md §13.32).
 location = /auth/logout {
     proxy_pass http://127.0.0.1:4181/auth/logout;
 }
@@ -630,20 +632,25 @@ its `root:bb-auth 0640` ownership. Then reload — see below.
 ### Editing it in a browser — `bb-auth-web`
 
 The same file in a browser: a server-rendered admin GUI that needs no JavaScript. The bar is
-one row at every width: the deployment's logo, its name, three tabs about the access file, a
-fourth over what the gate has recorded, and a pill showing your given name (or your first
-address) that opens the **account menu**: **System settings**, "Go to your account", Preferences
-(theme and language) and Sign out. At 800px and below the tabs move into that menu too, so the
-bar never wraps.
+one row at every width: a ☰ that opens the navigation (below the breakpoint), the deployment's
+logo, its name, **five tabs** (Dashboard, Applications, Users, Audit, and Settings last), and a
+pill showing your given name (or your first address) that opens the **account menu**: your name
+and every address of your roster row, "Go to your account", Preferences (theme and language)
+and Sign out. Nothing in that menu is about who reaches what, and the panel is one fixed width,
+the same box on this surface and on `/account`. At 941px and below the tabs move into the
+☰'s own menu, never into the account one, so the bar never wraps; the two panels are one
+`details` group, so opening one closes the other with no script.
 **Users** holds the three sections about people, in the order they nest: the user groups and
 who references each one, then the roster, then the `denied` veto. **Applications** lists each
 one with its area, its scope count and which credential classes get in anywhere inside it,
 and each application's page shows its scopes **numbered in file order** (the number is the
 meaning — first match wins) with their members, their credentials and their `excluded`.
 Every key's expiry is on its owner's page. **Audit** is the one tab that edits nothing: see
-[The audit](#the-audit) below. **System settings** is not a tab and reads like it:
-it edits the other file (see [Config](#config)), which is why it is a row of the account menu
-rather than a fifth thing the bar has to find room for.
+[The audit](#the-audit) below. **Settings** is the fifth tab and it sits last, because the first
+four are about who reaches what and it is the only one that is not: it edits the other file (see
+[Config](#config)). Its tab is labelled "Settings" because the bar has no room for the full name
+at any width, and the heading of the page it opens spells that out ("System settings"); the URL
+is unchanged (`/config`).
 
 The **access check** (`can EMAIL URL` in the browser, answered by the gate's own decision
 function) has no tab, because every tab is a place and it is a question. It is a section of
@@ -694,7 +701,7 @@ serving anyone.
 | `BB_AUTH_WEB_DELETE_SECRET` | no | *(none)* | the value sent to the intake in `X-BB-Delete-Secret`, on the proxy secret's rules: at least 32 characters of `[A-Za-z0-9_-]`. The install does **not** generate this one, because the same bytes have to reach the intake's own unit. Optional today, because the intake checks no secret yet: with the intake set and no secret the GUI starts and says so once, in the journal. A **malformed** value is fatal, since a secret set and not sent is a deployment that believes it is protected. Never printed, banner and journal included |
 | `BB_AUTH_WEB_WORKERS` | no | `8` | how many request **handlers run at once**, not how many connections are open: `tiny_http` keeps its own accept pool and an unbounded queue, so a request that finds every worker busy waits, it is never refused. Accepted 1 to 64; anything else (0, 65, negative, empty, padded, non-numeric) is a **fatal startup** naming the variable. Size it by how many slow handlers may be in flight while page views still get through, not by cores: writes queue on one lock and a page read is milliseconds, so nothing past that count parallelises, and the Cognito calls the profile edit makes queue on the network (docs/ARCHITECTURE.md §13.13). Read once at startup, so a change needs a restart, and the banner prints `workers=N` |
 | `BB_AUTH_WEB_DEFAULT_LANG` | no | `en` | `en` or `it`; a `?lang=` choice is remembered in a cookie |
-| `BB_AUTH_WEB_LOGOUT_URL` | no | *(none)* | where the header's "Sign out" points. **Unset means no control at all**, which is the only safe default: this binary knows neither its own scheme nor its own host, and the one thing it is handed is a client-supplied `Host:`. A bad value is refused at startup. On the self-service page the same value is worn with its `rd` parameter dropped, so a person who is not an administrator signs out to the sign-in page instead of to a `403` on the console (docs/ARCHITECTURE.md §13.17) |
+| `BB_AUTH_WEB_LOGOUT_URL` | no | *(none)* | where the header's "Sign out" points. **Unset means no control at all**, which is the only safe default: this binary knows neither its own scheme nor its own host, and the one thing it is handed is a client-supplied `Host:`. A bad value is refused at startup. On the self-service page the same value is worn with its `rd` parameter dropped, so a person who is not an administrator signs out to the sign-in page instead of to a `403` on the console (docs/ARCHITECTURE.md §13.17). A completed self-service deletion answers with it too, as a `303` whose `rd` names the sign-in page's deletion notice; unset, that deletion ends on its done page and the person signs out by hand (docs/ARCHITECTURE.md §13.32) |
 | `BB_AUTH_AUDIT_FILE` | no | `/var/log/bb-auth/audit.jsonl` | the audit the **Audit** tab reads, written by the gate (the gate's own variable name, so unset on both sides means one file). Read-only here; empty means the tab says the audit is off rather than looking empty |
 | `BB_AUTH_WEB_ALLOW_NONLOOPBACK` | no | *(unset)* | `1` to allow a non-loopback `BB_AUTH_WEB_LISTEN`. Without it that bind is a fatal startup: the service's only credential is a header nginx sets, so anything that can reach the port could edit the access file |
 
@@ -723,7 +730,12 @@ data**, and it exists only where `BB_AUTH_WEB_DELETE_INTAKE` names the owner's w
 lists what goes and asks the person to type one of their own addresses, and the one press removes
 the roster row (so the keys and the named grants die at once) and queues every address with that
 worker. The pages say *queued* and never *deleted*, because this program cannot read the worker's
-outcome (docs/ARCHITECTURE.md §13.30). It is the console's trust model with the
+outcome (docs/ARCHITECTURE.md §13.30). Where every address is queued and `BB_AUTH_WEB_LOGOUT_URL`
+is set, that press signs this browser out by itself: a `303` through the gate's logout onto the
+sign-in page, whose one fixed notice says the same thing the done page said, *queued* included,
+and that the person's other browsers stay signed in until they sign out there or the session
+ends. A partial run keeps its page, its "Try again" and its "Sign out", because the retry needs
+the session (docs/ARCHITECTURE.md §13.32). It is the console's trust model with the
 privilege taken out, and `web.admins` is **not** read there at all, because an administrator there
 is one more person looking at their own account. That is why the prefix is dispatched *ahead of*
 the administrator list, and why the two prefixes must be siblings: a page nested under `/admin`

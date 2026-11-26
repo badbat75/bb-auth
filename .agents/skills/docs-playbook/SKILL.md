@@ -30,6 +30,15 @@ Rules are in `AGENTS.md`. Format of this file: `AGENTS.md`, under "Skills".
   `BB_AUTH_WEB_LISTEN=127.0.0.1:18091`. A unit test proves the parser; only the run proves the
   fatal path (exit 1, message naming the variable) and what the banner says.
 
+- The CHANGELOG's released sections (`## 1.99.8 (…)`) are the record of that release. When
+  unreleased work undoes a claim one of them makes, say so in a new `###` section under
+  `## Unreleased` and name the release it replaces ("replacing the 1.99.8 compromise"): never
+  rewrite the released section.
+- To re-measure the `node e2e/shots.js` figures: scenes are the `['name', …]` entries between
+  `const SCENES = [` and its `];`, interaction states the same inside `const STATES = [`, and
+  the shot total is per `VIEWS` entry (a view with `states: true` runs both lists, the Italian
+  view runs its own `only` list, the last views run two each).
+
 ## Pitfalls
 
 - A source about something similar looks like a source, but is only a hint.

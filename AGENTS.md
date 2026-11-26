@@ -89,21 +89,32 @@ One crate, four targets, and the split is load-bearing:
   self-service page too, which is why one save restyles both programs), each a group that
   folds to its heading with no script and that the page opens folded, and an **Audit** tab over
   the file the gate writes. The bar is **one row at every width** (`flex-wrap:nowrap`,
-  §13.28): the operator's logo (`ui.logo_url`, and the console's `img-src` admits it, as the
-  self-service page's already did), the brand, **four tabs** (Dashboard, Applications, Users,
-  Audit) and one pill, the person's given name or else their first address, which opens the
-  **account menu**. That menu is a `details`, so it opens with markup and closes when a row
-  navigates away, and its rows are the caller's name and every address, then the places (System
-  settings, and "Go to your account" on the console only), then Preferences nested and closed,
-  then Sign out. At 800px and below the tabs ride in it too, which is the compromise the user
-  accepted on 2026-11-25: one tap away, never a second row. None of the tabs is `denied` or
+  §13.28): a ☰ navigation trigger (the console only, and shown only below the breakpoint), the
+  operator's logo (`ui.logo_url`, and the console's `img-src` admits it, as the self-service
+  page's already did), the brand, **five tabs** (Dashboard, Applications, Users, Audit and
+  **Settings**, that one last) and one pill, the person's given name or else their first
+  address, which opens the **account menu**. That menu is a `details`, so it opens with markup
+  and closes when a row navigates away, and its rows are the caller's own things and nothing
+  else: the caller's name and every address, then the one place ("Go to your account", on the
+  console only), then Preferences nested and closed, then Sign out (§13.34 §3). At **941px and
+  below** the tabs ride in a navigation menu of their own, opened by that ☰ at the start of the
+  bar and never in the account menu (the user's option B, 2026-11-26, replacing the compromise
+  the user accepted on 2026-11-25 of riding them in the account panel): the two panels are one
+  exclusive `details` group (`name="bar-menu"`), so opening one closes the other with no script,
+  and the nested `details.prefs` carries no `name` for exactly that reason. The account menu is
+  **one fixed width on both surfaces** (`.menu` is `width:20rem` capped at `calc(100vw - 32px)`,
+  §13.34 §3, W13): the console's panel and the self-service page's are one box, that width
+  holding the longest row of either in both languages. None of the tabs is `denied` or
   `user_groups`: those two are **sections of the users
   page**, groups above the roster, because a group only means anything in terms of the roster
   and both are about people. Audit comes after them because it is about the same people one
-  step later: `users` says who may get in, the audit says who did. System settings is not a tab
-  at all, for the reason it read as the odd one out while it was one: it is the only thing here
-  that is not about who reaches what, so it is a row of the account menu, where the bar has room
-  for it at every width, and its URL is unchanged (`/config`).
+  step later: `users` says who may get in, the audit says who did. **Settings** is a tab, and last
+  among them for the reason it read as the odd one out while it was one: it is the only thing here
+  that is not about who reaches what, so it sits at the end of a list whose subject is who reaches
+  what, and its URL is unchanged (`/config`). The tab's word is "Settings" / "Impostazioni"
+  (`K::ConfigTab`), because the full label leaves the brand cut at every width (§13.34 §0), and
+  the `h1` it opens spells the name out ("System settings" / "Impostazioni di sistema",
+  `K::Config`).
   **Every tab is a noun**, a place that owns a section of a file, and
   that is what says where the **access check** goes: it is a verb, it owns nothing, and it was
   the odd item out for as long as it was a fifth tab. It is now a section of the application
@@ -201,7 +212,7 @@ One crate, four targets, and the split is load-bearing:
   the console's own header (`top_bar`, one function for both surfaces): the operator's brand,
   mark and name, worn as a `span` and not a link, since this page is the only one its visitor
   came to the estate for, an empty tabs nav, and the console's one account menu with **no
-  places** in it (this page has no tabs to move and offers no console page), so its panel is who
+  places** in it (this page offers no console page), so its panel is who
   the caller is in full, the Preferences box nested and closed, and Sign out. The person chooses
   only the theme (light, dark, "Auto (system)") and the language (English, Italian, auto) from
   that box, which is the console's own form: its two list boxes carry the console's one
@@ -251,7 +262,15 @@ One crate, four targets, and the split is load-bearing:
   die before the pool is asked; then each address is queued at the intake, one call each, stopping
   at the first answer that is not `202`. A caller with no row is queued and the access file is
   untouched. The pages never say *deleted*, only **queued**, because this program cannot read the
-  worker's outcome, and a partial run says what did happen and offers the retry. A deleted
+  worker's outcome, and a partial run says what did happen and offers the retry. Where **every**
+  address is queued and `BB_AUTH_WEB_LOGOUT_URL` is set, the `POST` answers no page at all: a
+  `303` to that logout with `rd=/auth/login?notice=account-deleted`, so the gate clears the cookie
+  (it is the only program that knows its name, its `Domain` and its `Path`, and a second builder
+  of a clearing `Set-Cookie` is how a clear ends up doing nothing) and the person lands on the
+  sign-in page's one fixed notice, whose words are the done page's, *queued* included (§13.32 §1,
+  §13.33 §1). Only on full success: every partial outcome offers "Try again", and that retry is
+  the walk over the header's addresses, which needs the session, so those pages keep their "Sign
+  out" pill and their words. With no logout URL set the done page stays what it was. A deleted
   administrator stays in `web.admins` (the user's decision, 2026-11-26): this path edits the access
   file and never the settings file. The intake is reached at a loopback `http` origin over
   `X-Auth-Email`, and the optional shared secret `BB_AUTH_WEB_DELETE_SECRET` travels in
@@ -411,7 +430,7 @@ passed, on code untouched since it passed, tells you nothing you did not already
 `cargo doc --no-deps` earns its place when an intra-doc link could have moved, which is a
 real risk when a type or a function is renamed and no risk at all when a border-radius
 changes. `node e2e/shots.js` takes a scene-name filter for the same reason: the full walk is
-243 shots at most across seven views (58 scenes, plus the 13 interaction states in the two views
+291 shots at most across seven views (70 scenes, plus the 13 interaction states in the two views
 that run them; a scene that cannot run in a view is reported `SKIPPED`), and a change to one
 page needs one of them.
 
@@ -1116,6 +1135,23 @@ the unit creates through `LogsDirectory` precisely so that the gate's own prefix
 - **Sessions are stateless** — no server-side store. Any worker validates any cookie; a restart
   logs nobody out. Don't introduce per-session server state.
 
+  The statelessness has one accepted cost, and it is stated here so nobody has to rediscover
+  it: **a deletion does not end the sessions minted in the person's other browsers.** A cookie
+  minted before a self-service deletion keeps verifying until it expires, `gate.session_ttl_secs`
+  after it was minted, in every browser that holds one; the deleting browser is signed out by the
+  deletion's own `303` (§13.32 §1). What that stale cookie reaches is narrow: a `restricted` scope
+  admits nobody once the row is gone, every `denied` and `excluded` veto still matches the bare
+  email, the API keys went with the row, and what is left is `anonymous` and `authenticated`,
+  where the deleted person can register the same email again within a minute and walk into exactly
+  the same scopes. That is why the gap is **accepted** (the user, 2026-11-26, who also kept the
+  TTL at 30 days) and said on the sign-in page's notice: while self-signup is open it grants
+  nothing a stranger cannot get in a minute. The premise is the thing to watch: if the pool
+  becomes admin-create-only, or an `authenticated` scope starts to mean "people we once knew", the
+  gap becomes real and the tombstone of §13.32 §2 (a time-bounded section of the access file, with
+  an `iat` in the cookie's claims, which is no `COOKIE_VERSION` bump) is the design to build.
+  Nothing here may close the gap with per-session server state, since that is this rule's own
+  subject.
+
 - **id_token validation** must keep all of: `alg==RS256`, `iss`/`aud`/`exp` enforced (`exp`
   required, 60s leeway), `token_use=="id"`, `email_verified` truthy. The **one** sanctioned
   exception: `allow_unverified_social` accepts `email_verified=false` **only** for federated
@@ -1207,7 +1243,12 @@ the unit creates through `LogsDirectory` precisely so that the gate's own prefix
   quotes, fatal at startup otherwise) or HTML-escaped. Request data reaches a page in exactly
   one place, `data-rd` on the sign-in page's `<body>`, validated with the same
   `rd_url_allowed` `safe_rd` uses and emitted as an escaped attribute, never as JavaScript
-  source. **Every page carries a policy, and the policy is derived rather than written**:
+  source. The one other request value that page reads is its `notice` parameter, and it is a
+  **closed set of one**: compared byte for byte against `LOGIN_NOTICE_ACCOUNT_DELETED`, a match
+  swaps in two fixed `__BB_*__` strings (the deletion paragraph, and the attribute naming it as
+  the email field's description) and any other value, or none, swaps in empty ones, so a code
+  selects a fixed element and no byte of the query is reflected (§13.32 §1, §13.33 §2).
+  **Every page carries a policy, and the policy is derived rather than written**:
   `PAGE_SECURITY_HEADERS` on every HTML response, and a `page_csp` of `default-src 'none'`
   plus exactly what that page uses, which is a per-response nonce (`csp_nonce`) on the two
   inline blocks, the origins the script talks to, the two `ui` URLs an operator may have
