@@ -1305,6 +1305,7 @@ enum K {
     // The pages a deletion request answers with (§13.30 §4). The words are here, never in a
     // handler: the handler picks a key, and the key's words are the reader's language's.
     AccountDeleteQueuedTitle,
+    AccountDeleteNowGone,
     AccountDeleteQueued,
     AccountDeletedSignOut,
     AccountDeletedClose,
@@ -1316,6 +1317,7 @@ enum K {
     AccountDeleteNoCheck,
     AccountDeleteRetry,
     AccountDeleteStartAgain,
+    AccountDeleteWriteFailed,
     AccountDeleteChangedTitle,
     AccountDeleteChanged,
     AccountDeleteTypedWrong,
@@ -3150,6 +3152,12 @@ fn t(lang: Lang, key: K) -> &'static str {
             "Your account is being deleted",
             "Il tuo account è in fase di eliminazione",
         ),
+        K::AccountDeleteNowGone => m(
+            lang,
+            "Your API keys and every access an administrator gave you by name are gone.",
+            "Le tue chiavi API e ogni accesso che un amministratore ti ha dato per nome non ci \
+             sono più.",
+        ),
         K::AccountDeleteQueued => m(
             lang,
             "Your sign-in accounts are queued for deletion. This page cannot tell when that \
@@ -3212,6 +3220,14 @@ fn t(lang: Lang, key: K) -> &'static str {
         ),
         K::AccountDeleteRetry => m(lang, "Try again", "Riprova"),
         K::AccountDeleteStartAgain => m(lang, "Start again", "Ricomincia"),
+        K::AccountDeleteWriteFailed => m(
+            lang,
+            "bb-auth could not save the change, so nothing was deleted and you can still sign \
+             in. Try again in a minute; if it fails again, tell an administrator.",
+            "bb-auth non è riuscito a salvare la modifica, quindi non è stato eliminato nulla e \
+             puoi ancora accedere. Riprova tra un minuto; se non funziona di nuovo, avvisa un \
+             amministratore.",
+        ),
         K::AccountDeleteChangedTitle => m(
             lang,
             "Your account changed",
@@ -11241,6 +11257,19 @@ fn page_account_delete_outcome(lede: Markup, pills: Vec<Markup>) -> Markup {
     }
 }
 
+/// Why the roster row did not go, and which page each answer is (§13.30 §4).
+enum RowGone {
+    /// The page is not the current one: its bytes moved under it, or the row it names is no
+    /// longer in the file. The same page as the check at (2) answers this, because for the
+    /// person each is "my account changed", and one page for both is also what stops the
+    /// delete form being an oracle for which of the two checks fired.
+    Changed,
+    /// The write did not land, for a reason the filesystem or the parser gave. The library's
+    /// sentence rides along for the journal, and the page says only that bb-auth could not
+    /// save: the person has no use for an `EPERM`, and an operator reads it in the journal.
+    Failed(String),
+}
+
 /// Answer the delete `POST` (§13.29 W3).
 ///
 /// The order is W3's, and every step that can refuse refuses **before** the intake is asked,
@@ -11257,11 +11286,13 @@ fn page_account_delete_outcome(lede: Markup, pills: Vec<Markup>) -> Markup {
 /// 5. `whoami` for **every** address, ahead of any `POST`. The protected list is the intake's, and
 ///    a caller whose second address is protected must not leave a record queued behind the first,
 ///    which is why this is a loop of its own and not a check inside the write loop;
-/// 6. `POST` each address, stopping at the first that is not accepted;
-/// 7. the journal line (§13.29 W7), then the page (§13.30 §4).
+/// 6. for a caller the file has a row for: that row, removed under [`WRITE_LOCK`] through
+///    [`remove_user`], ahead of the first `POST` (the reason is at the step);
+/// 7. `POST` each address, stopping at the first that is not accepted;
+/// 8. the journal lines (§13.29 W7), then the page (§13.30 §4).
 ///
-/// This is the stranger's half: it writes nothing to the access file, and the roster write that
-/// goes ahead of the first `POST` for a caller who has a row is the next slice.
+/// A caller with no row skips (6) and the access file is never opened for writing on that path,
+/// which is the stranger's half of W3: the same walk, one effect short.
 #[allow(clippy::too_many_arguments)]
 fn account_delete_post(
     mut req: Request,
@@ -11429,7 +11460,102 @@ fn account_delete_post(
             }
         }
     }
-    // (6) The records, one address per request, stopping at the first that is not accepted: a
+    // (6) The row, ahead of the first `POST` (§13.29 W3 step 5).
+    //
+    // **Why the row goes first, and not after a `202`.** The worker runs `user show` and then
+    // `user rm`, and a row that disappears between the two fails its whole run: the cursor is
+    // kept, the owner is mailed, and every later deletion waits for the spool to change again
+    // (W1). A row that is **already** gone when the record lands is the path its contract
+    // tolerates: `show` finds nothing, the worker logs "not in the roster" and goes on. Removing
+    // the row after the `202` races that by construction, however short our write is. The
+    // person's half is the same fact seen from their side: the row goes with its keys and every
+    // reference to it, so no credential that still works is left waiting on a queue nobody can
+    // read, and `bb-auth-reload.path` hands the gate the new file as soon as this write lands.
+    //
+    // The lock ends at the commit, as every write in this program does (§13.13): what it owes is
+    // that no other writer renames between this one's `rev` check and this one's rename, and the
+    // intake walk that follows is a network call, which is the one thing never held across it.
+    let mut row_gone = false;
+    if let Some(uuid) = uuid {
+        let writing = WRITE_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        let done = (|| -> Result<(), RowGone> {
+            // `rev` **again**, under the lock. The check at (2) is a courtesy to a stale page:
+            // between it and here a console save, an `bb-auth-adm` over SSH or this page's own
+            // mint can land, and the bytes the person confirmed are the bytes this write replaces.
+            let raw = std::fs::read_to_string(&cfg.access_path)
+                .map_err(|e| RowGone::Failed(format!("read {}: {e}", cfg.access_path)))?;
+            if form.get("rev").trim() != sha256_hex(&raw) {
+                return Err(RowGone::Changed);
+            }
+            let (mut doc, _) = open_access_file(&cfg.access_path).map_err(RowGone::Failed)?;
+            // The library's sweep, the same one `bb-auth-adm user rm` runs: the row, its keys,
+            // every scope and group that named it, and an `excluded` entry **rewritten** to the
+            // row's primary email rather than dropped, because dropping a veto lifts it and an
+            // `authenticated` scope lets that identity walk straight back in.
+            remove_user(&mut doc, uuid).map_err(|_| RowGone::Changed)?;
+            AccessWrite::prepare(&doc)
+                .map_err(RowGone::Failed)?
+                .commit(&cfg.access_path)
+                .map_err(RowGone::Failed)?;
+            Ok(())
+        })();
+        drop(writing);
+        match done {
+            Ok(()) => {
+                row_gone = true;
+                audit(&format!("{typed} (self)"), "user rm", uuid);
+            }
+            Err(RowGone::Changed) => {
+                // The page (2) renders, for the reason §13.30 §4 gives: to the person a file that
+                // moved and a row an administrator took away are the same fact, "my account
+                // changed", and one page for both is what keeps this form from reporting which
+                // check fired. Nothing was written and nothing has been posted.
+                respond_account(
+                    req,
+                    409,
+                    prefs,
+                    t(lang, K::AccountDeleteChangedTitle),
+                    page_account_delete_outcome(
+                        html! { (t(lang, K::AccountDeleteChanged)) },
+                        vec![
+                            pill_link(delete_path, t(lang, K::AccountDeleteStartAgain)),
+                            back_link(lang, page),
+                        ],
+                    ),
+                    look,
+                    false,
+                );
+                return;
+            }
+            Err(RowGone::Failed(msg)) => {
+                // One journal line for the one effect that failed, carrying the library's sentence
+                // (a path and an OS error, never a bearer), and a page that says only that the
+                // save failed and signing in still works: the row stands, so that is true.
+                audit(
+                    &format!("{typed} (self)"),
+                    "user rm",
+                    &format!("failed: {msg}"),
+                );
+                respond_account(
+                    req,
+                    500,
+                    prefs,
+                    t(lang, K::AccountDeleteNotDoneTitle),
+                    page_account_delete_outcome(
+                        html! { (t(lang, K::AccountDeleteWriteFailed)) },
+                        vec![
+                            pill_link(delete_path, t(lang, K::AccountDeleteStartAgain)),
+                            back_link(lang, page),
+                        ],
+                    ),
+                    look,
+                    false,
+                );
+                return;
+            }
+        }
+    }
+    // (7) The records, one address per request, stopping at the first that is not accepted: a
     // later address is asked about on the partial page, which is the roster's case.
     for id in ids {
         match intake_delete(&agent, cfg, origin, id) {
@@ -11485,7 +11611,7 @@ fn account_delete_post(
             }
         }
     }
-    // (7) Every address is queued, which is all this page knows (§13.29 W6): the worker's
+    // (8) Every address is queued, which is all this page knows (§13.29 W6): the worker's
     // outcome is not readable from here, so the page says "being deleted" and never "deleted",
     // and its one action is the sign out, because the cookie outlives the deletion.
     audit(
@@ -11503,7 +11629,14 @@ fn account_delete_post(
         prefs,
         t(lang, K::AccountDeleteQueuedTitle),
         page_account_delete_outcome(
-            html! { (t(lang, K::AccountDeleteQueued)) " " (tail) },
+            // The row's half first, and only where the row went: it is the part that is already
+            // true, while the queue is a promise about a process this page cannot see (§13.30 §4).
+            html! {
+                @if row_gone {
+                    (t(lang, K::AccountDeleteNowGone)) " "
+                }
+                (t(lang, K::AccountDeleteQueued)) " " (tail)
+            },
             logout
                 .map(|url| pill_link(url, t(lang, K::SignOut)))
                 .into_iter()
@@ -33383,6 +33516,11 @@ mod tests {
         secret: Option<String>,
         real_ip: Option<String>,
         confirm_email: Option<String>,
+        // 7d: the access file as it stood the moment this request arrived, answered for the
+        // uuid the test asked the fake to watch. The order of a write and a `POST` is a fact
+        // about two effects, and the response of either cannot show it: only the file, read
+        // from inside the request, can say which came first.
+        row_present: Option<bool>,
     }
 
     /// The fake intake: a `tiny_http` server on an ephemeral loopback port, shaped as
@@ -33395,6 +33533,7 @@ mod tests {
     struct FakeIntake {
         port: u16,
         calls: std::sync::Arc<std::sync::Mutex<Vec<IntakeCall>>>,
+        watched: std::sync::Arc<std::sync::Mutex<Option<(String, String)>>>,
         // Silent mode keeps the accepted sockets open, so the caller waits on a live connection
         // rather than being refused.
         _held: std::sync::Arc<std::sync::Mutex<Vec<std::net::TcpStream>>>,
@@ -33406,6 +33545,10 @@ mod tests {
             let server = Server::http("127.0.0.1:0").expect("bind the fake intake");
             let port = server.server_addr().to_ip().expect("an ip address").port();
             let seen = std::sync::Arc::clone(&calls);
+            // The file a test wants watched, as `(path, needle)`: see [`FakeIntake::watch`].
+            let watched: std::sync::Arc<std::sync::Mutex<Option<(String, String)>>> =
+                std::sync::Arc::new(std::sync::Mutex::new(None));
+            let file = std::sync::Arc::clone(&watched);
             std::thread::spawn(move || {
                 // A reply with status 0 is a request the fake takes and never answers, for the
                 // one path a test wants to time out while the others work.
@@ -33431,6 +33574,16 @@ mod tests {
                     let confirm = form_urlencoded::parse(raw.as_bytes())
                         .find(|(k, _)| k == "confirm_email")
                         .map(|(_, v)| v.into_owned());
+                    // The watched file, read **now**: this is the only moment that can say
+                    // whether the row was still there when this request landed.
+                    let row_present = {
+                        let w = file.lock().unwrap();
+                        w.as_ref().map(|(p, needle)| {
+                            std::fs::read_to_string(p)
+                                .map(|s| s.contains(needle.as_str()))
+                                .unwrap_or(false)
+                        })
+                    };
                     seen.lock().unwrap().push(IntakeCall {
                         method: method.clone(),
                         path: path.clone(),
@@ -33438,6 +33591,7 @@ mod tests {
                         secret,
                         real_ip,
                         confirm_email: confirm,
+                        row_present,
                     });
                     let at = format!("{method} {path}");
                     let (status, body, location) = script
@@ -33465,6 +33619,7 @@ mod tests {
             FakeIntake {
                 port,
                 calls,
+                watched,
                 _held: Default::default(),
             }
         }
@@ -33485,6 +33640,7 @@ mod tests {
             FakeIntake {
                 port,
                 calls: Default::default(),
+                watched: Default::default(),
                 _held: held,
             }
         }
@@ -33513,6 +33669,24 @@ mod tests {
         /// in two languages) asserts on what one drive added, not on the whole journal.
         fn at_since(&self, seen: usize) -> Vec<String> {
             self.at()[seen..].to_vec()
+        }
+
+        /// Watch `path` for `needle`, answering each request with whether the file held it at
+        /// the moment the request arrived. The order of a write and a `POST` is a fact about
+        /// two effects, and the response of neither can show it: the row has to be looked for
+        /// in the file, from inside the request that is supposed to follow the write.
+        fn watch(&self, path: &str, needle: &str) {
+            *self.watched.lock().unwrap() = Some((path.to_string(), needle.to_string()));
+        }
+
+        /// What each call saw, in the order it arrived: `Some(true)` where the watched file
+        /// held the needle when that request landed, `Some(false)` where it did not, `None`
+        /// where nothing was watched.
+        fn rows_since(&self, seen: usize) -> Vec<Option<bool>> {
+            self.calls.lock().unwrap()[seen..]
+                .iter()
+                .map(|c| c.row_present)
+                .collect()
         }
     }
 
@@ -35183,5 +35357,512 @@ mod tests {
             "the self-service page's head is not the skeleton's"
         );
         let _ = std::fs::remove_file(&path);
+    }
+
+    // ===========================================================================================
+    // §13.29 W3 step 5, W10 slice 7d: the roster row goes before the first POST
+    //
+    // A caller WITH a roster row. The whoami walk (7c) finishes, then the row is removed
+    // through the library's editing core under the GUI's write lock, and only then are the
+    // addresses posted. The order is the whole slice, and no assertion on a response can see
+    // it: the row has to be looked for in the file, from inside the request that is supposed
+    // to follow the write, which is what [`FakeIntake::watch`] does.
+    //
+    // The partial outcomes (a `POST` refused after the row is gone) are slice 7e, so the fake
+    // answers every `POST` on this path with `202 accepted`.
+    // ===========================================================================================
+
+    /// `AccountDeleteWriteFailed` (§13.30 §5), verbatim in both languages. A const and not a
+    /// `K` key: the key does not exist yet, and the red this slice wants is the missing
+    /// behaviour, not a missing symbol.
+    const DELETE_WRITE_FAILED_EN: &str = "bb-auth could not save the change, so nothing was \
+                                          deleted and you can still sign in. Try again in a \
+                                          minute; if it fails again, tell an administrator.";
+    const DELETE_WRITE_FAILED_IT: &str = "bb-auth non è riuscito a salvare la modifica, quindi \
+                                          non è stato eliminato nulla e puoi ancora accedere. \
+                                          Riprova tra un minuto; se non funziona di nuovo, \
+                                          avvisa un amministratore.";
+
+    /// The full roster fixture with one fact added: the `authenticated` onboarding scope keeps
+    /// bob **out**. An `excluded` entry is the one reference `remove_user` must not simply
+    /// drop (dropping a veto lifts it), and the fixture the other tests share has none.
+    fn account_access_roster() -> String {
+        ACCOUNT_ACCESS_FULL
+            .replace(
+                r#""access": "authenticated" } ] },"#,
+                r#""access": "authenticated", "excluded": ["__BOB__"] } ] },"#,
+            )
+            .replace("__BOB__", ACCOUNT_BOB)
+            .replace("__CAROL__", ACCOUNT_CAROL)
+            .replace("__LAPTOP_HASH__", &sha256_hex(ACCOUNT_BEARER_LAPTOP))
+            .replace("__CI_HASH__", &sha256_hex(ACCOUNT_BEARER_CI))
+    }
+
+    /// The roster fixture on disk, with the deployment's settings beside it.
+    fn account_scratch_roster(name: &str) -> String {
+        account_scratch_access(name, &account_access_roster())
+    }
+
+    /// The roster fixture in a directory of its own, made **read-only**. The write ends with a
+    /// temp file renamed into the access file's directory, so a directory that refuses creates
+    /// is the write failing on the path the handler takes, not on a mock of it. `r-x` for its
+    /// owner keeps the reads a request starts (`rev`, the file) working, and uid 1000 is not
+    /// root, so the mode means what it says.
+    #[cfg(unix)]
+    fn account_scratch_roster_locked(name: &str) -> (String, std::path::PathBuf) {
+        use std::os::unix::fs::PermissionsExt;
+        let dir = std::env::temp_dir().join(format!("bb-auth-web-account-{name}"));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).expect("the scratch directory");
+        let path = dir.join("access.json").to_string_lossy().into_owned();
+        std::fs::write(&path, account_access_roster()).expect("write the access fixture");
+        std::fs::write(settings_path(&path), ACCOUNT_SETTINGS_FULL)
+            .expect("write the settings fixture");
+        std::fs::set_permissions(&dir, std::fs::Permissions::from_mode(0o500))
+            .expect("the scratch directory is made read-only");
+        (path, dir)
+    }
+
+    /// The directory writable again, so the scratch can be removed.
+    #[cfg(unix)]
+    fn account_scratch_unlocked(dir: &std::path::Path) {
+        use std::os::unix::fs::PermissionsExt;
+        std::fs::set_permissions(dir, std::fs::Permissions::from_mode(0o700))
+            .expect("the scratch directory is made writable again");
+    }
+
+    /// §13.29 W3 step 5, the order the slice exists for: the row is out of the access file
+    /// **before** the first `POST` reaches the worker. A worker that found the row standing
+    /// would find the key too, and the whole point of the step is that it finds neither. The
+    /// page is the roster's done page: `NowGone` first, because that half is bb-auth-web's.
+    ///
+    /// The identity carries both of the row's addresses, space-joined as the gate sends them,
+    /// because the order this test pins is only visible on a walk over more than one: a single
+    /// address makes "every `whoami` before the first `POST`" and "the write before the first
+    /// `POST`" the same one request, and a handler that posted first would pass.
+    #[test]
+    fn a_roster_deletion_removes_the_row_before_the_first_post() {
+        for lang in [Lang::En, Lang::It] {
+            let intake = FakeIntake::answering(vec![
+                (WHOAMI_PATH, whoami_ok()),
+                (DELETE_PATH, delete_accepted()),
+            ]);
+            let path = account_scratch_roster(&format!("delete-7d-order-{}", lang.code()));
+            intake.watch(&path, ACCOUNT_BOB);
+            let port = account_port_intake_at(&path, &intake.endpoint());
+            let url = format!("http://127.0.0.1:{port}{ACCOUNT_PATH}/delete");
+            let rev = rev_of(&path);
+            let fields = [
+                ("rev", rev.as_str()),
+                ("uuid", ACCOUNT_BOB),
+                ("confirm_email", "bob@x.com"),
+            ];
+
+            let g = account_post_lang(&url, "bob@x.com bob@old.com", &fields, lang);
+            assert_eq!(
+                g.status,
+                200,
+                "{}: every address was asked and posted: {}",
+                lang.code(),
+                account_readable(&g.body)
+            );
+            // The walk: every address asked, then every address posted.
+            assert_eq!(
+                intake.at(),
+                vec![
+                    WHOAMI_PATH.to_string(),
+                    WHOAMI_PATH.to_string(),
+                    DELETE_PATH.to_string(),
+                    DELETE_PATH.to_string()
+                ],
+                "{}: both addresses are asked before either is posted: {:?}",
+                lang.code(),
+                intake.at()
+            );
+            // The order the slice exists for, where only the file can see it: bob's uuid is in
+            // the file when each `whoami` lands and out of it when each `POST` does. A worker
+            // that landed on the row would find the key too, so a `POST` that arrives while the
+            // row stands is the failure this witness is built for.
+            let rows = intake.rows_since(0);
+            assert_eq!(
+                rows,
+                vec![Some(true), Some(true), Some(false), Some(false)],
+                "{}: the row is gone before the first POST arrives: {rows:?}",
+                lang.code()
+            );
+            // And the file as it stands says the same.
+            let doc = bb_auth_core::read_access_file(&path)
+                .expect("the file the write left parses with the gate's own parser");
+            let uuids: Vec<&String> = doc.users.iter().map(|u| &u.uuid).collect();
+            assert!(
+                !uuids.contains(&&ACCOUNT_BOB.to_string()),
+                "{}: bob's row is out of the file: {uuids:?}",
+                lang.code()
+            );
+            assert!(
+                uuids.contains(&&ACCOUNT_CAROL.to_string()),
+                "{}: the row nobody asked about stands: {uuids:?}",
+                lang.code()
+            );
+            // The page: queued, not deleted, and its lede says what bb-auth-web took away
+            // first, because that half is true the moment the write lands.
+            assert_eq!(
+                account_heading(&g.body, "h1"),
+                m(lang, DELETE_QUEUED_TITLE_EN, DELETE_QUEUED_TITLE_IT),
+                "{}: being deleted, not deleted: {}",
+                lang.code(),
+                account_readable(&g.body)
+            );
+            assert_eq!(
+                the_page_lede(&g.body),
+                format!(
+                    "{} {} {}",
+                    m(lang, DELETE_NOW_GONE_EN, DELETE_NOW_GONE_IT),
+                    m(lang, DELETE_QUEUED_EN, DELETE_QUEUED_IT),
+                    m(lang, DELETE_SIGN_OUT_EN, DELETE_SIGN_OUT_IT)
+                ),
+                "{}: what went, then the queue, then why to sign out, in that order: {}",
+                lang.code(),
+                account_readable(&g.body)
+            );
+            let pills = the_action_pills(&g.body);
+            assert_eq!(
+                pills.len(),
+                1,
+                "{}: one action, the sign-out: {}",
+                lang.code(),
+                account_readable(&g.body)
+            );
+            assert_eq!(
+                visible_text(&pills[0]),
+                t(lang, K::SignOut),
+                "{}: {}",
+                lang.code(),
+                pills[0]
+            );
+            assert_eq!(
+                attr(open_tag(&pills[0]), "href").as_deref(),
+                Some("/auth/logout"),
+                "{}: the sign-out link is the config's, with the console's `rd` dropped: {}",
+                lang.code(),
+                pills[0]
+            );
+            let _ = std::fs::remove_file(&path);
+        }
+    }
+
+    /// §13.29 W3 step 5: the row goes **with everything attached to it**. The key is the one
+    /// that must not survive (a bearer that still works after the person asked to be deleted is
+    /// the failure); the scope and group references are what the library's sweep exists for;
+    /// and the exclusion is the one reference that is rewritten rather than dropped.
+    #[test]
+    fn keys_scope_and_group_references_go_and_exclusions_become_the_email() {
+        let intake = FakeIntake::answering(vec![
+            (WHOAMI_PATH, whoami_ok()),
+            (DELETE_PATH, delete_accepted()),
+        ]);
+        let path = account_scratch_roster("delete-7d-sweep");
+        let port = account_port_intake_at(&path, &intake.endpoint());
+        let url = format!("http://127.0.0.1:{port}{ACCOUNT_PATH}/delete");
+        let rev = rev_of(&path);
+        let g = account_post(
+            &url,
+            Some("bob@x.com bob@old.com"),
+            &[
+                ("rev", rev.as_str()),
+                ("uuid", ACCOUNT_BOB),
+                ("confirm_email", "bob@x.com"),
+            ],
+        );
+        assert_eq!(
+            g.status,
+            200,
+            "the roster walk completes: {}",
+            account_readable(&g.body)
+        );
+
+        // The file the write left, read by the gate's own parser: a file the gate would refuse
+        // is a boot loop on the next reload, and no page is worth one.
+        let doc = bb_auth_core::read_access_file(&path)
+            .expect("the file the write left parses with the gate's own parser");
+        let uuids: Vec<&String> = doc.users.iter().map(|u| &u.uuid).collect();
+        assert!(
+            !uuids.contains(&&ACCOUNT_BOB.to_string()),
+            "bob's row is gone: {uuids:?}"
+        );
+        // The key went with the row: the file keeps no hash of a credential nobody can revoke
+        // any more, and no id that names one.
+        let text = read(&path);
+        assert!(
+            !text.contains("laptop"),
+            "bob's key went with the row: {text}"
+        );
+        assert!(
+            !text.contains(&sha256_hex(ACCOUNT_BEARER_LAPTOP)),
+            "the hash of a bearer that would still be accepted is gone: {text}"
+        );
+        // The scopes that named the row by uuid, and the veto that named it.
+        for app in &doc.applications {
+            for scope in &app.scopes {
+                let at = format!("{}/{}", app.name, scope.name);
+                if let Some(users) = &scope.users {
+                    assert!(
+                        !users.iter().any(|u| u == ACCOUNT_BOB),
+                        "{at}: a scope no longer names a row that does not exist: {users:?}"
+                    );
+                }
+                if app.name == "mpa" && scope.name == "onboarding" {
+                    // The veto, rewritten: the row's primary email is the only spelling left
+                    // for an identity the roster no longer knows, and `authenticated` admits
+                    // that identity the moment it re-registers.
+                    assert_eq!(
+                        scope.excluded,
+                        Some(vec!["bob@x.com".to_string()]),
+                        "{at}: the excluded entry became the row's primary email, it did not \
+                         go away"
+                    );
+                }
+            }
+        }
+        // The group that named it.
+        let admins = doc.user_groups.get("admins").cloned().unwrap_or_default();
+        assert!(
+            !admins.iter().any(|u| u == ACCOUNT_BOB),
+            "the group no longer names bob: {admins:?}"
+        );
+        // The write is an edit, not a rewrite: the row nobody asked about stands, with its own
+        // addresses untouched.
+        let carol = doc
+            .users
+            .iter()
+            .find(|u| u.uuid == ACCOUNT_CAROL)
+            .expect("carol's row stands");
+        assert_eq!(
+            carol.emails,
+            vec!["carol@x.com".to_string()],
+            "carol is exactly as she was"
+        );
+        let _ = std::fs::remove_file(&path);
+    }
+
+    /// §13.30 §4 on the roster path: the `rev` and the uuid are re-checked under the write
+    /// lock, and a page that is not the current one writes nothing **and posts nothing**. A
+    /// queued deletion for an account the person was never shown is the one outcome this page
+    /// cannot take back, and the console's conflict sentence is not this page's words.
+    #[test]
+    fn a_stale_rev_is_a_409_and_posts_nothing() {
+        let intake = FakeIntake::answering(vec![
+            (WHOAMI_PATH, whoami_ok()),
+            (DELETE_PATH, delete_accepted()),
+        ]);
+        let path = account_scratch_roster("delete-7d-stale");
+        let port = account_port_intake_at(&path, &intake.endpoint());
+        let url = format!("http://127.0.0.1:{port}{ACCOUNT_PATH}/delete");
+        let before = read(&path);
+        // Bytes the page never saw: the file moved after the form was rendered.
+        let stale = "0000000000000000000000000000000000000000000000000000000000000000";
+        let fields = [
+            ("rev", stale),
+            ("uuid", ACCOUNT_BOB),
+            ("confirm_email", "bob@x.com"),
+        ];
+
+        for lang in [Lang::En, Lang::It] {
+            let g = account_post_lang(&url, "bob@x.com", &fields, lang);
+            assert_eq!(
+                g.status,
+                409,
+                "{}: a form submitted onto bytes it never saw is a conflict: {}",
+                lang.code(),
+                account_readable(&g.body)
+            );
+            assert_eq!(
+                account_heading(&g.body, "h1"),
+                m(lang, DELETE_CHANGED_TITLE_EN, DELETE_CHANGED_TITLE_IT),
+                "{}: the heading says the account changed: {}",
+                lang.code(),
+                account_readable(&g.body)
+            );
+            assert_eq!(
+                the_page_lede(&g.body),
+                m(lang, DELETE_CHANGED_EN, DELETE_CHANGED_IT),
+                "{}: the lede says nothing was deleted: {}",
+                lang.code(),
+                account_readable(&g.body)
+            );
+            assert!(
+                !the_page_words(&g.body).contains(t(lang, K::ConflictBody)),
+                "{}: the console's conflict sentence is not this page's: {}",
+                lang.code(),
+                the_page_words(&g.body)
+            );
+            let pills = the_action_pills(&g.body);
+            assert!(
+                pills.iter().any(
+                    |p| visible_text(p) == m(lang, DELETE_START_EN, DELETE_START_IT)
+                        && attr(open_tag(p), "href").as_deref()
+                            == Some(&format!("{ACCOUNT_PATH}/delete")[..])
+                ),
+                "{}: Start again re-renders the confirmation against the current file: \
+                 {pills:?}",
+                lang.code()
+            );
+            // Nothing was sent, at all: not a `whoami`, not a `POST`.
+            assert!(
+                intake.calls().is_empty(),
+                "{}: a conflict sends the intake nothing: {:?}",
+                lang.code(),
+                intake.calls()
+            );
+            // And nothing was written.
+            assert_eq!(
+                read(&path),
+                before,
+                "{}: the conflict wrote nothing: the access file is byte for byte what it was",
+                lang.code()
+            );
+        }
+        let _ = std::fs::remove_file(&path);
+    }
+
+    /// §13.29 W5 on the roster path: the protected check is **ahead of the write**, so a
+    /// caller on the intake's list leaves the row, the key, every reference and every queue
+    /// standing. This is the guard that the write step does not run for a caller the walk
+    /// refused.
+    #[test]
+    fn a_protected_roster_user_keeps_the_row() {
+        let intake = FakeIntake::answering(vec![
+            (WHOAMI_PATH, whoami_protected()),
+            (DELETE_PATH, delete_accepted()),
+        ]);
+        let path = account_scratch_roster("delete-7d-protected");
+        let port = account_port_intake_at(&path, &intake.endpoint());
+        let url = format!("http://127.0.0.1:{port}{ACCOUNT_PATH}/delete");
+        let before = read(&path);
+        let rev = rev_of(&path);
+        let fields = [
+            ("rev", rev.as_str()),
+            ("uuid", ACCOUNT_BOB),
+            ("confirm_email", "bob@x.com"),
+        ];
+
+        for lang in [Lang::En, Lang::It] {
+            let seen = intake.calls().len();
+            let g = account_post_lang(&url, "bob@x.com", &fields, lang);
+            assert_eq!(
+                g.status,
+                403,
+                "{}: a protected address is refused: {}",
+                lang.code(),
+                account_readable(&g.body)
+            );
+            assert_eq!(
+                account_heading(&g.body, "h1"),
+                m(lang, DELETE_NOT_DONE_EN, DELETE_NOT_DONE_IT),
+                "{}: the heading states the result, in the reader's words: {}",
+                lang.code(),
+                account_readable(&g.body)
+            );
+            assert_eq!(
+                the_page_lede(&g.body),
+                m(lang, DELETE_PROTECTED_EN, DELETE_PROTECTED_IT),
+                "{}: the lede: {}",
+                lang.code(),
+                account_readable(&g.body)
+            );
+            let asked = intake.at_since(seen);
+            assert_eq!(
+                asked,
+                vec![WHOAMI_PATH.to_string()],
+                "{}: asked, refused, posted nothing: {asked:?}",
+                lang.code()
+            );
+            assert_eq!(
+                read(&path),
+                before,
+                "{}: a protected account leaves the file byte for byte as it was",
+                lang.code()
+            );
+        }
+        let _ = std::fs::remove_file(&path);
+    }
+
+    /// §13.30 §4: the write is the step that can fail on its own, and a failure is the
+    /// server's, said as one: `500`, the row standing, and **no `POST /account/delete`**. A
+    /// queued address whose row was never removed is a deletion the worker carries out against
+    /// a file that still says the person is here. The `whoami` of W3 step 4 is asked **before**
+    /// the write of step 5, so it is expected here: what step 5 forbids is step 6.
+    #[cfg(unix)]
+    #[test]
+    fn a_failed_write_posts_nothing() {
+        let (path, dir) = account_scratch_roster_locked("delete-7d-write-fail");
+        let intake = FakeIntake::answering(vec![
+            (WHOAMI_PATH, whoami_ok()),
+            (DELETE_PATH, delete_accepted()),
+        ]);
+        let port = account_port_intake_at(&path, &intake.endpoint());
+        let url = format!("http://127.0.0.1:{port}{ACCOUNT_PATH}/delete");
+        let before = read(&path);
+        let rev = rev_of(&path);
+        let fields = [
+            ("rev", rev.as_str()),
+            ("uuid", ACCOUNT_BOB),
+            ("confirm_email", "bob@x.com"),
+        ];
+
+        for lang in [Lang::En, Lang::It] {
+            let seen = intake.calls().len();
+            let g = account_post_lang(&url, "bob@x.com", &fields, lang);
+            assert_eq!(
+                g.status,
+                500,
+                "{}: a write that cannot land is the server's fault, not the caller's: {}",
+                lang.code(),
+                account_readable(&g.body)
+            );
+            assert_eq!(
+                account_heading(&g.body, "h1"),
+                m(lang, DELETE_NOT_DONE_EN, DELETE_NOT_DONE_IT),
+                "{}: the heading states the result: {}",
+                lang.code(),
+                account_readable(&g.body)
+            );
+            assert_eq!(
+                the_page_lede(&g.body),
+                m(lang, DELETE_WRITE_FAILED_EN, DELETE_WRITE_FAILED_IT),
+                "{}: the lede says the file could not be written, and that signing in still \
+                 works: {}",
+                lang.code(),
+                account_readable(&g.body)
+            );
+            let pills = the_action_pills(&g.body);
+            let texts: Vec<String> = pills.iter().map(|p| visible_text(p)).collect();
+            assert_eq!(
+                texts,
+                vec![
+                    m(lang, DELETE_START_EN, DELETE_START_IT).to_string(),
+                    back_words(lang)
+                ],
+                "{}: start again, then back: {pills:?}",
+                lang.code()
+            );
+            // W3 step 4 (`whoami`) runs ahead of step 5 (the write), so a `whoami` is the walk
+            // doing its job. What a failed write must not do is step 6: queue a record for a row
+            // that is still standing.
+            let asked = intake.at_since(seen);
+            assert!(
+                !asked.iter().any(|c| c == DELETE_PATH),
+                "{}: a failed write posts no deletion record: {asked:?}",
+                lang.code()
+            );
+            assert_eq!(
+                read(&path),
+                before,
+                "{}: a failed write leaves the file byte for byte as it was",
+                lang.code()
+            );
+        }
+        account_scratch_unlocked(&dir);
+        let _ = std::fs::remove_dir_all(&dir);
     }
 }
