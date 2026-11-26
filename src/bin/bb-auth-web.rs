@@ -4615,6 +4615,62 @@ fn account_menu(
     }
 }
 
+/// The document skeleton both HTML surfaces of this program wear: the doctype, `<html>` stamped
+/// with the language and with the theme when one is chosen, the head, and `body` as the whole
+/// contents of the `<body>` element.
+///
+/// One function for both surfaces, because the head is the part the estate's safety argument
+/// rests on: a page's `Content-Security-Policy` carries the hash of the three inlined
+/// stylesheets **as one string** (see [`admin_csp`] and [`account_csp`]), so a head that emitted
+/// them in another order, or with whitespace between them, is a page whose own policy refuses
+/// its own look. Two heads written by hand is two chances for that to drift, and the drift is
+/// invisible from inside either one.
+///
+/// The three stylesheets are the deliberately raw emissions on any page, and all three are
+/// compile-time constants: never request data and never anything read out of the access file.
+/// Their order is the contract: the palette, the components built out of it (the same bytes the
+/// gate's pages get), the layout that arranges them, then whatever the operator wants to say
+/// over the top.
+///
+/// `theme_attr` is the resolved theme's spelling, and the caller resolves the fallback order
+/// (this browser's choice, then the deployment's default, then nothing). It is optional in the
+/// type as well as in the markup: `None` omits `data-theme` outright rather than emitting
+/// `data-theme=""`, because an empty attribute is one the palette's `[data-theme=…]` selectors
+/// do not match, and leaving it off is what lets the `prefers-color-scheme` rule in `THEME_CSS`
+/// be the one deciding.
+///
+/// `title` is the **whole** `<title>` text, escaped, and this function adds no prefix of its
+/// own: that is what lets the console say `bb-auth-web · …` and the self-service page say
+/// `{brand} · …` from the one skeleton.
+///
+/// `stylesheet` is the operator's own stylesheet, linked **after** the `<style>` so an override
+/// wins by source order and needs no `!important`; `None` links nothing at all, because the
+/// built-in look is complete and a deployment that configured nothing fetches nothing (a host
+/// that is down then costs a page its palette and nothing else). The link is raw because the
+/// library builds a whole `<link>` element out of a URL that has already passed
+/// `compile_asset_url`, and maud has no way to say "an element" except in maud.
+fn page_document(
+    lang: Lang,
+    theme_attr: Option<&str>,
+    title: &str,
+    stylesheet: Option<&str>,
+    body: Markup,
+) -> Markup {
+    html! {
+        (DOCTYPE)
+        html lang=(lang.code()) data-theme=[theme_attr] {
+            head {
+                meta charset="utf-8";
+                meta name="viewport" content="width=device-width,initial-scale=1";
+                title { (title) }
+                style { (PreEscaped(THEME_CSS)) (PreEscaped(BASE_CSS)) (PreEscaped(CSS)) }
+                (PreEscaped(stylesheet_link(stylesheet)))
+            }
+            body { (body) }
+        }
+    }
+}
+
 /// The chrome around every page: the tabs, the account menu, the footer.
 ///
 /// [`shell_as`] with no given name, no identity header and no logo to show, which is the
@@ -4757,56 +4813,36 @@ fn shell_named(
             ))
         }
     };
-    html! {
-        (DOCTYPE)
-        // The theme, resolved here and in one expression, because the fallback order is the
-        // rule: this browser's choice, then the deployment's default, then nothing at all.
-        // `data-theme=[…]` is maud's optional-attribute form, so the `None` two `System`s
-        // produce omits the attribute outright rather than emitting `data-theme=""` — which
-        // is what leaves the `prefers-color-scheme` rule in `THEME_CSS` as the one deciding.
-        html lang=(v.lang.code()) data-theme=[v.theme.attr().or(v.look.theme.attr())] {
-            head {
-                meta charset="utf-8";
-                meta name="viewport" content="width=device-width,initial-scale=1";
-                title { "bb-auth-web · " (title) }
-                // The three deliberately raw emissions on any page, and all three are
-                // compile-time constants: never request data and never anything read out of
-                // the access file. The order is the contract — the palette, the components
-                // that read it (the same bytes the gate's pages get), the layout that
-                // arranges them, then (below) whatever the operator wants to say over the top.
-                style { (PreEscaped(THEME_CSS)) (PreEscaped(BASE_CSS)) (PreEscaped(CSS)) }
-                // The operator's own stylesheet, or nothing. Raw because the string is a
-                // whole `<link>` element built by the library, from a URL that has already
-                // passed `compile_asset_url` and is escaped again on the way out; there is
-                // no way to say "an element" in maud without saying it in maud.
-                (PreEscaped(stylesheet_link(v.look.stylesheet)))
-            }
-            body {
-                (top_bar(brand, tab_nav, acct))
-                main {
-                    // The one thing a redirect is allowed to say, from a closed set.
-                    @if let Some(msg) = v.msg {
-                        div class="flash" { (msg.text(v.lang)) }
-                    }
-                    (content)
+    page_document(
+        v.lang,
+        v.theme.attr().or(v.look.theme.attr()),
+        &format!("bb-auth-web · {title}"),
+        v.look.stylesheet,
+        html! {
+            (top_bar(brand, tab_nav, acct))
+            main {
+                // The one thing a redirect is allowed to say, from a closed set.
+                @if let Some(msg) = v.msg {
+                    div class="flash" { (msg.text(v.lang)) }
                 }
-                footer {
-                    // No reload hint: `bb-auth-reload.path` watches the file and reloads the
-                    // gate on every save, so telling an administrator to run
-                    // `systemctl reload bb-auth` would describe work nobody has to do.
-                    //
-                    // And no "signed in as": the bar above says it, where the session controls
-                    // are, and a fact kept in two places is a fact that starts disagreeing
-                    // with itself one edit at a time.
-                    // What these bytes were built from, which the version in the bar cannot
-                    // say: a `.deb` reads 1.99.1-1 for a clean release and for a working tree
-                    // somebody built by hand, and this is the one place a person can see
-                    // which of the two is answering.
-                    span class="muted" { code { (version_line("bb-auth-web")) } }
-                }
+                (content)
             }
-        }
-    }
+            footer {
+                // No reload hint: `bb-auth-reload.path` watches the file and reloads the
+                // gate on every save, so telling an administrator to run
+                // `systemctl reload bb-auth` would describe work nobody has to do.
+                //
+                // And no "signed in as": the bar above says it, where the session controls
+                // are, and a fact kept in two places is a fact that starts disagreeing
+                // with itself one edit at a time.
+                // What these bytes were built from, which the version in the bar cannot
+                // say: a `.deb` reads 1.99.1-1 for a clean release and for a working tree
+                // somebody built by hand, and this is the one place a person can see
+                // which of the two is answering.
+                span class="muted" { code { (version_line("bb-auth-web")) } }
+            }
+        },
+    )
 }
 
 /// What an unordered list looks like when it has nothing to show, which is **three** states
@@ -9252,36 +9288,19 @@ fn account_shell(prefs: &AccountPrefs, title: &str, content: Markup, look: Accou
             ))
         }
     };
-    html! {
-        (DOCTYPE)
-        // The theme, resolved here and in one expression, because the fallback order is the
-        // rule: this browser's choice, then the deployment's default, then nothing at all.
-        // `data-theme=[…]` is maud's optional-attribute form, so the `None` two `System`s
-        // produce omits the attribute outright rather than emitting `data-theme=""`, which is
-        // what leaves the `prefers-color-scheme` rule in `THEME_CSS` as the one deciding.
-        html lang=(prefs.lang.code()) data-theme=[prefs.theme.attr().or(look.theme.attr())] {
-            head {
-                meta charset="utf-8";
-                meta name="viewport" content="width=device-width,initial-scale=1";
-                title { (brand_name) " · " (title) }
-                // The three deliberately raw emissions on the page, and all three are
-                // compile-time constants: never request data and never anything read out of the
-                // access file. The order is the console's order, because the policy's hash
-                // covers all three together.
-                style { (PreEscaped(THEME_CSS)) (PreEscaped(BASE_CSS)) (PreEscaped(CSS)) }
-                // Raw because the library builds a whole `<link>` element from a URL that has
-                // already passed `compile_asset_url`, and maud has no way to say "an element".
-                (PreEscaped(stylesheet_link(look.stylesheet)))
+    page_document(
+        prefs.lang,
+        prefs.theme.attr().or(look.theme.attr()),
+        &format!("{brand_name} · {title}"),
+        look.stylesheet,
+        html! {
+            (top_bar(brand, html! { nav {} }, acct))
+            main class="selfserve" {
+                h1 { (title) }
+                (content)
             }
-            body {
-                (top_bar(brand, html! { nav {} }, acct))
-                main class="selfserve" {
-                    h1 { (title) }
-                    (content)
-                }
-            }
-        }
-    }
+        },
+    )
 }
 
 /// One HTML page under the prefix, with the estate's shared headers and this page's own policy.
@@ -29406,6 +29425,172 @@ mod tests {
                 account_readable(&g.body)
             );
         }
+        let _ = std::fs::remove_file(&path);
+    }
+
+    // -------------------------------------------------------------------
+    // §13.26 §6 D: one document skeleton
+    //
+    // `shell_named` and `account_shell` each wrote the same document head, and the head is
+    // the part the estate's safety argument rests on: the CSP's style hash covers the three
+    // inlined stylesheets as one string, so a head that emits them in another order, or with
+    // whitespace between them, is a page whose own policy refuses its own look. One function
+    // for both surfaces is what stops that drifting one edit at a time, and these tests pin
+    // the shape of that one function, then pin that both surfaces still wear it.
+    // -------------------------------------------------------------------
+
+    /// The `<head>` element of a document, both tags included, byte for byte.
+    fn head_of(doc: &str) -> String {
+        let start = doc.find("<head>").unwrap_or_else(|| {
+            panic!("the document has no <head>: {}", account_readable(doc));
+        });
+        let rest = &doc[start..];
+        let end = rest
+            .find("</head>")
+            .unwrap_or_else(|| panic!("the document has no </head>: {}", account_readable(doc)))
+            + "</head>".len();
+        rest[..end].to_string()
+    }
+
+    /// The text between `<title>` and `</title>`, spelled as the document spells it (escaped).
+    /// The parity test reads the title **out of** the page it is checking, because the prefix
+    /// is the caller's (`bb-auth-web · …` on the console, `{brand} · …` on the page) and a test
+    /// that hardcoded the wording would be a translation test in disguise.
+    fn title_of(doc: &str) -> String {
+        let rest = &doc[doc.find("<title>").unwrap_or_else(|| {
+            panic!("the document has no <title>: {}", account_readable(doc));
+        })..];
+        let inner = &rest["<title>".len()..];
+        inner[..inner
+            .find("</title>")
+            .expect("the document has no </title>")]
+            .to_string()
+    }
+
+    #[test]
+    fn page_document_opens_with_the_doctype() {
+        // The first bytes of the document, in order, with nothing before them: a stray
+        // whitespace text node ahead of `<!DOCTYPE html>` puts a browser in quirks mode, and
+        // the layout the three stylesheets describe is written for the standard one.
+        let doc = page_document(Lang::En, None, "t", None, html! {}).into_string();
+        assert!(doc.starts_with("<!DOCTYPE html>"), "{doc}");
+    }
+
+    #[test]
+    fn page_document_stamps_the_theme_and_omits_the_attribute_for_none() {
+        // `None` is the `System` arm, and it must leave the attribute **absent** rather than
+        // empty: `data-theme=""` is an attribute the palette's `[data-theme=…]` selectors do
+        // not match, and the `prefers-color-scheme` rule in `THEME_CSS` is what decides then.
+        // The tag is read, not the page, because `THEME_CSS` spells `data-theme` in its own
+        // selectors and a whole-document search matches the stylesheet.
+        let dark = page_document(Lang::It, Some("dark"), "t", None, html! {}).into_string();
+        assert_eq!(
+            account_html_tag(&dark),
+            r#"<html lang="it" data-theme="dark">"#,
+            "{dark}"
+        );
+        let none = page_document(Lang::En, None, "t", None, html! {}).into_string();
+        assert_eq!(account_html_tag(&none), r#"<html lang="en">"#, "{none}");
+        assert!(
+            !account_html_tag(&none).contains("data-theme"),
+            "no theme chosen means no attribute at all: {}",
+            account_html_tag(&none)
+        );
+    }
+
+    #[test]
+    fn page_document_titles_with_the_text_as_given_and_escaped() {
+        // The title is the **whole** `<title>` text: the function adds no prefix of its own,
+        // which is what lets the console say `bb-auth-web · …` and the self-service page say
+        // `{brand} · …` from the one skeleton. And it is escaped, because a brand name comes
+        // out of the settings file and a page title is HTML.
+        let doc = page_document(Lang::En, None, "A & B <x>", None, html! {}).into_string();
+        assert!(doc.contains("<title>A &amp; B &lt;x&gt;</title>"), "{doc}");
+        assert_eq!(title_of(&doc), "A &amp; B &lt;x&gt;");
+    }
+
+    #[test]
+    fn page_document_inlines_the_three_stylesheets_then_the_operators_link() {
+        // The order is the contract, and it is byte-exact rather than "contains all three":
+        // the response's CSP carries `csp_hash(&format!("{THEME_CSS}{BASE_CSS}{CSS}"))`, so
+        // anything between the three constants, or one of them moved, is a page whose policy
+        // refuses its own stylesheet. The operator's link goes **after** the `<style>`, so an
+        // override wins by source order and needs no `!important`.
+        let url = "https://assets.badbat75.com/css/theme.css";
+        let doc = page_document(Lang::En, None, "t", Some(url), html! {}).into_string();
+        let styles = elements(&doc, "<style>", "</style>");
+        assert_eq!(styles.len(), 1, "one inline style element: {doc}");
+        let style = &styles[0];
+        let inner = &style["<style>".len()..style.len() - "</style>".len()];
+        assert_eq!(inner, format!("{THEME_CSS}{BASE_CSS}{CSS}"));
+
+        let head = head_of(&doc);
+        let link = format!("<link rel=\"stylesheet\" href=\"{url}\">");
+        assert!(
+            head.contains(&link),
+            "the operator's stylesheet is linked in the head: {}",
+            account_readable(&head)
+        );
+        assert_eq!(head.matches("<link").count(), 1, "{head}");
+        assert!(
+            head.find("</style>").expect("the style element")
+                < head.find(&link).expect("the stylesheet link"),
+            "the override lands after the built-in look: {}",
+            account_readable(&head)
+        );
+    }
+
+    #[test]
+    fn page_document_links_nothing_when_no_stylesheet_is_given() {
+        // The property the whole arrangement rests on: the built-in look is complete, so a
+        // deployment that configured nothing fetches nothing, and a host that is down costs a
+        // page its palette and nothing else.
+        let doc = page_document(Lang::En, None, "t", None, html! {}).into_string();
+        assert!(!doc.contains("<link"), "{doc}");
+    }
+
+    #[test]
+    fn page_document_puts_the_body_markup_inside_the_body_element() {
+        // `body` is the whole contents of the element, so the caller keeps its own arrangement
+        // (the console's `main` plus footer, the page's bar plus `main.selfserve`) and the
+        // skeleton owns only the document around it.
+        let body = html! { main { h1 { "Hello" } } };
+        let doc = page_document(Lang::En, None, "t", None, body).into_string();
+        let rest = &doc[doc.find("<body>").expect("the document has no <body>")..];
+        let inner = &rest["<body>".len()..];
+        let inner = &inner[..inner.find("</body>").expect("the document has no </body>")];
+        assert!(
+            inner.contains("<main><h1>Hello</h1></main>"),
+            "{}",
+            account_readable(&doc)
+        );
+    }
+
+    #[test]
+    fn the_console_and_the_account_page_wear_the_same_document_head() {
+        // The point of the slice: two surfaces, one head. Both fixtures configure no `ui`
+        // section, so both take the built-in look (no theme attribute, no operator stylesheet),
+        // which is the shape `page_document` is called with here. The head is compared byte for
+        // byte, title text read out of each page, so a skeleton that changed the meta tags, the
+        // order of the three stylesheets or the link's position is red on both surfaces.
+        let console = render("skeleton-console", Route::Dashboard);
+        let want = page_document(Lang::En, None, &title_of(&console), None, html! {}).into_string();
+        assert_eq!(
+            head_of(&console),
+            head_of(&want),
+            "the console's head is not the skeleton's"
+        );
+
+        let path = account_scratch("skeleton-account", ACCOUNT_SETTINGS);
+        let url = account_serve(&path);
+        let g = account_call(&url, Some("bob@x.com"));
+        assert_eq!(g.status, 200, "{}", account_readable(&g.body));
+        let want = page_document(Lang::En, None, &title_of(&g.body), None, html! {}).into_string();
+        assert_eq!(
+            head_of(&g.body),
+            head_of(&want),
+            "the self-service page's head is not the skeleton's"
+        );
         let _ = std::fs::remove_file(&path);
     }
 }

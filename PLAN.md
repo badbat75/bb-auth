@@ -238,7 +238,7 @@ out, the usual pattern, replacing the preferences form at the foot of the page; 
 it to §13.17.
 
 Slices 8a to 8f are done (8f, §13.21: row rules, one control size, ticks in the accent). Then the
-shared front end (W13), designed in §13.26 §6 as small slices after 5g (**P**, the pill links, is done): **D** one `page_document` skeleton; **T** `text_field` with
+shared front end (W13), designed in §13.26 §6 as small slices after 5g (**P**, the pill links, and **D**, one `page_document`, are done): **T** `text_field` with
 `FieldOpts`, absorbing `account_key_id_field` and the profile inputs; **F** the account page's flat
 ground goes, so it wears the console's ground and cards (the user, 2026-11-25). **H** is done (§13.28, with **L**, the console's logo, folded in and **M** absorbed): one account menu
 in the shared header, asked by the user on 2026-11-25. The bar holds one row at every width: logo, brand,
