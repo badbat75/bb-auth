@@ -111,6 +111,26 @@ first, each step with the user's go-ahead. §13.30 was reworded for the worker o
   once, and after the worker's run they can no longer sign in. If `gate.allow_unverified_social` is
   on, it is turned off first (the user, 2026-11-26).
 
+### 14. Deleting the account signs the person out
+
+Covers: R4. Asked by the user on 2026-11-26, after deleting the test account for real on rpi-01:
+confirming the deletion should sign the person out at once, instead of a done page that asks
+them to ("This browser stays signed in until you sign out, so sign out now").
+
+A finding from the same run goes with it. Sessions are stateless (AGENTS.md), so a cookie minted
+before the deletion stays valid until `gate.session_ttl_secs` (30 days on rpi-01). Any
+`authenticated` scope (`mpa`, `auth/self-service` there) keeps admitting that identity, in every
+browser it signed in from, after its Cognito user is gone. A sign-out on the done page clears only
+the browser that pressed it. The architect weighs the options without breaking "Sessions are
+stateless" silently: the done page answered with the gate's logout, a revocation the gate can
+check, a shorter TTL, or accepting the gap and saying so on the page. The designer then words the
+done page for what is chosen.
+
+- Done when: a test shows that the deletion's success answer leaves that browser signed out
+  (the session cookie cleared, or the browser sent through `/auth/logout`) and still says what
+  was queued; the stale-cookie gap is either closed by a tested mechanism or accepted by the
+  user and stated in AGENTS.md; and it has been tried on rpi-01 with the user's go-ahead.
+
 ### 13. Loose ends of step 8
 
 Covers: R3. Left over when the user approved step 8's screenshots on 2026-11-26: the module rustdoc of
