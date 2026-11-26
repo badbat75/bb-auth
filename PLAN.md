@@ -122,3 +122,14 @@ against W13. In this step it becomes the same object, at the same size, on both 
   languages, with scripting on and off; a test shows the account menu has the same markup and
   the same width on both surfaces at the same viewport; the designer has approved the screenshots; and AGENTS.md
   says the new rule.
+
+### 16. Release `v1.99.9`, the release candidate of 2.0.0
+
+Covers: W11. Asked by the user on 2026-11-26: after step 15, tag 1.99.9 as the release candidate
+of the major, as `v1.99.8` was tagged a pre-release on 2026-11-25.
+
+- Done when: the tester has run the whole board on `main` (`cargo test`, `node e2e/run.js`,
+  `cargo doc --no-deps`, the cfg(unix) tests) and it is green; `CHANGELOG.md` has a `1.99.9`
+  section saying it is the release candidate of 2.0.0; `bash scripts/package.sh` built the
+  packages from a clean tree; rpi-01 runs that build; and, each with the user's go-ahead, `v1.99.9`
+  is tagged and published on GitHub as a pre-release.
