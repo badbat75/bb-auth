@@ -722,11 +722,6 @@ async function main() {
         javaScriptEnabled: view.javaScriptEnabled !== false,
       });
       const page = await context.newPage();
-      // Language and theme are cookies the server sets on a `?lang=` / `?theme=`
-      // redirect, so one visit each arms every scene below: the same door a human uses,
-      // not a fabricated cookie.
-      if (view.lang) await page.goto(`${ctx.base}/?lang=${view.lang}`);
-      if (view.theme) await page.goto(`${ctx.base}/?theme=${view.theme}`);
       for (const [name, steps] of scenes) {
         // Every scene starts from the fixture, both files: the settings scenes write to
         // the second one exactly as the others write to the first. The audit starts absent,
@@ -739,6 +734,17 @@ async function main() {
         // answer: the scripted answers are per scene, and a `503` that outlived its scene
         // would paint the next page with the last scene's outcome.
         ctx.intake.reset();
+        // The cookie jar is part of the state a scene can change, so it is reset with the
+        // files. A scene that photographs the Italian copy (`nav-menu-it`) goes through
+        // `?lang=it`, which the server answers by **setting a cookie**, and a cookie outlives
+        // the page that set it: left alone, the scene hands Italian to every scene after it in
+        // the same view, and the `light` view reads "Cruscotto" where the designer came to read
+        // English. Language and theme are re-armed the way the view arms them, through the same
+        // `?lang=` / `?theme=` visit a human uses, so the `it` view and the two explicit-theme
+        // views keep the choice they exist to photograph.
+        await context.clearCookies();
+        if (view.lang) await page.goto(`${ctx.base}/?lang=${view.lang}`);
+        if (view.theme) await page.goto(`${ctx.base}/?theme=${view.theme}`);
         // One scene that cannot reach its state (a selector the markup no longer has,
         // typically) must not cost the other hundred their screenshot: this is evidence
         // for a human, not an assertion, so it degrades instead of aborting. The exit

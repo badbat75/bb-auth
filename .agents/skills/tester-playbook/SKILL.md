@@ -65,7 +65,11 @@ Rules are in `AGENTS.md`. Format of this file: `AGENTS.md`, under "Skills".
 - To run **one** e2e area, copy `e2e/run.js`'s per-area reset into a script outside the repo that
   `require()`s `e2e/lib/server.js` by absolute path: `fs.copyFileSync(FIXTURE, ctx.accessFile)`,
   rewrite `ctx.settingsFile` from `SETTINGS_FIXTURE`, `fs.rmSync(ctx.auditFile)`, then
-  `require('.../e2e/tests/<area>').run(ctx, new Checker(area, null))`. `run.js` itself runs all nine.
+  `require('.../e2e/tests/<area>').run(ctx, new Checker(area, null))`. `run.js` itself runs all
+   the areas (eleven, its `TOTAL` line is the verdict) and takes **no** filter. A scratch copy of the
+   repo needs no `node_modules`: `e2e/lib/server.js` installs it on the first boot (a `cp -al` of that
+   directory into `/tmp` fails with `Invalid cross-device link`; `NODE_PATH=<repo>/e2e/node_modules`
+   works too).
 - A clipboard assertion is possible headless: `context.grantPermissions(['clipboard-read',
   'clipboard-write'], { origin: ctx.origin })` succeeds for the loopback origin on the `msedge`
   channel, so `navigator.clipboard.readText()` can be compared byte for byte. Wrap the grant in
@@ -264,6 +268,16 @@ Rules are in `AGENTS.md`. Format of this file: `AGENTS.md`, under "Skills".
   a scene that needs another width sets it and puts `page.viewport()` back at the end, and a scene
   that changes identity puts `admin@example.com` back. A new scene name must be added to a view's
   `only` list as well, or `it` and `noscript` never photograph it.
+- A **layout** claim in an e2e area (a box not cut, a bar on one row) is proved satisfiable the same
+  way, by patching the stylesheet in an rsync copy and running the area there: `page.addStyleTag` is
+  not an option, because every GUI page's CSP `style-src` carries one hash and an injected style
+  throws a CSP violation. For a text-ellipsis claim, read `scrollWidth` against `clientWidth`
+  (`scrollWidth` past it is the ellipsis), and assert the bar's one row and `scrollWidth - clientWidth`
+  of the document beside it, so a rule that bought the room by wrapping the bar cannot pass.
+- A `shots.js` change is proved at the file level, since the runner asserts nothing: run the same
+  scene twice, once with the scene that leaks before it and once alone, and compare the PNG's
+  `md5sum` (a byte-identical pair is the fix, a pair that differs is the leak), then grep the log for
+  `SKIPPED` to show the scenes still reach their state.
 - A long **given name** in the bar needs `gate.profile_claims: ['given_name']` written into the
   settings file: the header is read only where the deployment says the proxy fills it, so a walk
   that sends `X-Auth-Given-Name` alone measures the bar's easy case and passes on a broken layout.
@@ -286,6 +300,15 @@ Rules are in `AGENTS.md`. Format of this file: `AGENTS.md`, under "Skills".
 - maud 0.27 escapes only `&`, `<`, `>` and `"`, so an apostrophe in a `K` string reaches the page
   raw: compare a rendered refusal with the design's text as is, never with `'` replaced by `&#x27;`
   (S9 lost a pass to that). The library's `html_escape` gives `&#39;`, and only where it is called.
+- A `?lang=` / `?theme=` goto sets a cookie the **server** writes, and it outlives the page that set
+  it. `shots.js` runs a view's scenes in one context, so `nav-menu-it` handed Italian to every scene
+  after it, and the `light` view photographed "Cruscotto" where the design review came to read
+  English. Reset the jar with the files (`context.clearCookies()` per scene) and re-arm the view's own
+  choice through the same `?lang=` / `?theme=` visit; in an area, end a language walk on `?lang=en`.
+- An e2e area **writes the settings file as it walks** (the `settings` area's look section fills
+  `ui.brand_name` and `ui.logo_url`), so a check about the **built-in** look has to run at the top of
+  `run()`, before that section. Walked afterwards it measures a brand the area itself invented, with a
+  404 logo squeezing `.brand .t` to `clientWidth 1`, which no CSS rule can make whole.
 - A displayed refusal is pinned twice, in a Rust test and in `e2e/tests/*.js`: when a slice changes
   what the page says, grep `e2e/tests` for the old sentence and update both in the same pass.
 - `docs/ARCHITECTURE.md` **names test functions** (as the pin for a rule), so renaming one strands a

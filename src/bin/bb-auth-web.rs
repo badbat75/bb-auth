@@ -5641,7 +5641,19 @@ fn shell_named(
     let account_href = format!("{}/", v.cfg.account_path);
     let places = v.admin.map(|_| {
         html! {
-            a class="pill" href=(account_href) { (account_word) }
+            // The row wears a glyph as every other row of the panel does (§13.34 §3, the
+            // review of 2026-11-26): bare text among drawn marks starts left of its
+            // neighbours and reads as the odd row out of a list of places. The person
+            // outline says what the row is the page of, and it is **decoration** behind
+            // `aria-hidden`: the visible word stays the row's name, in a language the reader
+            // cannot see a glyph in and to a screen reader.
+            a class="pill" href=(account_href) {
+                svg class="i-person" viewBox="0 0 24 24" aria-hidden="true" focusable="false" {
+                    circle cx="12" cy="8" r="4" {}
+                    path d="M4 20a8 8 0 0 1 16 0" {}
+                }
+                (account_word)
+            }
         }
     });
     let prefs = prefs_form(
@@ -33089,6 +33101,73 @@ mod tests {
             !panel.contains("menu-tabs") && !panel.contains(&format!("{ADMIN_BASE}/config")),
             "a person who is not an administrator is offered no console page: {panel}"
         );
+        let _ = std::fs::remove_file(&path);
+    }
+
+    /// §13.34 §3 as the designer's review of the two menus narrowed it: the console's one place
+    /// row wears a glyph as every other row of the panel does (the trigger's caret, Preferences'
+    /// sliders, Sign out's arrow, the delete row's bin), and the glyph is **decoration**: the
+    /// visible word stays the row's name, so the row reads the same to a screen reader and in a
+    /// language the reader cannot see a glyph in. The panel's rows are a list of places and the
+    /// review caught that this one was bare text among drawn marks, which reads as the odd row
+    /// out rather than as a place.
+    ///
+    /// Red until the coder draws it: the places block is the only block in the panel whose row
+    /// carries no `svg` today, which is the gap, and no colour may be spelled in it (`.menu svg`
+    /// paints it, as the other glyphs).
+    #[test]
+    fn the_account_menu_place_carries_a_glyph() {
+        let path = account_scratch_full("place-glyph");
+        let port = account_port(&path);
+        let account_href = format!("{ACCOUNT_PATH}/");
+        for (lang, code) in [(Lang::En, "en"), (Lang::It, "it")] {
+            let g = console_get(
+                port,
+                "admin@x.com admin@alt.com",
+                &[("Cookie", &format!("lang={code}"))],
+            );
+            assert_eq!(g.status, 200, "{code}: {}", account_readable(&g.body));
+            let panel = the_panel(&g.body, &format!("console {code}"));
+            let rows = anchors_to(&panel, &account_href)
+                .into_iter()
+                .filter(|a| visible_text(a) == t(lang, K::NotAdminToAccount))
+                .collect::<Vec<_>>();
+            assert_eq!(
+                rows.len(),
+                1,
+                "{code}: the console's panel carries one Go to your account row: {panel}"
+            );
+            let row = &rows[0];
+            // One glyph, **inside** the row: a mark sitting beside the control would be a stray
+            // box in the panel, and a second glyph in a one-word row is a second mark to read.
+            let glyphs = elements(row, "<svg", "</svg>");
+            assert_eq!(glyphs.len(), 1, "{code}: the row carries its glyph: {row}");
+            let open = open_tag(&glyphs[0]);
+            assert!(
+                open.contains("aria-hidden=\"true\"") && open.contains("focusable=\"false\""),
+                "{code}: the glyph is decoration, never a second name: {open}"
+            );
+            assert!(
+                open.contains("viewBox=\"0 0 24 24\""),
+                "{code}: the glyph is drawn on the panel's 24 box: {open}"
+            );
+            assert!(
+                attr(open, "class").is_some(),
+                "{code}: the glyph is sized and painted by class, like the panel's other glyphs: \
+                 {open}"
+            );
+            assert!(
+                !open.contains("fill=") && !open.contains("stroke=") && !open.contains("style="),
+                "{code}: the glyph names no colour: {open}"
+            );
+            // The word is still the row's name: a glyph that **replaced** the word would name
+            // the row in pictures, and §13.17's naming rule does not reach a row that lost it.
+            assert_eq!(
+                visible_text(row),
+                t(lang, K::NotAdminToAccount),
+                "{code}: the visible word is the row: {row}"
+            );
+        }
         let _ = std::fs::remove_file(&path);
     }
 

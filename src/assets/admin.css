@@ -56,9 +56,17 @@ a.brand:hover{text-decoration:underline}
 .brand .t{min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
 /* The tag line is cut with the name, by the same three companions and for the same reason: it
    is the second line of the brand's text, and a truncated "Administ…" says the same thing the
-   whole word does about which surface this is. */
+   whole word does about which surface this is. It is cut **first**, though, and that is
+   §13.34 §0's fix: a flex row splits a shortfall in proportion to each item's base size, so
+   the two lines used to give way together and a phone's bar (narrowed by the ☰ the same
+   section adds) read "bb-a…" beside "Administrati…". The name is the deployment's identity and
+   the one copy of it on the page, the tag is a label that says which surface this is, and the
+   words of the label are said again in the page's own heading: the tag gives way and the name
+   stays whole. `flex-shrink:100` is a margin, not a measurement, for the row does all the
+   arithmetic; both lines keep `min-width:0`, so the tag can go to nothing while the name is
+   never cut. */
 .brand .v{display:block;color:var(--muted);font-weight:400;font-size:.85em;min-width:0;
-  overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+  overflow:hidden;text-overflow:ellipsis;white-space:nowrap;flex-shrink:100}
 /* One rule sizes the mark on both surfaces (§13.28 §6), and **height** is the bound: a logo is
    whatever shape the operator uploaded, and a rule keyed on width lets a wide wordmark eat the
    tabs' room, which is the same room the ellipsis pieces are fighting for. 96px is the width the

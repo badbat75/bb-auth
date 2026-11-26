@@ -11,7 +11,7 @@
 
 const {
   bytes, doc, writeDoc, settings, settingsBytes, writeSettings,
-  newPage, submit, mainText, formBytes, openPreferences, barStaysOneRow, headerLayout,
+  newPage, submit, mainText, formBytes, openPreferences, barStaysOneRow, barGeometry, headerLayout,
   openBarMenu, menuIsOpen, menuShape, menuIsOneSize, ACCT_MENU, NAV_MENU,
   attr, text, count,
 } = require('../lib/harness');
@@ -243,6 +243,50 @@ async function panelWalk(t, page, ctx) {
 }
 
 /**
+ * The brand's **name**, whole at the phone widths §13.34 §0 walked, in both languages, with the
+ * bar on one row. `.brand .t` is the name and `.brand .v` the tag under it; both carry
+ * `min-width:0`, so a brand with no room left splits the shortfall between the two lines and the
+ * name is the one that gets cut, "bb-au…", at 320, 360 and 390. The name is the piece with no
+ * second copy anywhere on the page, and the fix the design review asked for is that the **tag**
+ * gives up its room first. This is the measurement of that: `scrollWidth` past `clientWidth` is
+ * the ellipsis, so equal numbers on the name is the name being whole.
+ *
+ * The tag is deliberately not asserted: cutting "Amminist…" is what the stylesheet says to do,
+ * and whether the fixture's word is short enough to survive at a width is a fact about the
+ * fixture's word. The bar's one row is asserted beside every width, because a rule that bought
+ * the name's room by making the bar wrap is this fix turned into the fault §13.28 §4 exists to
+ * catch.
+ */
+async function brandStaysWhole(t, page, base) {
+  for (const width of [320, 360, 390]) {
+    await page.setViewportSize({ width, height: 720 });
+    for (const lang of ['en', 'it']) {
+      await page.goto(`${base}/users?lang=${lang}`);
+      const name = await page.evaluate(() => {
+        const el = document.querySelector('header .brand .t');
+        if (!el) return null;
+        return {
+          sw: Math.round(el.scrollWidth),
+          cw: Math.round(el.clientWidth),
+          word: el.textContent.trim(),
+        };
+      });
+      if (!t.check(`at ${width} ${lang}: the bar carries the brand's name`, !!name,
+        JSON.stringify(name))) continue;
+      t.check(`at ${width} ${lang}: the name "${name.word}" is not cut`, name.sw <= name.cw,
+        `scrollWidth ${name.sw} past clientWidth ${name.cw}`);
+      const g = await barGeometry(page);
+      t.eq(`at ${width} ${lang}: the bar is still one row`, [g.rows, g.kids > 1], [1, true]);
+      t.eq(`at ${width} ${lang}: the document does not scroll sideways`, g.sideways, 0);
+    }
+  }
+  // Back to the width and the language the rest of the area walks at, so a walk that measures
+  // the brand leaves nothing of its own behind (the language is a cookie, not a query).
+  await page.setViewportSize({ width: 1280, height: 900 });
+  await page.goto(`${base}/users?lang=en`);
+}
+
+/**
  * The bar at the widths §13.34 §0 measured: 942, where the five tabs are still in the bar, and
  * 941, where they have moved into the ☰. A long brand, a logo and a long given name together
  * are the widest case the measurements name, and the Italian tab words are longer than the
@@ -339,6 +383,11 @@ async function barAtTheWorstWidth(t, ctx, look) {
 
 async function run(ctx, t) {
   const { context, page } = await newPage(ctx);
+  // The brand's name at the phone widths, measured **before** this area writes a `ui` section:
+  // with no brand configured, the bar wears the built-in one, which is the brand the design's
+  // measurement was taken on (§13.34 §0). Later in this file the settings form writes a long
+  // brand, and that state is walked by `barAtTheWorstWidth` at the widths the design named.
+  await brandStaysWhole(t, page, ctx.base);
   // `$$eval` is Playwright's, not JavaScript's eval: it runs this fixed function inside the
   // page over the matched elements, and nothing of it comes from the page under test.
   const openCount = () => page.$$eval('details.group', (ds) => ds.filter((d) => d.open).length);
