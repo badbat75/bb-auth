@@ -1743,3 +1743,10 @@ removing it. And de-authorizing *one person* is a different lever, not a small v
 this one: put them in `denied` (or remove them from the roster) and reload, which is
 re-checked on every `/auth/validate` and so denies even their unexpired cookie, while
 everybody else stays signed in.
+
+## Licence
+
+bb-auth is licensed under the **GNU AGPL v3 (AGPL-3.0-or-later)**; the full text is in
+[LICENSE](LICENSE). Section 13 asks anyone who runs a modified version as a network service
+to make its source available to the users who interact with it over that network. Releases
+up to v1.99.8 were published under the MIT licence and stay MIT for whoever holds them.

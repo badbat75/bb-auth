@@ -3,7 +3,7 @@ name = "bb-auth"
 version = "1.99.9"
 edition = "2021"
 description = "Minimal, service-agnostic Cognito id_token → session-cookie auth gate (nginx auth_request)"
-license = "MIT"
+license = "AGPL-3.0-or-later"
 
 # The access file — schema, parser, URL matcher, grant model. The ONE thing the gate and
 # the admin CLI must agree on, so there is one implementation of it and both link this.

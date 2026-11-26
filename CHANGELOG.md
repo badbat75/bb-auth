@@ -38,6 +38,19 @@ lets a completed deletion land on the sign-in page's notice, because the `rd` it
 is relative. Without it the person is signed out all the same and lands on the sign-in page with
 nothing said (see "a completed deletion signs this browser out" below).
 
+### Changed: the licence becomes the GNU AGPL
+
+* **The project moves from MIT to the GNU Affero General Public License version 3**
+  (SPDX `AGPL-3.0-or-later`, the user's decision on 2026-11-26, plan step 16). `LICENSE`
+  holds the AGPL-3.0's full text from gnu.org, `Cargo.toml` names the identifier, and the
+  packages' `copyright` files follow because cargo-deb generates them from `Cargo.toml`.
+  The AGPL was chosen over the plain GPL because bb-auth is a network service, and its
+  section 13 asks whoever offers a modified version over a network to offer its source as
+  well. The user is the sole author, so the change needs nobody else's consent.
+* **Releases already published stay MIT.** Everything up to v1.99.8 was published under the
+  MIT licence and stays MIT for whoever holds those copies; the change lands before the
+  `v1.99.9` tag.
+
 ### Changed: two menus in the bar, and the settings page is a tab again
 
 * **The bar has five tabs, and the fifth is "Settings" / "Impostazioni"**, last after Dashboard,
