@@ -270,7 +270,7 @@ sentence verbatim, so it names wire keys (`landing_url`) on an Italian page. Des
 a `SettingsRefusal` enum in the library (46 codes in 37 variants), whose `Display` is today's
 exact English for `bb-auth-adm` and `--check-settings`, and one exhaustive GUI match onto `K` keys
 naming the visible labels. Slices **S0** (golden tests of today's strings, green from the start) , **S1**
-(the enum's skeleton) and **S2** (claims, attributes) are done; then **S3** to **S9** (`ConfigForm::apply` drops its duplicate checks), each with its red tests named in §13.31 §7.
+(the enum's skeleton) , **S2** (claims, attributes) and **S3** (URLs) are done; then **S4** to **S9** (`ConfigForm::apply` drops its duplicate checks), each with its red tests named in §13.31 §7.
 
 - Done when: every refusal reads in the page's language and names the visible label (a test walks
   every code in both languages); the CLI's and the gate's sentences are byte for byte today's (S0's

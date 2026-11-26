@@ -213,27 +213,39 @@ pub fn compile_login_url(raw: &str) -> Result<String, String> {
 /// absolute https:// URL" is a sentence an operator can act on, and the same sentence about
 /// `login_url` for a value they wrote under another key is one they cannot.
 pub fn compile_page_url(field: &str, raw: &str) -> Result<String, String> {
-    let e = |m: &str| Err(format!("{field} '{raw}': {m}"));
-    let u = raw.trim();
-    if u.is_empty() {
-        return e("empty");
+    if raw.trim().is_empty() {
+        return Err(format!("{field} '{raw}': empty"));
     }
+    page_url_core(raw).map_err(|(raw, fault)| format!("{field} '{raw}': {fault}"))
+}
+
+/// [`compile_page_url`]'s checks, answering the typed refusal so `compile_settings` can hand one
+/// to the GUI as a code (§13.31 §3). The pair it returns is the text today's sentence quotes and
+/// the fault, never the whole sentence: `field` belongs to the caller, which is why the access
+/// file's parser and `bb-auth-adm` keep their own names in front of the same tail.
+///
+/// An empty value is not here. It is the setting being unset, which `compile_settings` skips
+/// before calling and which the leaf's own callers answer with their own `empty` sentence, so
+/// the enum holds only the faults a value can have (§13.31 §2).
+fn page_url_core(raw: &str) -> Result<String, (String, UrlFault)> {
+    let u = raw.trim();
+    let e = |fault| Err((raw.to_string(), fault));
     if !u.bytes().all(|b| b.is_ascii_graphic()) {
-        return e("must be printable ASCII (no spaces, no control bytes)");
+        return e(UrlFault::NotPrintable);
     }
     let rest = match u.strip_prefix("https://") {
         Some(r) => r,
-        None => return e("must be an absolute https:// URL"),
+        None => return e(UrlFault::NotHttps),
     };
     let authority = rest.split(['/', '?', '#']).next().unwrap_or("");
     if authority.is_empty() {
-        return e("empty host");
+        return e(UrlFault::EmptyHost);
     }
     if authority.contains('@') {
-        return e("userinfo '@' is not allowed in the host");
+        return e(UrlFault::Userinfo);
     }
     if u.contains('\\') {
-        return e("backslash is not allowed");
+        return e(UrlFault::Backslash);
     }
     Ok(u.to_string())
 }
@@ -5298,27 +5310,35 @@ pub fn request_site(
 /// the belt worth having: this string is written by an administrator through a GUI, which is
 /// one hop further from the code than an env var is.
 pub fn compile_asset_url(field: &str, raw: &str) -> Result<Option<String>, String> {
+    asset_url_core(raw).map_err(|(raw, fault)| format!("{field} '{raw}': {fault}"))
+}
+
+/// [`compile_asset_url`]'s checks, answering the typed refusal (§13.31 §3), with the same split
+/// as [`page_url_core`]: the pair is the text today's sentence quotes, which here is the
+/// **trimmed** value the leaf printed, and the fault. Empty is `Ok(None)`, the setting unset,
+/// and so is never a refusal.
+fn asset_url_core(raw: &str) -> Result<Option<String>, (String, UrlFault)> {
     let u = raw.trim();
     if u.is_empty() {
         return Ok(None);
     }
-    let e = |m: &str| Err(format!("{field} '{u}': {m}"));
+    let e = |fault| Err((u.to_string(), fault));
     if !u.bytes().all(|b| b.is_ascii_graphic()) {
-        return e("must be printable ASCII (no spaces, no control bytes)");
+        return e(UrlFault::NotPrintable);
     }
     if u.contains('"') || u.contains('\'') || u.contains('<') || u.contains('>') {
-        return e("must not contain a quote or an angle bracket");
+        return e(UrlFault::Quote);
     }
     if u.contains('\\') {
-        return e("backslash is not allowed");
+        return e(UrlFault::Backslash);
     }
     if let Some(rest) = u.strip_prefix("https://") {
         let authority = rest.split(['/', '?', '#']).next().unwrap_or("");
         if authority.is_empty() {
-            return e("empty host");
+            return e(UrlFault::EmptyHost);
         }
         if authority.contains('@') {
-            return e("userinfo '@' is not allowed in the host");
+            return e(UrlFault::Userinfo);
         }
         return Ok(Some(u.to_string()));
     }
@@ -5327,7 +5347,7 @@ pub fn compile_asset_url(field: &str, raw: &str) -> Result<Option<String>, Strin
     if u.starts_with('/') && !u.starts_with("//") {
         return Ok(Some(u.to_string()));
     }
-    e("must be an absolute https:// URL or a root-relative path starting with '/'")
+    e(UrlFault::NotHttpsOrRooted)
 }
 
 /// Validate a brand name: the product name a login page puts under its logo.
@@ -5669,27 +5689,36 @@ pub fn compile_oauth_domain(raw: &str) -> Result<String, String> {
 /// pool id and nothing else, so a value carrying either was written by somebody who meant a
 /// different URL, and trimming it would build a JWKS URL they never asked for.
 pub fn compile_issuer(raw: &str) -> Result<String, String> {
-    let e = |m: &str| Err(format!("issuer '{raw}': {m}"));
+    issuer_core(raw).map_err(|(raw, fault)| format!("issuer '{raw}': {fault}"))
+}
+
+/// [`compile_issuer`]'s checks, answering the typed refusal (§13.31 §3). The value it quotes is
+/// `raw` as given, which is what today's sentence printed, and the trailing-slash trim happens
+/// here, so `"https://"` is refused as not https, exactly as before. An empty issuer is
+/// `Ok(String::new())`, the setting unset, and the gate says so loudly at startup rather than
+/// refusing to boot.
+fn issuer_core(raw: &str) -> Result<String, (String, UrlFault)> {
     let u = raw.trim().trim_end_matches('/');
+    let e = |fault| Err((raw.to_string(), fault));
     if u.is_empty() {
         return Ok(String::new());
     }
     if !u.bytes().all(|b| b.is_ascii_graphic()) {
-        return e("must be printable ASCII (no spaces, no control bytes)");
+        return e(UrlFault::NotPrintable);
     }
     let rest = match u.strip_prefix("https://") {
         Some(r) => r,
-        None => return e("must be an absolute https:// URL"),
+        None => return e(UrlFault::NotHttps),
     };
     let authority = rest.split(['/', '?', '#']).next().unwrap_or("");
     if authority.is_empty() {
-        return e("empty host");
+        return e(UrlFault::EmptyHost);
     }
     if authority.contains('@') || u.contains('\\') {
-        return e("userinfo '@' and backslashes are not allowed");
+        return e(UrlFault::UserinfoOrBackslash);
     }
     if u.contains('?') || u.contains('#') {
-        return e("must be the bare issuer URL: no query, no fragment");
+        return e(UrlFault::QueryOrFragment);
     }
     Ok(u.to_string())
 }
@@ -5975,6 +6004,141 @@ pub fn compile_social_buttons(raw: &[SocialButtonSpec]) -> Result<Vec<SocialButt
     Ok(out)
 }
 
+/// Which settings-file value a [`SettingsRefusal::Url`] is about, so the refusal can name the
+/// setting in the reader's language instead of carrying a sentence that names it (§13.31 §3).
+///
+/// The name is the string today's sentences spell, because that is what an operator reads in
+/// `--check-settings`, in the journal and in `bb-auth-adm`: a gate key bare (`login_url`), an
+/// audit key with its section (`audit.rotation`). The audit four arrive with this type and are
+/// read by the audit slice (S6); they are named here because a name is cheapest pinned the day
+/// the type exists, not the day it is first printed.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum SettingKey {
+    /// `gate.login_url`: the page a `401` sends somebody to.
+    LoginUrl,
+    /// `gate.denied_url`: the page a `403` lands on.
+    DeniedUrl,
+    /// `gate.landing_url`: where a sign-in with no `rd` arrives.
+    LandingUrl,
+    /// `gate.issuer`: the Cognito endpoint an id_token's `iss` must equal.
+    Issuer,
+    /// `gate.social_callback_url`: the OAuth `redirect_uri` registered on the app client.
+    SocialCallbackUrl,
+    /// `ui.stylesheet_url`: the operator's stylesheet a page loads after the built-in one.
+    StylesheetUrl,
+    /// `ui.logo_url`: the operator's logo a page loads.
+    LogoUrl,
+    /// `audit.client_ip_header`: the header the audit reads an address out of.
+    ClientIpHeader,
+    /// `audit.request_id_header`: the header the audit reads nginx's request id out of.
+    RequestIdHeader,
+    /// `audit.rotation`: when the live audit file rotates.
+    AuditRotation,
+    /// `audit.retention`: how much of the audit the pair keeps.
+    AuditRetention,
+}
+
+impl SettingKey {
+    /// The name today's sentences quote this setting by, which is what `Display` and every
+    /// `String` leaf wrapper print, byte for byte as before.
+    pub fn name(self) -> &'static str {
+        match self {
+            Self::LoginUrl => "login_url",
+            Self::DeniedUrl => "denied_url",
+            Self::LandingUrl => "landing_url",
+            Self::Issuer => "issuer",
+            Self::SocialCallbackUrl => "social_callback_url",
+            Self::StylesheetUrl => "stylesheet_url",
+            Self::LogoUrl => "logo_url",
+            Self::ClientIpHeader => "audit.client_ip_header",
+            Self::RequestIdHeader => "audit.request_id_header",
+            Self::AuditRotation => "audit.rotation",
+            Self::AuditRetention => "audit.retention",
+        }
+    }
+}
+
+/// The nine shapes a URL setting is refused for, as a name rather than a sentence (§13.31 §2).
+///
+/// It is a type of its own because the same checks are reached from callers that name the value
+/// differently: `compile_settings` names the settings key, the access file's parser names the
+/// field it is compiling (`denied_url`), and `bb-auth-adm` names its own flag (`--stylesheet`).
+/// Each tail lives here once, so the leaf's `String` wrapper and the enum's `sentence()` cannot
+/// drift apart, which is the whole reason [`SettingsRefusal::Url`] is nested.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum UrlFault {
+    /// A byte outside printable ASCII, such as a space, a tab or a CR/LF. These values are
+    /// emitted into a `Location:` header, into `X-Auth-Login-URL` and into an attribute on a
+    /// page, where a CR/LF is a response-splitting gadget and a space breaks the URL.
+    NotPrintable,
+    /// Not an absolute `https://` URL. The estate is https-only and a sign-in page hands a real
+    /// credential over this address, so a plain-http one gives the token to whoever is listening.
+    NotHttps,
+    /// An empty authority (`https://`), which names nowhere: the redirect lands on a page that
+    /// never loads.
+    EmptyHost,
+    /// A userinfo `@` before the host, the lookalike [`rd_url_allowed`] rejects for the same
+    /// reason: `https://badbat75.com@evil.com` reads as the estate and goes to the attacker.
+    Userinfo,
+    /// A backslash, which a browser folds to `/` and a URL parser does not, so the host a person
+    /// reads is not the host the request goes to.
+    Backslash,
+    /// The issuer's spelling of the two above, in one sentence, because that value is compared
+    /// byte for byte against a token claim and both shapes are refused together.
+    UserinfoOrBackslash,
+    /// A query or a fragment on the issuer. Cognito's `iss` is an origin and a pool id and
+    /// nothing else, so a value carrying either was written meaning a different URL, and
+    /// trimming it would build a JWKS URL nobody asked for.
+    QueryOrFragment,
+    /// A quote or an angle bracket, which would close the attribute the value is emitted into.
+    /// Belt over the escaping in [`stylesheet_link`], spent on purpose: this field is written by
+    /// an administrator through a GUI, one hop further from the code than an env var is.
+    Quote,
+    /// Neither an absolute `https://` URL nor a root-relative path, the only two shapes an asset
+    /// URL may take. `//host/path` is refused with it: protocol-relative is an absolute URL
+    /// wearing a relative URL's clothes, and the one shape somebody writes by accident.
+    NotHttpsOrRooted,
+}
+
+impl UrlFault {
+    /// The `url_<fault>` code §2 lists, which is what the GUI maps to a `K` key in slice S8.
+    fn code(self) -> &'static str {
+        match self {
+            Self::NotPrintable => "url_not_printable",
+            Self::NotHttps => "url_not_https",
+            Self::EmptyHost => "url_empty_host",
+            Self::Userinfo => "url_userinfo",
+            Self::Backslash => "url_backslash",
+            Self::UserinfoOrBackslash => "url_userinfo_or_backslash",
+            Self::QueryOrFragment => "url_query_or_fragment",
+            Self::Quote => "url_quote",
+            Self::NotHttpsOrRooted => "url_not_https_or_rooted",
+        }
+    }
+}
+
+impl std::fmt::Display for UrlFault {
+    /// The tail of a URL refusal, byte for byte as the leaves spelled it before this type
+    /// existed. The setting's name and the quoted value come from the caller; the reason comes
+    /// from here, once.
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        let tail = match self {
+            Self::NotPrintable => "must be printable ASCII (no spaces, no control bytes)",
+            Self::NotHttps => "must be an absolute https:// URL",
+            Self::EmptyHost => "empty host",
+            Self::Userinfo => "userinfo '@' is not allowed in the host",
+            Self::Backslash => "backslash is not allowed",
+            Self::UserinfoOrBackslash => "userinfo '@' and backslashes are not allowed",
+            Self::QueryOrFragment => "must be the bare issuer URL: no query, no fragment",
+            Self::Quote => "must not contain a quote or an angle bracket",
+            Self::NotHttpsOrRooted => {
+                "must be an absolute https:// URL or a root-relative path starting with '/'"
+            }
+        };
+        f.write_str(tail)
+    }
+}
+
 /// Why a settings file is refused, as a name and its arguments rather than as a sentence
 /// (docs/ARCHITECTURE.md §13.31).
 ///
@@ -6052,6 +6216,23 @@ pub enum SettingsRefusal {
     /// `gate.landing_url`'s host is outside `gate.authorized_hosts`, so [`rd_url_allowed`]
     /// refuses it at every login and a sign-in with no `rd` falls back to the sign-in page.
     LandingOffHosts,
+    /// A URL setting is not an address this estate can be trusted with. `key` says which
+    /// setting, `raw` is the text today's sentence quotes (the value as given for the issuer and
+    /// the page URLs, trimmed for an asset URL, which is what each leaf printed), and `fault` is
+    /// which of the nine shapes [`UrlFault`] lists.
+    ///
+    /// These are refused because the value is **emitted**, not stored. A page URL goes into a
+    /// `Location:` header, into `X-Auth-Login-URL` and into the sign-in page; the issuer is
+    /// fetched from over the network and compared byte for byte against a token's `iss`, and
+    /// lands in that page's `connect-src`; an asset URL goes into an attribute on a page both
+    /// programs emit. Printable ASCII, https-only, no userinfo, no backslash and no quote are
+    /// what make those emissions safe with no per-use check, and each fault's own doc says what
+    /// the shape would cost.
+    Url {
+        key: SettingKey,
+        raw: String,
+        fault: UrlFault,
+    },
     /// `gate.social_callback_url` is not an absolute https URL, and Cognito compares the
     /// `redirect_uri` byte for byte.
     CallbackNotHttps,
@@ -6088,6 +6269,7 @@ impl SettingsRefusal {
             Self::TtlAboveCeiling { .. } => "ttl_above_ceiling",
             Self::HostsOutsideCookieDomain { .. } => "hosts_outside_cookie_domain",
             Self::LandingOffHosts => "landing_off_hosts",
+            Self::Url { fault, .. } => fault.code(),
             Self::CallbackNotHttps => "callback_not_https",
             Self::SocialHalfConfigured { .. } => "social_half_configured",
             Self::AuditHeadersSame { .. } => "audit_headers_same",
@@ -6098,9 +6280,11 @@ impl SettingsRefusal {
 
     /// The key `compile_settings` used to write in front of the leaf's own sentence, as a
     /// `map_err(|e| format!("…: {e}"))`: `profile_claims` and `identity_attrs` for the leaves
-    /// whose parser knows nothing of the file's keys, and nothing at all for a refusal the
-    /// settings function spells itself, whose sentence already names its key (§13.31 §3).
-    /// `Other` carries today's prefixed sentence whole, so it has no prefix of its own.
+    /// whose parser knows nothing of the file's keys, `login_url` for the sign-in page's URL
+    /// (which is how today's doubled `login_url: login_url '…': …` is kept), and nothing at all
+    /// for a refusal the settings function spells itself, whose sentence already names its key
+    /// (§13.31 §3). `Other` carries today's prefixed sentence whole, so it has no prefix of its
+    /// own.
     fn prefix(&self) -> Option<&'static str> {
         match self {
             Self::ClaimCharset { .. }
@@ -6111,6 +6295,10 @@ impl SettingsRefusal {
             Self::AttrUnknown { .. } | Self::AttrTwice { .. } | Self::AttrNone => {
                 Some("identity_attrs")
             }
+            Self::Url {
+                key: SettingKey::LoginUrl,
+                ..
+            } => Some("login_url"),
             _ => None,
         }
     }
@@ -6185,6 +6373,9 @@ impl SettingsRefusal {
             Self::LandingOffHosts => "landing_url: its host is not covered by authorized_hosts, \
                  so every sign-in with no rd would fall back to the sign-in page"
                 .to_string(),
+            Self::Url { key, raw, fault } => {
+                format!("{} '{raw}': {fault}", key.name())
+            }
             Self::CallbackNotHttps => "social_callback_url: must be the absolute https:// URL \
                  registered on the app client, because Cognito compares it byte for byte"
                 .to_string(),
@@ -6252,6 +6443,13 @@ impl From<PrepareError> for String {
     }
 }
 
+/// The `map_err` that turns a URL leaf's `(raw, fault)` pair into [`SettingsRefusal::Url`] for
+/// one setting, so the six URL settings of this function name themselves without six copies of
+/// the same arm (§13.31 §3).
+fn url_refusal(key: SettingKey) -> impl FnOnce((String, UrlFault)) -> SettingsRefusal {
+    move |(raw, fault)| SettingsRefusal::Url { key, raw, fault }
+}
+
 /// Turn a settings document into the compiled settings, or say why it cannot be one.
 ///
 /// Fatal, with the same reflex the access file's parser has: what changes behaviour is an
@@ -6317,19 +6515,17 @@ pub fn compile_settings(file: &SettingsFile) -> Result<Settings, SettingsRefusal
         compile_app_client_id("client_id", &file.gate.client_id).map_err(SettingsRefusal::Other)?;
     let login_url = match file.gate.login_url.trim() {
         "" => String::new(),
-        raw => {
-            compile_login_url(raw).map_err(|e| SettingsRefusal::Other(format!("login_url: {e}")))?
-        }
+        raw => page_url_core(raw).map_err(url_refusal(SettingKey::LoginUrl))?,
     };
     let denied_url = match file.gate.denied_url.trim() {
         "" => String::new(),
-        raw => compile_page_url("denied_url", raw).map_err(SettingsRefusal::Other)?,
+        raw => page_url_core(raw).map_err(url_refusal(SettingKey::DeniedUrl))?,
     };
     let landing_url = match file.gate.landing_url.trim() {
         "" => String::new(),
-        raw => compile_page_url("landing_url", raw).map_err(SettingsRefusal::Other)?,
+        raw => page_url_core(raw).map_err(url_refusal(SettingKey::LandingUrl))?,
     };
-    let issuer = compile_issuer(&file.gate.issuer).map_err(SettingsRefusal::Other)?;
+    let issuer = issuer_core(&file.gate.issuer).map_err(url_refusal(SettingKey::Issuer))?;
     let cookie_domain =
         compile_cookie_domain(&file.gate.cookie_domain).map_err(SettingsRefusal::Other)?;
     let mut authorized_hosts: Vec<UrlPattern> =
@@ -6376,13 +6572,12 @@ pub fn compile_settings(file: &SettingsFile) -> Result<Settings, SettingsRefusal
     }
     let oauth_domain =
         compile_oauth_domain(&file.gate.oauth_domain).map_err(SettingsRefusal::Other)?;
-    let social_callback_url =
-        match compile_asset_url("social_callback_url", &file.gate.social_callback_url)
-            .map_err(SettingsRefusal::Other)?
-        {
-            Some(u) if !u.starts_with("https://") => return Err(SettingsRefusal::CallbackNotHttps),
-            other => other,
-        };
+    let social_callback_url = match asset_url_core(&file.gate.social_callback_url)
+        .map_err(url_refusal(SettingKey::SocialCallbackUrl))?
+    {
+        Some(u) if !u.starts_with("https://") => return Err(SettingsRefusal::CallbackNotHttps),
+        other => other,
+    };
     let social_buttons =
         compile_social_buttons(&file.gate.social_buttons).map_err(SettingsRefusal::Other)?;
     // A button with nowhere to send the browser, or nowhere for it to come back to, is the
@@ -6444,10 +6639,9 @@ pub fn compile_settings(file: &SettingsFile) -> Result<Settings, SettingsRefusal
     // wrong with nothing anywhere saying why. It cannot lock anybody out, which is what earns
     // it a place in this file at all, but "cannot lock anybody out" is not "may be wrong in
     // silence".
-    let stylesheet_url = compile_asset_url("stylesheet_url", &file.ui.stylesheet_url)
-        .map_err(SettingsRefusal::Other)?;
-    let logo_url =
-        compile_asset_url("logo_url", &file.ui.logo_url).map_err(SettingsRefusal::Other)?;
+    let stylesheet_url =
+        asset_url_core(&file.ui.stylesheet_url).map_err(url_refusal(SettingKey::StylesheetUrl))?;
+    let logo_url = asset_url_core(&file.ui.logo_url).map_err(url_refusal(SettingKey::LogoUrl))?;
     let brand_name = compile_brand_name(&file.ui.brand_name).map_err(SettingsRefusal::Other)?;
     let theme = UiTheme::parse(&file.ui.theme).ok_or_else(|| SettingsRefusal::ThemeUnknown {
         raw: file.ui.theme.trim().to_string(),
@@ -11717,6 +11911,202 @@ mod tests {
                 "{label}: the String wrapper's sentence is not the variant's"
             );
         }
+    }
+
+    /// S3 (§13.31 §2, §3, §7): a URL refusal is one `Url` variant carrying which setting
+    /// (`SettingKey`), the text today's sentence quotes (`raw`) and which of the nine faults
+    /// (`UrlFault`), not a sentence riding in `Other`. Each row is the S0 golden's own fixture
+    /// for that sentence, so the refusal is known reachable and reaches the arm under test, and
+    /// each row asserts five things: the variant's three arguments; `code()` is §2's
+    /// `url_<fault>` name, which is what S8 maps to a `K` key; `prefix()` is `login_url` for the
+    /// sign-in page and nothing for the rest, which is how today's doubled
+    /// `login_url: login_url '…': …` is kept while the other six settings stay single;
+    /// `sentence()` is the setting's name, the quoted text and the fault's tail, which is what
+    /// the leaf's `String` wrapper answers under the caller's field name; and `Display` is
+    /// today's bytes, prefix joined with ": ". Every fixture carries no surrounding whitespace,
+    /// so the trimmed and untrimmed readings of `raw` (§2 notes the three leaves differ) cannot
+    /// differ here, and the row pins the value the sentence quotes, not one of the two readings.
+    /// The blocks after the table pin the shared parts: the nine tails, the eleven setting names,
+    /// and that each `String` wrapper is thin, formatting the caller's field name with the same
+    /// tail the variant carries, so the access file's parser and the CLI's flag-named pre-checks
+    /// keep their bytes and every tail has exactly one home.
+    #[test]
+    fn url_refusals_name_the_setting_and_the_fault() {
+        type Row<'a> = (
+            &'a str,               // label
+            &'a str,               // the fixture, the S0 golden's own
+            SettingKey,            // which setting the variant names
+            &'a str,               // the text the sentence quotes
+            UrlFault,              // which of the nine faults
+            &'a str,               // code()
+            Option<&'a str>,       // prefix()
+            &'a str,               // Display: today's bytes, byte for byte
+            fn(&'a str) -> String, // the String wrapper, under the setting's own name
+        );
+        let cases: Vec<Row> = vec![
+            (
+                "sign-in page not https",
+                r#"{ "version": 3, "gate": { "login_url": "http://x.com" } }"#,
+                SettingKey::LoginUrl,
+                "http://x.com",
+                UrlFault::NotHttps,
+                "url_not_https",
+                Some("login_url"),
+                "login_url: login_url 'http://x.com': must be an absolute https:// URL",
+                |raw| refusal(compile_login_url(raw)),
+            ),
+            (
+                "landing page not https",
+                r#"{ "version": 3, "gate": { "landing_url": "http://x.com" } }"#,
+                SettingKey::LandingUrl,
+                "http://x.com",
+                UrlFault::NotHttps,
+                "url_not_https",
+                None,
+                "landing_url 'http://x.com': must be an absolute https:// URL",
+                |raw| refusal(compile_page_url("landing_url", raw)),
+            ),
+            (
+                "issuer with a query",
+                r#"{ "version": 3, "gate": { "issuer": "https://x.com?q" } }"#,
+                SettingKey::Issuer,
+                "https://x.com?q",
+                UrlFault::QueryOrFragment,
+                "url_query_or_fragment",
+                None,
+                "issuer 'https://x.com?q': must be the bare issuer URL: no query, no fragment",
+                |raw| refusal(compile_issuer(raw)),
+            ),
+            (
+                // The callback is an asset URL, so a scheme that is not https and is not a
+                // root-relative path is the asset fault; the bare `/cb` that passes this leaf is
+                // the separate `CallbackNotHttps` (S1), which is why this row is `ftp://`.
+                "callback not https and not rooted",
+                r#"{ "version": 3, "gate": { "social_callback_url": "ftp://x.com" } }"#,
+                SettingKey::SocialCallbackUrl,
+                "ftp://x.com",
+                UrlFault::NotHttpsOrRooted,
+                "url_not_https_or_rooted",
+                None,
+                "social_callback_url 'ftp://x.com': must be an absolute https:// URL or a \
+                 root-relative path starting with '/'",
+                |raw| refusal(compile_asset_url("social_callback_url", raw)),
+            ),
+            (
+                "logo with a quote",
+                r#"{ "version": 3, "ui": { "logo_url": "https://x.com/\"a\"" } }"#,
+                SettingKey::LogoUrl,
+                "https://x.com/\"a\"",
+                UrlFault::Quote,
+                "url_quote",
+                None,
+                "logo_url 'https://x.com/\"a\"': must not contain a quote or an angle bracket",
+                |raw| refusal(compile_asset_url("logo_url", raw)),
+            ),
+        ];
+        for row in cases.iter() {
+            let (label, json, key, raw, fault, code, prefix, display, leaf) = *row;
+            let r = settings_refusal_of(json);
+            let (got_key, got_raw, got_fault) = match &r {
+                SettingsRefusal::Url {
+                    key: k,
+                    raw: w,
+                    fault: f,
+                } => (*k, w.clone(), *f),
+                other => panic!("{label}: expected SettingsRefusal::Url, got {other:?}"),
+            };
+            assert_eq!(got_key, key, "{label}: which setting the refusal names");
+            assert_eq!(got_raw, raw, "{label}: the text the sentence quotes");
+            assert_eq!(got_fault, fault, "{label}: which fault");
+            assert_eq!(r.code(), code, "{label}: {r:?}");
+            assert_eq!(r.prefix(), prefix, "{label}: {r:?}");
+            assert_eq!(
+                r.sentence(),
+                format!("{} '{raw}': {fault}", key.name()),
+                "{label}: the sentence is the setting's name, the quoted text and the fault's tail"
+            );
+            assert_eq!(
+                r.to_string(),
+                display,
+                "{label}: Display is not prefix + \": \" + sentence"
+            );
+            assert_eq!(
+                leaf(raw),
+                r.sentence(),
+                "{label}: the String wrapper is not the variant's sentence under the setting's \
+                 own name"
+            );
+        }
+        // The nine tails, byte for byte from today's leaf sentences. `UrlFault`'s `Display` is
+        // the one home of each: the wrapper formats `{field} '{raw}': {fault}` with the caller's
+        // field and the enum's `sentence()` formats it with the setting's name, and both print
+        // this tail unchanged (§3), which is the whole reason `Url` is nested.
+        let tails: Vec<(UrlFault, &str)> = vec![
+            (
+                UrlFault::NotPrintable,
+                "must be printable ASCII (no spaces, no control bytes)",
+            ),
+            (UrlFault::NotHttps, "must be an absolute https:// URL"),
+            (UrlFault::EmptyHost, "empty host"),
+            (
+                UrlFault::Userinfo,
+                "userinfo '@' is not allowed in the host",
+            ),
+            (UrlFault::Backslash, "backslash is not allowed"),
+            (
+                UrlFault::UserinfoOrBackslash,
+                "userinfo '@' and backslashes are not allowed",
+            ),
+            (
+                UrlFault::QueryOrFragment,
+                "must be the bare issuer URL: no query, no fragment",
+            ),
+            (
+                UrlFault::Quote,
+                "must not contain a quote or an angle bracket",
+            ),
+            (
+                UrlFault::NotHttpsOrRooted,
+                "must be an absolute https:// URL or a root-relative path starting with '/'",
+            ),
+        ];
+        for (fault, tail) in tails {
+            assert_eq!(fault.to_string(), tail, "{fault:?}");
+        }
+        // Which name each setting is quoted by: a gate key bare, an audit key with its section,
+        // which is what today's sentences spell (§3). The audit four are named here because
+        // `SettingKey` arrives with this slice and S6 is the slice that uses them: a name spelled
+        // for the audit's own sentence is pinned the day the type exists, not the day it is read.
+        let names: Vec<(SettingKey, &str)> = vec![
+            (SettingKey::LoginUrl, "login_url"),
+            (SettingKey::DeniedUrl, "denied_url"),
+            (SettingKey::LandingUrl, "landing_url"),
+            (SettingKey::Issuer, "issuer"),
+            (SettingKey::SocialCallbackUrl, "social_callback_url"),
+            (SettingKey::StylesheetUrl, "stylesheet_url"),
+            (SettingKey::LogoUrl, "logo_url"),
+            (SettingKey::ClientIpHeader, "audit.client_ip_header"),
+            (SettingKey::RequestIdHeader, "audit.request_id_header"),
+            (SettingKey::AuditRotation, "audit.rotation"),
+            (SettingKey::AuditRetention, "audit.retention"),
+        ];
+        for (key, name) in names {
+            assert_eq!(key.name(), name, "{key:?}");
+        }
+        // The two callers whose field name is not a settings key, through the same core: the
+        // tail is the shared one, the field is the caller's. The bytes are the S0 leaf golden's;
+        // this pins that they come out of the typed core and not out of a second copy of a
+        // sentence, which is what the access file's parser and `bb-auth-adm` depend on.
+        assert_eq!(
+            refusal(compile_asset_url("--stylesheet", "ftp://x.com")),
+            format!("--stylesheet 'ftp://x.com': {}", UrlFault::NotHttpsOrRooted),
+            "the CLI's flag-named asset refusal does not carry the shared tail"
+        );
+        assert_eq!(
+            refusal(compile_page_url("denied_url", "https://x.com/a b")),
+            format!("denied_url 'https://x.com/a b': {}", UrlFault::NotPrintable),
+            "the access file's field-named page refusal does not carry the shared tail"
+        );
     }
 
     /// S1: `From<PrepareError> for String` is the one thing that lets `bb-auth-adm` print these
