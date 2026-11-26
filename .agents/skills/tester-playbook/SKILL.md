@@ -406,6 +406,25 @@ Rules are in `AGENTS.md`. Format of this file: `AGENTS.md`, under "Skills".
   same `K::Config` string, so `panel.find(t(lang, K::Config))` is the tab. Locate the row by
   `anchors_to(&panel, "{ADMIN_BASE}/config")` and measure the order from that, and pin "among the
   places" as `nested_block(&panel, "<div class=\"menu-places\">", "div").contains(&row)`.
+- A `K` **variant** the design promises but the code has not added is the same compile trap as a new
+  library API: `t(lang, K::AccountDeleteTitle)` fails the whole `bb-auth-web` target (E0599), so the
+  red is a compile error and no assertion runs. Spell the design's EN/IT strings as local consts and
+  reach for `t(lang, K::…)` only where the variant **already** exists (`Cancel`, `AccountNoRow`,
+  `AccountVeto*`, the `Unit*` words), which is also how a "the page never says X" assert names the
+  veto's words without writing them.
+- The audit's size in a sentence is `AuditPolicy::max_bytes()`, which is two files at the rotation
+  size (8 MiB by default), not `AUDIT_MAX_BYTES` (4 MiB, one file): read it from the library, never
+  a literal.
+- The account page's language is the `lang` cookie: an Italian assertion needs `Cookie: lang=it`
+  on the request, or both loop iterations get English.
+- `visible_text` of a **whole** document is the inlined stylesheets read as prose (the palette's
+  comments), so a "this page says no X" assert needs the stylesheets cut first:
+  `visible_text(&account_readable(body))`.
+- `tiny_http::Request` answers `req.url()` for the path, not `req.uri()`: a recording fake (the
+  intake, a webhook) that wants `METHOD path` is `format!("{} {}", fmt_method(req.method()),
+  req.url())`, with the method spelled by `format!("{method:?}")`.
+- `elements(html, "<input", ">")`: the open-tag pattern must **not** end in a space: `"<input "`
+  matches no field, because the attributes vary, and the empty list reads as "the page has no form".
 - A test written against a `Result<_, String>` with `.err().expect(…)` trips clippy's `err_expect`
   the day the error becomes a `Debug` enum (step 12 S1). Write `.expect_err(…)` from the start;
   it compiles against both.
