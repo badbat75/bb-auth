@@ -7018,7 +7018,7 @@ in text (<https://www.w3.org/WAI/WCAG22/Understanding/error-identification.html>
 fragments do only through the red outline and `aria-describedby`. That trades consistency
 (Nielsen's fourth heuristic) for identification until the old keys are brought in line, which is
 a separate change to the `K` table and not part of S8; it is proposed to the coordinator as
-follow-up work, not done here.
+follow-up work, not done here. (Designed as S10 in §10.)
 
 `app_client_id`'s `{0}` is `t(lang, K::SignInEmail)` for `client_id` and the provider's name
 for a button: the "Ways in" table labels its rows that way, and the cell is the field.
@@ -7164,7 +7164,174 @@ to `SettingsRefusal`); S8 and S9 add the `K` keys, so also `node e2e/run.js` and
 
 None blocks the slices. Two are worth a look in the morning: the wording in §4, which the
 designer reviewed and rewrote on 2026-11-26 (see the list above its table; the TTL keys now take
-the floor or ceiling and not the value, and the older fragment-style keys are left as a proposed
-follow-up); and whether the
+the floor or ceiling and not the value, and the older fragment-style keys are reworded in §10); and whether the
 CLI should one day name its flags in these refusals the way it already does in its pre-checks
 is left alone here, because the user asked for its bytes to stay as they are.
+
+#### 10. S10: the page's own refusals
+
+Designed by the designer on 2026-11-26, after S9 (`0e3db28`). What was read: `ConfigForm::apply`,
+the `Route::Config` arm of `mutate` (the confirmation of guarded changes included),
+`settings_refusal`, `settings_group_of`, `social_choices`, `page_config`, `Route::title`, the
+`GET /config` branch of the request handler, the file-error branch that reads `web.admins`, and
+every `K` entry named below, in both languages, at `0e3db28`. Nothing was rendered for this
+section: it changes words, and §4's register was already reviewed on screen after S8.
+
+**What the page can refuse on its own.** Nine messages, all raised by `ConfigForm::apply` except
+the last, which the library raises and `settings_refusal` maps onto the page's own key. The
+confirmation of guarded changes raises no refusal: a token that does not match re-shows the
+confirmation, which is a step and not an error. The rest of the `POST`'s failures are not field
+refusals and stay as they are: a stale `rev` is the shared `page_conflict` (a `409` on every
+page), and a settings file broken on disk or a failed write is shown in the gate's English, for
+the reason §5 gives.
+
+| Field (`name=`) | Raised by | Key today | Key after S10 | Shared with |
+| --- | --- | --- | --- | --- |
+| `ttl` | `apply` | `SessionTtlBad` | `SessionTtlBad` | nothing |
+| `admins` (empty) | `apply` | `AdminsNeverEmpty` | **`SetRefAdminsNone`** (new) | `AdminsNeverEmpty` is also the 500 page for a settings file with no administrators |
+| `admins` (yourself) | `apply` | `AdminsKeepYourself` | **`SetRefAdminsSelf`** (new) | `AdminsKeepYourself` is also the Administrators help text, in brackets |
+| `client_id` | `apply` | `ClientIdNeeded` | `ClientIdNeeded` | nothing |
+| `aud-<idp>` | `apply` and `settings_refusal` (`button_no_audience`) | `AudienceNeeded` | `AudienceNeeded` | nothing outside this page |
+| `issuer` | `apply` | `IssuerNeeded` | `IssuerNeeded` | nothing |
+| `hosts` | `apply` | `AuthorizedHostsNeeded` | `AuthorizedHostsNeeded` | nothing |
+| `ui_theme` | `apply` and `settings_refusal` (`theme_unknown`) | `DefaultThemeBad` | `DefaultThemeBad` | nothing outside this page |
+| `domain` | `settings_refusal` (`social_half_configured`) | `SocialWiringNeeded` | `SocialWiringNeeded` | nothing outside this page |
+
+No key here is used by the access-file pages or by `/account`. **Two are shared inside this
+binary and are split, not reworded**, because their other use reads correctly as it is and
+would read wrongly with a label in front: `AdminsNeverEmpty` follows a file path on the
+file-error page (`settings.json: at least one administrator is required: …`), which is the
+register of a shell message, and `AdminsKeepYourself` sits in brackets after the
+Administrators help text, where "Administrators:" would repeat the label printed just above it.
+Both keep their key and their words; `apply` moves to the two new keys. The seven others are
+reworded in place, and every call site of them (the eight `apply` refusals and the three
+`settings_refusal` arms) goes through `fill`.
+
+**The words.** The register is §4's: the visible label first, then a colon, then what is
+allowed, ending with a full stop; `{0}` is `t(lang, label)` so a renamed label carries. The two
+app client rows have no label of their own, so they start the way `SetRefAppClientId` already
+does, with "App client for" and the row's heading (`t(lang, K::SignInEmail)`, or
+`social_idp_label(idp)` for a provider). "Sign-in" replaces "login", which the page does not say
+anywhere else.
+
+| `K` key | `{…}` | English | Italian |
+| --- | --- | --- | --- |
+| `SessionTtlBad` | `SessionTtl` | `{0}: must be a whole number of seconds, such as 2592000 for 30 days.` | `{0}: deve essere un numero intero di secondi, come 2592000 per 30 giorni.` |
+| `SetRefAdminsNone` | `Admins` | `{0}: at least one is needed; an empty list must never come to mean 'everyone'.` | `{0}: ne serve almeno uno; una lista vuota non deve mai finire per significare 'chiunque'.` |
+| `SetRefAdminsSelf` | `Admins` | `{0}: your own address must stay on the list; to remove yourself, use bb-auth-adm over SSH.` | `{0}: il tuo indirizzo deve restare nella lista; per rimuovere te stesso usa bb-auth-adm via SSH.` |
+| `ClientIdNeeded` | `SignInEmail` | `App client for {0}: cannot be empty; without one, no sign-in can complete. It is the Cognito app client the sign-in page signs people in against.` | `App client per {0}: non può essere vuoto; senza, nessun accesso può concludersi. È l'app client Cognito con cui la pagina di accesso fa entrare le persone.` |
+| `AudienceNeeded` | provider label | `App client for {0}: this provider needs its own, because Cognito federates per app client; name the one that offers this provider.` | `App client per {0}: questo provider ha bisogno del proprio, perché Cognito federa per app client; indica quello che offre questo provider.` |
+| `IssuerNeeded` | `Issuer` | `{0}: cannot be empty; without one, no token can be validated and no sign-in can complete.` | `{0}: non può essere vuoto; senza, nessun token può essere validato e nessun accesso può concludersi.` |
+| `AuthorizedHostsNeeded` | `AuthorizedHosts` | `{0}: at least one is needed; without one, every redirect after sign-in is refused and everybody lands back on the sign-in page.` | `{0}: ne serve almeno uno; senza, ogni redirect dopo l'accesso viene rifiutato e tutti tornano alla pagina di accesso.` |
+| `DefaultThemeBad` | `DefaultTheme` | `{0}: choose one of the options in the list; this request carried a value the list does not offer.` | `{0}: scegli una delle opzioni dell'elenco; questa richiesta portava un valore che l'elenco non offre.` |
+| `SocialWiringNeeded` | `OauthDomain`, `SocialCallback` | `{0} and {1}: a social button needs both; without them there is nowhere to send a visitor and nowhere for them to come back to.` | `{0} e {1}: un pulsante social ha bisogno di entrambi; senza, non c'è dove mandare chi entra né dove farlo tornare.` |
+
+`DefaultThemeBad` no longer lists `light, dark, system`: those are the file's codes, and the list
+box shows "Light", "Dark" and the system option in the reader's language, so the codes were wire
+words on the page. Only a request this form did not build can carry another value, which is what
+the sentence now says. `SocialWiringNeeded` names both labels because the library does not say
+which of the two is empty; it still marks `domain`, as today.
+
+**Two attribution faults found on the way, fixed in the same slice.** `apply` refuses the theme
+on `"theme"`, but the list box is `name="ui_theme"` and `settings_refusal` already says
+`"ui_theme"`: `apply` moves to `"ui_theme"`. And `settings_group_of` lists `"theme"`, so a theme
+refusal on `"ui_theme"` opens the sign-in group instead of the one holding the list box: the arm
+names `"ui_theme"`. Both can only be reached by a forged request; they are fixed because the
+walk below would otherwise have to encode the wrong group.
+
+**Accents written as apostrophes.** The rule a test can check is stated under the tests. Against
+all 457 `K` entries at `0e3db28` it finds 22 occurrences in five keys, all genuine, and nothing
+else. `AudienceNeeded` has none. `ClientIdNeeded` and `SocialWiringNeeded` are fixed by their
+rewording above; the three help texts change only where listed.
+
+| Key | Old | New |
+| --- | --- | --- |
+| `GlobalLoginUrlHelp` | `che e' quello` | `che è quello` |
+| `GlobalLoginUrlHelp` | `Una applicazione puo' sovrascriverla` | `Una applicazione può sovrascriverla` |
+| `GlobalDeniedUrlHelp` | `qui non e' ammesso` | `qui non è ammesso` |
+| `GlobalDeniedUrlHelp` | `Non puo' chiudere` | `Non può chiudere` |
+| `GlobalDeniedUrlHelp` | `chi e' gia' stato respinto` (two) | `chi è già stato respinto` |
+| `GlobalDeniedUrlHelp` | `Una applicazione puo' sovrascriverla` | `Una applicazione può sovrascriverla` |
+| `GlobalDeniedUrlHelp` | `ed e' cosi' che` (two) | `ed è così che` |
+| `GlobalDeniedUrlHelp` | `un solo gate da' a ogni host` | `un solo gate dà a ogni host` |
+| `ClientIdNeeded` | `puo' concludersi. E' l'app client` (two) | as in the table of words above |
+| `SocialWiringNeeded` | `non c'e' dove … ne' dove` (two) | as in the table of words above |
+| `SocialWaysHelp` | `Email e codice e' sempre offerto ed e' l'app client` (two) | `Email e codice è sempre offerto ed è l'app client` |
+| `SocialWaysHelp` | `solo se e' spuntato` | `solo se è spuntato` |
+| `SocialWaysHelp` | `perche' Cognito federa` | `perché Cognito federa` |
+| `SocialWaysHelp` | `per cui e' stato emesso` | `per cui è stato emesso` |
+| `SocialWaysHelp` | `da qui non si puo' raggiungerne un altro` | removed with its sentence, see below |
+| `SocialWaysHelp` | `Microsoft e' l'account personale` | `Microsoft è l'account personale` |
+| `SocialWaysHelp` | `un tenant Entra ID e' un provider separato` | `un tenant Entra ID è un provider separato` |
+
+**One sentence of `SocialWaysHelp` is no longer true, in both languages**, and it is in the
+string being edited, so it is corrected here rather than left for later: "The pool they belong
+to stays in the env file, so nothing here can reach another one." / "Il pool a cui appartengono
+resta nel file env, quindi da qui non si può raggiungerne un altro." The pool has been
+`gate.issuer` in the settings file since version 3, edited by the User pool (issuer) field at the
+top of this same group. It becomes "They all belong to the User pool (issuer) above." /
+"Appartengono tutti allo User pool (issuer) qui sopra."
+
+**The refused page's title.** Every response to `/config` carries the title the `GET` carries,
+`t(lang, K::Config)`: "System settings" / "Impostazioni di sistema", for a refusal (`400`), a
+confirmation (`200`), a stale `rev` (`409`) and a broken file (`500`) alike. Today the `POST`
+takes `Route::title`, which answers the untranslated "settings". That rule (a page is titled with
+the file section an operator types) fits the access-file pages and not this one: the settings
+file is a whole file in four sections, "settings" is a key in neither file, and the `GET`, the
+`h1` and the account menu's row all already say "System settings". A browser tab or a screen
+reader's page title that changes language and wording after a save is a page that seems to have
+moved (WCAG 2.2 SC 2.4.2 Page Titled,
+<https://www.w3.org/WAI/WCAG22/Understanding/page-titled.html>; Nielsen's fourth heuristic,
+consistency).
+
+#### 10a. Tests for S10 (the tester's names)
+
+- **`every_config_refusal_starts_with_its_label`** (bb-auth-web, over the real router like the
+  S9 tests). For each row of the first table, `POST /config` with a form built by
+  `settings_fields` that triggers it, once with the `lang=en` cookie and once with `lang=it`:
+  `ttl=abc`; `admins` blank; `admins=someone@else.com`; `client_id` blank; `issuer` blank; `hosts`
+  blank; `idp-Google=on` with `aud-Google` blank; `ui_theme=purple`; and `idp-Google=on` with an
+  app client and `domain` blank. Each answers `400`; the `div.err` text (not the whole body, which
+  carries the help texts) starts with the expected label as the page prints it in that language
+  (`Session lifetime` / `Durata della sessione`, `Administrators` / `Amministratori`, `App client
+  for Email and code` / `App client per Email e codice`, `App client for Google` / `App client
+  per Google`, `User pool (issuer)`, `Authorized hosts` / `Host autorizzati`, `Default
+  appearance` / `Aspetto predefinito`, `Hosted UI domain and Callback URL` / `Dominio della
+  hosted UI e URL di callback`) followed by `:`, ends with `.`, holds no `{` followed by a digit,
+  and differs between the two languages; the field named in the first column is the one marked
+  `invalid` with `aria-describedby="form-error"` (except `ui_theme`, whose list box is not marked:
+  its group `g-look` is asserted `open` instead, on plain `/config` without `?groups=open`). The
+  two admins rows assert the new keys' text and that the help text still reads "you cannot
+  remove yourself here" / "non puoi rimuovere te stesso da qui".
+- **`every_settings_refusal_reads_in_both_languages`** gains one assertion: for every code that
+  is not file-only, the message starts with the label of the field its `Refusal` marks, using the
+  same field-to-label map as the walk above (extended to the library's fields), so the three
+  library arms that reuse the page's keys are held to the same rule.
+- **`italian_k_strings_write_accents_as_letters`** (bb-auth-web, unit). It walks the Italian of
+  every `K` entry. `K` has no list of its variants and none is added for a test: the test reads
+  its own file with `include_str!("bb-auth-web.rs")`, takes the body of `fn t(lang: Lang, key:
+  K)`, and from each `m(lang, "…", "…")` the third argument, unescaped as Rust does (a `\` at a
+  line end drops the newline and the next line's leading spaces; `\"`, `\\` and `\u{…}` become
+  their characters). The rule, exactly: an apostrophe `'` (U+0027) is a fault when the character
+  before it is one of `a e i o u A E I O U` and the character after it is not a letter (a space,
+  punctuation, or the end of the string), **unless it closes a quotation**, where a quotation is
+  opened by a `'` at the start of the string or right after a space or `(`, and closed by the next
+  `'` that is followed by a non-letter. The failure names the key and the text around the fault.
+  Red on today's table with exactly the 22 occurrences listed above.
+- **`the_accent_rule_flags_only_apostrophe_accents`** (unit, over the rule's function alone):
+  it flags `puo' x`, `c'e' x`, `ne' dove`, `È bene. E' l`, `da' a`, `perche'.`, `gia'`; it does not
+  flag `l'Header`, `un'email`, `dell'URL`, `'chiunque'`, `'solo questi',`, `'@nome'`,
+  `('tutti gli ambiti')`, or the typographic `un’email`. This is what keeps the walk from being
+  satisfied by a rule that flags nothing.
+- **`a_refused_settings_save_keeps_the_page_title`** (bb-auth-web, over the router): the `<title>`
+  of a `400` (`ttl=abc`), of a confirmation `200` (an `issuer` change) and of a `409` (a stale
+  `rev`) on `/config` equals the `GET`'s, in English and in Italian: `System settings` /
+  `Impostazioni di sistema`.
+- **Existing tests whose assertion is the old wording**: the admins test around line 15052 asserts
+  `"at least one administrator"` on the refused page and moves to the new `SetRefAdminsNone` text
+  in its `div.err`; the one at 15042 (`"cannot remove yourself"`) passes on the help text alone
+  and should assert the `div.err` instead. No other test spells these keys' English.
+- **What a person sees**: the designer reviews an Italian refusal of the page's own (`ttl=abc`)
+  from a scratch probe on plain `/config` (the `config-*` scenes force every group open), plus
+  the help texts of the sign-in group in Italian, before the slice closes. No new `shots.js`
+  scene: `config-landing-refused` already shows the register on screen.

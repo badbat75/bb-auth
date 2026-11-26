@@ -63,7 +63,11 @@ Rules are in `AGENTS.md`. Format of this file: `AGENTS.md`, under "Skills".
 - A mockup with no server and no Edge: `/tmp/d7w/mock.js` inlines the three real stylesheets in a `<style>` and
   launches Playwright's chromium with `executablePath` set to the cached `chromium_headless_shell-1255` binary.
 
+- To find Italian accents typed as apostrophes in the `K` table, extract each `m(lang, en, it)`'s third string with Python and apply §13.31 §10a's rule (a `'` after a vowel, before a non-letter, not closing a quote opened after a space or `(`); a plain regex also flags `'chiunque'`.
+
 ## Pitfalls
+
+- A refused field's group opens through `settings_group_of`, keyed by `name=`: a refusal's field must be the real `name=` (the theme box is `ui_theme`), or it opens the wrong group.
 
 - The `config-*` scenes open `/config?groups=open`, so they cannot show whether a refusal opens its own group: check that from a scratch script on plain `/config`, setting the hidden field with `page.evaluate` (Playwright's `fill` refuses an input inside a closed `details`). Example: `/tmp/s8r/probe.js`.
 
@@ -93,7 +97,8 @@ Rules are in `AGENTS.md`. Format of this file: `AGENTS.md`, under "Skills".
 - `shots.js`'s `phone` view is light only: there is no dark phone screenshot to show, so shoot one with a scratch script if a review needs it.
 - `ul.plain` has no margin, so a second `p.lbl` after it sits against the last item: a second group of facts in one card reads better as `p.muted` sentences than as a second labelled list.
 - Every row of the header panel carries a glyph with a `.5em` margin, so a row without one starts its word left of the others: a new panel row needs a glyph too.
-- The settings page's older refusal keys (`SessionTtlBad`, `IssuerNeeded`, `DefaultThemeBad`…) are label-less lowercase fragments shown above the form, not beside the field: a new refusal key names the label first, and reusing an old one keeps that gap.
+- Before rewording a `K` key, grep every `K::Name` use: `AdminsKeepYourself` is also a help text and `AdminsNeverEmpty` a file-error line, so a label-first rewording must split them, not edit them.
+- `Route::title` gives untranslated file-section names, but `/config` and the dashboard are titled `t(lang, …)` on `GET`: a `POST` that takes `Route::title` changes the tab's title after a save.
 - A library refusal's English can be narrower than its check (`url_not_printable` said "spaces and control characters" for a printable-ASCII test, so an accented letter got the wrong reason): read the check's code, not its sentence, before wording the `K` key.
 - `boot()`'s Edge can time out at launch while other agents' Edge processes run, and Playwright's own chromium
   asks for a build the cache lacks: pass `executablePath`. A `<link href="file://…">` in `setContent` is blocked,
