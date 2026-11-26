@@ -65,6 +65,8 @@ Rules are in `AGENTS.md`. Format of this file: `AGENTS.md`, under "Skills".
 
 ## Pitfalls
 
+- The `config-*` scenes open `/config?groups=open`, so they cannot show whether a refusal opens its own group: check that from a scratch script on plain `/config`, setting the hidden field with `page.evaluate` (Playwright's `fill` refuses an input inside a closed `details`). Example: `/tmp/s8r/probe.js`.
+
 - `autofocus` is ignored when the URL has a fragment (MDN): a link that opens a form must not add `#id`.
 - A cell's class can collide with a component's: `td.pills` also matches `base.css`'s `.pills{display:inline-flex}`, so it stopped being a table cell after its own rule lost `display:flex`. Check computed values, not the rule text.
 - Edge ignores `line-height` on a `select`: to match a field's height to a pill's, use `min-height`, measured.

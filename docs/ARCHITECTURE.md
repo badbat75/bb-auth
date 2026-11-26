@@ -7103,6 +7103,16 @@ reaches `prepare` and is refused there, in the page's words, on its field.
   is why §13.21's `body.contains("landing_url")` passes whatever the message says.
 - **What a person sees.** `node e2e/shots.js config-landing-refused`: the designer reads the
   Italian shot and the English one, which today show the wire sentence (§13.21).
+  Reviewed after S8 (designer, 2026-11-26): the four views show the message in the reader's
+  language, opening with the field's label, and the landing page's input is the one marked
+  (`invalid`, `aria-invalid="true"`, `aria-describedby="form-error"`); a folded group opens
+  itself on the refusal (checked without `?groups=open`, which the scene passes). That meets
+  SC 3.3.1 by the text alone, and the message is first in `main` after a full page load, so it
+  needs no live region or focus move. Claims (`claim_consumed`, `claims_collide`) and the
+  session lifetime read the same way in both languages. The stray host still shows `apply`'s
+  English `format!` until S9, so the several-host sentence of `hosts_outside_cookie_domain` is
+  reachable only then; its sample reads "Authorized hosts: the Cookie domain '.example.com'
+  does not reach a.other.org, b.other.org, c.third.net, so …", which holds for a list.
 
 #### 7. Slices
 
