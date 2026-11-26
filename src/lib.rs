@@ -5653,17 +5653,17 @@ pub struct SocialButton {
 /// lowercase alphanumerics, so nothing this refuses could have been one.
 /// The tail of an app client id refusal, byte for byte as the leaf spelled it before
 /// [`SettingsRefusal::AppClientId`] existed (§13.31 §2 row 12). It is a `const` because two
-/// callers print it under two different names: the enum's `sentence()` spells the settings key,
-/// and this leaf's wrapper spells whatever its caller names (`client_id`, the CLI's `--client-id`,
-/// a button's spelling), so the tail must have exactly one home.
+/// callers print it under two different names: the enum's `sentence()` spells the settings key
+/// and the button's name, and this leaf's wrapper spells whatever its caller names (`client_id`,
+/// the CLI's `--client-id`, the GUI's `audience`), so the tail must have exactly one home.
 const APP_CLIENT_TAIL: &str = "is not an app client id, which is letters, digits, '.', '_' and '-'";
 
 pub fn compile_app_client_id(what: &str, raw: &str) -> Result<String, String> {
     app_client_id_core(raw)
         // The caller's name in front of the shared tail: the CLI calls this leaf with its own
-        // flag and `compile_social_buttons` with the button's spelling, and neither is a
-        // settings key, so the variant's own sentence, which names `client_id`, is not what
-        // these callers print (§13.31 §3).
+        // flag and the GUI with its own field name, and neither is a settings key, so the
+        // variant's own sentence, which names `client_id`, is not what these callers print
+        // (§13.31 §3).
         .map_err(|_| format!("{what}: '{}' {APP_CLIENT_TAIL}", raw.trim()))
 }
 
@@ -5999,45 +5999,55 @@ pub fn guarded_changes(old: &GateSettings, new: &GateSettings) -> Vec<GuardedSet
 /// Duplicates are refused rather than deduplicated: two buttons for one provider is not what
 /// anybody meant, and quietly dropping one would hide a copy-paste from an operator who is
 /// looking straight at the list.
-pub fn compile_social_buttons(raw: &[SocialButtonSpec]) -> Result<Vec<SocialButton>, String> {
+///
+/// This leaf answers the typed [`SettingsRefusal`] itself, with no `String` wrapper beside it:
+/// `compile_settings` is its only caller, so the refusal built here is the refusal the file is
+/// refused with, and there is no other caller whose words a wrapper would have to serve
+/// (docs/ARCHITECTURE.md §13.31 §3).
+pub fn compile_social_buttons(
+    raw: &[SocialButtonSpec],
+) -> Result<Vec<SocialButton>, SettingsRefusal> {
     let mut out: Vec<SocialButton> = Vec::with_capacity(raw.len());
     for entry in raw {
         let wired = match entry {
             SocialButtonSpec::Wired(w) => w,
             // The pre-2 shape, answered with the sentence a type error could not have said.
             SocialButtonSpec::Name(n) => {
-                return Err(format!(
-                    "social_buttons: '{n}' is a bare provider name, which was the shape before \
-                     each button carried its own app client. Write it as {{ \"idp\": \"{n}\", \
-                     \"audience\": \"<app client id>\" }}"
-                ))
+                return Err(SettingsRefusal::ButtonBareName { name: n.clone() })
             }
         };
         let name = wired.idp.trim();
         if name.is_empty() {
-            return Err("social_buttons: an entry names no identity_provider".to_string());
+            return Err(SettingsRefusal::ButtonNoIdp);
         }
         if !name
             .bytes()
             .all(|b| b.is_ascii_alphanumeric() || b == b'.' || b == b'_' || b == b'-')
         {
-            return Err(format!(
-                "social_buttons '{name}': a Cognito identity_provider name is letters, digits, \
-                 '.', '_' and '-'"
-            ));
+            return Err(SettingsRefusal::ButtonIdpCharset {
+                idp: name.to_string(),
+            });
         }
         if out.iter().any(|k| k.idp.eq_ignore_ascii_case(name)) {
-            return Err(format!("social_buttons: '{name}' is listed twice"));
+            return Err(SettingsRefusal::ButtonTwice {
+                idp: name.to_string(),
+            });
         }
-        let audience = compile_app_client_id(
-            &format!("social_buttons '{name}': audience"),
-            &wired.audience,
-        )?;
+        // The shared app client core, with this button's name put on its refusal: the variant's
+        // sentence spells `client_id`, which is the setting the core answers for, and a button's
+        // audience is not that (§13.31 §3). Empty is `Ok("")` there, so the empty audience is
+        // this leaf's own refusal, one check below.
+        let audience = app_client_id_core(&wired.audience).map_err(|r| match r {
+            SettingsRefusal::AppClientId { id, .. } => SettingsRefusal::AppClientId {
+                button: Some(name.to_string()),
+                id,
+            },
+            other => other,
+        })?;
         if audience.is_empty() {
-            return Err(format!(
-                "social_buttons '{name}': names no app client, so no button could be drawn for \
-                 it. Cognito federates per app client, so this is the one that offers {name}"
-            ));
+            return Err(SettingsRefusal::ButtonNoAudience {
+                idp: name.to_string(),
+            });
         }
         out.push(SocialButton {
             idp: name.to_string(),
@@ -6361,6 +6371,64 @@ pub enum SettingsRefusal {
         /// The value trimmed, which is what today's sentence quoted.
         raw: String,
     },
+    /// A `gate.social_buttons` entry that is a bare string: the shape from before every button
+    /// carried its own app client, when one `gate.client_id` served them all.
+    ///
+    /// Refused rather than read as a button with no audience, because Cognito federates **per
+    /// app client**: the name says which provider the pool offers, not which client offers it,
+    /// so there is no value this entry could be completed with. The sentence writes the entry in
+    /// the shape that works, because the one thing an operator holding this file has to do is add
+    /// a value, and that is easier with the shape in front of them than described.
+    ButtonBareName {
+        /// The name as given, which is what today's sentence quoted, twice.
+        name: String,
+    },
+    /// A `gate.social_buttons` entry whose `identity_provider` is empty once trimmed, so nothing
+    /// says what the button is for.
+    ///
+    /// Refused because that name is the whole entry: it is what the sign-in page shows on the
+    /// button, what Cognito is named in the authorize URL, and what the callback matches the
+    /// button against. An empty one draws a button that leads a visitor to a provider no pool
+    /// offers. It refuses the file rather than skipping the entry for the reason the whole list
+    /// is fatal: a button an operator wrote and the page does not draw is invisible, with no
+    /// error and no log line at the moment it matters.
+    ButtonNoIdp,
+    /// A `gate.social_buttons` `identity_provider` outside letters, digits, `.`, `_` and `-`.
+    ///
+    /// Refused because the name is **emitted**: into the sign-in page's HTML, into the
+    /// `identity_provider` query parameter of Cognito's authorize URL, and into the button's
+    /// label. That charset is what makes all three safe by construction rather than by escaping,
+    /// the same argument [`compile_app_client_id`] makes for the audience beside it. It is not a
+    /// list of known providers, because a pool may federate a SAML or OIDC provider under any
+    /// name its administrator chose; what this refuses is a value that could never be one.
+    ButtonIdpCharset {
+        /// The name trimmed, which is what today's sentence quoted.
+        idp: String,
+    },
+    /// One `identity_provider` listed by two `gate.social_buttons` entries, compared
+    /// case-insensitively because Cognito's own names differ only in case.
+    ///
+    /// Refused rather than deduplicated: two buttons for one provider is not what anybody meant,
+    /// and quietly dropping one hides a copy-paste from an operator looking straight at the
+    /// list. It also keeps one provider bound to exactly one app client, which is what the
+    /// callback's lookup of a button by provider assumes.
+    ButtonTwice {
+        /// The name as the **second** entry spelled it, which is what today's sentence quoted:
+        /// the comparison is case-insensitive, so the stored name is the first entry's, and
+        /// naming that would blame the line nobody wrote wrong.
+        idp: String,
+    },
+    /// A `gate.social_buttons` entry with an empty `audience`: a provider with no app client.
+    ///
+    /// Refused because the app client is the half that offers the provider, so a button drawn
+    /// from this entry opens the hosted UI on a client that does not list that provider, and the
+    /// visitor sits on Cognito's own error page with the reason in Amazon's words. A button that
+    /// cannot be drawn is refused rather than dropped, for the same reason as a bad provider
+    /// name, and the sentence names the value to add.
+    ButtonNoAudience {
+        /// The provider name trimmed, which is what today's sentence quoted, twice.
+        idp: String,
+    },
     /// Social buttons are configured with no `gate.oauth_domain` or no
     /// `gate.social_callback_url`: nowhere to send a visitor, nowhere for them to come back to.
     SocialHalfConfigured { buttons: usize },
@@ -6403,6 +6471,11 @@ impl SettingsRefusal {
             Self::HostNotBare { .. } => "host_not_bare",
             Self::HostAtOrDotDot { .. } => "host_at_or_dot_dot",
             Self::OauthDomainNotBare { .. } => "oauth_domain_not_bare",
+            Self::ButtonBareName { .. } => "button_bare_name",
+            Self::ButtonNoIdp => "button_no_idp",
+            Self::ButtonIdpCharset { .. } => "button_idp_charset",
+            Self::ButtonTwice { .. } => "button_twice",
+            Self::ButtonNoAudience { .. } => "button_no_audience",
             Self::SocialHalfConfigured { .. } => "social_half_configured",
             Self::AuditHeadersSame { .. } => "audit_headers_same",
             Self::ThemeUnknown { .. } => "theme_unknown",
@@ -6539,6 +6612,21 @@ impl SettingsRefusal {
             Self::OauthDomainNotBare { raw } => format!(
                 "oauth_domain: '{raw}' is not a bare host, which is letters, digits, '.' and \
                  '-' with no scheme and no path"
+            ),
+            Self::ButtonBareName { name } => format!(
+                "social_buttons: '{name}' is a bare provider name, which was the shape before \
+                 each button carried its own app client. Write it as {{ \"idp\": \"{name}\", \
+                 \"audience\": \"<app client id>\" }}"
+            ),
+            Self::ButtonNoIdp => "social_buttons: an entry names no identity_provider".to_string(),
+            Self::ButtonIdpCharset { idp } => format!(
+                "social_buttons '{idp}': a Cognito identity_provider name is letters, digits, \
+                 '.', '_' and '-'"
+            ),
+            Self::ButtonTwice { idp } => format!("social_buttons: '{idp}' is listed twice"),
+            Self::ButtonNoAudience { idp } => format!(
+                "social_buttons '{idp}': names no app client, so no button could be drawn for \
+                 it. Cognito federates per app client, so this is the one that offers {idp}"
             ),
             Self::SocialHalfConfigured { buttons } => format!(
                 "social_buttons: {buttons} button(s) configured, but oauth_domain or \
@@ -6733,8 +6821,7 @@ pub fn compile_settings(file: &SettingsFile) -> Result<Settings, SettingsRefusal
         Some(u) if !u.starts_with("https://") => return Err(SettingsRefusal::CallbackNotHttps),
         other => other,
     };
-    let social_buttons =
-        compile_social_buttons(&file.gate.social_buttons).map_err(SettingsRefusal::Other)?;
+    let social_buttons = compile_social_buttons(&file.gate.social_buttons)?;
     // A button with nowhere to send the browser, or nowhere for it to come back to, is the
     // half-configured social sign-in that used to be a fatal startup when this lived in the
     // environment. It is still refused, one level earlier: in the editor, on the file.
@@ -12454,6 +12541,195 @@ mod tests {
         assert_eq!(
             button.to_string(),
             "social_buttons 'Google': audience: 'bad id' is not an app client id, which is letters, digits, '.', '_' and '-'"
+        );
+    }
+
+    /// A `gate.social_buttons` array, as the settings file spells it.
+    fn social_specs(json: &str) -> Vec<SocialButtonSpec> {
+        serde_json::from_str(json).expect("button fixture parses")
+    }
+
+    /// S5 (§13.31 §2, §3, §7): the five refusals a `gate.social_buttons` entry can raise are
+    /// variants of `SettingsRefusal`, not sentences riding in `Other`, and
+    /// `compile_social_buttons` answers that typed refusal itself: its only caller is
+    /// `compile_settings` (§3), so it keeps no `String` wrapper, and the refusal the leaf builds
+    /// is the refusal the file is refused with, variant for variant. Each row is the S0 golden's
+    /// own fixture for that sentence, so the refusal is known reachable and reaches the arm under
+    /// test, and each row asserts five things: the variant carries the §2 arguments; `code()` is
+    /// the §2 `snake_case` name S8 maps to `SetRefFileOnly`; `prefix()` is nothing, because each
+    /// of these sentences names `social_buttons` itself, which is why today's bytes carry no
+    /// doubled key; `sentence()` is today's bytes; and `Display` is those same bytes, which is
+    /// what `--check-settings` and `bb-auth-adm` print (the golden pins the bytes, this pins the
+    /// shape). The fixture is built from the row's own button array, so the leaf and
+    /// `compile_settings` are fed the same document, and the last assert of each row requires the
+    /// two refusals to be the same variant: one home for each sentence, and no re-wrapping on the
+    /// way out of the leaf. The blocks after the table pin the three things the table cannot: that
+    /// the name reaching the variant is the **trimmed** one today's sentence quoted, that a
+    /// duplicate is reported under the spelling of the entry that tripped it (the comparison is
+    /// case-insensitive, so the stored name is not the one being refused), and that a well-formed
+    /// button still compiles to the pair it always compiled to, which is what keeps this slice a
+    /// change of error type and not a change of what is accepted. The last block pins a button's
+    /// bad audience as S4's `AppClientId` with the button's name, reached through
+    /// `compile_settings` for the first time in this slice.
+    #[test]
+    fn social_button_refusals_are_codes() {
+        type Row<'a> = (
+            &'a str,
+            &'a str,
+            &'a str,
+            Option<&'a str>,
+            &'a str,
+            fn(&SettingsRefusal) -> bool,
+        );
+        let cases: Vec<Row> = vec![
+            (
+                "button bare name",
+                r#"["Google"]"#,
+                "button_bare_name",
+                None,
+                "social_buttons: 'Google' is a bare provider name, which was the shape before each button carried its own app client. Write it as { \"idp\": \"Google\", \"audience\": \"<app client id>\" }",
+                |r| {
+                    matches!(r, SettingsRefusal::ButtonBareName { name } if name == "Google")
+                },
+            ),
+            (
+                "button no idp",
+                r#"[ { "idp": "", "audience": "abc" } ]"#,
+                "button_no_idp",
+                None,
+                "social_buttons: an entry names no identity_provider",
+                |r| matches!(r, SettingsRefusal::ButtonNoIdp),
+            ),
+            (
+                "button idp charset",
+                r#"[ { "idp": "a b", "audience": "abc" } ]"#,
+                "button_idp_charset",
+                None,
+                "social_buttons 'a b': a Cognito identity_provider name is letters, digits, '.', '_' and '-'",
+                |r| {
+                    matches!(r, SettingsRefusal::ButtonIdpCharset { idp } if idp == "a b")
+                },
+            ),
+            (
+                "button twice",
+                r#"[ { "idp": "Google", "audience": "abc" }, { "idp": "Google", "audience": "def" } ]"#,
+                "button_twice",
+                None,
+                "social_buttons: 'Google' is listed twice",
+                |r| matches!(r, SettingsRefusal::ButtonTwice { idp } if idp == "Google"),
+            ),
+            (
+                "button no audience",
+                r#"[ { "idp": "Google", "audience": "" } ]"#,
+                "button_no_audience",
+                None,
+                "social_buttons 'Google': names no app client, so no button could be drawn for it. Cognito federates per app client, so this is the one that offers Google",
+                |r| {
+                    matches!(r, SettingsRefusal::ButtonNoAudience { idp } if idp == "Google")
+                },
+            ),
+        ];
+        for row in cases.iter() {
+            let (label, spec, code, prefix, sentence, is_variant) = *row;
+            let json = format!(r#"{{ "version": 3, "gate": {{ "social_buttons": {spec} }} }}"#);
+            let r = settings_refusal_of(&json);
+            assert!(is_variant(&r), "{label}: got {r:?}");
+            assert_eq!(r.code(), code, "{label}: {r:?}");
+            assert_eq!(r.prefix(), prefix, "{label}: {r:?}");
+            assert_eq!(r.sentence(), sentence, "{label}: {r:?}");
+            let display = match prefix {
+                Some(p) => format!("{p}: {sentence}"),
+                None => sentence.to_string(),
+            };
+            assert_eq!(
+                r.to_string(),
+                display,
+                "{label}: Display is not prefix + \": \" + sentence"
+            );
+            assert_eq!(
+                compile_social_buttons(&social_specs(spec)).expect_err("the leaf refuses too"),
+                r,
+                "{label}: the leaf's refusal is not the refusal compile_settings shows"
+            );
+        }
+        // The name the variant carries is the **trimmed** one, which is the text today's sentence
+        // quoted: the leaf trims before it checks the charset, so a padded name is refused under
+        // the spelling the file means rather than the one that was typed.
+        let padded = social_specs(r#"[ { "idp": "  a b  ", "audience": "abc" } ]"#);
+        let r = compile_social_buttons(&padded).expect_err("refused");
+        assert!(
+            matches!(&r, SettingsRefusal::ButtonIdpCharset { idp } if idp == "a b"),
+            "{r:?}"
+        );
+        assert_eq!(
+            r.sentence(),
+            "social_buttons 'a b': a Cognito identity_provider name is letters, digits, '.', '_' and '-'",
+            "{r:?}"
+        );
+        // A duplicate is found case-insensitively and reported under the spelling of the entry
+        // that tripped the check, which is the line the operator has to fix: reporting the stored
+        // name would name the first entry, the one nobody wrote wrong.
+        let twice = social_specs(
+            r#"[ { "idp": "Google", "audience": "abc" }, { "idp": "google", "audience": "def" } ]"#,
+        );
+        let r = compile_social_buttons(&twice).expect_err("refused");
+        assert!(
+            matches!(&r, SettingsRefusal::ButtonTwice { idp } if idp == "google"),
+            "{r:?}"
+        );
+        assert_eq!(r.code(), "button_twice", "{r:?}");
+        assert_eq!(
+            r.to_string(),
+            "social_buttons: 'google' is listed twice",
+            "{r:?}"
+        );
+        // The accept path is unchanged by this slice: a well-formed button compiles to the pair
+        // it always compiled to, provider name trimmed. Without this, a leaf that refused
+        // everything would leave every row above green.
+        let ok = compile_social_buttons(&social_specs(
+            r#"[ { "idp": " Google ", "audience": "abc123" }, { "idp": "Amazon", "audience": "xyz789" } ]"#,
+        ))
+        .expect("a well-formed button compiles");
+        assert_eq!(
+            ok,
+            vec![
+                SocialButton {
+                    idp: "Google".to_string(),
+                    audience: "abc123".to_string(),
+                },
+                SocialButton {
+                    idp: "Amazon".to_string(),
+                    audience: "xyz789".to_string(),
+                },
+            ]
+        );
+        // A button's bad audience is §2 row 12, the S4 variant with the button's name, reached
+        // through `compile_settings` for the first time in this slice: the leaf calls the app
+        // client core with the button's spelling, and the fixture and the bytes are the S0
+        // golden's own, which answer `Other` today.
+        let json = r#"{ "version": 3, "gate": { "oauth_domain": "auth.x.com", "social_callback_url": "https://auth.x.com/cb", "social_buttons": [ { "idp": "Google", "audience": "bad id" } ] } }"#;
+        let r = settings_refusal_of(json);
+        assert!(
+            matches!(
+                &r,
+                SettingsRefusal::AppClientId { button, id }
+                    if button.as_deref() == Some("Google") && id == "bad id"
+            ),
+            "{r:?}"
+        );
+        assert_eq!(r.code(), "app_client_id", "{r:?}");
+        assert_eq!(r.prefix(), None, "{r:?}");
+        assert_eq!(
+            r.to_string(),
+            "social_buttons 'Google': audience: 'bad id' is not an app client id, which is letters, digits, '.', '_' and '-'"
+        );
+        assert_eq!(
+            compile_social_buttons(&social_specs(
+                r#"[ { "idp": "Google", "audience": "bad id" } ]"#,
+            ))
+            .expect_err("the leaf refuses too"),
+            r,
+            "the button audience refusal is not the one the leaf builds"
         );
     }
 
