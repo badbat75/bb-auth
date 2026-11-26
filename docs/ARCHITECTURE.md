@@ -5643,6 +5643,34 @@ removes the row through the same `remove_user` the CLI uses (it calls `bb-auth-a
 does); how long a record takes from the `202` to the deletion (no number is promised anywhere until
 7g measures one).
 
+#### W1a. The next versions, prepared and not deployed (worker)
+
+**Relayed by IT-Admin on 2026-11-26, not read by this repository's roles.** The owner had IT-Admin
+prepare W8 §1, §2, §3 and §5 in itadmin as intake 2.1.0 and worker 1.1.0. They were tested there
+with stubs and are not on rpi-01 until the owner says so. W8 §4 (a mail to the person) was left
+out by the owner. What bb-auth-web may rely on once 2.1.0 is installed, on both `GET
+/account/whoami` and `POST /account/delete`, checked in this order:
+
+- `X-BB-Delete-Secret` wrong, **or sent while the intake has none configured**: `403
+  {"error":"forbidden"}`. A missing header is accepted while `BBDR_REQUIRE_SECRET=0` (the
+  transition), and is a `403` once that is `1`. So the secret is set on both sides or on
+  neither, and bb-auth-web treats this `403` as "not accepted", like every non-`202`.
+- `X-Auth-Email` empty: `401`. It contains whitespace: `400 multiple_identities` (W8 §5). W3's
+  one-address-per-request already never sends one.
+- The protected list unreadable or empty: `503 unavailable` (fail closed).
+- Then, unchanged: `confirm_email` mismatch `400`, a protected address `403 protected`, success
+  `202` / whoami `200 {"ok","email","protected"}`.
+
+The secret is read through `LoadCredential` from `/etc/bb-delete-request/delete-secret`
+(`^[A-Za-z0-9_-]{32,}$`, compared with `hmac.compare_digest`). The owner's recipe generates it with
+`secrets.token_urlsafe(32)`, which gives 43 characters and passes W2's rule, and the same bytes go
+to `BB_AUTH_WEB_DELETE_SECRET`, written by the operator (7g). The protected list becomes one file,
+`/etc/bb-delete-request/protected`, read on every request and every run. Worker 1.1.0 processes at
+most 10 distinct addresses per run and leaves the rest queued, with a timer (5 min after boot,
+then every 15 min). On a failure it stops at that line and the timer retries it, which also
+retires W1's "no retry without a new record". W3's order (the row removed before the first `POST`)
+is unchanged by any of this.
+
 #### W2. Decision: bb-auth-web calls the intake on loopback, and its unit does not change (worker)
 
 bb-auth-web calls the intake's two paths itself, over plain HTTP on loopback, with the identity it
