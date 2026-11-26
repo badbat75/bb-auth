@@ -4106,32 +4106,10 @@ impl AuditLimit {
     /// Parse `<amount> <unit>`, the space optional: `4 MiB`, `4MiB`, `1 year`, `26 weeks`.
     /// The amount is a whole number, at least one, and at most [`AuditUnit`]'s ceiling.
     pub fn parse(raw: &str) -> Result<AuditLimit, String> {
-        let s = raw.trim();
-        let split = s.find(|c: char| !c.is_ascii_digit()).unwrap_or(s.len());
-        let (digits, unit) = s.split_at(split);
-        let refuse = || {
-            Err(format!(
-                "'{s}' is not an amount and a unit: write it as, say, '4 MiB', '1 GiB', \
-                 '26 weeks', '6 months' or '1 year'"
-            ))
-        };
-        let Some(unit) = AuditUnit::parse(unit) else {
-            return refuse();
-        };
-        let Ok(amount) = digits.parse::<u64>() else {
-            return refuse();
-        };
-        if amount == 0 {
-            return Err(format!("'{s}': an amount of nothing is not a limit"));
-        }
-        if amount > unit.max_amount() {
-            return Err(format!(
-                "'{s}': at most {} {}, which is already more than any disk or any audit needs",
-                unit.max_amount(),
-                unit.code()
-            ));
-        }
-        Ok(AuditLimit { amount, unit })
+        // The key is the setting a refusal names, and a limit refusal's sentence names no key at
+        // all (its caller prefixes its own, the CLI's flag or the settings function's), so every
+        // caller of this prints the bytes it always printed (§13.31 §3).
+        audit_limit_core(raw, SettingKey::AuditRotation).map_err(|r| r.sentence())
     }
 
     /// How the file writes it: `4 MiB`, `1 year`, `6 months`. What [`AuditLimit::parse`]
@@ -4156,6 +4134,41 @@ impl AuditLimit {
     pub fn bytes(&self) -> Option<u64> {
         (!self.unit.is_time()).then(|| self.amount.saturating_mul(self.unit.scale()))
     }
+}
+
+/// [`AuditLimit::parse`]'s checks, answering the typed refusal (§13.31 §3). `key` is the setting
+/// the caller is compiling, which the refusal carries so the page can mark the right box; the
+/// quoted `raw` is the value **trimmed**, which is what today's sentence printed.
+fn audit_limit_core(raw: &str, key: SettingKey) -> Result<AuditLimit, SettingsRefusal> {
+    let s = raw.trim();
+    let split = s.find(|c: char| !c.is_ascii_digit()).unwrap_or(s.len());
+    let (digits, unit) = s.split_at(split);
+    let refuse = || {
+        Err(SettingsRefusal::AuditLimitNotAmount {
+            key,
+            raw: s.to_string(),
+        })
+    };
+    let Some(unit) = AuditUnit::parse(unit) else {
+        return refuse();
+    };
+    let Ok(amount) = digits.parse::<u64>() else {
+        return refuse();
+    };
+    if amount == 0 {
+        return Err(SettingsRefusal::AuditLimitZero {
+            key,
+            raw: s.to_string(),
+        });
+    }
+    if amount > unit.max_amount() {
+        return Err(SettingsRefusal::AuditLimitTooMuch {
+            key,
+            raw: s.to_string(),
+            unit,
+        });
+    }
+    Ok(AuditLimit { amount, unit })
 }
 
 /// When the live audit file rotates and how much of the audit is kept: `audit.rotation` and
@@ -4191,23 +4204,7 @@ impl Default for AuditPolicy {
 impl AuditPolicy {
     /// A policy, or the sentence saying why it bounds no bytes.
     pub fn new(rotation: AuditLimit, retention: Option<AuditLimit>) -> Result<AuditPolicy, String> {
-        let sized = rotation.bytes().is_some() || retention.is_some_and(|r| r.bytes().is_some());
-        if !sized {
-            return Err(format!(
-                "rotation '{}' with {} bounds how old the audit gets and not how big: a flood \
-                 of refusals would grow the live file without limit. Rotate on a size (MiB, GiB) \
-                 or give the retention one",
-                rotation.spelled(),
-                match retention {
-                    Some(r) => format!("retention '{}'", r.spelled()),
-                    None => "no retention".to_string(),
-                }
-            ));
-        }
-        Ok(AuditPolicy {
-            rotation,
-            retention,
-        })
+        audit_policy_core(rotation, retention).map_err(|r| r.sentence())
     }
 
     /// The size the live file rotates at: the rotation's own, or half a retention in space,
@@ -4241,6 +4238,43 @@ impl AuditPolicy {
     pub fn max_bytes(&self) -> u64 {
         self.rotate_at_bytes().saturating_mul(2)
     }
+}
+
+/// [`AuditPolicy::new`]'s check, answering the typed refusal (§13.31 §3). The pair it refuses
+/// carries the limits as the file **spells** them, which is what today's sentence quoted:
+/// `'1 weeks'` is refused as `'1 week'`, because the spelling the file does not accept is not a
+/// spelling to point an operator at.
+fn audit_policy_core(
+    rotation: AuditLimit,
+    retention: Option<AuditLimit>,
+) -> Result<AuditPolicy, SettingsRefusal> {
+    let sized = rotation.bytes().is_some() || retention.is_some_and(|r| r.bytes().is_some());
+    if !sized {
+        return Err(SettingsRefusal::AuditUnbounded {
+            rotation: rotation.spelled(),
+            retention: retention.map(|r| r.spelled()),
+        });
+    }
+    Ok(AuditPolicy {
+        rotation,
+        retention,
+    })
+}
+
+/// [`compile_audit_policy`]'s checks, answering the typed refusal (§13.31 §3): the two limits,
+/// each named by its own setting, and the pair between them, in the order the settings function
+/// reads them. An empty value is a default and not a refusal for both, so the enum holds no
+/// refusal of it.
+fn audit_section_core(rotation: &str, retention: &str) -> Result<AuditPolicy, SettingsRefusal> {
+    let rotation = match rotation.trim() {
+        "" => AuditPolicy::default().rotation,
+        raw => audit_limit_core(raw, SettingKey::AuditRotation)?,
+    };
+    let retention = match retention.trim() {
+        "" => None,
+        raw => Some(audit_limit_core(raw, SettingKey::AuditRetention)?),
+    };
+    audit_policy_core(rotation, retention)
 }
 
 /// What kind of thing happened. The outcome is a property of the kind rather than a field of
@@ -5823,23 +5857,30 @@ const CREDENTIAL_HEADERS: [&str; 3] = ["Authorization", "Proxy-Authorization", "
 /// arrives, and naming a header that carries a credential would put that credential into a file
 /// an administrator reads, which is the one thing this system never does with a bearer.
 pub fn compile_audit_header(what: &str, raw: &str) -> Result<String, String> {
+    // The caller's name in front of the shared tail: `bb-auth-adm` calls this leaf with its own
+    // flag and the GUI with its own field name, and neither is a settings key, so the variant's
+    // own sentence, which names `audit.client_ip_header`, is not what these callers print
+    // (§13.31 §3).
+    audit_header_core(raw).map_err(|(name, fault)| format!("{what}: '{name}' {fault}"))
+}
+
+/// [`compile_audit_header`]'s checks, answering the typed refusal's parts (§13.31 §3). The pair
+/// it returns is the name **trimmed**, which is what today's sentence quoted, and the fault: the
+/// setting's name belongs to the caller, which is why the CLI keeps its flag name in front of
+/// the same tail. An empty value is the setting switched off, and is `Ok(String::new())`.
+fn audit_header_core(raw: &str) -> Result<String, (String, HeaderFault)> {
     let name = raw.trim();
     if name.is_empty() {
         return Ok(String::new());
     }
     if name.len() > 64 || !name.bytes().all(|b| b.is_ascii_alphanumeric() || b == b'-') {
-        return Err(format!(
-            "{what}: '{name}' is not a header name, which is letters, digits and '-' (nginx \
-             drops a request header with an underscore in its name)"
-        ));
+        return Err((name.to_string(), HeaderFault::NotAName));
     }
     if CREDENTIAL_HEADERS
         .iter()
         .any(|c| c.eq_ignore_ascii_case(name))
     {
-        return Err(format!(
-            "{what}: '{name}' carries a credential, and the audit never writes one down"
-        ));
+        return Err((name.to_string(), HeaderFault::Credential));
     }
     Ok(name.to_string())
 }
@@ -5851,15 +5892,11 @@ pub fn compile_audit_header(what: &str, raw: &str) -> Result<String, String> {
 /// which is what the audit did before either was a setting. Each message names the setting it
 /// is about, because the one sentence [`AuditPolicy::new`] can add is about the pair.
 pub fn compile_audit_policy(rotation: &str, retention: &str) -> Result<AuditPolicy, String> {
-    let rotation = match rotation.trim() {
-        "" => AuditPolicy::default().rotation,
-        raw => AuditLimit::parse(raw).map_err(|e| format!("audit.rotation: {e}"))?,
-    };
-    let retention = match retention.trim() {
-        "" => None,
-        raw => Some(AuditLimit::parse(raw).map_err(|e| format!("audit.retention: {e}"))?),
-    };
-    AuditPolicy::new(rotation, retention).map_err(|e| format!("audit: {e}"))
+    // `Display` is the prefixed sentence, which is byte for byte what this function printed
+    // when it built the prefixes itself: `audit.rotation: …` / `audit.retention: …` for a limit,
+    // `audit: …` for the pair, which is the prefix `bb-auth-adm` swaps for its own flags
+    // (§13.31 §3).
+    audit_section_core(rotation, retention).map_err(|r| r.to_string())
 }
 
 /// What a `Domain=` attribute actually reaches: the value without the optional leading dot,
@@ -6062,9 +6099,9 @@ pub fn compile_social_buttons(
 ///
 /// The name is the string today's sentences spell, because that is what an operator reads in
 /// `--check-settings`, in the journal and in `bb-auth-adm`: a gate key bare (`login_url`), an
-/// audit key with its section (`audit.rotation`). The audit four arrive with this type and are
-/// read by the audit slice (S6); they are named here because a name is cheapest pinned the day
-/// the type exists, not the day it is first printed.
+/// audit key with its section (`audit.rotation`). The audit four were named here a slice before
+/// the one that reads them, because a name is cheapest pinned the day the type exists, not the
+/// day it is first printed.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum SettingKey {
     /// `gate.login_url`: the page a `401` sends somebody to.
@@ -6187,6 +6224,56 @@ impl std::fmt::Display for UrlFault {
             Self::NotHttpsOrRooted => {
                 "must be an absolute https:// URL or a root-relative path starting with '/'"
             }
+        };
+        f.write_str(tail)
+    }
+}
+
+/// The two shapes an audit header name is refused for, as a name rather than a sentence
+/// (§13.31 §2).
+///
+/// It is a type of its own for the reason [`UrlFault`] is: the same check is reached by callers
+/// that name the value differently, `compile_settings` naming the settings key
+/// (`audit.client_ip_header`) and `bb-auth-adm` naming its own flag (`--client-ip-header`), so
+/// each tail lives here once and the leaf's `String` wrapper and the enum's `sentence()` cannot
+/// drift apart.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum HeaderFault {
+    /// A name outside letters, digits and `-`, or longer than the 64 bytes the leaf bounds it
+    /// at. The underscore is the shape that costs an afternoon: nginx drops a request header
+    /// whose name carries one unless `underscores_in_headers` says otherwise, so a setting that
+    /// allowed it is a setting that reads nothing, in silence, on a file that looks configured.
+    NotAName,
+    /// One of the three headers in `CREDENTIAL_HEADERS`. An address is parsed and whatever is
+    /// not one is dropped, so naming `Authorization` there would only record nothing; a request
+    /// id is written down **as it arrives**, so naming a credential header there would copy a
+    /// bearer into a file an administrator reads, which is the one thing this system never does
+    /// with a key.
+    Credential,
+}
+
+impl HeaderFault {
+    /// The `audit_header_<fault>` code §2 lists, which is what the GUI maps to a `K` key in
+    /// slice S8, spelled the way [`UrlFault::code`] is.
+    fn code(self) -> &'static str {
+        match self {
+            Self::NotAName => "audit_header_not_a_name",
+            Self::Credential => "audit_header_credential",
+        }
+    }
+}
+
+impl std::fmt::Display for HeaderFault {
+    /// The tail of a header refusal, byte for byte as the leaf spelled it before this type
+    /// existed. The setting's name and the quoted value come from the caller; the reason comes
+    /// from here, once.
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        let tail = match self {
+            Self::NotAName => {
+                "is not a header name, which is letters, digits and '-' (nginx drops a request \
+                 header with an underscore in its name)"
+            }
+            Self::Credential => "carries a credential, and the audit never writes one down",
         };
         f.write_str(tail)
     }
@@ -6432,9 +6519,64 @@ pub enum SettingsRefusal {
     /// Social buttons are configured with no `gate.oauth_domain` or no
     /// `gate.social_callback_url`: nowhere to send a visitor, nowhere for them to come back to.
     SocialHalfConfigured { buttons: usize },
+    /// An `audit.client_ip_header` / `audit.request_id_header` value the audit may not read a
+    /// value out of. `key` says which of the two settings, `name` is the name **trimmed** (the
+    /// text today's sentence quoted), `fault` is which of the two shapes [`HeaderFault`] lists.
+    ///
+    /// Refused because the audit believes a header only when an operator has named it, and a
+    /// name that reaches nothing is worse than the setting switched off: every row goes on
+    /// looking configured with nothing in the field the setting was written for. The underscore
+    /// is the shape that bites, because nginx drops such a header before the gate ever sees it.
+    /// A credential is refused because a request id is recorded as it arrives, so this is the
+    /// one place a bearer could be written into a file an administrator reads.
+    AuditHeader {
+        key: SettingKey,
+        name: String,
+        fault: HeaderFault,
+    },
     /// The two audit headers name one header, which cannot carry an address and a request id
     /// at once.
     AuditHeadersSame { name: String },
+    /// An `audit.rotation` / `audit.retention` value that is not an amount and a unit at all.
+    /// `key` says which of the two settings, `raw` is the value **trimmed** (the text today's
+    /// sentence quoted).
+    ///
+    /// Refused rather than defaulted, because the rotation decides when the live audit file is
+    /// replaced: a value silently read as the default rotates that file on a schedule nobody
+    /// wrote, and an operator reading a limit in the file believes it is the one in force.
+    AuditLimitNotAmount { key: SettingKey, raw: String },
+    /// A limit of zero (`0 MiB`): an amount of nothing.
+    ///
+    /// Refused because both settings turn a zero into a destruction: a rotation of `0 MiB`
+    /// rotates on every event, and a retention of `0 MiB` keeps nothing, so the audit would
+    /// prune the evidence it exists to keep, quietly, from the next request onward.
+    AuditLimitZero { key: SettingKey, raw: String },
+    /// A limit past the ceiling of the unit it was written in (a century, a tebibyte). `unit`
+    /// is that unit, because the ceiling the sentence names is the unit's own.
+    ///
+    /// Refused because a limit that high bounds nothing, which is the promise the section makes:
+    /// the audit is bounded by construction, and the arithmetic behind a limit saturates, so
+    /// `999999999 GiB` is a file that grows past any disk while looking bounded. The ceilings
+    /// are far past any disk on this host, so nothing an operator means is refused.
+    AuditLimitTooMuch {
+        key: SettingKey,
+        raw: String,
+        unit: AuditUnit,
+    },
+    /// A rotation and a retention that are both units of time, so nothing bounds how many bytes
+    /// the audit takes on disk. The two strings are the limits as the file spells them
+    /// ([`AuditLimit::spelled`]), which is what today's sentence quoted, and the retention is
+    /// `None` when nobody wrote one, which is the sentence's other arm.
+    ///
+    /// Refused because this is the one combination the audit's bound does not cover: a time says
+    /// how old the audit gets and says nothing about how big, so a flood of refusals inside one
+    /// rotation period grows the live file without limit, and a flood is the one case an audit
+    /// exists for. With a size in either setting, [`AuditPolicy::max_bytes`] is an answer.
+    AuditUnbounded {
+        rotation: String,
+        retention: Option<String>,
+    },
+
     /// `ui.theme` is not one of `system`, `light`, `dark`.
     ThemeUnknown { raw: String },
     /// TEMPORARY (S1 to S6, deleted in S7): a refusal not yet converted, carrying today's
@@ -6477,7 +6619,12 @@ impl SettingsRefusal {
             Self::ButtonTwice { .. } => "button_twice",
             Self::ButtonNoAudience { .. } => "button_no_audience",
             Self::SocialHalfConfigured { .. } => "social_half_configured",
+            Self::AuditHeader { fault, .. } => fault.code(),
             Self::AuditHeadersSame { .. } => "audit_headers_same",
+            Self::AuditLimitNotAmount { .. } => "audit_limit_not_amount",
+            Self::AuditLimitZero { .. } => "audit_limit_zero",
+            Self::AuditLimitTooMuch { .. } => "audit_limit_too_much",
+            Self::AuditUnbounded { .. } => "audit_unbounded",
             Self::ThemeUnknown { .. } => "theme_unknown",
             Self::Other(_) => "other",
         }
@@ -6488,8 +6635,12 @@ impl SettingsRefusal {
     /// whose parser knows nothing of the file's keys, `authorized_hosts` for the three host
     /// faults (the leaf's sentence starts `host pattern '…'`, and the settings function named
     /// the key), `login_url` for the sign-in page's URL (which is how today's doubled
-    /// `login_url: login_url '…': …` is kept), and nothing at all for a refusal the settings
-    /// function spells itself, whose sentence already names its key (§13.31 §3). `Other` carries
+    /// `login_url: login_url '…': …` is kept), `audit.rotation` / `audit.retention` for a limit
+    /// (the leaf's sentence starts `'…': an amount of nothing`, and the settings function named
+    /// the key), and `audit` for the unbounded pair (the settings function prefixed the pair
+    /// leaf's sentence with `audit:`, which is the prefix `bb-auth-adm` swaps for its own flags).
+    /// Nothing at all for a refusal the settings function spells itself, whose sentence already
+    /// names its key, the two header refusals among them (§13.31 §3). `Other` carries
     /// today's prefixed sentence whole, so it has no prefix of its own.
     fn prefix(&self) -> Option<&'static str> {
         match self {
@@ -6508,6 +6659,10 @@ impl SettingsRefusal {
                 key: SettingKey::LoginUrl,
                 ..
             } => Some("login_url"),
+            Self::AuditLimitNotAmount { key, .. }
+            | Self::AuditLimitZero { key, .. }
+            | Self::AuditLimitTooMuch { key, .. } => Some(key.name()),
+            Self::AuditUnbounded { .. } => Some("audit"),
             _ => None,
         }
     }
@@ -6633,9 +6788,36 @@ impl SettingsRefusal {
                  social_callback_url is empty, so there is nowhere to send a visitor and \
                  nowhere for them to come back to"
             ),
+            Self::AuditHeader { key, name, fault } => {
+                format!("{}: '{name}' {fault}", key.name())
+            }
             Self::AuditHeadersSame { name } => format!(
                 "audit.client_ip_header and audit.request_id_header both name '{name}'; one \
                  header cannot carry an address and a request id at once"
+            ),
+            Self::AuditLimitNotAmount { raw, .. } => format!(
+                "'{raw}' is not an amount and a unit: write it as, say, '4 MiB', '1 GiB', \
+                 '26 weeks', '6 months' or '1 year'"
+            ),
+            Self::AuditLimitZero { raw, .. } => {
+                format!("'{raw}': an amount of nothing is not a limit")
+            }
+            Self::AuditLimitTooMuch { raw, unit, .. } => format!(
+                "'{raw}': at most {} {}, which is already more than any disk or any audit needs",
+                unit.max_amount(),
+                unit.code()
+            ),
+            Self::AuditUnbounded {
+                rotation,
+                retention,
+            } => format!(
+                "rotation '{rotation}' with {} bounds how old the audit gets and not how big: \
+                 a flood of refusals would grow the live file without limit. Rotate on a size \
+                 (MiB, GiB) or give the retention one",
+                match retention {
+                    Some(r) => format!("retention '{r}'"),
+                    None => "no retention".to_string(),
+                }
             ),
             Self::ThemeUnknown { raw } => {
                 format!("theme: '{raw}' is not one of system, light, dark")
@@ -6697,6 +6879,13 @@ impl From<PrepareError> for String {
 /// the same arm (§13.31 §3).
 fn url_refusal(key: SettingKey) -> impl FnOnce((String, UrlFault)) -> SettingsRefusal {
     move |(raw, fault)| SettingsRefusal::Url { key, raw, fault }
+}
+
+/// The `map_err` that turns the audit header leaf's `(name, fault)` pair into
+/// [`SettingsRefusal::AuditHeader`] for one of the two audit settings, the sibling of
+/// [`url_refusal`] (§13.31 §3).
+fn header_refusal(key: SettingKey) -> impl FnOnce((String, HeaderFault)) -> SettingsRefusal {
+    move |(name, fault)| SettingsRefusal::AuditHeader { key, name, fault }
 }
 
 /// Turn a settings document into the compiled settings, or say why it cannot be one.
@@ -6844,19 +7033,16 @@ pub fn compile_settings(file: &SettingsFile) -> Result<Settings, SettingsRefusal
     // with a sentence rather than accepted: it could only ever be a slip, since no header
     // carries an address and an id at once, and one of the two settings would then record
     // nothing while looking configured.
-    let client_ip_header =
-        compile_audit_header("audit.client_ip_header", &file.audit.client_ip_header)
-            .map_err(SettingsRefusal::Other)?;
-    let request_id_header =
-        compile_audit_header("audit.request_id_header", &file.audit.request_id_header)
-            .map_err(SettingsRefusal::Other)?;
+    let client_ip_header = audit_header_core(&file.audit.client_ip_header)
+        .map_err(header_refusal(SettingKey::ClientIpHeader))?;
+    let request_id_header = audit_header_core(&file.audit.request_id_header)
+        .map_err(header_refusal(SettingKey::RequestIdHeader))?;
     if !client_ip_header.is_empty() && client_ip_header.eq_ignore_ascii_case(&request_id_header) {
         return Err(SettingsRefusal::AuditHeadersSame {
             name: client_ip_header,
         });
     }
-    let audit_policy = compile_audit_policy(&file.audit.rotation, &file.audit.retention)
-        .map_err(SettingsRefusal::Other)?;
+    let audit_policy = audit_section_core(&file.audit.rotation, &file.audit.retention)?;
 
     let mut admins: Vec<String> = Vec::new();
     for raw in &file.web.admins {
@@ -12730,6 +12916,400 @@ mod tests {
             .expect_err("the leaf refuses too"),
             r,
             "the button audience refusal is not the one the leaf builds"
+        );
+    }
+
+    /// S6 (§13.31 §2, §3, §7): the six audit refusals are variants of `SettingsRefusal`, not
+    /// sentences riding in `Other`. Each row is the S0 golden's own fixture for that sentence, so
+    /// the refusal is known reachable and reaches the arm under test, and each row asserts four
+    /// things: the variant carries the §2 arguments (which of the two header settings, which of
+    /// the two `HeaderFault`s, which of the two limit settings, which unit, and the retention arm
+    /// of the unbounded pair); `code()` is the §2 `snake_case` name S8 maps to a `K` key, the two
+    /// header faults spelled `audit_header_<fault>` the way `UrlFault`'s are `url_<fault>`;
+    /// `prefix()` is the key `compile_settings` used to write in front of the leaf's sentence,
+    /// which is `audit.rotation` / `audit.retention` for a limit (the leaf's sentence is the tail,
+    /// as the host leaf's is) and `audit` for the unbounded pair (the settings function prefixed
+    /// `AuditPolicy::new`'s sentence with `audit:`, which is what the CLI's
+    /// `.replace("audit:", …)` swaps), and nothing for a header refusal, whose sentence names its
+    /// own key; and `Display` joins the two with ": ", which is what the CLI and the gate print
+    /// (the golden pins those joined bytes, this pins the join). The blocks after the table pin
+    /// what the table cannot: that the name a header refusal carries is the **trimmed** one
+    /// today's sentence quoted, that a credential is matched case-insensitively and reported
+    /// under the spelling typed (the comparison is against `CREDENTIAL_HEADERS`, so naming the
+    /// stored spelling would blame the constant rather than the line the operator wrote), that a
+    /// name past the length bound is the charset fault and not a fault of its own, that the
+    /// unbounded pair carries the **spelled** limit and not the raw text (`'1 weeks'` is refused
+    /// as `'1 week'`, which is today's byte), and that the three `String` wrappers are thin:
+    /// `compile_audit_header` prints the shared tail under the CLI's flag name, `AuditLimit::parse`
+    /// prints a limit refusal's sentence with no key prefix (the CLI prefixes its own flag),
+    /// `AuditPolicy::new` prints the pair's sentence with no `audit:` prefix (the settings function
+    /// adds it), and `compile_audit_policy` keeps both prefixes byte for byte, which is why it
+    /// stays a `String` for the CLI's `.replace`. The last block pins the accept path unchanged: a
+    /// good header, a good limit and a bounded pair still compile to the values they always
+    /// compiled to, so a wrapper that refused everything would not leave every row above green.
+    #[test]
+    fn audit_refusals_are_codes() {
+        type Row<'a> = (
+            &'a str,
+            &'a str,
+            &'a str,
+            Option<&'a str>,
+            &'a str,
+            fn(&SettingsRefusal) -> bool,
+        );
+        let cases: Vec<Row> = vec![
+            (
+                "audit header not a name",
+                r#"{ "version": 3, "audit": { "client_ip_header": "X_Real_IP" } }"#,
+                "audit_header_not_a_name",
+                None,
+                "audit.client_ip_header: 'X_Real_IP' is not a header name, which is letters, digits and '-' (nginx drops a request header with an underscore in its name)",
+                |r| {
+                    matches!(
+                        r,
+                        SettingsRefusal::AuditHeader { key, name, fault }
+                            if *key == SettingKey::ClientIpHeader
+                                && name == "X_Real_IP"
+                                && *fault == HeaderFault::NotAName
+                    )
+                },
+            ),
+            (
+                "audit header credential",
+                r#"{ "version": 3, "audit": { "request_id_header": "Authorization" } }"#,
+                "audit_header_credential",
+                None,
+                "audit.request_id_header: 'Authorization' carries a credential, and the audit never writes one down",
+                |r| {
+                    matches!(
+                        r,
+                        SettingsRefusal::AuditHeader { key, name, fault }
+                            if *key == SettingKey::RequestIdHeader
+                                && name == "Authorization"
+                                && *fault == HeaderFault::Credential
+                    )
+                },
+            ),
+            (
+                "audit limit not an amount",
+                r#"{ "version": 3, "audit": { "rotation": "4" } }"#,
+                "audit_limit_not_amount",
+                Some("audit.rotation"),
+                "'4' is not an amount and a unit: write it as, say, '4 MiB', '1 GiB', '26 weeks', '6 months' or '1 year'",
+                |r| {
+                    matches!(
+                        r,
+                        SettingsRefusal::AuditLimitNotAmount { key, raw }
+                            if *key == SettingKey::AuditRotation && raw == "4"
+                    )
+                },
+            ),
+            (
+                "audit limit zero",
+                r#"{ "version": 3, "audit": { "rotation": "0 MiB" } }"#,
+                "audit_limit_zero",
+                Some("audit.rotation"),
+                "'0 MiB': an amount of nothing is not a limit",
+                |r| {
+                    matches!(
+                        r,
+                        SettingsRefusal::AuditLimitZero { key, raw }
+                            if *key == SettingKey::AuditRotation && raw == "0 MiB"
+                    )
+                },
+            ),
+            (
+                // The same fault on the other setting: the `key` argument is what tells an
+                // operator which box to fix, and the golden's fixtures only ever name the
+                // rotation, so the table needs a row of its own for the retention.
+                "audit limit zero on the retention",
+                r#"{ "version": 3, "audit": { "rotation": "4 MiB", "retention": "0 GiB" } }"#,
+                "audit_limit_zero",
+                Some("audit.retention"),
+                "'0 GiB': an amount of nothing is not a limit",
+                |r| {
+                    matches!(
+                        r,
+                        SettingsRefusal::AuditLimitZero { key, raw }
+                            if *key == SettingKey::AuditRetention && raw == "0 GiB"
+                    )
+                },
+            ),
+            (
+                "audit limit too much",
+                r#"{ "version": 3, "audit": { "rotation": "2048 GiB" } }"#,
+                "audit_limit_too_much",
+                Some("audit.rotation"),
+                "'2048 GiB': at most 1024 GiB, which is already more than any disk or any audit needs",
+                |r| {
+                    matches!(
+                        r,
+                        SettingsRefusal::AuditLimitTooMuch { key, raw, unit }
+                            if *key == SettingKey::AuditRotation
+                                && raw == "2048 GiB"
+                                && *unit == AuditUnit::GiB
+                    )
+                },
+            ),
+            (
+                // The second unit's arm: the sentence names the ceiling **of the unit written**,
+                // so a refusal that hardcoded one ceiling would pass the row above alone.
+                "audit limit too much in MiB",
+                r#"{ "version": 3, "audit": { "rotation": "1048577 MiB" } }"#,
+                "audit_limit_too_much",
+                Some("audit.rotation"),
+                "'1048577 MiB': at most 1048576 MiB, which is already more than any disk or any audit needs",
+                |r| {
+                    matches!(
+                        r,
+                        SettingsRefusal::AuditLimitTooMuch { key, raw, unit }
+                            if *key == SettingKey::AuditRotation
+                                && raw == "1048577 MiB"
+                                && *unit == AuditUnit::MiB
+                    )
+                },
+            ),
+            (
+                "audit unbounded with retention",
+                r#"{ "version": 3, "audit": { "rotation": "1 year", "retention": "2 years" } }"#,
+                "audit_unbounded",
+                Some("audit"),
+                "rotation '1 year' with retention '2 years' bounds how old the audit gets and not how big: a flood of refusals would grow the live file without limit. Rotate on a size (MiB, GiB) or give the retention one",
+                |r| {
+                    matches!(
+                        r,
+                        SettingsRefusal::AuditUnbounded { rotation, retention }
+                            if rotation == "1 year" && retention.as_deref() == Some("2 years")
+                    )
+                },
+            ),
+            (
+                // The other arm of the same sentence: today's bytes say `with no retention` when
+                // the retention is empty, and the variant carries an `Option` for exactly that.
+                "audit unbounded no retention",
+                r#"{ "version": 3, "audit": { "rotation": "1 year" } }"#,
+                "audit_unbounded",
+                Some("audit"),
+                "rotation '1 year' with no retention bounds how old the audit gets and not how big: a flood of refusals would grow the live file without limit. Rotate on a size (MiB, GiB) or give the retention one",
+                |r| {
+                    matches!(
+                        r,
+                        SettingsRefusal::AuditUnbounded { rotation, retention }
+                            if rotation == "1 year" && retention.is_none()
+                    )
+                },
+            ),
+        ];
+        for row in cases.iter() {
+            let (label, json, code, prefix, sentence, is_variant) = *row;
+            let r = settings_refusal_of(json);
+            assert!(is_variant(&r), "{label}: got {r:?}");
+            assert_eq!(r.code(), code, "{label}: {r:?}");
+            assert_eq!(r.prefix(), prefix, "{label}: {r:?}");
+            assert_eq!(r.sentence(), sentence, "{label}: {r:?}");
+            let display = match prefix {
+                Some(p) => format!("{p}: {sentence}"),
+                None => sentence.to_string(),
+            };
+            assert_eq!(
+                r.to_string(),
+                display,
+                "{label}: Display is not prefix + \": \" + sentence"
+            );
+        }
+        // The name the variant carries is the **trimmed** one, which is the text today's sentence
+        // quoted: the leaf trims before it checks anything, so a padded header is refused under
+        // the spelling the file means rather than the one that was typed.
+        let padded = settings_refusal_of(
+            r#"{ "version": 3, "audit": { "client_ip_header": "  X_Real_IP  " } }"#,
+        );
+        assert!(
+            matches!(
+                &padded,
+                SettingsRefusal::AuditHeader { name, fault, .. }
+                    if name == "X_Real_IP" && *fault == HeaderFault::NotAName
+            ),
+            "{padded:?}"
+        );
+        assert_eq!(
+            padded.to_string(),
+            "audit.client_ip_header: 'X_Real_IP' is not a header name, which is letters, digits and '-' (nginx drops a request header with an underscore in its name)",
+            "{padded:?}"
+        );
+        // A credential is matched case-insensitively (header names are) and reported under the
+        // spelling typed: naming the constant's spelling would blame `Cookie` on a file that
+        // wrote `cookie`, which is the line the operator has to fix.
+        let lowered =
+            settings_refusal_of(r#"{ "version": 3, "audit": { "request_id_header": "cookie" } }"#);
+        assert!(
+            matches!(
+                &lowered,
+                SettingsRefusal::AuditHeader { name, fault, .. }
+                    if name == "cookie" && *fault == HeaderFault::Credential
+            ),
+            "{lowered:?}"
+        );
+        assert_eq!(
+            lowered.to_string(),
+            "audit.request_id_header: 'cookie' carries a credential, and the audit never writes one down",
+            "{lowered:?}"
+        );
+        // A name past the length bound is the charset fault, not a fault of its own: today's leaf
+        // refuses both with one sentence, and §2 lists one code, so a new fault here would be a
+        // code the GUI has no key for.
+        let long = "X".repeat(65);
+        let r = settings_refusal_of(&format!(
+            r#"{{ "version": 3, "audit": {{ "client_ip_header": "{long}" }} }}"#
+        ));
+        assert!(
+            matches!(
+                &r,
+                SettingsRefusal::AuditHeader { name, fault, .. }
+                    if name == &long && *fault == HeaderFault::NotAName
+            ),
+            "{r:?}"
+        );
+        assert_eq!(r.code(), "audit_header_not_a_name", "{r:?}");
+        // The unbounded pair carries the **spelled** limit, not the raw text: the sentence today
+        // prints is built from `AuditLimit::spelled`, so `'1 weeks'` is refused as `'1 week'`.
+        // Keeping the raw text would be a refusal quoting a spelling the file does not accept.
+        let spelled =
+            settings_refusal_of(r#"{ "version": 3, "audit": { "rotation": "1 weeks" } }"#);
+        assert!(
+            matches!(
+                &spelled,
+                SettingsRefusal::AuditUnbounded { rotation, retention }
+                    if rotation == "1 week" && retention.is_none()
+            ),
+            "{spelled:?}"
+        );
+        assert_eq!(
+            spelled.to_string(),
+            "audit: rotation '1 week' with no retention bounds how old the audit gets and not how big: a flood of refusals would grow the live file without limit. Rotate on a size (MiB, GiB) or give the retention one",
+            "{spelled:?}"
+        );
+        // The header wrapper, called the way `bb-auth-adm` calls it, and the tail's one home: the
+        // CLI's bytes are the variant's sentence with the setting's name swapped for the flag's,
+        // and nothing else moves. The literals are the S0 leaf golden's.
+        for (flag, key, fault, raw, tail) in [
+            (
+                "--client-ip-header",
+                SettingKey::ClientIpHeader,
+                HeaderFault::NotAName,
+                "X_Real_IP",
+                "is not a header name, which is letters, digits and '-' (nginx drops a request header with an underscore in its name)",
+            ),
+            (
+                "--request-id-header",
+                SettingKey::RequestIdHeader,
+                HeaderFault::Credential,
+                "Cookie",
+                "carries a credential, and the audit never writes one down",
+            ),
+        ] {
+            let v = SettingsRefusal::AuditHeader {
+                key,
+                name: raw.to_string(),
+                fault,
+            };
+            assert_eq!(
+                refusal(compile_audit_header(flag, raw)),
+                format!("{flag}: '{raw}' {tail}"),
+                "{flag}: the wrapper's bytes moved"
+            );
+            assert_eq!(
+                v.sentence(),
+                format!("{}: '{raw}' {tail}", key.name()),
+                "{flag}: the variant's sentence is not the same tail under the setting's name"
+            );
+            assert_eq!(v.prefix(), None, "{flag}: {v:?}");
+        }
+        // The limit wrapper: exactly the variant's sentence, with no key prefix, because the CLI
+        // prefixes its own flag name (`--audit-rotation: {e}`) and `compile_settings` prefixes the
+        // setting's. One tail, three callers, no second copy of the sentence.
+        for (raw, json) in [
+            ("4", r#"{ "version": 3, "audit": { "rotation": "4" } }"#),
+            (
+                "0 MiB",
+                r#"{ "version": 3, "audit": { "rotation": "0 MiB" } }"#,
+            ),
+            (
+                "2048 GiB",
+                r#"{ "version": 3, "audit": { "rotation": "2048 GiB" } }"#,
+            ),
+        ] {
+            assert_eq!(
+                refusal(AuditLimit::parse(raw)),
+                settings_refusal_of(json).sentence(),
+                "'{raw}': AuditLimit::parse is not the variant's sentence"
+            );
+        }
+        // The pair: `AuditPolicy::new` answers the sentence and no prefix (the settings function
+        // adds `audit:`, which is the prefix the CLI swaps), and `compile_audit_policy` keeps both
+        // prefixes byte for byte, which is why it stays a `String` for that `.replace`.
+        let pair = settings_refusal_of(
+            r#"{ "version": 3, "audit": { "rotation": "1 year", "retention": "2 years" } }"#,
+        );
+        assert_eq!(
+            refusal(AuditPolicy::new(
+                AuditLimit::new(1, AuditUnit::Years),
+                Some(AuditLimit::new(2, AuditUnit::Years))
+            )),
+            pair.sentence(),
+            "AuditPolicy::new is not the variant's sentence"
+        );
+        assert_eq!(
+            refusal(compile_audit_policy("1 year", "2 years")),
+            pair.to_string(),
+            "compile_audit_policy's bytes moved"
+        );
+        assert_eq!(
+            refusal(compile_audit_policy("1 year", "2 years"))
+                .replace("audit:", "--audit-rotation / --audit-retention:"),
+            "--audit-rotation / --audit-retention: rotation '1 year' with retention '2 years' bounds how old the audit gets and not how big: a flood of refusals would grow the live file without limit. Rotate on a size (MiB, GiB) or give the retention one",
+            "the CLI's flag-named pair refusal is not what it prints today"
+        );
+        assert_eq!(
+            refusal(compile_audit_policy("4", "")),
+            settings_refusal_of(r#"{ "version": 3, "audit": { "rotation": "4" } }"#).to_string(),
+            "compile_audit_policy no longer prefixes a limit refusal with the setting's name"
+        );
+        // The accept path is unchanged by this slice: a good header, a good limit and a bounded
+        // pair compile to the values they always compiled to, and a whole audit section still
+        // compiles through `compile_settings`. Without this, a wrapper that refused everything
+        // would leave every row above green.
+        assert_eq!(
+            compile_audit_header("--client-ip-header", " X-Real-IP ")
+                .expect("a good header compiles"),
+            "X-Real-IP"
+        );
+        assert_eq!(
+            AuditLimit::parse("4 MiB").expect("a good limit compiles"),
+            AuditLimit::new(4, AuditUnit::MiB)
+        );
+        assert_eq!(
+            compile_audit_policy("4 MiB", "6 months").expect("a bounded pair compiles"),
+            AuditPolicy {
+                rotation: AuditLimit::new(4, AuditUnit::MiB),
+                retention: Some(AuditLimit::new(6, AuditUnit::Months)),
+            }
+        );
+        assert_eq!(
+            compile_audit_policy("", "").expect("empty is a default, not a refusal"),
+            AuditPolicy::default()
+        );
+        let ok: SettingsFile = serde_json::from_str(
+            r#"{ "version": 3, "audit": { "client_ip_header": "X-Real-IP", "request_id_header": "X-Request-Id", "rotation": "8 MiB", "retention": "6 months" } }"#,
+        )
+        .expect("fixture parses");
+        assert_eq!(
+            compile_settings(&ok)
+                .expect("a well-formed audit section compiles")
+                .audit_policy,
+            AuditPolicy {
+                rotation: AuditLimit::new(8, AuditUnit::MiB),
+                retention: Some(AuditLimit::new(6, AuditUnit::Months)),
+            }
         );
     }
 
