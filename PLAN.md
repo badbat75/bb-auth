@@ -14,7 +14,7 @@ as the column says. A requirement still open must be covered by a step.
 
 | ID | Requirement | State |
 |---|---|---|
-| R1 | Self-service API keys: a user mints, rotates and removes their own `bbk_` tokens, without an administrator | Step 4 |
+| R1 | Self-service API keys: a user mints, rotates and removes their own `bbk_` tokens, without an administrator | Done: live on rpi-01, checked in a browser by the user on 2026-11-26 (step 4 closed) |
 | R2 | Self-service profile: a user sees what bb-auth knows about them and edits their own Cognito profile attributes | Step 5 |
 | R3 | The self-service surface is a section of the admin GUI (`bb-auth-web`), served at its own prefix `/account/` (`BB_AUTH_WEB_ACCOUNT_PATH`) beside the admin pages at `/admin/`, open to any signed-in identity, never reading `web.admins` and acting only on the caller's own account, so further user-facing features have a home. Changed by the user on 2026-11-23 from "a fourth binary of its own", and that evening from `<base>/me/` to `/account/` so the administrators' URLs do not move | Design revised (`docs/ARCHITECTURE.md` §13); Read-only page live on rpi-01 at `/account/` since 2026-11-24; the writes are steps 4, 5 and 7 |
 | R4 | Self-service deletion: a user deletes their own account and its related data after a confirmation: the roster row, keys and references in scopes and groups at once, and every Cognito user with their address (federated twins included) through the owner's deletion worker (`bb-account-delete`, the user's choice on 2026-11-26). The audit is not edited: their lines expire with `audit.retention`, and the page says so | Step 7 (the step 6 it once named is done). Changed on 2026-11-26: the worker deletes a social-only user's Cognito account too, so the 2026-11-23 "left to an administrator" exception goes |
@@ -79,58 +79,6 @@ reversal's cost, stated in `docs/ARCHITECTURE.md` §13.12, is that strangers now
 process that writes both files, so two gaps found the same day are closed **first**, before the
 GUI is opened to anyone who is not an administrator: `bb-auth-web` can read the HMAC key, and it
 believes `X-Auth-Email` from any local process. The design is `docs/ARCHITECTURE.md` §13.
-
-### 4. Self-service API keys
-
-Covers: R1.
-
-Hard requirements (invariants this feature touches):
-
-- **Keys only narrow.** The form offers an `id`, a `duration`, and either no restriction or any
-  subset of the scopes the owner's keys reach (`Access::key_scopes_for`, added to the library
-  test first, §13.8), grouped under their application. It submits `application/scope` pairs;
-  each is checked against that set, and one outside it is a `400` with nothing written, never
-  dropped silently.
-- **No URLs on screen.** The key form and key list show application and scope names, never a URL
-  pattern or base. A key entry the owner no longer reaches is shown and marked.
-- **Rotate keeps the restriction byte for byte.** Only `key_hash` and `released` change.
-- **One identity.** The page acts on `X-Auth-Email` and on no form field. A caller with no roster
-  row gets an explanatory page, never a form that mints an ownerless key.
-- **`denied` is checked before anything.** A vetoed identity mints nothing.
-- **Reveal-once stays.** The raw bearer shows exactly once, in the `200` answering the `POST`,
-  after the write lands, with `Cache-Control: no-store`, and is never stored, re-rendered or logged.
-- **Write path unchanged.** `add_api_key`, `rotate_api_key`, `remove_api_key` through
-  `AccessWrite`, the `rev` 409 check and `bb-auth-web`'s write lock.
-- **JavaScript sparingly** (4g's copy script on the reveal is one). GET never mutates; POST carries the proxy secret, the strict same-origin
-  check and `rev`.
-- **Bound**: at most 10 keys per row, `duration` at least `1d` or `never` (the 365-day bound was
-  lifted by the user in 4h), `id` matching `[a-z0-9-]{1,32}`.
-- **Journal**: `[bb-auth-web] <uuid> (self): key add|rotate|remove <id>`, nothing else.
-
-Tests: authorization (administrator, roster user, stranger, denied); `key_scopes_for` agrees
-with `decide` for a key; a pair outside the set `400` with the file unchanged; the file gets
-exactly the submitted pairs; an administrator-narrowed key displayed by scope name with no URL;
-rotate leaves its `scopes` bytes identical; the bounds, reveal-once, the `rev` conflict, and the
-e2e flow with scripting off.
-
-Done so far: `Access::key_scopes_for` (4a), minting (4b), rotating and removing (4c) from
-`/account`. Made reliable in parallel (4d); the worker count is
-`BB_AUTH_WEB_WORKERS` (4e). The e2e flow with scripting off passes (`nojs.js`).
-
-8a to 8e installed on rpi-01 on 2026-11-25 (as 1.99.9, gb9d7100, then the same code as 1.99.8,
-g75f788a), verify.sh green; still to see
-in a browser: a rotate, the copy icon, the confirmations, the header and the theme; and, since
-v1.99.8, that a sign-out from `/account` followed by a sign-in lands back on `/account`. Earlier,
-installed on 2026-11-24 (gd49d43a): the user minted and removed a key in a browser
-(journal: `(self): key add test`, `key remove test`); a rotate is still to be seen. The reveal page shows only the key with a copy button (4g, done).
-
-The user's rework after trying 4g (4h: copy icon, confirmations, five duration choices, the
-365-day bound lifted) is done in 8a, designed in `docs/ARCHITECTURE.md` §13.15 and §13.16. Left: a
-new install on rpi-01 and the browser check below, now including a rotate, the copy icon and the
-two confirmations.
-
-- Done when: a roster user mints, rotates and removes a key of their own in a browser, while a
-  stranger and a denied user cannot.
 
 ### 5. Editable Cognito profile
 
@@ -267,5 +215,5 @@ the same file.
   deleted; 7g's test account is a new one, for which the coordinator prepares the commands. The
   proposals for itadmin (§13.29 W8 §1 to §3 and §5) go to IT-Admin, which asks the owner before
   applying them on rpi-01.
-- Steps 4 and 5e: the user does the browser checks after the next deploy, from a checklist the
-  coordinator prepares.
+- Step 5e: the user's browser check on rpi-01 with the new native test account
+  the test Gmail account (re-registered on 2026-11-26, roster row `00597000-…`, no scopes).
