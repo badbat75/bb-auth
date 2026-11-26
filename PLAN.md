@@ -66,7 +66,7 @@ The gate, the CLI (`bb-auth-adm`) and the admin GUI (`bb-auth-web`) are built an
 `AGENTS.md` and `CHANGELOG.md` say what they do. The agent structure (roles, skills, this plan) was added
 on 2026-11-23; the work before it is in `git log`. The self-service page is the `/account` section of `bb-auth-web`, live on rpi-01 since
 2026-11-24, with its key writes, header and theme since 2026-11-25. `v1.99.8` (g978eca8) is tagged, on GitHub as a
-pre-release; rpi-01 runs `v1.99.9-gadf4556` since 2026-11-26 (self-service account deletion through the owner's worker, on; the account page applying preferences on selection) with `gate.landing_url` set to its `/account/` page and `gate.allow_unverified_social` off.
+pre-release; rpi-01 runs `v1.99.9-g5b7d9ad` since the evening of 2026-11-26 (self-service account deletion through the owner's worker, signing the browser out on completion; the two menus; the AGPL licence) with `gate.landing_url` set to its `/account/` page and `gate.allow_unverified_social` off.
 
 ## Next steps
 
@@ -96,6 +96,13 @@ check, a shorter TTL, or accepting the gap and saying so on the page. The design
 done page for what is chosen. Designed in §13.32 (slices 14a to 14d). The user chose the
 recommended answers: the success answer goes through the gate's logout to its sign-in page with a
 fixed notice, the stale-cookie gap is accepted and stated, and the session TTL stays 30 days.
+
+Where it stands (2026-11-26, evening): 14a to 14c are built and documented, and their build is on
+rpi-01. Read there, with GET requests only: the sign-in page shows the notice for `account-deleted`
+alone, and `/auth/logout` with the relative `rd` still lands on the bare sign-in page, because the
+`location = /auth/logout` of `auth.badbat75.com` sets no `X-Original-URL`. The classifier refused
+the coordinator's edit of that file, so the user runs the one-line change (the command is in the
+session of 2026-11-26) and tries a real deletion with a test account the next morning.
 
 - Done when: a test shows that the deletion's success answer leaves that browser signed out
   (the session cookie cleared, or the browser sent through `/auth/logout`) and still says what
