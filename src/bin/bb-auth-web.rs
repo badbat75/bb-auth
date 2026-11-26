@@ -11287,13 +11287,23 @@ fn intake_delete(agent: &ureq::Agent, cfg: &Config, origin: &str, email: &str) -
 /// `muted` is the line the "some are queued" outcome adds: the addresses this walk cannot
 /// confirm, which is a list of values for the administrator the person is sent to ask, not a
 /// sentence of the lede (§13.30 §4). Every other outcome passes `None`.
+///
+/// The row's tag depends on how many pills it holds. maud writes no whitespace between
+/// siblings, so pills written straight into one paragraph touch borders and read as one control
+/// (WCAG 2.5.8, target spacing): a row of two rides in `div.actions`, which `admin.css` gives
+/// `gap:12px` and the confirmation page's form already uses. `p.primary` stays for the single
+/// pill, which needs no gap and is the shape the rest of the estate's pages have.
 fn page_account_delete_outcome(lede: Markup, muted: Option<Markup>, pills: Vec<Markup>) -> Markup {
     html! {
         p class="lede" { (lede) }
         @if let Some(line) = muted {
             p class="muted" { (line) }
         }
-        @if !pills.is_empty() {
+        @if pills.len() > 1 {
+            div class="actions" {
+                @for pill in &pills { (pill) }
+            }
+        } @else if !pills.is_empty() {
             p class="primary" {
                 @for pill in &pills { (pill) }
             }
@@ -34012,6 +34022,66 @@ mod tests {
             .collect()
     }
 
+    /// The row of actions at the foot of an outcome page, and the spacing rule the screenshot
+    /// review of §13.30 §4 added (WCAG 2.5.8, target spacing).
+    ///
+    /// maud writes no whitespace between siblings, so pills written straight into one paragraph
+    /// touch borders and read as one control. A row of **two or more** therefore rides in
+    /// `div.actions`, which `admin.css` gives `gap:12px` and the confirmation page's form already
+    /// uses; `p.primary` stays only where there is a single pill, which is the shape the rest of
+    /// the estate's pages already have. Zero pills is a page that offers nothing (the done page
+    /// where the operator named no logout destination), and gets neither container.
+    fn assert_action_row(who: &str, body: &str, count: usize) {
+        let main = the_main(body);
+        let page = account_readable(body);
+        let primary = controls_with_class(&main, "p", "primary");
+        let actions = controls_with_class(&main, "div", "actions");
+        match count {
+            0 => assert!(
+                primary.is_empty() && actions.is_empty(),
+                "{who}: no actions, so no row of them: {page}"
+            ),
+            1 => {
+                assert_eq!(
+                    primary.len(),
+                    1,
+                    "{who}: one action sits in one p.primary: {page}"
+                );
+                assert!(
+                    actions.is_empty(),
+                    "{who}: one pill needs no gap, so no div.actions: {page}"
+                );
+            }
+            n => {
+                assert_eq!(
+                    actions.len(),
+                    1,
+                    "{who}: {n} actions sit in one div.actions, whose gap separates them: {page}"
+                );
+                assert!(
+                    primary.is_empty(),
+                    "{who}: {n} pills written into p.primary touch borders: {page}"
+                );
+            }
+        }
+        // The container named above is the one holding the pills the person sees, not an empty one
+        // standing beside a row that stayed where it was.
+        let rows = the_page_actions(body);
+        assert_eq!(
+            rows.len(),
+            if count == 0 { 0 } else { 1 },
+            "{who}: the page's actions are one row: {page}"
+        );
+        let held: usize = rows
+            .iter()
+            .map(|a| controls_with_class(a, "a", "pill").len())
+            .sum();
+        assert_eq!(
+            held, count,
+            "{who}: the row holds exactly the {count} actions the page offers: {page}"
+        );
+    }
+
     /// §13.29 W3 steps 4 and 6: a caller with no roster row is asked, then posted, and the
     /// access file's bytes are the proof that this slice writes nothing. The order is the
     /// contract: `whoami` for every address **before** the first `POST`, so a protected address
@@ -36134,6 +36204,11 @@ mod tests {
     /// and Start again are `pill_link({account}/delete, …)`" and "Sign out is
     /// `pill_link(account_logout_url, …)`": a pill with the right words and the wrong `href` is
     /// a page that offers an action it does not perform.
+    ///
+    /// The row that holds them is checked too ([`assert_action_row`]), because §4 says "one row
+    /// of pills" and says nothing about the tag: the spacing rule is the designer's, and every
+    /// row of this table is a row of one, two or zero pills, so the table is where both halves
+    /// of that rule get exercised.
     fn assert_outcome(
         who: &str,
         g: &AccountGot,
@@ -36181,6 +36256,7 @@ mod tests {
                 );
             }
         }
+        assert_action_row(who, &g.body, pills.len());
     }
 
     /// §13.30 §7: one case per row of §4's table that ends on an outcome page, each asserting
@@ -36189,6 +36265,11 @@ mod tests {
     /// (`a_cross_site_delete_is_refused`, `a_typed_address_that_is_not_the_callers_sends_nothing`);
     /// the write failure is 7d's `a_failed_write_posts_nothing`, which is `cfg(unix)` and owns a
     /// read-only directory of its own.
+    ///
+    /// Each case also asserts the **shape of the row** its actions sit in ([`assert_action_row`]),
+    /// because the table is where both halves of that rule land: the done, protected and
+    /// too-many rows are one pill and keep `p.primary`, while the changed, whoami, partial and
+    /// some rows are two and have to sit in `div.actions` to be two targets.
     ///
     /// English only: the words of every new page are pinned in both languages by the tests below
     /// and by 7c's and 7d's, and this table's subject is which page each case is.

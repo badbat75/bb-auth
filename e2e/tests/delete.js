@@ -110,9 +110,11 @@ const restore = (ctx) => {
 
 /** The words of every `li` of the facts list, in the order the page writes them. */
 const factLines = (page) => page.locator('div.panel.bad ul.plain li').allInnerTexts();
-/** The pills of an outcome page, as `{text, href}`, in the order the page writes them. */
+/** The pills of an outcome page, as `{text, href}`, in the order the page writes them. A row of
+ *  two rides in `div.actions` for its gap, a single pill stays in `p.primary`, so the reader asks
+ *  both and takes whichever holds them. */
 const pills = async (page) => {
-  const box = page.locator('main p.primary');
+  const box = page.locator('main div.actions, main p.primary');
   if ((await box.count()) === 0) return [];
   return box.locator('a').evaluateAll((as) => as.map((a) => ({
     text: a.innerText.trim(),
@@ -513,7 +515,7 @@ module.exports = {
         ]);
         // The retry, from this page, over a row that is already gone: the confirmation page it
         // renders is the stranger's, and the walk over the header's addresses is the same walk.
-        await page.click(`main p.primary a[href="${DEL}"]`);
+        await page.click(`main div.actions a[href="${DEL}"], main p.primary a[href="${DEL}"]`);
         t.eq('the retry opens the page again', await text(page, 'h1'), W.title);
         // The facts list is the stranger's (no record, no keys, no group), and the sign-in line
         // is still the "any of these addresses" arm: the arm follows the addresses the header
