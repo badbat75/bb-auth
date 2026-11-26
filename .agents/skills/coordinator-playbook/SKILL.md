@@ -48,7 +48,10 @@ are the files in `.opencode/agents/`):
     opencode run --agent <tester|coder|docs> -m llama.cpp/Swift-Qwen3.8-Flash-Next \
       --auto --archived --title <task-name> "$(cat <prompt-file>)" > <task-name>.out 2>&1
 
-Run it as a background command and read `<task-name>.out` when it ends. Keep the prompt and `.out`
+Run it as a background command (`run_in_background`, never a foreground call) and read
+`<task-name>.out` when the completion notification arrives. A foreground run lasts 40 minutes or
+more, and for all of it the session cannot read messages, so the user and other sessions see it as
+asleep (the owner's request through IT-Admin, 2026-11-26). Keep the prompt and `.out`
 files outside the repo.
 
 1. `--auto` approves every tool permission, so the brief is the only limit. Start each brief with
