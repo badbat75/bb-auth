@@ -255,13 +255,26 @@ the tabs (at 800px and below), "System settings" / "Impostazioni di sistema", an
 "Delete account and all its data" goes on `/account`'s menu only, built by step 7. Kept
 apart on purpose, with reasons in §13.26: the section pattern and the mint row's missing owner
 field. What is left of the step is the user's approval of the screenshots (Done when below). Left,
-as later items: the module rustdoc of `bb-auth-web.rs` (about line 253) still calls the account page's arrangement a centred card; library refusals on the Settings tab are in the file's English words rather
-than the page's labels and language (its own slice, sketched in §13.21); one look by hand at the
+as later items: the module rustdoc of `bb-auth-web.rs` (about line 253) still calls the account page's arrangement a centred card; one look by hand at the
 native "Preferences" tooltip while the open menu's cover is up. Steps 5 and 7 add their forms into this layout later (Profile now first: §13.26).
 
 - Done when: the user approves screenshots of the page in both themes and both languages, at
   desktop and phone width, with the forms of steps 4, 5 and 7 on it; e2e and the scripting-off
   walk still pass.
+
+### 12. Settings refusals in the page's words and language
+
+Covers: R3 (the GUI's displayed text rule). A later item of step 8, split out on 2026-11-26 because
+it reaches every settings refusal. The System settings page shows `compile_settings`'s English
+sentence verbatim, so it names wire keys (`landing_url`) on an Italian page. Designed in §13.31:
+a `SettingsRefusal` enum in the library (46 codes in 37 variants), whose `Display` is today's
+exact English for `bb-auth-adm` and `--check-settings`, and one exhaustive GUI match onto `K` keys
+naming the visible labels. Slices **S0** (golden tests of today's strings, green from the start) to
+**S9** (`ConfigForm::apply` drops its duplicate checks), each with its red tests named in §13.31 §7.
+
+- Done when: every refusal reads in the page's language and names the visible label (a test walks
+  every code in both languages); the CLI's and the gate's sentences are byte for byte today's (S0's
+  goldens, unedited); and a look at the System settings page with an Italian refusal.
 
 ## Waiting for the user
 

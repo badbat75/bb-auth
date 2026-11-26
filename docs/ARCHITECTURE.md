@@ -3611,7 +3611,8 @@ a `K` key in English and Italian that names the visible labels ("Landing page", 
 hosts"), and `bb-auth-adm` keeping today's English sentence through the same enum's `Display`. It
 reaches every settings refusal, not just this one, so it is a slice of its own, with a test that
 every code has both translations and a Settings-tab test per code that the page shows the label
-and not the key.
+and not the key. Designed in §13.31, which settles the test differently: one test over every
+code for both translations, and one route test per path rather than per code.
 
 #### Tests for the three nits and the scene
 
@@ -6269,3 +6270,403 @@ at these.
    (recommended), or make both red?
 3. The places reached are not listed among what is deleted (§2): enough, or should A's page list
    them as the architect drafted?
+
+### 13.31 Settings refusals as codes, in the page's words (plan step 8, later item)
+
+Designed 2026-11-26, while the user was asleep and had delegated the decisions; each decision
+below carries its reason so it can be overturned in the morning without re-deriving it.
+
+What was read: `compile_settings` and everything it calls in `src/lib.rs` (`compile_page_url`,
+`compile_login_url`, `compile_issuer`, `compile_asset_url`, `compile_cookie_domain`,
+`compile_host_pattern`, `compile_oauth_domain`, `compile_app_client_id`,
+`compile_profile_claims`, `compile_identity_attrs`, `compile_social_buttons`,
+`compile_audit_header`, `compile_audit_policy`, `AuditLimit::parse`, `AuditPolicy::new`,
+`compile_brand_name`, `UiTheme::parse`), `SettingsWrite::prepare`, `read_settings`,
+`open_settings_file`; in `src/bin/bb-auth-web.rs` `Refusal`, `ConfigForm::apply`, the
+`Route::Config` arm of `mutate`, `page_config`, `page_file_error`, `unit_label` and the `K`
+labels of the Settings tab; in `src/bin/bb-auth-adm.rs` `cmd_settings_set`'s validators and
+`save_settings`. Nothing here was run against a real system; every string quoted is read from
+the source at commit `8358b7c`.
+
+#### 1. The problem, measured in the source
+
+`compile_settings` returns `Result<Settings, String>`, and the sentence names the file's keys.
+The GUI reaches it on two paths, and both are English on an Italian page:
+
+- **Through `prepare`.** `mutate` shows `SettingsWrite::prepare`'s `String` as the refusal, and
+  attributes it to a field by sniffing the text (`e.contains("landing_url")`), which is exactly
+  what `Refusal`'s own rustdoc says never to do ("never guessed from the message text").
+  `profile_claims`, `identity_attrs` and the `landing_url` cross-check reach the page only this
+  way.
+- **Through `apply`'s pre-checks.** `ConfigForm::apply` calls eleven of the library's validators
+  itself, to attribute each refusal to its input, and shows their English sentences verbatim
+  (`Refusal::on("issuer", &e)`). It also writes two English sentences of its own inline, with
+  `format!` (the stray host, the shared audit header), against the Displayed text rule.
+
+The CLI (`bb-auth-adm settings set`, `settings init`) and the gate (`--check-settings`, startup,
+SIGHUP) print the same sentences and must keep printing them byte for byte.
+
+#### 2. Inventory: every refusal `compile_settings` can produce
+
+One row per distinct sentence. "Prefix" is what `compile_settings` adds in front of a leaf's
+own sentence (today's `map_err(|e| format!("…: {e}"))`); `{x}` marks an argument. The `raw`
+argument is always **the text the sentence quotes today**, which is sometimes trimmed and
+sometimes not (`issuer`, `cookie_domain` and a host pattern quote the value as given; a page
+URL, an asset URL and the OAuth domain quote it trimmed); `compile_settings` stores whichever
+the old sentence printed, so the bytes cannot move. Codes are `snake_case` of the variant, or
+`url_<fault>` / `audit_header_<fault>` for the nested ones.
+
+| # | Variant (args) | Today's string (source literal; the S0 golden test copies each exactly) | GUI |
+| --- | --- | --- | --- |
+| 1 | `Version { found: u32 }` | `"version": 1 was written before the app clients moved into this file (expected 3). Set gate.client_id, …` / `"version": 2 was written before the pool, …` / `"version": {v} is not this format (expected 3)` (three sentences, one variant: Display branches on `found`) | file only |
+| 2 | `ClaimCharset { claim }` | prefix `profile_claims`: `claim '{claim}' must be non-empty and contain only [A-Za-z0-9_:-]` | claims |
+| 3 | `ClaimEmptyPart { claim }` | prefix `profile_claims`: `claim '{claim}' has an empty part around a '_', ':' or '-'` | claims |
+| 4 | `ClaimConsumed { claim }` | prefix `profile_claims`: `claim '{claim}' is consumed by the gate itself and cannot be propagated` | claims |
+| 5 | `ClaimHeaderReserved { claim, header }` | prefix `profile_claims`: `claim '{claim}' derives '{header}', which is reserved` | claims |
+| 6 | `ClaimsCollide { first, second, header }` | prefix `profile_claims`: `claims '{first}' and '{second}' both derive '{header}'` | claims |
+| 7 | `AttrUnknown { attr }` | prefix `identity_attrs`: `unknown identity attribute '{attr}' (known: uuid, email)` (the list is `IDENTITY_ATTRS` joined) | identity |
+| 8 | `AttrTwice { attr }` | prefix `identity_attrs`: `identity attribute '{attr}' is listed twice` | identity |
+| 9 | `AttrNone` | prefix `identity_attrs`: `at least one identity attribute is required (known: uuid, email); a 204 that names nobody breaks every application behind this gate, in silence` | identity |
+| 10 | `TtlBelowFloor { ttl }` | `session_ttl_secs: {ttl} is below the 60s floor; a session that expires as it is handed over is a login loop, not a short login` | ttl |
+| 11 | `TtlAboveCeiling { ttl }` | `session_ttl_secs: {ttl} is past the 3153600000s ceiling; a lifetime that does not fit the arithmetic mints a cookie that is already expired` | ttl |
+| 12 | `AppClientId { button: Option<String>, id }` | `client_id: '{id}' is not an app client id, which is letters, digits, '.', '_' and '-'`; with a button: `social_buttons '{button}': audience: '{id}' is not an app client id, …` | client_id / `aud-{button}` |
+| 13 | `Url { key, raw, fault: UrlFault::NotPrintable }` | `{key} '{raw}': must be printable ASCII (no spaces, no control bytes)` | by key |
+| 14 | `Url { …, UrlFault::NotHttps }` | `{key} '{raw}': must be an absolute https:// URL` | by key |
+| 15 | `Url { …, UrlFault::EmptyHost }` | `{key} '{raw}': empty host` | by key |
+| 16 | `Url { …, UrlFault::Userinfo }` | `{key} '{raw}': userinfo '@' is not allowed in the host` | by key |
+| 17 | `Url { …, UrlFault::Backslash }` | `{key} '{raw}': backslash is not allowed` | by key |
+| 18 | `Url { …, UrlFault::UserinfoOrBackslash }` | `issuer '{raw}': userinfo '@' and backslashes are not allowed` | issuer |
+| 19 | `Url { …, UrlFault::QueryOrFragment }` | `issuer '{raw}': must be the bare issuer URL: no query, no fragment` | issuer |
+| 20 | `Url { …, UrlFault::Quote }` | `{key} '{raw}': must not contain a quote or an angle bracket` | by key |
+| 21 | `Url { …, UrlFault::NotHttpsOrRooted }` | `{key} '{raw}': must be an absolute https:// URL or a root-relative path starting with '/'` | by key |
+| 22 | `CallbackNotHttps` | `social_callback_url: must be the absolute https:// URL registered on the app client, because Cognito compares it byte for byte` | callback |
+| 23 | `CookieDomainNotBare { raw }` | `cookie_domain '{raw}': is not a bare domain: letters, digits, '.' and '-', an optional leading dot, and no scheme, port or path` | cookie_domain |
+| 24 | `CookieDomainSingleLabel { raw }` | `cookie_domain '{raw}': is a single label, which a browser stores for nothing: name the registrable domain the services share, such as '.example.com'` | cookie_domain |
+| 25 | `HostControlByte { raw }` | prefix `authorized_hosts`: `host pattern '{raw}': contains a control byte` | hosts |
+| 26 | `HostNotBare { raw }` | prefix `authorized_hosts`: `host pattern '{raw}': must be a bare host — no scheme, port or path` (the dash is today's data, kept) | hosts |
+| 27 | `HostAtOrDotDot { raw }` | prefix `authorized_hosts`: `host pattern '{raw}': must not contain '@' or '..'` | hosts |
+| 28 | `HostsOutsideCookieDomain { hosts: Vec<String>, cookie_domain }` | `authorized_hosts: {hosts joined ", "} outside cookie_domain '{cookie_domain}', so a login would redirect there and the browser would send no session cookie: a 401, a bounce back to the sign-in page, and a loop` | hosts |
+| 29 | `LandingOffHosts` | `landing_url: its host is not covered by authorized_hosts, so every sign-in with no rd would fall back to the sign-in page` | landing_url |
+| 30 | `OauthDomainNotBare { raw }` | `oauth_domain: '{raw}' is not a bare host, which is letters, digits, '.' and '-' with no scheme and no path` | domain |
+| 31 | `ButtonBareName { name }` | `social_buttons: '{name}' is a bare provider name, which was the shape before each button carried its own app client. Write it as { "idp": "{name}", "audience": "<app client id>" }` | file only |
+| 32 | `ButtonNoIdp` | `social_buttons: an entry names no identity_provider` | file only |
+| 33 | `ButtonIdpCharset { idp }` | `social_buttons '{idp}': a Cognito identity_provider name is letters, digits, '.', '_' and '-'` | file only |
+| 34 | `ButtonTwice { idp }` | `social_buttons: '{idp}' is listed twice` | file only |
+| 35 | `ButtonNoAudience { idp }` | `social_buttons '{idp}': names no app client, so no button could be drawn for it. Cognito federates per app client, so this is the one that offers {idp}` | `aud-{idp}` |
+| 36 | `SocialHalfConfigured { buttons: usize }` | `social_buttons: {buttons} button(s) configured, but oauth_domain or social_callback_url is empty, so there is nowhere to send a visitor and nowhere for them to come back to` | domain |
+| 37 | `AuditHeader { key, name, fault: HeaderFault::NotAName }` | `{key}: '{name}' is not a header name, which is letters, digits and '-' (nginx drops a request header with an underscore in its name)` | by key |
+| 38 | `AuditHeader { …, HeaderFault::Credential }` | `{key}: '{name}' carries a credential, and the audit never writes one down` | by key |
+| 39 | `AuditHeadersSame { name }` | `audit.client_ip_header and audit.request_id_header both name '{name}'; one header cannot carry an address and a request id at once` | request_id_header |
+| 40 | `AuditLimitNotAmount { key, raw }` | prefix `{key}`: `'{raw}' is not an amount and a unit: write it as, say, '4 MiB', '1 GiB', '26 weeks', '6 months' or '1 year'` | by key |
+| 41 | `AuditLimitZero { key, raw }` | prefix `{key}`: `'{raw}': an amount of nothing is not a limit` | by key |
+| 42 | `AuditLimitTooMuch { key, raw, unit: AuditUnit }` | prefix `{key}`: `'{raw}': at most {unit.max_amount()} {unit.code()}, which is already more than any disk or any audit needs` | by key |
+| 43 | `AuditUnbounded { rotation: String, retention: Option<String> }` | prefix `audit`: `rotation '{rotation}' with retention '{r}'` (or `with no retention`) `bounds how old the audit gets and not how big: a flood of refusals would grow the live file without limit. Rotate on a size (MiB, GiB) or give the retention one` | audit_retention |
+| 44 | `BrandControl { name }` | `brand_name '{name}': contains a control character` | brand |
+| 45 | `BrandTooLong { chars: usize }` | `brand_name: {chars} characters is longer than the 64 allowed` | brand |
+| 46 | `ThemeUnknown { raw }` | `theme: '{raw}' is not one of system, light, dark` | theme |
+
+**46 codes, in 37 variants of `SettingsRefusal`**: `Url` carries 9 faults and `AuditHeader` 2.
+`key` is a `SettingKey` (below). `web.admins` has no row because it refuses nothing: a malformed
+entry is a warning and a skip, and so are the two TTL and `social_providers` warnings, which are
+not refusals and stay `eprintln!`. Two strings in the leaves are not rows because
+`compile_settings` can never produce them: `compile_page_url`'s `empty` and
+`compile_host_pattern`'s `empty` (a blank value is skipped before either is called). They stay
+in the `String` wrappers, outside the enum, so the enum holds only what is reachable and the
+golden test can reach every code.
+
+`SettingsWrite::prepare` adds two more failures that are not settings refusals,
+`cannot serialize: {e}` and `serialized to invalid JSON: {e}` (serde on our own structs, never
+seen), and prefixes a refusal with `refusing to write:` and a space.
+
+#### 3. Decision: the enum, where it lives, and its `Display`
+
+**`SettingsRefusal` lives in `src/lib.rs`, beside `compile_settings`.** Reason: the membership
+rule. What a settings file is refused for is an opinion about a file three programs read, and
+two of them (the CLI and the gate) print the same sentence for it; it is the same argument that
+put `decision_reason` in the library for the audit. The English sentence stays in the library
+too, as `Display`, because it is already there and is the one both the CLI and the gate print:
+moving it into each binary would make two copies of one sentence. The **translation** does not
+go in the library, because the library has no language and the `K` table is the one home of
+displayed text.
+
+Its shape, flat except where a leaf is shared with a caller that names the setting differently:
+
+```rust
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum SettingsRefusal { /* the 37 variants of §2 */ }
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum SettingKey {
+    LoginUrl, DeniedUrl, LandingUrl, Issuer, SocialCallbackUrl, StylesheetUrl, LogoUrl,
+    ClientIpHeader, RequestIdHeader, AuditRotation, AuditRetention,
+}
+// SettingKey::name(): "login_url", …, "audit.client_ip_header", "audit.rotation": the name
+// today's sentences use, which is a gate key bare and an audit key with its section.
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum UrlFault { NotPrintable, NotHttps, EmptyHost, Userinfo, Backslash,
+                    UserinfoOrBackslash, QueryOrFragment, Quote, NotHttpsOrRooted }
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum HeaderFault { NotAName, Credential }
+
+pub enum PrepareError { Serialize(String), Reparse(String), Refused(SettingsRefusal) }
+impl From<PrepareError> for String { fn from(e: PrepareError) -> String { e.to_string() } }
+```
+
+- **Why nested for `Url` and `AuditHeader` only.** Those leaves take a `field`/`what` argument
+  and the CLI calls them with its own flag names (`compile_asset_url("--stylesheet", …)`,
+  `compile_audit_header("--client-ip-header", …)`), so the tail of the sentence (`UrlFault`'s and
+  `HeaderFault`'s `Display`) must exist without the setting's name, once, for both the wrapper and
+  the enum. Everywhere else a flat variant is one arm in each match, which is what a small model
+  can extend without a map of types.
+- **`Display` reproduces today's bytes through two private methods.** `prefix(&self) ->
+  Option<&'static str>` is what `compile_settings` used to add (`profile_claims`,
+  `identity_attrs`, `authorized_hosts` for the three host faults, `login_url` for
+  `Url { key: LoginUrl, .. }`, which is how today's doubled `login_url: login_url '…': …` is
+  kept, the audit limit's `key.name()`, and `audit` for `AuditUnbounded`); `sentence(&self) ->
+  String` is the rest. `Display` writes `{prefix}: {sentence}` or `{sentence}`.
+- **The `String` leaves keep their signatures, as thin wrappers.** Each keeps
+  `pub fn … -> Result<_, String>` and becomes a private typed core plus a `map_err`:
+  `compile_profile_claims`, `compile_identity_attrs`, `compile_host_pattern`,
+  `compile_cookie_domain`, `compile_oauth_domain`, `compile_brand_name`, `AuditLimit::parse`
+  and `AuditPolicy::new` return `r.sentence()`; `compile_page_url`, `compile_issuer` and
+  `compile_asset_url` format `{field} '{raw}': {fault}`; `compile_app_client_id` and
+  `compile_audit_header` format `{what}: '{x}' {tail}` with the tail a `const` (app client) or
+  `HeaderFault`'s `Display`. Reason: the access file's parser (`compile_access` calls
+  `compile_login_url` and `compile_page_url`), the CLI's flag-named pre-checks (which `.replace`
+  inside these strings) and the gate's tests all call them, and none of that is in scope. The one
+  exception is `compile_social_buttons`, whose only caller is `compile_settings`: it returns
+  `SettingsRefusal` directly.
+- **How it travels.** `compile_settings -> Result<Settings, SettingsRefusal>`.
+  `SettingsWrite::prepare -> Result<SettingsWrite, PrepareError>`, whose `Display` is
+  `cannot serialize: {e}` / `serialized to invalid JSON: {e}` / `refusing to write: {r}`.
+  `read_settings` and `open_settings_file` keep `Result<_, String>`: they already `format!`
+  the error with the path, which works on `Display` unchanged, and they also carry I/O and serde
+  errors that are no refusal. The CLI's `SettingsWrite::prepare(doc)?` in a function returning
+  `Result<_, String>` keeps compiling through `From<PrepareError> for String`, so
+  `bb-auth-adm` changes not one line. The gate's tests call `compile_settings(..).unwrap()`,
+  which needs only `Debug`.
+- **`code(&self) -> &'static str`, an exhaustive match, and `SETTINGS_REFUSAL_CODES: [&str;
+  46]`.** The codes exist for the tests (§6) and as the refusal's stable name, as `Decision`'s
+  are; no production code branches on them. `#[doc(hidden)] pub fn
+  settings_refusal_samples() -> Vec<SettingsRefusal>` builds one of each code with neutral
+  arguments, so the GUI's test can iterate them across the crate boundary (a `cfg(test)` item is
+  invisible to another crate). It is the one item here that exists only for tests, and it is
+  `doc(hidden)` to say so.
+
+#### 4. Decision: the GUI maps each code to a `K` key naming the visible label
+
+One function in `bb-auth-web.rs`, an **exhaustive match with no `_` arm**, so a new variant
+does not compile until somebody decides what the page says about it:
+
+```rust
+fn settings_refusal(lang: Lang, r: &SettingsRefusal) -> Refusal
+```
+
+- **The message** is a `K` template with positional placeholders `{0}`, `{1}`, … filled by one
+  new helper, `fn fill(template: &str, args: &[&str]) -> String`, single-pass (a substituted
+  argument is never rescanned, the reason `render_page` gives for its own substitution). `{0}` is
+  always the visible label of the field, `t(lang, label)`, which is what "names the visible field
+  label" means mechanically. The value an operator typed is quoted only where the field cannot
+  show which part is wrong: an entry of a list (a claim, an attribute, a host) or a header name.
+  A single-value field is marked `invalid` and already shows its value.
+- **The field** is decided in the same arm and goes in `Refusal::field` (its `name=`), which is
+  what marks the input `invalid`, points `aria-describedby` at the message and opens its group.
+  `SettingKey` maps to its `name=` and its label in one helper, `setting_field(key) ->
+  (&'static str, K)`: `LoginUrl` `("login_url", GlobalLoginUrl)`, `DeniedUrl` `("denied_url",
+  GlobalDeniedUrl)`, `LandingUrl` `("landing_url", GlobalLandingUrl)`, `Issuer` `("issuer",
+  Issuer)`, `SocialCallbackUrl` `("callback", SocialCallback)`, `StylesheetUrl` `("stylesheet",
+  StylesheetUrl)`, `LogoUrl` `("logo", LogoUrl)`, `ClientIpHeader` `("client_ip_header",
+  ClientIpHeader)`, `RequestIdHeader` `("request_id_header", RequestIdHeader)`, `AuditRotation`
+  `("audit_rotation", AuditRotation)`, `AuditRetention` `("audit_retention", AuditRetention)`.
+  The other variants name their field in their arm: the "GUI" column of §2. The two cross-checks
+  go where today's code already sends them: a stray host to `hosts`, the landing page to
+  `landing_url`, the half-configured social sign-in to `domain`, the shared header to
+  `request_id_header`, the unbounded pair to `audit_retention`.
+- **`unit_label` takes `Lang` instead of `&View`** (its body reads only `v.t`), so
+  `AuditLimitTooMuch` can name the unit in the list box's own words.
+
+The keys, as a draft for the designer to review (English, then Italian). New keys are prefixed
+`SetRef`; three existing keys are reused because they already say the same thing.
+
+| Code(s) | `K` key | `{…}` | English | Italian |
+| --- | --- | --- | --- | --- |
+| `claim_charset` | `SetRefClaimCharset` | label, claim | `{0}: '{1}' may contain only letters, digits, '_', ':' and '-'.` | `{0}: '{1}' può contenere solo lettere, cifre, '_', ':' e '-'.` |
+| `claim_empty_part` | `SetRefClaimEmptyPart` | label, claim | `{0}: '{1}' has an empty part around a '_', ':' or '-'.` | `{0}: '{1}' ha una parte vuota attorno a '_', ':' o '-'.` |
+| `claim_consumed` | `SetRefClaimConsumed` | label, claim | `{0}: '{1}' is read by the gate itself and cannot be passed on.` | `{0}: '{1}' è letto dal gate stesso e non può essere inoltrato.` |
+| `claim_header_reserved` | `SetRefClaimHeaderReserved` | label, claim, header | `{0}: '{1}' would become the header {2}, which the gate keeps for itself.` | `{0}: '{1}' diventerebbe l'header {2}, che il gate riserva a sé.` |
+| `claims_collide` | `SetRefClaimsCollide` | label, first, second, header | `{0}: '{1}' and '{2}' would both become the header {3}.` | `{0}: '{1}' e '{2}' diventerebbero entrambi l'header {3}.` |
+| `attr_unknown` | `SetRefAttrUnknown` | label, attr, known | `{0}: '{1}' is not one the gate knows (it knows {2}).` | `{0}: '{1}' non è tra quelli che il gate conosce ({2}).` |
+| `attr_twice` | `SetRefAttrTwice` | label, attr | `{0}: '{1}' is listed twice.` | `{0}: '{1}' compare due volte.` |
+| `attr_none` | `SetRefAttrNone` | label, known | `{0}: at least one is needed ({1}); without one, the applications behind the gate are told nobody signed in.` | `{0}: ne serve almeno uno ({1}); senza, le applicazioni dietro il gate non sanno chi è entrato.` |
+| `ttl_below_floor` | `SetRefTtlBelowFloor` | label, ttl, floor | `{0}: {1} seconds is under the minimum of {2}; a session that expires as it is handed over is a sign-in loop.` | `{0}: {1} secondi è sotto il minimo di {2}; una sessione che scade mentre viene consegnata è un ciclo di accesso.` |
+| `ttl_above_ceiling` | `SetRefTtlAboveCeiling` | label, ttl, ceiling | `{0}: {1} seconds is over the maximum of {2}.` | `{0}: {1} secondi supera il massimo di {2}.` |
+| `app_client_id` | `SetRefAppClientId` | way in, id | `App client for {0}: '{1}' is not an app client id, which is letters, digits, '.', '_' and '-'.` | `App client per {0}: '{1}' non è un id di app client, che è fatto di lettere, cifre, '.', '_' e '-'.` |
+| `url_not_printable` | `SetRefUrlNotPrintable` | label | `{0}: spaces and control characters are not allowed.` | `{0}: spazi e caratteri di controllo non sono ammessi.` |
+| `url_not_https` | `SetRefUrlNotHttps` | label | `{0}: must be an absolute address starting with https://.` | `{0}: deve essere un indirizzo assoluto che inizia con https://.` |
+| `url_empty_host` | `SetRefUrlEmptyHost` | label | `{0}: the address names no host.` | `{0}: l'indirizzo non indica alcun host.` |
+| `url_userinfo` | `SetRefUrlUserinfo` | label | `{0}: a user name with '@' before the host is not allowed.` | `{0}: un nome utente con '@' prima dell'host non è ammesso.` |
+| `url_backslash` | `SetRefUrlBackslash` | label | `{0}: a backslash is not allowed.` | `{0}: la barra rovesciata non è ammessa.` |
+| `url_userinfo_or_backslash` | `SetRefUrlUserinfoOrBackslash` | label | `{0}: a user name with '@' and backslashes are not allowed.` | `{0}: un nome utente con '@' e le barre rovesciate non sono ammessi.` |
+| `url_query_or_fragment` | `SetRefUrlQueryOrFragment` | label | `{0}: must be the bare issuer address, with no query and no fragment.` | `{0}: deve essere il solo indirizzo dell'issuer, senza query né frammento.` |
+| `url_quote` | `SetRefUrlQuote` | label | `{0}: quotes and angle brackets are not allowed.` | `{0}: virgolette e parentesi angolari non sono ammesse.` |
+| `url_not_https_or_rooted` | `SetRefUrlNotHttpsOrRooted` | label | `{0}: must be an absolute https:// address or a path starting with '/'.` | `{0}: deve essere un indirizzo https:// assoluto o un percorso che inizia con '/'.` |
+| `callback_not_https` | `SetRefCallbackNotHttps` | label | `{0}: must be the absolute https:// address registered on the app clients, because Cognito compares it byte for byte.` | `{0}: deve essere l'indirizzo https:// assoluto registrato sugli app client, perché Cognito lo confronta byte per byte.` |
+| `cookie_domain_not_bare` | `SetRefCookieDomainNotBare` | label | `{0}: must be a bare domain such as .example.com: letters, digits, '.' and '-', with no scheme, port or path.` | `{0}: deve essere un dominio semplice come .example.com: lettere, cifre, '.' e '-', senza schema, porta o percorso.` |
+| `cookie_domain_single_label` | `SetRefCookieDomainSingleLabel` | label | `{0}: a single word is a domain no browser keeps a cookie for; name the domain the services share, such as .example.com.` | `{0}: una sola parola è un dominio per cui nessun browser tiene un cookie; indica il dominio condiviso dai servizi, come .example.com.` |
+| `host_control_byte` | `SetRefHostControlByte` | label, host | `{0}: '{1}' contains a control character.` | `{0}: '{1}' contiene un carattere di controllo.` |
+| `host_not_bare` | `SetRefHostNotBare` | label, host | `{0}: '{1}' must be a bare host, with no scheme, port or path.` | `{0}: '{1}' deve essere un host semplice, senza schema, porta o percorso.` |
+| `host_at_or_dot_dot` | `SetRefHostAtOrDotDot` | label, host | `{0}: '{1}' must not contain '@' or '..'.` | `{0}: '{1}' non deve contenere '@' o '..'.` |
+| `hosts_outside_cookie_domain` | `SetRefHostsOutsideCookieDomain` | label, hosts, cookie label, domain | `{0}: {1} is not covered by the {2} '{3}', so a sign-in landing there carries no session cookie and loops back to the sign-in page.` | `{0}: {1} non è coperto dal {2} '{3}', quindi un accesso che arriva lì non porta il cookie di sessione e torna in ciclo alla pagina di accesso.` |
+| `landing_off_hosts` | `SetRefLandingOffHosts` | label, hosts label | `{0}: its host is not among the {1}, so every sign-in that names no destination would fall back to the sign-in page.` | `{0}: il suo host non è tra gli {1}, quindi ogni accesso che non indica una destinazione tornerebbe alla pagina di accesso.` |
+| `oauth_domain_not_bare` | `SetRefOauthDomainNotBare` | label | `{0}: must be a bare host: letters, digits, '.' and '-', with no scheme and no path.` | `{0}: deve essere un host semplice: lettere, cifre, '.' e '-', senza schema né percorso.` |
+| `button_no_audience` | `AudienceNeeded` (exists) | none | as today | as today |
+| `social_half_configured` | `SocialWiringNeeded` (exists) | none | as today | as today |
+| `audit_header_not_a_name` | `SetRefHeaderNotAName` | label, name | `{0}: '{1}' is not a header name: letters, digits and '-' only (nginx drops a header with an underscore in its name).` | `{0}: '{1}' non è un nome di header: solo lettere, cifre e '-' (nginx scarta un header con un trattino basso nel nome).` |
+| `audit_header_credential` | `SetRefHeaderCredential` | label, name | `{0}: '{1}' carries a credential, and the audit never writes one down.` | `{0}: '{1}' porta una credenziale, e l'audit non ne scrive mai una.` |
+| `audit_headers_same` | `SetRefHeadersSame` | label, name, other label | `{0}: '{1}' is already the {2}; one header cannot carry an address and a request id at once.` | `{0}: '{1}' è già l'{2}; un solo header non può portare insieme un indirizzo e un id di richiesta.` |
+| `audit_limit_not_amount` | `SetRefLimitNotAmount` | label | `{0}: the amount must be a whole number.` | `{0}: la quantità deve essere un numero intero.` |
+| `audit_limit_zero` | `SetRefLimitZero` | label | `{0}: an amount of nothing is not a limit.` | `{0}: una quantità nulla non è un limite.` |
+| `audit_limit_too_much` | `SetRefLimitTooMuch` | label, max, unit label | `{0}: at most {1} {2}.` | `{0}: al massimo {1} {2}.` |
+| `audit_unbounded` | `SetRefAuditUnbounded` | rotation label, retention label | `{0} and {1}: at least one of the two must be a size (MiB, GiB), or a flood of refusals would grow the audit without limit.` | `{0} e {1}: almeno una delle due deve essere una dimensione (MiB, GiB), altrimenti un'ondata di rifiuti farebbe crescere l'audit senza limite.` |
+| `brand_control` | `SetRefBrandControl` | label | `{0}: control characters are not allowed.` | `{0}: i caratteri di controllo non sono ammessi.` |
+| `brand_too_long` | `SetRefBrandTooLong` | label, chars, max | `{0}: {1} characters is longer than the {2} allowed.` | `{0}: {1} caratteri superano i {2} ammessi.` |
+| `theme_unknown` | `DefaultThemeBad` (exists) | none | as today | as today |
+| `version`, `button_bare_name`, `button_no_idp`, `button_idp_charset`, `button_twice` | `SetRefFileOnly` | the English sentence | `The settings file is refused for a reason this page cannot fix; correct it with bb-auth-adm over SSH. The gate says: {0}` | `Il file delle impostazioni è rifiutato per un motivo che questa pagina non può correggere; correggilo con bb-auth-adm via SSH. Il gate dice: {0}` |
+
+`app_client_id`'s `{0}` is `t(lang, K::SignInEmail)` for `client_id` and the provider's name
+for a button: the "Ways in" table labels its rows that way, and the cell is the field.
+
+#### 5. Decision: refusals the GUI's own form can never produce
+
+Five codes cannot come from this form, and each for a reason the form's construction gives:
+`version` (the form edits a document that already opened, and never touches `version`);
+`button_bare_name` (`ConfigForm::read` writes only `Wired` buttons; a bare name on disk is
+rendered as a row with an empty app client, which `button_no_audience` answers first);
+`button_no_idp` (`idps` is split on whitespace, so no entry is empty); `button_idp_charset` and
+`button_twice` (the providers come from the page's own hidden `idps`, so only a forged request
+carries a bad or repeated one).
+
+**They are mapped, not skipped, to `SetRefFileOnly`, which wraps the library's English sentence
+verbatim and attributes nothing.** Reason: the exhaustive match still forces a decision for
+each, so a new variant cannot hide behind a wildcard; and the honest reader of those five is an
+operator at a shell, which is the precedent `page_file_error` already sets (a file the gate
+refuses is shown in the gate's own words, because the operator will meet those exact words in
+`--check-settings` and the journal). Translating sentences nobody can reach through the page
+would be 10 strings of maintenance for no reader. `open_settings_file`'s error in the `POST`
+(a file broken on disk between the `GET` and the `POST`) stays as it is for the same reason.
+
+The `apply` pre-checks the GUI keeps are only the ones that are **not** the library's: `ttl` not
+a number, `admins` empty or without the caller, an empty `client_id` / `issuer` /
+`authorized_hosts` / button audience (the GUI is stricter than the gate on purpose), and a
+`ui_theme` the list box cannot send. Those already have `K` keys. Every other check in `apply`
+duplicates `compile_settings` and is removed (slice S9), so there is exactly one path from a
+library refusal to the page, and the two inline English `format!`s go with them. Where `apply`
+used a validator's `Ok` value to normalise what it writes (`issuer` without its trailing slash,
+`cookie_domain` lowercased, `client_id` and the two headers trimmed, the rotation and retention
+spelled), it keeps the call and takes `.unwrap_or` the trimmed input on `Err`, so for every
+value the library accepts the file is written byte for byte as before, and a value it refuses
+reaches `prepare` and is refused there, in the page's words, on its field.
+
+#### 6. How each decision is shown to hold
+
+- **CLI and gate bytes unchanged.** Slice S0 lands, before any code moves, three golden tests
+  in `src/lib.rs` written from today's source literals:
+  `settings_refusals_read_as_they_always_have` (one bad `SettingsFile` per code, built by
+  mutating a valid one, asserting `format!("{}", compile_settings(&f).err().unwrap())` equals the
+  literal; `format!("{}", …)` compiles against both `String` and the enum, so the test is not
+  edited when the type changes), `settings_leaf_refusals_read_as_they_always_have` (each `String`
+  wrapper, with the CLI's own names: `compile_app_client_id("--client-id", …)`,
+  `compile_audit_header("--client-ip-header", …)`, `compile_asset_url("--stylesheet", …)`,
+  `compile_page_url("denied_url", …)`, and each fault of each other leaf, including the two
+  `empty`s) and `a_refused_write_reads_as_it_always_has` (`SettingsWrite::prepare` on a bad
+  document starts with `refusing to write:`, a space, and continues with the first test's literal). They are
+  green on the day they land, by design: their red is shown by changing one byte of one library
+  sentence locally, watching the test fail, and reverting. Every later slice keeps them green
+  unedited; that is the byte-identity guarantee for `bb-auth-adm` (which prints the `String`
+  that `From<PrepareError>` makes, `e.to_string()`) and for `--check-settings` (which prints
+  `read_settings`' `{path}: {e}`). `prepare_error_becomes_the_same_string` pins the `From`.
+- **Every code has a sentence, a sample and a golden.** `every_refusal_has_a_code_a_sample_and_a_sentence`
+  (lib): the codes of `settings_refusal_samples()` are exactly `SETTINGS_REFUSAL_CODES`, each
+  once, and every sample's `Display` is non-empty; the golden test asserts the set of codes its
+  files produced equals `SETTINGS_REFUSAL_CODES`. A new variant fails to compile in `code()`, then
+  fails this test until it is listed, sampled and given a golden.
+- **Every code has a `K` mapping in both languages.** Compile time: `settings_refusal` has no
+  `_` arm. Run time, `every_settings_refusal_reads_in_both_languages` (bb-auth-web): for each
+  sample and each of `Lang::En`, `Lang::It`, the message is non-empty and holds no `{digit}`;
+  for the five file-only codes (a `const FILE_ONLY: [&str; 5]` in the test) the message contains
+  `r.to_string()` and `field` is `None`; for every other code `field` is `Some`, the message does
+  **not** contain `r.to_string()`, does not contain any wire key that has a `_` or a `.` in it
+  (`profile_claims`, `identity_attrs`, `session_ttl_secs`, `client_id`, `login_url`,
+  `denied_url`, `landing_url`, `cookie_domain`, `authorized_hosts`, `oauth_domain`,
+  `social_callback_url`, `social_buttons`, `client_ip_header`, `request_id_header`,
+  `audit.rotation`, `audit.retention`, `stylesheet_url`, `logo_url`, `brand_name`; the samples'
+  arguments avoid them, and `issuer` is not in the list because the label "User pool (issuer)"
+  carries it), and the English and Italian messages differ. `fill_is_single_pass`: an argument
+  holding `{1}` is not expanded.
+- **The wiring, once per path rather than once per code.** `settings_refusal` is a pure
+  function, so the test above covers every code; the route needs one test per path into it:
+  `an_italian_settings_refusal_names_the_labels` (landing page off the hosts, through `prepare`,
+  with the `lang=it` cookie: the `div.err` text contains "Pagina di arrivo" and "Host
+  autorizzati" and neither `landing_url` nor `authorized_hosts`, and `f-landing_url invalid`
+  stays), `a_claim_refusal_is_marked_on_its_field` (a bad claim, through `prepare`: `claims`
+  marked, which is not attributed today), and in S9
+  `the_settings_form_says_a_stray_host_in_italian` and
+  `the_settings_form_says_a_shared_audit_header_in_italian` (today `apply`'s inline English).
+  Assert on the `div.err` text, not the whole body: the body contains `name="landing_url"`, which
+  is why §13.21's `body.contains("landing_url")` passes whatever the message says.
+- **What a person sees.** `node e2e/shots.js config-landing-refused`: the designer reads the
+  Italian shot and the English one, which today show the wire sentence (§13.21).
+
+#### 7. Slices
+
+Each is one red-green pass touching a few functions, in this order, and none leaves a `pub`
+function without a caller (clippy's `dead_code` does not fire on a library `pub` item, but a
+GUI helper with no caller does, which is why S8 is one slice).
+
+| Slice | What changes | Red test(s) first |
+| --- | --- | --- |
+| S0 | Tests only: §6's three goldens. | Green by design; red shown by a one-byte local edit. |
+| S1 | `SettingsRefusal` with `Version`, `TtlBelowFloor`, `TtlAboveCeiling`, `HostsOutsideCookieDomain`, `LandingOffHosts`, `CallbackNotHttps`, `SocialHalfConfigured`, `AuditHeadersSame`, `ThemeUnknown`, plus a **temporary** `Other(String)` holding the prefixed sentence of every leaf not yet converted; `Display`, `code()` (`Other` is `"other"`); `PrepareError` and its `From`; `compile_settings`, `prepare` change type; the GUI's `prepare` call takes `.to_string()` before its existing sniff (unchanged behaviour). | `compile_settings_names_its_refusal` (`matches!(…, SettingsRefusal::LandingOffHosts)`, and one TTL case), `prepare_error_becomes_the_same_string`. |
+| S2 | `ClaimCharset`, `ClaimEmptyPart`, `ClaimConsumed`, `ClaimHeaderReserved`, `ClaimsCollide`, `AttrUnknown`, `AttrTwice`, `AttrNone`; the private `prefix()`/`sentence()` pair; `compile_profile_claims` and `compile_identity_attrs` become wrappers. | `claim_and_attribute_refusals_are_codes`. |
+| S3 | `SettingKey`, `UrlFault`, `Url`; private cores behind `compile_page_url`, `compile_issuer`, `compile_asset_url`. | `url_refusals_name_the_setting_and_the_fault` (login, landing, issuer, callback, logo). |
+| S4 | `AppClientId`, `CookieDomainNotBare`, `CookieDomainSingleLabel`, `HostControlByte`, `HostNotBare`, `HostAtOrDotDot`, `OauthDomainNotBare`; wrappers for the four leaves. | `domain_host_and_client_refusals_are_codes`. |
+| S5 | `ButtonBareName`, `ButtonNoIdp`, `ButtonIdpCharset`, `ButtonTwice`, `ButtonNoAudience` (`AppClientId { button: Some }` already exists); `compile_social_buttons` returns `SettingsRefusal`. | `social_button_refusals_are_codes`. |
+| S6 | `HeaderFault`, `AuditHeader`, `AuditLimitNotAmount`, `AuditLimitZero`, `AuditLimitTooMuch`, `AuditUnbounded`; wrappers `compile_audit_header`, `AuditLimit::parse`, `AuditPolicy::new` (`compile_audit_policy` stays `String` for the CLI's `.replace("audit:", …)`). | `audit_refusals_are_codes`. |
+| S7 | `BrandControl`, `BrandTooLong`; delete `Other`; `SETTINGS_REFUSAL_CODES`, `settings_refusal_samples()`. | `every_refusal_has_a_code_a_sample_and_a_sentence`; the golden test's codes-reached assertion. |
+| S8 | GUI: `fill`, the `SetRef*` keys (§4), `setting_field`, `unit_label(Lang, …)`, `settings_refusal` (exhaustive), and the `prepare` call mapped through it with the `e.contains("landing_url")` sniff deleted. Update the existing test that asserts the English sentence, if any. | `every_settings_refusal_reads_in_both_languages`, `fill_is_single_pass`, `an_italian_settings_refusal_names_the_labels`, `a_claim_refusal_is_marked_on_its_field`. |
+| S9 | GUI: `ConfigForm::apply` drops the checks that duplicate the library (and its two inline English `format!`s), keeping only its own stricter ones and the `.unwrap_or` normalisation (§5). Every existing attribution test (`f-hosts invalid`, `f-aud-… invalid`, …) stays green unedited. | `the_settings_form_says_a_stray_host_in_italian`, `the_settings_form_says_a_shared_audit_header_in_italian`. |
+
+Checks per slice, per the table in AGENTS.md: S0 to S7 touch the library, so `cargo test`,
+`cargo clippy --all-targets`, `cargo fmt --check` and `cargo doc --no-deps` (new intra-doc links
+to `SettingsRefusal`); S8 and S9 add the `K` keys, so also `node e2e/run.js` and the
+`config-landing-refused` scene, reviewed by the designer.
+
+#### 8. Alternatives rejected (settings refusals)
+
+- **Keep sniffing the English in the GUI** (extend `e.contains("landing_url")` to every
+  sentence): it is the practice `Refusal`'s rustdoc forbids, and a reworded library sentence
+  would silently move or drop the attribution.
+- **Codes only in the library, the English moved into the CLI and the gate:** two binaries print
+  these sentences, so that is two copies of each, which is the drift the library exists to end.
+- **The library returns translated text, or `K` keys:** the library has no language, and the
+  Displayed text rule gives the `K` table as the one home of what the GUI shows.
+- **`thiserror` / `strum` for `Display` and iteration:** a dependency to save two hand-written
+  matches, against the rule that keeps the tree small and checked after every bump; the
+  exhaustive matches are the coverage guarantee anyway.
+- **Change every leaf to return the typed error:** the access file's parser and the CLI's
+  flag-named pre-checks call those leaves and edit their strings, so the change would reach the
+  access file's error path, which nobody asked to change.
+- **Translate the five file-only codes too:** ten strings no reader of the page can reach; the
+  English is what the operator meets at the shell.
+- **One route test per code:** the mapping is pure; one route test per path proves the wiring.
+- **A fully flat enum** (each URL fault times seven settings): forty-odd arms that repeat one
+  tail; and a fully nested one (a fault type per setting) is more types than a small model can
+  hold. Nested only where a leaf is shared with a caller that names the setting itself.
+
+#### 9. Open questions for the user (settings refusals)
+
+None blocks the slices. Two are worth a look in the morning: the Italian wording in §4 is a
+draft for the designer (it names the labels exactly as `K` spells them today); and whether the
+CLI should one day name its flags in these refusals the way it already does in its pre-checks
+is left alone here, because the user asked for its bytes to stay as they are.

@@ -44,6 +44,9 @@ Rules are in `AGENTS.md`. Format of this file: `AGENTS.md`, under "Skills".
 - The self-service page never reads `web.admins`: a design there cannot branch on "is an admin".
 - The real pool's facts are in `PLAN.md` step 5 (read 2026-11-25); its changes go through the
   OpenTofu repository named there, never the AWS CLI.
+- A library refusal the GUI must translate is an enum whose `Display` is today's English (for the
+  CLI and the gate) and an exhaustive GUI match to `K`; keep the `String` leaf functions as
+  wrappers, because `compile_access` and the CLI's flag-named pre-checks call them (§13.31).
 
 ## Pitfalls
 
@@ -81,3 +84,5 @@ Rules are in `AGENTS.md`. Format of this file: `AGENTS.md`, under "Skills".
   which is every attribute writable: an absent list is not "none".
 - The rpi-01 pool has unlinked native and federated users sharing one email: `USERNAME` = email
   reaches the native one. Act on a session's Cognito user by its `cognito:username`, never its email.
+- A GUI test's `body.contains("landing_url")` passes on the input's `name=`: assert on the
+  `div.err` text when the point is what the refusal says.
