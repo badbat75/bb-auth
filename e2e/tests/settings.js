@@ -423,7 +423,11 @@ async function run(ctx, t) {
     await page.goto(ctx.base + '/config?lang=en');
     await page.fill('textarea[name=admins]', '   ');
     t.eq('emptying the list is a 400', (await submit(page)).status(), 400);
-    t.check('and says why', (await mainText(page)).includes('at least one administrator'));
+    // The refusal's own block, in the page's register: the label of the field, then what is
+    // needed (§13.31 §10). The body is not searched, because the body carries the help text.
+    t.eq('and says why, opening with the label of the field',
+      (await page.locator('div.err').first().innerText()).trim(),
+      "Administrators: at least one is needed; an empty list must never come to mean 'everyone'.");
 
     // A value the gate would refuse never reaches the disk either, and the page says so in
     // the reader's own words, naming the field by its visible label (§13.31 §4). The library's

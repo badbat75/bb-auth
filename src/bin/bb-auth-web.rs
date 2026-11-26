@@ -1146,6 +1146,13 @@ enum K {
     SetRefAuditUnbounded,
     SetRefBrandControl,
     SetRefBrandTooLong,
+    // The two the page raises itself, in the same register as the library's (`Admins:` then
+    // what is needed), because the library cannot make them: it does not know who is signed
+    // in. Their `Admins*` neighbours keep their own keys and words, since those read as a
+    // shell message and as a bracketed help line, where a label in front would repeat the
+    // label printed just above them (§13.31 §10).
+    SetRefAdminsNone,
+    SetRefAdminsSelf,
     Days,
     // --- the self-service page ---
     //
@@ -1358,15 +1365,21 @@ fn t(lang: Lang, key: K) -> &'static str {
             "Con cosa un 204 nomina l'identità autorizzata, uno per riga: email, uuid. Mai vuoto. nginx azzera già entrambi i nomi, quindi accenderne uno non richiede modifiche lì.",
         ),
         K::SessionTtl => m(lang, "Session lifetime", "Durata della sessione"),
+        // The list box's own words, not the file's codes: the box shows "Light", "Dark" and
+        // the system option in the reader's language, so `light, dark, system` were wire
+        // words on a page (§13.31 §10). Only a request this form did not build carries
+        // another value, which is what the sentence says.
         K::SessionTtlBad => m(
             lang,
-            "must be a whole number of seconds",
-            "deve essere un numero intero di secondi",
+            "{0}: must be a whole number of seconds, such as 2592000 for 30 days.",
+            "{0}: deve essere un numero intero di secondi, come 2592000 per 30 giorni.",
         ),
         K::DefaultThemeBad => m(
             lang,
-            "must be one of: light, dark, system",
-            "deve essere uno tra: light, dark, system",
+            "{0}: choose one of the options in the list; this request carried a value the \
+             list does not offer.",
+            "{0}: scegli una delle opzioni dell'elenco; questa richiesta portava un valore \
+             che l'elenco non offre.",
         ),
         // A settings-file refusal, in the reader's language (§13.31). `{0}` is the visible label
         // of the field the refusal is marked on, filled by `settings_refusal` through `fill`.
@@ -1565,6 +1578,21 @@ fn t(lang: Lang, key: K) -> &'static str {
             "{0}: {1} characters, and at most {2} are allowed.",
             "{0}: {1} caratteri, e ne sono ammessi al massimo {2}.",
         ),
+        // The page's own two, in the same register: the label, then what is needed. The
+        // library cannot raise them, because it does not know who is signed in.
+        K::SetRefAdminsNone => m(
+            lang,
+            "{0}: at least one is needed; an empty list must never come to mean 'everyone'.",
+            "{0}: ne serve almeno uno; una lista vuota non deve mai finire per significare \
+             'chiunque'.",
+        ),
+        K::SetRefAdminsSelf => m(
+            lang,
+            "{0}: your own address must stay on the list; to remove yourself, use \
+             bb-auth-adm over SSH.",
+            "{0}: il tuo indirizzo deve restare nella lista; per rimuovere te stesso usa \
+             bb-auth-adm via SSH.",
+        ),
         K::SessionTtlHelp => m(
             lang,
             "Seconds. Applies to cookies minted from now on: nobody is logged out by changing it.",
@@ -1585,13 +1613,13 @@ fn t(lang: Lang, key: K) -> &'static str {
         K::GlobalLoginUrlHelp => m(
             lang,
             "Where a 401 sends people, and where a rejected redirect lands. Empty means the gate's own /auth/login on the host the request arrived at, which is what a deployment that has not moved its sign-in page wants. An application can override it for its own area.",
-            "Dove un 401 manda le persone, e dove finisce un redirect rifiutato. Vuoto significa la /auth/login del gate stesso sull'host da cui arriva la richiesta, che e' quello che vuole un deployment che non ha spostato la propria pagina di accesso. Una applicazione puo' sovrascriverla per la propria area.",
+            "Dove un 401 manda le persone, e dove finisce un redirect rifiutato. Vuoto significa la /auth/login del gate stesso sull'host da cui arriva la richiesta, che è quello che vuole un deployment che non ha spostato la propria pagina di accesso. Una applicazione può sovrascriverla per la propria area.",
         ),
         K::GlobalDeniedUrl => m(lang, "Refusal page", "Pagina di rifiuto"),
         K::GlobalDeniedUrlHelp => m(
             lang,
             "Where a 403 sends people: somebody who is signed in and is not admitted here. Empty means the gate's own /auth/denied, which it builds out of the look below. It cannot shut a door, only decide what the person already shut out is shown. An application can override it for its own area, which is how one gate gives each host its own page.",
-            "Dove un 403 manda le persone: qualcuno che ha fatto l'accesso e qui non e' ammesso. Vuoto significa la /auth/denied del gate stesso, costruita con l'aspetto qui sotto. Non puo' chiudere nessuna porta: decide solo cosa vede chi e' gia' stato respinto. Una applicazione puo' sovrascriverla per la propria area, ed e' cosi' che un solo gate da' a ogni host la sua pagina.",
+            "Dove un 403 manda le persone: qualcuno che ha fatto l'accesso e qui non è ammesso. Vuoto significa la /auth/denied del gate stesso, costruita con l'aspetto qui sotto. Non può chiudere nessuna porta: decide solo cosa vede chi è già stato respinto. Una applicazione può sovrascriverla per la propria area, ed è così che un solo gate dà a ogni host la sua pagina.",
         ),
         K::GlobalLandingUrl => m(lang, "Landing page", "Pagina di arrivo"),
         K::GlobalLandingUrlHelp => m(
@@ -1615,23 +1643,44 @@ fn t(lang: Lang, key: K) -> &'static str {
         K::SignInEmail => m(lang, "Email and code", "Email e codice"),
         K::ClientIdNeeded => m(
             lang,
-            "An app client is needed: without one no login can complete. It is the Cognito app client the sign-in page signs people in against.",
-            "Serve un app client: senza, nessun accesso puo' concludersi. E' l'app client Cognito con cui la pagina di accesso fa entrare le persone.",
+            "App client for {0}: cannot be empty; without one, no sign-in can complete. It \
+             is the Cognito app client the sign-in page signs people in against.",
+            "App client per {0}: non può essere vuoto; senza, nessun accesso può \
+             concludersi. È l'app client Cognito con cui la pagina di accesso fa entrare le \
+             persone.",
         ),
         K::AudienceNeeded => m(
             lang,
-            "This provider needs its own app client: Cognito federates per app client, so the one that offers this provider is the one to name here.",
-            "Questo provider ha bisogno del proprio app client: Cognito federa per app client, quindi va indicato quello che offre questo provider.",
+            "App client for {0}: this provider needs its own, because Cognito federates per \
+             app client; name the one that offers this provider.",
+            "App client per {0}: questo provider ha bisogno del proprio, perché Cognito \
+             federa per app client; indica quello che offre questo provider.",
         ),
         K::SocialWiringNeeded => m(
             lang,
-            "A social button needs both the hosted UI domain and the callback URL above: without them there is nowhere to send a visitor and nowhere for them to come back to.",
-            "Un pulsante social ha bisogno sia del dominio della hosted UI sia dell'URL di callback qui sopra: senza, non c'e' dove mandare chi entra ne' dove farlo tornare.",
+            "{0} and {1}: a social button needs both; without them there is nowhere to send \
+             a visitor and nowhere for them to come back to.",
+            "{0} e {1}: un pulsante social ha bisogno di entrambi; senza, non c'è dove \
+             mandare chi entra né dove farlo tornare.",
         ),
         K::SocialWaysHelp => m(
             lang,
-            "Every way into this deployment, and the Cognito app client it runs through. Email and code is always offered and is the app client the sign-in page runs USER_AUTH against; each social provider is offered only if it is ticked, and carries its own app client, because Cognito federates per app client. These app clients ARE the audiences the gate accepts: an id_token carries the client it was minted for. The pool they belong to stays in the env file, so nothing here can reach another one. Microsoft is the personal account (outlook.com, hotmail.com), not a work or school one: an Entra ID tenant is a separate provider on the pool.",
-            "Ogni modo di entrare in questo deployment, e l'app client Cognito attraverso cui passa. Email e codice e' sempre offerto ed e' l'app client con cui la pagina di accesso esegue USER_AUTH; ogni provider social viene offerto solo se e' spuntato e porta il proprio app client, perche' Cognito federa per app client. Questi app client SONO le audience che il gate accetta: un id_token porta il client per cui e' stato emesso. Il pool a cui appartengono resta nel file env, quindi da qui non si puo' raggiungerne un altro. Microsoft e' l'account personale (outlook.com, hotmail.com), non uno aziendale o scolastico: un tenant Entra ID e' un provider separato sul pool.",
+            "Every way into this deployment, and the Cognito app client it runs through. \
+             Email and code is always offered and is the app client the sign-in page runs \
+             USER_AUTH against; each social provider is offered only if it is ticked, and \
+             carries its own app client, because Cognito federates per app client. These app \
+             clients ARE the audiences the gate accepts: an id_token carries the client it \
+             was minted for. They all belong to the User pool (issuer) above. Microsoft is \
+             the personal account (outlook.com, hotmail.com), not a work or school one: an \
+             Entra ID tenant is a separate provider on the pool.",
+            "Ogni modo di entrare in questo deployment, e l'app client Cognito attraverso cui \
+             passa. Email e codice è sempre offerto ed è l'app client con cui la pagina di \
+             accesso esegue USER_AUTH; ogni provider social viene offerto solo se è spuntato \
+             e porta il proprio app client, perché Cognito federa per app client. Questi app \
+             client SONO le audience che il gate accetta: un id_token porta il client per cui \
+             è stato emesso. Appartengono tutti allo User pool (issuer) qui sopra. Microsoft \
+             è l'account personale (outlook.com, hotmail.com), non uno aziendale o \
+             scolastico: un tenant Entra ID è un provider separato sul pool.",
         ),
         K::ColShownAs => m(lang, "shown as", "mostrato come"),
         K::ColAudience => m(lang, "app client (aud)", "app client (aud)"),
@@ -1653,10 +1702,10 @@ fn t(lang: Lang, key: K) -> &'static str {
         ),
         K::IssuerNeeded => m(
             lang,
-            "a user pool is required: with none, no token can be validated and no login can \
-             complete",
-            "serve uno user pool: senza, nessun token può essere validato e nessun accesso \
-             può concludersi",
+            "{0}: cannot be empty; without one, no token can be validated and no sign-in \
+             can complete.",
+            "{0}: non può essere vuoto; senza, nessun token può essere validato e nessun \
+             accesso può concludersi.",
         ),
         K::CookieDomain => m(lang, "Cookie domain", "Dominio del cookie"),
         K::CookieDomainHelp => m(
@@ -1684,10 +1733,10 @@ fn t(lang: Lang, key: K) -> &'static str {
         ),
         K::AuthorizedHostsNeeded => m(
             lang,
-            "at least one host is required: with none, every post-login redirect is refused \
-             and everybody lands back on the sign-in page",
-            "serve almeno un host: senza, ogni redirect dopo l'accesso viene rifiutato e \
-             tutti tornano alla pagina di accesso",
+            "{0}: at least one is needed; without one, every redirect after sign-in is \
+             refused and everybody lands back on the sign-in page.",
+            "{0}: ne serve almeno uno; senza, ogni redirect dopo l'accesso viene rifiutato e \
+             tutti tornano alla pagina di accesso.",
         ),
         K::ConfirmTitle => m(
             lang,
@@ -5604,12 +5653,17 @@ fn settings_refusal(lang: Lang, r: &SettingsRefusal) -> Refusal {
         // The two the form can produce and already says something about, in its own words, in
         // both languages: reused rather than rewritten, because the row says the same thing
         // before the save as after it.
-        SettingsRefusal::ButtonNoAudience { idp } => {
-            Refusal::on(aud_field(idp), t(lang, K::AudienceNeeded))
-        }
-        SettingsRefusal::SocialHalfConfigured { .. } => {
-            Refusal::on("domain", t(lang, K::SocialWiringNeeded))
-        }
+        SettingsRefusal::ButtonNoAudience { idp } => Refusal::on(
+            aud_field(idp),
+            fill(t(lang, K::AudienceNeeded), &[social_idp_label(idp)]),
+        ),
+        SettingsRefusal::SocialHalfConfigured { .. } => Refusal::on(
+            "domain",
+            fill(
+                t(lang, K::SocialWiringNeeded),
+                &[t(lang, K::OauthDomain), t(lang, K::SocialCallback)],
+            ),
+        ),
         SettingsRefusal::AuditHeader { key, name, fault } => {
             let (field, label) = setting_field(*key);
             let key = match fault {
@@ -5683,9 +5737,10 @@ fn settings_refusal(lang: Lang, r: &SettingsRefusal) -> Refusal {
         ),
         // The field is `ui_theme` and not the file's `theme`: it is the page's own name for the
         // box, and the one the form posts (§13.31 §2).
-        SettingsRefusal::ThemeUnknown { .. } => {
-            Refusal::on("ui_theme", t(lang, K::DefaultThemeBad))
-        }
+        SettingsRefusal::ThemeUnknown { .. } => Refusal::on(
+            "ui_theme",
+            fill(t(lang, K::DefaultThemeBad), &[t(lang, K::DefaultTheme)]),
+        ),
     }
 }
 
@@ -8307,21 +8362,30 @@ impl ConfigForm {
     /// check is `compile_settings`'s, made once on the way to disk, where its refusal is said in
     /// the reader's language on the field that can fix it (docs/ARCHITECTURE.md §13.31 §5).
     fn apply(&self, doc: &mut SettingsFile, admin: &str, lang: Lang) -> Result<(), Refusal> {
-        let ttl: u64 = self
-            .ttl
-            .trim()
-            .parse()
-            .map_err(|_| Refusal::on("ttl", t(lang, K::SessionTtlBad)))?;
+        // Every refusal here is said in the page's own register: the visible label of the
+        // field, then what is allowed, through `fill` like the library's (§13.31 §10).
+        let ttl: u64 = self.ttl.trim().parse().map_err(|_| {
+            Refusal::on(
+                "ttl",
+                fill(t(lang, K::SessionTtlBad), &[t(lang, K::SessionTtl)]),
+            )
+        })?;
         let admins = Self::lines(&self.admins);
         if admins.is_empty() {
-            return Err(Refusal::on("admins", t(lang, K::AdminsNeverEmpty)));
+            return Err(Refusal::on(
+                "admins",
+                fill(t(lang, K::SetRefAdminsNone), &[t(lang, K::Admins)]),
+            ));
         }
         // The guard that makes this page safe to hand an administrator: you may add anyone
         // and remove anyone but yourself. Removing the last administrator is refused above;
         // removing *this* one would leave a GUI nobody can open, and the way back is the SSH
         // this page exists to save people from. `bb-auth-adm` will still do it.
         if !admins.iter().any(|a| norm_email(a) == admin) {
-            return Err(Refusal::on("admins", t(lang, K::AdminsKeepYourself)));
+            return Err(Refusal::on(
+                "admins",
+                fill(t(lang, K::SetRefAdminsSelf), &[t(lang, K::Admins)]),
+            ));
         }
         // The four the GUI is stricter than the gate about on purpose: a deployment with an
         // empty one of these is one where no login can complete, and a form should not be able
@@ -8330,25 +8394,46 @@ impl ConfigForm {
         let client_id = compile_app_client_id("client_id", &self.client_id)
             .unwrap_or(self.client_id.trim().to_string());
         if client_id.is_empty() {
-            return Err(Refusal::on("client_id", t(lang, K::ClientIdNeeded)));
+            return Err(Refusal::on(
+                "client_id",
+                fill(t(lang, K::ClientIdNeeded), &[t(lang, K::SignInEmail)]),
+            ));
         }
         let issuer = compile_issuer(&self.issuer).unwrap_or(self.issuer.trim().to_string());
         if issuer.is_empty() {
-            return Err(Refusal::on("issuer", t(lang, K::IssuerNeeded)));
+            return Err(Refusal::on(
+                "issuer",
+                fill(t(lang, K::IssuerNeeded), &[t(lang, K::Issuer)]),
+            ));
         }
         let hosts = Self::lines(&self.hosts);
         if hosts.is_empty() {
-            return Err(Refusal::on("hosts", t(lang, K::AuthorizedHostsNeeded)));
+            return Err(Refusal::on(
+                "hosts",
+                fill(
+                    t(lang, K::AuthorizedHostsNeeded),
+                    &[t(lang, K::AuthorizedHosts)],
+                ),
+            ));
         }
         for (idp, aud) in &self.buttons {
             if aud.trim().is_empty() {
-                return Err(Refusal::on(aud_field(idp), t(lang, K::AudienceNeeded)));
+                return Err(Refusal::on(
+                    aud_field(idp),
+                    fill(t(lang, K::AudienceNeeded), &[social_idp_label(idp)]),
+                ));
             }
         }
         // A value this list box cannot produce, so a refusal here means the request was not
         // this form. It is still a refusal and not a silent `system`: see `UiTheme::parse`.
-        let theme = UiTheme::parse(&self.theme)
-            .ok_or_else(|| Refusal::on("theme", t(lang, K::DefaultThemeBad)))?;
+        // The field is `ui_theme`, the page's name for the box, as `settings_refusal` says:
+        // `theme` is the file's key, and marks nothing on this page (§13.31 §10).
+        let theme = UiTheme::parse(&self.theme).ok_or_else(|| {
+            Refusal::on(
+                "ui_theme",
+                fill(t(lang, K::DefaultThemeBad), &[t(lang, K::DefaultTheme)]),
+            )
+        })?;
         // The validators stay where their `Ok` value is what the file stores: the issuer with
         // its trailing slash gone, the cookie domain lowercased, an app client and a header
         // trimmed, the two audit limits in the file's own spelling. The refusal does not stay:
@@ -8497,7 +8582,9 @@ fn settings_group_of(field: &str) -> &'static str {
         "social" | "providers" | "ttl" => "access",
         "identity" | "claims" => "handover",
         "client_ip_header" | "request_id_header" | "audit_rotation" | "audit_retention" => "audit",
-        "admins" | "brand" | "stylesheet" | "logo" | "theme" => "look",
+        // The list box is `ui_theme`, the page's name for it; `theme` is the file's key, and a
+        // refusal spelled that way opened no group at all (§13.31 §10).
+        "admins" | "brand" | "stylesheet" | "logo" | "ui_theme" => "look",
         // Everything else on the page is the sign-in box's, including the table of ways in,
         // whose fields are named after the providers in the file (`aud-Google`).
         _ => "signin",
@@ -8988,7 +9075,15 @@ fn mutate(v: &View, form: &Form) -> Outcome {
     // Whichever file this route edits: the same `rev` field, checked against the file whose
     // fingerprint the form was given ([`edited_file`]).
     let path = edited_file(v.cfg, &v.at);
-    let title = v.at.title();
+    // The settings page is titled with its own name, translated, on every response this route
+    // gives: the settings file is a whole file in four sections, so `Route::title`'s
+    // untranslated word ("settings") names no section an operator types, and a browser tab
+    // that changes wording and language after a save is a page that seems to have moved
+    // (§13.31 §10, WCAG 2.2 SC 2.4.2). The access-file pages keep the section word.
+    let title = match &v.at {
+        Route::Config => v.t(K::Config),
+        _ => v.at.title(),
+    };
 
     // (1) The file as it is right now, byte for byte.
     let raw = match std::fs::read_to_string(path) {
@@ -14383,6 +14478,240 @@ mod tests {
         (0..b.len()).any(|i| b[i] == b'{' && b.get(i + 1).is_some_and(|c| c.is_ascii_digit()))
     }
 
+    /// The visible label a refusal's message must start with, for the field it marks
+    /// (docs/ARCHITECTURE.md §13.31 §10): the page's own map from a field's `name=` to the
+    /// label printed above it. One map, read by the walk over the page's own refusals and by
+    /// the walk over the library's, so the two cannot disagree about what "starts with the
+    /// label" means. Three messages name more than the field they mark, and say so at the call
+    /// site: the two app-client rows ("App client for …", which has no label of its own), the
+    /// half-wired social pair, and the audit's rotation/retention pair.
+    fn field_label(lang: Lang, field: &str) -> String {
+        let k = match field {
+            "ttl" => K::SessionTtl,
+            "admins" => K::Admins,
+            "issuer" => K::Issuer,
+            "hosts" => K::AuthorizedHosts,
+            "ui_theme" => K::DefaultTheme,
+            "claims" => K::ProfileClaims,
+            "identity" => K::IdentityAttrs,
+            "cookie_domain" => K::CookieDomain,
+            "brand" => K::BrandName,
+            "domain" => K::OauthDomain,
+            "callback" => K::SocialCallback,
+            "login_url" => K::GlobalLoginUrl,
+            "denied_url" => K::GlobalDeniedUrl,
+            "landing_url" => K::GlobalLandingUrl,
+            "stylesheet" => K::StylesheetUrl,
+            "logo" => K::LogoUrl,
+            "client_ip_header" => K::ClientIpHeader,
+            "request_id_header" => K::RequestIdHeader,
+            "audit_rotation" => K::AuditRotation,
+            "audit_retention" => K::AuditRetention,
+            _ => panic!("this test's map knows no field {field:?}"),
+        };
+        t(lang, k).to_string()
+    }
+
+    /// The prefix of an app-client refusal: the row's heading, behind the words the row's
+    /// message opens with. Spelled here because no `K` key names those words on their own:
+    /// they are the front of `ClientIdNeeded`, `AudienceNeeded` and `SetRefAppClientId`.
+    fn app_client_prefix(lang: Lang, who: &str) -> String {
+        match lang {
+            Lang::En => format!("App client for {who}"),
+            Lang::It => format!("App client per {who}"),
+        }
+    }
+
+    /// "A and B" / "A e B": the join of the two labels a refusal names at once.
+    fn two_labels(lang: Lang, a: &str, b: &str) -> String {
+        match lang {
+            Lang::En => format!("{a} and {b}"),
+            Lang::It => format!("{a} e {b}"),
+        }
+    }
+
+    /// The markup tag that carries `name="…"`: the input, textarea or list box a refusal
+    /// marks. Asserted on as one tag, because a body-wide search for `invalid` passes on any
+    /// other field's marking (§13.31 §10a).
+    fn field_tag(html: &str, name: &str) -> String {
+        let needle = format!("name=\"{name}\"");
+        let at = html
+            .find(&needle)
+            .unwrap_or_else(|| panic!("the page carries no field {name:?}"));
+        let start = html[..at].rfind('<').expect("a name inside a tag");
+        let end = at + html[at..].find('>').expect("a closed tag") + 1;
+        html[start..end].to_string()
+    }
+
+    /// The raw contents of the string literal that starts at `at` (a `"`), and the index just
+    /// after its closing quote. A `\` skips the next character, which is what makes a `\` at
+    /// the end of a line (rustfmt's continuation) part of the literal.
+    fn string_literal(src: &str, at: usize) -> (String, usize) {
+        let b = src.as_bytes();
+        assert_eq!(b[at], b'"', "a string literal starts at a quote");
+        let mut i = at + 1;
+        while i < b.len() {
+            match b[i] {
+                b'\\' => i += 2,
+                b'"' => return (src[at + 1..i].to_string(), i + 1),
+                _ => i += 1,
+            }
+        }
+        panic!("an unterminated string literal");
+    }
+
+    /// A string literal's contents as the compiler reads them: `\"`, `\\`, `\n`, `\r`, `\t`,
+    /// `\0` and `\u{…}` become their character, and a `\` at the end of a line drops the
+    /// newline and the next line's leading whitespace. The test compares the words the page
+    /// shows, so it has to read them the way the binary does.
+    fn unescape(src: &str) -> String {
+        let cs: Vec<char> = src.chars().collect();
+        let mut out = String::new();
+        let mut i = 0;
+        while i < cs.len() {
+            if cs[i] != '\\' {
+                out.push(cs[i]);
+                i += 1;
+                continue;
+            }
+            i += 1;
+            assert!(i < cs.len(), "a literal ends in a backslash");
+            match cs[i] {
+                '\n' => {
+                    i += 1;
+                    while matches!(cs.get(i), Some(' ') | Some('\t')) {
+                        i += 1;
+                    }
+                }
+                '"' => {
+                    out.push('"');
+                    i += 1;
+                }
+                '\\' => {
+                    out.push('\\');
+                    i += 1;
+                }
+                'n' => {
+                    out.push('\n');
+                    i += 1;
+                }
+                'r' => {
+                    out.push('\r');
+                    i += 1;
+                }
+                't' => {
+                    out.push('\t');
+                    i += 1;
+                }
+                '0' => {
+                    out.push('\0');
+                    i += 1;
+                }
+                'u' => {
+                    assert_eq!(
+                        cs.get(i + 1),
+                        Some(&'{'),
+                        "a unicode escape names its braces"
+                    );
+                    let close = i
+                        + 2
+                        + cs[i + 2..]
+                            .iter()
+                            .position(|c| *c == '}')
+                            .expect("a closing brace");
+                    let hex: String = cs[i + 2..close].iter().collect();
+                    let n = u32::from_str_radix(&hex, 16).expect("a code point in hex");
+                    out.push(char::from_u32(n).expect("a character"));
+                    i = close + 1;
+                }
+                c => panic!("an escape this test does not read: \\{c}"),
+            }
+        }
+        out
+    }
+
+    /// The Italian of every arm of `fn t`, with the keys that arm answers for.
+    ///
+    /// `K` has no list of its variants and none is added for a test, so the table is read
+    /// where it is written: this file's own source, from the signature of `fn t` to the first
+    /// brace at column 0 (rustfmt indents every inner block, so that brace closes the function),
+    /// arm by arm. Each arm's third argument is the Italian. An arm that answers for several
+    /// keys is reported under all of them, so a fault in a shared string names every key that
+    /// shows it (§13.31 §10a).
+    fn italian_k_strings() -> Vec<(String, String)> {
+        const SRC: &str = include_str!("bb-auth-web.rs");
+        const HEAD: &str = "fn t(lang: Lang, key: K) -> &'static str {";
+        let start = SRC.find(HEAD).expect("the translation function, by name") + HEAD.len();
+        let end = start
+            + SRC[start..]
+                .find("\n}")
+                .expect("the translation function's end");
+        let body = &SRC[start..end];
+        let mut out = Vec::new();
+        let mut from = 0;
+        // Two spellings, both rustfmt's doing: `=> m(lang, "…", "…")` on one line, and
+        // `=> m(` with the two strings on their own lines when the pair is long. The scan
+        // takes the arm, then its first string (the English) and the one after it (the
+        // Italian), which is the same in both.
+        while let Some(rel) = body[from..].find("=> m(") {
+            let arrow = from + rel;
+            let keys: Vec<String> = body[from..arrow]
+                .split_whitespace()
+                .filter_map(|w| {
+                    w.strip_prefix("K::")
+                        .map(|k| k.trim_end_matches('|').to_string())
+                })
+                .collect();
+            assert!(!keys.is_empty(), "an arm names at least one key: {keys:?}");
+            let en = arrow + body[arrow..].find('"').expect("the English literal");
+            let (_, after_en) = string_literal(body, en);
+            let it = after_en + body[after_en..].find('"').expect("the Italian literal");
+            let (raw, _) = string_literal(body, it);
+            out.push((keys.join(" | "), unescape(&raw)));
+            from = it;
+        }
+        out
+    }
+
+    /// The index of every apostrophe written in place of an accent (§13.31 §10).
+    ///
+    /// The rule, exactly: `'` (U+0027) is a fault when the character before it is a plain
+    /// vowel (`a e i o u A E I O U`) and the character after it is not a letter, **unless it
+    /// closes a quotation**, where a quotation opens at a `'` that starts the string or follows
+    /// a space or `(`, and closes at the next `'` followed by a non-letter. The quotation arm
+    /// is not decoration: the page's own Italian quotes (`'chiunque'`, `'@nome'`) close after a
+    /// vowel, which is exactly the shape of the fault, and a rule that flagged them would be a
+    /// rule an operator answers by deleting the accents.
+    fn accent_faults(s: &str) -> Vec<usize> {
+        let cs: Vec<char> = s.chars().collect();
+        let letter = |c: char| c.is_alphabetic();
+        let vowel =
+            |c: char| matches!(c, 'a' | 'e' | 'i' | 'o' | 'u' | 'A' | 'E' | 'I' | 'O' | 'U');
+        let mut out = Vec::new();
+        let mut quoted = false;
+        for (i, c) in cs.iter().enumerate() {
+            if *c != '\'' {
+                continue;
+            }
+            let before = i.checked_sub(1).map(|j| cs[j]);
+            let after = cs.get(i + 1).copied();
+            if quoted {
+                if !after.is_some_and(letter) {
+                    quoted = false;
+                }
+                continue;
+            }
+            if before.is_none_or(|b| b == ' ' || b == '(') {
+                quoted = true;
+                continue;
+            }
+            if before.is_some_and(vowel) && !after.is_some_and(letter) {
+                out.push(i);
+            }
+        }
+        out
+    }
+
     /// Every code says something on this page, in both languages, on a field, in this page's
     /// own words (§13.31 §6).
     ///
@@ -14424,6 +14753,28 @@ mod tests {
                         got.field.is_some(),
                         "{code} in {name}: a refusal this form can produce marks the field it \
                          is about"
+                    );
+                    // The label rule of the page's own refusals (§10) reaches the three
+                    // library arms that reuse the page's keys, and every arm that fills a
+                    // label: the message opens with the label of the field it marks. The map
+                    // is the walk's, so the two read the same pair.
+                    let field = got.field.as_deref().unwrap();
+                    let label = if field == "client_id" {
+                        app_client_prefix(lang, t(lang, K::SignInEmail))
+                    } else if let Some(idp) = field.strip_prefix("aud-") {
+                        app_client_prefix(lang, social_idp_label(idp))
+                    } else if code == "social_half_configured" {
+                        two_labels(lang, t(lang, K::OauthDomain), t(lang, K::SocialCallback))
+                    } else if code == "audit_unbounded" {
+                        two_labels(lang, t(lang, K::AuditRotation), t(lang, K::AuditRetention))
+                    } else {
+                        field_label(lang, field)
+                    };
+                    assert!(
+                        got.msg.starts_with(&format!("{label}:")),
+                        "{code} in {name}: the message must open with the label of the field \
+                         it marks ({label:?}): {:?}",
+                        got.msg
                     );
                     assert!(
                         !got.msg.contains(&r.to_string()),
@@ -14606,6 +14957,360 @@ mod tests {
             got.body
         );
         assert_eq!(read(&sp), before, "nothing written");
+        cleanup(&path);
+    }
+
+    /// Every refusal of the page's own reads "label: what is allowed." in the reader's
+    /// language, on the field that can fix it, in both languages (§13.31 §10, §10a).
+    ///
+    /// Over the socket with the `lang` cookie, because the language is negotiated from the
+    /// request and the page's own refusals are raised by `ConfigForm::apply`, which the
+    /// in-process `post` answers in English only. The message is read out of the `div.err`
+    /// block and not out of the body: the body carries every help text on the page, and a
+    /// help text is not the refusal.
+    ///
+    /// The expected text is spelled out here, in both languages, because these are the words
+    /// the designer wrote and the operator reads: a test that only asserted "starts with a
+    /// colon" would pass on any sentence.
+    #[test]
+    fn every_config_refusal_starts_with_its_label() {
+        // One row per refusal `ConfigForm::apply` raises, plus the one the library raises that
+        // this page answers with its own key (`domain`, from `social_half_configured`). `over`
+        // is the form that triggers it, on top of `settings_fields`'s defaults.
+        #[derive(Debug)]
+        struct Case {
+            field: &'static str,
+            en_label: &'static str,
+            it_label: &'static str,
+            over: Vec<(&'static str, &'static str)>,
+            /// The whole message, byte for byte, in each language, where this row's words are
+            /// the point of the row (the two administrators refusals, §13.31 §10).
+            words: Option<(&'static str, &'static str)>,
+        }
+        let cases = vec![
+            Case {
+                field: "ttl",
+                en_label: "Session lifetime",
+                it_label: "Durata della sessione",
+                over: vec![("ttl", "abc")],
+                words: None,
+            },
+            Case {
+                field: "admins",
+                en_label: "Administrators",
+                it_label: "Amministratori",
+                over: vec![("admins", "")],
+                words: Some((
+                    "Administrators: at least one is needed; an empty list must never come to \
+                     mean 'everyone'.",
+                    "Amministratori: ne serve almeno uno; una lista vuota non deve mai finire \
+                     per significare 'chiunque'.",
+                )),
+            },
+            Case {
+                field: "admins",
+                en_label: "Administrators",
+                it_label: "Amministratori",
+                over: vec![("admins", "someone@else.com")],
+                words: Some((
+                    "Administrators: your own address must stay on the list; to remove \
+                     yourself, use bb-auth-adm over SSH.",
+                    "Amministratori: il tuo indirizzo deve restare nella lista; per rimuovere \
+                     te stesso usa bb-auth-adm via SSH.",
+                )),
+            },
+            Case {
+                field: "client_id",
+                en_label: "App client for Email and code",
+                it_label: "App client per Email e codice",
+                over: vec![("client_id", "")],
+                words: None,
+            },
+            Case {
+                field: "issuer",
+                en_label: "User pool (issuer)",
+                it_label: "User pool (issuer)",
+                over: vec![("issuer", "")],
+                words: None,
+            },
+            Case {
+                field: "hosts",
+                en_label: "Authorized hosts",
+                it_label: "Host autorizzati",
+                over: vec![("hosts", "")],
+                words: None,
+            },
+            Case {
+                field: "aud-Google",
+                en_label: "App client for Google",
+                it_label: "App client per Google",
+                over: vec![("idps", "Google"), ("idp-Google", "on"), ("aud-Google", "")],
+                words: None,
+            },
+            Case {
+                field: "ui_theme",
+                en_label: "Default appearance",
+                it_label: "Aspetto predefinito",
+                over: vec![("ui_theme", "purple")],
+                words: None,
+            },
+            Case {
+                field: "domain",
+                en_label: "Hosted UI domain and Callback URL",
+                it_label: "Dominio della hosted UI e URL di callback",
+                over: vec![
+                    ("idps", "Google"),
+                    ("idp-Google", "on"),
+                    ("aud-Google", "google-client"),
+                    ("domain", ""),
+                    ("callback", ""),
+                ],
+                words: None,
+            },
+        ];
+        let path = scratch("cfg-labels", SAMPLE);
+        let cfg = cfg_for(&path, "/admin");
+        let sp = cfg.settings_path.clone();
+        let port = serve(&path, "/admin");
+        let url = format!(
+            "http://127.0.0.1:{port}{ADMIN_BASE}{}",
+            Route::Config.path()
+        );
+        let before = read(&sp);
+        let rev = rev_of(&sp);
+        for c in &cases {
+            let mut said: Vec<String> = Vec::new();
+            for (cookie, label, words) in [
+                ("lang=en", c.en_label, c.words.map(|w| w.0)),
+                ("lang=it", c.it_label, c.words.map(|w| w.1)),
+            ] {
+                let fields = settings_fields(&rev, &c.over);
+                let _permit = WRITE_PERMIT.lock().unwrap_or_else(|e| e.into_inner());
+                let r = post_with_secret(&url)
+                    .header(IDENTITY_HEADER, "admin@x.com")
+                    .header("Sec-Fetch-Site", "same-origin")
+                    .header("Cookie", cookie)
+                    .send_form(fields.iter().copied())
+                    .expect("a POST response");
+                let got = got_of(r);
+                assert_eq!(got.status, 400, "{cookie} {:?} {c:?}", got);
+                let err = err_text(&got.body);
+                assert!(
+                    err.starts_with(&format!("{label}:")),
+                    "the {cookie} refusal must open with the label of the field it is about, \
+                     as the page prints it ({label:?}): {err}"
+                );
+                assert!(
+                    err.ends_with('.'),
+                    "the {cookie} refusal ends with a full stop: {err}"
+                );
+                assert!(
+                    !holds_placeholder(&err),
+                    "a placeholder reached the {cookie} page unfilled: {err}"
+                );
+                if let Some(want) = words {
+                    assert_eq!(err, want, "{cookie}");
+                }
+                if c.field == "ui_theme" {
+                    // The list box carries no `invalid` marking, so what this row can pin is
+                    // that the refusal is not folded away: the group holding it opens, on a
+                    // plain `/config` with no `?groups=open` (§13.31 §10a).
+                    assert!(
+                        got.body
+                            .contains(r#"<details class="panel group" id="g-look" open>"#),
+                        "a theme refusal opens the group that holds the list box: {}",
+                        got.body
+                    );
+                } else {
+                    let tag = field_tag(&got.body, c.field);
+                    assert!(
+                        tag.contains("invalid")
+                            && tag.contains(r#"aria-invalid="true""#)
+                            && tag.contains(&format!(r#"aria-describedby="{ERR_ID}""#)),
+                        "the refusal must mark {} as the field to fix: {tag}",
+                        c.field
+                    );
+                }
+                said.push(err);
+            }
+            assert_ne!(
+                said[0], said[1],
+                "{:?}: English and Italian are one string",
+                c.over
+            );
+            // The administrators rows share a label and a field, so the pair is told apart by
+            // its own words above; the rest are told apart by their label.
+            assert_eq!(
+                read(&sp),
+                before,
+                "a refused save writes nothing: {:?}",
+                c.over
+            );
+        }
+        // The help text keeps its own sentence beside the new refusal: the bracketed line is
+        // the one that tells an administrator where the removal *is* possible, and the refusal
+        // now says the same thing in its own register, so both are on the page at once.
+        for (cookie, help) in [
+            ("lang=en", "you cannot remove yourself here"),
+            ("lang=it", "non puoi rimuovere te stesso da qui"),
+        ] {
+            let fields = settings_fields(&rev, &[("admins", "  ")]);
+            let _permit = WRITE_PERMIT.lock().unwrap_or_else(|e| e.into_inner());
+            let r = post_with_secret(&url)
+                .header(IDENTITY_HEADER, "admin@x.com")
+                .header("Sec-Fetch-Site", "same-origin")
+                .header("Cookie", cookie)
+                .send_form(fields.iter().copied())
+                .expect("a POST response");
+            let got = got_of(r);
+            assert_eq!(got.status, 400, "{cookie} {got:?}");
+            assert!(
+                got.body.contains(help),
+                "the {cookie} page keeps the administrators help text ({help:?}): {}",
+                &got.body[..200.min(got.body.len())]
+            );
+        }
+        cleanup(&path);
+    }
+
+    /// The Italian of every `K` entry writes its accents as letters (§13.31 §10).
+    ///
+    /// Red today on 22 occurrences in five keys, all of them genuine: `puo'` for `può`, `e'`
+    /// for `è`, `perche'` for `perché`, `da'` for `dà`. An apostrophe there is not a typographic
+    /// choice, it is a word spelled wrong on the page an Italian operator reads, and it is what
+    /// a shell-era habit leaves behind when nobody looks.
+    #[test]
+    fn italian_k_strings_write_accents_as_letters() {
+        let table = italian_k_strings();
+        // A parser that found no arm would pass this test vacuously, so the walk's own reach is
+        // asserted: the table has 457 keys, and a walk that finds a handful is broken.
+        assert!(
+            table.len() > 400,
+            "the walk read {} arms out of `fn t`, which is not the whole table",
+            table.len()
+        );
+        let mut faults: Vec<String> = Vec::new();
+        for (keys, it) in &table {
+            for at in accent_faults(it) {
+                let from = at.saturating_sub(14);
+                let around: String = it.chars().skip(from).take(28).collect();
+                faults.push(format!("{keys}: …{around}…"));
+            }
+        }
+        assert!(
+            faults.is_empty(),
+            "{} Italian strings write an accent as an apostrophe:\n{}",
+            faults.len(),
+            faults.join("\n")
+        );
+    }
+
+    /// The accent rule, on strings that are not from the table: it flags the faults and leaves
+    /// the apostrophes alone. This is what keeps the test above from being satisfied by a rule
+    /// that flags nothing, and from being answered by an operator deleting real apostrophes
+    /// (§13.31 §10a).
+    #[test]
+    fn the_accent_rule_flags_only_apostrophe_accents() {
+        for s in [
+            "puo' x",
+            "c'e' x",
+            "ne' dove",
+            "È bene. E' l",
+            "da' a",
+            "perche'.",
+            "gia'",
+        ] {
+            assert!(
+                !accent_faults(s).is_empty(),
+                "{s:?} is a fault: it means può, c'è, né, \
+                     è, dà, perché, già with an apostrophe where the accented letter goes"
+            );
+        }
+        for s in [
+            "l'Header",
+            "un'email",
+            "dell'URL",
+            "'chiunque'",
+            "'solo questi',",
+            "'@nome'",
+            "('tutti gli ambiti')",
+            "un’email",
+        ] {
+            assert!(
+                accent_faults(s).is_empty(),
+                "{s:?} is not a fault: {:?}",
+                accent_faults(s)
+            );
+        }
+    }
+
+    /// Every response to `/config` carries the title the `GET` carries, in the reader's
+    /// language (§13.31 §10: WCAG 2.2 SC 2.4.2 Page Titled).
+    ///
+    /// Over the socket, because the title is the response's, and the three responses are the
+    /// three the `POST` answers with: a refusal (`400`), a held guarded change (`200`), and a
+    /// stale `rev` (`409`). Today all three are titled with `Route::title`, the untranslated
+    /// "settings", while the `GET` says "System settings" / "Impostazioni di sistema": a tab
+    /// that changes wording and language after a save is a page that seems to have moved.
+    #[test]
+    fn a_refused_settings_save_keeps_the_page_title() {
+        let path = scratch("cfg-title", SAMPLE);
+        let cfg = cfg_for(&path, "/admin");
+        let sp = cfg.settings_path.clone();
+        let port = serve(&path, "/admin");
+        let url = format!(
+            "http://127.0.0.1:{port}{ADMIN_BASE}{}",
+            Route::Config.path()
+        );
+        let rev = rev_of(&sp);
+        for (cookie, want) in [
+            ("lang=en", "System settings"),
+            ("lang=it", "Impostazioni di sistema"),
+        ] {
+            let r = get_with_secret(&url)
+                .header(IDENTITY_HEADER, "admin@x.com")
+                .header("Cookie", cookie)
+                .call()
+                .expect("a GET response");
+            let got = got_of(r);
+            assert_eq!(got.status, 200, "{cookie} {got:?}");
+            let titled = title_of(&got.body);
+            assert!(titled.contains(want), "the {cookie} GET: {titled}");
+            let cases = vec![
+                // A refusal: the form is wrong.
+                (400, settings_fields(&rev, &[("ttl", "abc")])),
+                // A guarded change: the form is fine and the page asks. A new pool is one of
+                // the five, so this is the confirmation and not a save.
+                (
+                    200,
+                    settings_fields(
+                        &rev,
+                        &[(
+                            "issuer",
+                            "https://cognito-idp.eu-central-1.amazonaws.com/eu-central-1_OTHER",
+                        )],
+                    ),
+                ),
+                // A stale `rev`: the shared conflict page, on this route.
+                (409, settings_fields("deadbeef", &[("ttl", "3600")])),
+            ];
+            for (status, fields) in cases {
+                let _permit = WRITE_PERMIT.lock().unwrap_or_else(|e| e.into_inner());
+                let r = post_with_secret(&url)
+                    .header(IDENTITY_HEADER, "admin@x.com")
+                    .header("Sec-Fetch-Site", "same-origin")
+                    .header("Cookie", cookie)
+                    .send_form(fields.iter().copied())
+                    .expect("a POST response");
+                let got = got_of(r);
+                assert_eq!(got.status, status, "{cookie} {fields:?} {got:?}");
+                assert_eq!(
+                    title_of(&got.body),
+                    titled,
+                    "the {cookie} {status} must carry the title the GET carries"
+                );
+            }
+        }
         cleanup(&path);
     }
 
@@ -15039,7 +15744,13 @@ mod tests {
         );
         let (status, page) = got.page();
         assert_eq!(status, 400);
-        assert!(page.contains("cannot remove yourself"), "{page}");
+        // The refusal's own words, in the `div.err` block and not the body: the body carries
+        // the help text, which says the same thing in its own register (§13.31 §10).
+        assert_eq!(
+            err_text(page),
+            "Administrators: your own address must stay on the list; to remove yourself, use \
+             bb-auth-adm over SSH."
+        );
 
         // Emptying the list: refused before the library ever sees it, because an empty list
         // must never come to mean "everyone".
@@ -15049,7 +15760,11 @@ mod tests {
             &settings_fields(&rev_of(&sp), &[("admins", "  \n ")]),
         );
         assert_eq!(got.page().0, 400);
-        assert!(got.page().1.contains("at least one administrator"));
+        assert_eq!(
+            err_text(got.page().1),
+            "Administrators: at least one is needed; an empty list must never come to mean \
+             'everyone'."
+        );
 
         // An identity list the gate would refuse never reaches the disk either, and the page
         // says so in the reader's language, naming the field by its visible label (§13.31 §4).

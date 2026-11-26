@@ -43,7 +43,25 @@ Rules are in `AGENTS.md`. Format of this file: `AGENTS.md`, under "Skills".
 - Assert anything about a **response** (CSP, `X-Frame-Options`, status line) over a real socket.
   The in-process `post(&cfg, Route, fields)` helper calls `mutate` and builds the `shell` itself, so
   its `Got` carries **no headers at all**: it cannot see a `Content-Security-Policy`, and a test
-  written against it passes for the wrong reason.
+  written against it passes for the wrong reason. The same helper renders **English only**, so
+  anything negotiated from the `lang` cookie needs the socket too
+  (`post_with_secret(… ).header("Cookie", "lang=it")`).
+- To see **every** case of a multi-case socket test at once, add a temporary `zz_probe` test that
+  collects each case's status, message and markings into a `Vec` and ends with
+  `panic!("PROBE\n{}", out.join("\n"))`, run it with `-- --nocapture`, then delete it. Cheaper than
+  rewriting the real test with soft asserts and reverting it, and it shows which markings are
+  **already** green, so the coder is not sent after a harness bug.
+- A test that walks this file's **own source** (`include_str!("bb-auth-web.rs")`) to read `fn t`'s
+  arms must match `=> m(`, not `=> m(lang, "`: rustfmt puts the two strings of a long arm on their
+  own lines, and the narrow pattern reads 231 of the 457 arms in silence. Assert the arm count
+  against the `K` variant count, and read the literals with a real string-literal scanner plus an
+  unescaper (rustfmt's `\` line continuation, `\"`, `\u{…}`), because the test compares words the
+  page shows.
+- A **list box** (`<select>`) in this GUI carries no `aria-invalid` marking, so a refusal on one
+  (`ui_theme`) is pinned by the group that holds it opening, `<details class="panel group"
+  id="g-look" open>`, and not by the field. Every text field and `textarea` does carry the marking,
+  read off its **own opening tag** (`field_tag(html, name)`), because a body-wide search for
+  `invalid` passes on another field's marking.
 - To run **one** e2e area, copy `e2e/run.js`'s per-area reset into a script outside the repo that
   `require()`s `e2e/lib/server.js` by absolute path: `fs.copyFileSync(FIXTURE, ctx.accessFile)`,
   rewrite `ctx.settingsFile` from `SETTINGS_FIXTURE`, `fs.rmSync(ctx.auditFile)`, then
@@ -199,6 +217,10 @@ Rules are in `AGENTS.md`. Format of this file: `AGENTS.md`, under "Skills".
 
 ## Pitfalls
 
+- `npx prettier --check e2e/tests/*.js` fails on the **committed** files: the repo carries no
+  prettier config, so the defaults (printWidth 80) judge a suite written at ~100. It is not a gate,
+  and `--write` would reformat the whole area. Match the file's own shape (2-space indent, the
+  multi-line `t.eq('label',\n  actual,\n  want)` form) and check syntax with `node --check`.
 - maud 0.27 escapes only `&`, `<`, `>` and `"`, so an apostrophe in a `K` string reaches the page
   raw: compare a rendered refusal with the design's text as is, never with `'` replaced by `&#x27;`
   (S9 lost a pass to that). The library's `html_escape` gives `&#39;`, and only where it is called.
