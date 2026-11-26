@@ -45,8 +45,10 @@ Rules are in `AGENTS.md`. Format of this file: `AGENTS.md`, under "Skills".
   skill and agent files, because MD041 fires on their YAML frontmatter. Judge the run by whether
   your own files appear in the list, not by the exit code, and do not "fix" the frontmatter.
 - The line-number prefix (`N:` and a space) that `read` prints makes an AGENTS.md bullet continuation look indented **three**
-  spaces; it is **two** (same in CHANGELOG.md's `*` bullets). An `edit` oldString copied from
-  `read` fails to match. Check with `sed -n 'A,Bp' AGENTS.md | awk '{printf "[%s]\n", $0}'`.
+  spaces; it is **two** (same in CHANGELOG.md's `*` bullets, and in `docs/ARCHITECTURE.md` §13's
+  `-` bullets: §13.29/§13.30 use two, so a `read` copy fails to match there too). An `edit`
+  oldString copied from `read` fails to match. Check with
+  `sed -n 'A,Bp' AGENTS.md | awk '{printf "[%s]\n", $0}'`.
 - The invariant count in `AGENTS.md` is stated in **three** places and pinned by no test: the
   contents-table row (`**42 rules…**`), the lead sentence (`Forty-two of them`), and the index
   list at the top of the section.

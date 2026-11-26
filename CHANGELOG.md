@@ -34,6 +34,41 @@ upgrade: the `/account/` location forwards `X-Auth-Native-Username` and every ot
 location clears it. The packages need no order. Without that line the page shows the profile
 list and the sentence where the edit pill would be, to everybody, native accounts included.
 
+### New: a person can delete their own account from `/account`
+
+* **The account menu ends with "Delete account and all its data" / "Elimina l'account e tutti i
+  suoi dati"**, after Sign out, and it is there only on a deployment that wired the feature:
+  `BB_AUTH_WEB_DELETE_INTAKE` names the owner's worker, and unset is the feature off, which is no
+  row at all and a `404` at `{account}/delete`. The console's menu carries no such row: an
+  administrator deletes other people from the roster, and this row is the person's own account.
+* **One page, one red press, and the press asks for a typed address.** The page lists what goes
+  (the bb-auth record and every access an administrator gave by name, the person's API keys, their
+  groups, and every sign-in account with each of their addresses), says what the audit keeps and
+  for how long, and then requires the person to type one of their own addresses. That field carries
+  **no** `autocomplete` and no `autofocus`: the confirmation is the person's own act, so a browser
+  offers nothing and Enter is never one keystroke from a deletion. This is the estate's one
+  deliberate exception to WCAG 1.3.5, and §13.30 §6 says so on purpose.
+* **What happens, in which order.** The roster row is removed **first** (through the library's
+  `remove_user` and `AccessWrite`, on the same write lock and `rev` check as every other edit), so
+  the keys and the named grants stop working before the pool is asked; then each of the
+  person's addresses is queued at the intake, one call each. A protected address is refused before
+  anything is written, and a caller with no roster row is queued while the access file is untouched.
+* **The pages say "queued", never "deleted"**, because this program cannot read the worker's
+  outcome. A run that stops partway says what did happen, lists the addresses it could not confirm,
+  and offers the retry; the done page's one action is Sign out. A deleted administrator stays in
+  `web.admins` (the user's decision, 2026-11-26): this path edits the access file, never the
+  settings file.
+* **The intake is loopback only**, a plain-HTTP origin (`BB_AUTH_WEB_DELETE_INTAKE`) called with
+  the identity in `X-Auth-Email`, because every call carries an address in clear to a service whose
+  one check is that header. `BB_AUTH_WEB_DELETE_SECRET` is the shared secret sent in
+  `X-BB-Delete-Secret`: optional today, because the intake checks no secret yet, and a malformed
+  one is a fatal startup.
+* **No cookie change, no access-file change, no nginx change.** The upgrade is the two packages and,
+  for anyone who wants the feature, the intake's URL in the GUI's env file. The design is
+  docs/ARCHITECTURE.md §13.29 and §13.30. **Not yet run against a real intake**: the real-host test
+  (plan step 7g) is open, so the queueing path is proven against a stand-in socket and not yet
+  against the owner's worker.
+
 ### Changed: the settings page says why it refused, in the reader's language
 
 * **A refused save names the field, in the language the page is read in.** Every reason the

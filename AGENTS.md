@@ -225,8 +225,29 @@ One crate, four targets, and the split is load-bearing:
   native user: the pool is asked by `USERNAME`, taken from `X-Auth-Native-Username` on **this**
   request and never from a posted field, and the IdToken Cognito returns is bound by
   `cognito:username`, so a challenge that answers for anybody else writes nothing and says so
-  (§13.25). Account deletion is the next step. Its
-  design is
+  (§13.25). Account deletion is there too, as the account menu's last row (`K::AccountDelete`,
+  after Sign out), and **only when `BB_AUTH_WEB_DELETE_INTAKE` names the owner's intake**: with it
+  unset there is no row and `{account}/delete` is the `404` every unknown path under the prefix
+  gets. The `GET` is the confirmation and changes nothing: it lists what goes (the bb-auth record
+  and the named grants on it, the caller's API keys, their groups, and every sign-in account with
+  each of the caller's addresses), says what the audit keeps and for how long, and asks the person
+  to type one of those addresses. That field carries **no** `autocomplete` (the user's decision,
+  2026-11-26: the confirmation is the person's own act, and this is the estate's one deliberate
+  exception to WCAG 1.3.5), and no `autofocus`. The `POST` goes in the order that cannot leave a
+  half: the same-origin door, then `rev` and the `uuid` behind it (a stale one is a `409` that
+  writes nothing), then the typed address (one of the caller's, or a `400` that keeps what was
+  typed), then the intake's `whoami` for **every** address before anything is touched (a protected
+  address is a `403` and nothing is written, so the page is no oracle for somebody else's
+  account). For a caller with a roster row the row is removed **first**, under the write lock
+  through `remove_user` and `AccessWrite` with `rev` re-checked, so the keys and the named grants
+  die before the pool is asked; then each address is queued at the intake, one call each, stopping
+  at the first answer that is not `202`. A caller with no row is queued and the access file is
+  untouched. The pages never say *deleted*, only **queued**, because this program cannot read the
+  worker's outcome, and a partial run says what did happen and offers the retry. A deleted
+  administrator stays in `web.admins` (the user's decision, 2026-11-26): this path edits the access
+  file and never the settings file. The intake is reached at a loopback `http` origin over
+  `X-Auth-Email`, and the optional shared secret `BB_AUTH_WEB_DELETE_SECRET` travels in
+  `X-BB-Delete-Secret`. Its design is
   [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md) §13.
 
 The defining constraint vs. authorization-code OIDC proxies (oauth2-proxy): those drive the

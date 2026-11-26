@@ -6458,17 +6458,20 @@ The facts inside the panel, in this order, each present only where it applies:
 2. `p.muted` `K::AccountDeleteLater`: the sign-in accounts are queued, not deleted on the press.
    A sentence after the list rather than a second `p.lbl` ("Deleted later"), for the reason the
    overnight mockup found: `ul.plain` has no margin, and a second label sits against the last item.
-3. Stranger only: `p.muted` `K::AccountNoRow` (the page's existing sentence), the fact that the
-   access file holds nothing for them.
+3. Stranger only: **nothing**. (Changed by the user, 2026-11-26: the page's existing
+   `K::AccountNoRow` sentence is not written here, and no line stands in its place.) A person who
+   came to delete is being told what goes, and a line about what is not there is not a fact about
+   the deletion, so the stranger's list is the sign-in accounts and the page stops there.
 4. `p.muted`, the audit: with a retention, `K::AccountDeleteAuditKept` + `" "` +
    `limit_text(lang, retention)` + `K::AccountDeleteAuditTail` ("... is kept for 6 months, then
    dropped."); with none, `K::AccountDeleteAuditSize` + `" "` + `size_text(max_bytes)` + `"."`
    ("... keeps at most 8 MiB."). `limit_text` takes a `Lang` (§13.29 W10 7b) so the unit is
    Italian on an Italian page.
 5. Inside the form, before the actions: the field, `text_field_with(K::AccountDeleteTypeLabel,
-   "confirm_email", value, "", hints, invalid, FieldOpts { required: true, autocomplete:
-   Some("email"), inputmode: Some("email"), class: Some("f-email"), .. })`, with the hint
-   `K::AccountDeleteTypeHintMany` only when the row has two addresses or more. Empty on a `GET`.
+   "confirm_email", value, "", hints, invalid, FieldOpts { required: true, inputmode:
+   Some("email"), class: Some("f-email"), .. })`, with the hint
+   `K::AccountDeleteTypeHintMany` only when the row has two addresses or more. Empty on a `GET`,
+   and no `autocomplete` (the trade below).
 
 **The addresses are listed** because they are what the press acts on (every one of them is queued,
 §13.29 W3 and W12 answer 2), and because the field asks for one of them: the person reads the
@@ -6476,14 +6479,18 @@ address they are asked to type (recognition over recall, Nielsen 6). Typing a sh
 proof of anything, and §13.29 W4 does not ask it to be one: it guards against a slip, not an
 attacker.
 
-**`autocomplete="email"`, and the trade.** WCAG 1.3.5 asks that a field collecting information
+**No `autocomplete`, and the trade.** WCAG 1.3.5 asks that a field collecting information
 about the user name its purpose, and the person's own email is one of the listed purposes
 (<https://www.w3.org/WAI/WCAG22/Understanding/identify-input-purpose.html>); the same token lets a
 browser offer the address, which keeps a person who cannot type easily from typing it. That
 weakens the slip guard by one deliberate pick from a list, which is still not a slip. WCAG 3.3.7
 would not require it (re-entry "required to ensure the security of the content" is an exception,
 <https://www.w3.org/WAI/WCAG22/Understanding/redundant-entry.html>), so this is a choice for 1.3.5
-and for the person, not an obligation. A `text` field with `inputmode="email"` and not
+and for the person, not an obligation. (Changed by the user, 2026-11-26: the field carries **no**
+`autocomplete`, and the browser offers nothing.) The design asked for the token so the field stayed
+usable; the answer is that this confirmation is the person's own act, and a value picked from a
+browser's list is not that act. The cost is named: someone who cannot type their own address
+cannot confirm, and Cancel is the way back. A `text` field with `inputmode="email"` and not
 `type="email"`: the browser's own refusal would be in the browser's language and wording, and the
 server already normalises (`norm_email`) and answers in the page's.
 
@@ -6510,7 +6517,7 @@ anyone.
 | Variant | `p.lede` | Facts | Field | Button |
 |---|---|---|---|---|
 | roster | `AccountDeleteLead` | Record, keys, groups, SignInOne/Many; Later; audit | `TypeLabel`, `TypeHintMany` with two addresses or more | `AccountDeleteConfirm`, `danger` |
-| stranger | `AccountDeleteLead` | SignInOne; Later; NoRow; audit | `TypeLabel` | `AccountDeleteConfirm`, `danger` |
+| stranger | `AccountDeleteLead` | SignInOne; Later; audit | `TypeLabel` | `AccountDeleteConfirm`, `danger` |
 | more than ten addresses | `AccountDeleteTooMany` | none, no panel, no form | none | `p.primary` back link |
 
 **One red press, and it deletes.** There is one step now, so the brief's "danger" falls on the
@@ -6674,11 +6681,13 @@ an account is gone).
   refusal keeps the typed value.
 - WCAG 3.3.4 (AA): the page is the review and the typed address the confirmation; 3.3.1 and
   3.3.3: the refusal is text, tied to the field by `aria-describedby`, and says how to fix it;
-  1.3.5: `autocomplete="email"`; 3.3.2: the field has a visible label; 1.4.1: the danger button
+  1.3.5: **not met on the typed field**, by the user's decision of 2026-11-26 (no `autocomplete`,
+  §2); 3.3.2: the field has a visible label; 1.4.1: the danger button
   says what it does in words; 2.5.3: every button's accessible name is its visible text; 2.5.8:
   the menu rows measure 30px at phone width.
-- **Trade 1:** `autocomplete="email"` serves 1.3.5 and a person who types with difficulty, at the
-  cost of a slip guard that a browser can fill (§2).
+- **Trade 1:** the typed field carries no `autocomplete`, so 1.3.5 is not met and a person who
+  cannot type their own address cannot confirm here (the user's decision, 2026-11-26, §2). What it
+  buys is that the confirmation is typed by the person rather than picked from a browser's list.
 - **Trade 2:** the done page cannot say when, or even whether, the worker acts (§13.29 W6); it
   is honest at the cost of an ending with no certainty, and "tell an administrator" is the
   recovery for the case it cannot see.
@@ -6702,14 +6711,16 @@ with `t(lang, K::…)`, never with a literal.
   id in `code`, the groups line, and last `AccountDeleteSignInMany` with each address in `code` in
   the header's order (a fixture row with two addresses); `p.muted` `AccountDeleteLater` then the
   audit; one `form.edit` posting to `{account}/delete` with hidden `rev` and `uuid`, one `input`
-  `name="confirm_email"` with `value=""`, `required`, `autocomplete="email"`, `inputmode="email"`,
-  class `f-email`, under the label `AccountDeleteTypeLabel` with the hint
+  `name="confirm_email"` with `value=""`, `required`, no `autocomplete` (the user's decision,
+  2026-11-26), `inputmode="email"`, class `f-email`, under the label
+  `AccountDeleteTypeLabel` with the hint
   `AccountDeleteTypeHintMany`; its button is `AccountDeleteConfirm` with `class="danger"`; a
   `K::Cancel` pill to the page; no `autofocus` attribute anywhere; no `AccountNoRow`.
 - 7b `delete_page_with_one_address_uses_the_singular_and_no_hint`: `AccountDeleteSignInOne`, no
   `span.hint` in the form.
 - 7b `delete_page_for_a_stranger_lists_only_the_sign_in_accounts`: the `li`s are SignInOne only;
-  `AccountDeleteLater`, `AccountNoRow`; empty `uuid`; the same field and button.
+  `AccountDeleteLater`; no `AccountNoRow` (the user's decision, 2026-11-26: where the caller has no
+  roster row the page writes nothing in its place); empty `uuid`; the same field and button.
 - 7b `delete_page_omits_empty_key_and_group_lines`: a row with no keys and no groups lists Record
   and SignIn only.
 - 7b `delete_page_with_more_addresses_than_a_run_takes_has_no_form`: eleven addresses give `200`,
@@ -6770,12 +6781,12 @@ two addresses, a key and a group (`you@example.com` has none of them, the skill'
 #### 8. Open questions for the user (delete design)
 
 Overnight question 1 (the menu row's words) is settled: they are now true for every caller (§1).
-Question 2 (one red press) is settled: there is one press. Question 3 stands as:
+Question 2 (one red press) is settled: there is one press. Question 3 stood as the two below, and
+the user answered both on 2026-11-26:
 
-1. The places reached are not listed among what is deleted (§2): enough, or should the roster page
-   list them?
-2. `autocomplete="email"` on the typed address (§2): keep it (WCAG 1.3.5, and easier for a person
-   who types with difficulty), or leave it off so that a browser cannot fill the confirmation?
+1. The places reached are **not** listed among what is deleted (§2): accepted as designed.
+2. The typed address carries **no** `autocomplete` (§2, §6): the confirmation stays the person's
+   own act, and WCAG 1.3.5 is not met on this one field.
 
 ### 13.31 Settings refusals as codes, in the page's words (plan step 8, later item)
 
