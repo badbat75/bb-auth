@@ -238,8 +238,7 @@ out, the usual pattern, replacing the preferences form at the foot of the page; 
 it to §13.17.
 
 Slices 8a to 8f are done (8f, §13.21: row rules, one control size, ticks in the accent). Then the
-shared front end (W13), designed in §13.26 §6 as small slices after 5g (**P**, the pill links, **D**, one `page_document`, and **T**, one text field, are done): **F** the account page's flat
-ground goes, so it wears the console's ground and cards (the user, 2026-11-25). **H** is done (§13.28, with **L**, the console's logo, folded in and **M** absorbed): one account menu
+shared front end (W13), designed in §13.26 §6 as small slices after 5g (**P**, **D**, **T** and **F** are done; F's ground was reviewed by the designer on 2026-11-26: no band on either surface). **H** is done (§13.28, with **L**, the console's logo, folded in and **M** absorbed): one account menu
 in the shared header, asked by the user on 2026-11-25. The bar holds one row at every width: logo, brand,
 four tabs (Dashboard, Applications, Users, Audit) and a pill with the person's name. The pill opens a
 panel, which holds, in order:
@@ -247,8 +246,8 @@ the tabs (at 800px and below), "System settings" / "Impostazioni di sistema", an
 (console only); then Preferences; then Sign out. The theme reads "Auto (system)" / "Auto (sistema)".
 "Delete account and all its data" goes on `/account`'s menu only, built by step 7. Kept
 apart on purpose, with reasons in §13.26: the section pattern and the mint row's missing owner
-field. Left,
-as later items: base.css's accent-color rule sits above a note whose "above" meant the field
+field. What is left of the step is the user's approval of the screenshots (Done when below). Left,
+as later items: `account_shell`'s rustdoc still says "the centred-card arrangement"; base.css's accent-color rule sits above a note whose "above" meant the field
 rule (move it below); library refusals on the Settings tab are in the file's English words rather
 than the page's labels and language (its own slice, sketched in §13.21); one look by hand at the
 native "Preferences" tooltip while the open menu's cover is up. Steps 5 and 7 add their forms into this layout later (Profile now first: §13.26).

@@ -9376,7 +9376,7 @@ fn account_shell(prefs: &AccountPrefs, title: &str, content: Markup, look: Accou
         look.stylesheet,
         html! {
             (top_bar(brand, html! { nav {} }, acct))
-            main class="selfserve" {
+            main {
                 h1 { (title) }
                 (content)
             }
@@ -22863,6 +22863,23 @@ mod tests {
             !a_panel.contains("menu-tabs") && !a_panel.contains(&format!("{ADMIN_BASE}/config")),
             "the page offers no console place at all: {a_panel}"
         );
+
+        // §13.26 ("F. The flat ground"): the account page's `main` is the console's `main`,
+        // class for class, so the ground rule that keyed off a class on this one element has
+        // nothing to key on. The bare class is gone from the markup; `selfserve-brand`, the
+        // brand slot's own arrangement asserted above, is a different class and not this string.
+        for (label, body) in [("console", &console.body), ("account", &acct_page.body)] {
+            assert!(
+                body.contains("<main>"),
+                "{label}: the main carries no class: {}",
+                account_readable(body)
+            );
+        }
+        assert!(
+            !acct_page.body.contains("class=\"selfserve\""),
+            "no element on the account page carries the bare `selfserve` class: {}",
+            account_readable(&acct_page.body)
+        );
         let _ = std::fs::remove_file(&path);
 
         // The operator's brand and logo wear the same slot.
@@ -30141,7 +30158,7 @@ mod tests {
     #[test]
     fn page_document_puts_the_body_markup_inside_the_body_element() {
         // `body` is the whole contents of the element, so the caller keeps its own arrangement
-        // (the console's `main` plus footer, the page's bar plus `main.selfserve`) and the
+        // (the console's `main` plus footer, the page's bar plus `main`) and the
         // skeleton owns only the document around it.
         let body = html! { main { h1 { "Hello" } } };
         let doc = page_document(Lang::En, None, "t", None, body).into_string();

@@ -9675,6 +9675,11 @@ mod tests {
     /// nothing narrows it for one surface. The `.selfserve` width rules are gone, and the
     /// reading measure that replaces them (`main p.lede` at 75ch, a profile field at 40ch) is
     /// asserted here because it is the rule that keeps a 1000px column readable on both pages.
+    ///
+    /// §13.26 ("F. The flat ground"): the body override that painted this page's ground flat is
+    /// gone too, so the bare `body:has(.selfserve)` rule joins the forbidden list. The account
+    /// page wears the estate's ground, and `rules_named` matches one part of a selector list
+    /// exactly (whitespace-free), so the rule is named by its own spelling.
     #[test]
     fn the_header_shares_the_content_column() {
         let admin = include_str!("assets/admin.css");
@@ -9690,13 +9695,15 @@ mod tests {
         has(".bar", "padding:016px");
         for gone in [
             ".selfserve",
+            "body:has(.selfserve)",
             "body:has(.selfserve).bar",
             ".selfserve.panelh2",
         ] {
             assert!(
                 rules_named(admin, gone).is_empty(),
-                "`{gone}` must be gone: the account page is the console's column, and a second \
-                 rule naming a width is the drift §13.26 deletes ({:?})",
+                "`{gone}` must be gone: the account page is the console's column and wears the \
+                 estate's ground, and a rule naming `.selfserve` alone is the drift §13.26 \
+                 deletes ({:?})",
                 rules_named(admin, gone)
             );
         }

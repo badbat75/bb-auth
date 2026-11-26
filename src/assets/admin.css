@@ -439,17 +439,6 @@ details.settings[open]>summary{background:var(--chip);border-color:var(--accent)
    is inside the CSP style hash of both pages.
    --------------------------------------------------------------------------- */
 
-/* The ground on this page is flat. `--bg-grad` is a decorative glow painted over `--bg` that
-   reaches its outer stop at 60% of a 1200x600 ellipse, so it goes flat about a quarter of the
-   way down the viewport: on the console, a wide sheet, that is a ground, but this page is one
-   column of facts about one person, and the boundary crossing the ground above the
-   first panel reads as a band of a second shade laid under the content. A flat ground is a
-   state the palette already sanctions (a deployment sets `--bg-grad: none` to get it estate
-   wide), so this asks for it for the one page that shows the seam, and `:has` is what keeps
-   the ask scoped to it: the selector matches nothing that is not this page.
-   `:has` is the only way to reach the body from here, because the page's own element is the
-   `main` inside it, and the ground is painted on the body. */
-body:has(.selfserve){background:var(--bg)}
 /* The deployment's mark and name, in the bar's brand slot (§13.17). `margin:0` because the bar
    is a flex row with its own gap: a bottom margin here would push the bar's height, which is
    what the two controls at the other end are centred against. The mark, the name and the row

@@ -48,10 +48,9 @@ Rules are in `AGENTS.md`. Format of this file: `AGENTS.md`, under "Skills".
   also matches the `--bg-grad` ground a few px below a panel, which reads as the box ending where the
   panel does.
 - The estate's ground is a glow: `--bg-grad` is a `radial-gradient(1200px 600px at 50% -10%, …)` that
-  reaches its outer stop at 60% of the ellipse, so it goes flat about 240px down. A page that reads as a
-  lit band over a flat field wants a flat ground, and the one rule for that is
-  `body:has(.selfserve){background:var(--bg)}` in `admin.css` (`:has` because the ground is painted on
-  the body and the page's own element is the `main` inside it).
+  reaches its outer stop at 60% of the ellipse, so it goes flat about 240px down. Both surfaces wear it
+  (`body` in `base.css`); the account page's flat-ground exception was removed in slice F, so a band seen
+  on one page is a fix for both, never a per-page override.
 - To insert a large block at a known line, use the `shell` tool with a `python3` heredoc. Code Mode
   (`execute`) has no `fs` and no `shell` tool, so it cannot edit this repo at all.
 - A check piped through `grep -c '^warning'` exits 1 when the count is 0, so read the number, not the
