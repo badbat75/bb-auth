@@ -7594,6 +7594,9 @@ Alternatives weighed:
 
 #### 3. What changes for the designer
 
+The designer's answers (the notice's words, its place and markup, the rows that replace the
+done page) are §13.33; where they differ from the bullets below, §13.33 holds.
+
 - **The success page of §13.30 §4 is gone** where a logout URL is set: the two `200` rows
   (roster, stranger) become "`303` to the logout, then the sign-in page with the notice". Their
   words move to the notice, in `login.html` (English in the element, Italian in the page's
@@ -7686,3 +7689,108 @@ The user chose the recommended answers ("applica solo il raccomandato"):
 The success answer through the gate's logout (§1) is the recommended one too. The line in rpi-01's
 nginx that makes the notice show (`X-Original-URL` on `location = /auth/logout`) is part of 14d,
 with the user's go-ahead.
+
+### 13.33 The deletion notice on the sign-in page (plan step 14, designed 2026-11-26)
+
+The designer's half of §13.32 §3. **What was looked at:** `src/assets/login.html` (its `.brand`,
+the `#msg` box with `role="alert"`, the `autofocus` email field, `applyLang`, which sets each
+`[data-i18n]` element's `textContent`), `src/assets/auth.css` (`.msg{display:none}` and
+`.msg.show{display:block}`), `src/assets/base.css` (`.msg.ok`, the bordered box with the `--ok`
+left rule), the `K::AccountDelete*` keys in `src/bin/bb-auth-web.rs`, `build_cookie` in
+`src/bin/bb-auth.rs` (the cookie carries `Max-Age`, so it is persistent), and a mockup:
+`/tmp/d14/gen.js` fills `login.html` with the three real stylesheets plus the one rule below and
+shoots it (`/tmp/d14/notice-{en,it}-{light,dark}-{1280,360}.png`, and light at 320; no sideways
+scroll at any width).
+
+#### 1. The words (deletion notice)
+
+One paragraph, the same for a roster user and a stranger, since one code reflects nothing about
+who arrived:
+
+- **English** (the text in the element): "Your account is being deleted: this browser is signed
+  out, and your sign-in accounts are queued for deletion. If you can still sign in later without
+  signing up again, tell an administrator. Other browsers where you signed in stay signed in until
+  you sign out there or the session ends."
+- **Italian** (`i18n.it.notice_account_deleted`): "Il tuo account è in fase di eliminazione:
+  questo browser è disconnesso e i tuoi account di accesso sono in coda per l'eliminazione. Se più
+  avanti riesci ancora ad accedere senza registrarti di nuovo, avvisa un amministratore. Gli altri
+  browser in cui avevi effettuato l'accesso restano connessi finché non esci da lì o la sessione
+  non termina."
+
+Why these words:
+
+- **Queued, never deleted**, for the Cognito half (the user's rule, §13.29 W6). "Is being deleted"
+  is the done page's own title (`K::AccountDeleteQueuedTitle`), so the person reads the same
+  claim they would have read there, and the rest is `K::AccountDeleteQueued` without "This page
+  cannot tell when", which a sign-in page has no reason to say.
+- **"without signing up again"** is new and needed here: this page creates an account on the fly
+  for an email it does not know, so after a deletion typing the same email *should* succeed, as a
+  registration. Only the old account signing straight in means the deletion service did not act,
+  and that is the case the administrator must hear of.
+- **The gap's sentence** is the last one, because it is the least likely to matter (§13.32 §2,
+  accepted by the user on 2026-11-26). It names what the person can do about it (sign out there)
+  and carries **no session length**: the number is per deployment, would be a substitution into a
+  page whose notice is otherwise fixed bytes, and needs day plurals in two languages; "the session
+  ends" is true everywhere. Rejected for the same reason: a second code for the roster half
+  (`K::AccountDeleteNowGone`). The confirmation page already listed what goes, and a second code is
+  a second sentence to keep true for no new decision.
+- **Not "close your browser".** The cookie has `Max-Age` (`build_cookie`), so it outlives a closed
+  browser. `K::AccountDeletedClose` says the opposite today and is false; its replacement is in §3.
+
+#### 2. Where it sits, and its markup (deletion notice)
+
+```html
+<p id="notice" class="msg ok show" role="status" data-i18n="notice_account_deleted"__BB_NOTICE_HIDDEN__>…English…</p>
+```
+
+- **Between `.brand` and `#msg`**, so the card reads brand, what just happened, then the form. Not
+  inside `#msg`: the script empties that box on every step, and its `role="alert"` would make an
+  arrival read as an error.
+- **`.msg.ok`** from `BASE_CSS`: the box the page already has for a message, in its success arm.
+  Not `.warn`: nothing went wrong, and the one thing to act on is conditional. `show` is static,
+  because `auth.css` hides a bare `.msg`.
+- **`hidden` unless the code matches**: `__BB_NOTICE_HIDDEN__` is a space and `hidden`, or empty. `AUTH_CSS`
+  gains one rule, placed **after** `.msg.show`: `.msg[hidden]{display:none}`. A bare
+  `[hidden]{display:none}` (§13.32 §3) is not enough: `.msg.show` (two classes) outranks one
+  attribute selector, so the notice would show for every visitor. The two have equal specificity
+  (0,2,0) and the later wins.
+- **Reaching a screen reader.** The email field has `autofocus`, so focus lands below the notice
+  and a screen-reader user starts past it; and a live region's content present at load is not
+  announced, only later changes (MDN, ARIA live regions:
+  <https://developer.mozilla.org/en-US/docs/Web/Accessibility/ARIA/Guides/Live_regions>, not
+  re-read this session). So when the code matches the email input also gets
+  `aria-describedby="notice"` (`__BB_NOTICE_DESCRIBEDBY__`, a space and `aria-describedby="notice"`, or empty),
+  read when the field takes focus
+  (<https://developer.mozilla.org/en-US/docs/Web/Accessibility/ARIA/Reference/Attributes/aria-describedby>).
+  It must not be there unconditionally: a `hidden` element referenced by `aria-describedby` is
+  still read (Accessible Name and Description Computation 1.2, step 2A,
+  <https://www.w3.org/TR/accname-1.2/>). `role="status"` stays, harmless, as §13.32 §3 asked.
+  Both placeholders are fixed strings chosen by `notice == "account-deleted"`, so no byte of the
+  query reaches the page. Trade-off: the field's description is long for one visit; the
+  alternative, dropping `autofocus` when the notice shows, costs every sighted person a click.
+
+#### 3. What replaces the two `200` rows of §13.30 §4 (deletion notice)
+
+| Case | Logout URL set | Logout URL unset |
+|---|---|---|
+| every `POST` `202`, roster | `303` to `/auth/logout?rd=…notice=account-deleted`; the person lands on §2 | `200`, `AccountDeleteQueuedTitle`, `NowGone` + `Queued` + `AccountDeletedClose`, no pill |
+| every `POST` `202`, stranger | the same `303` | `200`, `AccountDeleteQueuedTitle`, `Queued` + `AccountDeletedClose`, no pill |
+
+`K::AccountDeletedSignOut` goes. `K::AccountDeletedClose` is reworded, because the cookie
+outlives a closed browser: "This browser stays signed in until the session ends." / "Questo
+browser resta connesso finché la sessione non termina." Every partial row is unchanged, pills
+included.
+
+#### 4. Tests and scenes (deletion notice)
+
+- §13.32 14a's `the_sign_in_page_shows_the_deletion_notice_only_for_its_code` also asserts the
+  email input carries `aria-describedby="notice"` with the code and no `aria-describedby` without
+  it, and that the notice precedes `id="msg"` in the bytes.
+- `the_deletion_notice_speaks_both_languages`: the English and Italian strings above, verbatim.
+- `the_auth_css_hides_a_hidden_message` (gate, over `AUTH_CSS`): `.msg[hidden]{display:none}`
+  appears after `.msg.show{display:block}`.
+- `with_no_logout_url_the_done_page_stays` asserts the reworded `AccountDeletedClose` and that
+  neither language contains "close" / "chiudi".
+- `e2e/shots.js`: retire `account-delete-queued` (its page no longer exists in the shots' view,
+  which sets a logout URL); the notice is reviewed by hand on `/auth/login?notice=account-deleted`
+  in both languages, light and dark, and at 360.

@@ -64,6 +64,8 @@ Rules are in `AGENTS.md`. Format of this file: `AGENTS.md`, under "Skills".
   launches Playwright's chromium with `executablePath` set to the cached `chromium_headless_shell-1255` binary.
 
 - To find Italian accents typed as apostrophes in the `K` table, extract each `m(lang, en, it)`'s third string with Python and apply §13.31 §10a's rule (a `'` after a vowel, before a non-letter, not closing a quote opened after a space or `(`); a plain regex also flags `'chiunque'`.
+- The stranger's `/account/` (no roster row) has no `shots.js` scene: `/tmp/rev13/stranger.js` boots the e2e server and shoots it as `friend@example.com` in light, dark, 360 and `it`, menu open, listing any visible submit in the menu.
+- A notice on the sign-in page with the three real stylesheets: `/tmp/d14/gen.js` (§13.33).
 
 ## Pitfalls
 
@@ -106,3 +108,5 @@ Rules are in `AGENTS.md`. Format of this file: `AGENTS.md`, under "Skills".
 - `boot()`'s Edge can time out at launch while other agents' Edge processes run, and Playwright's own chromium
   asks for a build the cache lacks: pass `executablePath`. A `<link href="file://…">` in `setContent` is blocked,
   so a mockup shot that way is unstyled: inline the CSS.
+- On the sign-in page `auth.css` hides a bare `.msg` and shows `.msg.show`, which outranks `[hidden]`: a hidden message box needs `.msg[hidden]{display:none}` after `.msg.show`.
+- A native `title` tooltip never appears in a headless screenshot: judge one in a real browser, not from `shots.js`.
