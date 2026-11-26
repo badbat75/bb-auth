@@ -244,7 +244,26 @@ Rules are in `AGENTS.md`. Format of this file: `AGENTS.md`, under "Skills".
   vertical centres of `.bar`'s **children**, so a tab strip that wraps inside its own `nav` leaves
   all three children centred on one line and the wrap is invisible. Read the strip's own rows
   (`nav:not(.acct)` children) and `bar.getBoundingClientRect().height` (one row measures 36px, a
-  wrapped strip measures 76).
+  wrapped strip measures 76). Count the rows of the box that is **showing** (`getComputedStyle(el).display
+  !== 'none'`): a `details` panel is a child of the bar too, and a five-row panel that hangs below
+  the bar reads as a five-row bar.
+- Count a box's links by what **renders**, when the claim is about visibility:
+  `document.querySelectorAll('nav.tabs a').length` counts the links inside a `display:none` strip
+  (5, at every width), and the rows of a closed `details` are in the document as well. A rendered
+  count is the boxes' bounding rects (`barTabRows`, `e2e/lib/harness.js`); a DOM count answers
+  "does this surface have a copy of the tabs at all", which is the claim for a surface with no
+  tabs. Keep the two apart in the label, or a green row says nothing about which it proved.
+- A **declared panel width** that must be the same on two surfaces is a browser measurement, not a
+  CSS read: `getBoundingClientRect().width` of the same box on `/admin/users` and `/account/`, in
+  one context, at the widths the design names (`menuIsOneSize`, `e2e/lib/harness.js`). The
+  stylesheet can be pinned for `width:20rem` and still render 230px on one page and 286px on the
+  other, which is exactly the drift §13.34 §0 measured, and no text read of the file can see it.
+  Compare within 0.5px (a layout engine's number), and assert the expected value too, so a panel
+  that is equal on both pages but the wrong size cannot pass.
+- A `shots.js` scene runs in the **view's** viewport, in one page shared by that view's scenes, so
+  a scene that needs another width sets it and puts `page.viewport()` back at the end, and a scene
+  that changes identity puts `admin@example.com` back. A new scene name must be added to a view's
+  `only` list as well, or `it` and `noscript` never photograph it.
 - A long **given name** in the bar needs `gate.profile_claims: ['given_name']` written into the
   settings file: the header is read only where the deployment says the proxy fills it, so a walk
   that sends `X-Auth-Given-Name` alone measures the bar's easy case and passes on a broken layout.
@@ -433,7 +452,19 @@ Rules are in `AGENTS.md`. Format of this file: `AGENTS.md`, under "Skills".
   nested in the panel (`openPreferences`, `e2e/lib/harness.js`) before touching a control inside it,
   and **guard on its return value**: it answers `false` when a box is absent, and a
   `locator('details.prefs').evaluate(...)` on markup that does not exist waits the full 30 s and
-  takes every later check in the area with it.
+  takes every later check in the area with it. The same trap on the bar's **two** menus (§13.34):
+  the ☰ is a `details.settings` too and comes first in document order, so a bare
+  `details.settings` on the console targets a summary that is `display:none` above the breakpoint,
+  and its click times out. Use the harness's `ACCT_MENU` / `NAV_MENU`, and grep
+  `grep -rn "details.settings" e2e/` when a second one lands: the areas written before it spell
+  the account menu bare.
+- A check about a box that may not exist on this surface is a **value, not an exception**:
+  `page.$eval(sel, …)` / `page.click(sel)` reject, and the area's own contract is to keep walking
+  past a missing control, so one unguarded read of new markup ends the area (the runner records
+  `area completed without an unhandled error` and every check behind it vanishes). Read it as
+  `menuIsOpen` / `menuShape` do (`locator(sel).evaluate(…).catch(() => null)`, `count()` before a
+  click). Playwright has **no** browser-level `setDefaultTimeout` (only context and page), so a
+  probe script cannot shorten the 30 s default for the whole suite.
 - An e2e area that imports a short-named helper (`text`, `count`, `attr`, `prop`) must check the area
   for an existing `const text = await mainText(page)`-style local: a `const` in the same function
   shadows the import for the **whole** function, so the failure is `TypeError: text is not a function`

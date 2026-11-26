@@ -214,7 +214,7 @@ async function run(ctx, t) {
     // The bar's own strip: the panel's tab rows carry the same mark, and they are in the DOM
     // while closed, so an unscoped `nav a.pill.on` is two elements and a strict-mode error.
     t.eq('and the tab is still there',
-      await page.locator('header .bar > nav:not(.acct) a.pill.on').innerText(), 'Audit');
+      await page.locator('header .bar > nav.tabs a.pill.on').innerText(), 'Audit');
   } finally {
     await context.close();
   }

@@ -9,7 +9,7 @@
 // parameters, and picking an option has to apply it on the spot while keeping the rest of
 // the URL intact.
 
-const { newPage, pageLang, api, openPreferences } = require('../lib/harness');
+const { newPage, pageLang, api, openPreferences, ACCT_MENU } = require('../lib/harness');
 
 async function run(ctx, t) {
   // The redirect + cookie contract, at the HTTP level.
@@ -65,9 +65,11 @@ async function run(ctx, t) {
 
     const canUrl = '/apps/app1?email=spammer%40example.com&url=https%3A%2F%2Fapp.example.com%2Fapp1';
     await page.goto(ctx.base + canUrl);
+    // §13.34 §2: the bar has a second `details.settings` (the ☰), so the account menu is read
+    // through the harness constant, never by a bare class that matches both.
     t.check('the menu is closed until it is opened',
-      !(await page.locator('details.settings').evaluate((d) => d.open)));
-    await page.click('details.settings > summary');
+      !(await page.locator(ACCT_MENU).evaluate((d) => d.open)));
+    await page.click(`${ACCT_MENU} > summary`);
     t.check('the language list box offers auto and the two languages',
       (await page.locator('.menu select[name=lang] option').evaluateAll(
         (os) => os.map((o) => o.value))).join(',') === 'auto,en,it');
@@ -83,7 +85,7 @@ async function run(ctx, t) {
       (await page.locator('main').innerText()).includes('NEGATO'));
 
     // The theme is a second, independent pick, and it does not disturb the first.
-    await page.click('details.settings > summary');
+    await page.click(`${ACCT_MENU} > summary`);
     await pick('theme', 'dark');
     t.eq('picking a theme applies it the same way',
       await page.locator('html').getAttribute('data-theme'), 'dark');

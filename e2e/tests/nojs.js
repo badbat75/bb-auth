@@ -13,7 +13,8 @@
 
 const crypto = require('crypto');
 const fs = require('fs');
-const { doc, bytes, newPage, submit, mainText, openPreferences, count } = require('../lib/harness');
+const { doc, bytes, newPage, submit, mainText, openPreferences, count,
+  openBarMenu, barStaysOneRow, headerLayout, ACCT_MENU, NAV_MENU } = require('../lib/harness');
 const { profileSettingsBytes, PROFILE_HEADERS } = require('../lib/cognito');
 const { FIXTURE } = require('../lib/server');
 const { WHOAMI, DELETE } = require('../lib/intake');
@@ -35,7 +36,14 @@ async function revealKey(page, base, user, id) {
  *  A control the person has to hit is a box, and the only honest measurement of a box is
  *  the one the layout engine made. */
 async function iconBoxes(page) {
-  return page.$$eval('.pill.ico', (els) => els.map((el) => {
+  return page.$$eval('.pill.ico', (els) => els.filter((el) => {
+    // Measure a target where it is **laid out**. The bar's ☰ is `display:none` above the 941px
+    // breakpoint (§13.34 §2), and a box inside a box that generates no box measures 0×0, so a
+    // size check on it at desktop width measures nothing. The same is true of the reveal's copy
+    // button before its script unhides it.
+    const r = el.getBoundingClientRect();
+    return r.width > 0 && r.height > 0;
+  }).map((el) => {
     const r = el.getBoundingClientRect();
     return { w: Math.round(r.width), h: Math.round(r.height), name: (el.textContent || '').trim() };
   }));
@@ -76,8 +84,8 @@ function prefHandlersOnly(t, label, html) {
  *  walk opens both before it touches one: a closed `details` keeps its fields in the DOM, so
  *  a count passes and a click times out, which says nothing about the panel. */
 async function menuClosesOutside(t, page, who, apply) {
-  const isOpen = () => page.$eval('details.settings', (d) => d.open);
-  await page.click('details.settings > summary');
+  const isOpen = () => page.$eval(ACCT_MENU, (d) => d.open);
+  await page.click(`${ACCT_MENU} > summary`);
   t.eq(`${who}: the trigger opens the menu`, await isOpen(), true);
   await page.mouse.click(4, 896);
   t.eq(`${who}: a click at the bottom-left of the viewport closes it`, await isOpen(), false);
@@ -251,9 +259,19 @@ async function run(ctx, t) {
       await page.setViewportSize({ width, height: 900 });
       await acct8d.setViewportSize({ width, height: 900 });
       await page.goto(ctx.base + '/');
-      t.check(`the console's brand shares the h1's left edge at ${width}`,
-        Math.abs((await left(page, 'header .brand')) - (await left(page, 'main h1'))) <= 1,
-        `${await left(page, 'header .brand')} vs ${await left(page, 'main h1')}`);
+      if (width <= 941) {
+        // §13.34 §2: at and below the breakpoint the ☰ is the bar's **first** child, so the box
+        // that shares the page's left edge on the console is the ☰, and the brand sits behind it.
+        // The account page has no ☰ (§4), so there the brand keeps the edge at every width.
+        const edge = await left(page, 'main h1');
+        t.check(`the console's ☰ shares the h1's left edge at ${width}`,
+          Math.abs((await left(page, 'header .bar > nav.navm')) - edge) <= 1,
+          `${await left(page, 'header .bar > nav.navm')} vs ${edge}`);
+      } else {
+        t.check(`the console's brand shares the h1's left edge at ${width}`,
+          Math.abs((await left(page, 'header .brand')) - (await left(page, 'main h1'))) <= 1,
+          `${await left(page, 'header .brand')} vs ${await left(page, 'main h1')}`);
+      }
       await acct8d.goto(`${ctx.origin}/account/`);
       t.check(`the account's brand shares the h1's left edge at ${width}`,
         Math.abs((await left(acct8d, 'header .brand')) - (await left(acct8d, 'main h1'))) <= 1,
@@ -468,7 +486,7 @@ async function run(ctx, t) {
     const page = await noJs.newPage();
     await page.goto(ctx.base + '/users');
     // `details` is HTML, not script: the menu still opens, and so does the box nested in it.
-    await page.click('details.settings > summary');
+    await page.click(`${ACCT_MENU} > summary`);
     t.eq('with scripting off the Settings menu still opens',
       await page.locator('.menu select[name=lang]').count(), 1);
     t.eq('and grows its submit button back', await page.locator('.menu button').count(), 1);
@@ -490,30 +508,40 @@ async function run(ctx, t) {
       await Promise.all([page.waitForNavigation(), page.click('.menu button')]);
     });
 
-    // At phone width the panel is the only navigation the console has, and both of its rows
-    // are plain links, so scripting off changes nothing about reaching a page (§13.28 §4).
-    await page.setViewportSize({ width: 360, height: 760 });
-    await page.goto(ctx.base + '/users?lang=en');
-    t.eq('the bar shows no tabs here',
-      await page.locator('header .bar > nav:not(.acct)')
-        .evaluate((el) => getComputedStyle(el).display).catch(() => 'absent'),
-      'none');
-    await page.click('details.settings > summary');
-    t.eq('the panel carries the tabs', await count(page, '.menu-tabs a'), 4);
-    if ((await count(page, '.menu-tabs a[href$="/apps"]')) === 1) {
-      await Promise.all([page.waitForNavigation(), page.click('.menu-tabs a[href$="/apps"]')]);
-      t.check('a panel tab navigates', page.url().endsWith('/apps'), page.url());
-      await page.click('details.settings > summary');
-      await Promise.all([
-        page.waitForNavigation(),
-        page.click('details.settings .menu-places a[href$="/config"]'),
-      ]);
-      t.check('and the System settings row reaches the settings page',
-        page.url().endsWith('/config'), page.url());
-    } else {
-      t.check('a panel tab navigates', false, 'no Applications row in the panel to click');
-      t.check('and the System settings row reaches the settings page', false, 'no row to click');
+    // At phone width the ☰ is the only navigation the console has, and a `details` is HTML,
+    // not script: it opens with markup, its rows are plain links, and scripting off changes
+    // nothing about reaching a page (§13.28 §4, §13.34 §2). 360 is a phone, 941 the widest
+    // width that takes this path.
+    const navTab = `${NAV_MENU} .menu-tabs a`;
+    for (const width of [360, 941]) {
+      await page.setViewportSize({ width, height: 760 });
+      await page.goto(ctx.base + '/users?lang=en');
+      const l = await headerLayout(page);
+      t.eq(`at ${width}: the bar's strip is hidden`, l.tabs, 'none');
+      t.check(`at ${width}: the ☰ is in the bar`, l.navMenu !== 'none', l.navMenu);
+      t.eq(`at ${width}: the ☰ opens with markup alone`, await openBarMenu(page, NAV_MENU), true);
+      t.eq(`at ${width}: and carries the five tabs`, await count(page, navTab), 5);
+      if ((await count(page, `${navTab}[href$="/apps"]`)) === 1) {
+        await Promise.all([page.waitForNavigation(), page.click(`${navTab}[href$="/apps"]`)]);
+        t.check(`at ${width}: a ☰ tab navigates`, page.url().endsWith('/apps'), page.url());
+        await openBarMenu(page, NAV_MENU);
+        await Promise.all([page.waitForNavigation(), page.click(`${navTab}[href$="/config"]`)]);
+        t.check(`at ${width}: and the Settings tab reaches the settings page`,
+          page.url().endsWith('/config'), page.url());
+      } else {
+        t.check(`at ${width}: a ☰ tab navigates`, false, 'no Applications row in the ☰ to click');
+        t.check(`at ${width}: and the Settings tab reaches the settings page`, false,
+          'no Settings row in the ☰');
+      }
+      // The account menu is the person's own things at every width, so it never grows a copy
+      // of the navigation, and with scripting off there is no script that could move it.
+      await openBarMenu(page, ACCT_MENU);
+      t.eq(`at ${width}: the account menu carries no tabs`,
+        await count(page, `${ACCT_MENU} .menu .menu-tabs`), 0);
     }
+    // The narrowest phone the design measured, in both languages, with no script to help: the
+    // Italian tab words are the longer ones, so English alone measures the easy half.
+    await barStaysOneRow(t, page, ctx.base, '/users', 'console bar, scripting off');
     await page.setViewportSize({ width: 1280, height: 900 });
 
     // The self-service page with scripting off. Its handler is inert here, so the `<noscript>`
@@ -539,16 +567,18 @@ async function run(ctx, t) {
       } else {
         t.check('and its Apply button applies the theme', false, 'the panel never opened');
       }
-      await ap.click('details.settings > summary');
+      // §13.34 §2 gives the bar a second `details.settings` (the ☰), so every read of the
+      // account menu is scoped to `nav.acct`, the constant the harness names.
+      await ap.click(`${ACCT_MENU} > summary`);
       t.eq('no console tabs, no settings row',
-        await count(ap, 'details.settings .menu .menu-tabs, details.settings .menu a[href$="/config"]'),
+        await count(ap, `${ACCT_MENU} .menu .menu-tabs, ${ACCT_MENU} .menu a[href$="/config"]`),
         0);
       // §13.30 §1: the delete row belongs on this surface, and with scripting off it is still
       // a plain link, so the walk to the page that asks needs no script at all.
       t.eq('the delete row is one link',
-        await count(ap, 'details.settings .menu a.pill.rm[href="/account/delete"]'), 1);
+        await count(ap, `${ACCT_MENU} .menu a.pill.rm[href="/account/delete"]`), 1);
       t.eq('and nothing here submits a deletion by itself',
-        await count(ap, 'details.settings .menu form[action*="delete"]'), 0);
+        await count(ap, `${ACCT_MENU} .menu form[action*="delete"]`), 0);
     } finally {
       await acct.close();
     }
@@ -717,10 +747,10 @@ async function deleteWalk(t, ctx) {
     // The panel opens with markup, and its last row is a link: the door to the page that asks
     // is a GET, so a browser that prefetches it costs nobody their account.
     await page.goto(ctx.origin + '/account/');
-    await page.click('details.settings > summary');
+    await page.click(`${ACCT_MENU} > summary`);
     await Promise.all([
       page.waitForNavigation(),
-      page.click('details.settings .menu a.pill.rm[href="/account/delete"]'),
+      page.click(`${ACCT_MENU} .menu a.pill.rm[href="/account/delete"]`),
     ]);
     t.check('the page that asks is reached by a link alone',
       page.url().endsWith('/account/delete'), page.url());

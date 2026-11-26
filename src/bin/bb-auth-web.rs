@@ -874,6 +874,11 @@ enum K {
     // The word that turns the bar's name into a control's name: "Ada, account menu"
     // (§13.28 §1).
     AccountMenu,
+    // §13.34 §4: the fifth tab's word. `Config` stays the page's own title ("System settings"),
+    // because the heading and the `<title>` say what the page is and a tab has to fit the strip.
+    ConfigTab,
+    // §13.34 §2: the ☰'s accessible name. The control is an icon, so this string is its name.
+    NavMenu,
     // The self-service menu's last row (§13.30 §1). The words say what the press costs, because
     // the worker's deletion is the one action on this estate nobody can undo.
     AccountDelete,
@@ -1343,6 +1348,8 @@ fn t(lang: Lang, key: K) -> &'static str {
     match key {
         K::Dashboard => m(lang, "Dashboard", "Cruscotto"),
         K::Config => m(lang, "System settings", "Impostazioni di sistema"),
+        K::ConfigTab => m(lang, "Settings", "Impostazioni"),
+        K::NavMenu => m(lang, "Navigation menu", "Menu di navigazione"),
         K::ConfigIntro => m(
             lang,
             "The settings that take effect with no restart. Everything else bb-auth is configured with stays in its env file, on the host.",
@@ -5174,19 +5181,20 @@ fn who(given_name: Option<&str>, email_header: &str) -> Who {
     }
 }
 
-/// The bar every page of this program wears, as three slots: the brand, the tabs, and the
-/// account end.
+/// The bar every page of this program wears, as four slots: the navigation menu, the brand,
+/// the tabs, and the account end.
 ///
 /// Factored out of [`shell`] because the self-service page wears the same bar (§13.17), and
 /// two copies of one bar is how two surfaces drift a pixel at a time, each editor changing the
 /// file in front of them. The slots are markup and not a type because that is all the two
-/// surfaces differ on: the account page has no tabs to pass and names the operator's brand
-/// where the console names the tool. Every class is `admin.css`'s already, so a slot that
-/// arrives with one of its own is the thing to fix.
-fn top_bar(brand: Markup, tabs: Markup, acct: Markup) -> Markup {
+/// surfaces differ on: the account page has no tabs to move and no ☰ to move them in, and names
+/// the operator's brand where the console names the tool. Every class is `admin.css`'s already,
+/// so a slot that arrives with one of its own is the thing to fix.
+fn top_bar(navn: Markup, brand: Markup, tabs: Markup, acct: Markup) -> Markup {
     html! {
         header class="top" {
             div class="bar" {
+                (navn)
                 (brand)
                 (tabs)
                 (acct)
@@ -5297,15 +5305,27 @@ fn prefs_form(
 /// The trigger is the person's own name, because the bar has a few characters of room and a
 /// name is what a person recognises in it; the word "account menu" rides along inside the
 /// control, visually hidden, so a reader is told what the name **is** rather than left with a
-/// word that reads as a heading. The panel then says who they are in full, offers the console's
-/// places (`places`, `None` on the self-service page and on the `403`, where the caller has no
-/// console page to be offered), the nested Preferences box, and Sign out, and ends in the delete
+/// word that reads as a heading. The panel says who they are in full, offers the places this
+/// menu has (`places`: §13.34 leaves the console's one, the caller's own page, and the
+/// self-service page has none), the nested Preferences box, and Sign out, and ends in the delete
 /// row on the one surface that offers it.
 ///
 /// The panel is a `details` for the reason §13.20 gave: it opens with no script, closes by
 /// itself when a row navigates away, and its trigger keeps the light-dismiss cover the console
 /// already has. The nested box gets no cover of its own, so it toggles only from its own row.
 /// `logout` is `None` when the operator named no destination, and then there is no row.
+///
+/// `grouped` is whether the bar carries a ☰ beside this menu (§13.34 §2), and it is a parameter
+/// because the answer is not this function's to read: the console's pages have one, `/account/`
+/// has one, and the console's `403` has none, because a page with no tabs has no tab strip to
+/// move. `name="bar-menu"` is the exclusive-open group, and it groups **two** boxes, so a page
+/// with one menu names a group nothing else belongs to. A group of one is not a rule, it is a
+/// claim about a control that is not on the page.
+///
+/// The panel's groups are divided by a rule on **both** surfaces (§13.34 §3): one ahead of
+/// Preferences, one ahead of Sign out. A rule that appears only where the console has places is
+/// how the two panels stopped being one object, which is what `the_account_menu_is_one_object`
+/// reads as the ordered list of classes.
 ///
 /// `delete` is the self-service page's last row (§13.30 §1), and `None` is the whole reason it
 /// is a parameter rather than something read here: the console's panel never carries it, and the
@@ -5317,11 +5337,13 @@ fn account_menu(
     prefs: Markup,
     logout: Option<&str>,
     delete: Option<&str>,
+    grouped: bool,
 ) -> Markup {
     let label = who.map(|w| w.label.as_str()).unwrap_or("");
     let menu_word = format!(", {}", t(lang, K::AccountMenu));
+    let group = grouped.then_some("bar-menu");
     html! {
-        details class="settings" {
+        details class="settings" name=[group] {
             // The name, the caret, and the word that names the control. `title` carries the full
             // label because the ellipsis may cut it, and a tooltip is the one place a cut name is
             // still the whole name.
@@ -5347,12 +5369,21 @@ fn account_menu(
                         }
                     }
                 }
-                // The console's places, and the rule that divides them from the rows below. A
-                // caller with no places gets no container at all, which is what keeps the `403`
-                // from offering a page it has refused.
+                // The console's places, and the rule that divides them from the rows below (§13.34
+                // §3). A caller with no places gets no container and no rule at all, which is what
+                // keeps the `403` from offering a page it has refused. The rule is an `hr` and not
+                // the panel's `div.sep`, because the panel must stay **one object** across the two
+                // surfaces: `the_account_menu_is_one_object` reads the ordered list of classes the
+                // panel emits once its two surface-only blocks are out, and a classed rule that
+                // only the console emits is exactly the difference that test is there to catch.
+                // `hr` is the element for a thematic break, so the divider is semantics with no
+                // class to drift, and it sits after the places block, not inside it: the block is
+                // the places, and a rule closing it would divide the block from itself.
                 @if let Some(p) = places {
-                    div class="menu-places" { (p) }
-                    div class="sep" {}
+                    div class="menu-places" {
+                        (p)
+                    }
+                    hr;
                 }
                 details class="prefs" {
                     // The sliders, and the word "Preferences": the panel's rows are places to go
@@ -5522,14 +5553,16 @@ fn shell_named(
     title: &str,
     content: Markup,
 ) -> Markup {
-    // Four tabs, not five: the Settings page is not a place in the bar (§13.28 §4). It is a row
-    // of the account panel, where the bar has room for it at every width, and the bar's four are
-    // what fits on one row at 320px with a name that is the trigger.
+    // Five tabs, Settings last (§13.34 §1): it is the page the bar's own row has room for, and
+    // the row a phone reaches last through the ☰. The word is `K::ConfigTab` and not
+    // `K::Config`, because the strip has to fit the bar and the page's heading can say what the
+    // page is; the two words are pinned apart by `aria_current_names_the_page`.
     let tabs = [
         (Route::Dashboard, v.t(K::Dashboard)),
         (Route::Apps, v.t(K::Apps)),
         (Route::Users, v.t(K::Users)),
         (Route::Audit, v.t(K::Audit)),
+        (Route::Config, v.t(K::ConfigTab)),
     ];
     let current = v.at.tab();
     // The brand is the way home, but only when there is a home to go to: the 403 page has no
@@ -5549,30 +5582,65 @@ fn shell_named(
     // emitted twice and exactly one copy is displayed. `aria-current="page"` is the word a
     // reader hears for "you are here", because `.on` is a colour and colour alone is not a
     // distinction WCAG 1.3.1 accepts.
+    // The strip's links, and the ☰'s copy of them, from one loop (§13.28 §4, §13.34 §1): moving
+    // an element between the bar and a closed `details` cannot be done in CSS, so the links are
+    // emitted twice and exactly one copy is displayed, which is also why the panel's rows are
+    // `.pill`s, so the copy that appears is the same object as the copy it replaces.
+    // `aria-current="page"` is the word a reader hears for "you are here", because `.on` is a
+    // colour and colour alone is not a distinction WCAG 1.3.1 accepts.
     let tab_links = html! {
         @for (r, label) in &tabs {
             a class=@if *r == current { "pill on" } @else { "pill" }
               href=(v.href(r)) aria-current=[(*r == current).then_some("page")] { (label) }
         }
     };
+    // The strip is named `tabs` so the breakpoint rule can hide it by name: with the ☰ in the
+    // bar, `nav:not(.acct)` would hide that too (§13.34 §2). A page with no places to move
+    // carries an empty strip, which is what keeps the bar's slots one shape on both surfaces.
     let tab_nav = html! {
-        @if v.admin.is_some() { nav { (tab_links) } } @else { nav {} }
+        @if v.admin.is_some() { nav class="tabs" { (tab_links) } } @else { nav class="tabs" {} }
     };
-    // The console's places, in the panel: the four tabs (which the bar shows above 800px and
-    // hides below), the System settings page that left the bar, and the caller's own page. All
-    // three are places to go, which is why they sit together, above the rows that only change
-    // how the estate looks. `v.admin` is the gate: a caller the allowlist refused is offered no
-    // console page at all, and gets no `div.menu-places` to be offered in.
-    let config_word = v.t(K::Config);
-    let on_config = current == Route::Config;
+    // The bar's navigation menu (§13.34 §2): the phone's tab strip, and the tabs' only home at
+    // and below the breakpoint. It is a `nav` because it is navigation, which also gives its
+    // rows the quiet tab look of `nav .pill`. `name="bar-menu"` puts it in one exclusive group
+    // with the account menu, so opening one shuts the other with no script; the nested
+    // `details.prefs` stays out of that group, or opening Preferences would close the menu it
+    // sits in. The trigger is the glyph plus `K::NavMenu` in `span.vh`: a `summary` has no ARIA
+    // role, so the name is hidden text and not `aria-label`, and `title` is the tooltip for the
+    // pointer. A `403` names no console page, so it gets no ☰ at all: a page with no tabs has
+    // no tab strip to move.
+    let nav_word = v.t(K::NavMenu);
+    let navn = v
+        .admin
+        .map(|_| {
+            html! {
+                nav class="navm" {
+                    details class="settings navmenu" name="bar-menu" {
+                        summary class="pill ico" title=(nav_word) {
+                            svg class="i-menu" viewBox="0 0 24 24" aria-hidden="true" focusable="false" {
+                                path d="M4 6h16" {}
+                                path d="M4 12h16" {}
+                                path d="M4 18h16" {}
+                            }
+                            span class="vh" { (nav_word) }
+                        }
+                        div class="menu" {
+                            div class="menu-tabs" { (tab_links) }
+                        }
+                    }
+                }
+            }
+        })
+    .unwrap_or_default();
+    // The console's places, in the account panel: one row, the caller's own page (§13.34 §3).
+    // The tabs left it for the ☰ and the settings page left it for the strip, so a row to
+    // either here would be two answers to one question, one of them a row a phone cannot reach.
+    // `v.admin` is the gate: a caller the allowlist refused is offered no console page at all,
+    // and gets no `div.menu-places` to be offered in.
     let account_word = v.t(K::NotAdminToAccount);
     let account_href = format!("{}/", v.cfg.account_path);
     let places = v.admin.map(|_| {
         html! {
-            div class="menu-tabs" { (tab_links) }
-            a class=@if on_config { "pill on" } @else { "pill" }
-              href=(v.href(&Route::Config)) aria-current=[on_config.then_some("page")]
-              { (config_word) }
             a class="pill" href=(account_href) { (account_word) }
         }
     });
@@ -5604,6 +5672,9 @@ fn shell_named(
                 // No delete row here (§13.28 §5): this surface edits **other people's** accounts,
                 // and a person deletes their own on the page under the account prefix.
                 None,
+                // The ☰ is in this bar exactly where it is, so the two menus are one group
+                // exactly where there are two menus to group (§13.34 §2).
+                v.admin.is_some(),
             ))
         }
     };
@@ -5613,7 +5684,7 @@ fn shell_named(
         &format!("bb-auth-web · {title}"),
         v.look.stylesheet,
         html! {
-            (top_bar(brand, tab_nav, acct))
+            (top_bar(navn, brand, tab_nav, acct))
             main {
                 // The one thing a redirect is allowed to say, from a closed set.
                 @if let Some(msg) = v.msg {
@@ -10494,6 +10565,9 @@ fn account_shell(prefs: &AccountPrefs, title: &str, content: Markup, look: Accou
                 prefs_box,
                 prefs.logout,
                 prefs.delete,
+                // Grouped: this page's bar has the account menu and no ☰, and the console's bar
+                // beside it has both, so the name is the pair's, written the same on each half.
+                true,
             ))
         }
     };
@@ -10503,7 +10577,13 @@ fn account_shell(prefs: &AccountPrefs, title: &str, content: Markup, look: Accou
         &format!("{brand_name} · {title}"),
         look.stylesheet,
         html! {
-            (top_bar(brand, html! { nav {} }, acct))
+            // No ☰ here (§13.34 §4), and the strip is the strip with its own name and empty:
+            // the breakpoint rules hide the strip by name (`nav.tabs`), because with the ☰ in
+            // the console's bar the old `nav:not(.acct)` would hide that too. A strip written
+            // without the class is invisible to every one of those rules, and on a phone it
+            // lands in front of the brand as an ordering item, which is what moves the brand
+            // off the left edge the page's `h1` starts at.
+            (top_bar(html! {}, brand, html! { nav class="tabs" {} }, acct))
             main {
                 h1 { (title) }
                 (content)
@@ -25988,7 +26068,7 @@ mod tests {
             account_readable(&acct_page.body)
         );
 
-        // Tabs: the console's four pills (§13.28 §4); the account's an empty `nav`.
+        // Tabs: the console's five pills (§13.28 §4, §13.34); the account's an empty `nav`.
         assert_eq!(
             controls_with_class(&c_top, "nav", "acct").len(),
             1,
@@ -25996,17 +26076,35 @@ mod tests {
         );
         assert_eq!(
             controls_with_class(&the_tab_nav(&console.body, "console"), "a", "pill").len(),
-            4,
-            "console: the bar keeps four tabs: {}",
+            5,
+            "console: the bar keeps five tabs: {}",
             the_tab_nav(&console.body, "console")
         );
+        // §13.34 §2 gives the strip its own class so the 941px rule can name it, and §4 says
+        // `/account/` keeps that element empty: the same header, with nothing in the strip.
         assert!(
-            a_top.contains("<nav></nav>"),
-            "account: an empty `nav` where the tabs would be: {a_top}"
+            a_top.contains("<nav class=\"tabs\"></nav>"),
+            "account: an empty `nav.tabs` where the tabs would be: {a_top}"
         );
         assert!(
             !a_top.contains("class=\"pill on\""),
             "account: no tab is current: {a_top}"
+        );
+        // §13.34 §4: and no ☰ either. The navigation menu belongs to the console's tabs, and this
+        // page has none, so a ☰ here would be a control that opens on an empty box. Read the
+        // header's markup, not the page: every page inlines `admin.css`, whose rules name
+        // `details.navmenu` at the top level and in the 941 block, so a substring over the whole
+        // document is true of the stylesheet, not of the markup.
+        assert!(
+            !a_top.contains("<nav class=\"navm\"") && !a_top.contains("navmenu"),
+            "account: no navigation menu: {a_top}"
+        );
+        // §13.34 §2: the account menu's `details` carries the group name on **both** surfaces, so
+        // the one shared function emits it unconditionally. The page has no ☰ to trade places
+        // with, and an element that changed attributes per caller is not one object.
+        assert!(
+            a_top.contains("<details class=\"settings\" name=\"bar-menu\""),
+            "account: the account menu is in the bar's exclusive group here too: {a_top}"
         );
 
         // The account end: one menu on each surface, built by one function, so the trigger is
@@ -26063,12 +26161,19 @@ mod tests {
                 outs[0]
             );
         }
+        // §13.34: the console's account menu is no longer a list of the console's places. The
+        // tabs ride in the ☰, the settings page is a tab, and what is left in this panel is the
+        // caller's own page, which is the one place the menu has on both surfaces.
         let c_panel = the_panel(&c_acct, "console");
         let a_panel = the_panel(&a_acct, "account");
         assert!(
-            c_panel.contains("<div class=\"menu-tabs\">")
-                && c_panel.contains(&format!("{ADMIN_BASE}/config")),
-            "the console's panel carries its places: {c_panel}"
+            !c_panel.contains("<div class=\"menu-tabs\"")
+                && !c_panel.contains(&format!("{ADMIN_BASE}/config")),
+            "the console's account menu carries no console place: {c_panel}"
+        );
+        assert!(
+            c_panel.contains(&format!("href=\"{ACCOUNT_PATH}/\"")),
+            "the console's account menu carries the caller's own page: {c_panel}"
         );
         assert!(
             !a_panel.contains("menu-tabs") && !a_panel.contains(&format!("{ADMIN_BASE}/config")),
@@ -32092,15 +32197,40 @@ mod tests {
         nested_block(&nav, "<div class=\"menu\">", "div")
     }
 
+    /// The panel of the bar's navigation menu: the `div.menu` inside `details.settings.navmenu`
+    /// (§13.34). It is a panel of the same family as [`the_panel`], and the two are asked the
+    /// same question, so they are read the same way.
+    fn the_nav_panel(html: &str, label: &str) -> String {
+        let nav = the_nav_menu(html, label);
+        nested_block(&nav, "<div class=\"menu\">", "div")
+    }
+
     /// The bar's content box, with its nested `div`s kept whole.
     fn the_bar(html: &str, label: &str) -> String {
         nested_block(&the_header_bar(html, label), "<div class=\"bar\">", "div")
     }
 
-    /// The bar's tab `nav`: the first `nav` inside the bar, `nav.acct` being the last.
+    /// The bar's tab `nav`: the strip, named by its class. It used to be "the first `nav` in
+    /// the bar", and §13.34 put a `nav` in front of it: the navigation menu. A test that takes
+    /// the first one now reads the menu and asserts a menu against a menu, which passes on a
+    /// page with no tabs at all, so the strip is found by the class the design names.
     fn the_tab_nav(html: &str, label: &str) -> String {
-        let navs = elements(&the_bar(html, label), "<nav", "</nav>");
-        assert!(!navs.is_empty(), "{label}: the bar has a nav");
+        let bar = the_bar(html, label);
+        let navs = elements(&bar, "<nav class=\"tabs\"", "</nav>");
+        assert_eq!(navs.len(), 1, "{label}: the bar has one tab strip: {bar}");
+        navs.into_iter().next().unwrap()
+    }
+
+    /// The bar's navigation menu (§13.34): the `nav.navm` that carries the phone's copy of the
+    /// tabs. Its box is the one the bar measures, so it is found by the class the design names.
+    fn the_nav_menu(html: &str, label: &str) -> String {
+        let bar = the_bar(html, label);
+        let navs = elements(&bar, "<nav class=\"navm\"", "</nav>");
+        assert_eq!(
+            navs.len(),
+            1,
+            "{label}: the bar has one navigation menu: {bar}"
+        );
         navs.into_iter().next().unwrap()
     }
 
@@ -32311,87 +32441,389 @@ mod tests {
             "{at}: {}",
             outs[0]
         );
-        if at == "console" {
-            let sys: Vec<String> = controls_with_class(&panel, "a", "pill")
-                .into_iter()
-                .filter(|el| el.contains("/config"))
-                .collect();
-            assert_eq!(sys.len(), 1, "{at}: the System settings row: {panel}");
-            assert_eq!(
-                visible_text(&sys[0]),
-                t(lang, K::Config),
-                "{at}: the row and the page say the same thing: {}",
-                sys[0]
-            );
-        }
+        // No System settings row here: §13.34 §3 moved it out of the account menu and §1 made the
+        // settings page the fifth tab, so a tab is named by the strip, not by this panel (and the
+        // strip is pinned by `the_bar_has_five_tabs`).
     }
 
-    /// §13.28 §4 and §2: the bar keeps **four** tabs. The Settings tab is not a place in the
-    /// bar any more, and the bar's tabs say which one is current in words a reader hears, not
-    /// only in colour (WCAG 1.3.1).
+    /// §13.28 §4 as §13.34 extends it: the bar keeps **five** tabs. Settings rides in the strip
+    /// as the fifth and last, so a phone reaches it through the ☰ with no extra row anywhere,
+    /// and the bar's tabs say which one is current in words a reader hears, not only in colour
+    /// (WCAG 1.3.1).
+    ///
+    /// Red until the coder adds the tab: the strip today is the four, and the fifth's word is
+    /// not in it.
     #[test]
-    fn the_bar_has_four_tabs() {
-        let html = render("four-tabs", Route::Users);
-        let tabs = the_tab_nav(&html, "console");
-        let pills = controls_with_class(&tabs, "a", "pill");
+    fn the_bar_has_five_tabs() {
+        let scratch = account_scratch_full("five-tabs");
+        let port = account_port(&scratch);
         let want = [
-            ("/", t(Lang::En, K::Dashboard)),
-            ("/apps", t(Lang::En, K::Apps)),
-            ("/users", t(Lang::En, K::Users)),
-            ("/audit", t(Lang::En, K::Audit)),
+            ("/", K::Dashboard),
+            ("/apps", K::Apps),
+            ("/users", K::Users),
+            ("/audit", K::Audit),
+            ("/config", K::ConfigTab),
         ];
-        assert_eq!(
-            pills.len(),
-            want.len(),
-            "the bar's tabs are exactly the four places: {tabs}"
-        );
-        for (i, (href, word)) in want.iter().enumerate() {
+
+        for (lang, code) in [(Lang::En, "en"), (Lang::It, "it")] {
+            let g = console_get(port, "admin@x.com", &[("Cookie", &format!("lang={code}"))]);
+            assert_eq!(g.status, 200, "{code}: {}", account_readable(&g.body));
+            let tabs = the_tab_nav(&g.body, "console");
+            let pills = controls_with_class(&tabs, "a", "pill");
             assert_eq!(
-                attr(open_tag(&pills[i]), "href").as_deref(),
-                Some(*href),
-                "tab {i}: {}",
-                pills[i]
+                pills.len(),
+                want.len(),
+                "{code}: the bar's tabs are exactly the five places: {tabs}"
             );
-            assert_eq!(visible_text(&pills[i]), *word, "tab {i}: {}", pills[i]);
+            for (i, (path, key)) in want.iter().enumerate() {
+                assert_eq!(
+                    attr(open_tag(&pills[i]), "href").as_deref(),
+                    Some(format!("{ADMIN_BASE}{path}").as_str()),
+                    "{code}: tab {i}: {}",
+                    pills[i]
+                );
+                assert_eq!(
+                    visible_text(&pills[i]),
+                    t(lang, *key),
+                    "{code}: tab {i}: {}",
+                    pills[i]
+                );
+            }
+            // Settings is last, which is the whole arrangement of §13.34: it is the tab a phone
+            // reaches last, through the ☰, and the bar's own row is unchanged at four words.
+            assert_eq!(
+                attr(open_tag(pills.last().unwrap()), "href").as_deref(),
+                Some(format!("{ADMIN_BASE}/config").as_str()),
+                "{code}: Settings is the last tab: {tabs}"
+            );
+            // The current one is named, and only one is, on a page that is one of them.
+            let current = pills
+                .iter()
+                .filter(|a| attr(open_tag(a), "aria-current").as_deref() == Some("page"))
+                .collect::<Vec<_>>();
+            assert_eq!(
+                current.len(),
+                1,
+                "{code}: exactly one tab is aria-current on the dashboard: {tabs}"
+            );
         }
-        // The strip, not the whole bar: the panel hangs off the bar's account end, and its
-        // System settings row is a link to that page by design (§2), so a check on the bar
-        // would refuse the very row the other test in this section demands.
-        assert!(
-            !tabs.contains("/config"),
-            "no tab in the bar's strip links to the Settings page: {tabs}"
-        );
-        // The current one is named, and only one is.
-        let current = pills
-            .iter()
-            .filter(|a| attr(open_tag(a), "aria-current").as_deref() == Some("page"))
-            .collect::<Vec<_>>();
-        assert_eq!(
-            current.len(),
-            1,
-            "exactly one tab is aria-current on /users: {tabs}"
-        );
-        assert_eq!(
-            visible_text(current[0]),
-            t(Lang::En, K::Users),
-            "{}",
-            current[0]
-        );
+
+        // The two words, pinned in both languages. `Config` keeps its own words: it is the
+        // page's heading and `<title>`, and the tab has to fit the strip (§13.34 §4).
+        assert_eq!(t(Lang::En, K::ConfigTab), "Settings");
+        assert_eq!(t(Lang::It, K::ConfigTab), "Impostazioni");
+        assert_eq!(t(Lang::En, K::Config), "System settings");
+        assert_eq!(t(Lang::It, K::Config), "Impostazioni di sistema");
+        cleanup(&scratch);
     }
 
-    /// §13.28 §2: the panel's content and order, on both surfaces. The panel was opened by
-    /// clicking a name, so it starts with who that name is; the console's places come next,
-    /// because they are pages of the console, and with them the row to the caller's own page
-    /// (the user's decision of 2026-11-25, which answers §13.28's open question 2: the console
-    /// carries it, `/account/` does not); Preferences is a closed group inside it; Sign out
-    /// is a row with the word on it.
+    /// §13.34: the bar's **navigation menu** is the phone's tab strip, and it is *the tabs*. The
+    /// console's account menu no longer carries a copy of them, so on a phone the ☰ is the only
+    /// way to the tabs, and the rows it holds have to be the strip's own, in the strip's own
+    /// order, named in the reader's language.
+    ///
+    /// The markup half of §7. The width of the trigger box is a real measurement, and lives in
+    /// `e2e/tests/settings.js`, where a browser lays the bar out.
+    ///
+    /// Red until the coder adds it: there is no `nav.navm` on the page, and the ☰'s word is not
+    /// a key.
+    #[test]
+    fn the_navigation_menu_holds_the_tabs() {
+        let scratch = account_scratch_full("nav-menu");
+        let port = account_port(&scratch);
+        let hrefs = |els: &[String]| -> Vec<String> {
+            els.iter()
+                .filter_map(|a| attr(open_tag(a), "href"))
+                .collect()
+        };
+
+        for (lang, code) in [(Lang::En, "en"), (Lang::It, "it")] {
+            let g = console_get(port, "admin@x.com", &[("Cookie", &format!("lang={code}"))]);
+            assert_eq!(g.status, 200, "{code}: {}", account_readable(&g.body));
+            let bar = the_bar(&g.body, &format!("console {code}"));
+            let nav = the_nav_menu(&g.body, &format!("console {code}"));
+
+            // The menu is the bar's first child, ahead of the brand: §13.34 §0 measured that the
+            // bar's width is set by the trigger box, and a box that is not in the bar at all, or
+            // sits at the far end, is a bar measured on somebody else's arithmetic.
+            let nav_at = bar
+                .find("<nav class=\"navm\"")
+                .expect("the navigation menu is in the bar");
+            let brand_at = bar
+                .find("class=\"brand\"")
+                .expect("the brand is in the bar");
+            assert!(nav_at < brand_at, "{code}: the ☰ precedes the brand: {bar}");
+
+            // One `details`, of the menu family, in the same exclusive-open group as the account
+            // menu (§13.28 §5), and shut: the bar measures a closed ☰.
+            let boxes = elements(&nav, "<details", ">");
+            assert_eq!(
+                boxes.len(),
+                1,
+                "{code}: one details in the navigation menu: {nav}"
+            );
+            let tag = open_tag(&boxes[0]);
+            let classes = attr(tag, "class").unwrap_or_default();
+            for class in ["settings", "navmenu"] {
+                assert!(
+                    classes.split_whitespace().any(|word| word == class),
+                    "{code}: the details carries `{class}`: {tag}"
+                );
+            }
+            assert_eq!(
+                attr(tag, "name").as_deref(),
+                Some("bar-menu"),
+                "{code}: the two bar menus are one exclusive group: {tag}"
+            );
+            assert!(
+                attr(tag, "open").is_none(),
+                "{code}: the ☰ starts shut: {tag}"
+            );
+
+            // The trigger is the icon-only pill: glyph out of the accessibility tree, named by
+            // one hidden word, in the reader's language, and the same word in `title` for the
+            // pointer (§13.28 §2).
+            let summaries = controls_with_class(&nav, "summary", "ico");
+            assert_eq!(summaries.len(), 1, "{code}: one icon summary: {nav}");
+            let summary = open_tag(&summaries[0]);
+            assert!(
+                attr(summary, "class")
+                    .is_some_and(|c| c.split_whitespace().any(|word| word == "pill")),
+                "{code}: the trigger is a pill: {summary}"
+            );
+            let word = t(lang, K::NavMenu);
+            let hidden = controls_with_class(&summaries[0], "span", "vh");
+            assert_eq!(
+                hidden.len(),
+                1,
+                "{code}: the glyph is named by exactly one hidden span: {}",
+                summaries[0]
+            );
+            assert_eq!(
+                visible_text(&hidden[0]),
+                word,
+                "{code}: the ☰ says the word in the reader's language: {}",
+                summaries[0]
+            );
+            assert_eq!(
+                attr(summary, "title").as_deref(),
+                Some(word),
+                "{code}: {summary}"
+            );
+            let glyphs = elements(&summaries[0], "<svg", "</svg>");
+            assert_eq!(
+                glyphs.len(),
+                1,
+                "{code}: the trigger carries one glyph: {}",
+                summaries[0]
+            );
+            assert!(
+                glyphs[0].contains("aria-hidden=\"true\""),
+                "{code}: the glyph is decoration: {}",
+                glyphs[0]
+            );
+
+            // The panel is the tabs: the strip's links, in the strip's order, and nothing else.
+            let panel = the_nav_panel(&g.body, &format!("console {code}"));
+            let tabs = nested_block(&panel, "<div class=\"menu-tabs\">", "div");
+            let rows = controls_with_class(&tabs, "a", "pill");
+            assert_eq!(
+                rows.len(),
+                5,
+                "{code}: the navigation menu's panel is the five tabs: {panel}"
+            );
+            assert_eq!(
+                hrefs(&rows),
+                hrefs(&controls_with_class(
+                    &the_tab_nav(&g.body, "console"),
+                    "a",
+                    "pill"
+                )),
+                "{code}: the ☰'s rows are the strip's tabs, in order: {panel}"
+            );
+            assert!(
+                !panel.contains("<div class=\"menu-places\"") && !panel.contains("/auth/logout"),
+                "{code}: the ☰ is the tabs and nothing else: {panel}"
+            );
+        }
+
+        // A page the visitor cannot use has no tabs to reach, so it carries no ☰ at all: the
+        // console's `403` is not a console page, and `/account/` never was one (§13.34 §2). Read
+        // the header's markup: every page inlines `admin.css`, whose top-level and 941-block
+        // rules name `details.navmenu`, so a substring over the whole document reports the
+        // stylesheet, not the page.
+        let denied = console_get(port, "bob@x.com", &[]);
+        assert_eq!(
+            denied.status, 403,
+            "a non-administrator is refused the console"
+        );
+        let denied_bar = the_header_bar(&denied.body, "403");
+        assert!(
+            !denied_bar.contains("<nav class=\"navm\"") && !denied_bar.contains("navmenu"),
+            "the 403 carries no navigation menu: {denied_bar}"
+        );
+        assert!(
+            !denied_bar.contains("<div class=\"menu-tabs\""),
+            "the 403 carries no copy of the tabs: {denied_bar}"
+        );
+
+        // The word, in both languages: the ☰ is an icon, so its accessible name is this string
+        // and the string that ships wrong is the English one on an Italian page.
+        assert_eq!(t(Lang::En, K::NavMenu), "Navigation menu");
+        assert_eq!(t(Lang::It, K::NavMenu), "Menu di navigazione");
+    }
+
+    /// §13.34: the account menu is **one object** on both surfaces, and what differs between the
+    /// console and `/account/` is a block, never a size.
+    ///
+    /// Pinned as the same ordered list of classes, because what §13.34 §0 measured was three
+    /// panel widths from one shared rule: the console's panel was 230px and the account page's
+    /// was 286px, because `min-width` was measured against a trigger no panel on that page
+    /// uses. A width cannot be measured by a unit test, so the size is pinned twice over: by
+    /// the one rule that sets it (`the_bar_stays_one_row_at_every_width`) and by a browser
+    /// measuring the box (`e2e/tests/settings.js`).
+    ///
+    /// Red for the console: its account box carries no `name`, and its panel holds a copy of
+    /// the tabs and a row to the settings page.
+    #[test]
+    fn the_account_menu_is_one_object() {
+        let path = account_scratch_full("one-menu");
+        let port = account_port(&path);
+        let a_port = account_port(&path);
+        let console = console_get(port, "admin@x.com", &[]).body;
+        let account = account_call(
+            &format!("http://127.0.0.1:{a_port}{ACCOUNT_PATH}/"),
+            Some("bob@x.com"),
+        )
+        .body;
+
+        for (label, html) in [("console", &console), ("account", &account)] {
+            let nav = the_account_nav(html, label);
+            let boxes: Vec<(String, String)> = elements(&nav, "<details", ">")
+                .iter()
+                .map(|el| {
+                    let tag = open_tag(el);
+                    (
+                        attr(tag, "class").unwrap_or_default(),
+                        attr(tag, "name").unwrap_or_default(),
+                    )
+                })
+                .collect();
+            assert_eq!(
+                boxes.len(),
+                2,
+                "{label}: the account box and the nested Preferences box: {nav}"
+            );
+            assert_eq!(
+                boxes[0].0, "settings",
+                "{label}: the account box is `details.settings`: {nav}"
+            );
+            assert_eq!(
+                boxes[0].1, "bar-menu",
+                "{label}: the account box is in the bar's exclusive group, so opening it shuts \
+                 the ☰ on a phone where both live in the bar: {nav}"
+            );
+            assert_eq!(
+                boxes[1].0, "prefs",
+                "{label}: the nested box is `details.prefs`: {nav}"
+            );
+            assert_eq!(
+                boxes[1].1, "",
+                "{label}: the nested box is in no group, so it opens while its own panel stays \
+                 open (§13.28 §5): {nav}"
+            );
+
+            // The trigger and the panel are the same controls on both surfaces. A class list is
+            // matched one word at a time (`controls_with_class`), so the lookup uses the word that
+            // names *this* control: `pill` is on the Preferences trigger too, and a two-word
+            // value matches nothing. The trigger's whole class value is read off the tag.
+            for (tag, class) in [("summary", "who"), ("div", "menu")] {
+                let found = controls_with_class(&nav, tag, class);
+                assert_eq!(
+                    found.len(),
+                    1,
+                    "{label}: exactly one `{tag}.{class}` in the account menu: {nav}"
+                );
+                if tag == "summary" {
+                    assert_eq!(
+                        attr(open_tag(&found[0]), "class").as_deref(),
+                        Some("pill who"),
+                        "{label}: the trigger is a name pill, class for class: {}",
+                        found[0]
+                    );
+                }
+            }
+        }
+
+        // The panel's contents as the ordered list of classes it emits, once the two blocks that
+        // belong to one page each are out: the console's `div.menu-places` (which §13.34 empties
+        // of the tabs and of the settings row) and the account page's `div.menu-danger`.
+        // Everything left is one object; a row that arrives on one surface wearing a class the
+        // other does not have shows up here.
+        let shape = |html: &str, label: &str| -> Vec<String> {
+            let mut panel = the_panel(html, label);
+            for class in ["menu-places", "menu-danger"] {
+                let open = format!("<div class=\"{class}\"");
+                if panel.contains(&open) {
+                    let block = nested_block(&panel, &open, "div");
+                    let at = panel.find(&open).expect("the block is in the panel");
+                    panel.replace_range(at..at + block.len(), "");
+                }
+            }
+            class_values(&panel)
+        };
+        let console_shape = shape(&console, "console");
+        let account_shape = shape(&account, "account");
+        assert!(
+            console_shape.iter().any(|c| c == "who-full")
+                && account_shape.iter().any(|c| c == "who-full"),
+            "both panels open with who the caller is: {console_shape:?} / {account_shape:?}"
+        );
+        assert_eq!(
+            console_shape, account_shape,
+            "the account menu is one object, in the same order, on both surfaces"
+        );
+
+        // And the blocks that do differ are the one block of their surface. The console offers
+        // the caller's own page and nothing else: no copy of the tabs (§13.34 moved them to the
+        // ☰), and no settings row (the settings page is a tab now, so a second row to it in the
+        // panel would be two answers to "where is Settings").
+        let panel = the_panel(&console, "console");
+        let rows: Vec<String> = controls_with_class(&panel, "a", "pill")
+            .iter()
+            .filter_map(|a| attr(open_tag(a), "href"))
+            .collect();
+        assert!(
+            !panel.contains("<div class=\"menu-tabs\""),
+            "§13.34: the console's account menu carries no copy of the tabs: {panel}"
+        );
+        assert!(
+            !rows.iter().any(|href| href.ends_with("/config")),
+            "§13.34: the settings page is a tab, so the account menu names it nowhere: {rows:?}"
+        );
+        assert_eq!(
+            rows.iter()
+                .filter(|href| href.starts_with(ACCOUNT_PATH))
+                .count(),
+            1,
+            "the account menu's one place is the caller's own page: {rows:?}"
+        );
+        let _ = std::fs::remove_file(&path);
+    }
+
+    /// §13.28 §2 as §13.34 narrows it: the panel's content and order, on both surfaces. The
+    /// panel was opened by clicking a name, so it starts with who that name is; on the console
+    /// comes the one place the menu has left, the caller's own page, then a rule; Preferences is
+    /// a closed group inside it; a rule and Sign out, the row that leaves the estate. The tab
+    /// rows and the System settings row are gone: §13.34 moved the tabs into the ☰ and made the
+    /// settings page a tab, so a row to it here would be two answers to one question.
     #[test]
     fn the_panel_is_in_order() {
         let path = account_scratch_full("panel-order");
         let port = account_port(&path);
         let base = format!("http://127.0.0.1:{port}{ACCOUNT_PATH}/");
 
-        // --- the console: who, the tab rows, System settings, Preferences, Sign out.
+        // --- the console: who, the caller's own page, Preferences, Sign out.
         let g = console_get(port, "admin@x.com admin@alt.com", &[]);
         assert_eq!(g.status, 200, "{}", account_readable(&g.body));
         let panel = the_panel(&g.body, "console");
@@ -32410,12 +32842,15 @@ mod tests {
             "the uuid is not in the panel: {panel}"
         );
 
-        let tabs_at = panel
-            .find("<div class=\"menu-tabs\">")
-            .expect("the console's panel carries the tab rows");
-        let settings_at = panel
-            .find(t(Lang::En, K::Config))
-            .expect("the console's panel carries the System settings row");
+        // §13.34 §3: the console's panel is who, the caller's own page, Preferences, Sign out.
+        // The tab rows are gone from it (they ride in the ☰ now), and so is the System settings
+        // row (the settings page is a tab), which leaves the places block with one row in it.
+        let who_at = panel
+            .find("<p class=\"who-full\"")
+            .expect("the panel opens with the caller");
+        let places_at = panel
+            .find("<div class=\"menu-places\">")
+            .expect("the console's panel carries its places block");
         let prefs_at = panel
             .find("<details class=\"prefs\">")
             .expect("the console's panel carries the nested Preferences box");
@@ -32427,8 +32862,8 @@ mod tests {
             .find(&sign_out)
             .expect("the Sign out row is in the panel");
         assert!(
-            tabs_at < settings_at && settings_at < prefs_at && prefs_at < sign_out_at,
-            "the panel's order is the tabs, System settings, Preferences, Sign out: {panel}"
+            who_at < places_at && places_at < prefs_at && prefs_at < sign_out_at,
+            "the panel's order is the caller, the places, Preferences, Sign out: {panel}"
         );
 
         // The blocks are divided by a rule (§2), and Sign out sits behind the last of them: it is
@@ -32449,32 +32884,24 @@ mod tests {
             "Sign out sits behind the last rule: {panel}"
         );
 
-        // The tab rows are the bar's tabs: same hrefs, same order.
-        let menu_tabs = nested_block(&panel, "<div class=\"menu-tabs\">", "div");
-        let hrefs = |nav: &str| -> Vec<String> {
-            controls_with_class(nav, "a", "pill")
+        let hrefs = |markup: &str| -> Vec<String> {
+            controls_with_class(markup, "a", "pill")
                 .iter()
                 .filter_map(|a| attr(open_tag(a), "href"))
                 .collect()
         };
-        assert_eq!(
-            hrefs(&menu_tabs),
-            hrefs(&the_tab_nav(&g.body, "console")),
-            "the panel's tab rows are the bar's tabs"
-        );
 
-        // The Settings row is one link to the Settings page, reading the page's own word.
-        let settings = anchors_to(&panel, &format!("{ADMIN_BASE}/config"));
-        assert_eq!(settings.len(), 1, "one System settings row: {panel}");
+        // The tab rows and the settings row are out of this panel. The tabs live in the ☰, and
+        // the settings page is a tab, so a row to it here would be two answers to "where is
+        // Settings", one of them a row a phone cannot reach.
         assert!(
-            panel[tabs_at..].contains(&settings[0]),
-            "the row sits with the tabs, below them: {panel}"
+            !panel.contains("<div class=\"menu-tabs\""),
+            "§13.34: no copy of the tab rows in the account menu: {panel}"
         );
-        assert_eq!(
-            visible_text(&settings[0]),
-            t(Lang::En, K::Config),
-            "the row reads the page's word: {}",
-            settings[0]
+        assert!(
+            !hrefs(&panel).iter().any(|href| href.ends_with("/config")),
+            "§13.34: the settings page is named nowhere in the account menu: {:?}",
+            hrefs(&panel)
         );
 
         // Preferences is a closed group holding the one form.
@@ -32560,26 +32987,28 @@ mod tests {
                 rows[0]
             );
             // Among the places, before Preferences: inside `div.menu-places` (§2 names that
-            // container), below the System settings row, ahead of the nested box. The row is
-            // located by its href, not by the word, because the Settings tab carries the same
-            // word as the Settings row and a word search answers for the tab.
+            // container), ahead of the nested box. The row is located by its href, not by the
+            // word, because the Settings tab now carries the word the settings page answers to.
             let places = nested_block(&panel, "<div class=\"menu-places\">", "div");
             assert!(
                 places.contains(&rows[0]),
                 "{code}: the row is one of the console's places: {panel}"
             );
-            let settings = anchors_to(&panel, &format!("{ADMIN_BASE}/config"))
-                .into_iter()
-                .next()
-                .expect("the panel carries the System settings row");
-            let settings_at = panel.find(&settings).expect("the row is in its panel");
+            assert_eq!(
+                hrefs(&places),
+                vec![account_href.clone()],
+                "{code}: §13.34 leaves one row in the places block, the caller's own page: {places}"
+            );
             let prefs_at = panel
                 .find("<details class=\"prefs\">")
                 .expect("the panel carries the nested Preferences box");
-            let row_at = panel.find(&rows[0]).expect("the row is in its panel");
+            let places_end = panel
+                .find(&places)
+                .expect("the places block is in its panel")
+                + places.len();
             assert!(
-                settings_at < row_at && row_at < prefs_at,
-                "{code}: the row sits below the System settings row, before Preferences: {panel}"
+                places_end < prefs_at,
+                "{code}: the places block closes before the nested Preferences box: {panel}"
             );
         }
 
@@ -35368,100 +35797,103 @@ mod tests {
         let _ = std::fs::remove_file(&path);
     }
 
-    /// §13.28 §4 and §2: `aria-current` names the page in both copies of the tabs, and on a
-    /// Settings page no bar tab is current while the panel's Settings row is. The page's own
-    /// heading carries the new name, in both languages.
+    /// §13.28 §4 as §13.34 narrows it: `aria-current` names the current page in the strip, and
+    /// in the ☰'s copy of the strip, and **nowhere else**. The page's own heading carries the
+    /// page's own words, in both languages.
+    ///
+    /// Red for the second half: today the account menu carries a copy of the mark (on its tab
+    /// rows, and on its System settings row), and the settings page's tab does not exist.
     #[test]
     fn aria_current_names_the_page() {
         let path = account_scratch_full("aria-current");
         let port = account_port(&path);
+        let marked = |markup: &str| -> Vec<String> {
+            controls_with_class(markup, "a", "pill")
+                .iter()
+                .filter(|a| attr(open_tag(a), "aria-current").as_deref() == Some("page"))
+                .map(|a| visible_text(a).to_string())
+                .collect()
+        };
 
-        for (lang, cookie, current) in [
-            (Lang::En, "lang=en", t(Lang::En, K::Users)),
-            (Lang::It, "lang=it", t(Lang::It, K::Users)),
+        for (cookie, current) in [
+            ("lang=en", t(Lang::En, K::Users)),
+            ("lang=it", t(Lang::It, K::Users)),
         ] {
             let g = console_at(port, "admin@x.com", "/users", cookie);
             assert_eq!(g.status, 200, "{cookie}: {}", account_readable(&g.body));
-            let tabs = the_tab_nav(&g.body, cookie);
-            let marked = controls_with_class(&tabs, "a", "pill")
-                .into_iter()
-                .filter(|a| attr(open_tag(a), "aria-current").as_deref() == Some("page"))
-                .collect::<Vec<_>>();
-            assert_eq!(marked.len(), 1, "{cookie}: one current tab: {tabs}");
-            assert_eq!(visible_text(&marked[0]), current, "{cookie}: {}", marked[0]);
-
-            let panel = the_panel(&g.body, cookie);
-            let menu_tabs = nested_block(&panel, "<div class=\"menu-tabs\">", "div");
-            let marked = controls_with_class(&menu_tabs, "a", "pill")
-                .into_iter()
-                .filter(|a| attr(open_tag(a), "aria-current").as_deref() == Some("page"))
-                .collect::<Vec<_>>();
             assert_eq!(
-                marked.len(),
-                1,
-                "{cookie}: one current tab in the panel: {menu_tabs}"
+                marked(&the_tab_nav(&g.body, cookie)),
+                vec![current.to_string()],
+                "{cookie}: exactly one tab is current: {}",
+                the_tab_nav(&g.body, cookie)
             );
-            assert_eq!(visible_text(&marked[0]), current, "{cookie}: {}", marked[0]);
-            let _ = lang;
+            assert_eq!(
+                marked(&the_nav_panel(&g.body, cookie)),
+                vec![current.to_string()],
+                "{cookie}: the ☰ marks the same page the strip does: {}",
+                the_nav_panel(&g.body, cookie)
+            );
+            assert!(
+                marked(&the_panel(&g.body, cookie)).is_empty(),
+                "{cookie}: the account menu marks no page: {}",
+                the_panel(&g.body, cookie)
+            );
         }
 
-        // A Settings page: no bar tab is current (the Settings tab is gone from the bar), and
-        // the panel's row is marked and wears `.on`.
-        for (label, cookie) in [("English", "lang=en"), ("Italian", "lang=it")] {
+        // The settings page: the tab is current in the strip and in the ☰, in the reader's
+        // words, and it wears `.on` beside the attribute.
+        for (lang, cookie) in [(Lang::En, "lang=en"), (Lang::It, "lang=it")] {
             let g = console_at(port, "admin@x.com", "/config", cookie);
-            assert_eq!(g.status, 200, "{label}: {}", account_readable(&g.body));
-            let tabs = the_tab_nav(&g.body, label);
-            assert!(
-                !tabs.contains("aria-current"),
-                "{label}: no bar tab is current on a Settings page: {tabs}"
-            );
-
-            let panel = the_panel(&g.body, label);
-            let menu_tabs = nested_block(&panel, "<div class=\"menu-tabs\">", "div");
-            assert!(
-                !menu_tabs.contains("aria-current"),
-                "{label}: no tab row is current either: {menu_tabs}"
-            );
-            let row = controls_with_class(&panel, "a", "pill")
-                .into_iter()
-                .find(|a| {
-                    attr(open_tag(a), "href")
-                        .is_some_and(|h| h.ends_with(&format!("{ADMIN_BASE}/config")))
-                })
-                .unwrap_or_else(|| panic!("{label}: the Settings row: {panel}"));
+            assert_eq!(g.status, 200, "{cookie}: {}", account_readable(&g.body));
+            let tab_word = t(lang, K::ConfigTab);
+            let strip = the_tab_nav(&g.body, cookie);
             assert_eq!(
-                attr(open_tag(&row), "aria-current").as_deref(),
-                Some("page"),
-                "{label}: the row names the page: {row}"
+                marked(&strip),
+                vec![tab_word.to_string()],
+                "{cookie}: Settings is the current tab: {strip}"
             );
+            assert_eq!(
+                marked(&the_nav_panel(&g.body, cookie)),
+                vec![tab_word.to_string()],
+                "{cookie}: the ☰ marks Settings current: {}",
+                the_nav_panel(&g.body, cookie)
+            );
+            assert!(
+                marked(&the_panel(&g.body, cookie)).is_empty(),
+                "{cookie}: the account menu names no current page: {}",
+                the_panel(&g.body, cookie)
+            );
+            let row = controls_with_class(&strip, "a", "pill")
+                .into_iter()
+                .find(|a| attr(open_tag(a), "aria-current").as_deref() == Some("page"))
+                .expect("the current tab");
             assert!(
                 attr(open_tag(&row), "class")
-                    .is_some_and(|c| c.split_whitespace().any(|w| w == "on")),
-                "{label}: the current row wears .on: {row}"
+                    .is_some_and(|c| c.split_whitespace().any(|word| word == "on")),
+                "{cookie}: the current tab wears .on: {row}"
             );
 
-            // One name per place: the row, the page's `h1` and its `<title>` agree.
-            let word = t(
-                if label == "Italian" {
-                    Lang::It
-                } else {
-                    Lang::En
-                },
-                K::Config,
+            // One name per place, and the tab is not it. The heading and the `<title>` read the
+            // page's words, which are deliberately **not** the tab's: the tab has to fit the
+            // strip, and the heading can say what the page is (§13.34 §4).
+            let word = t(lang, K::Config);
+            assert_ne!(
+                word, tab_word,
+                "{cookie}: the page's words and the tab's are two words, by design"
             );
             let h1 = elements(&g.body, "<h1", "</h1>");
-            assert_eq!(h1.len(), 1, "{label}: {}", account_readable(&g.body));
-            assert_eq!(visible_text(&h1[0]), word, "{label}: {}", h1[0]);
+            assert_eq!(h1.len(), 1, "{cookie}: {}", account_readable(&g.body));
+            assert_eq!(visible_text(&h1[0]), word, "{cookie}: {}", h1[0]);
             let title = elements(&g.body, "<title>", "</title>");
-            assert_eq!(title.len(), 1, "{label}");
+            assert_eq!(title.len(), 1, "{cookie}");
             assert!(
                 visible_text(&title[0]).contains(word),
-                "{label}: the title reads the same word: {}",
+                "{cookie}: the title reads the same word: {}",
                 title[0]
             );
         }
 
-        // The words themselves, pinned in both languages (§13.28 §8).
+        // The words themselves, pinned in both languages (§13.28 §8, §13.34 §4).
         assert_eq!(t(Lang::En, K::Config), "System settings");
         assert_eq!(t(Lang::It, K::Config), "Impostazioni di sistema");
         assert_eq!(t(Lang::En, K::AccountMenu), "account menu");
@@ -35632,14 +36064,35 @@ mod tests {
         cleanup(&path);
     }
 
-    /// §13.28 §4: the bar is **one row by construction**. `flex-wrap:nowrap` means no operator's
-    /// font, brand or person's name can make a second line; the tabs leave the bar at 800px,
-    /// where the measured four-tab worst case (773px) stops fitting, and ride in the panel.
+    /// §13.28 §4 as §13.34 moves it: the bar is **one row by construction**, and the breakpoint
+    /// where the tabs leave it is the measured one. `flex-wrap:nowrap` means no operator's font,
+    /// brand or person's name can make a second line; at 941px the five-tab worst case (the
+    /// Italian words, with the longest name the estate measured) stops fitting, and the tabs
+    /// move into the ☰.
     ///
-    /// Red until the coder writes the CSS: `admin.css` has no 800px block, and `.bar` wraps.
+    /// The panel is pinned here too, because §13.34 §0 measured what a floor did with no width:
+    /// one rule produced a 230px panel on the console and a 286px panel on the account page,
+    /// because a panel's floor was its trigger's width, and the account page's trigger carries a
+    /// longer word than the console's name pill. One declared width, capped to the viewport, is
+    /// the fix, so this asserts the **absence** of `min-width` as much as the presence of `width`.
+    ///
+    /// Red until the coder writes the CSS: `admin.css` breaks at 800px, shows the ☰ nowhere, and
+    /// floors the panel at a measured width.
     #[test]
     fn the_bar_stays_one_row_at_every_width() {
         let scoped = css_scoped(CSS);
+        // A rule's last compound, per comma-part: the declarations belong to the box the last
+        // name names, and this stylesheet shares declarations across comma-lists.
+        let compounds = |sel: &str| -> Vec<String> {
+            sel.split(',')
+                .map(|p| {
+                    p.rsplit(['>', '+', '~', ' '])
+                        .next()
+                        .unwrap_or(p)
+                        .to_string()
+                })
+                .collect()
+        };
 
         let bar = top_rule(&scoped, ".bar");
         assert_eq!(
@@ -35648,40 +36101,99 @@ mod tests {
             "the bar cannot make a second row: {bar}"
         );
 
-        // Above 800px the panel's tab rows are not displayed; at and below, the bar's tabs are.
-        let tabs = top_rule(&scoped, ".menu-tabs");
-        assert_eq!(
-            css_decl(&tabs, "display").as_deref(),
-            Some("none"),
-            "the panel's tab rows are hidden above the breakpoint: {tabs}"
-        );
-        let at = "@media(max-width:800px)";
-        let hidden = rules_setting(&scoped, at, "display", "none");
+        // The breakpoint is 941px, and the one it replaced is **gone**: a stale 800px block
+        // hides the strip at a width where the ☰ is still hidden, which is a bar with no
+        // navigation and no tabs.
+        let at = "@media(max-width:941px)";
+        let media: Vec<&String> = scoped
+            .iter()
+            .map(|(a, _, _)| a)
+            .filter(|a| a.starts_with("@media"))
+            .collect();
         assert!(
-            hidden.iter().any(|(sel, _)| sel.split(',').any(|p| {
-                let last = p.rsplit(['>', '+', '~', ' ']).next().unwrap_or(p);
-                last.starts_with("nav") && !last.contains("nav.acct")
-            })),
-            "{at}: the bar's tab nav is hidden, so the panel's rows are the navigation: \
-             {hidden:?}"
+            scoped.iter().any(|(a, _, _)| a == at),
+            "{at}: admin.css breaks where the five tabs stop fitting: {media:?}"
         );
-        let tabs = scoped_rule(&scoped, at, ".menu-tabs");
-        assert_eq!(
-            css_decl(&tabs, "display").as_deref(),
-            Some("flex"),
-            "and the panel's tab rows appear: {tabs}"
+        assert!(
+            !media
+                .iter()
+                .any(|a| a.as_str() == "@media(max-width:800px)"),
+            "the 800px block moved to 941px, it did not join it: {media:?}"
         );
 
-        // The sideways-scrolling tab strip is gone: a strip that scrolls is the clipped tab
-        // §13.17 named, and one row with a scroll is two dimensions.
+        // In it, the strip is out and the ☰ is in. Both by declaration, so the pair cannot be
+        // half-written: a strip hidden with nothing to replace it is a bar with no navigation.
+        let hidden = rules_setting(&scoped, at, "display", "none");
+        assert!(
+            hidden.iter().any(|(sel, _)| {
+                compounds(sel)
+                    .iter()
+                    .any(|c| c.starts_with("nav") && !c.contains("nav.acct") && !c.contains("navm"))
+            }),
+            "{at}: the bar's tab strip is hidden: {hidden:?}"
+        );
+        let shown = rules_setting(&scoped, at, "display", "flex");
+        assert!(
+            shown
+                .iter()
+                .any(|(sel, _)| compounds(sel).iter().any(|c| c.contains("navm"))),
+            "{at}: the ☰ appears in the bar: {shown:?}"
+        );
+        let navm = rule_named(&scoped, "", "nav.navm");
+        assert_eq!(
+            css_decl(&navm, "display").as_deref(),
+            Some("none"),
+            "outside the breakpoint the ☰ is not in the bar at all, so it costs the bar no room: \
+             {navm}"
+        );
+
+        // The panel is **one width**, declared, with a viewport cap for the narrowest phone, and
+        // no floor measured against a trigger.
+        let menu = top_rule(&scoped, ".menu");
+        assert_eq!(
+            css_decl(&menu, "width").as_deref(),
+            Some("20rem"),
+            "the panel is a declared width, so it is one box on every page: {menu}"
+        );
+        assert_eq!(
+            css_decl(&menu, "max-width").as_deref(),
+            Some("calc(100vw-32px)"),
+            "and it cannot outgrow a phone: {menu}"
+        );
+        assert!(
+            css_decl(&menu, "min-width").is_none(),
+            "no floor measured against a trigger: that is the 230px/286px drift §13.34 §0 \
+             measured: {menu}"
+        );
+
+        // The ☰ opens from the bar's left edge, the account menu from its right. One shared
+        // `right:0` would push the ☰'s panel off the screen on a phone.
+        let navm_menu = rule_named(&scoped, "", "details.navmenu .menu");
+        assert_eq!(
+            css_decl(&navm_menu, "left").as_deref(),
+            Some("0"),
+            "the ☰'s panel is anchored under the ☰: {navm_menu}"
+        );
+        assert_eq!(
+            css_decl(&navm_menu, "right").as_deref(),
+            Some("auto"),
+            "and not at the right edge as well: {navm_menu}"
+        );
+
+        // The ☰'s rows are always the column, so `div.menu-tabs` carries no display rule that
+        // hides it anywhere: it lives in one panel now, and a `display:none` there is a phone
+        // whose ☰ opens on an empty box.
         for (a, sel, body) in &scoped {
-            if sel
-                .split(',')
-                .any(|p| p.ends_with("nav:not(.acct)") || p == "nav.tabs")
-            {
-                assert!(
-                    css_decl(body, "overflow-x").is_none(),
-                    "{sel} in {a} scrolls sideways: {body}"
+            if sel.split(',').any(|part| part.ends_with(".menu-tabs")) {
+                assert_eq!(
+                    css_decl(body, "display").as_deref(),
+                    Some("flex"),
+                    ".menu-tabs is the column in every rule that names it: {sel} in {a}: {body}"
+                );
+                assert_eq!(
+                    css_decl(body, "flex-direction").as_deref(),
+                    Some("column"),
+                    "{sel} in {a}: {body}"
                 );
             }
         }

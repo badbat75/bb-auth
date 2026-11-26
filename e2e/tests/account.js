@@ -24,7 +24,8 @@
 
 const {
   doc, bytes, sha256, settings, writeSettings, api, submit, mainText,
-  openPreferences, barStaysOneRow, attr, text, count, prop,
+  openPreferences, barStaysOneRow, openBarMenu, menuIsOneSize, ACCT_MENU,
+  attr, text, count, prop,
 } = require('../lib/harness');
 const { PROFILE_HEADERS, profileSettingsBytes } = require('../lib/cognito');
 
@@ -125,8 +126,8 @@ const readable = (html) => words(html
  *  clicks it. §13.28 §2 moved the list boxes into a box nested in the panel, closed by default,
  *  so the walk opens both before it touches one. */
 async function menuClosesOutside(t, page, who, apply) {
-  const isOpen = () => page.$eval('details.settings', (d) => d.open);
-  const open = () => page.click('details.settings > summary');
+  const isOpen = () => page.$eval(ACCT_MENU, (d) => d.open);
+  const open = () => page.click(`${ACCT_MENU} > summary`);
   await open();
   t.eq(`${who}: the trigger opens the menu`, await isOpen(), true);
   await page.mouse.click(4, 896);
@@ -165,9 +166,9 @@ async function menuClosesOutside(t, page, who, apply) {
  */
 async function panelWalk(t, page, url, label) {
   await page.goto(url);
-  await page.click('details.settings > summary');
-  const panel = 'details.settings .menu';
-  const trigSel = 'details.settings > summary';
+  await openBarMenu(page, ACCT_MENU);
+  const panel = `${ACCT_MENU} .menu`;
+  const trigSel = `${ACCT_MENU} > summary`;
   const trig = await text(page, trigSel);
 
   t.check(`${label}: the trigger says who opened the panel`, trig.includes(WHO), trig);
@@ -183,6 +184,13 @@ async function panelWalk(t, page, url, label) {
 
   const who = await text(page, `${panel} p.who-full`);
   t.check(`${label}: the panel heads with the addresses`, who.includes(WHO), who);
+  // §13.34 §2: the ☰ is the console's navigation, and this page is not the console. It carries
+  // no navigation menu and no strip, so a person who comes here for their own account is not
+  // offered a way into the administrator surface's pages, and the bar has room for the rows
+  // that are theirs.
+  t.eq(`${label}: the bar carries no navigation menu`,
+    await page.locator('header .bar > nav.navm').count(), 0);
+  t.eq(`${label}: and no tab strip`, await count(page, 'header .bar > nav.tabs a'), 0);
   t.eq(`${label}: no console tabs here`, await count(page, `${panel} .menu-tabs`), 0);
   t.eq(`${label}: no System settings row here`, await count(page, `${panel} a[href$="/config"]`), 0);
   // The console's panel carries a row to this page (the user's decision of 2026-11-25,
@@ -670,10 +678,22 @@ async function run(ctx, t) {
   // The same absence in Italian: the row the console's panel carries is worded in the reader's
   // language, so the page that must not carry it is checked in that language too.
   await page.goto(`${url}?lang=it`);
-  await page.click('details.settings > summary');
+  await openBarMenu(page, ACCT_MENU);
   t.eq('account it: no row to the page it is standing on',
-    await count(page, 'details.settings .menu a[href="/account/"], '
-      + 'details.settings .menu a:has-text("Vai al tuo account")'), 0);
+    await count(page, `${ACCT_MENU} .menu a[href="/account/"], `
+      + `${ACCT_MENU} .menu a:has-text("Vai al tuo account")`), 0);
+
+  // The same box on both surfaces (§13.34 §3), measured in a browser, from this area with an
+  // administrator's headers: the drift this section exists for was a console panel of 230px
+  // beside an account panel of 286px, and the person who sees it is the one standing on this
+  // page. The caller is an administrator on the console half so that half is the console, not
+  // the refusal.
+  const oneSize = await ctx.browser.newContext({
+    viewport: { width: 1280, height: 900 },
+    extraHTTPHeaders: { 'X-Auth-Email': 'admin@example.com' },
+  });
+  await menuIsOneSize(t, oneSize, ctx.base, 'account menu');
+  await oneSize.close();
 
   // The trigger names the person by the name the deployment forwards, when it forwards one.
   // Without the claim configured there is no header to read, which is the fixture's state and
@@ -682,11 +702,11 @@ async function run(ctx, t) {
   writeSettings(ctx, JSON.parse(profileSettingsBytes()));
   await page.setExtraHTTPHeaders({ 'X-Auth-Email': WHO, ...PROFILE_HEADERS });
   await page.goto(url);
-  const trig = await text(page, 'details.settings > summary');
+  const trig = await text(page, `${ACCT_MENU} > summary`);
   t.check('the trigger reads the forwarded name, not the address',
     trig.trim().startsWith('Ada') && !trig.includes(WHO), trig);
-  await page.click('details.settings > summary');
-  const full = await text(page, 'details.settings .menu p.who-full');
+  await openBarMenu(page, ACCT_MENU);
+  const full = await text(page, `${ACCT_MENU} .menu p.who-full`);
   t.check('and the panel prints the name and the address together',
     full.includes('Ada') && full.includes(WHO), full);
   await page.setExtraHTTPHeaders({ 'X-Auth-Email': WHO });

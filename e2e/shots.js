@@ -24,7 +24,8 @@ const fs = require('fs');
 const path = require('path');
 
 const { E2E_DIR, FIXTURE, SETTINGS_FIXTURE, boot } = require('./lib/server');
-const { submit, formBytes, resubmit, writeDoc, doc, setDuration, openPreferences } = require('./lib/harness');
+const { submit, formBytes, resubmit, writeDoc, doc, setDuration, openPreferences,
+  openBarMenu, ACCT_MENU, NAV_MENU } = require('./lib/harness');
 const { profileSettingsBytes, PROFILE_HEADERS } = require('./lib/cognito');
 const { DELETE } = require('./lib/intake');
 
@@ -53,7 +54,7 @@ const VIEWS = [
       'conflict-mint', 'forbidden', 'settings-menu', 'config-landing-refused',
       // The account panel is the copy of this slice: its rows are translated words, and the
       // Italian spellings are the long ones that stress the bar's one row (§13.28 §4).
-      'settings-menu-prefs', 'config-menu', 'forbidden-menu', 'account-menu-prefs',
+      'settings-menu-prefs', 'config-menu', 'nav-menu-it', 'forbidden-menu', 'account-menu-prefs',
       // The self-service page is prose a person reads in their own language, so the copy of
       // the table's headings and the refusal is worth reading in Italian too.
       'account', 'account-stranger', 'account-new', 'account-new-scopes', 'account-error',
@@ -98,7 +99,10 @@ const VIEWS = [
     colorScheme: 'light',
     viewport: { width: 1280, height: 900 },
     javaScriptEnabled: false,
-    only: ['settings-menu'],
+    // The ☰ is a `details`, so with no script it opens exactly as it does with one, and the
+    // panel is the same box: the two shapes that a reviewer cannot tell from the scripted
+    // view without looking.
+    only: ['settings-menu', 'nav-menu'],
   },
 ];
 
@@ -261,13 +265,31 @@ const SCENES = [
     await submit(page);
   }],
 
-  // The Settings menu, open. A scene and not a state: what is inside it is prose (so the
-  // `it` view has to see it) and a 230px panel hanging off the right edge (so the phone
-  // does). It is the one page shape a `goto` cannot reach, because `details` remembers
-  // nothing across a navigation.
+  // The account menu, open. A scene and not a state: what is inside it is prose (so the
+  // `it` view has to see it) and a 20rem panel hanging off the right edge, declared rather
+  // than shrink-to-fit, so the phone and the other surface see the same box (§13.34 §3). It
+  // is the one page shape a `goto` cannot reach, because `details` remembers nothing across a
+  // navigation.
   ['settings-menu', async (page, ctx) => {
     await page.goto(ctx.base + '/users');
-    await page.click('details.settings > summary');
+    await page.click(`${ACCT_MENU} > summary`);
+  }],
+  // The ☰ open: the bar's navigation as a phone reads it (§13.34 §1 to §2). A scene, for the
+  // same reason as the panel above. It sets the phone width itself, because that is the only
+  // width where the ☰ is in the bar at all, and it does not restore the view's own viewport:
+  // the screenshot is taken **after** the scene returns, so a restore would photograph the ☰
+  // hidden. The runner sets `view.viewport` before every scene, which is where the restore is.
+  ['nav-menu', async (page, ctx) => {
+    await page.setViewportSize({ width: 390, height: 844 });
+    await page.goto(ctx.base + '/users');
+    await openBarMenu(page, NAV_MENU);
+  }],
+  // The same panel in Italian: the tab words are the longer ones, and the ☰ is where a phone
+  // reader meets them (§13.34 §0, §7: "the five in Italian, at a phone width").
+  ['nav-menu-it', async (page, ctx) => {
+    await page.setViewportSize({ width: 390, height: 844 });
+    await page.goto(ctx.base + '/users?lang=it');
+    await openBarMenu(page, NAV_MENU);
   }],
   // The same panel with the nested Preferences box open (§13.28 §2): the box is closed by
   // default, so the two list boxes and the console's Apply are a state of their own.
@@ -275,11 +297,14 @@ const SCENES = [
     await page.goto(ctx.base + '/users');
     await openPreferences(page);
   }],
-  // The panel on the Settings page, where its System settings row is the current page. The
-  // tab is gone from the bar, so this row is the only thing that says where the person is.
+  // The ☰ on the Settings page, at the width the navigation moved into it: the panel marks
+  // the page the person is standing on, and this is the scene that says the fifth tab is
+  // worded for the bar and marked where it landed (§13.34 §1). The account panel beside it is
+  // `settings-menu`, one page along, which is the pair whose widths must agree.
   ['config-menu', async (page, ctx) => {
+    await page.setViewportSize({ width: 390, height: 844 });
     await page.goto(ctx.base + '/config');
-    await page.click('details.settings > summary');
+    await openBarMenu(page, NAV_MENU);
   }],
   // The bar with the widest brand an operator can type and a logo present (§13.28 §4, §6):
   // the one page shape that shows what the bar cuts when it runs out of room.
@@ -328,7 +353,7 @@ const SCENES = [
   ['account-menu', async (page, ctx) => {
     await asPerson(page);
     await page.goto(acct(ctx, '/'));
-    await page.click('details.settings > summary');
+    await page.click(`${ACCT_MENU} > summary`);
     await asAdmin(page);
   }],
   // The same panel with its Preferences box open. Since plan step 13 this surface is the
@@ -389,7 +414,7 @@ const SCENES = [
   ['account-menu-delete', async (page, ctx) => {
     await asCaller(page);
     await page.goto(acct(ctx, '/'));
-    await page.click('details.settings > summary');
+    await page.click(`${ACCT_MENU} > summary`);
     await asAdmin(page);
   }],
   ['account-delete', async (page, ctx) => {
@@ -571,7 +596,7 @@ const SCENES = [
     await page.setExtraHTTPHeaders({ 'X-Auth-Email': 'friend@example.com' });
     try {
       await page.goto(ctx.base + '/');
-      await page.click('details.settings > summary');
+      await page.click(`${ACCT_MENU} > summary`);
     } finally {
       await page.setExtraHTTPHeaders({ 'X-Auth-Email': 'admin@example.com' });
     }
@@ -617,7 +642,7 @@ const STATES = [
   }],
   ['hover-settings', async (page, ctx) => {
     await page.goto(ctx.base + '/users');
-    await page.hover('details.settings > summary');
+    await page.hover(`${ACCT_MENU} > summary`);
   }],
   // The two surfaces where the text colour flips between the arms, which is what makes them
   // worth a frame each: a filled accent surface carries --on-accent, white on light and dark
@@ -625,9 +650,10 @@ const STATES = [
   // hover fill is photographed anywhere.
   ['hover-tab', async (page, ctx) => {
     await page.goto(ctx.base + '/users');
-    // The bar's strip only: the panel's rows are `nav a` too, and they are in the DOM while
-    // the panel is closed, so an unscoped selector is a strict-mode violation.
-    await page.hover('header .bar > nav:not(.acct) a:not(.on)');
+    // The bar's strip by name: §13.34 §2 gives the bar a second `nav` (the ☰, `nav.navm`), and
+    // strict mode counts matches whether the element is displayed or not, so `nav:not(.acct)`
+    // resolves to two navigations at every width.
+    await page.hover('header .bar > nav.tabs a:not(.on)');
   }],
   ['hover-submit', async (page, ctx) => {
     await page.goto(ctx.base + '/users/%2Badd');
@@ -718,6 +744,10 @@ async function main() {
         // for a human, not an assertion, so it degrades instead of aborting. The exit
         // code still says something went wrong.
         try {
+          // The viewport too is per scene: a scene that photographs a phone-only control has
+          // to set the width itself, and the shot is taken after it returns, so a restore at
+          // the end of a scene would photograph the control hidden.
+          await page.setViewportSize(view.viewport);
           await steps(page, ctx);
           await page.screenshot({ path: path.join(dir, `${name}.png`), fullPage: true });
           console.log(`  ${view.tag.padEnd(6)} ${name}`);

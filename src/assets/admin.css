@@ -87,6 +87,17 @@ nav:not(.acct){flex-wrap:nowrap;min-width:max-content}
    which is how the strip's tabs got squeezed before. `margin-left:auto` pushes it to the far
    edge. */
 nav.acct{flex:0 1 auto;min-width:0;align-items:center;gap:6px;margin-left:auto}
+/* The bar's navigation menu (§13.34 §2), and outside its breakpoint it is not in the bar at
+   all: the five tabs are already there, and a ☰ beside them is a trigger that opens a copy of
+   what the eye is reading. `display:none` is also what makes it cost the bar no room, which is
+   what the 942px measurement was taken with. The two declarations after it are the ☰'s share of
+   the bar, and they are the same pair the account end carries: `nav` is `flex:1 1 auto`, which
+   is right for the strip (the design says it takes the room that is left) and wrong here, where
+   it measured 529px wide at 941px with a 30px trigger inside it, pushing the brand off the
+   column's edge. `min-width:0` is the other half: `nav:not(.acct)` floors every bar row at
+   `max-content`, which is the rule that stops a strip being squeezed into cut tabs, and a
+   trigger has nothing to be cut. */
+nav.navm{display:none;flex:0 1 auto;min-width:0}
 /* The trigger is the bar's first give (§13.28 §4), and the cap is what makes it one: a name is
    as long as the longest address in the roster, which is a fact about the file and not a measure
    this file can take. 16rem is the longest label worth reading in a bar whose job is to say
@@ -126,24 +137,30 @@ nav.acct{flex:0 1 auto;min-width:0;align-items:center;gap:6px;margin-left:auto}
    above with `:not` since that would drop the bar's font size too and make the glyph
    smaller than its neighbours. The note follows its rule for the same reason as in
    `base.css`: the test reads the rule by its exact selector. */
-/* The panel's copy of the tab strip, hidden above the breakpoint (§13.28 §4). The four links
-   exist twice, once in the bar and once in the panel, because moving an element out of a closed
-   `details` and into a bar is not a thing CSS can do: the markup carries both and exactly one is
-   displayed, which is also why the panel's rows are `.pill`s, so the copy that appears is the
-   same object as the copy it replaces. `gap:0` because those rows are `.menu .pill`s and each
-   carries its own `margin-bottom:4px`: a gap on the row stacks a second space between them, and
-   the panel's rows stop reading as the one list they are. */
-.menu-tabs{display:none;gap:0}
-/* The one breakpoint for the tabs, and the number is the bar's width and not a device: at 800px
-   the brand, four tabs, a person's name and the trigger stop fitting on a row that cannot wrap,
-   and the thing a bar must never do is cut a tab. Below it the bar's strip is hidden and the
-   panel's rows are the navigation, which is the compromise the user accepted on 2026-11-25: the
-   tabs move one tap away rather than onto a second row. `nav:not(.acct)` is the bar's tab row;
-   the account end is excluded because it holds the trigger that opens the panel the tabs have
-   just moved into. */
-@media (max-width:800px){
-  nav:not(.acct){display:none}
-  .menu-tabs{display:flex;flex-direction:column}
+/* The ☰'s copy of the tab strip (§13.34 §2). The five links exist twice, once in the bar and
+   once in the navigation menu, because moving an element out of a closed `details` and into a
+   bar is not a thing CSS can do: the markup carries both and exactly one is displayed, which is
+   also why the panel's rows are `.pill`s, so the copy that appears is the same object as the
+   copy it replaces. It is **always** the column: it lives only in `nav.navm`, and the rule below
+   shows or hides that box whole, so nothing hides a panel's contents anywhere, which is what a
+   phone's ☰ opening on an empty box is made of. `gap:0` because those rows are `.menu .pill`s
+   and each carries its own `margin-bottom:4px`: a gap on the row stacks a second space between
+   them, and the panel's rows stop reading as the one list they are. */
+.menu-tabs{display:flex;flex-direction:column;gap:0}
+/* The one breakpoint for the tabs, and the number is the bar's width and not a device: at 941px
+   the brand, the five tabs (the Italian "Impostazioni" is the widest of the five words), a
+   person's name and the ☰'s trigger stop fitting on a row that cannot wrap, and the thing a bar
+   must never do is cut a tab (§13.34 §0 measured 942 as the narrowest width that holds). Below
+   it the bar's strip is hidden and the ☰'s panel is the navigation, which is the compromise the
+   user accepted on 2026-11-25 and §13.34 kept: the tabs move one tap away rather than onto a
+   second row. Both halves are declarations, so the pair cannot be half-written: a strip hidden
+   with nothing to replace it is a bar with no navigation and no tabs. The strip is named
+   `nav.tabs` rather than written `nav:not(.acct)`, because with the ☰ in the bar the `:not`
+   would hide that too, leaving a bar whose only navigation is a trigger with no strip beside
+   it. */
+@media (max-width:941px){
+  nav.tabs{display:none}
+  nav.navm{display:flex}
 }
 /* The page's one action, and the way out beside it, are one object and must be one height:
    `cancel` next to `Create key` at three quarters the height reads as a caption of the button
@@ -368,15 +385,28 @@ details.settings[open]>summary::before{content:"";position:fixed;inset:0;z-index
 /* With the cover up, the pointer is over the trigger everywhere, so the open trigger wears the
    look of a control that is being used for as long as it is open. */
 details.settings[open]>summary{background:var(--chip);border-color:var(--accent);color:var(--accent)}
-.menu{position:absolute;right:0;top:calc(100% + 8px);z-index:10;min-width:230px;
+.menu{position:absolute;right:0;top:calc(100% + 8px);z-index:10;width:20rem;
   background:var(--card);border:1px solid var(--card-border);border-radius:var(--r-box);
   padding:14px 16px;box-shadow:var(--shadow-md);
-  /* The panel is a page's worth of rows now (the tabs, the system's settings, the preferences,
+  /* The panel is a page's worth of rows now (the tabs, the caller's own page, the preferences,
      sign out), so it is bounded by the viewport that opens it: `dvh` so a phone in landscape
      measures the visible part of the screen and not the whole of it, and the last row is
      reachable by scrolling the panel rather than by being off-screen. The width guard is the
-     same courtesy on a narrow screen, where `min-width:230px` alone would push a row out. */
+     same courtesy on a narrow screen.
+
+     `width:20rem` is a **declared** width and replaces a `min-width:230px` with no width, and
+     that is the whole of the fix for §13.34 §0's measurement: shrink-to-fit made the panel as
+     wide as its widest row, so the same object measured 230px on the console and 286px on
+     `/account/`, where the delete row is longer, and a floor keyed to a trigger no panel on that
+     page uses is a width nobody can set from the file. 20rem holds the longest row on either
+     surface in both languages; a long address wraps inside it (`overflow-wrap:anywhere`), and
+     the cap keeps the box on a 320px screen. The ☰'s panel is the same `.menu` object and takes
+     the same width. */
   max-height:calc(100dvh - 80px);overflow-y:auto;max-width:calc(100vw - 32px)}
+/* The ☰ opens its panel from the bar's left edge and the account menu from its right, which is
+   what each trigger sits at (§13.34 §2). The shared `right:0` above would push the ☰'s panel off
+   a phone's screen, so the pair is stated, not inherited. */
+details.navmenu .menu{left:0;right:auto}
 /* The panel's rows are full-width, because a panel is a list read top to bottom and not a row
    of pills scanned across: `display:block` is what makes one (`.pill` is inline-flex in
    base.css), and `text-align:left` undoes the centring a block box gives text, so the labels
@@ -385,10 +415,14 @@ details.settings[open]>summary{background:var(--chip);border-color:var(--accent)
 /* The glyph rides beside the row's word, and a full-width block row gives it none of the gap a
    compact pill's own padding does, so the space has to be a margin on the glyph. */
 .menu .pill svg{margin-right:.5em}
-/* The rule between the panel's groups (§13.28 §2): places to go, what this looks like, and who
-   is leaving are three kinds of row, and space alone was too quiet to say so in a list this
-   dense. It is a border, not a tint, so it is the same object as the card's own edge. */
-.menu .sep{border-top:1px solid var(--card-border);margin:10px 0}
+/* The rule between the panel's groups (§13.28 §2, §13.34 §3): places to go, what this looks
+   like, and who is leaving are three kinds of row, and space alone was too quiet to say so in a
+   list this dense. It is a border, not a tint, so it is the same object as the card's own edge.
+   The console's places are divided from the rows below by an `hr` (§13.34 §3) and the rest by
+   `div.sep`, and the two share one rule: the panel has to read as one object on the console and
+   on `/account/`, so the divider that only the console emits carries no class, and `border:0`
+   first is what stops the element's own inset border from painting three extra edges. */
+.menu .sep,.menu hr{border:0;border-top:1px solid var(--card-border);margin:10px 0}
 /* Every address of the row, on a line of its own (§13.28 §1): a caller admitted by their second
    address reads a panel naming every address they have, and a list of them inline reads as one
    long string. `anywhere` is what keeps a 60-character address inside the panel's own width
@@ -482,11 +516,12 @@ details.settings[open]>summary{background:var(--chip);border-color:var(--accent)
      320px screen leaves the bar's first line once the brand and the sign-out pill are counted,
      and the trigger's `title` and the panel's first block both carry the whole label. */
   .bar .who{max-width:11rem}
-  /* `:not(.acct)` because the account row is a `nav` too, and this is about the tabs. They are
-     in the panel at this width (the 800px block above moved them), so the strip is not hidden
-     and scrolled: a row that scrolls sideways is the clipped tab §13.17 named, and one row
-     with a scroll is two dimensions, which is what WCAG 1.4.10 Reflow asks not to do. */
-  nav:not(.acct){display:none}
+  /* `nav.tabs` names the strip by name, and that is the whole rule: the account row is a `nav`
+     too, and so is the ☰, and this is about the tabs alone. They are in the ☰'s panel at this
+     width (the 941px block above moved them), so the strip is not hidden and scrolled: a row
+     that scrolls sideways is the clipped tab §13.17 named, and one row with a scroll is two
+     dimensions, which is what WCAG 1.4.10 Reflow asks not to do. */
+  nav.tabs{display:none}
   /* With a mark in the bar, the brand's words are the part that can go: the logo says which
      deployment this is, and a mark plus a name plus a trigger does not fit a 320px row. The
      words are visually hidden, not removed, which is why the image keeps `alt=""`: a reader

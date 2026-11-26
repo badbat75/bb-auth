@@ -27,7 +27,7 @@ const fs = require('fs');
 
 const {
   doc, bytes, writeDoc, api, submit, resubmit, formBytes, newPage, mainText,
-  barStaysOneRow, barGeometry, attr, text, count, prop,
+  barStaysOneRow, barGeometry, attr, text, count, prop, ACCT_MENU,
 } = require('../lib/harness');
 const { FIXTURE } = require('../lib/server');
 const { WHOAMI, DELETE } = require('../lib/intake');
@@ -52,7 +52,10 @@ const FORM = 'form[action="/account/delete"]';
 const FIELD = `${FORM} input[name=confirm_email]`;
 const SUBMIT = `${FORM} button[type=submit]`;
 const CANCEL = `${FORM} a.pill[href="/account/"]`;
-const MENU = 'details.settings';
+// The account menu, scoped to `nav.acct`: §13.34 §2 put a second `details.settings` in the bar
+// (the ☰ carries the class for the open look), so a bare `details.settings` is two elements on
+// the console, and `nav.acct` is the account menu on both surfaces.
+const MENU = ACCT_MENU;
 const ROW = '.menu a.pill.rm';
 // The e2e server always names a logout URL, so every page that ends in Sign out has one.
 const OUT = '/auth/logout';
