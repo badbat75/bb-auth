@@ -121,9 +121,11 @@ browser it signed in from, after its Cognito user is gone. A sign-out on the don
 the browser that pressed it. The architect weighs the options without breaking "Sessions are
 stateless" silently: the done page answered with the gate's logout, a revocation the gate can
 check, a shorter TTL, or accepting the gap and saying so on the page. The designer then words the
-done page for what is chosen.
+done page for what is chosen. Designed in §13.32 (slices 14a to 14d). The user chose the
+recommended answers: the success answer goes through the gate's logout to its sign-in page with a
+fixed notice, the stale-cookie gap is accepted and stated, and the session TTL stays 30 days.
 
 - Done when: a test shows that the deletion's success answer leaves that browser signed out
   (the session cookie cleared, or the browser sent through `/auth/logout`) and still says what
-  was queued; the stale-cookie gap is either closed by a tested mechanism or accepted by the
-  user and stated in AGENTS.md; and it has been tried on rpi-01 with the user's go-ahead.
+  was queued; the stale-cookie gap, accepted by the user on 2026-11-26, is stated in AGENTS.md
+  and on the notice; and it has been tried on rpi-01 with the user's go-ahead.
