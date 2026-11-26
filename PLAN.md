@@ -113,8 +113,12 @@ console's navigation is all in the tab list, and at 800px and below it moves int
 menu of its own, never into the account menu. This reverses §13.28's placement, so the designer
 designs it, and the docs that state the old rule change with it.
 
+Also from the user that day: the account menu is a different size on `/account` and on `/admin`,
+against W13. In this step it becomes the same object, at the same size, on both surfaces.
+
 - Done when: tests show the tab list carries all five places (System settings' URL unchanged,
   `/config`) and the account menu carries none of them on either surface; at 800px and below the
   places are in the navigation menu, not the account menu; the bar keeps one row at 320px in both
-  languages, with scripting on and off; the designer has approved the screenshots; and AGENTS.md
+  languages, with scripting on and off; a test shows the account menu has the same markup and
+  the same width on both surfaces at the same viewport; the designer has approved the screenshots; and AGENTS.md
   says the new rule.
