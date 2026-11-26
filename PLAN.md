@@ -247,8 +247,17 @@ Covers: R3. Left over when the user approved step 8's screenshots on 2026-11-26:
 names a Settings menu; and one look by hand at the native "Preferences" tooltip while the open
 menu's cover is up.
 
-- Done when: the rustdoc says what the page is (the console's column and one account menu), and
-  the tooltip has been looked at in a browser, or the look is reported as not done.
+Added by the user on 2026-11-26: when the caller has no roster row, `/account` writes **nothing**
+in its place, neither in the lede (today "bb-auth has no roster row for you." under the
+addresses, where a row shows "Account id") nor on 7b's deletion page; the line and its `br`
+simply go. `K::AccountNoRow` goes if nothing else uses it, and AGENTS.md's self-service paragraph
+("where a caller with no row is told there is none") is corrected. To do after 7b, which touches
+the same file.
+
+- Done when: the rustdoc says what the page is (the console's column and one account menu); a
+  test shows a stranger's `/account` (and the deletion page) carries no no-row sentence and no
+  empty line where the id would be; and the tooltip has been looked at in a browser, or the look
+  is reported as not done.
 
 ## Waiting for the user
 
