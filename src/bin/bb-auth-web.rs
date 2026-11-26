@@ -266,22 +266,20 @@ use base64::Engine;
 use bb_auth_core::{
     add_api_key, add_application, add_denied, add_scope, add_user, add_user_email, add_user_group,
     app_mut, app_pos, compile_app_client_id, compile_asset_url, compile_audit_header,
-    compile_brand_name, compile_cookie_domain, compile_host_pattern, compile_issuer,
-    compile_login_url, compile_oauth_domain, compile_page_url, cookie_domain_covers, csp_hash,
-    decide, default_settings_path, edit_urls, email_verified_true, format_date, format_datetime,
-    group_ref, guarded_changes, key_expiry, key_mut, move_scope, norm_email, now, open_access_file,
-    open_settings_file, page_csp, parse_duration, parse_exclusion, read_audit, remove_api_key,
-    remove_application, remove_denied, remove_scope, remove_user, remove_user_email,
-    remove_user_group, rename_application, rename_scope, request_site, request_url, rotate_api_key,
-    scope_mut, scope_pos, sha256_hex, shadowing_scope, social_idp_label, stylesheet_link,
-    user_group_mut, user_group_refs, user_label, user_pos, user_refs, version_line, Access,
-    AccessFile, AccessWrite, ApiKeySpec, AppSpec, AuditCredential, AuditEvent, AuditKind,
-    AuditLimit, AuditPolicy, AuditUnit, Decision, Dur, GateSettings, GuardedSetting, HeaderFault,
-    PrepareError, RequestSite, ScopeSpec, SealedKey, SettingKey, Settings, SettingsFile,
-    SettingsRefusal, SettingsWrite, SocialButtonSpec, Subject, UiTheme, UrlFault, UserSpec,
-    WiredButton, Written, BASE_CSS, DEFAULT_AUDIT_FILE, IDENTITY_ATTRS, IDENTITY_HEADER,
-    MAX_BRAND_NAME, MAX_SESSION_TTL, MIN_SESSION_TTL, PAGE_SECURITY_HEADERS, SOCIAL_IDPS,
-    THEME_CSS,
+    compile_cookie_domain, compile_issuer, csp_hash, decide, default_settings_path, edit_urls,
+    email_verified_true, format_date, format_datetime, group_ref, guarded_changes, key_expiry,
+    key_mut, move_scope, norm_email, now, open_access_file, open_settings_file, page_csp,
+    parse_duration, parse_exclusion, read_audit, remove_api_key, remove_application, remove_denied,
+    remove_scope, remove_user, remove_user_email, remove_user_group, rename_application,
+    rename_scope, request_site, request_url, rotate_api_key, scope_mut, scope_pos, sha256_hex,
+    shadowing_scope, social_idp_label, stylesheet_link, user_group_mut, user_group_refs,
+    user_label, user_pos, user_refs, version_line, Access, AccessFile, AccessWrite, ApiKeySpec,
+    AppSpec, AuditCredential, AuditEvent, AuditKind, AuditLimit, AuditPolicy, AuditUnit, Decision,
+    Dur, GateSettings, GuardedSetting, HeaderFault, PrepareError, RequestSite, ScopeSpec,
+    SealedKey, SettingKey, Settings, SettingsFile, SettingsRefusal, SettingsWrite,
+    SocialButtonSpec, Subject, UiTheme, UrlFault, UserSpec, WiredButton, Written, BASE_CSS,
+    DEFAULT_AUDIT_FILE, IDENTITY_ATTRS, IDENTITY_HEADER, MAX_BRAND_NAME, MAX_SESSION_TTL,
+    MIN_SESSION_TTL, PAGE_SECURITY_HEADERS, SOCIAL_IDPS, THEME_CSS,
 };
 use maud::{html, Markup, PreEscaped, DOCTYPE};
 use sha2::{Digest, Sha256};
@@ -8304,8 +8302,10 @@ impl ConfigForm {
             .collect()
     }
 
-    /// Apply the form to the document. The refusals here are the two the library cannot make
-    /// on its own: it does not know who is signed in, and it does not parse a form.
+    /// Apply the form to the document. The refusals here are the ones the library cannot make
+    /// on its own: it does not know who is signed in, and it does not parse a form. Every other
+    /// check is `compile_settings`'s, made once on the way to disk, where its refusal is said in
+    /// the reader's language on the field that can fix it (docs/ARCHITECTURE.md §13.31 §5).
     fn apply(&self, doc: &mut SettingsFile, admin: &str, lang: Lang) -> Result<(), Refusal> {
         let ttl: u64 = self
             .ttl
@@ -8323,125 +8323,54 @@ impl ConfigForm {
         if !admins.iter().any(|a| norm_email(a) == admin) {
             return Err(Refusal::on("admins", t(lang, K::AdminsKeepYourself)));
         }
-        // The `ui` fields are attributed to the field that carries them, which is the whole
-        // reason they are checked here and not left to the write: the library's refusal names
-        // the setting, but only this page knows which input the operator has to go back to.
-        // Empty is not a refusal anywhere here; it is the setting being unset.
-        // The Cognito wiring, checked field by field so a refusal can point at the input it
-        // is about: the library would refuse the file on the way to disk anyway, but only
-        // this page knows which cell of the table an operator has to go back to.
+        // The four the GUI is stricter than the gate about on purpose: a deployment with an
+        // empty one of these is one where no login can complete, and a form should not be able
+        // to write that. A fresh install has none of them and no way to reach this page either,
+        // so the first one is set with `bb-auth-adm` over SSH.
         let client_id = compile_app_client_id("client_id", &self.client_id)
-            .map_err(|e| Refusal::on("client_id", &e))?;
+            .unwrap_or(self.client_id.trim().to_string());
         if client_id.is_empty() {
             return Err(Refusal::on("client_id", t(lang, K::ClientIdNeeded)));
         }
-        if !self.login_url.trim().is_empty() {
-            compile_login_url(&self.login_url).map_err(|e| Refusal::on("login_url", &e))?;
-        }
-        if !self.denied_url.trim().is_empty() {
-            compile_page_url("denied_url", &self.denied_url)
-                .map_err(|e| Refusal::on("denied_url", &e))?;
-        }
-        // The landing page, syntax first. Its cross-check with the authorized hosts is the
-        // library's (`compile_settings`), and that refusal is attributed to this field where
-        // the write happens, because the message names both settings and only this page knows
-        // which input to mark.
-        if !self.landing_url.trim().is_empty() {
-            compile_page_url("landing_url", &self.landing_url)
-                .map_err(|e| Refusal::on("landing_url", &e))?;
-        }
-        // The pool, held to the same standard as the app client above and refused empty for
-        // the same reason: this form should not be able to write a deployment where no login
-        // can complete. A fresh install has no pool yet and no way to reach this page either,
-        // so the first one is set with `bb-auth-adm` over SSH.
-        let issuer = compile_issuer(&self.issuer).map_err(|e| Refusal::on("issuer", &e))?;
+        let issuer = compile_issuer(&self.issuer).unwrap_or(self.issuer.trim().to_string());
         if issuer.is_empty() {
             return Err(Refusal::on("issuer", t(lang, K::IssuerNeeded)));
         }
-        let cookie_domain = compile_cookie_domain(&self.cookie_domain)
-            .map_err(|e| Refusal::on("cookie_domain", &e))?;
         let hosts = Self::lines(&self.hosts);
         if hosts.is_empty() {
             return Err(Refusal::on("hosts", t(lang, K::AuthorizedHostsNeeded)));
         }
-        for h in &hosts {
-            compile_host_pattern(h).map_err(|e| Refusal::on("hosts", &e))?;
-        }
-        // The cross-check the library makes on the way to disk, made here as well so that it
-        // names the field an operator has to go back to. The two inputs are neighbours on
-        // this page precisely because of it.
-        if !cookie_domain.is_empty() {
-            if let Some(stray) = hosts
-                .iter()
-                .find(|h| !cookie_domain_covers(&cookie_domain, h))
-            {
-                return Err(Refusal::on(
-                    "hosts",
-                    format!(
-                        "'{stray}' is outside cookie_domain '{cookie_domain}': a login would \
-                         redirect there and the browser would send no session cookie"
-                    ),
-                ));
-            }
-        }
-        compile_oauth_domain(&self.domain).map_err(|e| Refusal::on("domain", &e))?;
-        compile_asset_url("social_callback_url", &self.callback)
-            .map_err(|e| Refusal::on("callback", &e))?;
         for (idp, aud) in &self.buttons {
-            let field = aud_field(idp);
-            let aud = compile_app_client_id("audience", aud)
-                .map_err(|e| Refusal::on(field.clone(), &e))?;
-            if aud.is_empty() {
-                return Err(Refusal::on(field, t(lang, K::AudienceNeeded)));
+            if aud.trim().is_empty() {
+                return Err(Refusal::on(aud_field(idp), t(lang, K::AudienceNeeded)));
             }
         }
-        // A button with nowhere to send the browser is the half-configured social sign-in
-        // that used to be a fatal startup. The library refuses it too; this is the same
-        // refusal, attributed to the field that can fix it.
-        if !self.buttons.is_empty()
-            && (self.domain.trim().is_empty() || self.callback.trim().is_empty())
-        {
-            return Err(Refusal::on("domain", t(lang, K::SocialWiringNeeded)));
-        }
-        // The two headers the audit believes, each refused on its own field. The library
-        // makes the same refusals on the way to disk, and one more (both naming one header),
-        // which it then attributes to the second of the two here, where it can be fixed.
-        let ip_header = compile_audit_header("client_ip_header", &self.ip_header)
-            .map_err(|e| Refusal::on("client_ip_header", &e))?;
-        let rid_header = compile_audit_header("request_id_header", &self.rid_header)
-            .map_err(|e| Refusal::on("request_id_header", &e))?;
-        if !ip_header.is_empty() && ip_header.eq_ignore_ascii_case(&rid_header) {
-            return Err(Refusal::on(
-                "request_id_header",
-                format!("'{rid_header}' is already the client address header; one header cannot carry both"),
-            ));
-        }
-        // The rotation and the retention, each put back together from its two controls and
-        // refused on the amount's box, which is the one an operator types into. The pair is
-        // checked last and blamed on the retention, since that is the half which can supply
-        // the size a rotation in time is missing.
-        let rotation = AuditLimit::parse(&format!(
-            "{} {}",
-            self.rotation_n.trim(),
-            self.rotation_unit.trim()
-        ))
-        .map_err(|e| Refusal::on("audit_rotation", format!("audit.rotation: {e}")))?;
-        let retention = match self.retention_unit.trim() {
-            "" => None,
-            unit => Some(
-                AuditLimit::parse(&format!("{} {unit}", self.retention_n.trim()))
-                    .map_err(|e| Refusal::on("audit_retention", format!("audit.retention: {e}")))?,
-            ),
-        };
-        AuditPolicy::new(rotation, retention).map_err(|e| Refusal::on("audit_retention", e))?;
-        compile_asset_url("stylesheet_url", &self.stylesheet)
-            .map_err(|e| Refusal::on("stylesheet", &e))?;
-        compile_asset_url("logo_url", &self.logo).map_err(|e| Refusal::on("logo", &e))?;
-        compile_brand_name(&self.brand).map_err(|e| Refusal::on("brand", &e))?;
         // A value this list box cannot produce, so a refusal here means the request was not
         // this form. It is still a refusal and not a silent `system`: see `UiTheme::parse`.
         let theme = UiTheme::parse(&self.theme)
             .ok_or_else(|| Refusal::on("theme", t(lang, K::DefaultThemeBad)))?;
+        // The validators stay where their `Ok` value is what the file stores: the issuer with
+        // its trailing slash gone, the cookie domain lowercased, an app client and a header
+        // trimmed, the two audit limits in the file's own spelling. The refusal does not stay:
+        // `.unwrap_or` takes the trimmed input, so a value the library accepts is written byte
+        // for byte as before and one it refuses reaches `prepare` and is answered there.
+        let cookie_domain = compile_cookie_domain(&self.cookie_domain)
+            .unwrap_or(self.cookie_domain.trim().to_string());
+        let ip_header = compile_audit_header("client_ip_header", &self.ip_header)
+            .unwrap_or(self.ip_header.trim().to_string());
+        let rid_header = compile_audit_header("request_id_header", &self.rid_header)
+            .unwrap_or(self.rid_header.trim().to_string());
+        let rotation_raw = format!("{} {}", self.rotation_n.trim(), self.rotation_unit.trim());
+        let rotation = AuditLimit::parse(&rotation_raw)
+            .map(|r| r.spelled())
+            .unwrap_or(rotation_raw);
+        let retention = match self.retention_unit.trim() {
+            "" => String::new(),
+            unit => {
+                let raw = format!("{} {unit}", self.retention_n.trim());
+                AuditLimit::parse(&raw).map(|r| r.spelled()).unwrap_or(raw)
+            }
+        };
 
         doc.gate.profile_claims = Self::lines(&self.claims);
         doc.gate.identity_attrs = Self::lines(&self.identity);
@@ -8469,8 +8398,8 @@ impl ConfigForm {
             .collect();
         doc.audit.client_ip_header = ip_header;
         doc.audit.request_id_header = rid_header;
-        doc.audit.rotation = rotation.spelled();
-        doc.audit.retention = retention.map(|r| r.spelled()).unwrap_or_default();
+        doc.audit.rotation = rotation;
+        doc.audit.retention = retention;
         doc.web.admins = admins;
         doc.ui.stylesheet_url = self.stylesheet.trim().to_string();
         doc.ui.logo_url = self.logo.trim().to_string();
@@ -14573,6 +14502,107 @@ mod tests {
         assert!(
             got.body.contains(r#"class="f-landing_url invalid""#),
             "the refusal must still point at the field: {}",
+            got.body
+        );
+        assert_eq!(read(&sp), before, "nothing written");
+        cleanup(&path);
+    }
+
+    /// A host the cookie domain cannot reach, refused on an Italian save, says §4's Italian
+    /// sentence on the hosts field (§13.31 §6, S9).
+    ///
+    /// Red today because `ConfigForm::apply` makes this cross-check itself and answers it with
+    /// an inline English `format!` (the `'…' is outside cookie_domain '…'` sentence), so the
+    /// refusal never reaches `settings_refusal` and an Italian page shows English. S9 removes
+    /// the duplicate check, and the refusal arrives from `SettingsWrite::prepare` instead.
+    #[test]
+    fn the_settings_form_says_a_stray_host_in_italian() {
+        let path = scratch("cfg-stray-host-it", SAMPLE);
+        let cfg = cfg_for(&path, "/admin");
+        let sp = cfg.settings_path.clone();
+        let port = serve(&path, "/admin");
+        let url = format!(
+            "http://127.0.0.1:{port}{ADMIN_BASE}{}",
+            Route::Config.path()
+        );
+        let before = read(&sp);
+        let rev = rev_of(&sp);
+        // Only the cookie domain is typed in: the fixture's hosts stay exactly as the file has
+        // them, so no host is taken away and the save stays out of the guarded changes, which
+        // would answer a confirmation page ahead of the refusal under test.
+        let fields = settings_fields(&rev, &[("cookie_domain", ".example.com")]);
+        let _permit = WRITE_PERMIT.lock().unwrap_or_else(|e| e.into_inner());
+        let r = post_with_secret(&url)
+            .header(IDENTITY_HEADER, "admin@x.com")
+            .header("Sec-Fetch-Site", "same-origin")
+            .header("Cookie", "lang=it")
+            .send_form(fields.iter().copied())
+            .expect("a POST response");
+        let got = got_of(r);
+        assert_eq!(got.status, 400, "{got:?}");
+        let err = err_text(&got.body);
+        // §4's sentence verbatim, with the two labels and the two values filled in: the label
+        // of the field the refusal marks, the cookie domain's label, the domain, and every
+        // stray host joined by ", ". Compared byte for byte: maud escapes `&`, `<`, `>` and
+        // the double quote only, so an apostrophe reaches the page as the design spells it.
+        let want = "Host autorizzati: il Dominio del cookie '.example.com' non raggiunge \
+                    badbat75.com, *.badbat75.com, quindi un accesso che arriva lì non porta \
+                    il cookie di sessione e torna in ciclo alla pagina di accesso.";
+        assert_eq!(err, want, "{err}");
+        assert!(
+            got.body.contains(r#"class="f-hosts invalid""#),
+            "the refusal must point at the hosts box: {}",
+            got.body
+        );
+        assert_eq!(read(&sp), before, "nothing written");
+        cleanup(&path);
+    }
+
+    /// The two audit headers naming one header, refused on an Italian save, says §4's Italian
+    /// sentence on the request id field (§13.31 §6, S9).
+    ///
+    /// Red today for the same reason as the stray host: `apply` compares the two itself and
+    /// answers with an inline English `format!` (`'…' is already the client address header`),
+    /// so the page never sees `SettingsRefusal::AuditHeadersSame`.
+    #[test]
+    fn the_settings_form_says_a_shared_audit_header_in_italian() {
+        let path = scratch("cfg-shared-header-it", SAMPLE);
+        let cfg = cfg_for(&path, "/admin");
+        let sp = cfg.settings_path.clone();
+        let port = serve(&path, "/admin");
+        let url = format!(
+            "http://127.0.0.1:{port}{ADMIN_BASE}{}",
+            Route::Config.path()
+        );
+        let before = read(&sp);
+        let rev = rev_of(&sp);
+        let fields = settings_fields(
+            &rev,
+            &[
+                ("client_ip_header", "X-Forwarded-For"),
+                ("request_id_header", "X-Forwarded-For"),
+            ],
+        );
+        let _permit = WRITE_PERMIT.lock().unwrap_or_else(|e| e.into_inner());
+        let r = post_with_secret(&url)
+            .header(IDENTITY_HEADER, "admin@x.com")
+            .header("Sec-Fetch-Site", "same-origin")
+            .header("Cookie", "lang=it")
+            .send_form(fields.iter().copied())
+            .expect("a POST response");
+        let got = got_of(r);
+        assert_eq!(got.status, 400, "{got:?}");
+        let err = err_text(&got.body);
+        // §4's sentence verbatim: the field it marks, the header both boxes name, and the
+        // label of the other box, which is the one the operator has to go and change. Byte
+        // for byte, as in the test above: maud leaves an apostrophe alone.
+        let want = "Header dell'id della richiesta: 'X-Forwarded-For' è già l'Header \
+                    dell'indirizzo del client; un solo header non può portare sia un indirizzo \
+                    sia un id di richiesta.";
+        assert_eq!(err, want, "{err}");
+        assert!(
+            got.body.contains(r#"class="f-request_id_header invalid""#),
+            "the refusal must point at the request id box: {}",
             got.body
         );
         assert_eq!(read(&sp), before, "nothing written");

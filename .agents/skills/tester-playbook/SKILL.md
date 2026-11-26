@@ -199,6 +199,11 @@ Rules are in `AGENTS.md`. Format of this file: `AGENTS.md`, under "Skills".
 
 ## Pitfalls
 
+- maud 0.27 escapes only `&`, `<`, `>` and `"`, so an apostrophe in a `K` string reaches the page
+  raw: compare a rendered refusal with the design's text as is, never with `'` replaced by `&#x27;`
+  (S9 lost a pass to that). The library's `html_escape` gives `&#39;`, and only where it is called.
+- A displayed refusal is pinned twice, in a Rust test and in `e2e/tests/*.js`: when a slice changes
+  what the page says, grep `e2e/tests` for the old sentence and update both in the same pass.
 - For a §13.31 refusal slice the stub in the rsync copy is the **whole** production change (the
   variants, `code()`, `sentence()`, the leaf's typed core plus its `String` wrapper,
   `SETTINGS_REFUSAL_CODES`, `settings_refusal_samples`): a partial stub leaves the codes-reached test

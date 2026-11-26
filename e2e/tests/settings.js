@@ -359,7 +359,13 @@ async function run(ctx, t) {
     const lookBefore = settingsBytes(ctx);
     await page.fill('input[name=stylesheet]', 'javascript:alert(1)');
     t.eq('a stylesheet that is not a stylesheet is a 400', (await submit(page)).status(), 400);
-    t.check('with the library own words', (await mainText(page)).includes('stylesheet_url'));
+    // The refusal speaks this page's words now, so what stays true of it is the SHAPE it
+    // names. The wire key `stylesheet_url` used to be asserted here, and that was the
+    // library's English sentence, which §13.31 replaced. Read the refusal block itself: the
+    // look group is folded on load, so a page-wide innerText search reads what the browser
+    // exposes of the form, and `#form-error` is absent on a page that refused nothing.
+    const refusal = await page.locator('#form-error').innerText();
+    t.check('the refusal names the shape it wants', refusal.includes('https://'), refusal.slice(0, 300));
     t.check('and nothing written', settingsBytes(ctx) === lookBefore);
 
     // Put it back, so the refusal tests below start from a file that works.
