@@ -2549,7 +2549,7 @@ enough, for both surfaces at once, then required that the operator's theme keep 
 
 | Slot | Console | `/account/` |
 |---|---|---|
-| brand | `a.brand` "bb-auth-web" plus version, links home. (Changed by §13.18: `ui.brand_name`, else `bb-auth`, over `K::ConsoleTag` ("Administration" / "Amministrazione"), still a link; the version is the footer's alone) | `span.brand.selfserve-brand`: the `ui.logo_url` image (when set) and `ui.brand_name`, where the page shows them today; not a link, since the page is the only one |
+| brand | `a.brand` "bb-auth-web" plus version, links home. (Changed by §13.18: `ui.brand_name`, else `bb-auth`, over `K::ConsoleTag` ("Administration" / "Amministrazione"), still a link; the version is the footer's alone. Changed by §13.34 §10: no tag line, the name alone, still a link) | `span.brand.selfserve-brand`: the `ui.logo_url` image (when set) and `ui.brand_name`, where the page shows them today; not a link, since the page is the only one |
 | tabs | the five `nav` pills | an empty `nav`, which is what the console's own `403` page already renders |
 | identity | **new**: `span.who.muted` in `nav.acct`, the address | the same: the given name and the first address ("Bot · `bot@example.com`"), or the address alone |
 | Preferences | `details.settings` "Preferences" (`K::Settings`), Language then Theme, `onchange` applies, `noscript` Apply | the same `details` and `.menu` and order, **no `onchange`**, and the Apply `button` in `div.actions` always present (Changed by plan step 13, 2026-11-26: the same `onchange` and the same `noscript` Apply, both shells emitting one `prefs_form`) |
@@ -2564,7 +2564,8 @@ names the console writes. The form's `action` is the account page. The brand slo
 operator's brand because this page is the operator's estate seen by a person, while the
 console names the tool to its administrators. (Changed by §13.18: the console's bar names the
 deployment the same way, over a line saying what that surface is, so the sentence's second half
-no longer holds; the reason for the first half stands.) (Changed by plan step 13, 2026-11-26:
+no longer holds; the reason for the first half stands. Changed again by §13.34 §10: the line
+saying what the surface is went too, so both bars now show the brand alone.) (Changed by plan step 13, 2026-11-26:
 the first sentence describes what was built then, not the page as it stands. The user asked for
 fewer clicks, so the account menu carries the console's handler, its policy admits that handler
 by the same hash (`page_script_src` is one function for both surfaces), and Apply is the
@@ -7899,6 +7900,9 @@ border because the mockup's ☰ sits outside a `nav`, which §2 corrects):
 and `/tmp/d15b/ham-{en,it}-dark-{1280-none,360-navmenu,360-acct}.png` (the chosen label; the
 first run's "Sistema" shots are under `/tmp/d15/`).
 
+(Superseded by §10, plan step 17: without the console's tag line the breakpoint is
+`max-width:883px`, measured the same way.)
+
 #### 1. The tab list: five tabs, Settings last, labelled "Settings" / "Impostazioni"
 
 - **Order**: Dashboard, Applications, Users, Audit, **Settings**. Last, where it was before
@@ -7920,7 +7924,7 @@ first run's "Sistema" shots are under `/tmp/d15/`).
 
 #### 2. Narrow widths: a navigation menu of its own
 
-- **Breakpoint**: `@media (max-width:941px)` replaces `(max-width:800px)`: 942px is the narrowest
+- **Breakpoint** (now 883px, §10): `@media (max-width:941px)` replaces `(max-width:800px)`: 942px is the narrowest
   width at which the measured worst case with "Impostazioni" keeps the brand whole (§0). No
   margin, by the user's choice of the smallest width that holds, so an operator's stylesheet with
   a wider font can cut the brand just above 941 (it truncates; the bar stays one row with no
@@ -8093,3 +8097,142 @@ built there, `top_bar`'s new first argument and both call sites, `name="bar-menu
 1. Answered 2026-11-26: the tab reads "Settings" / "Impostazioni", the page it opens "System
    settings" / "Impostazioni di sistema", and the breakpoint is the measured 941px with no
    margin (§0, §2).
+
+#### 10. Step 17: the brand without the tag, and why it stays a link (designed 2026-11-26)
+
+The user, at desktop width on rpi-01: beside "BadBat75" and its logo the bar shows the grey tag
+"Amministrazione" cut to "Amministrazio…", then the tabs; remove it. And: why is the brand a
+link at all?
+
+What was looked at: `PLAN.md` step 17; `shell_named`, `brand_block`, `K::ConsoleTag` and the
+`403` branch of the dispatcher in `src/bin/bb-auth-web.rs`; `.brand`, `.brand .v`, `nav.acct`,
+`.bar .who` and the 941 and 640 blocks of `src/assets/admin.css`; `brandStaysWhole` and the
+942/941 walk in `e2e/tests/settings.js`; §0's probe `/tmp/d15b/edge.js`.
+
+**Recommendation: the tag goes from every bar.** What it said ("this is the administration
+surface") is said four other ways on the console: the five tabs, which no other page of the
+estate has; the page's `h1`; the `<title>` (`bb-auth-web · …`); and the account menu's "Go to
+your account" row, which names the other surface as somewhere else. On the console's `403` (no
+tabs) the notice's own heading is "Not an administrator" / "Non sei un amministratore", so the
+tag would repeat the sentence right under it; it does not earn its place there either. On a
+1280px screen it was cut, and a cut label is the one form of a label that costs room and says
+less (Nielsen 8, aesthetic and minimalist design). `/account/` already shows the brand alone,
+so the two bars become the same shape, which is what §13.18 wanted from the tag in the first
+place (W13). Trade-off: a person who arrives at the console's `403` from a bookmark reads "which
+surface" from the notice rather than from the bar; that notice is the page's first content.
+
+**`K::ConsoleTag` goes.** Its only uses are `shell_named` (the one call of `brand_block` with
+`Some(tag)`) and the test `both_bars_name_the_deployment`. With the account call already passing
+`None`, `brand_block` loses its `tag` parameter and `span.v`, and `admin.css` loses `.brand .v`
+and `.brand:has(img) .v` (§13.34 §0's `flex-shrink:100` and the 2026-11-26 phone rule).
+
+**The brand stays a link on the console, and stays a `span` on `/account/` and on the `403`.**
+"Website logos should link to the homepage. This recommendation is a long-standing web
+convention", and the same article says to offer both the logo and an explicit Home link, not one
+instead of the other (Nielsen Norman Group, "Homepage Links Remain a Necessity",
+<https://www.nngroup.com/articles/homepage-links/>). So the Dashboard tab beside it is the
+explicit link the article asks for, not a reason to drop the implicit one. Below the breakpoint
+the Dashboard tab is inside the ☰, so the brand is the console's one-tap way home on a phone.
+Taking it away would break an expectation people bring from every other site (Nielsen 4,
+consistency and standards) to remove a redundancy that costs nothing. The two `span`s stay for
+the reasons §13.17 and §13.18 gave: `/account/` is the only page of its surface, so a link would
+lead to the page already open, and the `403` names a console the caller may not open, so a link
+home would lead to the same refusal. (The article says nothing about the logo on the home page
+itself; on `/admin/` the brand is a link to the page it is on, which is what the convention does
+and is harmless.) Open question 2 below, since the user asked.
+
+**One CSS change besides the deletions, and why it is needed.** Removing the tag alone makes the
+breakpoint worse, not better: walked with the same test as §0, the worst case rises from 941 to
+974 (Italian, "BadBat75 Estate Services" with no logo, long given name). The tag was the bar's
+hidden give: with `flex-shrink:100` it absorbed the shortfall inside the brand, so the name stayed
+whole while the name pill had room to spare. Without it, the brand and the name pill shrink in
+proportion and the name is cut the moment the row is short. The fix is to say out loud the order
+`admin.css` already promises in its `.brand` comment ("the name pill shrinks first, and the
+brand's words shrink next"): `nav.acct{flex-shrink:100}`, **only above the breakpoint**, inside
+`@media (min-width:884px)`. Below it the ☰ regime keeps today's proportional split: put
+everywhere, that rule let a long brand with no logo squeeze the name pill to 52px at 320 (just
+the glyph and one letter), while the split keeps it at 121px. The name pill never goes under
+128px above the breakpoint, because that is the test the breakpoint is measured by.
+
+##### 10a. Measurements (step 17)
+
+The real console after step 15 (`e2e/lib/server.js`, Edge), the tag removed from the live page
+and the rules injected, five real tabs. `/tmp/d17/edge.js` and `/tmp/d17/edge2.js`: strip forced
+visible, 1100 down to 641 in 1px steps, light and dark, the §0 test (one row, no sideways
+scroll, the brand's name as wide as at 1400, the name pill at least `min(128px, its natural
+width)`). Widest width at which the test still fails, for "Ada" / "Bartholomew-Alexander
+Montgomery":
+
+| Brand | Today (tag) EN | Today IT | No tag EN | No tag IT | No tag + `nav.acct` first EN | IT |
+|---|---|---|---|---|---|---|
+| `bb-auth`, no logo | 721 / 712 | 757 / 742 | <641 / 812 | 653 / 835 | <641 / 693 | 654 / 716 |
+| `bb-auth` + logo | 798 / 850 | 821 / 864 | 737 / 923 | 760 / 946 | 737 / 798 | 760 / 821 |
+| "BadBat75 Estate Services", no logo | 798 / 884 | 821 / 898 | 765 / 951 | 788 / 974 | 765 / 826 | 788 / 849 |
+| "BadBat75 Estate Services" + logo | 798 / 876 | 821 / 893 | 798 / 922 | 821 / 945 | 798 / 860 | 821 / **883** |
+
+Light and dark give the same figures. (The "today" column shows that step 15's `flex-shrink:100`
+had already brought the real worst case down to 898; §0's 941 was measured before it.) With the
+tag gone the long brand is whole at 1400 (191px of 191), where the tag used to cut it by a pixel,
+so "whole" is a stricter test than before, and it still holds from 884. **The breakpoint becomes
+`max-width:883px`**, no margin, as the user chose for §2. A 900px window now keeps the tabs.
+
+`/tmp/d17/ham.js` with that breakpoint and the scoped rule, 1400 down to 320 in 1px steps, the
+four brands, both languages, light and dark, both names: one row and no sideways scroll at every
+width, no fault. The brand's name is whole at 320, 360 and 390 for `bb-auth` with or without a
+logo and for the long brand with a logo (its words are hidden at 640 and below, as today); the
+24-character brand with no logo is cut there, as it is today, since 288px cannot hold it beside
+a ☰ and a name. Smallest name pill: 121px (long brand, long name, 320), 133px above the
+breakpoint (at 884, Italian, long brand with logo, long name).
+
+Screenshots: `/tmp/d17/bar-{plain,logo,long,longlogo}-{en,it}-light-{Ada,Bar}-{1280,884,883,390,320}.png`
+and `/tmp/d17/bar-plain-{en,it}-dark-{Ada,Bar}-{1280,884,883,390,320}.png` (the bar's top 70px).
+
+##### 10b. Changes (step 17)
+
+- `src/bin/bb-auth-web.rs`: `K::ConsoleTag` and its row go; `brand_block` loses `tag` and
+  `span.v`; `shell_named`'s comment about the two lines goes.
+- `src/assets/admin.css`: `.brand .v` and `.brand:has(img) .v` go, with their comments;
+  `@media (max-width:941px)` becomes `(max-width:883px)`; new
+  `@media (min-width:884px){nav.acct{flex-shrink:100}}`, its comment saying it is the give the
+  tag used to be. The comments naming 941/942 say 883/884.
+- AGENTS.md: the bb-auth-web paragraph's "at 941px and below" (as §6 rewrote it) says 883px, and
+  the bar is "the operator's logo, the brand, five tabs and one pill" with no tag.
+
+##### 10c. Tests and shots (step 17)
+
+Unit and socket tests in `src/bin/bb-auth-web.rs`:
+
+- `both_bars_name_the_deployment`: drop the two `K::ConsoleTag` asserts and the "second line is
+  the tag" check; instead, in both languages, the console's `a.brand` contains no `span.v` and its
+  visible text is exactly the brand name (`bb-auth`, then `BadBat75`), and its `href` is the
+  dashboard route. The account's `span.brand` is unchanged.
+- `the_forbidden_bar_names_only_the_deployment` (new): a non-administrator's `403` on `/admin/`
+  has one `span.brand` in the header, no `a.brand`, no `span.v`, visible text exactly the brand
+  name, in both languages.
+- `the_tag_line_hides_with_the_words_and_the_panel_rows_need_no_gap` becomes
+  `the_words_hide_with_a_logo_and_the_panel_rows_need_no_gap`: the `.brand:has(img) .t` checks
+  (clip pattern, no `display` or `visibility`) and the `.menu-tabs` gap check stay; and no rule in
+  `admin.css`, at any width, has a selector naming `.brand .v`.
+- `the_bar_stays_one_row_at_every_width`: the block is `@media(max-width:883px)` with
+  `nav.tabs{display:none}` and `nav.navm{display:flex}`; a `@media(min-width:884px)` block holds
+  `nav.acct` with `flex-shrink:100`; the top-level `nav.acct` keeps `flex:0 1 auto` and
+  `min-width:0`; no `max-width:941px` block remains.
+- A `K` test, or a compile failure, is enough for the key: `K::ConsoleTag` no longer exists.
+
+e2e:
+
+- `settings.js`: the one-row widths 941 and 942 become 883 and 884 (and keep 320, 360, 640, 641,
+  1024, 1280); at 883 the ☰ shows and `nav.tabs` is hidden, at 884 the reverse. At 884 in Italian
+  with the long brand, the logo and the long given name, the brand's `.t` has `scrollWidth` equal
+  to its width at 1280, the name pill is at least 128px, and the bar is one row with no sideways
+  scroll. `brandStaysWhole` drops the `.brand .v` sentence from its comment; its checks stay.
+- `e2e/shots.js`: retake `header-logo`, `forbidden`, `config-menu`, `nav-menu`, `settings-menu`
+  and `account-menu` (one run, all filters; the designer reviews light, dark, phone and `it`),
+  and by hand the console at 884 and 883 in `it` with the long brand, logo and long name.
+
+#### 11. Open questions for the user (step 17)
+
+1. The breakpoint is 883px, the measured smallest width, with no margin, as in §2. Confirm.
+2. The console's brand stays a link to the dashboard (the convention, §10); the alternative is a
+   `span` as on `/account/`, which removes the one-tap way home on a phone. Confirm or choose the
+   `span`.
