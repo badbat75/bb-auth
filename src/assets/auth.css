@@ -54,6 +54,13 @@ body{display:flex;justify-content:center;padding:24px}
 .msg{display:none;font-size:.9rem}
 .msg.show{display:block}
 
+/* The sign-in page's deletion notice (docs/ARCHITECTURE.md §13.33 §2) is `.msg.ok.show` and
+   closes with the `hidden` attribute, so this rule has to beat `.msg.show`: the two have
+   equal specificity (0,2,0), so **order is the whole tie-break** and the rule that closes
+   the box must come after the rule that opens it. Written above, the box never closes and
+   the notice shows to every visitor. */
+.msg[hidden]{display:none}
+
 .hint{text-align:center;margin:16px 2px 0}
 
 /* One page, several steps, one at a time: the whole flow is in the document and `.active` is

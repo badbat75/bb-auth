@@ -21,13 +21,22 @@ __BB_LOGO__
       <p data-i18n="brand_sub">Sign in</p>
     </div>
 
+    <!-- The deletion notice (docs/ARCHITECTURE.md §13.32 §1, §13.33): a fixed paragraph
+         above the form, shown only when this page is reached through the gate's logout with
+         the deletion's notice code. `show` is static because auth.css hides a bare `.msg`;
+         `__BB_NOTICE_HIDDEN__` is a space and `hidden`, or empty, and `.msg[hidden]` in
+         auth.css (placed after `.msg.show`, equal specificity) is what closes the box.
+         Nothing here is built out of the query: the code selects this element, and the
+         dictionary entry below is the translation, never a rendered value. -->
+    <p id="notice" class="msg ok show" role="status" data-i18n="notice_account_deleted"__BB_NOTICE_HIDDEN__>Your account is being deleted: this browser is signed out, and your sign-in accounts are queued for deletion. If you can still sign in later without signing up again, tell an administrator. Other browsers where you signed in stay signed in until you sign out there or the session ends.</p>
+
     <div id="msg" class="msg" role="alert" aria-live="polite"></div>
 
     <!-- Step 1: email -->
     <form id="email-form" class="step active" novalidate>
       <div class="field">
         <label class="fld" for="email" data-i18n="label_email">Email</label>
-        <input id="email" name="email" type="email" autocomplete="email" data-i18n-ph="ph_email" autofocus required>
+        <input id="email" name="email" type="email" autocomplete="email" data-i18n-ph="ph_email"__BB_NOTICE_DESCRIBEDBY__ autofocus required>
       </div>
       <button class="primary" type="submit" id="email-btn" data-i18n="btn_continue">Continue</button>
       <p class="hint" data-i18n="hint_email">Enter your email: we'll send you a code.</p>
@@ -153,6 +162,7 @@ __BB_SOCIAL_REGISTER__
     var I18N = {
       it: {
         brand_sub: "Accedi a " + BRAND,
+        notice_account_deleted: "Il tuo account è in fase di eliminazione: questo browser è disconnesso e i tuoi account di accesso sono in coda per l'eliminazione. Se più avanti riesci ancora ad accedere senza registrarti di nuovo, avvisa un amministratore. Gli altri browser in cui avevi effettuato l'accesso restano connessi finché non esci da lì o la sessione non termina.",
         label_email: "Email",
         ph_email: "nome@esempio.com",
         btn_continue: "Continua",
@@ -197,6 +207,7 @@ __BB_SOCIAL_REGISTER__
       },
       en: {
         brand_sub: "Sign in to " + BRAND,
+        notice_account_deleted: "Your account is being deleted: this browser is signed out, and your sign-in accounts are queued for deletion. If you can still sign in later without signing up again, tell an administrator. Other browsers where you signed in stay signed in until you sign out there or the session ends.",
         label_email: "Email",
         ph_email: "name@example.com",
         btn_continue: "Continue",

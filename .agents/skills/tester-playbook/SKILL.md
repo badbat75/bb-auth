@@ -143,6 +143,18 @@ Rules are in `AGENTS.md`. Format of this file: `AGENTS.md`, under "Skills".
   fragile), and use the **same provider order** as the page fixture, because file order is display
   order. The login page carries exactly one `<script>` and one `<style>`; a handler scan must require
   a space before `on…=`, since the template's `content="` matches `on[a-z]*=` without one.
+- `render_page` ties go to the **last** sub pushed for a placeholder (`max_by_key` on key length
+  returns the last maximum), so a mutant that pushes a second value for an existing `__BB_*__` is a
+  silent no-op and the "nothing is echoed" assert passes on a page that echoes. To prove that assert
+  bites, add a **new** placeholder to the template and fill it in the stub.
+- A CSS order check in `bb-auth`'s test module needs its own comment-stripping rule reader
+  (`css_rules`, yielding `(selector, declarations)` in file order): `bb-auth-web`'s `css_scoped` and
+  lib's `rules_named` are in other targets, and `auth.css`'s comments name selectors and declarations
+  as prose, so a raw scan reads documentation as rules. For an equal-specificity pair
+  (`.msg[hidden]` over `.msg.show`) assert the **index** of each rule as well as its declarations.
+- Keep a failure message printable: print the dictionary **line** that carries a key
+  (`dict_entry`), not the whole `I18N` arm, and never the whole page. A login page is ~40 KB of
+  inlined palette, and a panic that dumps it hides the one clause that failed.
 - Use one fixture per test.
 - Fill fixtures with real names and values captured from the real system.
 - In `bb-auth-web`, test a request end to end over a real socket: copy

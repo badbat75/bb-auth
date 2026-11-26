@@ -2580,7 +2580,11 @@ fn handle_login(req: Request, state: &State) {
             &settings.authorized_hosts,
         );
         let endpoint = settings.cognito_endpoint();
-        let page = login_page(&settings, &rd, &nonce);
+        // The notice code, selected here and never echoed: `login_page` matches it against
+        // the library's fixed code and swaps two fixed strings, and every other value,
+        // including an absent one, leaves the page exactly as it was (§13.32 §1).
+        let notice = query_param(req.url(), "notice").unwrap_or_default();
+        let page = login_page(&settings, &rd, &notice, &nonce);
         let csp = gate_csp(&settings, &nonce, &[&endpoint]);
         (page, csp)
     };
@@ -2623,10 +2627,40 @@ fn login_rd(rd: Option<&str>, referer: Option<&str>, hosts: &[UrlPattern]) -> St
 
 /// Render the sign-in page. Separate from [`handle_login`] so that what the page says can be
 /// asserted without a socket, which is the only way a test can read a page this size.
-fn login_page(settings: &Settings, rd: &str, nonce: &str) -> String {
+///
+/// `notice` selects one fixed paragraph above the form: the value of the `notice` query
+/// parameter, matched byte for byte against [`bb_auth_core::LOGIN_NOTICE_ACCOUNT_DELETED`]
+/// (docs/ARCHITECTURE.md §13.32 §1, §13.33), the deletion flow's last hop landing here
+/// through the gate's own logout. That match drives exactly two substitutions, each a fixed
+/// string: the notice element's `hidden` attribute, and the email field's
+/// `aria-describedby="notice"` (the input has `autofocus`, so focus lands below the notice
+/// and a screen-reader user starts past it; and an unconditional reference would read a
+/// deletion sentence to every visitor, because a `hidden` element named by
+/// `aria-describedby` is still read). No byte of the query reaches the page: the invariant
+/// that request data lands on a page in exactly one place (`data-rd`) holds in substance, a
+/// code selects an element and nothing is reflected.
+fn login_page(settings: &Settings, rd: &str, notice: &str, nonce: &str) -> String {
     let mut subs = look_subs(settings, nonce);
     subs.push(("__BB_RD__", html_escape(rd)));
     subs.push(("__BB_ENDPOINT__", settings.cognito_endpoint()));
+    let deleted = notice == bb_auth_core::LOGIN_NOTICE_ACCOUNT_DELETED;
+    // The notice sits statically between the brand and the message box; `show` is on it
+    // because `auth.css` hides a bare `.msg`, and `hidden` (with the `.msg[hidden]` rule
+    // placed after `.msg.show`, equal specificity, so order is the tie-break) is what the
+    // code toggles.
+    subs.push((
+        "__BB_NOTICE_HIDDEN__",
+        (if deleted { "" } else { " hidden" }).to_string(),
+    ));
+    subs.push((
+        "__BB_NOTICE_DESCRIBEDBY__",
+        (if deleted {
+            r#" aria-describedby="notice""#
+        } else {
+            ""
+        })
+        .to_string(),
+    ));
     // The app client the email flow runs against. Empty is a deployment nobody has told
     // which app client it is, and the page then cannot complete a login: the gate says so at
     // startup rather than here, because a page is the wrong place to explain a config gap.
@@ -2665,7 +2699,12 @@ fn login_page(settings: &Settings, rd: &str, nonce: &str) -> String {
 /// rather than a URL because the gate knows neither its own scheme nor its own host: a
 /// relative `Location` resolves against whatever vhost the request arrived at, which is the
 /// one place a sign-in page is certainly reachable from.
-const OWN_LOGIN_PATH: &str = "/auth/login";
+///
+/// The bytes are the library's ([`bb_auth_core::GATE_LOGIN_PATH`]) because `bb-auth-web`
+/// writes this same path into the deletion flow's logout `rd` (docs/ARCHITECTURE.md
+/// §13.32 §1): two programs naming one page is a shared fact, and the way they drift apart
+/// is a signed-out browser landing on a `404` with nothing saying why.
+const OWN_LOGIN_PATH: &str = bb_auth_core::GATE_LOGIN_PATH;
 
 /// The logout endpoint, as a path. The router matches on it and the refusal page links to
 /// it, and a test pins that the template really carries this string: a link that quietly
@@ -5362,6 +5401,7 @@ mod tests {
         let page = login_page(
             &settings_with_buttons(&[("Google", "google-client"), ("Okta", "okta-client")]),
             "https://search.badbat75.com/?q=a\"b",
+            "",
             "n0nce",
         );
         // Every placeholder was answered.
@@ -5411,6 +5451,7 @@ mod tests {
         let page = login_page(
             &settings_with_buttons(&[("Google", "google-client"), ("Okta", "okta-client")]),
             "",
+            "",
             "n0nce",
         );
         assert!(
@@ -5432,6 +5473,7 @@ mod tests {
         let both = login_page(
             &settings_with_buttons(&[("Okta", "okta-client"), ("Google", "google-client")]),
             "",
+            "",
             "n0nce",
         );
         let okta = both.find(r#"data-idp="Okta""#).expect("okta");
@@ -5444,7 +5486,7 @@ mod tests {
         // No hosted-UI domain, which is the only way a file can say "no social sign-in":
         // `compile_settings` refuses buttons without one, so there is one such state and not
         // two that look different.
-        let page = login_page(&social_settings("", &[]), "", "n0nce");
+        let page = login_page(&social_settings("", &[]), "", "", "n0nce");
         assert!(!page.contains("data-idp="), "{page}");
         assert!(!page.contains(r#"class="divider""#), "{page}");
         assert!(page.contains(r#"var AUTHORIZE_URL = "";"#), "{page}");
@@ -5576,6 +5618,7 @@ mod tests {
         login_page(
             &settings_with_buttons(&[("Google", "google-client"), ("Okta", "okta-client")]),
             "",
+            "",
             "n0nce",
         )
     }
@@ -5641,7 +5684,7 @@ mod tests {
         // the page's script, and the panel is what comes and goes.
         for page in [
             login_with_buttons(),
-            login_page(&social_settings("", &[]), "", "n0nce"),
+            login_page(&social_settings("", &[]), "", "", "n0nce"),
         ] {
             assert!(
                 page.contains(&format!("dup_note: \"{DUP_EN}\"")),
@@ -5668,7 +5711,7 @@ mod tests {
             social_settings("", &[]),
             social_settings("pool.auth.eu-central-1.amazoncognito.com", &[]),
         ] {
-            let page = login_page(&settings, "", "n0nce");
+            let page = login_page(&settings, "", "", "n0nce");
             assert!(open_tag(&page, "dup-note").is_none(), "{page}");
             assert!(!page.contains(r#"data-i18n="dup_note""#), "{page}");
             assert!(!page.contains("data-idp="), "{page}");
@@ -5690,7 +5733,7 @@ mod tests {
         // nothing is ignored when the description is computed, so one template serves both.
         for page in [
             login_with_buttons(),
-            login_page(&social_settings("", &[]), "", "n0nce"),
+            login_page(&social_settings("", &[]), "", "", "n0nce"),
         ] {
             let tag = open_tag(&page, "given_name").expect("the name field");
             assert!(
@@ -5717,6 +5760,7 @@ mod tests {
         // File order is still display order, on the step that has always shown them.
         let both = login_page(
             &settings_with_buttons(&[("Okta", "okta-client"), ("Google", "google-client")]),
+            "",
             "",
             "n0nce",
         );
@@ -5811,6 +5855,251 @@ mod tests {
         assert!(!csp.contains("unsafe-inline"), "{csp}");
     }
 
+    // --- the deletion notice on the sign-in page (docs §13.33) ----------------
+
+    /// The notice's sentences, spelled exactly as `docs/ARCHITECTURE.md` §13.33 §1 spells
+    /// them, in both languages. Pinned verbatim and not paraphrased: a paraphrase is red
+    /// after the words land and reads like a broken implementation, and the Italian is the
+    /// half a stub gets away with paraphrasing when only the English is asserted. The words
+    /// say `queued` and never `deleted`, because that is all this estate can claim (§13.29
+    /// W6), and the last sentence is the accepted gap of §13.32 §2.
+    const NOTICE_EN: &str = "Your account is being deleted: this browser is signed out, and your sign-in accounts are queued for deletion. If you can still sign in later without signing up again, tell an administrator. Other browsers where you signed in stay signed in until you sign out there or the session ends.";
+    const NOTICE_IT: &str = "Il tuo account è in fase di eliminazione: questo browser è disconnesso e i tuoi account di accesso sono in coda per l'eliminazione. Se più avanti riesci ancora ad accedere senza registrarti di nuovo, avvisa un amministratore. Gli altri browser in cui avevi effettuato l'accesso restano connessi finché non esci da lì o la sessione non termina.";
+
+    /// The dictionary key the element names. One key for both arms, since the notice cannot
+    /// tell a roster caller from a stranger (§13.32 §3): one code, one key, one sentence.
+    const NOTICE_KEY: &str = "notice_account_deleted";
+
+    /// The sign-in page as it is served to a browser arriving at
+    /// `/auth/login?notice=CODE`. A deployment with no social sign-in: the notice's presence
+    /// must not depend on any other section of the page.
+    fn login_page_notice(notice: &str) -> String {
+        login_page(&social_settings("", &[]), "", notice, "n0nce")
+    }
+
+    /// One arm of the page's `I18N` dictionary: the region from `NAME: {` to the next arm
+    /// (`en` is the last, so the region runs to the script's first statement after the
+    /// dictionary). A check that reads the page as a whole cannot tell a translation from the
+    /// *other* arm, and both arms have to carry the key: `applyLang` sets the text of every
+    /// `[data-i18n]` element from the arm it is showing, so a key in one arm only is an
+    /// English sentence sitting in an Italian page.
+    fn i18n_arm(page: &str, arm: &str) -> String {
+        let at = page
+            .find(&format!("{arm}: {{"))
+            .unwrap_or_else(|| panic!("the page's dictionary has no `{arm}` arm"));
+        let end = match arm {
+            "it" => at + page[at..].find("en: {").expect("the `en` arm follows `it`"),
+            _ => {
+                at + page[at..]
+                    .find("var msgEl")
+                    .expect("the dictionary ends where the script's next statement begins")
+            }
+        };
+        page[at..end].to_string()
+    }
+
+    /// The line of `dict` that carries `KEY:`, for a failure message. Printing the whole arm
+    /// is 80 lines of other people's translations, which hides the one line that moved.
+    fn dict_entry(dict: &str, key: &str) -> String {
+        match dict
+            .lines()
+            .find(|l| l.trim_start().starts_with(&format!("{key}:")))
+        {
+            Some(l) => l.trim().to_string(),
+            None => format!("no `{key}:` entry at all"),
+        }
+    }
+
+    /// Every rule of a stylesheet, in file order, as `(selector, declarations)`, with comments
+    /// removed. These stylesheets are flat, and their prose names selectors and declarations
+    /// as data on purpose, so a scan that kept the comments would read the documentation as
+    /// rules.
+    fn css_rules(css: &str) -> Vec<(String, String)> {
+        let mut code = String::new();
+        let mut rest = css;
+        while let Some(open) = rest.find("/*") {
+            code.push_str(&rest[..open]);
+            match rest[open..].find("*/") {
+                Some(close) => rest = &rest[open + close + 2..],
+                None => break,
+            }
+        }
+        code.push_str(rest);
+        let mut rules = Vec::new();
+        let mut rest = code.as_str();
+        while let Some(open) = rest.find('{') {
+            let head = rest[..open].trim().trim_matches('}').trim().to_string();
+            let Some(close) = rest[open..].find('}') else {
+                break;
+            };
+            rules.push((head, rest[open + 1..open + close].trim().to_string()));
+            rest = &rest[open + close + 1..];
+        }
+        rules
+    }
+
+    #[test]
+    fn the_sign_in_page_shows_the_deletion_notice_only_for_its_code() {
+        // The code is the library's, not this test's: §13.32 §1 puts it in `bb_auth_core`
+        // because `bb-auth-web` writes it into the logout's `rd` and this page reads it back.
+        let shown = login_page_notice(bb_auth_core::LOGIN_NOTICE_ACCOUNT_DELETED);
+        let tag = open_tag(&shown, "notice").expect("the notice element");
+        assert!(
+            !tag.contains("hidden"),
+            "the code matches, so it shows: {tag}"
+        );
+        // The markup §13.33 §2 chose: the box the page already has for a message, in its
+        // success arm, a status region (not `role="alert"`: nothing went wrong), and the key
+        // the page's own script translates it by.
+        assert!(tag.contains(r#"class="msg ok show""#), "{tag}");
+        assert!(tag.contains(r#"role="status""#), "{tag}");
+        assert!(
+            tag.contains(&format!(r#"data-i18n="{NOTICE_KEY}""#)),
+            "{tag}"
+        );
+        // Between the brand and the form's message box, and never inside it: the script
+        // empties `#msg` on every step, so a notice in there is erased by the first click.
+        let brand = shown.find(r#"class="brand""#).expect("the brand block");
+        let at = shown.find(r#"id="notice""#).expect("the notice");
+        let msg = shown.find(r#"id="msg""#).expect("the message box");
+        assert!(
+            brand < at && at < msg,
+            "brand, notice, message box: {brand} {at} {msg}"
+        );
+        // The email field has `autofocus`, so focus lands below the notice and a
+        // screen-reader user starts past it. With the code present the field names the
+        // notice, and it is read when the field takes focus.
+        let email = open_tag(&shown, "email").expect("the email input");
+        assert!(
+            email.contains(r#"aria-describedby="notice""#),
+            "the field must carry the notice it lands under: {email}"
+        );
+
+        // Every other request shows nothing. `""` is both "no `notice`" and `notice=`; the
+        // mixed-case value is the one a case-insensitive compare would let in, and the
+        // design's closed set is exactly one value.
+        for notice in [
+            "",
+            "other",
+            "ACCOUNT-DELETED",
+            "Account-Deleted",
+            "account-deleted-x",
+            "x-account-deleted",
+            "<script>x</script>",
+        ] {
+            let page = login_page_notice(notice);
+            // The element is in the page on every deployment: it is a template element with
+            // the `hidden` attribute, not markup that comes and goes, which is what keeps the
+            // `aria-describedby` a plain IDREF and the page's byte size fixed.
+            let tag = open_tag(&page, "notice").expect("the notice element");
+            assert!(
+                tag.contains("hidden"),
+                "`notice={notice}` must not show the notice: {tag}"
+            );
+            // And the field must not point at it: a `hidden` element named by
+            // `aria-describedby` is still read (ACCNAME 1.2 step 2A), so an unconditional
+            // attribute reads a sentence about a deletion to every visitor.
+            let email = open_tag(&page, "email").expect("the email input");
+            assert!(
+                !email.contains("aria-describedby"),
+                "`notice={notice}` must leave the field alone: {email}"
+            );
+            // No byte of the query reaches the page, in either spelling a reflection would
+            // take. The page carries a `<script>` of its own, so the whole value is searched.
+            assert!(
+                !page.contains("<script>x</script>"),
+                "`notice=<script>x</script>` is on the page as markup: the value is echoed"
+            );
+            assert!(
+                !page.contains("&lt;script&gt;x&lt;/script&gt;"),
+                "`notice=<script>x</script>` is on the page escaped: the value is echoed"
+            );
+        }
+        // Including the code that does show it: a code selects an element, it is never
+        // reflected into the page that holds it. The dictionary key is spelled with
+        // underscores, so the hyphenated code is the one that must be absent.
+        assert!(
+            !shown.contains(bb_auth_core::LOGIN_NOTICE_ACCOUNT_DELETED),
+            "the code selects the notice and appears nowhere in the page"
+        );
+    }
+
+    #[test]
+    fn the_deletion_notice_speaks_both_languages() {
+        let page = login_page_notice(bb_auth_core::LOGIN_NOTICE_ACCOUNT_DELETED);
+        // The element's own text is the English sentence, so the page reads correctly in the
+        // half-second before its script runs, and on a browser running no script at all.
+        assert_eq!(element_text(&page, "notice", "</p>"), NOTICE_EN);
+        // Each arm carries §13.33 §1's sentence for its own language, verbatim, and both arms
+        // have to carry it: `applyLang` sets the text of every `[data-i18n]` element from the
+        // arm it is showing, so a key in one arm only is an English sentence sitting in an
+        // Italian page, and a key in neither is an **empty** notice, the script clearing the
+        // text of an element it cannot translate. The English one is pinned twice over: what
+        // the person reads is the element's text, and what the script writes back on an
+        // English page must be the same bytes.
+        for (arm, words) in [("en", NOTICE_EN), ("it", NOTICE_IT)] {
+            let dict = i18n_arm(&page, arm);
+            assert!(
+                dict.contains(&format!(r#"{NOTICE_KEY}: "{words}""#)),
+                "the `{arm}` arm must carry the §13.33 sentence verbatim, and it says: {}",
+                dict_entry(&dict, NOTICE_KEY)
+            );
+        }
+        // One entry per dictionary, as the page's one other translated notice is pinned: a
+        // second key is a second sentence to keep true for no new decision (§13.32 §3).
+        assert_eq!(
+            page.matches(&format!("{NOTICE_KEY}:")).count(),
+            2,
+            "one entry per arm, and the element's key is not a dictionary entry"
+        );
+    }
+
+    #[test]
+    fn the_auth_css_hides_a_hidden_message() {
+        // §13.33 §2: the notice is `class="msg ok show"` and is hidden with the `hidden`
+        // attribute. A bare `[hidden]{display:none}` does not hide it, because `.msg.show`
+        // (two classes) outranks one attribute selector. The two rules have the same
+        // specificity (0,2,0), so the one that wins is the one that comes **later**, and a
+        // rule written above `.msg.show` is a notice shown to every visitor.
+        let rules = css_rules(AUTH_CSS);
+        let show = rules
+            .iter()
+            .position(|(s, _)| s == ".msg.show")
+            .expect("`.msg.show` is the rule the notice needs to beat");
+        let hidden = rules
+            .iter()
+            .position(|(s, _)| s == ".msg[hidden]")
+            .expect("`.msg[hidden]`: §13.33 §2 adds it, and nothing else hides a `.show` box");
+        assert!(
+            hidden > show,
+            "`.msg[hidden]` must come after `.msg.show`: they are equal on specificity, so \
+             order is the whole tie-break and above it the box never closes"
+        );
+        // Each rule says the thing the order is about: `show` opens the box, `[hidden]`
+        // closes it. A rule that closes a box it never opened proves nothing.
+        assert!(
+            rules[show].1.replace(' ', "").contains("display:block"),
+            "`.msg.show` must show it: {:?}",
+            rules[show]
+        );
+        assert!(
+            rules[hidden].1.replace(' ', "").contains("display:none"),
+            "`.msg[hidden]` must hide it: {:?}",
+            rules[hidden]
+        );
+        // And the box is hidden by default, which is why `show` is on the notice statically:
+        // an empty message box must never occupy space above the form.
+        let bare = rules
+            .iter()
+            .find(|(s, _)| s == ".msg")
+            .expect("the bare `.msg` rule");
+        assert!(
+            bare.1.replace(' ', "").contains("display:none"),
+            "the box is hidden until it has something to say: {:?}",
+            bare
+        );
+    }
+
     #[test]
     fn the_audiences_are_the_app_clients_the_file_names() {
         // Nothing else in the system says which app clients this gate is part of, so the
@@ -5837,6 +6126,7 @@ mod tests {
         let page = login_page(
             &ui_settings(bb_auth_core::UiSettings::default()),
             "",
+            "",
             "n0nce",
         );
         assert!(page.contains(r#"data-rd=""#), "{page}");
@@ -5852,7 +6142,7 @@ mod tests {
         };
         let settings = ui_settings(ui);
         for page in [
-            login_page(&settings, "", "n0nce"),
+            login_page(&settings, "", "", "n0nce"),
             callback_page(TOKEN_URL, CALLBACK_URL, &settings, "n0nce"),
         ] {
             let style = page.find("<style ").expect("the built-in stylesheet");
@@ -7534,6 +7824,25 @@ mod tests {
         assert_eq!(r.headers().get("Location").unwrap(), "/auth/login");
     }
 
+    /// The same default, pinned to the **library's** constant and not to a literal. The gate
+    /// answers a logout, a `401` and an empty `gate.login_url` with this path, and
+    /// `bb-auth-web` writes it into the logout `rd` of the deletion flow (§13.32 §1). Two
+    /// programs naming the same page is a shared fact, which is the library's membership rule,
+    /// so the byte is asserted once here and read from there. A rename of the gate's own page
+    /// that updates one program and not the other sends every signed-out browser to a `404`.
+    #[test]
+    fn the_login_path_is_the_librarys() {
+        assert_eq!("/auth/login", bb_auth_core::GATE_LOGIN_PATH);
+        let mut file: bb_auth_core::SettingsFile = serde_json::from_str(&format!(
+            r#"{{ "version": {}, "gate": {{ "client_id": "testclient" }} }}"#,
+            bb_auth_core::SETTINGS_VERSION
+        ))
+        .unwrap();
+        file.gate.login_url = String::new();
+        let settings = bb_auth_core::compile_settings(&file).unwrap();
+        assert_eq!(global_login(&settings), bb_auth_core::GATE_LOGIN_PATH);
+    }
+
     #[test]
     fn a_logout_clears_the_cookie_and_only_refuses_a_cross_site_one() {
         let base = serve(token_state(gate_settings("{}")));
@@ -7553,6 +7862,73 @@ mod tests {
             .unwrap();
         assert_eq!(r.status(), 302);
         assert!(r.headers().get("Set-Cookie").is_none());
+    }
+
+    /// The last hop of the deletion flow, as the account page issues it (docs §13.32 §4).
+    ///
+    /// Nothing new runs here, and that is the point: §13.32 §1 puts no code in the gate for
+    /// this step, because the notice is a query string on a URL the logout already lands on.
+    /// So this is a **pin**, and it is green before the page grows a notice: the pair that has
+    /// to keep working is that a signed-out browser is sent *through* the sign-in page with
+    /// the code attached, and the code arrives intact through `safe_rd`, which is the guard
+    /// that has every right to reject a value carrying a query. A change to the logout's
+    /// landing logic, to `safe_rd`, or to how the gate answers an `X-Original-URL` of nothing,
+    /// and the person whose account is being deleted sees the sign-in page with no explanation
+    /// of what happened to them.
+    #[test]
+    fn a_logout_with_the_deletion_rd_clears_and_lands_on_the_notice() {
+        // A cookie domain, because the expiring cookie has to carry the one the session was
+        // set with, and the notice is worthless to a person whose browser is still signed in.
+        let base = serve(token_state(gate_settings(
+            r#"{ "cookie_domain": ".badbat75.com" }"#,
+        )));
+        // The `rd` the account page writes, percent-encoded as a link writes it. The gate's
+        // own sign-in path and the library's notice code, not this test's: a rename of either
+        // moves every browser and silently lands this person on the sign-in page with the
+        // notice hidden.
+        let rd = format!(
+            "/{}?notice={}",
+            bb_auth_core::GATE_LOGIN_PATH.trim_start_matches('/'),
+            bb_auth_core::LOGIN_NOTICE_ACCOUNT_DELETED
+        );
+        let url = format!("{base}/auth/logout?rd={}", pct_encode(&rd));
+        let r = agent()
+            .get(&url)
+            .header("X-Original-URL", LANDING)
+            .header("Sec-Fetch-Site", "same-origin")
+            .call()
+            .unwrap();
+        assert_eq!(r.status(), 302);
+        // The `rd` survives: same-origin path, resolved against the caller's host, and the
+        // notice's query is not stripped on the way through `safe_rd`.
+        let want = format!(
+            "https://auth.badbat75.com{}?notice={}",
+            bb_auth_core::GATE_LOGIN_PATH,
+            bb_auth_core::LOGIN_NOTICE_ACCOUNT_DELETED
+        );
+        assert_eq!(
+            r.headers().get("Location").unwrap(),
+            &want,
+            "the signed-out browser must land on the sign-in page carrying the code"
+        );
+        let sc = r.headers().get("Set-Cookie").unwrap().to_str().unwrap();
+        assert!(sc.starts_with("bb_session=;"), "{sc}");
+        assert!(sc.contains("Max-Age=0"), "{sc}");
+        assert!(sc.contains("Domain=.badbat75.com"), "{sc}");
+        assert!(sc.contains("Path=/"), "{sc}");
+
+        // No `X-Original-URL`: the gate knows nothing about which host asked, and the logout
+        // must still clear the session and still reach a sign-in page. A person mid-deletion
+        // whose deployment has not wired the header is not left holding a live cookie.
+        let r = agent()
+            .get(&url)
+            .header("Sec-Fetch-Site", "same-origin")
+            .call()
+            .unwrap();
+        assert_eq!(r.status(), 302);
+        assert_eq!(r.headers().get("Location").unwrap(), LOGIN, "{rd}");
+        let sc = r.headers().get("Set-Cookie").unwrap().to_str().unwrap();
+        assert!(sc.contains("Max-Age=0"), "{sc}");
     }
 
     /// The list `--check-env` answers with, against the calls that actually make a variable

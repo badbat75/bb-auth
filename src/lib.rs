@@ -3320,6 +3320,38 @@ pub const IDENTITY_HEADER: &str = "X-Auth-Email";
 /// typed.
 pub const NATIVE_USERNAME_HEADER: &str = "X-Auth-Native-Username";
 
+/// The path of the sign-in page the gate serves itself, spelled once because **two programs
+/// write one URL**.
+///
+/// The gate answers a logout, a `401` and an empty `gate.login_url` with this path, and
+/// `bb-auth-web` builds the deletion flow's logout `rd` out of it and
+/// [`LOGIN_NOTICE_ACCOUNT_DELETED`] (docs/ARCHITECTURE.md §13.32 §1). A constant in each
+/// program is two strings that have to agree by eye, and the way they disagree is silent:
+/// every browser mid-deletion is sent to a `404`, and the flow's only explanation of itself
+/// never appears. The `rd` is relative because `bb-auth-web` knows neither its scheme nor its
+/// host, and a path is the shape the gate's own `global_login` answers with for the same
+/// reason.
+pub const GATE_LOGIN_PATH: &str = "/auth/login";
+
+/// The one notice code the sign-in page understands: arriving at the gate's login page with
+/// `?notice=account-deleted` shows one fixed paragraph (docs/ARCHITECTURE.md §13.32 §1,
+/// §13.33), the sign-in page of the estate answering "what just happened to my account".
+///
+/// The code is **fixed, a closed set of one**, and that is what keeps the notice carrying no
+/// request data: the query value is compared to this constant byte for byte (case-sensitive,
+/// so no casing trick widens the set), and the page's only two changes are the fixed strings
+/// `hidden` and `aria-describedby="notice"`. No byte of the query reaches the page, so
+/// AGENTS.md's "request data reaches a page in exactly one place, `data-rd`" stays true in
+/// substance: a code selects an element, nothing is reflected. A second notice is a second
+/// code, a second fixed paragraph and a second dictionary entry per arm, never a value
+/// rendered out of the request.
+///
+/// It lives here, beside [`GATE_LOGIN_PATH`], for the library's membership rule: `bb-auth-web`
+/// writes this code into the logout `rd` of a completed deletion and the gate reads it back
+/// out of the query string that lands on, and the way the two drift apart is silent (the
+/// person lands signed out with no explanation).
+pub const LOGIN_NOTICE_ACCOUNT_DELETED: &str = "account-deleted";
+
 /// What this build was made from: a `git describe --always --dirty --tags`, or `unknown`.
 ///
 /// Read from `BB_AUTH_BUILD` at compile time, which is what `scripts/build.sh` and
@@ -13877,5 +13909,18 @@ mod tests {
             "refusing to write: landing_url: its host is not covered by authorized_hosts, so \
              every sign-in with no rd would fall back to the sign-in page"
         );
+    }
+
+    /// §13.32 §1: the sign-in path and the deletion notice's code live in the library because
+    /// **two programs write one URL**. `bb-auth-web` builds the logout's `rd` out of both, and
+    /// the gate's sign-in page reads the code back out of the query string it lands in. A
+    /// constant in each program is two strings that have to agree by eye, and the way they
+    /// disagree is silent: every browser is sent to a page that shows no notice, and the
+    /// deletion flow's only explanation of itself never appears. So the pair is pinned to the
+    /// exact bytes §13.32 spells, and the gate's test module reads them from here.
+    #[test]
+    fn the_gate_login_path_and_the_notice_code_are_the_librarys() {
+        assert_eq!(GATE_LOGIN_PATH, "/auth/login");
+        assert_eq!(LOGIN_NOTICE_ACCOUNT_DELETED, "account-deleted");
     }
 }
