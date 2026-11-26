@@ -4076,7 +4076,10 @@ impl AuditUnit {
     }
 
     /// The largest amount of it that is a setting and not a typo: a century, or a tebibyte.
-    fn max_amount(self) -> u64 {
+    ///
+    /// The admin GUI reads it to name the ceiling in a refusal, so the page states the same
+    /// limit the parser applied.
+    pub fn max_amount(self) -> u64 {
         match self {
             AuditUnit::Weeks => 5_200,
             AuditUnit::Months => 1_200,

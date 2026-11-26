@@ -419,12 +419,16 @@ async function run(ctx, t) {
     t.eq('emptying the list is a 400', (await submit(page)).status(), 400);
     t.check('and says why', (await mainText(page)).includes('at least one administrator'));
 
-    // A value the gate would refuse never reaches the disk either: the library is the one
-    // that says so, in the sentence bb-auth-adm would print.
+    // A value the gate would refuse never reaches the disk either, and the page says so in
+    // the reader's own words, naming the field by its visible label (§13.31 §4). The library's
+    // English sentence, which is what this checked while the page showed it, is what
+    // bb-auth-adm prints at a shell; the page's block is the one under test here.
     await page.goto(ctx.base + '/config?lang=en');
     await page.fill('textarea[name=identity]', 'phone');
     t.eq('an unknown identity attribute is a 400', (await submit(page)).status(), 400);
-    t.check('with the parser own words', (await mainText(page)).includes('unknown identity attribute'));
+    t.eq('the refusal names the field by its label',
+      (await page.locator('div.err').first().innerText()).trim(),
+      "Identity attributes: 'phone' is not one of: uuid, email.");
 
     await page.goto(ctx.base + '/config?lang=en');
     await page.fill('input[name=ttl]', 'soon');

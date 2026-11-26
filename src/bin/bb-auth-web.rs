@@ -276,10 +276,12 @@ use bb_auth_core::{
     scope_mut, scope_pos, sha256_hex, shadowing_scope, social_idp_label, stylesheet_link,
     user_group_mut, user_group_refs, user_label, user_pos, user_refs, version_line, Access,
     AccessFile, AccessWrite, ApiKeySpec, AppSpec, AuditCredential, AuditEvent, AuditKind,
-    AuditLimit, AuditPolicy, AuditUnit, Decision, Dur, GateSettings, GuardedSetting, RequestSite,
-    ScopeSpec, SealedKey, Settings, SettingsFile, SettingsWrite, SocialButtonSpec, Subject,
-    UiTheme, UserSpec, WiredButton, Written, BASE_CSS, DEFAULT_AUDIT_FILE, IDENTITY_HEADER,
-    PAGE_SECURITY_HEADERS, SOCIAL_IDPS, THEME_CSS,
+    AuditLimit, AuditPolicy, AuditUnit, Decision, Dur, GateSettings, GuardedSetting, HeaderFault,
+    PrepareError, RequestSite, ScopeSpec, SealedKey, SettingKey, Settings, SettingsFile,
+    SettingsRefusal, SettingsWrite, SocialButtonSpec, Subject, UiTheme, UrlFault, UserSpec,
+    WiredButton, Written, BASE_CSS, DEFAULT_AUDIT_FILE, IDENTITY_ATTRS, IDENTITY_HEADER,
+    MAX_BRAND_NAME, MAX_SESSION_TTL, MIN_SESSION_TTL, PAGE_SECURITY_HEADERS, SOCIAL_IDPS,
+    THEME_CSS,
 };
 use maud::{html, Markup, PreEscaped, DOCTYPE};
 use sha2::{Digest, Sha256};
@@ -1094,6 +1096,58 @@ enum K {
     DefaultTheme,
     DefaultThemeHelp,
     DefaultThemeBad,
+    // --- a settings-file refusal, in the reader's language (docs/ARCHITECTURE.md §13.31) ---
+    //
+    // One key per refusal the library answers with a code, so the page that refuses a save says
+    // the same thing in Italian as it says in English. The `{0}` of each is the visible label of
+    // the field it is marked on, which is why none of them spells a wire name: an operator reads
+    // "Landing page", never `landing_url`. A typed value is quoted only where the refusal is
+    // about one entry of a list (a claim, an attribute, a host) or about a header name, since
+    // there the value is the thing to point at; a whole-field refusal quotes nothing, because the
+    // field below already shows what was typed.
+    //
+    // The library's code list is the authority on how many there are: `settings_refusal` matches
+    // on the variant with no wildcard arm, so a refusal added there stops this GUI compiling
+    // until it is given a key here.
+    SetRefFileOnly,
+    SetRefClaimCharset,
+    SetRefClaimEmptyPart,
+    SetRefClaimConsumed,
+    SetRefClaimHeaderReserved,
+    SetRefClaimsCollide,
+    SetRefAttrUnknown,
+    SetRefAttrTwice,
+    SetRefAttrNone,
+    SetRefTtlBelowFloor,
+    SetRefTtlAboveCeiling,
+    SetRefAppClientId,
+    SetRefUrlNotPrintable,
+    SetRefUrlNotHttps,
+    SetRefUrlEmptyHost,
+    SetRefUrlUserinfo,
+    SetRefUrlBackslash,
+    SetRefUrlUserinfoOrBackslash,
+    SetRefUrlQueryOrFragment,
+    SetRefUrlQuote,
+    SetRefUrlNotHttpsOrRooted,
+    SetRefCallbackNotHttps,
+    SetRefCookieDomainNotBare,
+    SetRefCookieDomainSingleLabel,
+    SetRefHostControlByte,
+    SetRefHostNotBare,
+    SetRefHostAtOrDotDot,
+    SetRefHostsOutsideCookieDomain,
+    SetRefLandingOffHosts,
+    SetRefOauthDomainNotBare,
+    SetRefHeaderNotAName,
+    SetRefHeaderCredential,
+    SetRefHeadersSame,
+    SetRefLimitNotAmount,
+    SetRefLimitZero,
+    SetRefLimitTooMuch,
+    SetRefAuditUnbounded,
+    SetRefBrandControl,
+    SetRefBrandTooLong,
     Days,
     // --- the self-service page ---
     //
@@ -1315,6 +1369,203 @@ fn t(lang: Lang, key: K) -> &'static str {
             lang,
             "must be one of: light, dark, system",
             "deve essere uno tra: light, dark, system",
+        ),
+        // A settings-file refusal, in the reader's language (§13.31). `{0}` is the visible label
+        // of the field the refusal is marked on, filled by `settings_refusal` through `fill`.
+        K::SetRefFileOnly => m(
+            lang,
+            "The settings file is refused for a reason this page cannot fix: correct it with bb-auth-adm over SSH. The gate says: {0}",
+            "Il file delle impostazioni viene rifiutato per un motivo che questa pagina non può risolvere: correggilo con bb-auth-adm via SSH. Il gate dice: {0}",
+        ),
+        K::SetRefClaimCharset => m(
+            lang,
+            "{0}: '{1}' may contain only letters, digits, '_', ':' and '-'.",
+            "{0}: '{1}' può contenere solo lettere, cifre, '_', ':' e '-'.",
+        ),
+        K::SetRefClaimEmptyPart => m(
+            lang,
+            "{0}: '{1}' starts or ends with '_', ':' or '-', or has two of them in a row; each one must sit between letters or digits.",
+            "{0}: '{1}' inizia o finisce con '_', ':' o '-', oppure ne ha due di fila; ognuno deve stare tra lettere o cifre.",
+        ),
+        K::SetRefClaimConsumed => m(
+            lang,
+            "{0}: '{1}' is a claim the gate reads for itself, so it cannot be passed to the application.",
+            "{0}: '{1}' è un claim che il gate legge per sé, quindi non può essere passato all'applicazione.",
+        ),
+        K::SetRefClaimHeaderReserved => m(
+            lang,
+            "{0}: '{1}' would become the header {2}, which the gate keeps for itself.",
+            "{0}: '{1}' diventerebbe l'header {2}, che il gate riserva a sé.",
+        ),
+        K::SetRefClaimsCollide => m(
+            lang,
+            "{0}: '{1}' and '{2}' would both become the header {3}; keep only one of them.",
+            "{0}: '{1}' e '{2}' diventerebbero entrambi l'header {3}; tienine solo uno.",
+        ),
+        K::SetRefAttrUnknown => m(
+            lang,
+            "{0}: '{1}' is not one of: {2}.",
+            "{0}: '{1}' non è uno tra: {2}.",
+        ),
+        K::SetRefAttrTwice => m(
+            lang,
+            "{0}: '{1}' is listed twice.",
+            "{0}: '{1}' compare due volte.",
+        ),
+        K::SetRefAttrNone => m(
+            lang,
+            "{0}: at least one is needed ({1}); without one, the applications behind the gate cannot tell who signed in.",
+            "{0}: ne serve almeno uno ({1}); senza, le applicazioni dietro il gate non sanno chi è entrato.",
+        ),
+        K::SetRefTtlBelowFloor => m(
+            lang,
+            "{0}: must be at least {1} seconds; a session that expires as it is handed over sends everybody back to the sign-in page.",
+            "{0}: servono almeno {1} secondi; una sessione che scade mentre viene consegnata rimanda tutti alla pagina di accesso.",
+        ),
+        K::SetRefTtlAboveCeiling => m(
+            lang,
+            "{0}: must be at most {1} seconds.",
+            "{0}: può essere al massimo di {1} secondi.",
+        ),
+        K::SetRefAppClientId => m(
+            lang,
+            "App client for {0}: '{1}' may contain only letters, digits, '.', '_' and '-'.",
+            "App client per {0}: '{1}' può contenere solo lettere, cifre, '.', '_' e '-'.",
+        ),
+        K::SetRefUrlNotPrintable => m(
+            lang,
+            "{0}: may contain only plain ASCII characters, with no spaces, accented letters or control characters.",
+            "{0}: può contenere solo caratteri ASCII semplici, senza spazi, lettere accentate o caratteri di controllo.",
+        ),
+        K::SetRefUrlNotHttps => m(
+            lang,
+            "{0}: must be an absolute address starting with https://.",
+            "{0}: deve essere un indirizzo assoluto che inizia con https://.",
+        ),
+        K::SetRefUrlEmptyHost => m(
+            lang,
+            "{0}: the address names no host after https://.",
+            "{0}: l'indirizzo non indica alcun host dopo https://.",
+        ),
+        K::SetRefUrlUserinfo => m(
+            lang,
+            "{0}: a user name and '@' before the host are not allowed.",
+            "{0}: un nome utente con '@' prima dell'host non è ammesso.",
+        ),
+        K::SetRefUrlBackslash => m(
+            lang,
+            "{0}: a backslash (\\) is not allowed.",
+            "{0}: la barra rovesciata (\\) non è ammessa.",
+        ),
+        K::SetRefUrlUserinfoOrBackslash => m(
+            lang,
+            "{0}: neither a user name with '@' nor a backslash (\\) is allowed.",
+            "{0}: non sono ammessi né un nome utente con '@' né la barra rovesciata (\\).",
+        ),
+        K::SetRefUrlQueryOrFragment => m(
+            lang,
+            "{0}: must be the issuer address alone, with no '?' query and no '#' fragment.",
+            "{0}: deve essere solo l'indirizzo dell'issuer, senza query '?' né frammento '#'.",
+        ),
+        K::SetRefUrlQuote => m(
+            lang,
+            "{0}: quotes and angle brackets are not allowed.",
+            "{0}: virgolette e parentesi angolari non sono ammesse.",
+        ),
+        K::SetRefUrlNotHttpsOrRooted => m(
+            lang,
+            "{0}: must be an absolute https:// address or a path starting with '/'.",
+            "{0}: deve essere un indirizzo https:// assoluto o un percorso che inizia con '/'.",
+        ),
+        K::SetRefCallbackNotHttps => m(
+            lang,
+            "{0}: must be the absolute https:// address registered on the app clients, because Cognito compares it byte for byte.",
+            "{0}: deve essere l'indirizzo https:// assoluto registrato sugli app client, perché Cognito lo confronta byte per byte.",
+        ),
+        K::SetRefCookieDomainNotBare => m(
+            lang,
+            "{0}: must be a bare domain such as .example.com: letters, digits, '.' and '-', with no scheme, port or path.",
+            "{0}: deve essere un dominio puro come .example.com: lettere, cifre, '.' e '-', senza schema, porta o percorso.",
+        ),
+        K::SetRefCookieDomainSingleLabel => m(
+            lang,
+            "{0}: no browser keeps a cookie for a one-word domain; name the domain the services share, such as .example.com.",
+            "{0}: nessun browser conserva un cookie per un dominio di una sola parola; indica il dominio che i servizi hanno in comune, come .example.com.",
+        ),
+        K::SetRefHostControlByte => m(
+            lang,
+            "{0}: '{1}' contains a control character, often left by a paste; type it again.",
+            "{0}: '{1}' contiene un carattere di controllo, spesso lasciato da un copia e incolla; riscrivilo.",
+        ),
+        K::SetRefHostNotBare => m(
+            lang,
+            "{0}: '{1}' must be a bare host such as app.example.com, with no scheme, port or path.",
+            "{0}: '{1}' deve essere un host puro come app.example.com, senza schema, porta o percorso.",
+        ),
+        K::SetRefHostAtOrDotDot => m(
+            lang,
+            "{0}: '{1}' must not contain '@' or '..'.",
+            "{0}: '{1}' non deve contenere '@' o '..'.",
+        ),
+        K::SetRefHostsOutsideCookieDomain => m(
+            lang,
+            "{0}: the {2} '{3}' does not reach {1}, so a sign-in that lands there carries no session cookie and loops back to the sign-in page.",
+            "{0}: il {2} '{3}' non raggiunge {1}, quindi un accesso che arriva lì non porta il cookie di sessione e torna in ciclo alla pagina di accesso.",
+        ),
+        K::SetRefLandingOffHosts => m(
+            lang,
+            "{0}: must be on one of the {1}, or every sign-in that names no page falls back to the sign-in page.",
+            "{0}: deve stare su uno degli {1}, altrimenti ogni accesso che non indica una pagina ricade sulla pagina di accesso.",
+        ),
+        K::SetRefOauthDomainNotBare => m(
+            lang,
+            "{0}: must be a bare host: letters, digits, '.' and '-', with no scheme and no path.",
+            "{0}: deve essere un host puro: lettere, cifre, '.' e '-', senza schema né percorso.",
+        ),
+        K::SetRefHeaderNotAName => m(
+            lang,
+            "{0}: '{1}' is not a header name: letters, digits and '-' only (nginx drops a header with an underscore in its name).",
+            "{0}: '{1}' non è un nome di header: solo lettere, cifre e '-' (nginx scarta un header con un trattino basso nel nome).",
+        ),
+        K::SetRefHeaderCredential => m(
+            lang,
+            "{0}: '{1}' carries a credential, and the audit never writes one down.",
+            "{0}: '{1}' contiene una credenziale, e l'audit non registra mai credenziali.",
+        ),
+        K::SetRefHeadersSame => m(
+            lang,
+            "{0}: '{1}' is already the {2}; one header cannot carry both an address and a request id.",
+            "{0}: '{1}' è già l'{2}; un solo header non può portare sia un indirizzo sia un id di richiesta.",
+        ),
+        K::SetRefLimitNotAmount => m(
+            lang,
+            "{0}: the amount must be a whole number.",
+            "{0}: la quantità deve essere un numero intero.",
+        ),
+        K::SetRefLimitZero => m(
+            lang,
+            "{0}: the amount must be more than 0.",
+            "{0}: la quantità deve essere maggiore di 0.",
+        ),
+        K::SetRefLimitTooMuch => m(
+            lang,
+            "{0}: the most allowed is {1} {2}.",
+            "{0}: il massimo ammesso è {1} {2}.",
+        ),
+        K::SetRefAuditUnbounded => m(
+            lang,
+            "{0} and {1}: at least one of the two must be a size (MiB, GiB), or a flood of refusals would grow the audit without limit.",
+            "{0} e {1}: almeno una delle due deve essere una dimensione (MiB, GiB), altrimenti un'ondata di rifiuti farebbe crescere l'audit senza limite.",
+        ),
+        K::SetRefBrandControl => m(
+            lang,
+            "{0}: control characters are not allowed.",
+            "{0}: i caratteri di controllo non sono ammessi.",
+        ),
+        K::SetRefBrandTooLong => m(
+            lang,
+            "{0}: {1} characters, and at most {2} are allowed.",
+            "{0}: {1} caratteri, e ne sono ammessi al massimo {2}.",
         ),
         K::SessionTtlHelp => m(
             lang,
@@ -5093,6 +5344,353 @@ impl From<String> for Refusal {
 /// the field.
 const ERR_ID: &str = "form-error";
 
+/// Fill `{0}`, `{1}`, … in `template` from `args`, in one pass.
+///
+/// The single pass is the point, for the reason `render_page` (the gate's page filler) gives for
+/// its own substitution:
+/// every argument is something an operator typed, and rescanning what a placeholder expanded to
+/// would let a claim named `{1}` ask for a second round of substitution inside the sentence
+/// about it. A `{` that opens nothing (no closing `}`, or a body that is not a number) is left
+/// as the text it is, and an index past the end of `args` fills the empty string: a message with
+/// a hole in it is a bug in this file, and the test over every code is what catches it, not a
+/// panic on a page an operator is reading.
+fn fill(template: &str, args: &[&str]) -> String {
+    let mut out = String::with_capacity(template.len());
+    let mut rest = template;
+    while let Some(at) = rest.find('{') {
+        out.push_str(&rest[..at]);
+        rest = &rest[at + 1..];
+        match rest.find('}') {
+            Some(end) if rest[..end].bytes().all(|b| b.is_ascii_digit()) => {
+                let n = rest[..end].parse::<usize>().unwrap_or(usize::MAX);
+                out.push_str(args.get(n).copied().unwrap_or(""));
+                rest = &rest[end + 1..];
+            }
+            _ => out.push('{'),
+        }
+    }
+    out.push_str(rest);
+    out
+}
+
+/// The field a [`SettingKey`] is about on the Settings page: its `name=` and its visible label.
+///
+/// One helper for the pair because a translated refusal has to name the label in its message and
+/// mark the input by its `name=`, and the two are the same fact said twice. A key the library
+/// names is the library's; which box on this page holds it is this page's, and this is the one
+/// place that knows both.
+fn setting_field(key: SettingKey) -> (&'static str, K) {
+    match key {
+        SettingKey::LoginUrl => ("login_url", K::GlobalLoginUrl),
+        SettingKey::DeniedUrl => ("denied_url", K::GlobalDeniedUrl),
+        SettingKey::LandingUrl => ("landing_url", K::GlobalLandingUrl),
+        SettingKey::Issuer => ("issuer", K::Issuer),
+        SettingKey::SocialCallbackUrl => ("callback", K::SocialCallback),
+        SettingKey::StylesheetUrl => ("stylesheet", K::StylesheetUrl),
+        SettingKey::LogoUrl => ("logo", K::LogoUrl),
+        SettingKey::ClientIpHeader => ("client_ip_header", K::ClientIpHeader),
+        SettingKey::RequestIdHeader => ("request_id_header", K::RequestIdHeader),
+        SettingKey::AuditRotation => ("audit_rotation", K::AuditRotation),
+        SettingKey::AuditRetention => ("audit_retention", K::AuditRetention),
+    }
+}
+
+/// A settings-file refusal as this page says it: in the reader's language, naming the visible
+/// label of the field it is about, and marking that field `invalid` (docs/ARCHITECTURE.md
+/// §13.31).
+///
+/// The match is exhaustive, with **no `_` arm on purpose**. `SettingsRefusal` is the library's
+/// answer about a file three programs read, so a refusal added there must not be able to arrive
+/// here and be shown in English on an Italian page, which is what a wildcard would do silently.
+/// Without one, a new variant is a compile error until somebody decides what the page says about
+/// it and writes the `K` key, which is the same reflex that makes [`SettingsRefusal::code`] an
+/// exhaustive match.
+///
+/// `{0}` of every key is `t(lang, label)`, which is what "names the visible field label" means
+/// mechanically. A typed value is quoted only where the field cannot show which part of it is
+/// wrong: an entry of a list (a claim, an attribute, a host) or a header name. The five codes
+/// this form can never produce (§13.31 §5) are the one place the library's English sentence is
+/// shown, because the operator who meets them is at a shell, where that is exactly what
+/// `bb-auth-adm --check-settings` says.
+fn settings_refusal(lang: Lang, r: &SettingsRefusal) -> Refusal {
+    // The attributes the field accepts, as its own help spells them: the library's list, joined,
+    // so a fourth attribute added there is named here by the same edit.
+    let known = IDENTITY_ATTRS.join(", ");
+    match r {
+        SettingsRefusal::Version { .. }
+        | SettingsRefusal::ButtonBareName { .. }
+        | SettingsRefusal::ButtonNoIdp
+        | SettingsRefusal::ButtonIdpCharset { .. }
+        | SettingsRefusal::ButtonTwice { .. } => {
+            Refusal::from(fill(t(lang, K::SetRefFileOnly), &[&r.to_string()]))
+        }
+        SettingsRefusal::ClaimCharset { claim } => Refusal::on(
+            "claims",
+            fill(
+                t(lang, K::SetRefClaimCharset),
+                &[t(lang, K::ProfileClaims), claim],
+            ),
+        ),
+        SettingsRefusal::ClaimEmptyPart { claim } => Refusal::on(
+            "claims",
+            fill(
+                t(lang, K::SetRefClaimEmptyPart),
+                &[t(lang, K::ProfileClaims), claim],
+            ),
+        ),
+        SettingsRefusal::ClaimConsumed { claim } => Refusal::on(
+            "claims",
+            fill(
+                t(lang, K::SetRefClaimConsumed),
+                &[t(lang, K::ProfileClaims), claim],
+            ),
+        ),
+        SettingsRefusal::ClaimHeaderReserved { claim, header } => Refusal::on(
+            "claims",
+            fill(
+                t(lang, K::SetRefClaimHeaderReserved),
+                &[t(lang, K::ProfileClaims), claim, header],
+            ),
+        ),
+        SettingsRefusal::ClaimsCollide {
+            first,
+            second,
+            header,
+        } => Refusal::on(
+            "claims",
+            fill(
+                t(lang, K::SetRefClaimsCollide),
+                &[t(lang, K::ProfileClaims), first, second, header],
+            ),
+        ),
+        SettingsRefusal::AttrUnknown { attr } => Refusal::on(
+            "identity",
+            fill(
+                t(lang, K::SetRefAttrUnknown),
+                &[t(lang, K::IdentityAttrs), attr, &known],
+            ),
+        ),
+        SettingsRefusal::AttrTwice { attr } => Refusal::on(
+            "identity",
+            fill(
+                t(lang, K::SetRefAttrTwice),
+                &[t(lang, K::IdentityAttrs), attr],
+            ),
+        ),
+        SettingsRefusal::AttrNone => Refusal::on(
+            "identity",
+            fill(
+                t(lang, K::SetRefAttrNone),
+                &[t(lang, K::IdentityAttrs), &known],
+            ),
+        ),
+        SettingsRefusal::TtlBelowFloor { .. } => Refusal::on(
+            "ttl",
+            fill(
+                t(lang, K::SetRefTtlBelowFloor),
+                &[t(lang, K::SessionTtl), &MIN_SESSION_TTL.to_string()],
+            ),
+        ),
+        SettingsRefusal::TtlAboveCeiling { .. } => Refusal::on(
+            "ttl",
+            fill(
+                t(lang, K::SetRefTtlAboveCeiling),
+                &[t(lang, K::SessionTtl), &MAX_SESSION_TTL.to_string()],
+            ),
+        ),
+        // The app client of the email flow and the one of a button are the same grammar in two
+        // rows of the "Ways in" table, so the row's own heading is what the message names.
+        SettingsRefusal::AppClientId { button: None, id } => Refusal::on(
+            "client_id",
+            fill(
+                t(lang, K::SetRefAppClientId),
+                &[t(lang, K::SignInEmail), id],
+            ),
+        ),
+        SettingsRefusal::AppClientId {
+            button: Some(idp),
+            id,
+        } => Refusal::on(
+            aud_field(idp),
+            fill(t(lang, K::SetRefAppClientId), &[social_idp_label(idp), id]),
+        ),
+        SettingsRefusal::Url { key, fault, .. } => {
+            let (field, label) = setting_field(*key);
+            let key = match fault {
+                UrlFault::NotPrintable => K::SetRefUrlNotPrintable,
+                UrlFault::NotHttps => K::SetRefUrlNotHttps,
+                UrlFault::EmptyHost => K::SetRefUrlEmptyHost,
+                UrlFault::Userinfo => K::SetRefUrlUserinfo,
+                UrlFault::Backslash => K::SetRefUrlBackslash,
+                UrlFault::UserinfoOrBackslash => K::SetRefUrlUserinfoOrBackslash,
+                UrlFault::QueryOrFragment => K::SetRefUrlQueryOrFragment,
+                UrlFault::Quote => K::SetRefUrlQuote,
+                UrlFault::NotHttpsOrRooted => K::SetRefUrlNotHttpsOrRooted,
+            };
+            Refusal::on(field, fill(t(lang, key), &[t(lang, label)]))
+        }
+        SettingsRefusal::CallbackNotHttps => {
+            let (field, label) = setting_field(SettingKey::SocialCallbackUrl);
+            Refusal::on(
+                field,
+                fill(t(lang, K::SetRefCallbackNotHttps), &[t(lang, label)]),
+            )
+        }
+        SettingsRefusal::CookieDomainNotBare { .. } => Refusal::on(
+            "cookie_domain",
+            fill(
+                t(lang, K::SetRefCookieDomainNotBare),
+                &[t(lang, K::CookieDomain)],
+            ),
+        ),
+        SettingsRefusal::CookieDomainSingleLabel { .. } => Refusal::on(
+            "cookie_domain",
+            fill(
+                t(lang, K::SetRefCookieDomainSingleLabel),
+                &[t(lang, K::CookieDomain)],
+            ),
+        ),
+        SettingsRefusal::HostControlByte { raw } => Refusal::on(
+            "hosts",
+            fill(
+                t(lang, K::SetRefHostControlByte),
+                &[t(lang, K::AuthorizedHosts), raw],
+            ),
+        ),
+        SettingsRefusal::HostNotBare { raw } => Refusal::on(
+            "hosts",
+            fill(
+                t(lang, K::SetRefHostNotBare),
+                &[t(lang, K::AuthorizedHosts), raw],
+            ),
+        ),
+        SettingsRefusal::HostAtOrDotDot { raw } => Refusal::on(
+            "hosts",
+            fill(
+                t(lang, K::SetRefHostAtOrDotDot),
+                &[t(lang, K::AuthorizedHosts), raw],
+            ),
+        ),
+        // Attributed to the hosts field, which is where the operator goes to fix it, and naming
+        // the cookie domain by its label, because the two are checked against each other and sit
+        // one above the other for exactly that reason.
+        SettingsRefusal::HostsOutsideCookieDomain {
+            hosts,
+            cookie_domain,
+        } => Refusal::on(
+            "hosts",
+            fill(
+                t(lang, K::SetRefHostsOutsideCookieDomain),
+                &[
+                    t(lang, K::AuthorizedHosts),
+                    &hosts.join(", "),
+                    t(lang, K::CookieDomain),
+                    cookie_domain,
+                ],
+            ),
+        ),
+        SettingsRefusal::LandingOffHosts => Refusal::on(
+            "landing_url",
+            fill(
+                t(lang, K::SetRefLandingOffHosts),
+                &[t(lang, K::GlobalLandingUrl), t(lang, K::AuthorizedHosts)],
+            ),
+        ),
+        SettingsRefusal::OauthDomainNotBare { .. } => Refusal::on(
+            "domain",
+            fill(
+                t(lang, K::SetRefOauthDomainNotBare),
+                &[t(lang, K::OauthDomain)],
+            ),
+        ),
+        // The two the form can produce and already says something about, in its own words, in
+        // both languages: reused rather than rewritten, because the row says the same thing
+        // before the save as after it.
+        SettingsRefusal::ButtonNoAudience { idp } => {
+            Refusal::on(aud_field(idp), t(lang, K::AudienceNeeded))
+        }
+        SettingsRefusal::SocialHalfConfigured { .. } => {
+            Refusal::on("domain", t(lang, K::SocialWiringNeeded))
+        }
+        SettingsRefusal::AuditHeader { key, name, fault } => {
+            let (field, label) = setting_field(*key);
+            let key = match fault {
+                HeaderFault::NotAName => K::SetRefHeaderNotAName,
+                HeaderFault::Credential => K::SetRefHeaderCredential,
+            };
+            Refusal::on(field, fill(t(lang, key), &[t(lang, label), name]))
+        }
+        // The shared header is marked on the request id, and the message names the other field
+        // by its label, which is the one the operator has to go and change.
+        SettingsRefusal::AuditHeadersSame { name } => Refusal::on(
+            "request_id_header",
+            fill(
+                t(lang, K::SetRefHeadersSame),
+                &[
+                    t(lang, K::RequestIdHeader),
+                    name,
+                    t(lang, K::ClientIpHeader),
+                ],
+            ),
+        ),
+        SettingsRefusal::AuditLimitNotAmount { key, .. } => {
+            let (field, label) = setting_field(*key);
+            Refusal::on(
+                field,
+                fill(t(lang, K::SetRefLimitNotAmount), &[t(lang, label)]),
+            )
+        }
+        SettingsRefusal::AuditLimitZero { key, .. } => {
+            let (field, label) = setting_field(*key);
+            Refusal::on(field, fill(t(lang, K::SetRefLimitZero), &[t(lang, label)]))
+        }
+        SettingsRefusal::AuditLimitTooMuch { key, unit, .. } => {
+            let (field, label) = setting_field(*key);
+            let max = unit.max_amount();
+            Refusal::on(
+                field,
+                fill(
+                    t(lang, K::SetRefLimitTooMuch),
+                    &[
+                        t(lang, label),
+                        &max.to_string(),
+                        unit_label(lang, *unit, max),
+                    ],
+                ),
+            )
+        }
+        // The pair, not one of them: the refusal is that neither of the two is a size, and the
+        // retention is the box an operator is more likely to fill in.
+        SettingsRefusal::AuditUnbounded { .. } => Refusal::on(
+            "audit_retention",
+            fill(
+                t(lang, K::SetRefAuditUnbounded),
+                &[t(lang, K::AuditRotation), t(lang, K::AuditRetention)],
+            ),
+        ),
+        SettingsRefusal::BrandControl { .. } => Refusal::on(
+            "brand",
+            fill(t(lang, K::SetRefBrandControl), &[t(lang, K::BrandName)]),
+        ),
+        SettingsRefusal::BrandTooLong { chars } => Refusal::on(
+            "brand",
+            fill(
+                t(lang, K::SetRefBrandTooLong),
+                &[
+                    t(lang, K::BrandName),
+                    &chars.to_string(),
+                    &MAX_BRAND_NAME.to_string(),
+                ],
+            ),
+        ),
+        // The field is `ui_theme` and not the file's `theme`: it is the page's own name for the
+        // box, and the one the form posts (§13.31 §2).
+        SettingsRefusal::ThemeUnknown { .. } => {
+            Refusal::on("ui_theme", t(lang, K::DefaultThemeBad))
+        }
+    }
+}
+
 /// The scaffold every editing form shares: the `POST` back to the route that rendered it,
 /// the `rev` the concurrency check reads, the refusal above the fields it is about, and a
 /// way out that changes nothing.
@@ -5336,8 +5934,11 @@ fn urls_field(label: &str, name: &str, value: &str, hint: Markup, invalid: bool)
             // An empty label is a field whose heading is already above it (the key form's
             // scope radios) — not a blank line to leave in the page.
             @if !label.is_empty() { span class="lbl" { (label) } }
+            // `f-{name}` as every other field carries: it is what lets a refusal's `name=` be
+            // found in the page, and the layout's width rules are written on `input.f-…`, so a
+            // textarea wearing its own name costs nothing.
             textarea name=(name) rows="6" spellcheck="false" autocapitalize="off"
-                      class=[invalid.then_some("invalid")]
+                      class=(format!("f-{name}{}", if invalid { " invalid" } else { "" }))
                       aria-invalid=[invalid.then_some("true")]
                       aria-describedby=[invalid.then_some(ERR_ID)] { (value) }
             span class="hint" { (hint) }
@@ -5347,12 +5948,15 @@ fn urls_field(label: &str, name: &str, value: &str, hint: Markup, invalid: bool)
 
 /// A unit's name in the reader's language, singular for one of it and plural otherwise. The
 /// two of space are the same word in every language, and are left as the file spells them.
-fn unit_label(v: &View, unit: AuditUnit, amount: u64) -> &'static str {
+///
+/// It takes the language and not the [`View`], because a refusal translated outside the page's
+/// own render has a language and no view (§13.31 §4).
+fn unit_label(lang: Lang, unit: AuditUnit, amount: u64) -> &'static str {
     let one = amount == 1;
     match unit {
-        AuditUnit::Weeks => v.t(if one { K::UnitWeek } else { K::UnitWeeks }),
-        AuditUnit::Months => v.t(if one { K::UnitMonth } else { K::UnitMonths }),
-        AuditUnit::Years => v.t(if one { K::UnitYear } else { K::UnitYears }),
+        AuditUnit::Weeks => t(lang, if one { K::UnitWeek } else { K::UnitWeeks }),
+        AuditUnit::Months => t(lang, if one { K::UnitMonth } else { K::UnitMonths }),
+        AuditUnit::Years => t(lang, if one { K::UnitYear } else { K::UnitYears }),
         AuditUnit::MiB => "MiB",
         AuditUnit::GiB => "GiB",
     }
@@ -5360,7 +5964,7 @@ fn unit_label(v: &View, unit: AuditUnit, amount: u64) -> &'static str {
 
 /// An audit limit in the reader's words: `4 MiB`, `6 mesi`, `1 year`.
 fn limit_text(v: &View, l: &AuditLimit) -> String {
-    format!("{} {}", l.amount, unit_label(v, l.unit, l.amount))
+    format!("{} {}", l.amount, unit_label(v.lang, l.unit, l.amount))
 }
 
 /// An amount-and-unit field: a number and a list box of [`AuditUnit`]s, posted as `name` and
@@ -5394,7 +5998,7 @@ fn limit_field(
                     }
                     @for u in AuditUnit::ALL {
                         option value=(u.code()) selected[u.code() == unit] {
-                            (unit_label(v, u, 2))
+                            (unit_label(v.lang, u, 2))
                         }
                     }
                 }
@@ -8519,21 +9123,16 @@ fn mutate(v: &View, form: &Form) -> Outcome {
                 }
             }
             // The library is the only door here too: `prepare` compiles the exact bytes with
-            // the parser the gate uses, `commit` writes the bytes it compiled. Its one
-            // cross-setting refusal that has an input to blame (`landing_url` off the
-            // authorized hosts) is attributed to that field here: the library's sentence names
-            // both settings and says why the pair matters, and only this page knows which box
-            // the operator has to go back to.
+            // the parser the gate uses, `commit` writes the bytes it compiled. What it refuses
+            // is a code, and this page says it in the reader's language and marks the box the
+            // operator has to go back to (§13.31): the library names the setting, only this
+            // page knows which field holds it.
             SettingsWrite::prepare(&doc)
-                .map_err(|e| {
-                    // The sentence, for now: §13.31 S8 maps the refusal's code to a `K` key and
-                    // this sniff goes away with it.
-                    let e = e.to_string();
-                    if e.contains("landing_url") {
-                        Refusal::on("landing_url", e)
-                    } else {
-                        Refusal::from(e)
-                    }
+                .map_err(|e| match &e {
+                    PrepareError::Refused(r) => settings_refusal(v.lang, r),
+                    // Not a settings refusal at all: serde on our own structs, never seen, and
+                    // nothing on the page to blame.
+                    _ => Refusal::from(e.to_string()),
                 })?
                 .commit(path)?;
             audit(v.admin.unwrap_or("?"), "settings set", path);
@@ -13708,7 +14307,10 @@ mod tests {
         );
         let (status, body) = got.page();
         assert_eq!(status, 400, "{body}");
-        assert!(body.contains("stylesheet_url"), "{body}");
+        // What the message has to do is say what the field wants. It used to be asserted by
+        // finding the wire key `stylesheet_url` in it, which is the English sentence §13.31
+        // replaces with the page's own words; the shape it names is what stays true of both.
+        assert!(err_text(body).contains("https://"), "{body}");
         assert!(
             body.contains(r#"class="f-stylesheet invalid""#),
             "the refusal must point at the field: {body}"
@@ -13789,6 +14391,219 @@ mod tests {
         let (status, body) = got.page();
         assert_eq!(status, 400, "{body}");
         assert!(body.contains(r#"class="f-landing_url invalid""#), "{body}");
+        assert_eq!(read(&sp), before, "nothing written");
+        cleanup(&path);
+    }
+
+    // --- a settings refusal in the reader's words (§13.31 S8) -----------------
+
+    /// The five codes this page's own form can never produce (§13.31 §5), each for a reason the
+    /// form's construction gives. Each is mapped to one wrapper around the library's English
+    /// sentence and attributed to nothing: the operator who meets these is at a shell, and the
+    /// English is exactly what `--check-settings` will say there.
+    const FILE_ONLY: [&str; 5] = [
+        "version",
+        "button_bare_name",
+        "button_no_idp",
+        "button_idp_charset",
+        "button_twice",
+    ];
+
+    /// Every wire key a translated refusal must not contain (§13.31 §6). A message names the
+    /// label the reader sees, never the name the file gives the setting: a message quoting
+    /// `profile_claims` is the sentence the CLI prints, and showing that on an Italian page is
+    /// the thing this slice ends. `issuer` is absent because its label, "User pool (issuer)",
+    /// carries the word in both languages.
+    const WIRE_KEYS: [&str; 19] = [
+        "profile_claims",
+        "identity_attrs",
+        "session_ttl_secs",
+        "client_id",
+        "login_url",
+        "denied_url",
+        "landing_url",
+        "cookie_domain",
+        "authorized_hosts",
+        "oauth_domain",
+        "social_callback_url",
+        "social_buttons",
+        "client_ip_header",
+        "request_id_header",
+        "audit.rotation",
+        "audit.retention",
+        "stylesheet_url",
+        "logo_url",
+        "brand_name",
+    ];
+
+    /// The text of a form's refusal block, as the reader reads it. Asserted on **instead of**
+    /// the body: the body carries `name="landing_url"` and every other wire name the form has,
+    /// so a body-wide search for a wire key passes whatever the message says (§13.31 §6).
+    fn err_text(html: &str) -> String {
+        const AT: &str = "<div class=\"err\" id=\"form-error\">";
+        let at = html
+            .find(AT)
+            .unwrap_or_else(|| panic!("the page must carry a refusal block: {html}"));
+        let rest = &html[at + AT.len()..];
+        rest.split("</div>").next().unwrap_or(rest).to_string()
+    }
+
+    /// `true` when `s` still holds a `{digit}`: a placeholder that reached the page unfilled.
+    fn holds_placeholder(s: &str) -> bool {
+        let b = s.as_bytes();
+        (0..b.len()).any(|i| b[i] == b'{' && b.get(i + 1).is_some_and(|c| c.is_ascii_digit()))
+    }
+
+    /// Every code says something on this page, in both languages, on a field, in this page's
+    /// own words (§13.31 §6).
+    ///
+    /// The mapping is a pure function, so this one test covers all 46 codes; the route needs
+    /// one test per path into it, which is what the two below are.
+    #[test]
+    fn every_settings_refusal_reads_in_both_languages() {
+        let samples = bb_auth_core::settings_refusal_samples();
+        assert_eq!(
+            samples.len(),
+            bb_auth_core::SETTINGS_REFUSAL_CODES.len(),
+            "one sample per code"
+        );
+        for r in &samples {
+            let code = r.code();
+            let english = settings_refusal(Lang::En, r);
+            let italian = settings_refusal(Lang::It, r);
+            for (lang, got) in [(Lang::En, &english), (Lang::It, &italian)] {
+                let name = lang.code();
+                assert!(!got.msg.is_empty(), "{code} in {name}: an empty message");
+                assert!(
+                    !holds_placeholder(&got.msg),
+                    "{code} in {name}: a placeholder reached the page unfilled: {:?}",
+                    got.msg
+                );
+                if FILE_ONLY.contains(&code) {
+                    assert!(
+                        got.msg.contains(&r.to_string()),
+                        "{code} in {name}: the wrapper must carry the gate's own sentence, \
+                         which is what the operator meets at the shell: {:?}",
+                        got.msg
+                    );
+                    assert!(
+                        got.field.is_none(),
+                        "{code} in {name}: this form cannot produce it, so it marks no field"
+                    );
+                } else {
+                    assert!(
+                        got.field.is_some(),
+                        "{code} in {name}: a refusal this form can produce marks the field it \
+                         is about"
+                    );
+                    assert!(
+                        !got.msg.contains(&r.to_string()),
+                        "{code} in {name}: the page shows its own words, not the library's: {:?}",
+                        got.msg
+                    );
+                    for key in WIRE_KEYS {
+                        assert!(
+                            !got.msg.contains(key),
+                            "{code} in {name}: the message names the label, not the file's key \
+                             {key:?}: {:?}",
+                            got.msg
+                        );
+                    }
+                }
+            }
+            assert_ne!(
+                english.msg, italian.msg,
+                "{code}: the English and the Italian are one string"
+            );
+        }
+    }
+
+    /// `fill` substitutes once, so an argument that looks like a placeholder stays text
+    /// (§13.31 §4, and the same reason `render_page` gives for its own substitution).
+    #[test]
+    fn fill_is_single_pass() {
+        assert_eq!(fill("{0} and {1}", &["one", "two"]), "one and two");
+        assert_eq!(fill("{1} then {0}", &["one", "two"]), "two then one");
+        assert_eq!(fill("{0}: {0}", &["Name"]), "Name: Name");
+        assert_eq!(fill("nothing to fill", &["x"]), "nothing to fill");
+        // The single pass, both ways: what one placeholder expands to is never rescanned, so a
+        // typed value that spells a placeholder cannot inject a second round of substitution.
+        assert_eq!(fill("{0} {1}", &["a", "{0}"]), "a {0}");
+        assert_eq!(fill("{0} {1}", &["{1}", "{0}"]), "{1} {0}");
+    }
+
+    /// The landing page off the authorized hosts, refused on an Italian page, names the two
+    /// labels an operator can see ("Pagina di arrivo", "Host autorizzati") and neither wire
+    /// key, and still marks its own field (§13.31 §6).
+    ///
+    /// Over the socket with the `lang=it` cookie, because the language is negotiated from the
+    /// request: the in-process `post` renders the English view.
+    #[test]
+    fn an_italian_settings_refusal_names_the_labels() {
+        let path = scratch("cfg-landing-it", SAMPLE);
+        let cfg = cfg_for(&path, "/admin");
+        let sp = cfg.settings_path.clone();
+        let port = serve(&path, "/admin");
+        let url = format!(
+            "http://127.0.0.1:{port}{ADMIN_BASE}{}",
+            Route::Config.path()
+        );
+        let before = read(&sp);
+        let rev = rev_of(&sp);
+        let fields = settings_fields(
+            &rev,
+            &[("landing_url", "https://evil.example.org/account/")],
+        );
+        // The same request `console_post` makes, plus the cookie: the language the page answers
+        // in is the thing under test.
+        let _permit = WRITE_PERMIT.lock().unwrap_or_else(|e| e.into_inner());
+        let r = post_with_secret(&url)
+            .header(IDENTITY_HEADER, "admin@x.com")
+            .header("Sec-Fetch-Site", "same-origin")
+            .header("Cookie", "lang=it")
+            .send_form(fields.iter().copied())
+            .expect("a POST response");
+        let got = got_of(r);
+        assert_eq!(got.status, 400, "{got:?}");
+        let err = err_text(&got.body);
+        assert!(err.contains("Pagina di arrivo"), "{err}");
+        assert!(err.contains("Host autorizzati"), "{err}");
+        assert!(!err.contains("landing_url"), "{err}");
+        assert!(!err.contains("authorized_hosts"), "{err}");
+        assert!(
+            got.body.contains(r#"class="f-landing_url invalid""#),
+            "the refusal must still point at the field: {}",
+            got.body
+        );
+        assert_eq!(read(&sp), before, "nothing written");
+        cleanup(&path);
+    }
+
+    /// A claim the library refuses marks the claims field (§13.31 §6). Today this refusal
+    /// reaches the page through `SettingsWrite::prepare` and is attributed to nothing, because
+    /// the attribution is a sniff for one string in the English sentence; the field stays
+    /// unmarked and the operator is left to find which box held `bad claim`.
+    #[test]
+    fn a_claim_refusal_is_marked_on_its_field() {
+        let path = scratch("cfg-claim-field", SAMPLE);
+        let cfg = cfg_for(&path, "");
+        let sp = cfg.settings_path.clone();
+        let before = read(&sp);
+        let got = post(
+            &cfg,
+            Route::Config,
+            &settings_fields(&rev_of(&sp), &[("claims", "bad claim")]),
+        );
+        let (status, body) = got.page();
+        assert_eq!(status, 400, "{body}");
+        let err = err_text(body);
+        assert!(err.contains(t(Lang::En, K::ProfileClaims)), "{err}");
+        assert!(err.contains("bad claim"), "{err}");
+        assert!(!err.contains("profile_claims"), "{err}");
+        assert!(
+            body.contains(r#"class="f-claims invalid""#),
+            "the refusal must point at the field: {body}"
+        );
         assert_eq!(read(&sp), before, "nothing written");
         cleanup(&path);
     }
@@ -14206,14 +15021,22 @@ mod tests {
         assert_eq!(got.page().0, 400);
         assert!(got.page().1.contains("at least one administrator"));
 
-        // An identity list the gate would refuse never reaches the disk either.
+        // An identity list the gate would refuse never reaches the disk either, and the page
+        // says so in the reader's language, naming the field by its visible label (§13.31 §4).
+        // The sentence below is that table's `attr_unknown` row spelled out: `{0}` the label,
+        // `{1}` the entry the operator typed, `{2}` the attributes the field accepts. The
+        // library's English sentence, which is what this asserted while the page showed it, is
+        // what `bb-auth-adm` prints at a shell, and belongs to the CLI and the gate.
         let got = post(
             &cfg,
             Route::Config,
             &settings_fields(&rev_of(&sp), &[("identity", "phone")]),
         );
         assert_eq!(got.page().0, 400);
-        assert!(got.page().1.contains("unknown identity attribute"));
+        assert_eq!(
+            err_text(got.page().1),
+            "Identity attributes: 'phone' is not one of: uuid, email."
+        );
 
         assert_eq!(read(&sp), before, "nothing was written on any refusal");
         cleanup(&path);

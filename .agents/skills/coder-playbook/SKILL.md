@@ -14,11 +14,14 @@ Rules are in `AGENTS.md`. Format of this file: `AGENTS.md`, under "Skills".
   entry: the veto is still in force, under the email. `user_rm_report` is the CLI's answer;
   the GUI's removal needs the same split.
 
-- A settings refusal the **library** makes on the whole file is attributed to a field at the
-  `SettingsWrite::prepare` call site in `mutate`: `From<String>` gives `field: None`, so the
-  message is matched there and turned into `Refusal::on(field, ..)`, which is what marks the
-  box `f-<name> invalid` and opens its group. `settings_group_of` sends every name it does not
-  list to `signin`, so a new gate field needs no entry there.
+- A settings refusal the **library** makes on the whole file arrives at `SettingsWrite::prepare`
+  as a `SettingsRefusal` **code**, and `settings_refusal(lang, r)` is the one place that turns it
+  into a `Refusal`: an exhaustive match (no `_` arm, so a new variant is a compile error) onto a
+  `SetRef*` `K` key, with `{0}` always `t(lang, label)` and the field's `name=` from
+  `setting_field` / the arm. Never match on the message text. `settings_group_of` sends every
+  name it does not list to `signin`, so a new gate field needs no entry there. A refusal
+  translated outside a render has a language and no `View`, which is why `unit_label` takes
+  `Lang`.
 - A library function that restates `decide` as a set must ask what `decide` asks, never a copy of
   its logic. For an identifier that means the helpers (`vetoes_identifier`, `excludes_identifier`,
   `uuid_of`); for a uuid (a key's owner, as `key_scopes_for` takes) it means the raw fields the
@@ -117,6 +120,11 @@ Rules are in `AGENTS.md`. Format of this file: `AGENTS.md`, under "Skills".
   (`nojs.js`, `crud.js`), where the Rust test only forbids the bearer glued to a `Bearer` prefix. So
   the hint names the shape as "the word `Bearer`, a space, then the key". Run `node e2e/run.js` for
   any change to displayed text, not only `cargo test`.
+- A `K` string is specified twice as well: the Rust test and the **e2e**. A slice that translates a
+  message the page used to pass through in English turns both red at once (`identity=phone` is
+  asserted as `unknown identity attribute` in `bb-auth-web.rs` and in `e2e/tests/settings.js`'s
+  "with the parser own words"). Grep `e2e/tests` for the English sentence before shipping the
+  translation, and report both by name.
 - Inside an opencode agent run (not in the coordinator's shell, where the suite passes as is), `node e2e/run.js`
   can die with `browserType.launch: Timeout 180000ms exceeded`, and it is
   not the code: `e2e/lib/server.js` launches Edge with no `--no-sandbox` and this machine's Chromium
@@ -126,6 +134,9 @@ Rules are in `AGENTS.md`. Format of this file: `AGENTS.md`, under "Skills".
   preload outside the repo: `NODE_OPTIONS="--require /tmp/opencode/nosandbox.js" node e2e/run.js`, where
   that file hooks `Module._load` for `playwright` and appends `--no-sandbox` to `launch`'s args. `e2e/`
   stays byte for byte; say in the report that the run used the shim.
+- The same suite can die at startup with `FATAL: Error: listen EADDRINUSE … 127.0.0.1:<port>` while
+  `ss -ltnp` shows nothing on that port: the previous run's server is still closing. Re-run it, it
+  passes; do not go looking for a process to kill.
 - Playwright's `click()` returns after the event dispatch, not after a promise the handler started, so
   a button label set in `navigator.clipboard.writeText(…).then(…)` is still the old word when the test
   reads `innerText()` a line later. Set the label on the click and replace it in `.catch`.
