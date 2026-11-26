@@ -17,7 +17,7 @@ as the column says. A requirement still open must be covered by a step.
 | R1 | Self-service API keys: a user mints, rotates and removes their own `bbk_` tokens, without an administrator | Step 4 |
 | R2 | Self-service profile: a user sees what bb-auth knows about them and edits their own Cognito profile attributes | Step 5 |
 | R3 | The self-service surface is a section of the admin GUI (`bb-auth-web`), served at its own prefix `/account/` (`BB_AUTH_WEB_ACCOUNT_PATH`) beside the admin pages at `/admin/`, open to any signed-in identity, never reading `web.admins` and acting only on the caller's own account, so further user-facing features have a home. Changed by the user on 2026-11-23 from "a fourth binary of its own", and that evening from `<base>/me/` to `/account/` so the administrators' URLs do not move | Design revised (`docs/ARCHITECTURE.md` §13); Read-only page live on rpi-01 at `/account/` since 2026-11-24; the writes are steps 4, 5 and 7 |
-| R4 | Self-service deletion: a user deletes their own account and its related data, at once, after a confirmation: the roster row, keys, references in scopes and groups, and the Cognito user. The audit is not edited: their lines expire with `audit.retention`, and the page says so | Step 7 (the step 6 it once named is done). For a social-only user the Cognito half is left to an administrator and the page says so: accepted by the user on 2026-11-23 |
+| R4 | Self-service deletion: a user deletes their own account and its related data after a confirmation: the roster row, keys and references in scopes and groups at once, and every Cognito user with their address (federated twins included) through the owner's deletion worker (`bb-account-delete`, the user's choice on 2026-11-26). The audit is not edited: their lines expire with `audit.retention`, and the page says so | Step 7 (the step 6 it once named is done). Changed on 2026-11-26: the worker deletes a social-only user's Cognito account too, so the 2026-11-23 "left to an administrator" exception goes |
 | R5 | The sign-in page warns, where it offers registration, that registering by email code creates an account separate from a Google or Microsoft one with the same address, and points such a person at their provider's button (the user's choice on 2026-11-25, option 1 of three: no Cognito change; a pre-sign-up Lambda or linking accounts stay for later) | Met: live on rpi-01 since 2026-11-25 (`v1.99.9-gfb2bd75`), seen in a browser by the designer in both themes, both languages and at phone width |
 
 ### How we work
@@ -278,18 +278,8 @@ naming the visible labels. Slices **S0** (golden tests of today's strings, green
 
 ## Waiting for the user
 
-- **Step 7 is on hold for one decision of yours** (raised by IT-Admin on 2026-11-26, read-only).
-  rpi-01 still runs your self-deletion worker: `bb-account-delete.path` and a root worker
-  holding the `privacy` IAM user's key. The worker runs `AdminDeleteUser` for **every** Cognito
-  user with the address, including federated twins, then `bb-auth-adm user rm`, a gate reload and
-  an SNS mail. It enforces a `PROTECTED` guard and `MAX_PER_RUN=10`. Its `/account/delete`
-  intake was unrouted on 2026-11-24, when bb-auth-web took `/account/` (nginx: "self-service
-  deletion returns with bb-auth plan step 7"); `/auth/delete-request` still feeds it.
-  §13.29 instead calls `DeleteUser` with the person's own token. That deletes one native user,
-  not the twins, sends no SNS mail, and skips your guard. Choose: (a) step 7 hands the
-  deletion to your worker (an intake under `/account/`; bb-auth-web holds no credential), or
-  (b) §13.29 as designed, keeping or retiring the worker. Either way the email-code
-  re-authentication fires the `post_authentication` Lambda, so you get a "login" mail.
+- Step 7: the user chose (a) on 2026-11-26: the deletion goes through their existing worker
+  (`bb-account-delete`). §13.29 is being redone on it, with IT-Admin for the spool's contract.
 - Decisions taken without the user, to review (the user asked for autonomy on 2026-11-25):
   - H (night of 2026-11-25, the user asleep): two of the designer's later items went in with the
     review fixes. At 640px and below, with a logo, the brand's tag line is hidden like its name. The
