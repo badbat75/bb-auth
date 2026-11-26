@@ -11,5 +11,10 @@
 
   // Table pipe-alignment policing is too opinionated and conflicts with
   // compact tables and long-cell tables (endpoints, config, etc.).
-  "MD060": false
+  "MD060": false,
+
+  // Skills and role files open with YAML front matter whose heading is `name:`
+  // (the SKILL.md and agent-file formats), not `title:`, so MD041 counts that
+  // key as the file's title instead of demanding a heading on the first line.
+  "MD041": { "front_matter_title": "^\\s*(title|name)\\s*[:=]" }
 }
