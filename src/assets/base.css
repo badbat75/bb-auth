@@ -127,6 +127,9 @@ input[type=text],input[type=email],input[type=tel],input[type=password],input[ty
 input[type=number],select,textarea{font-family:inherit;font-size:1rem;width:100%;padding:10px 12px;
   color:var(--text);background:var(--input-bg);border:1px solid var(--input-border);
   border-radius:var(--r-ctl);outline:none;transition:border-color .15s,box-shadow .15s}
+/* 1rem above and not `inherit`: below 16px, mobile Safari zooms the page when a field takes
+   focus, and the one page in this project a stranger meets on a phone is the sign-in form. */
+textarea{line-height:1.5;font-family:var(--font-mono);font-size:.95rem}
 input[type=radio],input[type=checkbox]{accent-color:var(--accent)}
 /* `accent-color` tints only the checked state and leaves the rest of the control native, so the
    section's promise above (a checkbox draws its own box) stands: the box is the browser's, only
@@ -134,9 +137,6 @@ input[type=radio],input[type=checkbox]{accent-color:var(--accent)}
    page outside the palette. `--accent` is the control colour by theme.css's own definition, and
    it measures 4.96:1 on the light card and 4.93:1 on the dark one, so the checked indicator
    clears WCAG 2.2's 3:1 (SC 1.4.11) in both arms. */
-/* 1rem above and not `inherit`: below 16px, mobile Safari zooms the page when a field takes
-   focus, and the one page in this project a stranger meets on a phone is the sign-in form. */
-textarea{line-height:1.5;font-family:var(--font-mono);font-size:.95rem}
 input:focus,select:focus,textarea:focus{border-color:var(--accent);
   box-shadow:0 0 0 3px var(--accent-weak)}
 input::placeholder,textarea::placeholder{color:var(--muted)}

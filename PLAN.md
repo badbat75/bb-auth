@@ -253,8 +253,7 @@ the tabs (at 800px and below), "System settings" / "Impostazioni di sistema", an
 "Delete account and all its data" goes on `/account`'s menu only, built by step 7. Kept
 apart on purpose, with reasons in §13.26: the section pattern and the mint row's missing owner
 field. What is left of the step is the user's approval of the screenshots (Done when below). Left,
-as later items: `account_shell`'s rustdoc still says "the centred-card arrangement"; base.css's accent-color rule sits above a note whose "above" meant the field
-rule (move it below); library refusals on the Settings tab are in the file's English words rather
+as later items: the module rustdoc of `bb-auth-web.rs` (about line 253) still calls the account page's arrangement a centred card; library refusals on the Settings tab are in the file's English words rather
 than the page's labels and language (its own slice, sketched in §13.21); one look by hand at the
 native "Preferences" tooltip while the open menu's cover is up. Steps 5 and 7 add their forms into this layout later (Profile now first: §13.26).
 

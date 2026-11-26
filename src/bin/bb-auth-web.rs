@@ -9328,7 +9328,7 @@ fn account_csp(look: &AccountLook, reveal: bool) -> String {
 }
 
 /// The chrome every page under the prefix is wrapped in: the palette, the components built out of
-/// it, the centred-card arrangement, then the operator's stylesheet, so an override wins by
+/// it, the console's arrangement, then the operator's stylesheet, so an override wins by
 /// source order and needs no `!important`.
 ///
 /// The bar is the console's, from [`top_bar`], and the three slots say what the two surfaces are
