@@ -871,6 +871,9 @@ enum K {
     // The word that turns the bar's name into a control's name: "Ada, account menu"
     // (§13.28 §1).
     AccountMenu,
+    // The self-service menu's last row (§13.30 §1). The words say what the press costs, because
+    // the worker's deletion is the one action on this estate nobody can undo.
+    AccountDelete,
     SettingLanguage,
     SettingTheme,
     LangAuto,
@@ -2215,6 +2218,14 @@ fn t(lang: Lang, key: K) -> &'static str {
         K::SignOut => m(lang, "Sign out", "Esci"),
         K::Settings => m(lang, "Preferences", "Preferenze"),
         K::AccountMenu => m(lang, "account menu", "menu dell'account"),
+        // The words §13.28 §5 reserved and §13.30 §1 pins, in both languages: the row names what
+        // the press costs, since the worker's deletion is the one action here no administrator
+        // can undo.
+        K::AccountDelete => m(
+            lang,
+            "Delete account and all its data",
+            "Elimina l'account e tutti i suoi dati",
+        ),
         K::SettingLanguage => m(lang, "Language", "Lingua"),
         K::SettingTheme => m(lang, "Theme", "Tema"),
         // Named after what decides when nobody has: the browser. "Auto" alone would leave an
@@ -3242,7 +3253,47 @@ struct Config {
     /// a reason to tune per deployment, and because a setting that bounds a call nobody can
     /// reproduce is a setting nobody can debug.
     cognito_timeout: std::time::Duration,
+    /// `BB_AUTH_WEB_DELETE_INTAKE`: the **origin** of the owner's deletion worker's intake, the
+    /// service that queues a self-service account deletion (docs/ARCHITECTURE.md §13.29 W2).
+    ///
+    /// Validated at startup by [`compile_delete_intake`], which accepts only a plain-HTTP
+    /// loopback origin. **Unset is the feature off**: no menu row, and the delete page is the
+    /// `404` every unknown path gets, exactly as [`Self::logout_url`] unset already behaves. It
+    /// is an env var and not a setting because it is read once and decides where an identity is
+    /// sent: the settings file is editable from the console, and a field there would let a
+    /// console session point every future deletion at another port.
+    delete_intake: Option<String>,
+    /// `BB_AUTH_WEB_DELETE_SECRET`: the value sent to the intake in `X-BB-Delete-Secret` on both
+    /// of its calls, when one is set (docs/ARCHITECTURE.md §13.29 W2, W8 §1).
+    ///
+    /// **Optional for now**, and the reason is the intake's, not ours: today the intake checks no
+    /// secret at all, so requiring one here would ship a half that enforces nothing while a
+    /// missing one stops the GUI from starting. bb-auth ships its half once and the owner starts
+    /// enforcing the header whenever they choose, with no release here. A **malformed** value is
+    /// still fatal ([`compile_delete_secret`]): optional means "unset is allowed", never "a
+    /// broken value is ignored". With the intake set and no secret the startup banner says so
+    /// once, in the journal.
+    ///
+    /// Never printed, logged or rendered, for the proxy secret's reason: a value that reaches the
+    /// journal at boot is a secret for as long as the journal is kept.
+    delete_secret: Option<String>,
+    /// How long one intake call may take before this gives up and says so (§13.29 W2).
+    ///
+    /// [`INTAKE_TIMEOUT`] at startup, and the tests shorten it as they do
+    /// [`Self::cognito_timeout`], because the "intake that never answers" case has to be fast.
+    /// It is a constant and not a setting for the same reason that one is. The startup banner
+    /// names it beside the origin, so the bound a deployment runs with is something an operator
+    /// can read out of the journal.
+    intake_timeout: std::time::Duration,
 }
+
+/// The bound on one deletion-intake call, end to end (§13.29 W2).
+///
+/// The same wall as [`COGNITO_TIMEOUT`], for the same reason: `tiny_http` runs a fixed pool of
+/// handler threads, so a call that hangs forever is a worker that never serves anybody again.
+/// The intake answers from a spool append, so five seconds is generous, and the design promises
+/// nothing longer.
+const INTAKE_TIMEOUT: Duration = Duration::from_secs(5);
 
 /// The bound on one Cognito call, end to end (§13.22).
 ///
@@ -3354,25 +3405,21 @@ fn normalize_base_path(raw: &str) -> Result<String, String> {
     })
 }
 
-/// Validate `BB_AUTH_WEB_PROXY_SECRET` (docs/ARCHITECTURE.md §13.3): at least 32 characters,
-/// all of `[A-Za-z0-9_-]`, so the value survives a shell, an env file and an nginx
-/// `proxy_set_header` line with nothing to quote.
+/// The rule both of this program's shared secrets follow, named by the variable that carries
+/// `raw`: at least 32 characters, all of `[A-Za-z0-9_-]`, so the value survives a shell, an env
+/// file, an nginx `proxy_set_header` line and a header value with nothing to quote.
 ///
-/// Required, with no default: a deployment that starts without a secret is a deployment where
-/// the check is not running, and a generated one is one line of the install.
-///
-/// It is the first check [`handle`] makes, ahead of the self-service page's dispatch, so the
-/// page is not a way around it (docs/ARCHITECTURE.md §13.2).
+/// `hint` is the one sentence each secret has of its own, because the two are installed
+/// differently: one is generated by the install, the other has to reach a file outside this
+/// repository with the same bytes.
 ///
 /// Every refusal names the variable and **never the value**. A startup message goes to the
 /// journal, and a secret printed once at boot is a secret in the journal for as long as the
 /// journal is kept; the length is safe to say, the bytes are not.
-fn compile_proxy_secret(raw: &str) -> Result<String, String> {
+fn compile_secret_value(var: &str, raw: &str, hint: &str) -> Result<String, String> {
     if raw.chars().count() < 32 {
         return Err(format!(
-            "BB_AUTH_WEB_PROXY_SECRET must be at least 32 characters of [A-Za-z0-9_-] (this \
-             one is {}); the install generates one, so an env file that predates it needs the \
-             line appended once",
+            "{var} must be at least 32 characters of [A-Za-z0-9_-] (this one is {}); {hint}",
             raw.chars().count()
         ));
     }
@@ -3380,14 +3427,142 @@ fn compile_proxy_secret(raw: &str) -> Result<String, String> {
         .chars()
         .all(|c| c.is_ascii_alphanumeric() || c == '_' || c == '-')
     {
-        return Err(
-            "BB_AUTH_WEB_PROXY_SECRET holds a character outside [A-Za-z0-9_-], which cannot go \
-             into an env file, a shell, an nginx `proxy_set_header` line or a header value \
-             without quoting it"
-                .to_string(),
-        );
+        return Err(format!(
+            "{var} holds a character outside [A-Za-z0-9_-], which cannot go into an env file, a \
+             shell, an nginx `proxy_set_header` line or a header value without quoting it"
+        ));
     }
     Ok(raw.to_string())
+}
+
+/// Validate `BB_AUTH_WEB_PROXY_SECRET` (docs/ARCHITECTURE.md §13.3), on the rule both of this
+/// program's secrets share ([`compile_secret_value`]).
+///
+/// Required, with no default: a deployment that starts without a secret is a deployment where
+/// the check is not running, and a generated one is one line of the install.
+///
+/// It is the first check [`handle`] makes, ahead of the self-service page's dispatch, so the
+/// page is not a way around it (docs/ARCHITECTURE.md §13.2).
+fn compile_proxy_secret(raw: &str) -> Result<String, String> {
+    compile_secret_value(
+        "BB_AUTH_WEB_PROXY_SECRET",
+        raw,
+        "the install generates one, so an env file that predates it needs the line appended once",
+    )
+}
+
+/// Validate `BB_AUTH_WEB_DELETE_SECRET` (docs/ARCHITECTURE.md §13.29 W2): the value this program
+/// sends to the deletion intake in `X-BB-Delete-Secret`, on the rule both of this program's
+/// secrets share ([`compile_secret_value`]), and `Ok(None)` when unset.
+///
+/// **Optional for now**, and the reason is the intake's: it checks no secret today, so a required
+/// one here would ship a half that enforces nothing while a missing one stopped the GUI from
+/// starting. The user's answer to §13.29 W12 question 3, 2026-11-26: bb-auth ships its half once
+/// and the owner starts enforcing the header when they choose, with no release here. With the
+/// intake set and no secret the GUI starts and its banner says once, in the journal, that the
+/// intake trusts any local caller until a secret is set on both sides.
+///
+/// Optional means "unset is allowed". A **malformed** value is fatal, because an operator who
+/// wrote a secret and did not get one sent is a deployment that believes it is protected. The
+/// rules are the proxy secret's so the one value can be written to this env file and to the
+/// owner's unit file with nothing to quote.
+fn compile_delete_secret(raw: &str) -> Result<Option<String>, String> {
+    let raw = raw.trim();
+    if raw.is_empty() {
+        return Ok(None);
+    }
+    compile_secret_value(
+        "BB_AUTH_WEB_DELETE_SECRET",
+        raw,
+        "the operator generates one and writes the same value here and where the intake's unit \
+         reads it, so the install does not generate it",
+    )
+    .map(Some)
+}
+
+/// Validate `BB_AUTH_WEB_DELETE_INTAKE` (docs/ARCHITECTURE.md §13.29 W2): the deletion intake's
+/// **origin**, and nothing more than an origin. Accepted: `http`, a loopback IP literal
+/// (`127.0.0.0/8` or `[::1]`), a port, and nothing else. Empty is `Ok(None)`, the feature off.
+///
+/// The accepted value is returned **as written**, because the caller appends the intake's two
+/// hard-coded paths to it, and a re-serialized origin is a second answer to what the operator
+/// typed.
+///
+/// **Loopback only**, and the reason is the request, not the port: every call carries an identity
+/// in clear, in `X-Auth-Email`, to a service whose one check is that header. To any other host
+/// that is an identity sent unencrypted to something that deletes accounts on it, which is why a
+/// plain-HTTP origin is accepted here and nowhere else in this estate.
+///
+/// Each refusal is its own reason, and each names the variable, because that is the only thing
+/// an operator can go and edit:
+///
+/// - a **name**, `localhost` included: a name resolves to whatever the resolver says, and
+///   "loopback" has to be a fact about the bytes the operator typed, not a guess the startup
+///   made for them;
+/// - a **non-loopback address**: the identity would leave the host;
+/// - **`https`** or any other scheme: the intake speaks plain HTTP on loopback, so an https
+///   origin names a host the operator did not name;
+/// - a **path**, a query or a fragment: the intake hard-codes its two paths, so a base carrying
+///   one appends them somewhere else;
+/// - **userinfo**: an `@` is credentials in an origin;
+/// - **no port**: the intake *is* a port, and the default one is not where it listens.
+fn compile_delete_intake(raw: &str) -> Result<Option<String>, String> {
+    let raw = raw.trim();
+    if raw.is_empty() {
+        return Ok(None);
+    }
+    let refuse = |why: &str| -> Result<Option<String>, String> {
+        Err(format!(
+            "BB_AUTH_WEB_DELETE_INTAKE must be the deletion intake's origin: `http`, a loopback \
+             IP literal (127.0.0.0/8 or [::1]) and a port, with no path, no query, no fragment \
+             and no userinfo (docs/ARCHITECTURE.md §13.29 W2); '{raw}' {why}"
+        ))
+    };
+    let Some(rest) = raw.strip_prefix("http://") else {
+        return refuse("is not an http:// origin");
+    };
+    // The authority runs to the first delimiter, and there is nothing to accept after it: the
+    // intake's paths are the caller's to append, so a base that already carries one is a base
+    // that appends them somewhere else.
+    let authority = match rest.find(['/', '?', '#']) {
+        Some(_) => return refuse("carries a path, a query or a fragment"),
+        None => rest,
+    };
+    if authority.contains('@') {
+        return refuse("carries userinfo");
+    }
+    // An IPv6 literal is bracketed, and the brackets are not part of the address.
+    let (host, port) = match authority.strip_prefix('[') {
+        Some(bracketed) => {
+            let Some(close) = bracketed.find(']') else {
+                return refuse("has an IPv6 literal with no closing bracket");
+            };
+            (
+                &bracketed[..close],
+                bracketed[close + 1..].strip_prefix(':').unwrap_or_default(),
+            )
+        }
+        None => match authority.rsplit_once(':') {
+            Some((h, p)) => (h, p),
+            None => return refuse("names no port"),
+        },
+    };
+    if port.is_empty()
+        || !port.bytes().all(|b| b.is_ascii_digit())
+        || !port.parse::<u16>().is_ok_and(|p| p > 0)
+    {
+        return refuse("names no port");
+    }
+    // A literal, both families, and nothing that has to be resolved to be known.
+    let loopback = host
+        .parse::<std::net::Ipv4Addr>()
+        .map(|a| a.is_loopback())
+        .or_else(|_| host.parse::<std::net::Ipv6Addr>().map(|a| a.is_loopback()))
+        .unwrap_or(false);
+    if !loopback {
+        return refuse("is not a loopback IP literal");
+    }
+    Ok(Some(raw.to_string()))
 }
 
 /// The self-service page's prefix: `BB_AUTH_WEB_ACCOUNT_PATH`, normalised, checked against the
@@ -3595,6 +3770,20 @@ impl Config {
                 eprintln!("[bb-auth-web] FATAL: {e}");
                 std::process::exit(1);
             });
+        // The deletion intake (§13.29 W2). Unset is the feature off, and off is a deployment:
+        // no menu row, and the delete page is the `404` every unknown path gets. A malformed
+        // value is fatal, like every other value read here, because a half-wired intake is a
+        // menu row that leads to a page that cannot reach the worker.
+        let delete_intake = compile_delete_intake(&env_or("BB_AUTH_WEB_DELETE_INTAKE", ""))
+            .unwrap_or_else(|e| {
+                eprintln!("[bb-auth-web] FATAL: {e}");
+                std::process::exit(1);
+            });
+        let delete_secret = compile_delete_secret(&env_or("BB_AUTH_WEB_DELETE_SECRET", ""))
+            .unwrap_or_else(|e| {
+                eprintln!("[bb-auth-web] FATAL: {e}");
+                std::process::exit(1);
+            });
         Config {
             listen: env_or("BB_AUTH_WEB_LISTEN", "127.0.0.1:8091"),
             access_path,
@@ -3620,6 +3809,9 @@ impl Config {
             }),
             // The production bound is the constant; only the tests shorten it.
             cognito_timeout: COGNITO_TIMEOUT,
+            delete_intake,
+            delete_secret,
+            intake_timeout: INTAKE_TIMEOUT,
         }
     }
 }
@@ -4829,18 +5021,24 @@ fn prefs_form(
 /// control, visually hidden, so a reader is told what the name **is** rather than left with a
 /// word that reads as a heading. The panel then says who they are in full, offers the console's
 /// places (`places`, `None` on the self-service page and on the `403`, where the caller has no
-/// console page to be offered), the nested Preferences box, and Sign out.
+/// console page to be offered), the nested Preferences box, and Sign out, and ends in the delete
+/// row on the one surface that offers it.
 ///
 /// The panel is a `details` for the reason §13.20 gave: it opens with no script, closes by
 /// itself when a row navigates away, and its trigger keeps the light-dismiss cover the console
 /// already has. The nested box gets no cover of its own, so it toggles only from its own row.
 /// `logout` is `None` when the operator named no destination, and then there is no row.
+///
+/// `delete` is the self-service page's last row (§13.30 §1), and `None` is the whole reason it
+/// is a parameter rather than something read here: the console's panel never carries it, and the
+/// page carries it only where an intake is wired.
 fn account_menu(
     lang: Lang,
     who: Option<&Who>,
     places: Option<Markup>,
     prefs: Markup,
     logout: Option<&str>,
+    delete: Option<&str>,
 ) -> Markup {
     let label = who.map(|w| w.label.as_str()).unwrap_or("");
     let menu_word = format!(", {}", t(lang, K::AccountMenu));
@@ -4906,6 +5104,24 @@ fn account_menu(
                             path d="M21 12H9" {}
                         }
                         (t(lang, K::SignOut))
+                    }
+                }
+                // The delete row, last (§13.30 §1). It is a link to the page that asks, not a
+                // submission: a `GET` never mutates, and a browser prefetches the last row of an
+                // open menu, which must not cost a person their account. The words name what the
+                // press costs, because the worker's deletion is the one action on this estate
+                // nobody can undo, and the glyph is decoration behind `aria-hidden`, so the
+                // visible word stays the accessible name. A trash can and not the keys table's
+                // `×`: at the bottom of a panel an `×` reads as "close this".
+                @if let Some(href) = delete {
+                    div class="sep" {}
+                    a class="pill rm" href=(href) {
+                        svg class="i-trash" viewBox="0 0 24 24" aria-hidden="true" focusable="false" {
+                            path d="M3 6h18" {}
+                            path d="M8 6V4h8v2" {}
+                            path d="M6 6l1 14h10l1-14" {}
+                        }
+                        (t(lang, K::AccountDelete))
                     }
                 }
             }
@@ -5108,6 +5324,9 @@ fn shell_named(
                 places,
                 prefs,
                 v.cfg.logout_url.as_deref(),
+                // No delete row here (§13.28 §5): this surface edits **other people's** accounts,
+                // and a person deletes their own on the page under the account prefix.
+                None,
             ))
         }
     };
@@ -9908,6 +10127,13 @@ struct AccountPrefs<'a> {
     /// dropped, and no control at all when the operator named no destination. The console's own
     /// pill is the same setting unchanged (§13.17).
     logout: Option<&'a str>,
+    /// The delete row's target: `{account}/delete`, and `None` when
+    /// [`Config::delete_intake`] is unset (§13.29 W2, §13.30 §1).
+    ///
+    /// A field and not something the shell derives, because the row exists only where there is a
+    /// worker behind the page: a deployment that never wired one must show nobody a door to
+    /// nothing, and the page's `{account}/delete` stays the ordinary `404`.
+    delete: Option<&'a str>,
     /// Whether **this page** carries its own `p.lede`, and the bar's menu therefore keeps the
     /// identity out.
     ///
@@ -9992,6 +10218,7 @@ fn account_shell(prefs: &AccountPrefs, title: &str, content: Markup, look: Accou
                 None,
                 prefs_box,
                 prefs.logout,
+                prefs.delete,
             ))
         }
     };
@@ -10782,6 +11009,13 @@ fn handle_account(
     // preference redirect are both this, and the bare prefix is answered as the page too, so
     // `/account` and `/account/` are one page rather than a page and a redirect.
     let page = format!("{}/", cfg.account_path);
+    // The delete row's target (§13.30 §1). The row exists only where an intake is wired, because
+    // it is the door to the worker: a deployment that never wired one shows nobody a door to
+    // nothing, and this path stays the ordinary `404` every unknown path under the prefix gets.
+    let delete_path = cfg
+        .delete_intake
+        .as_ref()
+        .map(|_| format!("{}/delete", cfg.account_path));
     // The keys prefix, and the mint's `POST` target. A path and not a query flag because a
     // mutation is a `POST` to a URL that names the mutation, exactly as every console route does,
     // and because the keys section's form has to name it in its `action`.
@@ -10809,6 +11043,7 @@ fn handle_account(
         page: &page,
         who: None,
         logout: cfg.account_logout_url.as_deref(),
+        delete: delete_path.as_deref(),
         page_lede: false,
     };
     // Below the prefix, only the page, the profile edit and the three key mutations exist. A
@@ -13890,6 +14125,27 @@ fn main() {
         "[bb-auth-web] proxy secret: set. A request whose {PROXY_SECRET_HEADER} does not match \
          is a 403, so nginx must include /opt/bb-auth/etc/bb-auth-web.nginx in the GUI's location."
     );
+    // The deletion intake, wired (§13.29 W2). The journal is where an operator checks what this
+    // surface is joined to, so the origin and the bound on one call are both worth naming: the
+    // bound is what stops a hung intake from holding a handler thread forever (§13.13), and
+    // naming it here is what makes it a fact of this deployment rather than a constant nobody
+    // can see. The secret is never named, for the proxy secret's reason.
+    if let Some(origin) = cfg.delete_intake.as_deref() {
+        eprintln!(
+            "[bb-auth-web] deletion intake: {origin}, one call given {}s before this gives up.",
+            cfg.intake_timeout.as_secs()
+        );
+        // The half-wired state, said once. The intake checks no secret today, so an operator who
+        // wired the worker and not the secret has a menu row reaching a service that trusts any
+        // local caller, and the journal is the only place that can say so.
+        if cfg.delete_secret.is_none() {
+            eprintln!(
+                "[bb-auth-web] deletion intake: no BB_AUTH_WEB_DELETE_SECRET set: the intake \
+                 trusts any caller that reaches it, until the same secret is written here and \
+                 where the intake's unit reads it."
+            );
+        }
+    }
     eprintln!(
         "[bb-auth-web] this instance WRITES {} — every edit is validated with the gate's own \
          parser first, and goes live on: systemctl reload bb-auth",
@@ -14018,6 +14274,12 @@ mod tests {
             // point at a fake (`profile_boot`).
             cognito_endpoint: None,
             cognito_timeout: COGNITO_TIMEOUT,
+            // The feature off, which is the startup default and what every fixture in this
+            // module is: a deployment that never wired the owner's worker. The tests that want
+            // it on set the fields on a copy (`account_port_intake`).
+            delete_intake: None,
+            delete_secret: None,
+            intake_timeout: COGNITO_TIMEOUT,
         }
     }
 
@@ -15979,6 +16241,174 @@ mod tests {
                  an operator can go and edit: {e}"
             );
         }
+    }
+
+    /// The startup rule for `BB_AUTH_WEB_DELETE_INTAKE` (docs/ARCHITECTURE.md §13.29 W2): the
+    /// intake's **origin**, `http`, a loopback IP literal, a port, and nothing else. Loopback
+    /// only, and the reason is the request, not the port: it carries an identity in clear to a
+    /// service whose one check is that header, so to any other host it is an identity sent
+    /// unencrypted to something that deletes accounts on it. Unset is the feature off
+    /// (`Ok(None)`), which is how `BB_AUTH_WEB_LOGOUT_URL` unset already behaves, and the
+    /// accepted value is kept as written, because the caller appends the intake's two
+    /// hard-coded paths to it and a re-serialized origin is a second answer to what the
+    /// operator typed.
+    ///
+    /// Red until the coder adds `fn compile_delete_intake(raw: &str) -> Result<Option<String>,
+    /// String>` and the three fields §13.29 W10 7a names (`Config::{delete_intake,
+    /// delete_secret, intake_timeout}`).
+    #[test]
+    fn delete_intake_accepts_a_loopback_http_origin() {
+        // The address the intake listens on today (§13.29 W1, rpi-01).
+        assert_eq!(
+            compile_delete_intake("http://127.0.0.1:8480"),
+            Ok(Some("http://127.0.0.1:8480".to_string())),
+            "the answer is the origin as written, so the caller appends its own paths to it \
+             rather than to a re-serialized origin"
+        );
+        // All of 127.0.0.0/8 is loopback, and so is the IPv6 literal.
+        for ok in [
+            "http://127.0.0.42:1",
+            "http://127.255.255.254:65535",
+            "http://[::1]:8480",
+        ] {
+            assert_eq!(
+                compile_delete_intake(ok),
+                Ok(Some(ok.to_string())),
+                "{ok} is a loopback origin"
+            );
+        }
+        // Unset is the feature off, not a refusal: a deployment that never wired the worker
+        // starts, shows no menu row, and answers the delete page as the 404 every unknown path
+        // gets.
+        assert_eq!(
+            compile_delete_intake(""),
+            Ok(None),
+            "an unset variable is a deployment, not a boot loop"
+        );
+    }
+
+    /// Every spelling that is **not** a loopback `http` origin is a fatal startup naming
+    /// `BB_AUTH_WEB_DELETE_INTAKE` (§13.29 W2). Each case is its own reason: `https` (the
+    /// intake speaks plain HTTP, so an https origin names a host the operator did not name);
+    /// a **name** (a name resolves to whatever the resolver says, and "loopback" has to be a
+    /// fact about the bytes, not a guess the startup made for the operator); a non-loopback
+    /// address (the identity would leave the host); a path (the intake hard-codes its two
+    /// paths, so a base carrying one appends them somewhere else, and the design says "nothing
+    /// else"); a query and a fragment for the same reason; userinfo (an `@` is credentials in
+    /// an origin); and no port, because the intake is a port, not a name on the default one.
+    #[test]
+    fn delete_intake_refuses_a_non_loopback_host_a_name_https_a_path_or_userinfo() {
+        for raw in [
+            "https://127.0.0.1:8480",
+            "ftp://127.0.0.1:8480",
+            "//127.0.0.1:8480",
+            "127.0.0.1:8480",
+            "http://localhost:8480",
+            "http://intake.internal:8480",
+            "http://127.0.0.1.evil.example:8480",
+            "http://10.0.0.5:8480",
+            "http://127.0.0.1:8480/account/whoami",
+            "http://127.0.0.1:8480?q=1",
+            "http://127.0.0.1:8480#x",
+            "http://user@127.0.0.1:8480",
+            "http://127.0.0.1",
+            "not a url",
+        ] {
+            let e = compile_delete_intake(raw).expect_err("not a loopback origin");
+            assert!(
+                e.contains("BB_AUTH_WEB_DELETE_INTAKE"),
+                "the refusal of {raw:?} must name the variable, since that is the only thing \
+                 an operator can go and edit: {e}"
+            );
+        }
+    }
+
+    /// `BB_AUTH_WEB_DELETE_SECRET` is **optional** (§13.29 W2 as amended on 2026-11-26, the
+    /// user's answer to question 3): unset is allowed, the GUI starts, and the startup banner
+    /// says once in the journal that the intake trusts any local caller until a secret is set
+    /// on both sides. This test is the 7a half of its name: a deployment with no secret is
+    /// accepted (`Ok(None)`), and the fixture's `Config` holds `None` for both new fields, so
+    /// every test in this module is a deployment that could start with the feature off. The
+    /// "sends no secret header" half is 7c's
+    /// `each_request_carries_one_address_and_the_secret_never_the_joined_header`: 7a makes no
+    /// call to the intake at all, so there is no header on the wire to look for yet.
+    ///
+    /// The bound on one intake call is asserted here because 7a is the slice that adds it:
+    /// §13.29 W2 says 5 s, the same wall `cognito_timeout` carries, and the tests shorten it
+    /// the same way.
+    #[test]
+    fn delete_intake_without_a_secret_starts_and_sends_no_secret_header() {
+        assert_eq!(
+            compile_delete_secret(""),
+            Ok(None),
+            "unset is the feature off, not a fatal startup: bb-auth ships its half once and \
+             the owner starts enforcing the header when they choose, with no release here"
+        );
+        let cfg = cfg_for("delete-secret-unset", ADMIN_BASE);
+        assert_eq!(
+            cfg.delete_secret, None,
+            "a Config with no delete secret is the fixture's shape, so the startup default is \
+             off and not a guess"
+        );
+        assert_eq!(
+            cfg.delete_intake, None,
+            "and no intake either: the row, the page and the call all follow that one field"
+        );
+        assert_eq!(
+            cfg.intake_timeout,
+            std::time::Duration::from_secs(5),
+            "the production bound is §13.29 W2's 5 s, and only the tests shorten it"
+        );
+    }
+
+    /// A **malformed** delete secret is fatal (§13.29 W2): optional means "unset is allowed",
+    /// it never means "a broken value is ignored". The rules are `compile_proxy_secret`'s,
+    /// because the same value has to reach the owner's unit file and this env file with
+    /// nothing to quote: 32 characters of `[A-Za-z0-9_-]` at least. Every refusal names
+    /// `BB_AUTH_WEB_DELETE_SECRET` and none echoes the value, for the proxy secret's reason:
+    /// a startup message goes to the journal, and a secret printed once at boot is a secret
+    /// for as long as the journal is kept.
+    #[test]
+    fn a_malformed_delete_secret_is_fatal_and_names_the_variable() {
+        let refused = |raw: &str| {
+            let e = compile_delete_secret(raw).expect_err("a malformed secret is fatal");
+            assert!(
+                e.contains("BB_AUTH_WEB_DELETE_SECRET"),
+                "the refusal must name the variable, since that is the only thing an operator \
+                 can go and edit: {e}"
+            );
+            e
+        };
+
+        // One character short of the floor.
+        let short = "a".repeat(31);
+        let e = refused(&short);
+        assert!(
+            !e.contains(&short),
+            "the message must not echo the value: {e}"
+        );
+
+        // Long enough, and one character outside the charset.
+        let spaced = format!("{} x", "a".repeat(30));
+        assert_eq!(spaced.chars().count(), 32);
+        let e = refused(&spaced);
+        assert!(
+            !e.contains(&spaced),
+            "the message must not echo the value: {e}"
+        );
+
+        // A value that meets the rule is accepted unchanged, and wrapped in `Some`: the field
+        // is an `Option`, and the difference between "no secret" and "this secret" is the
+        // difference between the banner's sentence and silence.
+        let ok = format!("{}-_ab", "a".repeat(28));
+        assert_eq!(ok.chars().count(), 32);
+        assert_eq!(compile_delete_secret(&ok), Ok(Some(ok)));
+        assert_eq!(
+            compile_delete_secret(TEST_SECRET),
+            Ok(Some(TEST_SECRET.to_string())),
+            "the fixture's secret passes the rule, so 7c's request record is a deployment \
+             that could start"
+        );
     }
 
     // --- routing ------------------------------------------------------------
@@ -31032,6 +31462,236 @@ mod tests {
                 "{label}: no delete words: {panel}"
             );
         }
+        let _ = std::fs::remove_file(&path);
+    }
+
+    /// The words §13.28's key and §13.30 §1 pin for the menu row, spelled out here because the
+    /// `K` key that carries them is the coder's to add. `K` has no `PartialEq`, so the rendered
+    /// wording is what a test can compare, and the row's accessible name **is** its visible
+    /// text (§13.28: a row that carries a word is named by that word, not by its glyph).
+    const DELETE_ROW_EN: &str = "Delete account and all its data";
+    const DELETE_ROW_IT: &str = "Elimina l'account e tutti i suoi dati";
+
+    /// The GUI served with `BB_AUTH_WEB_DELETE_INTAKE` set, so the menu row exists (§13.29 W2).
+    /// The address is a port nothing listens on: 7a makes **no call** to the intake, so all this
+    /// fixture has to be is set, and a fixture pointing at a live intake would be a test that
+    /// could reach a real worker, which the rules here forbid.
+    fn account_port_intake(path: &str) -> u16 {
+        let mut cfg = cfg_for(path, ADMIN_BASE);
+        cfg.delete_intake = Some("http://127.0.0.1:1".to_string());
+        cfg.delete_secret = Some(TEST_SECRET.to_string());
+        let server = Server::http("127.0.0.1:0").expect("bind an ephemeral port");
+        let port = server.server_addr().to_ip().expect("an ip address").port();
+        std::thread::spawn(move || {
+            for req in server.incoming_requests() {
+                handle(req, &cfg);
+            }
+        });
+        port
+    }
+
+    /// The three assertions every "no delete row here" test makes, in one place so the console's
+    /// panel, the `403`'s panel and the page's panel with the intake unset cannot drift apart.
+    /// The words are checked in both languages because a row that appears in one language only
+    /// is the same row.
+    fn assert_no_delete_row(panel: &str, at: &str) {
+        assert!(
+            !panel.contains("/delete"),
+            "{at}: no delete link in the panel: {panel}"
+        );
+        assert!(
+            !panel.contains("pill rm"),
+            "{at}: no row styled as a remove: {panel}"
+        );
+        assert!(
+            !panel.contains(DELETE_ROW_EN) && !panel.contains(DELETE_ROW_IT),
+            "{at}: no delete words: {panel}"
+        );
+    }
+
+    /// §13.30 §1: with the intake set, the account panel **ends** in the delete row, behind its
+    /// own rule, after Sign out's. The row is a `GET` link to `{account}/delete` (a link, so a
+    /// prefetch cannot delete, and the confirmation page is 7b's), it is the panel's last child,
+    /// its words are `K::AccountDelete` in the reader's language, and its trash glyph is
+    /// decoration, so the visible word is the accessible name. The target answers `404` in this
+    /// slice, which is the point: the row has a page in 7b, and 7a's job is to make the fields
+    /// have a production reader.
+    #[test]
+    fn the_account_menu_ends_with_delete_after_sign_out() {
+        let path = account_scratch_full("menu-delete");
+        let port = account_port_intake(&path);
+        let url = format!("http://127.0.0.1:{port}{ACCOUNT_PATH}/");
+
+        for (cookie, words) in [("lang=en", DELETE_ROW_EN), ("lang=it", DELETE_ROW_IT)] {
+            let g = account_call_pref(&url, Some("bob@x.com"), Some(cookie), None);
+            assert_eq!(g.status, 200, "{cookie}: {}", account_readable(&g.body));
+            let panel = the_panel(&g.body, cookie);
+
+            // One row, carrying the component's two classes, and it is a link.
+            let rows = controls_with_class(&panel, "a", "rm");
+            assert_eq!(rows.len(), 1, "{cookie}: exactly one delete row: {panel}");
+            let row = &rows[0];
+            assert!(
+                attr(open_tag(row), "class")
+                    .is_some_and(|c| c.split_whitespace().any(|w| w == "pill")),
+                "the row is a menu pill, so it wears the rows above it: {row}"
+            );
+            let href = attr(open_tag(row), "href").unwrap_or_default();
+            assert_eq!(
+                href,
+                format!("{ACCOUNT_PATH}/delete"),
+                "the row links to the page under the account prefix, as a path on this host: \
+                 the intake's own origin never reaches a page"
+            );
+
+            // The panel's order: who, Preferences, rule, Sign out, rule, Delete.
+            let prefs_at = panel
+                .find("<details class=\"prefs\">")
+                .unwrap_or_else(|| panic!("{cookie}: the panel has Preferences: {panel}"));
+            let out = anchors_to(&panel, "/auth/logout");
+            assert_eq!(out.len(), 1, "{cookie}: one Sign out row: {panel}");
+            let out_at = panel
+                .find(&out[0])
+                .unwrap_or_else(|| panic!("{cookie}: Sign out is in the panel: {panel}"));
+            let row_at = panel
+                .find(row.as_str())
+                .unwrap_or_else(|| panic!("{cookie}: the row is in the panel: {panel}"));
+            assert!(
+                prefs_at < out_at && out_at < row_at,
+                "{cookie}: the row comes after Sign out: {panel}"
+            );
+            assert_eq!(
+                elements(&panel, "<div class=\"sep\"", "</div>").len(),
+                2,
+                "{cookie}: two rules, one above Sign out and one above the row: {panel}"
+            );
+            // The rule directly above the row, with nothing in between.
+            let sep_end = panel[..row_at]
+                .rfind("</div>")
+                .map(|i| i + "</div>".len())
+                .unwrap_or(0);
+            assert!(
+                panel[sep_end..row_at].trim().is_empty(),
+                "{cookie}: the row follows its rule at once: {:?}",
+                &panel[sep_end..row_at]
+            );
+            // And it is the last child: nothing follows it inside `div.menu`.
+            for tag in ["<a ", "<div", "<details", "<p ", "<form"] {
+                assert!(
+                    !panel[row_at + row.len()..].contains(tag),
+                    "{cookie}: the row is the panel's last child, {tag} follows it: {panel}"
+                );
+            }
+
+            // The glyph is decoration and the visible word is the name: a glyph that kept a
+            // name of its own would make the row say the words twice to a reader.
+            assert_eq!(
+                visible_text(row),
+                words,
+                "{cookie}: the row reads the key's words, and nothing else: {row}"
+            );
+            let glyphs = elements(row, "<svg", "</svg>");
+            assert_eq!(glyphs.len(), 1, "{cookie}: one glyph: {row}");
+            assert!(
+                glyphs[0].contains("aria-hidden=\"true\"")
+                    && glyphs[0].contains("focusable=\"false\""),
+                "{cookie}: the glyph is out of the accessibility tree: {}",
+                glyphs[0]
+            );
+            // A trash can, not the keys table's `×`: at the bottom of a panel an `×` reads as
+            // "close this panel" (§13.30 §1). The three paths are the ones the design spells.
+            for d in ["M3 6h18", "M8 6V4h8v2", "M6 6l1 14h10l1-14"] {
+                assert!(
+                    glyphs[0].contains(d),
+                    "{cookie}: the trash glyph's {d}: {}",
+                    glyphs[0]
+                );
+            }
+
+            // A link, never a form: a `GET` must never mutate, and a prefetched link is a
+            // normal thing a browser does to the last row of a menu.
+            for form in elements(&g.body, "<form", "</form>") {
+                assert!(
+                    !form.contains(&format!("action=\"{ACCOUNT_PATH}/delete")),
+                    "{cookie}: the row is a link, not a submission: {form}"
+                );
+            }
+        }
+        let _ = std::fs::remove_file(&path);
+    }
+
+    /// §13.28 §5, unchanged: the console's panel has **no** delete row, with the intake set.
+    /// This program's administrator surface is not where a person deletes their own account,
+    /// and the row is not hidden there: markup a stylesheet could reveal is a dead link on the
+    /// surface that edits users.
+    #[test]
+    fn the_console_menu_has_no_delete_row() {
+        let path = account_scratch_full("console-no-delete");
+        let port = account_port_intake(&path);
+
+        for (label, g) in [
+            ("console", console_get(port, "admin@x.com", &[])),
+            (
+                "users",
+                console_at(port, "admin@x.com", "/users", "lang=en"),
+            ),
+            (
+                "settings",
+                console_at(port, "admin@x.com", "/config", "lang=it"),
+            ),
+            ("403", console_get(port, "bob@x.com", &[])),
+        ] {
+            assert!(
+                g.status == 200 || g.status == 403,
+                "{label}: a page: {}",
+                account_readable(&g.body)
+            );
+            assert_no_delete_row(&the_panel(&g.body, label), label);
+            assert!(
+                !g.body.contains(&format!("{ACCOUNT_PATH}/delete")),
+                "{label}: the whole document names no delete page: {}",
+                account_readable(&g.body)
+            );
+        }
+        let _ = std::fs::remove_file(&path);
+    }
+
+    /// §13.29 W2: unset is the feature **off**. The panel ends where it ends today, with Sign
+    /// out, and `{account}/delete` is the ordinary `404` every unknown path under the prefix
+    /// gets, so a deployment that never wired the worker shows a person a door to nothing.
+    #[test]
+    fn no_delete_row_when_the_intake_is_unset() {
+        let path = account_scratch_full("intake-unset");
+        let port = account_port(&path);
+        let url = format!("http://127.0.0.1:{port}{ACCOUNT_PATH}/");
+
+        for (cookie, who) in [("lang=en", "bob@x.com"), ("lang=it", "admin@x.com")] {
+            let g = account_call_pref(&url, Some(who), Some(cookie), None);
+            assert_eq!(g.status, 200, "{cookie}: {}", account_readable(&g.body));
+            let panel = the_panel(&g.body, cookie);
+            assert_no_delete_row(&panel, cookie);
+            // The panel ends in Sign out, so the row's place is not reserved as hidden markup.
+            let out = anchors_to(&panel, "/auth/logout");
+            assert_eq!(out.len(), 1, "{cookie}: one Sign out row: {panel}");
+            let out_at = panel
+                .find(&out[0])
+                .unwrap_or_else(|| panic!("{cookie}: Sign out is in the panel: {panel}"));
+            assert!(
+                !panel[out_at + out[0].len()..].contains("</a>"),
+                "{cookie}: Sign out is the panel's last row: {panel}"
+            );
+        }
+
+        // The route is not added in 7a, and the page is the 404 every unknown path gets: the
+        // row's target arrives with 7b.
+        let g = account_call(&format!("{url}delete"), Some("bob@x.com"));
+        assert_eq!(
+            g.status,
+            404,
+            "with the intake unset there is no delete page: {}",
+            account_readable(&g.body)
+        );
+        assert_no_delete_row(&the_panel(&g.body, "404"), "404");
         let _ = std::fs::remove_file(&path);
     }
 
