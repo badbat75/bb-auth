@@ -15,7 +15,7 @@ as the column says. A requirement still open must be covered by a step.
 | ID | Requirement | State |
 |---|---|---|
 | R1 | Self-service API keys: a user mints, rotates and removes their own `bbk_` tokens, without an administrator | Done: live on rpi-01, checked in a browser by the user on 2026-11-26 (step 4 closed) |
-| R2 | Self-service profile: a user sees what bb-auth knows about them and edits their own Cognito profile attributes | Step 5 |
+| R2 | Self-service profile: a user sees what bb-auth knows about them and edits their own Cognito profile attributes | Done: live on rpi-01, a real edit checked in a browser by the user on 2026-11-26 (step 5 closed); federated users see one sentence instead of the form, by design |
 | R3 | The self-service surface is a section of the admin GUI (`bb-auth-web`), served at its own prefix `/account/` (`BB_AUTH_WEB_ACCOUNT_PATH`) beside the admin pages at `/admin/`, open to any signed-in identity, never reading `web.admins` and acting only on the caller's own account, so further user-facing features have a home. Changed by the user on 2026-11-23 from "a fourth binary of its own", and that evening from `<base>/me/` to `/account/` so the administrators' URLs do not move | Design revised (`docs/ARCHITECTURE.md` §13); Read-only page live on rpi-01 at `/account/` since 2026-11-24; the writes are steps 4, 5 and 7 |
 | R4 | Self-service deletion: a user deletes their own account and its related data after a confirmation: the roster row, keys and references in scopes and groups at once, and every Cognito user with their address (federated twins included) through the owner's deletion worker (`bb-account-delete`, the user's choice on 2026-11-26). The audit is not edited: their lines expire with `audit.retention`, and the page says so | Step 7 (the step 6 it once named is done). Changed on 2026-11-26: the worker deletes a social-only user's Cognito account too, so the 2026-11-23 "left to an administrator" exception goes |
 | R5 | The sign-in page warns, where it offers registration, that registering by email code creates an account separate from a Google or Microsoft one with the same address, and points such a person at their provider's button (the user's choice on 2026-11-25, option 1 of three: no Cognito change; a pre-sign-up Lambda or linking accounts stay for later) | Met: live on rpi-01 since 2026-11-25 (`v1.99.9-gfb2bd75`), seen in a browser by the designer in both themes, both languages and at phone width |
@@ -80,83 +80,6 @@ process that writes both files, so two gaps found the same day are closed **firs
 GUI is opened to anyone who is not an administrator: `bb-auth-web` can read the HMAC key, and it
 believes `X-Auth-Email` from any local process. The design is `docs/ARCHITECTURE.md` §13.
 
-### 5. Editable Cognito profile
-
-Covers: R2.
-
-`cognito_endpoint` moves to the library as a `Settings` method (the gate's test keeps passing).
-The re-authentication of §13.7: choose one of one's own emails, `InitiateAuth` (`USER_AUTH`,
-`EMAIL_OTP`), a code form carrying Cognito's `Session` in a hidden field, then
-`RespondToAuthChallenge` and `UpdateUserAttributes`, with the tokens dropped at the end of that
-request. Editable: `gate.profile_claims` minus `email`, `phone_number`, `preferred_username`;
-`email` shown read-only. `bb-auth-web.service` loses `IPAddressDeny=any` and
-`IPAddressAllow=localhost`, which block the call to Cognito (cost in §13.7). Tests use a fake
-Cognito endpoint and never the real pool; the first real edit needs the user's go-ahead.
-
-The real pool, read on 2026-11-25 (read-only `describe-user-pool` and `describe-user-pool-client`,
-run by the IT-Admin session at the user's request; nothing changed): email is the username
-(`UsernameAttributes: [email]`), `AllowedFirstAuthFactors` has `EMAIL_OTP` and `PASSWORD`, MFA off,
-self-signup open, no custom attributes, `DeletionProtection` inactive. The native client
-`39c7grfrau8i7tvqqkej86sh98` (`gate.client_id`) allows `ALLOW_USER_AUTH` with
-`AuthSessionValidity` 3 minutes, no secret, and `ReadAttributes`/`WriteAttributes` unset (Cognito's
-default, all writable standard attributes; unverified). The social client
-`jsahvqjbm5v8idb6kj577ggbh` allows only `ALLOW_REFRESH_TOKEN_AUTH`, so a person who signed in only
-through Google or Microsoft cannot re-authenticate by email code there. Two consequences for the
-design: `AttributesRequireVerificationBeforeUpdate` is empty, so an email change would apply
-unconfirmed (moot while `email` stays read-only, which it does); and the pool and both clients
-are managed in OpenTofu (the itadmin repository, `infra/tofu/stacks/aws/production/cognito.tf`),
-so any change to them goes through that repository's plan and apply, never the AWS CLI.
-
-Slices (§13.22-§13.24): 5a to 5d are done (the library move, the form up to the emailed code,
-the code step and the save, the e2e fake Cognito with the profile's walks and 11 scenes, cf9109b).
-Installed on rpi-01 on 2026-11-25 as `v1.99.9-gcf9109b`, verify green, the unit's IP filter gone
-and the listener still on 127.0.0.1. Left: **5e**, a real edit in a browser against the real pool
-(the user's), including a Google-only account's case, then the docs.
-
-The real run on 2026-11-25 found a bug: signed in through MicrosoftPersonal, the user's edit
-reached a separate **native** Cognito user with the same email (confirmed read-only by the IT-Admin
-session: two unlinked users, only the native one modified), because the re-authentication looks
-the user up by email. The Google-only case answered correctly. The fix is designed in §13.25 and
-comes before 5e: **5f**, the gate forwards `X-Auth-Native-Username` (the token's
-`cognito:username`, only for a native sign-in; a new key in the cookie's JSON claims, no
-`COOKIE_VERSION` bump; an older cookie fails closed); **5g**, `bb-auth-web` offers the edit only
-with that header, asks Cognito for that username, and requires the same username after the code
-(`the_rpi01_twin_is_never_written`), and with it the page's sections reordered as the user asked on
-2026-11-25: Profile first, then API keys, then Groups, then Where you reach; 5f and 5g ship together; **5h**, the nginx change on rpi-01
-first (the user's go-ahead), then the deploy and the real run. From the designer's review of
-5b-5d (no WCAG failure): the code page's change list should read "Given name: Augusta (was Ada)"
-(the Italian `AccountProfileWas` becomes "prima") and the code field wants `max-width:14ch`;
-later, the date hint order, a gap under the read-only phone line, browser defaults for
-autocapitalize on names, autofocus on the refused field, and §13.23 to say the edit page's h1 is
-"Edit profile".
-
-5f and 5g are committed (98bb8ff, 13d0dc0, the code field's `max-width:14ch` in d90cf10) and
-**5h is done**: the nginx lines are in rpi-01's `location /account/` (backup `.bak-5h`), and
-`v1.99.9-gd90cf10` is installed there with verify green, on 2026-11-25 with the user's go-ahead. The
-IT-Admin session was told, to carry the nginx change into its own record of the host. On 2026-11-25, at the user's request, the IT-Admin session
-deleted the native twin (`a3144842-…`), so that email now matches only the MicrosoftPersonal
-user. A real 5e run therefore needs an account that signs in by email code.
-
-Federated users, read-only from IT-Admin on 2026-11-25 (`cognito.tf`; AWS: "Amazon Cognito updates
-mapped attributes when users sign in to your application through an IdP"): MicrosoftPersonal maps
-`email`, `name`, `given_name`, `family_name`, and Google maps `email`, `given_name`, `family_name`.
-Any edit of those on a federated user would therefore be reverted at that user's next sign-in, so the
-one sentence 5g shows instead of a form is the honest answer, not a gap. A federated edit path would
-need the user's decision first: drop those mappings in OpenTofu (edits stick, the automatic name sync
-is lost), plus a re-authentication through the social client whose `prompt=login`/`max_age`
-forwarding nobody has verified. Not planned.
-
-Inherited from §13.13: every Cognito call carries `timeout_global` of 5 s (assumed, not measured),
-no retry, at most two calls per request, so a slow Cognito cannot pin the workers; a test with a
-fake endpoint that never answers shows the handler answering within the bound and the worker
-serving the next request.
-
-- Done when: tests show a wrong code changes nothing, an email not among the caller's and a
-  non-editable attribute are refused before Cognito is called, and no token reaches a response
-  or a log; a non-loopback `BB_AUTH_WEB_LISTEN` without the opt-in still refuses to start; and a
-  user changes an editable attribute in a browser against the real pool (with the user's
-  go-ahead), and it shows in their next token's profile claims.
-
 ### 7. Delete my account
 
 Covers: R4.
@@ -215,5 +138,3 @@ the same file.
   deleted; 7g's test account is a new one, for which the coordinator prepares the commands. The
   proposals for itadmin (§13.29 W8 §1 to §3 and §5) go to IT-Admin, which asks the owner before
   applying them on rpi-01.
-- Step 5e: the user's browser check on rpi-01 with the new native test account
-  the test Gmail account (re-registered on 2026-11-26, roster row `00597000-…`, no scopes).
