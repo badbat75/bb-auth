@@ -66,7 +66,7 @@ The gate, the CLI (`bb-auth-adm`) and the admin GUI (`bb-auth-web`) are built an
 `AGENTS.md` and `CHANGELOG.md` say what they do. The agent structure (roles, skills, this plan) was added
 on 2026-11-23; the work before it is in `git log`. The self-service page is the `/account` section of `bb-auth-web`, live on rpi-01 since
 2026-11-24, with its key writes, header and theme since 2026-11-25. `v1.99.8` (g978eca8) is tagged, on GitHub as a
-pre-release; rpi-01 runs `v1.99.9-g5b7d9ad` since the evening of 2026-11-26 (self-service account deletion through the owner's worker, signing the browser out on completion; the two menus; the AGPL licence) with `gate.landing_url` set to its `/account/` page and `gate.allow_unverified_social` off.
+pre-release; rpi-01 runs `v1.99.9-g5b7d9ad` since the evening of 2026-11-26 (self-service account deletion through the owner's worker, signing the browser out on completion; the two menus; the AGPL licence) with `gate.landing_url` set to its `/account/` page and `gate.allow_unverified_social` on for `MicrosoftPersonal` alone. Google's `email_verified` is mapped in the pool (OpenTofu, through IT-Admin), so a Google sign-in proves its address. Microsoft's personal accounts send no claim Cognito accepts as a boolean (mapping `xms_edov` broke the sign-in, so the mapping was removed), so that one provider is the exception (the user, 2026-11-26).
 
 ## Next steps
 
