@@ -274,8 +274,16 @@ it reaches every settings refusal. The System settings page shows `compile_setti
 sentence verbatim, so it names wire keys (`landing_url`) on an Italian page. Designed in §13.31:
 a `SettingsRefusal` enum in the library (46 codes in 37 variants), whose `Display` is today's
 exact English for `bb-auth-adm` and `--check-settings`, and one exhaustive GUI match onto `K` keys
-naming the visible labels. Slices **S0** (golden tests of today's strings, green from the start) , **S1**
-(the enum's skeleton) , **S2** (claims, attributes) , **S3** (URLs) , **S4** (domains, hosts, client ids) , **S5** (social buttons) , **S6** (audit) , **S7** (brand; `Other` deleted; the code list) and **S8** (the GUI's K keys, `fill`, the exhaustive `settings_refusal`; the sniff gone) and **S9** (`apply` keeps only its own stricter checks) are done; then, and **S10** (the designer, 2026-11-26): reword the page's older refusal keys (`SessionTtlBad`, `IssuerNeeded`, `DefaultThemeBad` and the rest), which are lowercase fragments with no label, so that every refusal on the page starts with its field's label as the new ones do (WCAG 3.3.1); in the same pass, the Italian accents written as apostrophes (`puo'`, `E'`, `c'e'`, `ne'`) in `AudienceNeeded`, `SocialWiringNeeded` and the help texts near `bb-auth-web.rs:1590`, `1596` and `1636`, and the refused `POST`'s page title, which reads "settings" where the `GET` says "System settings" (the designer's S8 review, 2026-11-26) (`ConfigForm::apply` drops its duplicate checks), each with its red tests named in §13.31 §7.
+naming the visible labels. Slices S0 to S9 are done (the goldens, the enum, every family of
+codes, the GUI's `SetRef*` keys and exhaustive `settings_refusal`, and `apply` keeping only its
+own stricter checks). Left: **S10** (the designer, 2026-11-26): reword the page's older refusal
+keys (`SessionTtlBad`, `IssuerNeeded`, `DefaultThemeBad` and the rest), which are lowercase
+fragments with no label, so that every refusal on the page starts with its field's label as the
+new ones do (WCAG 3.3.1); in the same pass, the Italian accents written as apostrophes (`puo'`,
+`E'`, `c'e'`, `ne'`) in `AudienceNeeded`, `SocialWiringNeeded` and the help texts near
+`bb-auth-web.rs:1590`, `1596` and `1636`, and the refused `POST`'s page title, which reads
+"settings" where the `GET` says "System settings". The designer words it first, then a tester and
+a coder; then docs.
 
 - Done when: every refusal reads in the page's language and names the visible label (a test walks
   every code in both languages); the CLI's and the gate's sentences are byte for byte today's (S0's
