@@ -66,7 +66,7 @@ The gate, the CLI (`bb-auth-adm`) and the admin GUI (`bb-auth-web`) are built an
 `AGENTS.md` and `CHANGELOG.md` say what they do. The agent structure (roles, skills, this plan) was added
 on 2026-11-23; the work before it is in `git log`. The self-service page is the `/account` section of `bb-auth-web`, live on rpi-01 since
 2026-11-24, with its key writes, header and theme since 2026-11-25. `v1.99.8` (g978eca8) is tagged, on GitHub as a
-pre-release; rpi-01 runs `v1.99.9-gfb2bd75` (the profile edit bound to the session's native user, and the sign-in page's duplicate-account notice) with `gate.landing_url` set to its `/account/` page; self-service account deletion is missing there until step 7. Built since and not yet deployed: the one-row account menu and step 8's later items, and settings refusals in the page's language (step 12, 2026-11-26).
+pre-release; rpi-01 runs `v1.99.9-g8a522b8` since 2026-11-26 (the one-row account menu, step 8's later items, settings refusals in the page's language, and 7a's configuration, off there) with `gate.landing_url` set to its `/account/` page; self-service account deletion is missing there until step 7.
 
 ## Next steps
 
