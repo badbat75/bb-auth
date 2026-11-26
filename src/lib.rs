@@ -5960,6 +5960,188 @@ pub fn compile_social_buttons(raw: &[SocialButtonSpec]) -> Result<Vec<SocialButt
     Ok(out)
 }
 
+/// Why a settings file is refused, as a name and its arguments rather than as a sentence
+/// (docs/ARCHITECTURE.md §13.31).
+///
+/// This lives in the library because what a settings file is refused for is an opinion about a
+/// file three programs read, the same argument that put [`decision_reason`] here for the audit.
+/// The **translation** does not: the library has no language, and the `K` table is the one home
+/// of what the GUI shows. So `Display` is the exact English the CLI (`bb-auth-adm`) and the gate
+/// (`--check-settings`, startup, SIGHUP) printed before this type existed, byte for byte, which
+/// is why moving the sentences into each binary was rejected: two binaries print them, so that
+/// would be two copies of each. `code()` is the stable name the GUI maps to a `K` key in slice
+/// S8, so a page can say the same thing in the reader's language without sniffing English.
+///
+/// `Other` is temporary: S1 converts nine of the §2 codes and every leaf not yet converted
+/// travels in it, holding today's prefixed sentence byte for byte, which is what keeps the S0
+/// goldens green from here to S7, where the variant is deleted.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum SettingsRefusal {
+    /// The file declares a version this format is not: 1 predates the app clients, 2 predates
+    /// the pool, and anything else is not this format at all.
+    Version { found: u32 },
+    /// `session_ttl_secs` under [`MIN_SESSION_TTL`]: a session that expires as it is handed
+    /// over is a login loop, not a short login.
+    TtlBelowFloor { ttl: u64 },
+    /// `session_ttl_secs` past [`MAX_SESSION_TTL`]: the cookie's `exp` arithmetic wraps and
+    /// mints a cookie that is already expired.
+    TtlAboveCeiling { ttl: u64 },
+    /// Hosts `gate.authorized_hosts` names that `gate.cookie_domain` cannot reach, so a login
+    /// lands there, sends no session cookie, and bounces back to the sign-in page for ever.
+    HostsOutsideCookieDomain {
+        hosts: Vec<String>,
+        cookie_domain: String,
+    },
+    /// `gate.landing_url`'s host is outside `gate.authorized_hosts`, so [`rd_url_allowed`]
+    /// refuses it at every login and a sign-in with no `rd` falls back to the sign-in page.
+    LandingOffHosts,
+    /// `gate.social_callback_url` is not an absolute https URL, and Cognito compares the
+    /// `redirect_uri` byte for byte.
+    CallbackNotHttps,
+    /// Social buttons are configured with no `gate.oauth_domain` or no
+    /// `gate.social_callback_url`: nowhere to send a visitor, nowhere for them to come back to.
+    SocialHalfConfigured { buttons: usize },
+    /// The two audit headers name one header, which cannot carry an address and a request id
+    /// at once.
+    AuditHeadersSame { name: String },
+    /// `ui.theme` is not one of `system`, `light`, `dark`.
+    ThemeUnknown { raw: String },
+    /// TEMPORARY (S1 to S6, deleted in S7): a refusal not yet converted, carrying today's
+    /// sentence, prefix included, byte for byte.
+    Other(String),
+}
+
+impl SettingsRefusal {
+    /// The stable `snake_case` name of this refusal, the one §13.31 §2 lists and the GUI maps
+    /// to a `K` key. No production code branches on it: it is the refusal's name for the tests
+    /// and for the page, as [`Decision`]'s are for the audit. `Other` is `"other"`, and dies
+    /// with the variant.
+    pub fn code(&self) -> &'static str {
+        match self {
+            Self::Version { .. } => "version",
+            Self::TtlBelowFloor { .. } => "ttl_below_floor",
+            Self::TtlAboveCeiling { .. } => "ttl_above_ceiling",
+            Self::HostsOutsideCookieDomain { .. } => "hosts_outside_cookie_domain",
+            Self::LandingOffHosts => "landing_off_hosts",
+            Self::CallbackNotHttps => "callback_not_https",
+            Self::SocialHalfConfigured { .. } => "social_half_configured",
+            Self::AuditHeadersSame { .. } => "audit_headers_same",
+            Self::ThemeUnknown { .. } => "theme_unknown",
+            Self::Other(_) => "other",
+        }
+    }
+}
+
+impl std::fmt::Display for SettingsRefusal {
+    /// Today's sentence, byte for byte, pinned by the S0 goldens. The variants converted so far
+    /// spell it here; the rest arrive already spelled, in [`SettingsRefusal::Other`].
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            // Explanatory for the one version that exists in the wild, terse for anything else.
+            Self::Version { found } => match *found {
+                1 => write!(
+                    f,
+                    "\"version\": 1 was written before the app clients moved into this file \
+                     (expected {SETTINGS_VERSION}). Set gate.client_id, gate.oauth_domain and \
+                     gate.social_callback_url, give every gate.social_buttons entry its own \
+                     audience, and bump the version; see the CHANGELOG"
+                ),
+                2 => write!(
+                    f,
+                    "\"version\": 2 was written before the pool, the cookie domain and the \
+                     authorized hosts moved into this file (expected {SETTINGS_VERSION}). Copy \
+                     BB_AUTH_COGNITO_ISSUER into gate.issuer, BB_AUTH_COOKIE_DOMAIN into \
+                     gate.cookie_domain and BB_AUTH_AUTHORIZED_HOSTS into gate.authorized_hosts \
+                     (as a list), bump the version, and take all three out of bb-auth.env; see \
+                     the CHANGELOG"
+                ),
+                v => write!(
+                    f,
+                    "\"version\": {v} is not this format (expected {SETTINGS_VERSION})"
+                ),
+            },
+            Self::TtlBelowFloor { ttl } => write!(
+                f,
+                "session_ttl_secs: {ttl} is below the {MIN_SESSION_TTL}s floor; a session that \
+                 expires as it is handed over is a login loop, not a short login"
+            ),
+            Self::TtlAboveCeiling { ttl } => write!(
+                f,
+                "session_ttl_secs: {ttl} is past the {MAX_SESSION_TTL}s ceiling; a lifetime that \
+                 does not fit the arithmetic mints a cookie that is already expired"
+            ),
+            Self::HostsOutsideCookieDomain {
+                hosts,
+                cookie_domain,
+            } => write!(
+                f,
+                "authorized_hosts: {} outside cookie_domain '{cookie_domain}', so a login would \
+                 redirect there and the browser would send no session cookie: a 401, a bounce \
+                 back to the sign-in page, and a loop",
+                hosts.join(", ")
+            ),
+            Self::LandingOffHosts => write!(
+                f,
+                "landing_url: its host is not covered by authorized_hosts, so every sign-in \
+                 with no rd would fall back to the sign-in page"
+            ),
+            Self::CallbackNotHttps => write!(
+                f,
+                "social_callback_url: must be the absolute https:// URL registered on the app \
+                 client, because Cognito compares it byte for byte"
+            ),
+            Self::SocialHalfConfigured { buttons } => write!(
+                f,
+                "social_buttons: {buttons} button(s) configured, but oauth_domain or \
+                 social_callback_url is empty, so there is nowhere to send a visitor and \
+                 nowhere for them to come back to"
+            ),
+            Self::AuditHeadersSame { name } => write!(
+                f,
+                "audit.client_ip_header and audit.request_id_header both name '{name}'; one \
+                 header cannot carry an address and a request id at once"
+            ),
+            Self::ThemeUnknown { raw } => {
+                write!(f, "theme: '{raw}' is not one of system, light, dark")
+            }
+            Self::Other(s) => f.write_str(s),
+        }
+    }
+}
+
+/// Why [`SettingsWrite::prepare`] will not put a settings document on the disk: the two serde
+/// failures on our own structs, and the refusal [`compile_settings`] makes.
+///
+/// Its `Display` is the sentence `bb-auth-adm` prints today, `refusing to write:` included, and
+/// [`From<PrepareError> for String`] is the one thing that lets that CLI print it without
+/// changing a line (docs/ARCHITECTURE.md §13.31 §3). The GUI does not use the sentence: it maps
+/// the refusal's [`SettingsRefusal::code`] to a `K` key, in slice S8.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum PrepareError {
+    /// The document would not serialize: serde on our own structs, never seen.
+    Serialize(String),
+    /// The bytes it wrote do not re-parse: same, and the reason the check exists at all.
+    Reparse(String),
+    /// The compiled settings refuse these bytes, for a reason the settings file owns.
+    Refused(SettingsRefusal),
+}
+
+impl std::fmt::Display for PrepareError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::Serialize(e) => write!(f, "cannot serialize: {e}"),
+            Self::Reparse(e) => write!(f, "serialized to invalid JSON: {e}"),
+            Self::Refused(r) => write!(f, "refusing to write: {r}"),
+        }
+    }
+}
+
+impl From<PrepareError> for String {
+    fn from(e: PrepareError) -> String {
+        e.to_string()
+    }
+}
+
 /// Turn a settings document into the compiled settings, or say why it cannot be one.
 ///
 /// Fatal, with the same reflex the access file's parser has: what changes behaviour is an
@@ -5971,41 +6153,24 @@ pub fn compile_social_buttons(raw: &[SocialButtonSpec]) -> Result<Vec<SocialButt
 /// The gate reads only the `gate` half and the GUI only the `web` half, but both compile the
 /// whole file: an editor that validated only its own section could write one the other
 /// refuses, and the point of a shared parser is that it cannot.
-pub fn compile_settings(file: &SettingsFile) -> Result<Settings, String> {
+pub fn compile_settings(file: &SettingsFile) -> Result<Settings, SettingsRefusal> {
     if file.version != SETTINGS_VERSION {
         // Explanatory for the one version that exists in the wild, terse for anything else:
         // a file that says 1 was written before the Cognito app clients moved into it, and
         // its `social_client_id` and bare-name buttons cannot be read into this shape without
         // guessing which client each button belonged to.
-        return Err(match file.version {
-            1 => format!(
-                "\"version\": 1 was written before the app clients moved into this file \
-                 (expected {SETTINGS_VERSION}). Set gate.client_id, gate.oauth_domain and \
-                 gate.social_callback_url, give every gate.social_buttons entry its own \
-                 audience, and bump the version; see the CHANGELOG"
-            ),
-            2 => format!(
-                "\"version\": 2 was written before the pool, the cookie domain and the \
-                 authorized hosts moved into this file (expected {SETTINGS_VERSION}). Copy \
-                 BB_AUTH_COGNITO_ISSUER into gate.issuer, BB_AUTH_COOKIE_DOMAIN into \
-                 gate.cookie_domain and BB_AUTH_AUTHORIZED_HOSTS into gate.authorized_hosts \
-                 (as a list), bump the version, and take all three out of bb-auth.env; see \
-                 the CHANGELOG"
-            ),
-            v => format!("\"version\": {v} is not this format (expected {SETTINGS_VERSION})"),
+        return Err(SettingsRefusal::Version {
+            found: file.version,
         });
     }
     let profile_claims = compile_profile_claims(&file.gate.profile_claims)
-        .map_err(|e| format!("profile_claims: {e}"))?;
+        .map_err(|e| SettingsRefusal::Other(format!("profile_claims: {e}")))?;
     let identity_attrs = compile_identity_attrs(&file.gate.identity_attrs)
-        .map_err(|e| format!("identity_attrs: {e}"))?;
+        .map_err(|e| SettingsRefusal::Other(format!("identity_attrs: {e}")))?;
 
     let ttl = file.gate.session_ttl_secs;
     if ttl < MIN_SESSION_TTL {
-        return Err(format!(
-            "session_ttl_secs: {ttl} is below the {MIN_SESSION_TTL}s floor; a session that \
-             expires as it is handed over is a login loop, not a short login"
-        ));
+        return Err(SettingsRefusal::TtlBelowFloor { ttl });
     }
     if ttl > MAX_HONOURED_SESSION_TTL {
         eprintln!(
@@ -6019,10 +6184,7 @@ pub fn compile_settings(file: &SettingsFile) -> Result<Settings, String> {
         // `exp` and cast to `i64` for its `Max-Age`, so far enough out it wraps and mints a
         // cookie that expired in the past. That is the login loop the floor exists to
         // prevent, arrived at from the other end, and it is reachable from a GUI field.
-        return Err(format!(
-            "session_ttl_secs: {ttl} is past the {MAX_SESSION_TTL}s ceiling; a lifetime that \
-             does not fit the arithmetic mints a cookie that is already expired"
-        ));
+        return Err(SettingsRefusal::TtlAboveCeiling { ttl });
     }
 
     let providers: Vec<String> = file
@@ -6043,29 +6205,35 @@ pub fn compile_settings(file: &SettingsFile) -> Result<Settings, String> {
     // The app clients, and the audience list they derive. Nothing else in this system says
     // which app clients the gate is part of, which is what makes the derivation safe: there
     // is no second list to disagree with.
-    let client_id = compile_app_client_id("client_id", &file.gate.client_id)?;
+    let client_id =
+        compile_app_client_id("client_id", &file.gate.client_id).map_err(SettingsRefusal::Other)?;
     let login_url = match file.gate.login_url.trim() {
         "" => String::new(),
-        raw => compile_login_url(raw).map_err(|e| format!("login_url: {e}"))?,
+        raw => {
+            compile_login_url(raw).map_err(|e| SettingsRefusal::Other(format!("login_url: {e}")))?
+        }
     };
     let denied_url = match file.gate.denied_url.trim() {
         "" => String::new(),
-        raw => compile_page_url("denied_url", raw)?,
+        raw => compile_page_url("denied_url", raw).map_err(SettingsRefusal::Other)?,
     };
     let landing_url = match file.gate.landing_url.trim() {
         "" => String::new(),
-        raw => compile_page_url("landing_url", raw)?,
+        raw => compile_page_url("landing_url", raw).map_err(SettingsRefusal::Other)?,
     };
-    let issuer = compile_issuer(&file.gate.issuer)?;
-    let cookie_domain = compile_cookie_domain(&file.gate.cookie_domain)?;
+    let issuer = compile_issuer(&file.gate.issuer).map_err(SettingsRefusal::Other)?;
+    let cookie_domain =
+        compile_cookie_domain(&file.gate.cookie_domain).map_err(SettingsRefusal::Other)?;
     let mut authorized_hosts: Vec<UrlPattern> =
         Vec::with_capacity(file.gate.authorized_hosts.len());
     for raw in &file.gate.authorized_hosts {
         if raw.trim().is_empty() {
             continue;
         }
-        authorized_hosts
-            .push(compile_host_pattern(raw).map_err(|e| format!("authorized_hosts: {e}"))?);
+        authorized_hosts.push(
+            compile_host_pattern(raw)
+                .map_err(|e| SettingsRefusal::Other(format!("authorized_hosts: {e}")))?,
+        );
     }
     // The check that only became possible once these two stopped living in different files,
     // and the reason the move is worth what it cost. A host the cookie cannot reach is not a
@@ -6073,21 +6241,19 @@ pub fn compile_settings(file: &SettingsFile) -> Result<Settings, String> {
     // session cookie, nginx answers 401, and the browser goes back to the sign-in page it
     // just came from, for ever, with nothing anywhere saying why.
     if !cookie_domain.is_empty() {
-        let stray: Vec<&str> = file
+        let stray: Vec<String> = file
             .gate
             .authorized_hosts
             .iter()
             .map(|h| h.trim())
             .filter(|h| !h.is_empty() && !cookie_domain_covers(&cookie_domain, h))
+            .map(str::to_string)
             .collect();
         if !stray.is_empty() {
-            return Err(format!(
-                "authorized_hosts: {} outside cookie_domain '{}', so a login would redirect \
-                 there and the browser would send no session cookie: a 401, a bounce back to \
-                 the sign-in page, and a loop",
-                stray.join(", "),
-                cookie_domain
-            ));
+            return Err(SettingsRefusal::HostsOutsideCookieDomain {
+                hosts: stray,
+                cookie_domain: cookie_domain.clone(),
+            });
         }
     }
     // The same reflex one field along, and the reason `rd_url_allowed` lives in this library:
@@ -6098,35 +6264,26 @@ pub fn compile_settings(file: &SettingsFile) -> Result<Settings, String> {
     if !landing_url.is_empty()
         && (authorized_hosts.is_empty() || !rd_url_allowed(&landing_url, &authorized_hosts))
     {
-        return Err(
-            "landing_url: its host is not covered by authorized_hosts, so every sign-in with \
-             no rd would fall back to the sign-in page"
-                .to_string(),
-        );
+        return Err(SettingsRefusal::LandingOffHosts);
     }
-    let oauth_domain = compile_oauth_domain(&file.gate.oauth_domain)?;
+    let oauth_domain =
+        compile_oauth_domain(&file.gate.oauth_domain).map_err(SettingsRefusal::Other)?;
     let social_callback_url =
-        match compile_asset_url("social_callback_url", &file.gate.social_callback_url)? {
-            Some(u) if !u.starts_with("https://") => {
-                return Err(
-                    "social_callback_url: must be the absolute https:// URL registered on the app \
-                 client, because Cognito compares it byte for byte"
-                        .to_string(),
-                )
-            }
+        match compile_asset_url("social_callback_url", &file.gate.social_callback_url)
+            .map_err(SettingsRefusal::Other)?
+        {
+            Some(u) if !u.starts_with("https://") => return Err(SettingsRefusal::CallbackNotHttps),
             other => other,
         };
-    let social_buttons = compile_social_buttons(&file.gate.social_buttons)?;
+    let social_buttons =
+        compile_social_buttons(&file.gate.social_buttons).map_err(SettingsRefusal::Other)?;
     // A button with nowhere to send the browser, or nowhere for it to come back to, is the
     // half-configured social sign-in that used to be a fatal startup when this lived in the
     // environment. It is still refused, one level earlier: in the editor, on the file.
     if !social_buttons.is_empty() && (oauth_domain.is_empty() || social_callback_url.is_none()) {
-        return Err(format!(
-            "social_buttons: {} button(s) configured, but oauth_domain or social_callback_url \
-             is empty, so there is nowhere to send a visitor and nowhere for them to come back \
-             to",
-            social_buttons.len()
-        ));
+        return Err(SettingsRefusal::SocialHalfConfigured {
+            buttons: social_buttons.len(),
+        });
     }
     let mut audiences: Vec<String> = Vec::with_capacity(1 + social_buttons.len());
     if !client_id.is_empty() {
@@ -6143,16 +6300,18 @@ pub fn compile_settings(file: &SettingsFile) -> Result<Settings, String> {
     // carries an address and an id at once, and one of the two settings would then record
     // nothing while looking configured.
     let client_ip_header =
-        compile_audit_header("audit.client_ip_header", &file.audit.client_ip_header)?;
+        compile_audit_header("audit.client_ip_header", &file.audit.client_ip_header)
+            .map_err(SettingsRefusal::Other)?;
     let request_id_header =
-        compile_audit_header("audit.request_id_header", &file.audit.request_id_header)?;
+        compile_audit_header("audit.request_id_header", &file.audit.request_id_header)
+            .map_err(SettingsRefusal::Other)?;
     if !client_ip_header.is_empty() && client_ip_header.eq_ignore_ascii_case(&request_id_header) {
-        return Err(format!(
-            "audit.client_ip_header and audit.request_id_header both name '{client_ip_header}'; \
-             one header cannot carry an address and a request id at once"
-        ));
+        return Err(SettingsRefusal::AuditHeadersSame {
+            name: client_ip_header,
+        });
     }
-    let audit_policy = compile_audit_policy(&file.audit.rotation, &file.audit.retention)?;
+    let audit_policy = compile_audit_policy(&file.audit.rotation, &file.audit.retention)
+        .map_err(SettingsRefusal::Other)?;
 
     let mut admins: Vec<String> = Vec::new();
     for raw in &file.web.admins {
@@ -6177,14 +6336,13 @@ pub fn compile_settings(file: &SettingsFile) -> Result<Settings, String> {
     // wrong with nothing anywhere saying why. It cannot lock anybody out, which is what earns
     // it a place in this file at all, but "cannot lock anybody out" is not "may be wrong in
     // silence".
-    let stylesheet_url = compile_asset_url("stylesheet_url", &file.ui.stylesheet_url)?;
-    let logo_url = compile_asset_url("logo_url", &file.ui.logo_url)?;
-    let brand_name = compile_brand_name(&file.ui.brand_name)?;
-    let theme = UiTheme::parse(&file.ui.theme).ok_or_else(|| {
-        format!(
-            "theme: '{}' is not one of system, light, dark",
-            file.ui.theme.trim()
-        )
+    let stylesheet_url = compile_asset_url("stylesheet_url", &file.ui.stylesheet_url)
+        .map_err(SettingsRefusal::Other)?;
+    let logo_url =
+        compile_asset_url("logo_url", &file.ui.logo_url).map_err(SettingsRefusal::Other)?;
+    let brand_name = compile_brand_name(&file.ui.brand_name).map_err(SettingsRefusal::Other)?;
+    let theme = UiTheme::parse(&file.ui.theme).ok_or_else(|| SettingsRefusal::ThemeUnknown {
+        raw: file.ui.theme.trim().to_string(),
     })?;
 
     Ok(Settings {
@@ -6258,6 +6416,7 @@ pub fn render_settings_file(doc: &SettingsFile) -> Result<String, String> {
 /// stakes are lower than the access file's by exactly one step: a settings file the gate
 /// refuses is a *reload* it declines, not a boot loop, because the running table survives,
 /// but a restart would still meet it, so the check stays where it cannot be skipped.
+#[derive(Debug)]
 pub struct SettingsWrite {
     json: String,
     settings: Settings,
@@ -6265,13 +6424,13 @@ pub struct SettingsWrite {
 
 impl SettingsWrite {
     /// Render `doc`, then re-parse and compile the rendered text. `Err` means these bytes must
-    /// not reach the disk, and says why.
-    pub fn prepare(doc: &SettingsFile) -> Result<SettingsWrite, String> {
-        let json = render_settings_file(doc).map_err(|e| format!("cannot serialize: {e}"))?;
+    /// not reach the disk, and says why: [`PrepareError`], whose `Display` is the sentence the
+    /// CLI prints, prefix included.
+    pub fn prepare(doc: &SettingsFile) -> Result<SettingsWrite, PrepareError> {
+        let json = render_settings_file(doc).map_err(PrepareError::Serialize)?;
         let reparsed: SettingsFile =
-            serde_json::from_str(&json).map_err(|e| format!("serialized to invalid JSON: {e}"))?;
-        let settings =
-            compile_settings(&reparsed).map_err(|e| format!("refusing to write: {e}"))?;
+            serde_json::from_str(&json).map_err(|e| PrepareError::Reparse(e.to_string()))?;
+        let settings = compile_settings(&reparsed).map_err(PrepareError::Refused)?;
         Ok(SettingsWrite { json, settings })
     }
 
@@ -8409,11 +8568,15 @@ mod tests {
         spec.split(',').map(str::to_string).collect()
     }
 
-    /// The refusal, without asking the `Ok` side for a `Debug` it need not have.
-    fn refusal<T>(r: Result<T, String>) -> String {
+    /// The refusal, without asking the `Ok` side for a `Debug` it need not have. Generic over
+    /// the error because §13.31 changes it in mid-flight: the `String` leaf wrappers stay
+    /// `String`, while `compile_settings` answers `SettingsRefusal` and `prepare` answers
+    /// `PrepareError`. All three print the same sentence, so reading the sentence through
+    /// `Display` keeps every caller in this file compiling across every slice.
+    fn refusal<T, E: std::fmt::Display>(r: Result<T, E>) -> String {
         match r {
             Ok(_) => panic!("expected a refusal"),
-            Err(e) => e,
+            Err(e) => e.to_string(),
         }
     }
 
@@ -8576,9 +8739,12 @@ mod tests {
         assert!(refusal(compile_identity_attrs(&claims("email,email"))).contains("listed twice"));
     }
 
+    /// A settings document through the real parser. The error stays the printed sentence:
+    /// §13.31 turns `compile_settings`' error type into `SettingsRefusal`, whose `Display` is
+    /// today's sentence byte for byte, so every caller here keeps reading the same text.
     fn settings(json: &str) -> Result<Settings, String> {
         let f: SettingsFile = serde_json::from_str(json).map_err(|e| e.to_string())?;
-        compile_settings(&f)
+        compile_settings(&f).map_err(|e| e.to_string())
     }
 
     #[test]
@@ -11177,11 +11343,124 @@ mod tests {
             r#"{ "version": 3, "gate": { "landing_url": "https://nowhere.example/x" } }"#,
         )
         .expect("fixture parses");
-        let got = format!("{}", SettingsWrite::prepare(&doc).err().expect("refused"));
+        let got = format!("{}", SettingsWrite::prepare(&doc).expect_err("refused"));
         assert!(got.starts_with("refusing to write: "), "{got}");
         assert_eq!(
             got,
             "refusing to write: landing_url: its host is not covered by authorized_hosts, so every sign-in with no rd would fall back to the sign-in page"
+        );
+    }
+
+    /// A document `compile_settings` refuses, as the refusal it answers with (§13.31 §3).
+    /// `expect_err` asks for `Debug` on the `Ok` side, which `Settings` has.
+    fn settings_refusal_of(json: &str) -> SettingsRefusal {
+        let f: SettingsFile = serde_json::from_str(json).expect("fixture parses");
+        compile_settings(&f).expect_err("refused")
+    }
+
+    /// S1: `compile_settings` answers with the variant, not the sentence, and every variant
+    /// carries the stable code §2 lists. The matcher pins the variant (a `code()` that answered
+    /// the right string off the wrong arm would pass the code assert alone), and the code pins
+    /// the name S8 maps to a `K` key in the GUI. Each fixture is the one the S0 golden uses for
+    /// that sentence, so the refusal is known reachable and reaches the arm under test rather
+    /// than an earlier check. The last case is the temporary `Other`: a refusal S1 does not
+    /// convert keeps today's prefixed sentence byte for byte, which is what keeps the S0 goldens
+    /// green from S1 to S6, where `Other` is deleted.
+    #[test]
+    fn compile_settings_names_its_refusal() {
+        type Row<'a> = (&'a str, &'a str, &'a str, fn(&SettingsRefusal) -> bool);
+        let cases: Vec<Row> = vec![
+            ("version", r#"{ "version": 1 }"#, "version", |r| {
+                matches!(r, SettingsRefusal::Version { .. })
+            }),
+            (
+                "ttl below floor",
+                r#"{ "version": 3, "gate": { "session_ttl_secs": 30 } }"#,
+                "ttl_below_floor",
+                |r| matches!(r, SettingsRefusal::TtlBelowFloor { .. }),
+            ),
+            (
+                "ttl above ceiling",
+                r#"{ "version": 3, "gate": { "session_ttl_secs": 3153600001 } }"#,
+                "ttl_above_ceiling",
+                |r| matches!(r, SettingsRefusal::TtlAboveCeiling { .. }),
+            ),
+            (
+                "hosts outside cookie domain",
+                r#"{ "version": 3, "gate": { "cookie_domain": ".example.com", "authorized_hosts": ["other.com"] } }"#,
+                "hosts_outside_cookie_domain",
+                |r| matches!(r, SettingsRefusal::HostsOutsideCookieDomain { .. }),
+            ),
+            (
+                "landing off hosts",
+                r#"{ "version": 3, "gate": { "landing_url": "https://nowhere.example/x" } }"#,
+                "landing_off_hosts",
+                |r| matches!(r, SettingsRefusal::LandingOffHosts),
+            ),
+            (
+                "callback not https",
+                r#"{ "version": 3, "gate": { "social_callback_url": "/cb" } }"#,
+                "callback_not_https",
+                |r| matches!(r, SettingsRefusal::CallbackNotHttps),
+            ),
+            (
+                "social half configured",
+                r#"{ "version": 3, "gate": { "social_buttons": [ { "idp": "Google", "audience": "abc123" } ] } }"#,
+                "social_half_configured",
+                |r| matches!(r, SettingsRefusal::SocialHalfConfigured { .. }),
+            ),
+            (
+                "audit headers same",
+                r#"{ "version": 3, "audit": { "client_ip_header": "X-Real-IP", "request_id_header": "x-real-ip" } }"#,
+                "audit_headers_same",
+                |r| matches!(r, SettingsRefusal::AuditHeadersSame { .. }),
+            ),
+            (
+                "theme unknown",
+                r#"{ "version": 3, "ui": { "theme": "sepia" } }"#,
+                "theme_unknown",
+                |r| matches!(r, SettingsRefusal::ThemeUnknown { .. }),
+            ),
+        ];
+        for (label, json, code, is_variant) in cases {
+            let r = settings_refusal_of(json);
+            assert!(is_variant(&r), "{label}: got {r:?}");
+            assert_eq!(r.code(), code, "{label}: {r}");
+        }
+        // The temporary arm, pinned on its own because it is deleted in S7: today's sentence,
+        // prefix included, and the code §3 fixes for it.
+        let r = settings_refusal_of(r#"{ "version": 3, "gate": { "profile_claims": ["a b"] } }"#);
+        assert!(matches!(&r, SettingsRefusal::Other(_)), "{r:?}");
+        assert_eq!(r.code(), "other");
+        assert_eq!(
+            r.to_string(),
+            "profile_claims: claim 'a b' must be non-empty and contain only [A-Za-z0-9_:-]"
+        );
+    }
+
+    /// S1: `From<PrepareError> for String` is the one thing that lets `bb-auth-adm` print these
+    /// refusals without changing a line, so it is pinned to be exactly `refusing to write: `, a
+    /// space, and the refusal's own `Display`, and to that sentence's bytes (the S0 golden's
+    /// literal), not merely to whatever `Display` says today. The two serde arms of
+    /// `PrepareError` (`cannot serialize:`, `serialized to invalid JSON:`) are unreachable from
+    /// a document, so they are not asserted here.
+    #[test]
+    fn prepare_error_becomes_the_same_string() {
+        let doc: SettingsFile = serde_json::from_str(
+            r#"{ "version": 3, "gate": { "landing_url": "https://nowhere.example/x" } }"#,
+        )
+        .expect("fixture parses");
+        let err = SettingsWrite::prepare(&doc).expect_err("refused");
+        let shown = match &err {
+            PrepareError::Refused(r) => r.to_string(),
+            _ => panic!("expected a settings refusal, not a serialize failure"),
+        };
+        let s = String::from(err);
+        assert_eq!(s, format!("refusing to write: {shown}"));
+        assert_eq!(
+            s,
+            "refusing to write: landing_url: its host is not covered by authorized_hosts, so \
+             every sign-in with no rd would fall back to the sign-in page"
         );
     }
 }

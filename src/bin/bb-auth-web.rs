@@ -8526,6 +8526,9 @@ fn mutate(v: &View, form: &Form) -> Outcome {
             // the operator has to go back to.
             SettingsWrite::prepare(&doc)
                 .map_err(|e| {
+                    // The sentence, for now: §13.31 S8 maps the refusal's code to a `K` key and
+                    // this sniff goes away with it.
+                    let e = e.to_string();
                     if e.contains("landing_url") {
                         Refusal::on("landing_url", e)
                     } else {
