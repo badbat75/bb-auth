@@ -98,7 +98,7 @@ strings the redesign made untrue are listed in its §5 for the designer. The int
 (`BB_AUTH_WEB_DELETE_SECRET`) is optional for now (the user); W8 lists proposals for itadmin, at the
 owner's word. Slices: **7a** the configuration and the menu row (done); **7b** the confirmation page (done);
 **7c** the stranger's deletion and a fake intake (done); **7d** the roster row removed first (done); **7e** the
-partial outcomes; **7f** the browser suite; **7g** the real run on rpi-01, the worker in dry run
+partial outcomes (done); **7f** the browser suite; **7g** the real run on rpi-01, the worker in dry run
 first, each step with the user's go-ahead. §13.30 was reworded for the worker on 2026-11-26 (mockups in /tmp/d7w/).
 
 - Done when: tests show a protected address changes nothing, a failed write posts nothing, the row

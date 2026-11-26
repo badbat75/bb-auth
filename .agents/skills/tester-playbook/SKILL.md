@@ -78,6 +78,19 @@ Rules are in `AGENTS.md`. Format of this file: `AGENTS.md`, under "Skills".
   design's "hai effettuato l'accesso", is caught only by the IT assert.
 - To run **several** tests by name: `cargo test --bin bb-auth-web -- --test-threads=1 name1 name2`.
   Only one filter fits before `--`, and `--test-threads=1` keeps each failure's dump in its own block.
+  With `--exact` the name must be the **full path** (`tests::the_name`): a bare name matches nothing and
+  the run reports `ok. 0 passed; 0 failed; … N filtered out`, which reads as a green.
+- `FakeIntake` scripts by **path lookup**, so one path answers every request the same way. A walk where
+  one path must answer twice and differently (the first `POST` accepted, the second refused) is scripted
+  with `FakeIntake::in_order(path, replies)`, the last entry repeating, so a walk that retries after a
+  refusal ends on the reply the retry must get (`vec![delete_refused(503), delete_accepted()]`); a reply with status `0` parks the
+  request, which costs the caller the full 5 s `INTAKE_TIMEOUT`, so park one path, never the fake
+  (`FakeIntake::silent()` hangs everything, and cannot say "the second address timed out").
+- Keep the test module **clippy-clean**, because `cargo clippy --all-targets` is a gate here and counts
+  the test target: a nested `Arc<Mutex<HashMap<String, Vec<(u16, String, Option<String>)>>>>` trips
+  `type_complexity` (name it with a `type` alias), a helper with 8 parameters trips
+  `too_many_arguments` (the limit is 7: fold a trailing `bool` into a slice the caller fills),
+  `push_str("]")` wants `push(']')`, and `contains(&x)` wants `contains(x)`.
 - `K` carries no `PartialEq`, so a refusal is asserted through a helper that maps the variant to a
   `&'static str` name (`dur_answer`). Couple the assertion itself to the **English translation
   string** when the test reads a rendered page: that is what the operator sees, and it is the repo's
@@ -435,3 +448,7 @@ Rules are in `AGENTS.md`. Format of this file: `AGENTS.md`, under "Skills".
   mutated build and the next run reports the mutant's result. Restore with plain `cp`, or `touch` after.
 - A Python heredoc that writes Rust source turns a `\` line continuation into a run of spaces unless
   it is written `\\`; a golden test catches it, a weaker one does not.
+- A raw string built from a **JSON fragment** is a lexer trap: `r#"…"emails": ["bob@x.com"#` is fine,
+  but a fragment whose content ends in `]` has no `"` before the `#`, so the literal runs on to the next
+  `"#` in the file and swallows the code after it. The compiler reports `unexpected closing delimiter`
+  hundreds of lines away, at the end of the test module. Build a JSON fragment with escaped strings.
