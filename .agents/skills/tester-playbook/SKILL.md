@@ -367,3 +367,6 @@ Rules are in `AGENTS.md`. Format of this file: `AGENTS.md`, under "Skills".
   same `K::Config` string, so `panel.find(t(lang, K::Config))` is the tab. Locate the row by
   `anchors_to(&panel, "{ADMIN_BASE}/config")` and measure the order from that, and pin "among the
   places" as `nested_block(&panel, "<div class=\"menu-places\">", "div").contains(&row)`.
+- A test written against a `Result<_, String>` with `.err().expect(…)` trips clippy's `err_expect`
+  the day the error becomes a `Debug` enum (step 12 S1). Write `.expect_err(…)` from the start;
+  it compiles against both.
