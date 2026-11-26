@@ -101,3 +101,16 @@ fixed notice, the stale-cookie gap is accepted and stated, and the session TTL s
   (the session cookie cleared, or the browser sent through `/auth/logout`) and still says what
   was queued; the stale-cookie gap, accepted by the user on 2026-11-26, is stated in AGENTS.md
   and on the notice; and it has been tried on rpi-01 with the user's go-ahead.
+
+### 15. System settings back among the tabs
+
+Covers: R3. Asked by the user on 2026-11-26: "System settings" belongs in the console's tab list
+beside Dashboard, Applications, Users and Audit, where it was before §13.28 moved it into the
+account menu; in the account menu it makes little sense. This reverses §13.28's choice (AGENTS.md
+gives its reason: the bar keeps one row at every width), so the designer weighs where it sits in
+the tab order and what happens at 800px and below, where the tabs already ride in the account
+menu, and the docs that state the old rule change with it.
+
+- Done when: tests show the console's tab list carries System settings (its URL unchanged,
+  `/config`) and the account menu no longer does; the bar keeps one row at 320px in both
+  languages; the designer has approved the screenshots; and AGENTS.md says the new rule.
