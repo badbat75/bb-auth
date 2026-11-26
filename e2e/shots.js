@@ -26,6 +26,7 @@ const path = require('path');
 const { E2E_DIR, FIXTURE, SETTINGS_FIXTURE, boot } = require('./lib/server');
 const { submit, formBytes, resubmit, writeDoc, doc, setDuration, openPreferences } = require('./lib/harness');
 const { profileSettingsBytes, PROFILE_HEADERS } = require('./lib/cognito');
+const { DELETE } = require('./lib/intake');
 
 /** Where a screenshot lands. Under artifacts/, which is gitignored. */
 const OUT = path.join(E2E_DIR, 'artifacts', 'visual');
@@ -61,7 +62,14 @@ const VIEWS = [
       'account-profile', 'account-profile-edit', 'account-profile-nothing',
       'account-profile-code', 'account-profile-code-wrong', 'account-profile-saved',
       'account-profile-expired', 'account-profile-gone', 'account-profile-provider',
-      'account-profile-notyours', 'account-profile-noanswer', 'account-profile-unsure'],
+      'account-profile-notyours', 'account-profile-noanswer', 'account-profile-unsure',
+      // The deletion is the prose of this slice: the page that asks lists what goes, and the
+      // outcome pages are the ones a person reads in the worst minute of their day, so every
+      // one of them is read in Italian too (§13.30 §5).
+      'account-menu-delete', 'account-delete', 'account-delete-stranger',
+      'account-delete-typed-wrong', 'account-delete-protected', 'account-delete-queued',
+      'account-delete-partial', 'account-delete-unsure', 'account-delete-some',
+      'account-delete-changed'],
   },
   // An explicit theme is only worth photographing against the OPPOSITE `colorScheme`:
   // that is the pair that proves the choice beat the operating system. Under a matching
@@ -102,6 +110,13 @@ const go = (p) => async (page, ctx) => { await page.goto(ctx.base + p); };
  *  scene that left `you@example.com` in place would render the next one's console as a 403. */
 const asPerson = (page) => page.setExtraHTTPHeaders({ 'X-Auth-Email': 'you@example.com' });
 const asAdmin = (page) => page.setExtraHTTPHeaders({ 'X-Auth-Email': 'admin@example.com' });
+/** The fixture's delete row: two addresses, one API key, a place in `@staff`. The deletion
+ *  scenes swap to it for the same reason `asPerson` exists, and for one more: the page that
+ *  asks has to have a keys line and a groups line to photograph, and two addresses to say
+ *  "any one of these" about. */
+const asCaller = (page) => page.setExtraHTTPHeaders({
+  'X-Auth-Email': 'person@example.com person@legacy.example.com',
+});
 /** A path under the self-service prefix, which is a sibling of the console's base (§13). */
 const acct = (ctx, p) => `${ctx.origin}/account${p}`;
 
@@ -347,6 +362,96 @@ const SCENES = [
     await asAdmin(page);
   }],
 
+  // ---- the self-service deletion (§13.30): ten shapes ---------------------------------
+  // The row that opens the walk, the page that asks, and every outcome page the intake can
+  // leave a person on. The caller is the fixture's delete row (`person@example.com`, two
+  // addresses, one key, a place in `@staff`), because the page that asks has to have a keys
+  // line, a groups line and the "any of these addresses" arm to photograph.
+  ['account-menu-delete', async (page, ctx) => {
+    await asCaller(page);
+    await page.goto(acct(ctx, '/'));
+    await page.click('details.settings > summary');
+    await asAdmin(page);
+  }],
+  ['account-delete', async (page, ctx) => {
+    await asCaller(page);
+    await page.goto(acct(ctx, '/delete'));
+    await asAdmin(page);
+  }],
+  // A caller the file has no row for: the page answers with one fact and no uuid, because
+  // the sign-in accounts are theirs and the record is nobody's.
+  ['account-delete-stranger', async (page, ctx) => {
+    await page.setExtraHTTPHeaders({ 'X-Auth-Email': 'friend@example.com' });
+    await page.goto(acct(ctx, '/delete'));
+    await asAdmin(page);
+  }],
+  // The in-context refusal: the typed address is not one of this account, so the page that
+  // asked comes back with the value kept and the field marked.
+  ['account-delete-typed-wrong', async (page, ctx) => {
+    await asCaller(page);
+    await page.goto(acct(ctx, '/delete'));
+    await page.fill('form[action="/account/delete"] input[name=confirm_email]', 'nobody@example.com');
+    await submit(page);
+    await asAdmin(page);
+  }],
+  // The intake says this account is locked, ahead of any write, so nothing has gone.
+  ['account-delete-protected', async (page, ctx) => {
+    await asCaller(page);
+    ctx.intake.setProtected(['person@legacy.example.com']);
+    await page.goto(acct(ctx, '/delete'));
+    await page.fill('form[action="/account/delete"] input[name=confirm_email]', 'person@example.com');
+    await submit(page);
+    await asAdmin(page);
+  }],
+  // Everything accepted: the row is gone and the accounts are queued, which is all this page
+  // can say. The sign out is its one action.
+  ['account-delete-queued', async (page, ctx) => {
+    await asCaller(page);
+    await page.goto(acct(ctx, '/delete'));
+    await page.fill('form[action="/account/delete"] input[name=confirm_email]', 'person@example.com');
+    await submit(page);
+    await asAdmin(page);
+  }],
+  // The first queue refused, after the row already went: the page has to say both.
+  ['account-delete-partial', async (page, ctx) => {
+    await asCaller(page);
+    ctx.intake.inOrder('POST', DELETE, [{ status: 503 }, { status: 202, json: { ok: true, status: 'accepted' } }]);
+    await page.goto(acct(ctx, '/delete'));
+    await page.fill('form[action="/account/delete"] input[name=confirm_email]', 'person@example.com');
+    await submit(page);
+    await asAdmin(page);
+  }],
+  // The intake gave no answer, so the page cannot say whether anything is queued.
+  ['account-delete-unsure', async (page, ctx) => {
+    await asCaller(page);
+    ctx.intake.script('POST', DELETE, { close: true });
+    await page.goto(acct(ctx, '/delete'));
+    await page.fill('form[action="/account/delete"] input[name=confirm_email]', 'person@example.com');
+    await submit(page);
+    await asAdmin(page);
+  }],
+  // One address queued and one refused: the page names the addresses it cannot confirm, which
+  // is the fact the person has no way to check for themselves.
+  ['account-delete-some', async (page, ctx) => {
+    await asCaller(page);
+    ctx.intake.inOrder('POST', DELETE, [{ status: 202, json: { ok: true, status: 'accepted' } }, { status: 503 }]);
+    await page.goto(acct(ctx, '/delete'));
+    await page.fill('form[action="/account/delete"] input[name=confirm_email]', 'person@example.com');
+    await submit(page);
+    await asAdmin(page);
+  }],
+  // The file moved under the page (a `bb-auth-adm` over SSH), so the press posts nothing.
+  ['account-delete-changed', async (page, ctx) => {
+    await asCaller(page);
+    await page.goto(acct(ctx, '/delete'));
+    const fields = await formBytes(page);
+    const d = doc(ctx);
+    d.users.find((u) => (u.emails || []).includes('bot@example.com')).notes = 'moved out of band';
+    writeDoc(ctx, d);
+    await resubmit(page, `${ctx.origin}/account/delete`, fields);
+    await asAdmin(page);
+  }],
+
   // ---- the profile edit (section 13.23, §13.25, §13.26): twelve shapes -------------------
   ['account-profile', profileScene(async (page, ctx) => { await page.goto(acct(ctx, '/')); })],
   // The form of a native session: one identity, and the address is not a field (§13.26 §4).
@@ -589,6 +694,10 @@ async function main() {
         fs.writeFileSync(ctx.settingsFile, SETTINGS_FIXTURE);
         fs.rmSync(ctx.auditFile, { force: true });
         ctx.cognito.reset();
+        // The deletion fake forgets both what the last scene asked and what it was told to
+        // answer: the scripted answers are per scene, and a `503` that outlived its scene
+        // would paint the next page with the last scene's outcome.
+        ctx.intake.reset();
         // One scene that cannot reach its state (a selector the markup no longer has,
         // typically) must not cost the other hundred their screenshot: this is evidence
         // for a human, not an assertion, so it degrades instead of aborting. The exit

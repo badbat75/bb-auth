@@ -195,8 +195,12 @@ async function panelWalk(t, page, url, label) {
     (await text(page, out)).includes('Sign out'), await text(page, out));
   t.check(`${label}: and it carries no round trip of the console's`,
     !(await attr(page, out, 'href') || '').includes('rd='), await attr(page, out, 'href'));
-  t.eq(`${label}: nothing here deletes an account`,
-    await count(page, `${panel} a[href*="delete"], ${panel} form[action*="delete"]`), 0);
+  // §13.30 §1: this panel is the one place a person reaches their own deletion, so the row is
+  // here, as a link to the page that asks. A form would let a prefetch cost the account.
+  t.eq(`${label}: the one row that deletes an account`,
+    await count(page, `${panel} a.pill.rm[href="/account/delete"]`), 1);
+  t.eq(`${label}: and it is a link, never a submission`,
+    await count(page, `${panel} form[action*="delete"]`), 0);
 
   // The preferences are a box inside the panel, closed until asked for, and this surface
   // applies them with a button it always shows (no handler of its own).

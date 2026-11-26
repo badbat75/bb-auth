@@ -67,6 +67,9 @@ Rules are in `AGENTS.md`. Format of this file: `AGENTS.md`, under "Skills".
 
 ## Pitfalls
 
+- `shots.js` wipes `e2e/artifacts/visual/` on every run, so two runs leave only the second's shots: pass every filter to one run (`node e2e/shots.js account-delete account-menu-delete`).
+- Pills placed side by side straight in a `p.primary` touch (maud emits no whitespace between them): two or more actions belong in `div.actions`, which has the gap.
+
 - A refused field's group opens through `settings_group_of`, keyed by `name=`: a refusal's field must be the real `name=` (the theme box is `ui_theme`), or it opens the wrong group.
 
 - The `config-*` scenes open `/config?groups=open`, so they cannot show whether a refusal opens its own group: check that from a scratch script on plain `/config`, setting the hidden field with `page.evaluate` (Playwright's `fill` refuses an input inside a closed `details`). Example: `/tmp/s8r/probe.js`.

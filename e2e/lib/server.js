@@ -20,6 +20,7 @@ const REPO = path.resolve(E2E_DIR, '..');
 const FIXTURE = path.join(REPO, 'deploy', 'access.example.json');
 const CHANNEL = process.env.E2E_BROWSER_CHANNEL || 'msedge';
 const { startFakeCognito } = require('./cognito');
+const { startIntake } = require('./intake');
 
 /**
  * The proxy secret this suite starts the GUI with, and the value the harness puts on every
@@ -92,7 +93,7 @@ function freePort() {
 }
 
 /** Start bb-auth-web and resolve once it says it is listening. */
-function startServer(bin, accessFile, auditFile, port, cognitoUrl) {
+function startServer(bin, accessFile, auditFile, port, cognitoUrl, intakeUrl) {
   return new Promise((resolve, reject) => {
     const child = spawn(bin, [], {
       cwd: REPO,
@@ -117,6 +118,13 @@ function startServer(bin, accessFile, auditFile, port, cognitoUrl) {
         // Where the profile edit's Cognito calls go: the fake of lib/cognito.js. Read only by a
         // build with the `e2e-fake-cognito` feature, which says so on stderr (checked below).
         BB_AUTH_WEB_E2E_COGNITO_ENDPOINT: cognitoUrl,
+        // Where the delete walk's intake calls go: the fake of lib/intake.js. Set here, for every
+        // area and every scene, because the account menu's delete row exists only where an intake
+        // is wired (§13.30 §1), and a suite that left it unset would never reach the pages the
+        // delete design is about. The secret is deliberately not set: it is optional (§13.29 W2)
+        // and the fake records whatever arrives, so a run that set one would test a deployment
+        // detail the intake does not check today.
+        BB_AUTH_WEB_DELETE_INTAKE: intakeUrl,
       },
       stdio: ['ignore', 'pipe', 'pipe'],
     });
@@ -229,17 +237,19 @@ async function boot() {
   const port = await freePort();
   const proxyPort = await freePort();
 
-  let server, proxy, browser, cognito;
+  let server, proxy, browser, cognito, intake;
   const stop = async () => {
     if (browser) await browser.close().catch(() => {});
     if (proxy) proxy.close();
     if (server) server.kill();
     if (cognito) await cognito.close();
+    if (intake) await intake.close();
     fs.rmSync(dir, { recursive: true, force: true });
   };
   try {
     cognito = await startFakeCognito();
-    server = await startServer(bin, accessFile, auditFile, port, cognito.url);
+    intake = await startIntake();
+    server = await startServer(bin, accessFile, auditFile, port, cognito.url, intake.url);
     proxy = await startProxy(port, proxyPort);
     browser = await chromium.launch({ channel: CHANNEL, headless: true });
   } catch (e) {
@@ -254,6 +264,7 @@ async function boot() {
     settingsFile,
     auditFile,
     cognito,
+    intake,
   };
   console.log(`== server on ${ctx.origin} via the proxy secret (file: ${accessFile}) | browser: ${CHANNEL} ==\n`);
   return { ctx, stop };

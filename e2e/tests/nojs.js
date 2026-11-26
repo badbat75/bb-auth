@@ -15,6 +15,8 @@ const crypto = require('crypto');
 const fs = require('fs');
 const { doc, bytes, newPage, submit, mainText, openPreferences, count } = require('../lib/harness');
 const { profileSettingsBytes, PROFILE_HEADERS } = require('../lib/cognito');
+const { FIXTURE } = require('../lib/server');
+const { WHOAMI, DELETE } = require('../lib/intake');
 
 /** The CSP source expression that names a script whose bytes are `s`. */
 const cspHashOf = (s) => 'sha256-' + crypto.createHash('sha256').update(s, 'utf8').digest('base64');
@@ -510,9 +512,15 @@ async function run(ctx, t) {
         t.check('and its Apply button applies the theme', false, 'the panel never opened');
       }
       await ap.click('details.settings > summary');
-      t.eq('no console tabs, no settings row, no delete',
-        await count(ap, 'details.settings .menu .menu-tabs, details.settings .menu a[href$="/config"], details.settings .menu a[href*="delete"]'),
+      t.eq('no console tabs, no settings row',
+        await count(ap, 'details.settings .menu .menu-tabs, details.settings .menu a[href$="/config"]'),
         0);
+      // §13.30 §1: the delete row belongs on this surface, and with scripting off it is still
+      // a plain link, so the walk to the page that asks needs no script at all.
+      t.eq('the delete row is one link',
+        await count(ap, 'details.settings .menu a.pill.rm[href="/account/delete"]'), 1);
+      t.eq('and nothing here submits a deletion by itself',
+        await count(ap, 'details.settings .menu form[action*="delete"]'), 0);
     } finally {
       await acct.close();
     }
@@ -612,6 +620,77 @@ async function run(ctx, t) {
   } finally {
     await person.close();
     fs.writeFileSync(ctx.settingsFile, before);
+  }
+
+  await deleteWalk(t, ctx);
+}
+
+// --- the self-service deletion with scripting off (§13.30) ---------------------------
+// The walk that costs an account, run with no script anywhere. The row that opens it is a
+// plain link, the page that asks is a form like every other form on this estate, and the
+// outcome page is a plain response, so nothing in the most irreversible act on this surface
+// needs a script. The pages carry none, which is what `bare` measures at each step.
+
+const DEL_FORM = 'form[action="/account/delete"]';
+const DEL_FIELD = `${DEL_FORM} input[name=confirm_email]`;
+const DEL_WHO = 'person@example.com';
+const DEL_LEGACY = 'person@legacy.example.com';
+
+async function deleteWalk(t, ctx) {
+  fs.copyFileSync(FIXTURE, ctx.accessFile);
+  ctx.intake.reset();
+  const del = await ctx.browser.newContext({
+    viewport: { width: 1280, height: 900 },
+    extraHTTPHeaders: { 'X-Auth-Email': `${DEL_WHO} ${DEL_LEGACY}` },
+    javaScriptEnabled: false,
+  });
+  try {
+    const page = await del.newPage();
+    const bare = async (what) => {
+      const html = await page.content();
+      t.eq(`delete, scripting off: ${what} carries no <script>`, (html.match(/<script/gi) || []).length, 0);
+      t.eq('and no handler attribute', (html.match(/<[^>]*\son[a-z]+\s*=/gi) || []).length, 0);
+    };
+    // The panel opens with markup, and its last row is a link: the door to the page that asks
+    // is a GET, so a browser that prefetches it costs nobody their account.
+    await page.goto(ctx.origin + '/account/');
+    await page.click('details.settings > summary');
+    await Promise.all([
+      page.waitForNavigation(),
+      page.click('details.settings .menu a.pill.rm[href="/account/delete"]'),
+    ]);
+    t.check('the page that asks is reached by a link alone',
+      page.url().endsWith('/account/delete'), page.url());
+    await bare('the page that asks');
+    const before = bytes(ctx);
+    await page.fill(DEL_FIELD, 'nobody@example.com');
+    const wrong = await submit(page, `${DEL_FORM} button[type=submit]`);
+    t.eq('a typed address that is not one of this account is refused with no script',
+      wrong.status(), 400);
+    await bare('the refusal');
+    t.eq('the intake was asked nothing', ctx.intake.callsMade().length, 0);
+    t.eq('and the file is the bytes it was', bytes(ctx), before);
+    await page.fill(DEL_FIELD, DEL_WHO);
+    const gone = await submit(page, `${DEL_FORM} button[type=submit]`);
+    t.eq('the right address is accepted with no script anywhere', gone.status(), 200);
+    await bare('the page that says the accounts are queued');
+    t.check('which says so in the page\'s own heading',
+      (await page.locator('h1').first().innerText()).trim(), 'Your account is being deleted');
+    t.check('and offers the sign out as a link',
+      (await page.content()).includes('href="/auth/logout"'), 'no sign out link');
+    t.eq('the roster row is gone from the file',
+      doc(ctx).users.some((u) => (u.emails || []).includes(DEL_WHO)), false);
+    t.eq('the group it was in no longer names it', doc(ctx).user_groups.staff, []);
+    t.eq('every address was asked, then every address was queued, in the header\'s order',
+      ctx.intake.callsMade().map((c) => `${c.method} ${c.path}`),
+      [`GET ${WHOAMI}`, `GET ${WHOAMI}`, `POST ${DELETE}`, `POST ${DELETE}`]);
+    t.eq('and the queue names both addresses',
+      ctx.intake.callsMade().filter((c) => c.method === 'POST').map((c) => c.email),
+      [DEL_WHO, DEL_LEGACY]);
+  } finally {
+    await del.close();
+    fs.copyFileSync(FIXTURE, ctx.accessFile);
+    ctx.intake.reset();
   }
 }
 
