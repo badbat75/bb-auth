@@ -104,10 +104,17 @@ alone, and `/auth/logout` with the relative `rd` still lands on the bare sign-in
 the coordinator's edit of that file, so the user runs the one-line change (the command is in the
 session of 2026-11-26) and tries a real deletion with a test account the next morning.
 
+One more slice, 14e, added by the user on 2026-11-26 (evening). The notice says "if you can still
+sign in later without signing up again, tell an administrator". For a Google or Microsoft account
+that is misleading, because signing in with the provider recreates the Cognito user at once, and
+that is not a fault. The designer rewords the notice (§13.33) so it holds for both kinds of
+account, and the tester pins the new words in both languages.
+
 - Done when: a test shows that the deletion's success answer leaves that browser signed out
   (the session cookie cleared, or the browser sent through `/auth/logout`) and still says what
   was queued; the stale-cookie gap, accepted by the user on 2026-11-26, is stated in AGENTS.md
-  and on the notice; and it has been tried on rpi-01 with the user's go-ahead.
+  and on the notice; the notice reads true for a social account as well as a native one (14e);
+  and it has been tried on rpi-01 with the user's go-ahead.
 
 ### 17. Release `v1.99.9`, the release candidate of 2.0.0
 
