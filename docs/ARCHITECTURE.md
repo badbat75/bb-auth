@@ -5148,6 +5148,41 @@ the rendered page in a browser with the registration step active, light and dark
    {email} yet"?
 2. The email step's own hint promises "No account yet? We'll create one on the fly." Leave it?
 
+#### 9. User enumeration: accepted, with a pool migration kept for later (2026-11-26)
+
+The user asked whether the sign-in page lets anybody learn which addresses have an account. It
+does, and the notice above adds nothing to it: the notice is static, rendered for every visitor on
+a deployment with social buttons. What reveals existence is the email step itself. A known native
+address gets a code, and an unknown one moves to registration, because the page follows Cognito's
+`UserNotFoundException`. That needs the app client's `PreventUserExistenceErrors` at `LEGACY`
+(inferred from the page working, **not read** on the pool). Only native users show this way; a
+federated-only address looks unknown, which is the duplicate problem this section exists for.
+
+Turning the protection on alone does not close it here. With it `ENABLED`, `USER_AUTH` answers an
+unknown user with a challenge, so the page could no longer route to registration; and `SignUp`
+"always returns `UsernameExistsException` when a username is already taken", while this pool's
+username *is* the email (`UsernameAttributes: [email]`). The documented way out is the email as a
+verification-based **alias**, which is fixed when a pool is created.
+
+Three options were weighed with the user:
+
+1. **Accept the risk.** One address at a time, existence of a native account only, no WAF today.
+   **Chosen on 2026-11-26**, because the user wants sign-in and sign-up as fast as possible.
+2. Rate-limit in front of Cognito (AWS WAF on the pool, or Cognito's threat protection), keeping
+   today's flow. Cost not checked.
+3. **A new pool with the email as an alias and the protection on, kept in view for the future.**
+   Returning users would see no change. A new user would choose "Create account" before typing,
+   one click more. A new user who picks "Sign in" would wait for a code that probably never comes,
+   which is the slow case; the page could soften it with a sentence after a minute. Somebody who
+   already has an account and picks "Create account" gets a code, then `AliasExistsException` at
+   `ConfirmSignUp`, then a second code to sign in. And it is a migration: import the users,
+   re-link the providers, new app clients, a `gate.issuer` change (a guarded change), and
+   everybody's first sign-in on the new pool. bb-auth's own cookies survive it. Two things to
+   verify on a test pool before deciding: whether the challenge for an unknown user claims to send
+   a code, and whether sign-up's automatic sign-in works the same with an alias.
+
+Source: <https://docs.aws.amazon.com/cognito/latest/developerguide/cognito-user-pool-managing-errors.html>.
+
 ### 13.28 One account menu in the shared header, on one row, with the logo (plan step 8, slices H and L, designed 2026-11-25)
 
 The user's requests of 2026-11-25, in the order they came:
