@@ -80,49 +80,14 @@ process that writes both files, so two gaps found the same day are closed **firs
 GUI is opened to anyone who is not an administrator: `bb-auth-web` can read the HMAC key, and it
 believes `X-Auth-Email` from any local process. The design is `docs/ARCHITECTURE.md` §13.
 
-### 14. Deleting the account signs the person out
-
-Covers: R4. Asked by the user on 2026-11-26, after deleting the test account for real on rpi-01:
-confirming the deletion should sign the person out at once, instead of a done page that asks
-them to ("This browser stays signed in until you sign out, so sign out now").
-
-A finding from the same run goes with it. Sessions are stateless (AGENTS.md), so a cookie minted
-before the deletion stays valid until `gate.session_ttl_secs` (30 days on rpi-01). Any
-`authenticated` scope (`mpa`, `auth/self-service` there) keeps admitting that identity, in every
-browser it signed in from, after its Cognito user is gone. A sign-out on the done page clears only
-the browser that pressed it. The architect weighs the options without breaking "Sessions are
-stateless" silently: the done page answered with the gate's logout, a revocation the gate can
-check, a shorter TTL, or accepting the gap and saying so on the page. The designer then words the
-done page for what is chosen. Designed in §13.32 (slices 14a to 14d). The user chose the
-recommended answers: the success answer goes through the gate's logout to its sign-in page with a
-fixed notice, the stale-cookie gap is accepted and stated, and the session TTL stays 30 days.
-
-Where it stands (2026-11-26, evening): 14a to 14c are built and documented, and their build is on
-rpi-01. Read there, with GET requests only: the sign-in page shows the notice for `account-deleted`
-alone, and `/auth/logout` with the relative `rd` still lands on the bare sign-in page, because the
-`location = /auth/logout` of `auth.badbat75.com` sets no `X-Original-URL`. The classifier refused
-the coordinator's edit of that file, so the user runs the one-line change (the command is in the
-session of 2026-11-26) and tries a real deletion with a test account the next morning.
-
-One more slice, 14e, added by the user on 2026-11-26 (evening). The notice says "if you can still
-sign in later without signing up again, tell an administrator". For a Google or Microsoft account
-that is misleading, because signing in with the provider recreates the Cognito user at once, and
-that is not a fault. The designer rewords the notice (§13.33) so it holds for both kinds of
-account, and the tester pins the new words in both languages.
-
-- Done when: a test shows that the deletion's success answer leaves that browser signed out
-  (the session cookie cleared, or the browser sent through `/auth/logout`) and still says what
-  was queued; the stale-cookie gap, accepted by the user on 2026-11-26, is stated in AGENTS.md
-  and on the notice; the notice reads true for a social account as well as a native one (14e);
-  and it has been tried on rpi-01 with the user's go-ahead.
-
 ### 17. Release `v1.99.9`, the release candidate of 2.0.0
 
 Covers: W11. Asked by the user on 2026-11-26: after step 15, tag 1.99.9 as the release candidate
 of the major, as `v1.99.8` was tagged a pre-release on 2026-11-25.
 
 - Done when: the tester has run the whole board on `main` (`cargo test`, `node e2e/run.js`,
-  `cargo doc --no-deps`, the cfg(unix) tests) and it is green; `CHANGELOG.md` has a `1.99.9`
+  `cargo doc --no-deps`, the cfg(unix) tests) and it is green; the sign-in page on rpi-01 shows step 14e's
+  notice text (closed with step 14 on 2026-11-26, built in 1c3577e and not yet deployed); `CHANGELOG.md` has a `1.99.9`
   section saying it is the release candidate of 2.0.0; `bash scripts/package.sh` built the
   packages from a clean tree; rpi-01 runs that build; and, each with the user's go-ahead, `v1.99.9`
   is tagged and published on GitHub as a pre-release.
