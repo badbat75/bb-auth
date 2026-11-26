@@ -257,19 +257,34 @@ fn page_url_core(raw: &str) -> Result<String, (String, UrlFault)> {
 /// Env, not access file — but it compiles to the same [`UrlPattern`] and is matched by the
 /// same [`glob_match`], which is the point: one wildcard grammar, one implementation.
 pub fn compile_host_pattern(raw: &str) -> Result<UrlPattern, String> {
-    let e = |m: &str| Err(format!("host pattern '{raw}': {m}"));
-    let h = raw.trim().to_ascii_lowercase();
-    if h.is_empty() {
-        return e("empty");
+    if raw.trim().is_empty() {
+        // The one sentence of this leaf that is not a code (§13.31 §2): `compile_settings` skips
+        // a blank entry before it calls this, so the settings file can never produce it, and the
+        // enum holds only what is reachable.
+        return Err(format!("host pattern '{raw}': empty"));
     }
+    host_pattern_core(raw).map_err(|r| r.sentence())
+}
+
+/// [`compile_host_pattern`]'s checks, answering the typed refusal (§13.31 §3). The refusal quotes
+/// `raw` **as given**, which is what today's sentence printed, and the pattern returned is the
+/// trimmed, lowercased one.
+fn host_pattern_core(raw: &str) -> Result<UrlPattern, SettingsRefusal> {
+    let h = raw.trim().to_ascii_lowercase();
     if h.bytes().any(|b| b < 0x20 || b == 0x7f) {
-        return e("contains a control byte");
+        return Err(SettingsRefusal::HostControlByte {
+            raw: raw.to_string(),
+        });
     }
     if h.contains('/') || h.contains(':') {
-        return e("must be a bare host — no scheme, port or path");
+        return Err(SettingsRefusal::HostNotBare {
+            raw: raw.to_string(),
+        });
     }
     if h.contains('@') || h.contains("..") {
-        return e("must not contain '@' or '..'");
+        return Err(SettingsRefusal::HostAtOrDotDot {
+            raw: raw.to_string(),
+        });
     }
     Ok(UrlPattern {
         pat: h.into_bytes(),
@@ -5636,7 +5651,26 @@ pub struct SocialButton {
 /// construction rather than by escaping: the same argument the gate's `env_page_value` makes
 /// for the values these arrived as until they became settings. A Cognito app client id is 26
 /// lowercase alphanumerics, so nothing this refuses could have been one.
+/// The tail of an app client id refusal, byte for byte as the leaf spelled it before
+/// [`SettingsRefusal::AppClientId`] existed (§13.31 §2 row 12). It is a `const` because two
+/// callers print it under two different names: the enum's `sentence()` spells the settings key,
+/// and this leaf's wrapper spells whatever its caller names (`client_id`, the CLI's `--client-id`,
+/// a button's spelling), so the tail must have exactly one home.
+const APP_CLIENT_TAIL: &str = "is not an app client id, which is letters, digits, '.', '_' and '-'";
+
 pub fn compile_app_client_id(what: &str, raw: &str) -> Result<String, String> {
+    app_client_id_core(raw)
+        // The caller's name in front of the shared tail: the CLI calls this leaf with its own
+        // flag and `compile_social_buttons` with the button's spelling, and neither is a
+        // settings key, so the variant's own sentence, which names `client_id`, is not what
+        // these callers print (§13.31 §3).
+        .map_err(|_| format!("{what}: '{}' {APP_CLIENT_TAIL}", raw.trim()))
+}
+
+/// [`compile_app_client_id`]'s checks, answering the typed refusal (§13.31 §3). The refusal
+/// carries the **trimmed** id, which is what today's sentence quoted. Empty is
+/// `Ok(String::new())`, the setting unset, and so is never a refusal.
+fn app_client_id_core(raw: &str) -> Result<String, SettingsRefusal> {
     let id = raw.trim();
     if id.is_empty() {
         return Ok(String::new());
@@ -5645,9 +5679,10 @@ pub fn compile_app_client_id(what: &str, raw: &str) -> Result<String, String> {
         .bytes()
         .all(|b| b.is_ascii_alphanumeric() || b == b'.' || b == b'_' || b == b'-')
     {
-        return Err(format!(
-            "{what}: '{id}' is not an app client id, which is letters, digits, '.', '_' and '-'"
-        ));
+        return Err(SettingsRefusal::AppClientId {
+            button: None,
+            id: id.to_string(),
+        });
     }
     Ok(id.to_string())
 }
@@ -5659,6 +5694,13 @@ pub fn compile_app_client_id(what: &str, raw: &str) -> Result<String, String> {
 /// carries either was written by somebody who meant a URL and would otherwise be turned into
 /// one that quietly resolves somewhere else.
 pub fn compile_oauth_domain(raw: &str) -> Result<String, String> {
+    oauth_domain_core(raw).map_err(|r| r.sentence())
+}
+
+/// [`compile_oauth_domain`]'s checks, answering the typed refusal (§13.31 §3). The refusal quotes
+/// the **trimmed** value, which is what today's sentence printed, and an empty one is
+/// `Ok(String::new())`, the setting unset, so it is never a refusal.
+fn oauth_domain_core(raw: &str) -> Result<String, SettingsRefusal> {
     let d = raw.trim();
     if d.is_empty() {
         return Ok(String::new());
@@ -5669,10 +5711,7 @@ pub fn compile_oauth_domain(raw: &str) -> Result<String, String> {
         || d.starts_with('.')
         || d.ends_with('.')
     {
-        return Err(format!(
-            "oauth_domain: '{d}' is not a bare host, which is letters, digits, '.' and '-' \
-             with no scheme and no path"
-        ));
+        return Err(SettingsRefusal::OauthDomainNotBare { raw: d.to_string() });
     }
     Ok(d.to_string())
 }
@@ -5731,7 +5770,13 @@ fn issuer_core(raw: &str) -> Result<String, (String, UrlFault)> {
 /// has no use for one on a bare hostname that is not the request's own. What is wanted there
 /// is the registrable domain the services share.
 pub fn compile_cookie_domain(raw: &str) -> Result<String, String> {
-    let e = |m: &str| Err(format!("cookie_domain '{raw}': {m}"));
+    cookie_domain_core(raw).map_err(|r| r.sentence())
+}
+
+/// [`compile_cookie_domain`]'s checks, answering the typed refusal (§13.31 §3). The refusal
+/// quotes `raw` **as given**, which is what today's sentence printed, and the value returned is
+/// the trimmed, lowercased one. Empty is `Ok(String::new())`, the setting unset.
+fn cookie_domain_core(raw: &str) -> Result<String, SettingsRefusal> {
     let d = raw.trim().to_ascii_lowercase();
     if d.is_empty() {
         return Ok(String::new());
@@ -5747,16 +5792,14 @@ pub fn compile_cookie_domain(raw: &str) -> Result<String, String> {
         || bare.ends_with('-')
         || bare.contains("..")
     {
-        return e(
-            "is not a bare domain: letters, digits, '.' and '-', an optional leading dot, and \
-             no scheme, port or path",
-        );
+        return Err(SettingsRefusal::CookieDomainNotBare {
+            raw: raw.to_string(),
+        });
     }
     if !bare.contains('.') {
-        return e(
-            "is a single label, which a browser stores for nothing: name the registrable \
-             domain the services share, such as '.example.com'",
-        );
+        return Err(SettingsRefusal::CookieDomainSingleLabel {
+            raw: raw.to_string(),
+        });
     }
     Ok(d)
 }
@@ -6207,6 +6250,21 @@ pub enum SettingsRefusal {
     /// `session_ttl_secs` past [`MAX_SESSION_TTL`]: the cookie's `exp` arithmetic wraps and
     /// mints a cookie that is already expired.
     TtlAboveCeiling { ttl: u64 },
+    /// A Cognito app client id outside letters, digits, `.`, `_` and `-`: the email flow's
+    /// `gate.client_id` with no `button`, a social button's `audience` with that button's name.
+    ///
+    /// Refused because the value is **emitted**, not stored: it is substituted into the sign-in
+    /// page as a JavaScript string literal, into an HTML attribute on a button, and into the
+    /// query string of Cognito's authorize URL, so this charset is what makes all three safe by
+    /// construction rather than by escaping. A real app client id is 26 lowercase alphanumerics,
+    /// so nothing this refuses could ever have been one.
+    AppClientId {
+        /// The button whose `audience` this is, by its `identity_provider` name; `None` for
+        /// `gate.client_id`, which belongs to no button.
+        button: Option<String>,
+        /// The id as given, trimmed, which is what today's sentence quoted.
+        id: String,
+    },
     /// Hosts `gate.authorized_hosts` names that `gate.cookie_domain` cannot reach, so a login
     /// lands there, sends no session cookie, and bounces back to the sign-in page for ever.
     HostsOutsideCookieDomain {
@@ -6236,6 +6294,73 @@ pub enum SettingsRefusal {
     /// `gate.social_callback_url` is not an absolute https URL, and Cognito compares the
     /// `redirect_uri` byte for byte.
     CallbackNotHttps,
+    /// `gate.cookie_domain` carries a scheme, a port, a path, a leading or trailing dot or dash,
+    /// a `..`, or a byte outside letters, digits, `.` and `-`.
+    ///
+    /// Refused because this is the value of a `Set-Cookie` `Domain=` attribute and a browser
+    /// matches that attribute textually, so anything that is not a bare domain is a cookie no
+    /// request ever sends: the login lands, the browser arrives with no session, nginx answers
+    /// `401`, and the person is back at the sign-in page. That is
+    /// [`Self::HostsOutsideCookieDomain`] arrived at from the other end, and it is checked
+    /// rather than stripped because a value carrying a scheme was written by somebody who meant
+    /// a URL.
+    CookieDomainNotBare {
+        /// The value as given, which is what today's sentence quoted.
+        raw: String,
+    },
+    /// `gate.cookie_domain` is a single label (`example`, `com`): the mistake here that looks
+    /// most like it should work.
+    ///
+    /// Refused because a browser will not store a cookie for a public suffix and has no use for
+    /// one on a bare hostname that is not the request's own, so the setting reaches nothing in
+    /// silence. What is wanted is the registrable domain the services share, and the sentence
+    /// names it.
+    CookieDomainSingleLabel {
+        /// The value as given, which is what today's sentence quoted.
+        raw: String,
+    },
+    /// A `gate.authorized_hosts` entry with a control byte in it, the paste that arrived from a
+    /// spreadsheet.
+    ///
+    /// Refused because these entries are compiled into [`UrlPattern`] and the host they
+    /// authorize is written into a `Location:` header by the gate's `safe_rd`, where a CR/LF is
+    /// a response-splitting gadget.
+    HostControlByte {
+        /// The pattern as given, which is what today's sentence quoted.
+        raw: String,
+    },
+    /// A `gate.authorized_hosts` entry carrying a scheme, a port or a path.
+    ///
+    /// Refused because [`rd_url_allowed`] strips those from the candidate before matching, so a
+    /// pattern that keeps one matches nothing: the operator reads a host in the list and every
+    /// sign-in that names it falls back to the sign-in page, with nothing saying why. The
+    /// em-dash in the sentence is today's data, kept byte for byte.
+    HostNotBare {
+        /// The pattern as given, which is what today's sentence quoted.
+        raw: String,
+    },
+    /// A `gate.authorized_hosts` entry with a userinfo `@` or a `..`.
+    ///
+    /// Refused for the two shapes [`rd_url_allowed`] refuses on the candidate it matches, so the
+    /// list and the matcher cannot disagree: `@` is the lookalike that reads as the estate and
+    /// sends the browser to the attacker, and a `..` is a pattern no host can match, which
+    /// leaves an operator looking at a host they believe is authorized.
+    HostAtOrDotDot {
+        /// The pattern as given, which is what today's sentence quoted.
+        raw: String,
+    },
+    /// `gate.oauth_domain` carries a scheme, a path, a leading or trailing dot, or a byte
+    /// outside letters, digits, `.` and `-`.
+    ///
+    /// Refused because the hosted UI's authorize and callback URLs are **built out of this
+    /// value**, so a scheme or a path inside it produces a URL nobody wrote, pointing at a host
+    /// nobody meant, and the browser leaves the estate to go sign in. Checked, not stripped, for
+    /// the same reason as the cookie domain: a value carrying either was written by somebody who
+    /// meant a URL.
+    OauthDomainNotBare {
+        /// The value trimmed, which is what today's sentence quoted.
+        raw: String,
+    },
     /// Social buttons are configured with no `gate.oauth_domain` or no
     /// `gate.social_callback_url`: nowhere to send a visitor, nowhere for them to come back to.
     SocialHalfConfigured { buttons: usize },
@@ -6267,10 +6392,17 @@ impl SettingsRefusal {
             Self::AttrNone => "attr_none",
             Self::TtlBelowFloor { .. } => "ttl_below_floor",
             Self::TtlAboveCeiling { .. } => "ttl_above_ceiling",
+            Self::AppClientId { .. } => "app_client_id",
             Self::HostsOutsideCookieDomain { .. } => "hosts_outside_cookie_domain",
             Self::LandingOffHosts => "landing_off_hosts",
             Self::Url { fault, .. } => fault.code(),
             Self::CallbackNotHttps => "callback_not_https",
+            Self::CookieDomainNotBare { .. } => "cookie_domain_not_bare",
+            Self::CookieDomainSingleLabel { .. } => "cookie_domain_single_label",
+            Self::HostControlByte { .. } => "host_control_byte",
+            Self::HostNotBare { .. } => "host_not_bare",
+            Self::HostAtOrDotDot { .. } => "host_at_or_dot_dot",
+            Self::OauthDomainNotBare { .. } => "oauth_domain_not_bare",
             Self::SocialHalfConfigured { .. } => "social_half_configured",
             Self::AuditHeadersSame { .. } => "audit_headers_same",
             Self::ThemeUnknown { .. } => "theme_unknown",
@@ -6280,11 +6412,12 @@ impl SettingsRefusal {
 
     /// The key `compile_settings` used to write in front of the leaf's own sentence, as a
     /// `map_err(|e| format!("…: {e}"))`: `profile_claims` and `identity_attrs` for the leaves
-    /// whose parser knows nothing of the file's keys, `login_url` for the sign-in page's URL
-    /// (which is how today's doubled `login_url: login_url '…': …` is kept), and nothing at all
-    /// for a refusal the settings function spells itself, whose sentence already names its key
-    /// (§13.31 §3). `Other` carries today's prefixed sentence whole, so it has no prefix of its
-    /// own.
+    /// whose parser knows nothing of the file's keys, `authorized_hosts` for the three host
+    /// faults (the leaf's sentence starts `host pattern '…'`, and the settings function named
+    /// the key), `login_url` for the sign-in page's URL (which is how today's doubled
+    /// `login_url: login_url '…': …` is kept), and nothing at all for a refusal the settings
+    /// function spells itself, whose sentence already names its key (§13.31 §3). `Other` carries
+    /// today's prefixed sentence whole, so it has no prefix of its own.
     fn prefix(&self) -> Option<&'static str> {
         match self {
             Self::ClaimCharset { .. }
@@ -6295,6 +6428,9 @@ impl SettingsRefusal {
             Self::AttrUnknown { .. } | Self::AttrTwice { .. } | Self::AttrNone => {
                 Some("identity_attrs")
             }
+            Self::HostControlByte { .. }
+            | Self::HostNotBare { .. }
+            | Self::HostAtOrDotDot { .. } => Some("authorized_hosts"),
             Self::Url {
                 key: SettingKey::LoginUrl,
                 ..
@@ -6361,6 +6497,10 @@ impl SettingsRefusal {
                 "session_ttl_secs: {ttl} is past the {MAX_SESSION_TTL}s ceiling; a lifetime that \
                  does not fit the arithmetic mints a cookie that is already expired"
             ),
+            Self::AppClientId { button, id } => match button {
+                None => format!("client_id: '{id}' {APP_CLIENT_TAIL}"),
+                Some(b) => format!("social_buttons '{b}': audience: '{id}' {APP_CLIENT_TAIL}"),
+            },
             Self::HostsOutsideCookieDomain {
                 hosts,
                 cookie_domain,
@@ -6379,6 +6519,27 @@ impl SettingsRefusal {
             Self::CallbackNotHttps => "social_callback_url: must be the absolute https:// URL \
                  registered on the app client, because Cognito compares it byte for byte"
                 .to_string(),
+            Self::CookieDomainNotBare { raw } => format!(
+                "cookie_domain '{raw}': is not a bare domain: letters, digits, '.' and '-', an \
+                 optional leading dot, and no scheme, port or path"
+            ),
+            Self::CookieDomainSingleLabel { raw } => format!(
+                "cookie_domain '{raw}': is a single label, which a browser stores for nothing: \
+                 name the registrable domain the services share, such as '.example.com'"
+            ),
+            Self::HostControlByte { raw } => {
+                format!("host pattern '{raw}': contains a control byte")
+            }
+            Self::HostNotBare { raw } => {
+                format!("host pattern '{raw}': must be a bare host — no scheme, port or path")
+            }
+            Self::HostAtOrDotDot { raw } => {
+                format!("host pattern '{raw}': must not contain '@' or '..'")
+            }
+            Self::OauthDomainNotBare { raw } => format!(
+                "oauth_domain: '{raw}' is not a bare host, which is letters, digits, '.' and \
+                 '-' with no scheme and no path"
+            ),
             Self::SocialHalfConfigured { buttons } => format!(
                 "social_buttons: {buttons} button(s) configured, but oauth_domain or \
                  social_callback_url is empty, so there is nowhere to send a visitor and \
@@ -6511,8 +6672,7 @@ pub fn compile_settings(file: &SettingsFile) -> Result<Settings, SettingsRefusal
     // The app clients, and the audience list they derive. Nothing else in this system says
     // which app clients the gate is part of, which is what makes the derivation safe: there
     // is no second list to disagree with.
-    let client_id =
-        compile_app_client_id("client_id", &file.gate.client_id).map_err(SettingsRefusal::Other)?;
+    let client_id = app_client_id_core(&file.gate.client_id)?;
     let login_url = match file.gate.login_url.trim() {
         "" => String::new(),
         raw => page_url_core(raw).map_err(url_refusal(SettingKey::LoginUrl))?,
@@ -6526,18 +6686,14 @@ pub fn compile_settings(file: &SettingsFile) -> Result<Settings, SettingsRefusal
         raw => page_url_core(raw).map_err(url_refusal(SettingKey::LandingUrl))?,
     };
     let issuer = issuer_core(&file.gate.issuer).map_err(url_refusal(SettingKey::Issuer))?;
-    let cookie_domain =
-        compile_cookie_domain(&file.gate.cookie_domain).map_err(SettingsRefusal::Other)?;
+    let cookie_domain = cookie_domain_core(&file.gate.cookie_domain)?;
     let mut authorized_hosts: Vec<UrlPattern> =
         Vec::with_capacity(file.gate.authorized_hosts.len());
     for raw in &file.gate.authorized_hosts {
         if raw.trim().is_empty() {
             continue;
         }
-        authorized_hosts.push(
-            compile_host_pattern(raw)
-                .map_err(|e| SettingsRefusal::Other(format!("authorized_hosts: {e}")))?,
-        );
+        authorized_hosts.push(host_pattern_core(raw)?);
     }
     // The check that only became possible once these two stopped living in different files,
     // and the reason the move is worth what it cost. A host the cookie cannot reach is not a
@@ -6570,8 +6726,7 @@ pub fn compile_settings(file: &SettingsFile) -> Result<Settings, SettingsRefusal
     {
         return Err(SettingsRefusal::LandingOffHosts);
     }
-    let oauth_domain =
-        compile_oauth_domain(&file.gate.oauth_domain).map_err(SettingsRefusal::Other)?;
+    let oauth_domain = oauth_domain_core(&file.gate.oauth_domain)?;
     let social_callback_url = match asset_url_core(&file.gate.social_callback_url)
         .map_err(url_refusal(SettingKey::SocialCallbackUrl))?
     {
@@ -11731,14 +11886,14 @@ mod tests {
         }
         // The temporary arm, pinned on its own because it is deleted in S7: today's sentence,
         // prefix included, and the code §3 fixes for it. The fixture is a leaf this slice does
-        // not convert (the app client id is S4's), so the probe survives S2; each slice moves it
-        // to a leaf it has not converted yet.
-        let r = settings_refusal_of(r#"{ "version": 3, "gate": { "client_id": "bad id" } }"#);
+        // not convert (the brand name is S7's, so the probe survives S4 to S6); each slice moves
+        // it to a leaf it has not converted yet.
+        let r = settings_refusal_of(r#"{ "version": 3, "ui": { "brand_name": "Bad\u0007Bat" } }"#);
         assert!(matches!(&r, SettingsRefusal::Other(_)), "{r:?}");
         assert_eq!(r.code(), "other");
         assert_eq!(
             r.to_string(),
-            "client_id: 'bad id' is not an app client id, which is letters, digits, '.', '_' and '-'"
+            "brand_name 'Bad\u{7}Bat': contains a control character"
         );
     }
 
@@ -12106,6 +12261,199 @@ mod tests {
             refusal(compile_page_url("denied_url", "https://x.com/a b")),
             format!("denied_url 'https://x.com/a b': {}", UrlFault::NotPrintable),
             "the access file's field-named page refusal does not carry the shared tail"
+        );
+    }
+
+    /// S4 (§13.31 §2, §3, §7): the app client id, the cookie domain, the host pattern and the
+    /// OAuth domain refusals are variants of `SettingsRefusal`, not sentences riding in `Other`.
+    /// Each row is the S0 golden's own fixture for that sentence, so the refusal is known
+    /// reachable and reaches the arm under test, and each row asserts four things: the variant
+    /// carries the §2 arguments; `code()` is the §2 `snake_case` name S8 maps to a `K` key; the
+    /// private `prefix()`/`sentence()` pair splits today's sentence the way §3 says, the prefix
+    /// being `authorized_hosts` for the three host faults (the leaf's sentence starts
+    /// `host pattern '…'`, and `compile_settings` used to add the key) and nothing for the rest,
+    /// whose sentence names its key itself; and `Display` joins the two with ": ", which is what
+    /// the CLI and the gate print (the S0 golden pins those joined bytes, this pins the join).
+    /// The `HostNotBare` sentence carries today's em-dash: it is data, kept byte for byte. The
+    /// blocks after the table pin the four `String` wrappers as thin, each returning exactly its
+    /// variant's `sentence()` under the setting's own name, so the CLI's pre-checks keep their
+    /// bytes and each sentence has exactly one home, and pin the CLI's flag-named app client
+    /// refusal (`bb-auth-adm` calls `compile_app_client_id("--client-id", …)`) as the same tail
+    /// under the caller's name. The last block pins the button arm of `AppClientId`, which
+    /// `compile_settings` cannot produce until S5 converts `compile_social_buttons`: the variant
+    /// is built directly, and its `Display` is the S0 golden's button literal.
+    #[test]
+    fn domain_host_and_client_refusals_are_codes() {
+        type Row<'a> = (
+            &'a str,
+            &'a str,
+            &'a str,
+            Option<&'a str>,
+            &'a str,
+            fn(&SettingsRefusal) -> bool,
+        );
+        let cases: Vec<Row> = vec![
+            (
+                "app client id",
+                r#"{ "version": 3, "gate": { "client_id": "bad id" } }"#,
+                "app_client_id",
+                None,
+                "client_id: 'bad id' is not an app client id, which is letters, digits, '.', '_' and '-'",
+                |r| {
+                    matches!(
+                        r,
+                        SettingsRefusal::AppClientId { button, id }
+                            if button.is_none() && id == "bad id"
+                    )
+                },
+            ),
+            (
+                "cookie domain not bare",
+                r#"{ "version": 3, "gate": { "cookie_domain": "https://x.com" } }"#,
+                "cookie_domain_not_bare",
+                None,
+                "cookie_domain 'https://x.com': is not a bare domain: letters, digits, '.' and '-', an optional leading dot, and no scheme, port or path",
+                |r| {
+                    matches!(
+                        r,
+                        SettingsRefusal::CookieDomainNotBare { raw } if raw == "https://x.com"
+                    )
+                },
+            ),
+            (
+                "cookie domain single label",
+                r#"{ "version": 3, "gate": { "cookie_domain": "example" } }"#,
+                "cookie_domain_single_label",
+                None,
+                "cookie_domain 'example': is a single label, which a browser stores for nothing: name the registrable domain the services share, such as '.example.com'",
+                |r| {
+                    matches!(
+                        r,
+                        SettingsRefusal::CookieDomainSingleLabel { raw } if raw == "example"
+                    )
+                },
+            ),
+            (
+                "host control byte",
+                r#"{ "version": 3, "gate": { "authorized_hosts": ["ho\tst"] } }"#,
+                "host_control_byte",
+                Some("authorized_hosts"),
+                "host pattern 'ho\tst': contains a control byte",
+                |r| matches!(r, SettingsRefusal::HostControlByte { raw } if raw == "ho\tst"),
+            ),
+            (
+                "host not bare",
+                r#"{ "version": 3, "gate": { "authorized_hosts": ["https://x.com"] } }"#,
+                "host_not_bare",
+                Some("authorized_hosts"),
+                "host pattern 'https://x.com': must be a bare host — no scheme, port or path",
+                |r| {
+                    matches!(
+                        r,
+                        SettingsRefusal::HostNotBare { raw } if raw == "https://x.com"
+                    )
+                },
+            ),
+            (
+                "host at or dot dot",
+                r#"{ "version": 3, "gate": { "authorized_hosts": ["a..b"] } }"#,
+                "host_at_or_dot_dot",
+                Some("authorized_hosts"),
+                "host pattern 'a..b': must not contain '@' or '..'",
+                |r| matches!(r, SettingsRefusal::HostAtOrDotDot { raw } if raw == "a..b"),
+            ),
+            (
+                "oauth domain not bare",
+                r#"{ "version": 3, "gate": { "oauth_domain": "https://x.com" } }"#,
+                "oauth_domain_not_bare",
+                None,
+                "oauth_domain: 'https://x.com' is not a bare host, which is letters, digits, '.' and '-' with no scheme and no path",
+                |r| {
+                    matches!(
+                        r,
+                        SettingsRefusal::OauthDomainNotBare { raw } if raw == "https://x.com"
+                    )
+                },
+            ),
+        ];
+        for row in cases.iter() {
+            let (label, json, code, prefix, sentence, is_variant) = *row;
+            let r = settings_refusal_of(json);
+            assert!(is_variant(&r), "{label}: got {r:?}");
+            assert_eq!(r.code(), code, "{label}: {r:?}");
+            assert_eq!(r.prefix(), prefix, "{label}: {r:?}");
+            assert_eq!(r.sentence(), sentence, "{label}: {r:?}");
+            let display = match prefix {
+                Some(p) => format!("{p}: {sentence}"),
+                None => sentence.to_string(),
+            };
+            assert_eq!(
+                r.to_string(),
+                display,
+                "{label}: Display is not prefix + \": \" + sentence"
+            );
+        }
+        // The four wrappers, called the way `compile_settings` and the CLI's pre-checks call
+        // them, each answering its variant's own sentence: the app client leaf spells the
+        // setting's name from the caller's field, the cookie domain and OAuth leaves spell their
+        // key inside the sentence, and the host leaf's sentence is the tail the settings function
+        // prefixes with `authorized_hosts`. The bytes are the S0 leaf golden's; this pins that
+        // they come out of the typed cores and not out of a second copy of a sentence.
+        let leaves: Vec<(&str, String)> = vec![
+            (
+                "app client id",
+                refusal(compile_app_client_id("client_id", "bad id")),
+            ),
+            (
+                "cookie domain not bare",
+                refusal(compile_cookie_domain("https://x.com")),
+            ),
+            (
+                "cookie domain single label",
+                refusal(compile_cookie_domain("example")),
+            ),
+            ("host control byte", refusal(compile_host_pattern("ho\tst"))),
+            (
+                "host not bare",
+                refusal(compile_host_pattern("https://x.com")),
+            ),
+            ("host at or dot dot", refusal(compile_host_pattern("a..b"))),
+            (
+                "oauth domain not bare",
+                refusal(compile_oauth_domain("https://x.com")),
+            ),
+        ];
+        for (label, leaf) in leaves {
+            let json = cases
+                .iter()
+                .find(|c| c.0 == label)
+                .map(|c| c.1)
+                .expect("the label is one of the rows above");
+            assert_eq!(
+                leaf,
+                settings_refusal_of(json).sentence(),
+                "{label}: the String wrapper's sentence is not the variant's"
+            );
+        }
+        // The CLI's flag-named app client refusal: the same tail, under the caller's name, which
+        // is what `bb-auth-adm settings set --client-id` prints today.
+        assert_eq!(
+            refusal(compile_app_client_id("--client-id", "bad id")),
+            "--client-id: 'bad id' is not an app client id, which is letters, digits, '.', '_' and '-'",
+            "the CLI's flag-named app client refusal is not the shared tail under its own name"
+        );
+        // The button arm, built directly: `compile_settings` reaches it only when S5 converts
+        // `compile_social_buttons`, and the S0 golden's fixture for this sentence still answers
+        // `Other` today. The shape is §2's, and the bytes are the golden's.
+        let button = SettingsRefusal::AppClientId {
+            button: Some("Google".to_string()),
+            id: "bad id".to_string(),
+        };
+        assert_eq!(button.code(), "app_client_id");
+        assert_eq!(button.prefix(), None);
+        assert_eq!(
+            button.to_string(),
+            "social_buttons 'Google': audience: 'bad id' is not an app client id, which is letters, digits, '.', '_' and '-'"
         );
     }
 

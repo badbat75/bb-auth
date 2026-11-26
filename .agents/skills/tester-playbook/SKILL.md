@@ -372,3 +372,5 @@ Rules are in `AGENTS.md`. Format of this file: `AGENTS.md`, under "Skills".
   it compiles against both.
 - A mutation harness that restores the file with `cp -a` keeps the older mtime, so cargo reuses the
   mutated build and the next run reports the mutant's result. Restore with plain `cp`, or `touch` after.
+- A Python heredoc that writes Rust source turns a `\` line continuation into a run of spaces unless
+  it is written `\\`; a golden test catches it, a weaker one does not.
