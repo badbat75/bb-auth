@@ -119,3 +119,6 @@ files outside the repo.
   and never `git add X && git commit`, which commits the whole index: staged tests waiting for their coder
   were swept into a plan-only commit (2026-11-25) and into a playbook commit (982a670, 2026-11-26), both
   split back out by hand.
+- A tester-then-coder script must stop when the tester's `opencode run` exits non-zero: the
+  model server can answer `UnexpectedStatus: 500` at once (busy with another project's agent), and
+  a script that carries on runs the coder against no new tests.
