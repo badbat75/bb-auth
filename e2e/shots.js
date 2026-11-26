@@ -68,7 +68,7 @@ const VIEWS = [
       // outcome pages are the ones a person reads in the worst minute of their day, so every
       // one of them is read in Italian too (§13.30 §5).
       'account-menu-delete', 'account-delete', 'account-delete-stranger',
-      'account-delete-typed-wrong', 'account-delete-protected', 'account-delete-queued',
+      'account-delete-typed-wrong', 'account-delete-protected',
       'account-delete-partial', 'account-delete-unsure', 'account-delete-some',
       'account-delete-changed'],
   },
@@ -422,15 +422,11 @@ const SCENES = [
     await submit(page);
     await asAdmin(page);
   }],
-  // Everything accepted: the row is gone and the accounts are queued, which is all this page
-  // can say. The sign out is its one action.
-  ['account-delete-queued', async (page, ctx) => {
-    await asCaller(page);
-    await page.goto(acct(ctx, '/delete'));
-    await page.fill('form[action="/account/delete"] input[name=confirm_email]', 'person@example.com');
-    await submit(page);
-    await asAdmin(page);
-  }],
+  // `account-delete-queued` was retired by plan step 14b (§13.33 §4): a completed deletion
+  // with a logout URL configured, which the shots' server always sets, answers a `303` and
+  // renders no page (§13.32 §1), so there is nothing here to photograph. The notice the
+  // redirect names is reviewed by hand on `/auth/login?notice=account-deleted`.
+
   // The first queue refused, after the row already went: the page has to say both.
   ['account-delete-partial', async (page, ctx) => {
     await asCaller(page);

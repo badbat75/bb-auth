@@ -410,6 +410,10 @@ Rules are in `AGENTS.md`. Format of this file: `AGENTS.md`, under "Skills".
 - The Rust `FakeCognito` scripts replies by **action lookup**, not as a queue: every request for
   `InitiateAuth` gets the same scripted reply, so one fake answers the same `POST` in two languages
   and `fake.calls().len()` counts both. Assert the count you expect from the number of requests.
+- A Playwright `Response` captured by `page.waitForResponse` on a **redirect** (a 303 a form POST
+  answers, caught to assert the `Location:` without following it) has **no readable body**:
+  `response.text()` throws `Response body is unavailable for redirect responses`, and `run.js` records
+  the whole area as one failure. Assert status and `headerValue('location')`; pin the empty body in Rust.
 - A Node `Response` body is **single-use**: a second `(await res.text())` throws `Body is unusable`,
   and `run.js` records the whole area as one failure ("area completed without an unhandled error"),
   hiding every check behind it. Read it once into a `const`.

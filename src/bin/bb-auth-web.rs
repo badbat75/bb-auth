@@ -1309,7 +1309,6 @@ enum K {
     AccountDeleteQueuedTitle,
     AccountDeleteNowGone,
     AccountDeleteQueued,
-    AccountDeletedSignOut,
     AccountDeletedClose,
     AccountDeletePartialTitle,
     AccountDeleteNotQueued,
@@ -3167,16 +3166,10 @@ fn t(lang: Lang, key: K) -> &'static str {
              dire quando avverrà; se più avanti riesci ancora ad accedere, avvisa un \
              amministratore.",
         ),
-        K::AccountDeletedSignOut => m(
-            lang,
-            "This browser stays signed in until you sign out, so sign out now.",
-            "Questo browser resta connesso finché non esci, quindi esci adesso.",
-        ),
         K::AccountDeletedClose => m(
             lang,
-            "This browser stays signed in until the session ends: close your browser to end it.",
-            "Questo browser resta connesso finché la sessione non termina: chiudi il browser per \
-             terminarla.",
+            "This browser stays signed in until the session ends.",
+            "Questo browser resta connesso finché la sessione non termina.",
         ),
         K::AccountDeletePartialTitle => m(
             lang,
@@ -3456,7 +3449,9 @@ struct Config {
     /// [`logout_without_rd`] and `None` exactly when `logout_url` is. The self-service page's
     /// Sign out pill carries this (docs/ARCHITECTURE.md §13.17): the `rd` is the console's round
     /// trip to the administrator surface, and on `/account/` it would land a person who is not
-    /// an administrator on a `403`.
+    /// an administrator on a `403`. It is also the logout a completed deletion redirects
+    /// through (§13.32 §1, [`delete_logout_location`]), which is why the value is derived once
+    /// and never re-cut per request.
     account_logout_url: Option<String>,
     /// `BB_AUTH_AUDIT_FILE`, the authentication audit the gate appends to and this GUI reads.
     /// Default [`DEFAULT_AUDIT_FILE`], and **empty means there is no Audit tab at all**.
@@ -4108,6 +4103,42 @@ fn logout_without_rd(url: &str) -> String {
     }
 }
 
+/// The `Location:` of the `303` §13.32 §1 answers a **completed** deletion with: the operator's
+/// logout URL ([`Config::account_logout_url`], already without the console's `rd`) with our `rd`
+/// **added** to its query, ahead of any fragment.
+///
+/// A redirect and not a page because the gate is the only program that knows the session
+/// cookie's name and builds the clearing `Set-Cookie`: a second builder would clear on a
+/// `Domain` or `Path` that differs from the mint's, which "silently succeeds at nothing"
+/// (`build_cookie`'s rustdoc, §13.32 §1's rejected option (b)). The `303` rides on the full
+/// success **only**: every partial outcome above ends on a page that offers "Try again", and
+/// that retry is a walk over the header's addresses which the gate admits by the session
+/// cookie, so signing the browser out there strands the person on the page that tells them
+/// to retry. With no logout URL there is nowhere to send the browser, so the done page stays.
+///
+/// The `rd` names the gate's **own** sign-in page and is built from the library's two
+/// constants, never from the request: only that page understands the notice (the code is a
+/// closed set of one, §13.32 §1), it is a location every deployment already routes ungated,
+/// and the constants are the bytes the gate compiles its own `OWN_LOGIN_PATH` from, so the
+/// two programs cannot disagree on the landing page. Fixed bytes also mean no request byte
+/// ever rides into a `Location:` through this door. The value is percent-encoded with
+/// [`pct_encode_segment`] (RFC 3986 unreserved set), which is what lets the `?` and the `=`
+/// of the landing URL sit inside one parameter, and the fragment is kept **last**: a URL
+/// ending `…#f&rd=…` sends the browser to the fragment and drops the notice.
+fn delete_logout_location(logout: &str) -> String {
+    let rd = pct_encode_segment(&format!(
+        "{}?notice={}",
+        bb_auth_core::GATE_LOGIN_PATH,
+        bb_auth_core::LOGIN_NOTICE_ACCOUNT_DELETED
+    ));
+    let (url, fragment) = match logout.find('#') {
+        Some(i) => (&logout[..i], &logout[i..]),
+        None => (logout, ""),
+    };
+    let join = if url.contains('?') { '&' } else { '?' };
+    format!("{url}{join}rd={rd}{fragment}")
+}
+
 /// Is this listen address on the loopback interface? The gate has the same function and the
 /// same reason for it; this one is what makes a stray `0.0.0.0` fatal rather than merely
 /// mentioned.
@@ -4724,9 +4755,11 @@ fn respond_theme_redirect(req: Request, location: &str, theme: UiTheme) {
 /// [`Msg::key`], both printable ASCII by construction, so [`h`] cannot panic on it — and
 /// nothing request-supplied is in it.
 ///
-/// Its one other use is a `GET` that carried nothing but a time zone nobody could read, which
-/// comes back to its page with the zone dropped. That `location` is a [`preference_href`], so
-/// the same argument holds: every client byte in it has been re-encoded.
+/// Its other uses: a `GET` that carried nothing but a time zone nobody could read, which comes
+/// back to its page with the zone dropped (that `location` is a [`preference_href`], so the
+/// same argument holds: every client byte in it has been re-encoded); and the completed account
+/// deletion, sent through the gate's logout (§13.32 §1, [`delete_logout_location`]), whose
+/// `location` is operator config and library constants, no request byte.
 fn respond_redirect(req: Request, location: &str) {
     let resp = Response::empty(StatusCode(303))
         .with_header(h("Location", location))
@@ -11297,7 +11330,8 @@ fn page_account_delete_outcome(lede: Markup, muted: Option<Markup>, pills: Vec<M
 /// The actions of an outcome page that says something **did** go: the retry, then the sign out
 /// (§13.30 §4). The sign out is there because the cookie outlives the deletion and signing out is
 /// the one action left that is true, and it is absent exactly where the operator named no
-/// destination, which is the same rule the done page and the bar's row follow.
+/// destination, which is the same rule the bar's row follows. The completed deletion answers no
+/// page at all when a destination **is** named (§13.32 §1).
 fn with_sign_out(prefs: &AccountPrefs, lang: Lang, retry: Markup) -> Vec<Markup> {
     let mut pills = vec![retry];
     if let Some(url) = prefs.logout {
@@ -11338,7 +11372,9 @@ enum RowGone {
 /// 6. for a caller the file has a row for: that row, removed under [`WRITE_LOCK`] through
 ///    [`remove_user`], ahead of the first `POST` (the reason is at the step);
 /// 7. `POST` each address, stopping at the first that is not accepted;
-/// 8. the journal lines (§13.29 W7), then the page (§13.30 §4).
+/// 8. the journal lines (§13.29 W7), then the answer: where every address queued and the
+///    operator named a logout URL, a `303` through the gate's logout (§13.32 §1); every other
+///    outcome a page (§13.30 §4).
 ///
 /// A caller with no row skips (6) and the access file is never opened for writing on that path,
 /// which is the stranger's half of W3: the same walk, one effect short.
@@ -11764,18 +11800,24 @@ fn account_delete_post(
         // one the intake has just refused, which is the half-state §13.29 W3 exists to avoid.
         return;
     }
-    // (8) Every address is queued, which is all this page knows (§13.29 W6): the worker's
-    // outcome is not readable from here, so the page says "being deleted" and never "deleted",
-    // and its one action is the sign out, because the cookie outlives the deletion.
+    // (8) Every address is queued, which is all this program knows (§13.29 W6): the worker's
+    // outcome is not readable from here, so the answer says "being deleted" and never
+    // "deleted". Where the operator named a logout URL this is also the one outcome that
+    // signs the browser out, through the gate's logout (§13.32 §1): by the time a page is
+    // drawn the person is signed out, so nothing here ever asks them to sign out. Every
+    // partial outcome above keeps its page and its Sign out pill, because its "Try again"
+    // is a walk over the header's addresses and that walk needs the session. With no logout
+    // URL there is nowhere to send the browser, so the done page stays, and its last
+    // sentence says what the person can do themselves.
     audit(
         &format!("{typed} (self)"),
         "delete-request",
         &format!("{} queued", ids.len()),
     );
-    let (tail, logout) = match prefs.logout {
-        Some(url) => (t(lang, K::AccountDeletedSignOut), Some(url)),
-        None => (t(lang, K::AccountDeletedClose), None),
-    };
+    if let Some(url) = prefs.logout {
+        respond_redirect(req, &delete_logout_location(url));
+        return;
+    }
     respond_account(
         req,
         200,
@@ -11788,13 +11830,13 @@ fn account_delete_post(
                 @if row_gone {
                     (t(lang, K::AccountDeleteNowGone)) " "
                 }
-                (t(lang, K::AccountDeleteQueued)) " " (tail)
+                (t(lang, K::AccountDeleteQueued)) " " (t(lang, K::AccountDeletedClose))
             },
             None,
-            logout
-                .map(|url| pill_link(url, t(lang, K::SignOut)))
-                .into_iter()
-                .collect(),
+            // No pill: the page's one action used to be the sign out, and §13.32 §1 moved
+            // that action into the redirect this branch does not answer with. The bar's
+            // account menu is the sign out that is left.
+            vec![],
         ),
         look,
         false,
@@ -33704,14 +33746,12 @@ mod tests {
                                       by name are gone.";
     const DELETE_NOW_GONE_IT: &str = "Le tue chiavi API e ogni accesso che un amministratore ti \
                                       ha dato per nome non ci sono più.";
-    const DELETE_SIGN_OUT_EN: &str = "This browser stays signed in until you sign out, so sign \
-                                      out now.";
-    const DELETE_SIGN_OUT_IT: &str = "Questo browser resta connesso finché non esci, quindi esci \
-                                      adesso.";
-    const DELETE_CLOSE_EN: &str = "This browser stays signed in until the session ends: close \
-                                   your browser to end it.";
-    const DELETE_CLOSE_IT: &str = "Questo browser resta connesso finché la sessione non \
-                                   termina: chiudi il browser per terminarla.";
+    // The done page's last sentence, for the page that **stays**: the one a deployment gets when
+    // the operator named no logout URL, so there is nowhere to send the browser (§13.32 §1). Its
+    // words are §13.33 §3's, which replaced "close your browser to end it": the cookie carries
+    // `Max-Age` (`build_cookie`), so it outlives a closed browser and the old sentence was false.
+    const DELETE_CLOSE_EN: &str = "This browser stays signed in until the session ends.";
+    const DELETE_CLOSE_IT: &str = "Questo browser resta connesso finché la sessione non termina.";
     const DELETE_CHANGED_TITLE_EN: &str = "Your account changed";
     const DELETE_CHANGED_TITLE_IT: &str = "Il tuo account è cambiato";
     const DELETE_CHANGED_EN: &str = "Your account changed after you opened this page, so nothing \
@@ -33728,6 +33768,20 @@ mod tests {
     /// names them and nothing else, and the config value names only the origin.
     const WHOAMI_PATH: &str = "GET /account/whoami";
     const DELETE_PATH: &str = "POST /account/delete";
+
+    /// The `Location:` §13.32 §1 and §4 pin for a deletion whose every address was queued, on
+    /// this suite's logout URL (`BB_AUTH_WEB_LOGOUT_URL`, `/auth/logout`): the gate's logout, and
+    /// its **own sign-in page** as the round trip, carrying the deletion's one notice code.
+    ///
+    /// Spelled in full rather than rebuilt from `bb_auth_core::GATE_LOGIN_PATH` and
+    /// `bb_auth_core::LOGIN_NOTICE_ACCOUNT_DELETED`, because the encoded bytes are the fact: the
+    /// two constants are what the programs must agree on, and a builder that escaped the `?` and
+    /// the `=` wrongly would satisfy a test that re-encoded them the same way. This is also the
+    /// `rd` the gate's own pin decodes
+    /// (`a_logout_with_the_deletion_rd_clears_and_lands_on_the_notice`, `src/bin/bb-auth.rs`), so
+    /// the two tests meet in the middle of the wire.
+    const DELETE_LOGOUT_LOCATION: &str =
+        "/auth/logout?rd=%2Fauth%2Flogin%3Fnotice%3Daccount-deleted";
 
     /// The answer a healthy intake gives `whoami` for the address it was sent: not protected.
     /// `__EMAIL__` is the fake's echo (see [`FakeIntake::answering`]), because the contract
@@ -33987,14 +34041,20 @@ mod tests {
     }
 
     /// The GUI served with the intake pointing at a live listener **and** the logout URL given.
-    /// The done page's two variants (§13.30 §4: a Sign out pill, or the sentence that says to
-    /// close the browser) are the same walk on two configs.
+    /// The done page's two variants (§13.32 §1: a `303` through the gate's logout, or the page
+    /// that says what the person can do themselves) are the same walk on two configs.
+    ///
+    /// `account_logout_url` is derived by [`logout_without_rd`], exactly as startup derives it
+    /// from the same value (see the field's comment in [`cfg_for`]): the pair a deletion's
+    /// redirect is built from is the operator's URL **with the console's `rd` cut**, so a fixture
+    /// that handed the raw value over would make every assertion about that redirect red for a
+    /// reason no deployment can produce.
     fn account_port_intake_logout(path: &str, intake: &str, logout: Option<&str>) -> u16 {
         let mut cfg = cfg_for(path, ADMIN_BASE);
         cfg.delete_intake = Some(intake.to_string());
         cfg.delete_secret = Some(TEST_SECRET.to_string());
         cfg.logout_url = logout.map(str::to_string);
-        cfg.account_logout_url = logout.map(str::to_string);
+        cfg.account_logout_url = logout.map(logout_without_rd);
         let server = Server::http("127.0.0.1:0").expect("bind an ephemeral port");
         let port = server.server_addr().to_ip().expect("an ip address").port();
         std::thread::spawn(move || {
@@ -34052,6 +34112,11 @@ mod tests {
     /// words against one language's strings. A cookie the page ignored would make each of
     /// those assertions fail on the Italian side, and the failure would read as a wrong
     /// translation rather than as the request that never asked.
+    ///
+    /// That assertion is about a **page**, and the completed deletion answers a `303` that
+    /// renders none (§13.32 §1), so it runs on the responses that carry a document: every
+    /// redirect this program sends is empty-bodied, so on one there is nothing to be in the
+    /// wrong language.
     fn account_post_lang(
         url: &str,
         identity: &str,
@@ -34078,12 +34143,17 @@ mod tests {
                 .collect(),
             body: r.body_mut().read_to_string().expect("a body"),
         };
-        assert!(
-            account_html_tag(&out.body).contains(&format!("lang=\"{}\"", lang.code())),
-            "the request asked for {} and the page is not in it: {}",
-            lang.code(),
-            account_html_tag(&out.body)
-        );
+        // The language assertion is about a **page**. A `303` (§13.32 §1) carries no body,
+        // so there is no `<html>` to read and nothing to be in the wrong language: the check
+        // runs on a response that renders a document, which is every case that reads words.
+        if !out.body.is_empty() {
+            assert!(
+                account_html_tag(&out.body).contains(&format!("lang=\"{}\"", lang.code())),
+                "the request asked for {} and the page is not in it: {}",
+                lang.code(),
+                account_html_tag(&out.body)
+            );
+        }
         out
     }
 
@@ -34180,9 +34250,14 @@ mod tests {
         let g = account_post(&url, Some("stranger@elsewhere.com"), &fields);
         assert_eq!(
             g.status,
-            200,
-            "a stranger's walk, queued: {}",
+            303,
+            "a stranger's walk, queued, is answered by the logout redirect (§13.32 §1): {}",
             account_readable(&g.body)
+        );
+        assert_eq!(
+            g.header("Location"),
+            Some(DELETE_LOGOUT_LOCATION),
+            "and the walk is the same walk: the redirect replaces the page, not the work"
         );
         assert_eq!(
             intake.at(),
@@ -34230,9 +34305,14 @@ mod tests {
         let g = account_post(&url, Some(identity), &fields);
         assert_eq!(
             g.status,
-            200,
-            "a two-address walk, queued: {}",
+            303,
+            "a two-address walk, queued, is answered by the logout redirect (§13.32 §1): {}",
             account_readable(&g.body)
+        );
+        assert_eq!(
+            g.header("Location"),
+            Some(DELETE_LOGOUT_LOCATION),
+            "the caller's own addresses change nothing about the answer"
         );
         assert_eq!(
             intake.at(),
@@ -34856,106 +34936,318 @@ mod tests {
         let _ = std::fs::remove_file(&path);
     }
 
-    /// §13.29 W6, §13.30 §4: the page can only say what bb-auth-web did and what the intake
-    /// accepted. A `202` is "queued", never "deleted"; a stranger's page says nothing about keys
-    /// and named access, because a stranger has none; and its one action is Sign out, because
-    /// the cookie outlives the deletion. With no logout URL the page says what the person can do
-    /// and offers no pill.
+    // ---------------------------------------------------------------------
+    // Slice 14b (docs/ARCHITECTURE.md §13.32 §1 §4, §13.33 §3): a deletion that queued
+    // everything signs this browser out by itself. The `POST` answers a `303` to the gate's
+    // logout with the gate's sign-in page as its `rd`, so the gate clears the cookie (it is the
+    // only program that knows the cookie's name and builds the clearing `Set-Cookie`) and the
+    // person lands on the sign-in page with the notice, never on a page that asks them to sign
+    // out. Three things follow and are each pinned below: only the **full success** redirects
+    // (a partial one offers "Try again", and the retry is a walk over the header's addresses,
+    // which needs the session); a deployment with no `BB_AUTH_WEB_LOGOUT_URL` keeps the done
+    // page, because there is nowhere to send the browser; and bb-auth-web sends no `Set-Cookie`
+    // of its own (§13.32 §1's rejected option (b): a second builder of a clearing cookie).
+    //
+    // The words of the two `200` rows of §13.30 §4 moved to the notice, in `login.html`
+    // (§13.33 §3), so no test here asserts them: what is left on the page side is the
+    // no-logout-URL page, whose last sentence is reworded because the cookie carries `Max-Age`
+    // and so outlives a closed browser.
+    //
+    // The journal lines this flow writes (`user rm`, `N queued`) are on stderr, as every
+    // mutation line in this program is, so no over-the-socket test can read them (the same
+    // limit the key-rotation tests record). The effects those lines describe are asserted
+    // instead, in the access file and at the intake.
+    // ---------------------------------------------------------------------
+
+    /// §13.32 §4: a deletion where every address was answered `202` ends in a `303` to the
+    /// logout, for a roster user and for a stranger, in both languages. Nothing about the answer
+    /// depends on who: no page is rendered, so there is nothing for the redirect to translate,
+    /// which is the same reason the notice is one code (§13.33 §1).
+    ///
+    /// The walk is asserted as well as the answer. The redirect is not a shorter path: the row
+    /// still has to go before the first `POST`, and every address still has to be queued, since
+    /// a `303` that skipped the work would look identical to a browser.
     #[test]
-    fn the_done_page_says_queued_and_links_to_sign_out() {
+    fn a_complete_deletion_answers_with_the_gates_logout() {
+        let at = |port: u16| format!("http://127.0.0.1:{port}{ACCOUNT_PATH}/delete");
+
+        // The roster user: two addresses, so a walk of two `whoami` and two `POST`, and a row
+        // the page writes out. A fixture per language, because the row goes on the first drive
+        // and the second would be answered by the `409` that says so.
+        for lang in [Lang::En, Lang::It] {
+            let intake = FakeIntake::answering(vec![
+                (WHOAMI_PATH, whoami_ok()),
+                (DELETE_PATH, delete_accepted()),
+            ]);
+            let path = account_scratch_roster(&format!("delete-14b-roster-{}", lang.code()));
+            let port = account_port_intake_at(&path, &intake.endpoint());
+            let rev = rev_of(&path);
+            let g = account_post_lang(
+                &at(port),
+                "bob@x.com bob@old.com",
+                &[
+                    ("rev", rev.as_str()),
+                    ("uuid", ACCOUNT_BOB),
+                    ("confirm_email", "bob@x.com"),
+                ],
+                lang,
+            );
+            assert_eq!(
+                g.status,
+                303,
+                "{}: every POST answered 202, so the answer is a redirect: {}",
+                lang.code(),
+                account_readable(&g.body)
+            );
+            assert_eq!(
+                g.header("Location"),
+                Some(DELETE_LOGOUT_LOCATION),
+                "{}: the gate's logout, and its own sign-in page as the round trip",
+                lang.code()
+            );
+            assert!(
+                g.body.is_empty(),
+                "{}: the answer is a redirect, not a page that asks to be signed out: {:?}",
+                lang.code(),
+                g.body
+            );
+            assert!(
+                g.cookies().is_empty(),
+                "{}: the gate clears the cookie, and only the gate: it is the program that \
+                 knows the cookie's name and builds the clearing Set-Cookie (§13.32 §1b): {:?}",
+                lang.code(),
+                g.cookies()
+            );
+            // The work is the same work it was: the redirect replaces the page, not the walk.
+            assert_eq!(
+                intake.at(),
+                vec![WHOAMI_PATH, WHOAMI_PATH, DELETE_PATH, DELETE_PATH],
+                "{}: both addresses checked and queued before the redirect: {:?}",
+                lang.code(),
+                intake.at()
+            );
+            let doc = bb_auth_core::read_access_file(&path)
+                .expect("the file the write left parses with the gate's own parser");
+            let uuids: Vec<&String> = doc.users.iter().map(|u| &u.uuid).collect();
+            assert!(
+                !uuids.contains(&&ACCOUNT_BOB.to_string()),
+                "{}: the row is out of the file: {uuids:?}",
+                lang.code()
+            );
+            let _ = std::fs::remove_file(&path);
+        }
+
+        // The stranger: one address, no row, and the same answer. One fixture serves both
+        // languages, because this walk writes nothing to the file and cannot go stale.
         let intake = FakeIntake::answering(vec![
             (WHOAMI_PATH, whoami_ok()),
             (DELETE_PATH, delete_accepted()),
         ]);
-        let path = account_scratch_full("delete-7c-done");
+        let path = account_scratch_full("delete-14b-stranger");
         let port = account_port_intake_at(&path, &intake.endpoint());
-        let url = format!("http://127.0.0.1:{port}{ACCOUNT_PATH}/delete");
+        let url = at(port);
         let rev = rev_of(&path);
+        let before = read(&path);
         let fields = [
             ("rev", rev.as_str()),
             ("uuid", ""),
             ("confirm_email", "stranger@elsewhere.com"),
         ];
-
         for lang in [Lang::En, Lang::It] {
+            let seen = intake.calls().len();
             let g = account_post_lang(&url, "stranger@elsewhere.com", &fields, lang);
             assert_eq!(
                 g.status,
+                303,
+                "{}: a stranger with every address queued gets the same redirect: {}",
+                lang.code(),
+                account_readable(&g.body)
+            );
+            assert_eq!(
+                g.header("Location"),
+                Some(DELETE_LOGOUT_LOCATION),
+                "{}: the redirect names nothing about the caller, so it is the same bytes for \
+                 both",
+                lang.code()
+            );
+            assert!(
+                g.cookies().is_empty(),
+                "{}: no Set-Cookie here either: {:?}",
+                lang.code(),
+                g.cookies()
+            );
+            assert_eq!(
+                intake.at_since(seen),
+                vec![WHOAMI_PATH, DELETE_PATH],
+                "{}: asked, queued, redirected: {:?}",
+                lang.code(),
+                intake.at_since(seen)
+            );
+        }
+        assert_eq!(
+            read(&path),
+            before,
+            "a caller the file has no row for leaves its bytes alone"
+        );
+        let _ = std::fs::remove_file(&path);
+    }
+
+    /// §13.32 §4: the `rd` is **added to** the operator's logout URL, not written over it, and
+    /// it lands inside the query, not after the fragment. The operator's own `rd` (the console's
+    /// round trip) is gone, cut by `logout_without_rd` at startup, and ours appears exactly
+    /// once: a URL carrying two `rd` parameters is one whose meaning depends on which half of
+    /// the estate reads it first.
+    ///
+    /// `x=1` is there so the builder has to notice a query already exists and join with `&`.
+    /// The `#f` is there so it has to put the fragment **last**, which is the half a textual
+    /// append gets wrong: `?x=1&rd=…#f` sends the browser to the login page, `…#f&rd=…` sends
+    /// it to the fragment and drops the notice.
+    #[test]
+    fn the_deletion_rd_is_added_to_the_operators_query() {
+        // The bytes the answer must carry, spelled out: the operator's `x=1` kept, the console's
+        // `rd=/admin` gone, ours in its place, and the fragment after the query.
+        const WANT: &str =
+            "https://auth.x.com/auth/logout?x=1&rd=%2Fauth%2Flogin%3Fnotice%3Daccount-deleted#f";
+        let intake = FakeIntake::answering(vec![
+            (WHOAMI_PATH, whoami_ok()),
+            (DELETE_PATH, delete_accepted()),
+        ]);
+        let path = account_scratch_full("delete-14b-operator-query");
+        let port = account_port_intake_logout(
+            &path,
+            &intake.endpoint(),
+            Some("https://auth.x.com/auth/logout?x=1&rd=/admin#f"),
+        );
+        let rev = rev_of(&path);
+        let g = account_post(
+            &format!("http://127.0.0.1:{port}{ACCOUNT_PATH}/delete"),
+            Some("stranger@elsewhere.com"),
+            &[
+                ("rev", rev.as_str()),
+                ("uuid", ""),
+                ("confirm_email", "stranger@elsewhere.com"),
+            ],
+        );
+        assert_eq!(
+            g.status,
+            303,
+            "an absolute logout URL changes nothing about the answer: {}",
+            account_readable(&g.body)
+        );
+        assert_eq!(
+            g.header("Location"),
+            Some(WANT),
+            "the operator's query kept, the console's `rd` gone, ours added once, the fragment \
+             last"
+        );
+        let location = g.header("Location").unwrap_or_default();
+        assert_eq!(
+            location.matches("rd=").count(),
+            1,
+            "the operator's `rd` is replaced, not joined to: {location}"
+        );
+        assert!(
+            !location.contains("/admin"),
+            "the console's landing page is not on the wire after a deletion: {location}"
+        );
+        let _ = std::fs::remove_file(&path);
+    }
+
+    /// §13.32 §1 and §13.33 §3: with no `BB_AUTH_WEB_LOGOUT_URL` there is nowhere to send the
+    /// browser, so the `200` done page stays, in both languages, for a roster user and for a
+    /// stranger, with the rows §13.33 §3's table names and **no pill** (the bar's account menu
+    /// is the only sign-out left, and it is chrome, not the page's action).
+    ///
+    /// The page's last sentence is the reworded one (§13.33 §1: "close your browser to end it"
+    /// was false, the cookie carries `Max-Age`), so the words that are pinned are "until the
+    /// session ends", and the words that are **banned** are the closing advice, in both
+    /// languages: a page that tells a person to close the browser tells them to do something
+    /// that does not end the session.
+    #[test]
+    fn with_no_logout_url_the_done_page_stays() {
+        let at = |port: u16| format!("http://127.0.0.1:{port}{ACCOUNT_PATH}/delete");
+
+        for lang in [Lang::En, Lang::It] {
+            // The roster user: `NowGone` first, because the write is the half that is already
+            // true when the page is drawn (§13.30 §4).
+            let intake = FakeIntake::answering(vec![
+                (WHOAMI_PATH, whoami_ok()),
+                (DELETE_PATH, delete_accepted()),
+            ]);
+            let path =
+                account_scratch_roster(&format!("delete-14b-nologout-roster-{}", lang.code()));
+            let port = account_port_intake_logout(&path, &intake.endpoint(), None);
+            let rev = rev_of(&path);
+            let g = account_post_lang(
+                &at(port),
+                "bob@x.com bob@old.com",
+                &[
+                    ("rev", rev.as_str()),
+                    ("uuid", ACCOUNT_BOB),
+                    ("confirm_email", "bob@x.com"),
+                ],
+                lang,
+            );
+            assert_eq!(
+                g.status,
                 200,
-                "{}: every POST answered 202: {}",
+                "{}: no logout URL, so a page: {}",
                 lang.code(),
                 account_readable(&g.body)
             );
             assert_eq!(
                 account_heading(&g.body, "h1"),
                 m(lang, DELETE_QUEUED_TITLE_EN, DELETE_QUEUED_TITLE_IT),
-                "{}: being deleted, not deleted",
-                lang.code()
+                "{}: being deleted, not deleted: {}",
+                lang.code(),
+                account_readable(&g.body)
             );
             assert_eq!(
                 the_page_lede(&g.body),
                 format!(
-                    "{} {}",
+                    "{} {} {}",
+                    m(lang, DELETE_NOW_GONE_EN, DELETE_NOW_GONE_IT),
                     m(lang, DELETE_QUEUED_EN, DELETE_QUEUED_IT),
-                    m(lang, DELETE_SIGN_OUT_EN, DELETE_SIGN_OUT_IT)
+                    m(lang, DELETE_CLOSE_EN, DELETE_CLOSE_IT)
                 ),
-                "{}: queued, then the sentence that says why to sign out",
-                lang.code()
-            );
-            let words = the_page_words(&g.body);
-            assert!(
-                !words.contains(m(lang, DELETE_NOW_GONE_EN, DELETE_NOW_GONE_IT)),
-                "{}: a stranger has no keys and no access given by name: {words}",
-                lang.code()
-            );
-            let pills = the_action_pills(&g.body);
-            assert_eq!(
-                pills.len(),
-                1,
-                "{}: one action, and it is the one that ends the session: {}",
+                "{}: what went, then the queue, then this browser: {}",
                 lang.code(),
                 account_readable(&g.body)
             );
-            assert_eq!(
-                visible_text(&pills[0]),
-                t(lang, K::SignOut),
-                "{}: {}",
+            assert!(
+                controls_with_class(&the_main(&g.body), "a", "pill").is_empty(),
+                "{}: nowhere to send the browser, so the page offers no pill: {}",
                 lang.code(),
-                pills[0]
-            );
-            assert_eq!(
-                attr(open_tag(&pills[0]), "href").as_deref(),
-                Some("/auth/logout"),
-                "{}: the sign-out link is the config's, with the console's `rd` dropped: \
-                 {}",
-                lang.code(),
-                pills[0]
+                account_readable(&g.body)
             );
             assert!(
                 !the_main(&g.body).contains(&format!("href=\"{ACCOUNT_PAGE}\"")),
-                "{}: the page offers no way back to a page about an account that is \
-                 going: {}",
+                "{}: the page offers no way back to a page about an account that is going: {}",
                 lang.code(),
                 account_readable(&g.body)
             );
-        }
+            assert_no_closing_advice(&the_page_words(&g.body), lang);
+            let _ = std::fs::remove_file(&path);
 
-        // No logout URL: the page says what the person can do, and offers no pill.
-        let path = account_scratch_full("delete-7c-done-nologout");
-        let port = account_port_intake_logout(&path, &intake.endpoint(), None);
-        let url = format!("http://127.0.0.1:{port}{ACCOUNT_PATH}/delete");
-        let rev = rev_of(&path);
-        let fields = [
-            ("rev", rev.as_str()),
-            ("uuid", ""),
-            ("confirm_email", "stranger@elsewhere.com"),
-        ];
-        for lang in [Lang::En, Lang::It] {
-            let g = account_post_lang(&url, "stranger@elsewhere.com", &fields, lang);
+            // The stranger: no row, so no `NowGone`, and the same page otherwise.
+            let path =
+                account_scratch_full(&format!("delete-14b-nologout-stranger-{}", lang.code()));
+            let port = account_port_intake_logout(&path, &intake.endpoint(), None);
+            let rev = rev_of(&path);
+            let g = account_post_lang(
+                &at(port),
+                "stranger@elsewhere.com",
+                &[
+                    ("rev", rev.as_str()),
+                    ("uuid", ""),
+                    ("confirm_email", "stranger@elsewhere.com"),
+                ],
+                lang,
+            );
             assert_eq!(
                 g.status,
                 200,
-                "{}: no logout URL changes nothing about the walk: {}",
+                "{}: no logout URL, so a page: {}",
                 lang.code(),
                 account_readable(&g.body)
             );
@@ -34966,8 +35258,9 @@ mod tests {
                     m(lang, DELETE_QUEUED_EN, DELETE_QUEUED_IT),
                     m(lang, DELETE_CLOSE_EN, DELETE_CLOSE_IT)
                 ),
-                "{}: the close sentence stands where the sign-out sentence was",
-                lang.code()
+                "{}: a stranger has no keys and no access given by name: {}",
+                lang.code(),
+                account_readable(&g.body)
             );
             assert!(
                 controls_with_class(&the_main(&g.body), "a", "pill").is_empty(),
@@ -34975,7 +35268,103 @@ mod tests {
                 lang.code(),
                 account_readable(&g.body)
             );
+            assert!(
+                !the_main(&g.body).contains(&format!("href=\"{ACCOUNT_PAGE}\"")),
+                "{}: this page is the end of the account, not a step back into it: {}",
+                lang.code(),
+                account_readable(&g.body)
+            );
+            assert_no_closing_advice(&the_page_words(&g.body), lang);
+            let _ = std::fs::remove_file(&path);
         }
+    }
+
+    /// The page must not tell anybody to close the browser: the sentence's replacement says the
+    /// session ends, and the cookie carries `Max-Age` (`build_cookie`), so closing the browser
+    /// ends nothing (§13.33 §1). Checked case-insensitively over the words a person reads, in
+    /// the language they read them in.
+    fn assert_no_closing_advice(words: &str, lang: Lang) {
+        let needle = match lang {
+            Lang::En => "close",
+            Lang::It => "chiudi",
+        };
+        assert!(
+            !words.to_ascii_lowercase().contains(needle),
+            "{}: the page says nothing about closing the browser: {words}",
+            lang.code()
+        );
+    }
+
+    /// §13.32 §1: **only** the full success signs the browser out. The first `POST` refused,
+    /// after the row went, is the `502` partial page, and it has to stay a page: its "Try
+    /// again" pill is the stranger's walk over the header's addresses, and that walk is a
+    /// request the gate admits by the session cookie. A `303` through the logout here would
+    /// sign out the person who was told to try again.
+    ///
+    /// The words of this row are pinned by `each_delete_outcome_states_its_result_in_the_h1`;
+    /// what is pinned here is the absence of the redirect, and the Sign out pill that stands in
+    /// its place: the person signs out by hand, when they have finished retrying.
+    #[test]
+    fn a_partial_deletion_does_not_sign_out() {
+        let lang = Lang::En;
+        let intake = FakeIntake::answering(vec![(WHOAMI_PATH, whoami_ok())]);
+        intake.in_order(DELETE_PATH, vec![delete_refused(503)]);
+        let path = account_scratch_roster("delete-14b-partial");
+        let port = account_port_intake_at(&path, &intake.endpoint());
+        let rev = rev_of(&path);
+        let g = account_post_lang(
+            &format!("http://127.0.0.1:{port}{ACCOUNT_PATH}/delete"),
+            "bob@x.com bob@old.com",
+            &[
+                ("rev", rev.as_str()),
+                ("uuid", ACCOUNT_BOB),
+                ("confirm_email", "bob@x.com"),
+            ],
+            lang,
+        );
+        assert_eq!(
+            g.status,
+            502,
+            "the intake refused the record, so the page says so: {}",
+            account_readable(&g.body)
+        );
+        assert_eq!(
+            g.header("Location"),
+            None,
+            "a page that offers a retry signs nobody out"
+        );
+        let pills = the_action_pills(&g.body);
+        let got: Vec<String> = pills.iter().map(|p| visible_text(p)).collect();
+        assert_eq!(
+            got,
+            vec![t(lang, K::AccountDeleteRetry), t(lang, K::SignOut)],
+            "the retry, then the sign out the person takes themselves: {}",
+            account_readable(&g.body)
+        );
+        assert_eq!(
+            attr(open_tag(&pills[0]), "href").as_deref(),
+            Some(format!("{ACCOUNT_PATH}/delete").as_str()),
+            "Try again leads back to the confirmation page: {}",
+            pills[0]
+        );
+        assert_eq!(
+            attr(open_tag(&pills[1]), "href").as_deref(),
+            Some("/auth/logout"),
+            "the sign-out pill is the config's URL, `rd` dropped: {}",
+            pills[1]
+        );
+        assert!(
+            g.cookies().is_empty(),
+            "nothing is cleared on a page that asks for a retry: {:?}",
+            g.cookies()
+        );
+        let doc = bb_auth_core::read_access_file(&path)
+            .expect("the file the write left parses with the gate's own parser");
+        let uuids: Vec<&String> = doc.users.iter().map(|u| &u.uuid).collect();
+        assert!(
+            !uuids.contains(&&ACCOUNT_BOB.to_string()),
+            "the row went before the POST that was refused: {uuids:?}"
+        );
         let _ = std::fs::remove_file(&path);
     }
 
@@ -35805,7 +36194,9 @@ mod tests {
     /// §13.29 W3 step 5, the order the slice exists for: the row is out of the access file
     /// **before** the first `POST` reaches the worker. A worker that found the row standing
     /// would find the key too, and the whole point of the step is that it finds neither. The
-    /// page is the roster's done page: `NowGone` first, because that half is bb-auth-web's.
+    /// answer is the `303` §13.32 §1 gives a completed deletion, which renders no page: what
+    /// this test reads is the file and the intake, and the order they show is the same order
+    /// the done page used to describe.
     ///
     /// The identity carries both of the row's addresses, space-joined as the gate sends them,
     /// because the order this test pins is only visible on a walk over more than one: a single
@@ -35832,8 +36223,9 @@ mod tests {
             let g = account_post_lang(&url, "bob@x.com bob@old.com", &fields, lang);
             assert_eq!(
                 g.status,
-                200,
-                "{}: every address was asked and posted: {}",
+                303,
+                "{}: every address was asked and posted, so the answer is the logout redirect \
+                 (§13.32 §1): {}",
                 lang.code(),
                 account_readable(&g.body)
             );
@@ -35875,48 +36267,19 @@ mod tests {
                 "{}: the row nobody asked about stands: {uuids:?}",
                 lang.code()
             );
-            // The page: queued, not deleted, and its lede says what bb-auth-web took away
-            // first, because that half is true the moment the write lands.
+            // The answer: the gate's logout, and nothing rendered. The redirect replaces the
+            // page's words, and the two effects this test is about are untouched by it.
             assert_eq!(
-                account_heading(&g.body, "h1"),
-                m(lang, DELETE_QUEUED_TITLE_EN, DELETE_QUEUED_TITLE_IT),
-                "{}: being deleted, not deleted: {}",
-                lang.code(),
-                account_readable(&g.body)
+                g.header("Location"),
+                Some(DELETE_LOGOUT_LOCATION),
+                "{}: the completed deletion is answered by the gate's logout",
+                lang.code()
             );
-            assert_eq!(
-                the_page_lede(&g.body),
-                format!(
-                    "{} {} {}",
-                    m(lang, DELETE_NOW_GONE_EN, DELETE_NOW_GONE_IT),
-                    m(lang, DELETE_QUEUED_EN, DELETE_QUEUED_IT),
-                    m(lang, DELETE_SIGN_OUT_EN, DELETE_SIGN_OUT_IT)
-                ),
-                "{}: what went, then the queue, then why to sign out, in that order: {}",
+            assert!(
+                g.body.is_empty(),
+                "{}: no page, so no words to translate: {:?}",
                 lang.code(),
-                account_readable(&g.body)
-            );
-            let pills = the_action_pills(&g.body);
-            assert_eq!(
-                pills.len(),
-                1,
-                "{}: one action, the sign-out: {}",
-                lang.code(),
-                account_readable(&g.body)
-            );
-            assert_eq!(
-                visible_text(&pills[0]),
-                t(lang, K::SignOut),
-                "{}: {}",
-                lang.code(),
-                pills[0]
-            );
-            assert_eq!(
-                attr(open_tag(&pills[0]), "href").as_deref(),
-                Some("/auth/logout"),
-                "{}: the sign-out link is the config's, with the console's `rd` dropped: {}",
-                lang.code(),
-                pills[0]
+                g.body
             );
             let _ = std::fs::remove_file(&path);
         }
@@ -35947,9 +36310,14 @@ mod tests {
         );
         assert_eq!(
             g.status,
-            200,
-            "the roster walk completes: {}",
+            303,
+            "the roster walk completes, and its answer is the logout redirect (§13.32 §1): {}",
             account_readable(&g.body)
+        );
+        assert_eq!(
+            g.header("Location"),
+            Some(DELETE_LOGOUT_LOCATION),
+            "the sweep below is asserted on the file a completed walk left behind"
         );
 
         // The file the write left, read by the gate's own parser: a file the gate would refuse
@@ -36347,6 +36715,30 @@ mod tests {
         assert_action_row(who, &g.body, pills.len());
     }
 
+    /// The two rows of §13.30 §4 that used to be pages, as §13.33 §3's table replaces them: a
+    /// completed deletion on a deployment with a logout URL answers a `303` to the gate's logout
+    /// and renders nothing, so there is no `h1`, no lede and no pill to read. The row of the
+    /// table that says "which page is this case" is therefore answered by the `Location:`, and
+    /// the words moved to the sign-in page's notice.
+    fn assert_done_redirect(who: &str, g: &AccountGot) {
+        assert_eq!(
+            g.status,
+            303,
+            "{who}: the row is a redirect, not a page: {}",
+            account_readable(&g.body)
+        );
+        assert_eq!(
+            g.header("Location"),
+            Some(DELETE_LOGOUT_LOCATION),
+            "{who}: to the gate's logout, with the gate's sign-in page as the round trip"
+        );
+        assert!(
+            g.body.is_empty(),
+            "{who}: a redirect renders no page: {:?}",
+            g.body
+        );
+    }
+
     /// §13.30 §7: one case per row of §4's table that ends on an outcome page, each asserting
     /// the status, the `h1` key, the lede keys in order, and exactly the actions that row names.
     /// The two rows §4 leaves blank are the door's and the typed address's, and they are 7c's
@@ -36355,9 +36747,12 @@ mod tests {
     /// read-only directory of its own.
     ///
     /// Each case also asserts the **shape of the row** its actions sit in ([`assert_action_row`]),
-    /// because the table is where both halves of that rule land: the done, protected and
-    /// too-many rows are one pill and keep `p.primary`, while the changed, whoami, partial and
-    /// some rows are two and have to sit in `div.actions` to be two targets.
+    /// because the table is where both halves of that rule land: the protected and too-many rows
+    /// are one pill and keep `p.primary`, while the changed, whoami, partial and
+    /// some rows are two and have to sit in `div.actions` to be two targets. The two completed
+    /// rows are here as [`assert_done_redirect`], a `303` with no page (§13.32 §1, §13.33 §3):
+    /// they are the table's rows, and a table that left them out would read as a case nobody
+    /// answered.
     ///
     /// English only: the words of every new page are pinned in both languages by the tests below
     /// and by 7c's and 7d's, and this table's subject is which page each case is.
@@ -36525,7 +36920,8 @@ mod tests {
             let _ = std::fs::remove_file(&path);
         }
 
-        // Every `POST` accepted: the done page, roster (keys and named access gone) and stranger.
+        // Every `POST` accepted: §13.32 §1 took these two rows off the table of pages. They
+        // stay here so the table names every case, and are asserted as the redirect they are.
         {
             let intake = FakeIntake::answering(vec![
                 (WHOAMI_PATH, whoami_ok()),
@@ -36544,15 +36940,7 @@ mod tests {
                 ],
                 lang,
             );
-            assert_outcome(
-                "the roster's done page",
-                &g,
-                lang,
-                200,
-                DELETE_QUEUED_TITLE_EN,
-                &[DELETE_NOW_GONE_EN, DELETE_QUEUED_EN, DELETE_SIGN_OUT_EN],
-                &[t(lang, K::SignOut)],
-            );
+            assert_done_redirect("the roster's completed deletion", &g);
             let _ = std::fs::remove_file(&path);
         }
         {
@@ -36573,15 +36961,7 @@ mod tests {
                 ],
                 lang,
             );
-            assert_outcome(
-                "the stranger's done page",
-                &g,
-                lang,
-                200,
-                DELETE_QUEUED_TITLE_EN,
-                &[DELETE_QUEUED_EN, DELETE_SIGN_OUT_EN],
-                &[t(lang, K::SignOut)],
-            );
+            assert_done_redirect("the stranger's completed deletion", &g);
             let _ = std::fs::remove_file(&path);
         }
 
@@ -36847,7 +37227,10 @@ mod tests {
                 lang.code()
             );
             // And pressing it works: the walk runs again, as a stranger, over the addresses the
-            // header names, and the file has nothing left to take.
+            // header names, and the file has nothing left to take. Because the retry queues
+            // **every** address, §13.32 §1 takes its answer off the page table too: a completed
+            // deletion with a logout URL configured is the `303` through the gate's logout, the
+            // same answer the first-class success rows give, not the retired done page.
             let before = read(&path);
             let seen = intake.calls().len();
             let rev = rev_of(&path);
@@ -36861,13 +37244,7 @@ mod tests {
                 ],
                 lang,
             );
-            assert_eq!(
-                g.status,
-                200,
-                "{}: the retry, pressed, queues both addresses: {}",
-                lang.code(),
-                account_readable(&g.body)
-            );
+            assert_done_redirect("the retry, pressed, queues both addresses", &g);
             assert_eq!(
                 intake.at_since(seen),
                 vec![
@@ -37137,9 +37514,10 @@ mod tests {
             "the typed refusal",
             account_post(&url, Some("bob@x.com bob@old.com"), &typed_wrong),
         ));
-        // The done page.
+        // The completed deletion: a `303` with no body (§13.32 §1). It is in this list because
+        // an empty answer is the cheapest page to smuggle a script into.
         pages.push((
-            "the done page",
+            "the done redirect",
             account_post(&url, Some("bob@x.com bob@old.com"), &roster),
         ));
         // The 409, on bytes the page never saw.

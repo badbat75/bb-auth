@@ -689,10 +689,10 @@ async function run(ctx, t) {
 // --- the self-service deletion with scripting off (§13.30) ---------------------------
 // The walk that costs an account, run with no script anywhere. The row that opens it is a
 // plain link, the page that asks is a form like every other form on this estate, and the
-// outcome page is a plain response, so nothing in the most irreversible act on this surface
-// needs a script. The pages carry none, and their only handler attributes are the account
-// menu's two list boxes the deletion pages wear like every other page, which is what `bare`
-// measures at each step.
+// completed walk ends in a plain `303` (§13.32 §1), so nothing in the most irreversible act
+// on this surface needs a script. The pages carry none, and their only handler attributes
+// are the account menu's two list boxes the deletion pages wear like every other page,
+// which is what `bare` measures at each step.
 
 const DEL_FORM = 'form[action="/account/delete"]';
 const DEL_FIELD = `${DEL_FORM} input[name=confirm_email]`;
@@ -734,13 +734,23 @@ async function deleteWalk(t, ctx) {
     t.eq('the intake was asked nothing', ctx.intake.callsMade().length, 0);
     t.eq('and the file is the bytes it was', bytes(ctx), before);
     await page.fill(DEL_FIELD, DEL_WHO);
-    const gone = await submit(page, `${DEL_FORM} button[type=submit]`);
-    t.eq('the right address is accepted with no script anywhere', gone.status(), 200);
-    await bare('the page that says the accounts are queued');
-    t.check('which says so in the page\'s own heading',
-      (await page.locator('h1').first().innerText()).trim(), 'Your account is being deleted');
-    t.check('and offers the sign out as a link',
-      (await page.content()).includes('href="/auth/logout"'), 'no sign out link');
+    // §13.32 §1: a completed deletion answers a `303` through the gate's logout, and renders
+    // no page. Catch the POST's own response: this harness has no gate behind
+    // `/auth/logout`, so the landing the browser reaches is this server's 403, not the
+    // estate's sign-in page. Following a redirect is the browser's own machinery, so the
+    // no-script walk proves exactly as much about "no script is needed" as it ever did.
+    const [gone, nav] = await Promise.all([
+      page.waitForResponse((r) => r.url() === ctx.origin + '/account/delete'
+        && r.request().method() === 'POST'),
+      page.waitForNavigation(),
+      page.click(`${DEL_FORM} button[type=submit]`),
+    ]);
+    t.eq('the right address is accepted with no script anywhere', gone.status(), 303);
+    t.eq('through the gate logout, with the sign-in notice as the round trip',
+      await gone.headerValue('location'),
+      '/auth/logout?rd=%2Fauth%2Flogin%3Fnotice%3Daccount-deleted');
+    t.eq('and the browser follows the redirect with no script of its own',
+      new URL(nav.url()).pathname, '/auth/logout');
     t.eq('the roster row is gone from the file',
       doc(ctx).users.some((u) => (u.emails || []).includes(DEL_WHO)), false);
     t.eq('the group it was in no longer names it', doc(ctx).user_groups.staff, []);

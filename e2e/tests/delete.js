@@ -11,9 +11,12 @@
 // §1); the confirmation page's facts list, field and hidden uuid (§13.30 §2); the typed
 // address as the confirmation, refused with the page kept and nothing sent (§13.30 §3); the
 // success walk, where the row goes **before** the first `POST` and every address of the
-// header is queued in the header's order (§13.29 W3); the stale page as a `409` that posts
-// nothing; each outcome page of §13.30 §4 in its own words; and the keyboard walk, because
-// the row that costs an account has to be reachable by Enter alone.
+// header is queued in the header's order (§13.29 W3), and which completes with the `303`
+// through the gate's logout of §13.32 §1, asserted as the redirect itself: this harness has
+// no gate behind `/auth/logout`, so following it lands on the console's 403, and the notice
+// the redirect names is the gate's page, pinned in Rust; the stale page as a `409` that
+// posts nothing; each outcome page of §13.30 §4 in its own words; and the keyboard walk,
+// because the row that costs an account has to be reachable by Enter alone.
 //
 // The file is the source of truth as everywhere else: after every walk the assertions read
 // `doc(ctx)`, so "nothing was deleted" is a fact about the file and not about a sentence.
@@ -53,6 +56,12 @@ const MENU = 'details.settings';
 const ROW = '.menu a.pill.rm';
 // The e2e server always names a logout URL, so every page that ends in Sign out has one.
 const OUT = '/auth/logout';
+// §13.32 §1: a completed deletion on a deployment with a logout URL answers a `303` to the
+// gate's logout, with the gate's sign-in page (and its deletion notice) as the round trip,
+// and renders no page. This harness has no gate behind `/auth/logout`, so these walks assert
+// the redirect and stop: following it lands on the console's 403, and the notice is the
+// gate's page, pinned in Rust (`the_sign_in_page_shows_the_deletion_notice_only_for_its_code`).
+const DONE_REDIRECT = '/auth/logout?rd=%2Fauth%2Flogin%3Fnotice%3Daccount-deleted';
 
 /** The English words of the `K` table, verbatim, so a rewording is a red test and not a
  *  green one that stopped matching what a person reads. */
@@ -74,10 +83,11 @@ const W = {
   cancel: 'cancel',
   back: '← back',
   typedWrong: "The email address typed is not one of this account's, so nothing was deleted. Type it as it is shown above.",
-  queuedTitle: 'Your account is being deleted',
   gone: 'Your API keys and every access an administrator gave you by name are gone.',
-  queued: 'Your sign-in accounts are queued for deletion. This page cannot tell when that happens; if you can still sign in later, tell an administrator.',
-  signOutNow: 'This browser stays signed in until you sign out, so sign out now.',
+  // Retired by plan step 14b (2026-11-26, §13.32 §1, §13.33 §3): a completed deletion answers
+  // a `303` through the gate's logout, and the done page's heading and sentences moved to
+  // the sign-in page's notice, which the Rust suite pins in both languages. The walks below
+  // assert the redirect, not the page that used to carry them.
   signOut: 'Sign out',
   partial: 'Your account is only partly deleted',
   notQueued: 'Your sign-in accounts could not be queued for deletion, so they still exist. Try again later; if it fails again, tell an administrator.',
@@ -136,6 +146,17 @@ module.exports = {
   async run(ctx, t) {
     const { origin } = ctx;
     const acct = (p) => `${origin}${p}`;
+    /** Submit the delete form and hand back the response the POST **itself** got, without
+     *  following it: a completed deletion answers a `303` (§13.32 §1), and the harness's
+     *  `submit` follows the redirect onto this server's own 403, where no check lives. The
+     *  predicate matches only the form's own `POST`, on this origin, never an intake call. */
+    const submitPost = async (page) => {
+      const [resp] = await Promise.all([
+        page.waitForResponse((r) => r.url() === acct(DEL) && r.request().method() === 'POST'),
+        page.click(SUBMIT),
+      ]);
+      return resp;
+    };
 
     // ---- the row that opens the walk -------------------------------------------------
 
@@ -336,17 +357,10 @@ module.exports = {
       try {
         await page.goto(acct(DEL));
         await page.fill(FIELD, WHO);
-        const resp = await submit(page);
-        t.eq('the right address is accepted', resp.status(), 200);
-        t.eq('the page says the accounts are queued, which is all this page knows',
-          await text(page, 'h1'), W.queuedTitle);
-        const lede = await text(page, 'main p.lede');
-        const order = [W.gone, W.queued, W.signOutNow].map((s) => lede.indexOf(s));
-        t.check('the record first, then the queue, then the sign out, in that order',
-          order.every((i) => i >= 0)
-          && order.join(',') === order.slice().sort((a, b) => a - b).join(','),
-          `${JSON.stringify(order)} in ${lede.slice(0, 400)}`);
-        t.eq('its one action is the sign out', await pills(page), [{ text: W.signOut, href: OUT }]);
+        const resp = await submitPost(page);
+        t.eq('the right address is accepted', resp.status(), 303);
+        t.eq('through the gate logout, with the sign-in notice as the round trip: no page, so no words',
+          await resp.headerValue('location'), DONE_REDIRECT);
         // The file: the row, its keys, and every reference to it.
         t.eq('the roster row is gone', rowOf(ctx, WHO), undefined);
         t.eq('its key went with it', keyIds(ctx, WHO), []);
@@ -384,21 +398,18 @@ module.exports = {
       }
     }
     {
-      // The stranger's walk: the same page, one effect short. The file is never opened for
-      // writing, because there is no row to take.
+      // The stranger's walk: the same redirect, one effect short. The file is never opened
+      // for writing, because there is no row to take.
       restore(ctx);
       const before = bytes(ctx);
       const { context, page } = await newPage(ctx, STRANGER);
       try {
         await page.goto(acct(DEL));
         await page.fill(FIELD, STRANGER);
-        const resp = await submit(page);
-        t.eq('a stranger is queued too', resp.status(), 200);
-        t.eq('on the same page', await text(page, 'h1'), W.queuedTitle);
-        const lede = await text(page, 'main p.lede');
-        t.check('which says nothing about a record, because there was none',
-          lede.includes(W.queued) && !lede.includes(W.gone), lede.slice(0, 400));
-        t.eq('its one action is the sign out', await pills(page), [{ text: W.signOut, href: OUT }]);
+        const resp = await submitPost(page);
+        t.eq('a stranger is queued too', resp.status(), 303);
+        t.eq('on the same redirect, because the sign-in accounts are theirs and the record is nobody\'s',
+          await resp.headerValue('location'), DONE_REDIRECT);
         t.eq('the intake was asked once, then posted once', asked(ctx), [
           `GET ${WHOAMI} ${STRANGER}`,
           `POST ${DELETE} ${STRANGER}`,
@@ -534,12 +545,10 @@ module.exports = {
         t.eq('as a stranger, because the row is gone', await factLines(page),
           [`${W.many} ${WHO}, ${LEGACY}`]);
         await page.fill(FIELD, WHO);
-        const again = await submit(page);
-        t.eq('and the second attempt is accepted', again.status(), 200);
-        t.eq('on the page that says the accounts are queued', await text(page, 'h1'), W.queuedTitle);
-        const done = await text(page, 'main p.lede');
-        t.check('which no longer claims the record went, because that already happened',
-          done.includes(W.queued) && !done.includes(W.gone), done.slice(0, 400));
+        const again = await submitPost(page);
+        t.eq('and the second attempt is accepted', again.status(), 303);
+        t.eq('with the same redirect: the walk is complete, so there is no page left to claim anything',
+          await again.headerValue('location'), DONE_REDIRECT);
         // Three posts in all: the one the first attempt lost, then both addresses queued by
         // the retry, which covers the whole header again.
         t.eq('the intake was posted to three times in all',
