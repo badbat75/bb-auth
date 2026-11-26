@@ -5165,15 +5165,96 @@ fn text_field(
     hint: Option<&str>,
     invalid: bool,
 ) -> Markup {
+    text_field_with(
+        label,
+        name,
+        value,
+        placeholder,
+        hint.as_slice(),
+        invalid,
+        FieldOpts::default(),
+    )
+}
+
+/// The options a text field can be asked for beyond the console's plain one. They live here
+/// rather than as more arguments because the console's field takes none of them and the
+/// self-service page's fields take five of the eight: a positional list would put a
+/// `pattern` behind six blanks at every console call site, and a field that reads
+/// `text_field(label, name, v, "", "", true, true, None, …)` says nothing about what it asks
+/// the browser to enforce.
+///
+/// `prose` is the one that is not a constraint. A field that holds a person's **name** must
+/// not carry `autocapitalize="off"` and `spellcheck="false"`: those two are right for a URL,
+/// a header name and a key id, where a capital or a wavy underline is a typo, and wrong for
+/// `Ada Lovelace`, where the browser's own capitalisation is what a person expects to see.
+/// So it is one flag naming the kind of content, not two flags for two attributes.
+#[derive(Default)]
+struct FieldOpts<'a> {
+    /// Put the cursor in this field when the page opens. One per page.
+    autofocus: bool,
+    /// Refuse an empty submission in the browser as well as on the server.
+    required: bool,
+    /// The window the browser lets a person type into.
+    maxlength: Option<usize>,
+    /// The grammar the server enforces, spelled for the browser too.
+    pattern: Option<&'a str>,
+    /// An autofill token (WCAG 1.3.5).
+    autocomplete: Option<&'a str>,
+    /// The keyboard to offer, for a field that takes a shape and not prose.
+    inputmode: Option<&'a str>,
+    /// The width class, for a field that is not sized by its wire name.
+    class: Option<&'a str>,
+    /// The value is prose: keep the browser's capitalisation and spell check.
+    prose: bool,
+}
+
+/// The **one** text field: every label, input, hint and invalid mark on both surfaces is
+/// built here (§13.26 "One text field"). The console's [`text_field`] is this with no
+/// options, and the self-service page's fields are this with the browser's constraints on
+/// them, so a field on one surface cannot gain a border, a hint line, an `aria` pair or a
+/// width class that the other does not know about. That drift is invisible from inside
+/// either page, and it is the same argument that put the palette and the components in the
+/// library.
+///
+/// `placeholder` is an attribute only when there is something to suggest: an empty
+/// `placeholder=""` is an empty bubble in a Chromium field, and it says nothing. `hints` is
+/// one line per entry, in the order the caller gives them, under the control. `invalid` is
+/// the pair [`text_field`] describes, and it points at [`ERR_ID`], the id every form's
+/// message box carries on both surfaces.
+fn text_field_with(
+    label: &str,
+    name: &str,
+    value: &str,
+    placeholder: &str,
+    hints: &[&str],
+    invalid: bool,
+    opts: FieldOpts<'_>,
+) -> Markup {
+    let sized = format!("f-{name}");
+    let class = format!(
+        "{}{}",
+        opts.class.unwrap_or(&sized),
+        if invalid { " invalid" } else { "" }
+    );
     html! {
         label {
             span class="lbl" { (label) }
-            input type="text" name=(name) value=(value) placeholder=(placeholder)
-                  class=(format!("f-{name}{}", if invalid { " invalid" } else { "" }))
-                  autocapitalize="off" spellcheck="false"
+            input type="text" name=(name) value=(value)
+                  placeholder=[(!placeholder.is_empty()).then_some(placeholder)]
+                  class=(class)
+                  autocapitalize=[(!opts.prose).then_some("off")]
+                  spellcheck=[(!opts.prose).then_some("false")]
+                  autofocus[opts.autofocus]
+                  required[opts.required]
+                  maxlength=[opts.maxlength]
+                  pattern=[opts.pattern]
+                  autocomplete=[opts.autocomplete]
+                  inputmode=[opts.inputmode]
                   aria-invalid=[invalid.then_some("true")]
                   aria-describedby=[invalid.then_some(ERR_ID)];
-            @if let Some(h) = hint { span class="hint" { (h) } }
+            @for h in hints {
+                span class="hint" { (h) }
+            }
         }
     }
 }
@@ -9600,35 +9681,42 @@ impl NewKeyRow<'_> {
     };
 }
 
-/// The mint row's name field: [`text_field`]'s shape, plus the browser's own constraints.
+/// The mint row's name field: [`text_field_with`]'s markup, plus the browser's own constraints.
 ///
-/// [`text_field`] is the console's shared field, and the console's key form puts no constraint on
-/// its id: an operator typing `bb-auth-adm key add` over SSH is one person doing a counted thing,
-/// and the library checks the grammar anyway. This form is reachable by every signed-in identity
-/// on the estate, so the grammar goes on the field as well, and `autofocus` puts the person in the
-/// field the `+` asked for. All four are the browser's constraint validation and need no script,
-/// which is what keeps this page inside the estate's no-JavaScript rule; the server checks every
-/// one of them again.
+/// [`text_field_with`] is the one field both surfaces build from, and the console's key form puts
+/// no constraint on its id: an operator typing `bb-auth-adm key add` over SSH is one person doing a
+/// counted thing, and the library checks the grammar anyway. This form is reachable by every
+/// signed-in identity on the estate, so the grammar goes on the field as well, and `autofocus`
+/// puts the person in the field the `+` asked for. All four are the browser's constraint
+/// validation and need no script, which is what keeps this page inside the estate's no-JavaScript
+/// rule; the server checks every one of them again.
 ///
 /// The hint is the shape, spelled out, and it is shown on the open row. It is **omitted the
 /// moment the field carries the refusal**: the refusal is a sentence that already says what is
 /// allowed, in the reader's language, so the hint under it is one rule in two registers, and the
 /// one that is not the reason for the refusal is the one to drop.
 fn account_key_id_field(lang: Lang, value: &str, invalid: bool) -> Markup {
-    html! {
-        label {
-            span class="lbl" { (t(lang, K::KeyColName)) }
-            input type="text" name="id" value=(value) placeholder="laptop"
-                  class=(format!("f-id{}", if invalid { " invalid" } else { "" }))
-                  autocapitalize="off" spellcheck="false"
-                  autofocus required maxlength="32" pattern="[a-z0-9-]{1,32}"
-                  aria-invalid=[invalid.then_some("true")]
-                  aria-describedby=[invalid.then_some(ERR_ID)];
-            @if !invalid {
-                span class="hint" { (t(lang, K::AccountKeyIdHint)) }
-            }
-        }
-    }
+    // The shape, spelled out, on the open row only: see the doc comment.
+    let hints: Vec<&str> = if invalid {
+        Vec::new()
+    } else {
+        vec![t(lang, K::AccountKeyIdHint)]
+    };
+    text_field_with(
+        t(lang, K::KeyColName),
+        "id",
+        value,
+        "laptop",
+        &hints,
+        invalid,
+        FieldOpts {
+            autofocus: true,
+            required: true,
+            maxlength: Some(32),
+            pattern: Some("[a-z0-9-]{1,32}"),
+            ..FieldOpts::default()
+        },
+    )
 }
 
 /// The mint row: the console's `form.edit` inside one cell that spans the table.
@@ -10610,47 +10698,53 @@ fn forwarded_claim(req: &Request, header: &str) -> String {
 /// and a posted `email` is refused as a non-editable name. What stays is the sentence that says
 /// why the email is not a field, after the fields, where a person who is looking for it reads it.
 fn profile_form(lang: Lang, f: &ProfileForm, action: &str, page: &str) -> Markup {
-    // The first text field is the one the page focuses, and only it: two `autofocus` on one
-    // page is no focus at all.
-    let first = f.editable.first().map(|(c, _)| c.clone());
+    // Each editable claim as the shared field, in **prose** mode (§13.26): a person's name
+    // keeps the browser's capitalisation and its spell check, which the console's field drops
+    // because a URL, a header name and a key id have neither.
+    let mut fields: Vec<Markup> = Vec::new();
+    for (claim, value) in &f.editable {
+        let label = profile_label(lang, claim).unwrap_or_else(|| claim.clone());
+        // Where there is something to remove, the page says so before the person finds it by
+        // submitting: emptying a field is a removal, not a no-op.
+        let mut hints: Vec<&str> = Vec::new();
+        if !value.is_empty() {
+            hints.push(t(lang, K::AccountProfileClearDeletes));
+        }
+        if claim == "birthdate" {
+            hints.push(t(lang, K::AccountProfileDateHint));
+        }
+        fields.push(text_field_with(
+            &label,
+            claim,
+            value,
+            "",
+            &hints,
+            f.err.as_ref().is_some_and(|(c, _)| c == claim),
+            FieldOpts {
+                class: Some("f-profile"),
+                maxlength: Some(PROFILE_VALUE_MAX),
+                autocomplete: autocomplete_of(claim),
+                // The first text field is the one the page focuses, and only it: two
+                // `autofocus` on one page is no focus at all.
+                autofocus: f.editable.first().is_some_and(|(c, _)| c == claim),
+                prose: true,
+                ..FieldOpts::default()
+            },
+        ));
+    }
     html! {
         form class="edit" method="post" action=(action) {
             // The console's shape in this page's shell: the sentence above the form, and the
-            // field it names marked for assistive tech and not only coloured. `err` is this
-            // form's own id, because the account page has no console furniture to share an id
-            // with.
+            // field it names marked for assistive tech and not only coloured. The box carries
+            // [`ERR_ID`], the id every form's message box carries on both surfaces, so the
+            // `aria-describedby` the shared field writes points at something here too.
             @if let Some((_, msg)) = &f.err {
-                div class="err" id="err" { (msg) }
+                div class="err" id=(ERR_ID) { (msg) }
             }
             @if let Some(msg) = &f.warn {
                 div class="msg warn" { (msg) }
             }
-            @for (claim, value) in &f.editable {
-                label {
-                    span class="lbl" {
-                        (profile_label(lang, claim).unwrap_or_else(|| claim.clone()))
-                    }
-                    input type="text"
-                          class="f-profile"
-                          name=(claim)
-                          value=(value)
-                          maxlength=(PROFILE_VALUE_MAX)
-                          autocomplete=[autocomplete_of(claim)]
-                          autocapitalize="off"
-                          spellcheck="false"
-                          autofocus=[(first.as_deref() == Some(claim.as_str())).then(|| "true")]
-                          aria-invalid=[f.err.as_ref().is_some_and(|(c, _)| c == claim).then_some("true")]
-                          aria-describedby=[f.err.as_ref().is_some_and(|(c, _)| c == claim).then_some("err")];
-                    // Where there is something to remove, the page says so before the person
-                    // finds it by submitting: emptying a field is a removal, not a no-op.
-                    @if !value.is_empty() {
-                        span class="hint" { (t(lang, K::AccountProfileClearDeletes)) }
-                    }
-                    @if claim == "birthdate" {
-                        span class="hint" { (t(lang, K::AccountProfileDateHint)) }
-                    }
-                }
-            }
+            @for field in &fields { (field) }
             // Configured and not editable: shown as the read-only panel shows them, so the page
             // a person is editing says everything the page they came from said.
             @if !f.other.is_empty() {
@@ -25740,8 +25834,8 @@ mod tests {
                 .filter(|i| attr(i, "type").as_deref() == Some("text"))
                 .collect();
             assert!(
-                texts[0].contains("autofocus"),
-                "the first field is focused: {}",
+                bare_attr(&texts[0], "autofocus"),
+                "the first field is focused, and the attribute is bare: {}",
                 texts[0]
             );
             assert!(
@@ -25753,6 +25847,498 @@ mod tests {
                 "birthdate carries its format hint: {form}"
             );
         }
+        cleanup(&path);
+    }
+
+    /// A **bare** attribute on a tag: the word is there with no `="value"` behind it, which
+    /// is how HTML spells `autofocus` and `required`.
+    ///
+    /// `attr` reads `name="value"` and answers `None` for a bare one, so a test that asked
+    /// `attr(..).is_none()` about `autofocus` would pass on a field carrying neither, and a
+    /// test that asked `tag.contains("autofocus")` cannot tell the bare attribute from the
+    /// `autofocus="true"` the profile form used to write. The tag is split into its
+    /// attribute tokens, so only the bare spelling matches.
+    fn bare_attr(tag: &str, name: &str) -> bool {
+        tag.split_whitespace()
+            .any(|t| t == name || t == format!("{name}>"))
+    }
+
+    /// §13.26 "One text field": `text_field_with` is the one markup every text field on
+    /// both surfaces is built from, so every option is asserted **present when set and
+    /// absent when not**. An attribute that leaks out of a default is a constraint on a
+    /// field that never asked for it (a `required` the server does not enforce, a
+    /// `maxlength` that silently truncates what a person typed), and one that never
+    /// appears is a constraint the browser will never apply.
+    #[test]
+    fn the_shared_field_carries_exactly_what_it_is_told() {
+        fn field(placeholder: &str, hints: &[&str], invalid: bool, opts: FieldOpts<'_>) -> String {
+            text_field_with("Name", "x", "v", placeholder, hints, invalid, opts).into_string()
+        }
+        fn input(markup: &str) -> String {
+            tag_containing(markup, "name=\"x\"")
+        }
+
+        // --- the default: the console's field, and nothing else ------------------
+        let m = field("ph", &[], false, FieldOpts::default());
+        let i = input(&m);
+        assert!(
+            m.starts_with("<label>"),
+            "the field is a label wrapping its input: {m}"
+        );
+        assert!(
+            m.contains("<span class=\"lbl\">Name</span>"),
+            "the label is the visible word, in the console's span: {m}"
+        );
+        assert!(
+            m.find("<input").expect("an input") > m.find("class=\"lbl\"").expect("the label"),
+            "the word comes before the control: {m}"
+        );
+        assert_eq!(attr(&i, "type").as_deref(), Some("text"), "{i}");
+        assert_eq!(attr(&i, "value").as_deref(), Some("v"), "{i}");
+        assert_eq!(attr(&i, "placeholder").as_deref(), Some("ph"), "{i}");
+        assert_eq!(
+            attr(&i, "class").as_deref(),
+            Some("f-x"),
+            "the width class is keyed off the wire name, as the console's is: {i}"
+        );
+        assert_eq!(attr(&i, "autocapitalize").as_deref(), Some("off"), "{i}");
+        assert_eq!(attr(&i, "spellcheck").as_deref(), Some("false"), "{i}");
+        for absent in [
+            "autofocus",
+            "required",
+            "maxlength",
+            "pattern",
+            "autocomplete",
+            "inputmode",
+            "aria-invalid",
+            "aria-describedby",
+        ] {
+            assert!(
+                !i.contains(absent),
+                "an option that was not set emits no attribute at all: {absent} in {i}"
+            );
+        }
+        assert!(!m.contains("class=\"hint\""), "no hints, no hint line: {m}");
+
+        // --- an empty placeholder is nothing said --------------------------------
+        assert!(
+            attr(
+                &input(&field("", &[], false, FieldOpts::default())),
+                "placeholder"
+            )
+            .is_none(),
+            "a field with nothing to suggest carries no placeholder attribute"
+        );
+
+        // --- each option, set ---------------------------------------------------
+        let i = input(&field(
+            "ph",
+            &[],
+            false,
+            FieldOpts {
+                autofocus: true,
+                required: true,
+                maxlength: Some(32),
+                pattern: Some("[a-z0-9-]{1,32}"),
+                autocomplete: Some("given-name"),
+                inputmode: Some("numeric"),
+                ..FieldOpts::default()
+            },
+        ));
+        assert!(bare_attr(&i, "autofocus"), "bare, as HTML spells it: {i}");
+        assert!(bare_attr(&i, "required"), "bare, as HTML spells it: {i}");
+        assert_eq!(attr(&i, "maxlength").as_deref(), Some("32"), "{i}");
+        assert_eq!(
+            attr(&i, "pattern").as_deref(),
+            Some("[a-z0-9-]{1,32}"),
+            "the grammar the server enforces, on the field too: {i}"
+        );
+        assert_eq!(
+            attr(&i, "autocomplete").as_deref(),
+            Some("given-name"),
+            "WCAG 1.3.5: {i}"
+        );
+        assert_eq!(attr(&i, "inputmode").as_deref(), Some("numeric"), "{i}");
+
+        // --- the class override, and the invalid mark on top of it --------------
+        let i = input(&field(
+            "ph",
+            &[],
+            false,
+            FieldOpts {
+                class: Some("f-profile"),
+                ..FieldOpts::default()
+            },
+        ));
+        assert_eq!(
+            attr(&i, "class").as_deref(),
+            Some("f-profile"),
+            "a field that is not sized by its wire name names its own class: {i}"
+        );
+        let i = input(&field(
+            "ph",
+            &[],
+            true,
+            FieldOpts {
+                class: Some("f-profile"),
+                ..FieldOpts::default()
+            },
+        ));
+        assert_eq!(
+            attr(&i, "class").as_deref(),
+            Some("f-profile invalid"),
+            "the invalid state rides on the class the caller chose: {i}"
+        );
+        let i = input(&field("ph", &[], true, FieldOpts::default()));
+        assert_eq!(
+            attr(&i, "class").as_deref(),
+            Some("f-x invalid"),
+            "and on the default one: {i}"
+        );
+
+        // --- prose: a name keeps the browser's capitalisation and spell check ---
+        let i = input(&field(
+            "ph",
+            &[],
+            false,
+            FieldOpts {
+                prose: true,
+                ..FieldOpts::default()
+            },
+        ));
+        assert!(
+            attr(&i, "autocapitalize").is_none() && attr(&i, "spellcheck").is_none(),
+            "prose drops both: a browser that capitalises `Ada` on its own is the point: {i}"
+        );
+
+        // --- several hints, in the order the caller gave them -------------------
+        let m = field("ph", &["First.", "Second."], false, FieldOpts::default());
+        let hints: Vec<String> = elements(&m, "<span class=\"hint\"", "</span>")
+            .iter()
+            .map(|h| visible_text(h))
+            .collect();
+        assert_eq!(
+            hints,
+            vec!["First.".to_string(), "Second.".to_string()],
+            "one line per hint, in order, below the control: {m}"
+        );
+        assert!(
+            m.find("<input").expect("an input") < m.find("class=\"hint\"").expect("a hint"),
+            "the hints are under the field they describe: {m}"
+        );
+
+        // --- invalid: the pair, pointing at the shared message box --------------
+        let i = input(&field("ph", &[], true, FieldOpts::default()));
+        assert_eq!(attr(&i, "aria-invalid").as_deref(), Some("true"), "{i}");
+        assert_eq!(
+            attr(&i, "aria-describedby").as_deref(),
+            Some(ERR_ID),
+            "the one id every form's message box carries: {i}"
+        );
+    }
+
+    /// `text_field` keeps its signature as a one-line wrapper, so the console's 23 callers
+    /// do not change: the bytes it renders today are pinned, and they are the same bytes
+    /// `text_field_with` renders from a one-item hint slice and the default options.
+    #[test]
+    fn the_console_wrapper_is_the_shared_field_with_no_options() {
+        // The console's field as it renders today, byte for byte, so the shared helper
+        // cannot repaint a console field one attribute at a time.
+        const GOLDEN_INVALID: &str = concat!(
+            "<label><span class=\"lbl\">Name</span>",
+            "<input type=\"text\" name=\"name\" value=\"v\" placeholder=\"app1\"",
+            " class=\"f-name invalid\" autocapitalize=\"off\" spellcheck=\"false\"",
+            " aria-invalid=\"true\" aria-describedby=\"form-error\">",
+            "<span class=\"hint\">Shape here</span></label>",
+        );
+        const GOLDEN_PLAIN: &str = concat!(
+            "<label><span class=\"lbl\">Name</span>",
+            "<input type=\"text\" name=\"name\" value=\"v\" placeholder=\"app1\"",
+            " class=\"f-name\" autocapitalize=\"off\" spellcheck=\"false\"></label>",
+        );
+        assert_eq!(
+            text_field("Name", "name", "v", "app1", Some("Shape here"), true).into_string(),
+            GOLDEN_INVALID
+        );
+        assert_eq!(
+            text_field("Name", "name", "v", "app1", None, false).into_string(),
+            GOLDEN_PLAIN
+        );
+
+        let hints: &[&str] = &["Shape here"];
+        assert_eq!(
+            text_field("Name", "name", "v", "app1", Some("Shape here"), true).into_string(),
+            text_field_with(
+                "Name",
+                "name",
+                "v",
+                "app1",
+                hints,
+                true,
+                FieldOpts::default()
+            )
+            .into_string(),
+            "the wrapper is the shared field with a one-item hint slice"
+        );
+        assert_eq!(
+            text_field("Name", "name", "v", "app1", None, false).into_string(),
+            text_field_with(
+                "Name",
+                "name",
+                "v",
+                "app1",
+                &[],
+                false,
+                FieldOpts::default()
+            )
+            .into_string(),
+            "and no hint is an empty slice"
+        );
+    }
+
+    /// The mint row's name field is the shared field with the browser's constraints on it
+    /// (§13.26 "One text field"): the console's markup, `autocapitalize` and `spellcheck`
+    /// **kept** (a key id is a name typed, not prose), the bare `autofocus` and `required`,
+    /// the 32-character window and the grammar, and the shape hint only while the row is
+    /// clean. The refusal replaces the hint with its own sentence and adds the aria pair,
+    /// pointing at the shared message box.
+    #[test]
+    fn the_mint_name_field_is_the_shared_field_with_constraints() {
+        let path = account_scratch_access("keys-new-field", &account_access_keys());
+        let base = account_serve(&path);
+        let g = account_call(&format!("{base}keys/new"), Some("bob@x.com"));
+        assert_eq!(g.status, 200, "{}", account_readable(&g.body));
+        let id = tag_containing(&g.body, "name=\"id\"");
+        assert_eq!(attr(&id, "type").as_deref(), Some("text"), "{id}");
+        assert_eq!(attr(&id, "placeholder").as_deref(), Some("laptop"), "{id}");
+        assert_eq!(
+            attr(&id, "class").as_deref(),
+            Some("f-id"),
+            "the console's width class, not an override: {id}"
+        );
+        assert_eq!(attr(&id, "maxlength").as_deref(), Some("32"), "{id}");
+        assert_eq!(
+            attr(&id, "pattern").as_deref(),
+            Some("[a-z0-9-]{1,32}"),
+            "{id}"
+        );
+        assert_eq!(
+            attr(&id, "autocapitalize").as_deref(),
+            Some("off"),
+            "an id is a name typed, so the console's rule stands: {id}"
+        );
+        assert_eq!(attr(&id, "spellcheck").as_deref(), Some("false"), "{id}");
+        assert!(
+            bare_attr(&id, "autofocus"),
+            "the person lands in the field the + asked for: {id}"
+        );
+        assert!(
+            bare_attr(&id, "required"),
+            "an empty name is refused by the browser as well as the server: {id}"
+        );
+        assert!(
+            attr(&id, "aria-invalid").is_none() && attr(&id, "aria-describedby").is_none(),
+            "a clean field carries no mark: {id}"
+        );
+        let label_of_id = || {
+            elements(&g.body, "<label", "</label>")
+                .into_iter()
+                .find(|l| l.contains("name=\"id\""))
+                .unwrap_or_else(|| {
+                    panic!(
+                        "the mint row carries its name field: {}",
+                        account_readable(&g.body)
+                    )
+                })
+        };
+        assert!(
+            label_of_id().contains(&format!(
+                "<span class=\"hint\">{}</span>",
+                t(Lang::En, K::AccountKeyIdHint)
+            )),
+            "the open row says the shape under a clean field: {}",
+            label_of_id()
+        );
+
+        // Refused: the hint is gone, the pair is there, and it names the shared box.
+        let before = read(&path);
+        let rev = sha256_hex(&before);
+        let g = account_post(
+            &format!("{base}keys"),
+            Some("bob@x.com"),
+            &[
+                ("rev", rev.as_str()),
+                ("id", "My Laptop"),
+                ("duration", "30d"),
+                ("restrict", "all"),
+            ],
+        );
+        assert_eq!(g.status, 400, "{}", account_readable(&g.body));
+        let id = tag_containing(&g.body, "name=\"id\"");
+        assert_eq!(attr(&id, "aria-invalid").as_deref(), Some("true"), "{id}");
+        assert_eq!(
+            attr(&id, "aria-describedby").as_deref(),
+            Some(ERR_ID),
+            "the marked field points at the shared message box: {id}"
+        );
+        assert!(
+            g.body.contains(&format!("class=\"err\" id=\"{ERR_ID}\"")),
+            "and that box is the refusal above the form: {}",
+            account_readable(&g.body)
+        );
+        // The hint line is gone from the field. The check is scoped to the label, because
+        // the refusal's own sentence *contains* the hint's words: a page-wide search for
+        // them is satisfied by the message that replaced the hint.
+        let label = elements(&g.body, "<label", "</label>")
+            .into_iter()
+            .find(|l| l.contains("name=\"id\""))
+            .expect("the refused row keeps its name field");
+        assert!(
+            !label.contains("class=\"hint\""),
+            "the refusal says the shape in the reader's language, so the hint is dropped: \
+             {label}"
+        );
+        assert_eq!(read(&path), before, "a refusal writes nothing");
+        cleanup(&path);
+    }
+
+    /// The profile fields are the shared field in **prose** mode (§13.26's review nit): a
+    /// person's name keeps the browser's capitalisation and its spell check, so the field
+    /// carries no `autocapitalize` and no `spellcheck` at all. Everything else is the
+    /// shared field's: the `f-profile` class, the 2048 window, the autofill token, one
+    /// **bare** `autofocus` on the first field only, no placeholder attribute, and the
+    /// hints in the order the page gives them.
+    #[test]
+    fn the_profile_fields_are_prose() {
+        let fake = FakeCognito::answering(vec![]);
+        let (path, base) = profile_serve("prose-fields", &fake);
+        let g = profile_get(&format!("{base}profile"), "bob@x.com", &[]);
+        assert_eq!(g.status, 200, "{}", account_readable(&g.body));
+        let form = form_posting_to(&account_section(&g.body, "profile"), "/account/profile");
+        let labels = elements(&form, "<label", "</label>");
+        for claim in ["given_name", "family_name", "birthdate", "zoneinfo"] {
+            let i = input_named(&form, claim);
+            assert_eq!(attr(&i, "type").as_deref(), Some("text"), "{claim}: {i}");
+            assert_eq!(
+                attr(&i, "class").as_deref(),
+                Some("f-profile"),
+                "{claim}: the profile's own width class: {i}"
+            );
+            assert_eq!(
+                attr(&i, "maxlength").as_deref(),
+                Some("2048"),
+                "{claim}: {i}"
+            );
+            assert!(
+                attr(&i, "placeholder").is_none(),
+                "{claim}: the page has nothing to suggest, so no attribute: {i}"
+            );
+            assert!(
+                attr(&i, "autocapitalize").is_none(),
+                "{claim}: a name keeps the browser's capitalisation: {i}"
+            );
+            assert!(
+                attr(&i, "spellcheck").is_none(),
+                "{claim}: a name keeps the spell check: {i}"
+            );
+        }
+        let first = input_named(&form, "given_name");
+        assert!(
+            bare_attr(&first, "autofocus"),
+            "the first field is focused, and the attribute is bare: {first}"
+        );
+        for claim in ["family_name", "birthdate", "zoneinfo"] {
+            let i = input_named(&form, claim);
+            assert!(
+                !i.contains("autofocus"),
+                "one focus on a page, on the first field only: {i}"
+            );
+        }
+        assert_eq!(
+            attr(&input_named(&form, "birthdate"), "autocomplete").as_deref(),
+            Some("bday"),
+            "the autofill token the claim has one"
+        );
+        assert!(
+            attr(&input_named(&form, "zoneinfo"), "autocomplete").is_none(),
+            "and a claim with no token in the spec's vocabulary carries no attribute"
+        );
+
+        let label_of = |claim: &str| {
+            labels
+                .iter()
+                .find(|l| l.contains(&format!("name=\"{claim}\"")))
+                .cloned()
+                .unwrap_or_default()
+        };
+        let hints = |claim: &str| -> Vec<String> {
+            elements(&label_of(claim), "<span class=\"hint\"", "</span>")
+                .iter()
+                .map(|h| visible_text(h))
+                .collect()
+        };
+        assert_eq!(
+            hints("given_name"),
+            vec![t(Lang::En, K::AccountProfileClearDeletes)],
+            "a field with a value says emptying it removes it"
+        );
+        assert_eq!(
+            hints("zoneinfo"),
+            Vec::<String>::new(),
+            "an empty field has nothing to remove, so no line"
+        );
+        assert_eq!(
+            hints("birthdate"),
+            vec![
+                t(Lang::En, K::AccountProfileClearDeletes),
+                t(Lang::En, K::AccountProfileDateHint)
+            ],
+            "the two hints a field can carry, in the order a person reads them"
+        );
+        assert!(fake.calls().is_empty(), "a GET asks the pool nothing");
+        cleanup(&path);
+    }
+
+    /// The profile form's refusal box carries the **shared** id, so the field it attributes
+    /// points at it with `aria-describedby` exactly as every console form's fields do
+    /// (§13.26 "One text field"): one id for the message a marked field names, on both
+    /// surfaces.
+    #[test]
+    fn the_profile_refusal_shares_the_error_id() {
+        let fake = FakeCognito::answering(vec![]);
+        let (path, base) = profile_serve("refusal-id", &fake);
+        let long = Box::leak("a".repeat(2049).into_boxed_str());
+        let g = profile_post(
+            &format!("{base}profile"),
+            "bob@x.com",
+            &profile_with(profile_same(), "given_name", long),
+        );
+        assert_eq!(g.status, 400, "{}", account_readable(&g.body));
+        assert!(
+            fake.calls().is_empty(),
+            "a bad value is refused before the pool"
+        );
+        let err = element_containing(&g.body, &format!("id=\"{ERR_ID}\""), "</div>");
+        assert!(
+            err.starts_with("<div class=\"err\""),
+            "the refusal is the shared box, carrying the shared id: {err}"
+        );
+        assert!(
+            visible_text(&err).contains(t(Lang::En, K::AccountProfileValueBad)),
+            "and it is the sentence about the value: {err}"
+        );
+        let i = input_named(&g.body, "given_name");
+        assert_eq!(attr(&i, "aria-invalid").as_deref(), Some("true"), "{i}");
+        assert_eq!(
+            attr(&i, "aria-describedby").as_deref(),
+            Some(ERR_ID),
+            "the marked field names the box above it: {i}"
+        );
+        assert!(
+            !g.body.contains("id=\"err\""),
+            "no page-local id is left on this form: {}",
+            account_readable(&g.body)
+        );
         cleanup(&path);
     }
 
@@ -26586,8 +27172,11 @@ mod tests {
             );
             let g = profile_post(&url, "bob@x.com", &fields);
             assert_refused_before_cognito(&g, 400, &fake, "a bad value");
-            let err = element_containing(&g.body, "id=\"err\"", "</div>");
-            assert!(err.contains("class=\"err\""), "div.err#err: {err}");
+            let err = element_containing(&g.body, &format!("id=\"{ERR_ID}\""), "</div>");
+            assert!(
+                err.contains("class=\"err\""),
+                "div.err carrying the shared id: {err}"
+            );
             assert_eq!(
                 visible_text(&err),
                 format!(
@@ -26598,7 +27187,7 @@ mod tests {
             );
             let i = input_named(&g.body, "given_name");
             assert_eq!(attr(&i, "aria-invalid").as_deref(), Some("true"), "{i}");
-            assert_eq!(attr(&i, "aria-describedby").as_deref(), Some("err"), "{i}");
+            assert_eq!(attr(&i, "aria-describedby").as_deref(), Some(ERR_ID), "{i}");
             assert_eq!(
                 attr(&input_named(&g.body, "family_name"), "value").as_deref(),
                 Some("Typed")

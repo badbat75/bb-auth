@@ -238,8 +238,7 @@ out, the usual pattern, replacing the preferences form at the foot of the page; 
 it to §13.17.
 
 Slices 8a to 8f are done (8f, §13.21: row rules, one control size, ticks in the accent). Then the
-shared front end (W13), designed in §13.26 §6 as small slices after 5g (**P**, the pill links, and **D**, one `page_document`, are done): **T** `text_field` with
-`FieldOpts`, absorbing `account_key_id_field` and the profile inputs; **F** the account page's flat
+shared front end (W13), designed in §13.26 §6 as small slices after 5g (**P**, the pill links, **D**, one `page_document`, and **T**, one text field, are done): **F** the account page's flat
 ground goes, so it wears the console's ground and cards (the user, 2026-11-25). **H** is done (§13.28, with **L**, the console's logo, folded in and **M** absorbed): one account menu
 in the shared header, asked by the user on 2026-11-25. The bar holds one row at every width: logo, brand,
 four tabs (Dashboard, Applications, Users, Audit) and a pill with the person's name. The pill opens a
@@ -268,6 +267,10 @@ native "Preferences" tooltip while the open menu's cover is up. Steps 5 and 7 ad
   - P (same night): the key rows' rotate pill (it has an aria-label) and remove icon pill stay
     written by hand. `pill_link` takes only an href and a label, and options used by one caller
     would be speculative.
+  - T (same night): `text_field` keeps its signature as a wrapper over the new `text_field_with`
+    and `FieldOpts`, so its 23 console callers are untouched. The profile's name fields are
+    `prose` (browser default capitalisation and spell check). The profile refusal box now uses the
+    console's id (`form-error`). An empty placeholder emits no attribute.
   - 8b: on `/account` the Sign out link is `BB_AUTH_WEB_LOGOUT_URL` with its `rd` removed
     (`logout_without_rd`), so a person who is not an administrator lands on the sign-in page
     instead of a `403` on the console; no new setting (§13.17).

@@ -256,7 +256,9 @@ async function run(ctx, t) {
       const fedBody = await fedPost.text();
       t.check('and not an error: the person did nothing wrong',
         fedBody.includes('your profile comes from that provider')
-        && !fedBody.includes('id="err"'), fedBody.slice(0, 300));
+        // The shared id (§13.26): the profile form's refusal box is `div.err#form-error`,
+        // the same box every other form's marked field points at.
+        && !fedBody.includes('id="form-error"'), fedBody.slice(0, 300));
       t.eq('the pool was never called', ctx.cognito.calls.length, 0);
     } finally {
       await fed.context.close();
