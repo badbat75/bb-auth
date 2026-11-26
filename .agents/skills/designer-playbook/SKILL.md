@@ -116,5 +116,4 @@ Rules are in `AGENTS.md`. Format of this file: `AGENTS.md`, under "Skills".
   so a mockup shot that way is unstyled: inline the CSS.
 - On the sign-in page `auth.css` hides a bare `.msg` and shows `.msg.show`, which outranks `[hidden]`: a hidden message box needs `.msg[hidden]{display:none}` after `.msg.show`.
 - A native `title` tooltip never appears in a headless screenshot: judge one in a real browser, not from `shots.js`.
-- `shots.js` scenes share one browser context per view, so a scene that visits `?lang=it` (`nav-menu-it`) leaves the `lang` cookie for every later scene: check the language of each shot before judging it.
 - "Brand whole" was measured only at 942 and up: below the breakpoint the ☰ takes ~40px and `.brand .t` and `.brand .v` shrink alike, so the product name cuts before its muted tag line. Measure `.t`'s `clientWidth` against `scrollWidth` at 320/360/390 too.
