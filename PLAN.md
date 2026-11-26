@@ -264,6 +264,18 @@ native "Preferences" tooltip while the open menu's cover is up. Steps 5 and 7 ad
 
 ## Waiting for the user
 
+- **Step 7 is on hold for one decision of yours** (raised by IT-Admin on 2026-11-26, read-only).
+  rpi-01 still runs your self-deletion worker: `bb-account-delete.path` and a root worker
+  holding the `privacy` IAM user's key. The worker runs `AdminDeleteUser` for **every** Cognito
+  user with the address, including federated twins, then `bb-auth-adm user rm`, a gate reload and
+  an SNS mail. It enforces a `PROTECTED` guard and `MAX_PER_RUN=10`. Its `/account/delete`
+  intake was unrouted on 2026-11-24, when bb-auth-web took `/account/` (nginx: "self-service
+  deletion returns with bb-auth plan step 7"); `/auth/delete-request` still feeds it.
+  §13.29 instead calls `DeleteUser` with the person's own token. That deletes one native user,
+  not the twins, sends no SNS mail, and skips your guard. Choose: (a) step 7 hands the
+  deletion to your worker (an intake under `/account/`; bb-auth-web holds no credential), or
+  (b) §13.29 as designed, keeping or retiring the worker. Either way the email-code
+  re-authentication fires the `post_authentication` Lambda, so you get a "login" mail.
 - Decisions taken without the user, to review (the user asked for autonomy on 2026-11-25):
   - H (night of 2026-11-25, the user asleep): two of the designer's later items went in with the
     review fixes. At 640px and below, with a logo, the brand's tag line is hidden like its name. The
