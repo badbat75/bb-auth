@@ -240,32 +240,15 @@ first, each step with the user's go-ahead. §13.30 was reworded for the worker o
   once, and after the worker's run they can no longer sign in. If `gate.allow_unverified_social` is
   on, it is turned off first (the user, 2026-11-26).
 
-### 8. The account page's look
+### 13. Loose ends of step 8
 
-Covers: R3. First decided to wait for steps 4, 5 and 7; brought forward by the user on 2026-11-24
-after trying 4g, with the designer (the UX/UI role created that day). Designed in
-`docs/ARCHITECTURE.md` §13.16 (the keys table) and §13.17 (the page), approved by the user on
-2026-11-24: rotate as ↻ beside × in each row, "+ New key", the uuid kept as "Account id". The user
-then asked for a **header** with the person's identity, the settings (theme, language) and sign
-out, the usual pattern, replacing the preferences form at the foot of the page; the designer adds
-it to §13.17.
+Covers: R3. Left over when the user approved step 8's screenshots on 2026-11-26: the module rustdoc of
+`bb-auth-web.rs` (about line 253) still calls the account page's arrangement a centred card and
+names a Settings menu; and one look by hand at the native "Preferences" tooltip while the open
+menu's cover is up.
 
-Slices 8a to 8f are done (8f, §13.21: row rules, one control size, ticks in the accent). Then the
-shared front end (W13), designed in §13.26 §6 as small slices after 5g (**P**, **D**, **T** and **F** are done; F's ground was reviewed by the designer on 2026-11-26: no band on either surface). **H** is done (§13.28, with **L**, the console's logo, folded in and **M** absorbed): one account menu
-in the shared header, asked by the user on 2026-11-25. The bar holds one row at every width: logo, brand,
-four tabs (Dashboard, Applications, Users, Audit) and a pill with the person's name. The pill opens a
-panel, which holds, in order:
-the tabs (at 800px and below), "System settings" / "Impostazioni di sistema", and "Go to your account"
-(console only); then Preferences; then Sign out. The theme reads "Auto (system)" / "Auto (sistema)".
-"Delete account and all its data" goes on `/account`'s menu only, built by step 7. Kept
-apart on purpose, with reasons in §13.26: the section pattern and the mint row's missing owner
-field. What is left of the step is the user's approval of the screenshots (Done when below). Left,
-as later items: the module rustdoc of `bb-auth-web.rs` (about line 253) still calls the account page's arrangement a centred card; one look by hand at the
-native "Preferences" tooltip while the open menu's cover is up. Steps 5 and 7 add their forms into this layout later (Profile now first: §13.26).
-
-- Done when: the user approves screenshots of the page in both themes and both languages, at
-  desktop and phone width, with the forms of steps 4, 5 and 7 on it; e2e and the scripting-off
-  walk still pass.
+- Done when: the rustdoc says what the page is (the console's column and one account menu), and
+  the tooltip has been looked at in a browser, or the look is reported as not done.
 
 ## Waiting for the user
 
