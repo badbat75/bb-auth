@@ -58,6 +58,11 @@ Rules are in `AGENTS.md`. Format of this file: `AGENTS.md`, under "Skills".
   files newer than a marker in the newest `target/debug/incremental/<crate>-*/s-*` (§13.38).
 - rustc's incremental build isolates an edit **per file**, not per module: a length change shifts
   every later item in the same file and rebuilds its CGU (measured, §13.38 §2).
+- A crate root is a mod-rs file: `mod x;` in `src/bin/foo.rs` loads `src/bin/x.rs`, which Cargo
+  also discovers as a binary. A binary with a second file goes to `src/bin/foo/main.rs` (§13.38 §10).
+- To move a module body into its own file, run `cargo fmt` twice: the first run leaves a blank first
+  line and `--check` fails. Never de-indent by hand, raw strings change (§13.38 §10c).
+- In an agent shell `grep` may be a ugrep function: use `command grep` in scripts and checks.
 
 ## Pitfalls
 
@@ -108,6 +113,6 @@ Rules are in `AGENTS.md`. Format of this file: `AGENTS.md`, under "Skills".
   reaches the native one. Act on a session's Cognito user by its `cognito:username`, never its email.
 - A GUI test's `body.contains("landing_url")` passes on the input's `name=`: assert on the
   `div.err` text when the point is what the refusal says.
-- Never run awk with `getline` over `src/bin/bb-auth-web.rs`: on 2026-11-27 one such command grew
+- Never run awk with `getline` over the GUI's source (`src/bin/bb-auth-web.rs`, then its directory): on 2026-11-27 one such command grew
   to about 17 GB of RAM in 40 seconds on this shared host, and other sessions' jobs were killed.
   Use `grep -n -A1` or `sed -n`, wrap heavy commands in `timeout`, and build with `-j 4` or less.

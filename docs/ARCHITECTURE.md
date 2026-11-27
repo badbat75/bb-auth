@@ -9109,6 +9109,10 @@ empty, changes with it (docs agent).
 **Decided by the user on 2026-11-27: step 23a only.** The split is not built; this section stays
 as the record of what it would have cost and bought.
 
+**Later the same day, plan step 24: S1 and S2 are built, in all four targets, and nothing else.**
+§10 extends them to `src/lib.rs`, `bb-auth` and `bb-auth-adm`. P1-P12, T1-T5 and the `read_dir`
+form of §4 (3) stay dropped. Where §10 differs from §4-§6, §10 is the one that applies.
+
 The user, on 2026-11-27: the GUI is one file, every edit recompiles all of it, and every test
 round of a slice is slow. The moves will be made by a small local model, so each one must be a
 mechanical cut and paste that `cargo` can check on its own. Behaviour does not change.
@@ -9382,3 +9386,143 @@ No requirement changes.
    23a alone is enough, the split can stop after S2, or be dropped.
 2. Tests in topic files under `tests/` (recommended, a mechanical move), or beside the code they
    test (judgement for each of 347 tests, most of which would land in `main.rs`)?
+
+#### 10. Plan step 24: the tests leave all four main files (designed 2026-11-27)
+
+The user asked for this step: in every target, the unit tests move out of the file that holds the
+code, and nothing else moves. For the GUI that means S1 and S2. This subsection adds the same two
+moves for the other three targets. Behaviour does not change.
+
+What was read: `PLAN.md` step 24; `Cargo.toml` (an explicit `path` for every target);
+`scripts/build.sh` and `scripts/package.sh` (both copy `src/.` recursively and name no source
+file); `e2e/lib/server.js` (builds `--bin bb-auth-web` by name); every `include_str!` in the four
+files; and every mention of the four paths in `AGENTS.md`, `e2e/README.md` and the playbooks. At
+`b0195cc`, each file ends with its test module. The module starts at the `#[cfg(test)]` on
+line 7,487 of `src/lib.rs`, line 4,613 of `bb-auth.rs`, line 2,713 of `bb-auth-adm.rs` and
+line 15,814 of `bb-auth-web.rs`, and runs to the last line of the file. No other `cfg(test)`
+item sits outside a test module, and no test uses `file!()`, `line!()` or `module_path!()`.
+
+**a. The layout (read, then measured).**
+
+| Target | Code | Tests | Declaration left behind |
+|---|---|---|---|
+| `bb_auth_core` | `src/lib.rs` (unchanged) | `src/tests.rs` | `#[cfg(test)] mod tests;` |
+| `bb-auth` | `src/bin/bb-auth/main.rs` | `src/bin/bb-auth/tests.rs` | the same |
+| `bb-auth-adm` | `src/bin/bb-auth-adm/main.rs` | `src/bin/bb-auth-adm/tests.rs` | the same |
+| `bb-auth-web` | `src/bin/bb-auth-web/main.rs` | `src/bin/bb-auth-web/tests.rs` | the same |
+
+- Read: a crate root is a "mod-rs" file, so `mod tests;` in it loads `tests.rs` from the root's
+  own directory (Rust Reference, "Modules", "The `path` attribute":
+  <https://doc.rust-lang.org/reference/items/modules.html>). For the library that is `src/tests.rs`,
+  with no `#[path]`, which is the idiomatic form.
+- Measured (a scratch crate): the same `mod tests;` in `src/bin/foo.rs` looks for
+  `src/bin/tests.rs` and fails with E0583. Creating that file would also be wrong: Cargo
+  discovers every `src/bin/*.rs` as a binary, and auto-discovery stays on in edition 2021 even when
+  `[[bin]]` tables exist (Cargo book, "Cargo Targets", "Target auto-discovery":
+  <https://doc.rust-lang.org/cargo/reference/cargo-targets.html#target-auto-discovery>). The result
+  would be a fourth binary named `tests`. **That is the trap.** The binaries therefore take Cargo's
+  layout for a binary with more than one file, `src/bin/<name>/main.rs` (Cargo book, "Package
+  Layout": <https://doc.rust-lang.org/cargo/guide/project-layout.html>). The `[[bin]]` paths are
+  changed to match.
+- Rejected: `#[cfg(test)] #[path = "bb-auth/tests.rs"] mod tests;` in an unmoved
+  `src/bin/bb-auth.rs`. It works (measured: no warning, and Cargo ignores a `src/bin/<dir>/` that
+  has no `main.rs`), and it would keep every link to the old paths valid. It was rejected because
+  it leaves a directory named after the binary that holds only that binary's tests, while the root
+  file sits outside it. Every reader of the attribute would then have to know the mod-rs rule.
+- The test names do not change: the module is still called `tests`. Measured: `cargo test -- --list`
+  lists 678 names under `tests::`, and `cargo test session_roundtrip` still selects its 3 tests.
+- Visibility does not change: a file module is the same child module that the inline one was, so
+  the existing `use super::*;` still reaches private items. Measured: no `pub(crate)` was needed.
+
+**b. What moves, and what moves with it.** The body of each `mod tests { … }` is cut verbatim into
+`tests.rs`. Above the declaration, the `// Tests` banner stays where it is. Then:
+
+| Path | Change |
+|---|---|
+| `Cargo.toml` | the three `[[bin]]` `path`s become `src/bin/<name>/main.rs`. Two comments name a file: the one on line 10 (`src/bin/bb-auth.rs`) and the one on line 38 (`bb-auth-web.rs`) |
+| `bb-auth/main.rs` | five `include_str!("../assets/…")` become `"../../assets/…"` (`AUTH_CSS`, `LOGIN_HTML`, `CALLBACK_HTML`, `DENIED_HTML`, `ERROR_HTML`) |
+| `bb-auth-web/main.rs` | `include_str!("../assets/admin.css")` becomes `"../../assets/admin.css"` |
+| `bb-auth/tests.rs` | `the_required_env_list_matches_the_code` reads `include_str!("bb-auth.rs")` and becomes `"main.rs"`, because the `env_req` calls it counts are in the code, and no test calls `env_req` |
+| `bb-auth-web/tests.rs` | `italian_k_strings` reads `include_str!("bb-auth-web.rs")` and becomes `"main.rs"`, which is where `fn t` stays |
+| `src/tests.rs` | `every_symbol_the_manual_names_still_exists` lists **eight** sources: each `main.rs` and each `tests.rs`, plus `lib.rs` and `tests.rs`. The manual names test functions as well as code symbols (for example `rsa_signature_verification_works` and `no_page_but_the_reveal_carries_a_script`), so leaving out a `tests.rs` breaks this test. A fixed list is used, not §4 (3)'s `read_dir`: with no later slice adding files, a list is simpler, and `include_str!` makes Cargo rebuild the test when a source changes |
+| the library's other `include_str!`s | unchanged, because `src/tests.rs` sits beside `src/lib.rs` (`assets/*.css`, `../AGENTS.md`, `../Cargo.toml`, `../deploy/*.service`) |
+| `scripts/*`, `e2e/lib/server.js`, cargo-deb assets | unchanged: they copy `src/.` whole, build by `--bin` name, or name only `deploy/` |
+
+**c. rustfmt, and one trap (measured).** The moved body is still indented by four spaces. Run
+`cargo fmt` on it and never strip the indentation by hand. Removing it by hand would change bytes
+inside raw strings. In the prototype, `sed 's/^    //'` rewrote the continuation lines of a
+raw-string access file in `bb-auth-adm`'s tests and the `login.html` lines in `bb-auth`'s, which
+rustfmt leaves alone. **The first `cargo fmt` leaves a blank first line in every moved file, and
+`cargo fmt --check` fails until `cargo fmt` is run a second time.** rustfmt also rejoins lines that
+fit in 100 columns once they lose their four spaces, which the word check below does not notice.
+
+**d. The slices, smallest first, one target each.** Each slice is one commit.
+
+1. **24-1 `bb-auth-adm`** (294 test lines, 16 tests): `git mv` to `src/bin/bb-auth-adm/main.rs`,
+   cut the tests out, change its `[[bin]]` path, and change that one entry in the library's source
+   list.
+2. **24-2 `bb-auth`** (3,765 lines, 109 tests): the same, plus the five asset paths and
+   `the_required_env_list_matches_the_code`.
+3. **24-3 `bb_auth_core`** (6,432 lines, 209 tests): `src/tests.rs`, plus the library's own
+   `tests.rs` in the source list. No path changes.
+4. **24-4 `bb-auth-web`** (24,623 lines, 344 tests run, 347 `#[test]`s, 3 of them behind the
+   `e2e-fake-cognito` feature): S1 and S2 of §5 together, using the paths in the table above.
+5. **24-5 docs** (the docs agent): (f).
+
+**e. The checks for each slice** (one build at a time, `-j 4`):
+
+1. `cargo test`, with the counts unchanged: **209 / 109 / 16 / 344** (library, gate, CLI, GUI;
+   measured at `b0195cc` and in the prototype). Also `cargo clippy --all-targets`,
+   `cargo fmt --check` (after two `cargo fmt` runs, see (c)), and `cargo doc --no-deps` with zero
+   warnings. A test module is `cfg(test)` and is not documented, so no intra-doc link can break.
+   `node e2e/run.js` runs at 24-4.
+2. The word-multiset diff from §6, run over the slice's files. Its `before` reads the old path from
+   `HEAD`, and its `after` reads `main.rs` and `tests.rs`. Its output may list only the words of a
+   changed path: `main` for each `include_str!("main.rs")`, `bb`/`auth`/`web`/`adm` for each old
+   file name that goes away, and `include_str`, `bin`, `main`, `tests`, `rs` and the target's name
+   for each new line in the library's source list. In the prototype, with all four slices
+   together, the output was exactly the new library list's words. Use `command grep` in `words()`
+   in any shell where `grep` is a function or an alias: under ugrep, the pattern's empty
+   alternative is an error, and the diff then compares two empty lists.
+3. After 24-4, once: `bash scripts/package.sh --skip-tests`, which builds the three `.deb`s from
+   the new paths.
+4. After 24-4, the GUI's rebuild time, using §6's method.
+
+**Measured in the prototype (all four slices, today's load average of 9-12), six runs each:**
+
+| After a one-word edit in `page_groups` | today's layout | S1+S2 |
+|---|---|---|
+| `cargo build --bin bb-auth-web` | 0.68-0.71 s | 0.67-0.71 s |
+| `cargo test --bin bb-auth-web --no-run` | 1.52-1.73 s | 1.59-1.65 s |
+
+**There is no gain**, which is what §2 measured on the GUI alone: a page edit in `main.rs` still
+rebuilds the tests' CGU. What the step buys is files that each hold one kind of thing. It saves no
+compile time, so the timing check in "Done when" is a record that nothing got worse, not a target
+to beat. In the prototype, every suite passed with the counts above (the GUI's took 37 s, without
+step 23's fix), clippy and `cargo doc` reported no warnings, and `cargo fmt --check` was clean after
+the second run.
+
+**f. What changes in the docs (24-5).**
+
+- `AGENTS.md`, "What this is": the four bullet links become `src/lib.rs` (unchanged),
+  `src/bin/bb-auth/main.rs`, `src/bin/bb-auth-adm/main.rs` and `src/bin/bb-auth-web/main.rs`.
+  Each target's tests are in the `tests.rs` beside its code, and the library's are in
+  `src/tests.rs`. The gate's "Still **one file** (about 8,000 lines), still read top to bottom"
+  becomes one file of code: about 4,600 lines, with its tests beside it. "The GUI is about 29,300"
+  is already wrong (the GUI was 40,485 lines at `b0195cc`) and goes, as §8 says.
+- `AGENTS.md`, Commands: the comment on `cargo test` names the four test files.
+- `AGENTS.md`, the invariant "The library is the shared files": "`src/bin/bb-auth.rs` and
+  `src/assets/`, which is still one file, read top to bottom" names the new path, and the claim
+  stays true of the code. "Displayed text": `K` is in `src/bin/bb-auth-web/main.rs`.
+- `docs/ARCHITECTURE.md`, the file table (§1, the three `src/bin/*.rs` rows) and "Inside
+  `src/bin/bb-auth.rs`, in file order": the new paths, plus one line each for the `tests.rs` files.
+  Older subsections are records of their time and stay as written.
+- `e2e/README.md` line 3 and the two `Cargo.toml` comments: the new path.
+- The playbooks: the tester's `include_str!("bb-auth-web.rs")` pitfall becomes `"main.rs"`, and its
+  "`src/lib.rs`'s test" becomes `src/tests.rs`. The designer's and coder's
+  `src/bin/bb-auth-web.rs` / "grep `bb-auth-web.rs`" become the directory.
+  The architect's are updated with this subsection.
+
+No requirement changes, and no open question for the user. The one decision step 24 leaves open
+is whether a step that is known to save no compile time is still wanted. The user asked for it for
+the layout, so this design assumes the answer is yes.
