@@ -101,6 +101,10 @@ Rules are in `AGENTS.md`. Format of this file: `AGENTS.md`, under "Skills".
 
 ## Pitfalls
 
+- A pure-move range that starts at an item's doc comment: the `///` block sits **above** the
+  `#[derive]`/`#[serde]` attribute lines, so the upward walk to the range's top must step over
+  lines starting `#[` as well as `///`, and a range that starts at a banner also carries the
+  `// ---` dashes. Stopping the walk at the first attribute line leaves the attributes behind.
 - A new `Config` field breaks the test module's `cfg_for` struct literal (the only one). Check the
   staged test first: when the staged test reads the new field it has usually added the line itself
   (8b-3's `account_logout_url`), and the task is clear. When it has not and the task forbids editing
