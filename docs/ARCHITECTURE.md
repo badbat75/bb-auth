@@ -8468,6 +8468,9 @@ e2e, `e2e/tests/settings.js`:
 
 ##### 12g. Questions for the user (step 19), answered by the coordinator
 
+(Changed by §13.37 on 2026-11-27: the user reversed option (c); a mark that does not load now
+shows the brand's initial in a tile at 640px and below, with no script.)
+
 The user asked on 2026-11-27 for the plan to be carried to its end, with the decisions taken on
 the recommendations and reviewed afterwards. So both are taken as recommended, (a) for the first
 and acceptance for the second, and stand until the user reviews them.
@@ -8948,3 +8951,150 @@ The user confirmed all three later that day.
    the data changing.
 3. A group link in the roster opens the group's page, not the filtered roster. Recommended as
    designed (§3); the alternative makes it one click shorter to see the members as a table.
+
+### 13.37 A placeholder where a broken logo left the phone's brand empty (plan step 23, designed 2026-11-27)
+
+The user, on 2026-11-27, reversing the coordinator's choice of §13.34 §12g option (c): at 640px
+and below the bar hides the brand's words and keeps the mark (`ui.logo_url`), so a mark that does
+not load left the phone's brand empty; it must show a placeholder. The same day the user said the
+10px gap before the words when a mark fails **above** 640px is fine as it is ("if it does not load
+there is a problem"), so this design changes nothing above 640px. Read for this design:
+`brand_block`, `top_bar`, the `.brand` rules and the 640px block of `admin.css`, `page_csp` and
+the GUI's `img-src`, `brandWordsHidden` and `thePhoneHidesTheWordsAndTheConsoleKeepsThem` in
+`e2e/tests/settings.js`, and `the_words_hide_with_a_logo_and_the_panel_rows_need_no_gap`.
+
+**Measured** on the real server (`/tmp/d23/real.js`: boots the e2e server, writes
+`ui.brand_name` "BadBat75" with the `404` mark `/img/logo.png` and then a working one through
+`routeLogo`, injects the markup and CSS below into `/users` as an administrator, `/account/` and
+the non-administrator's `403`; 320, 360, 390, 640, 641 and 1280; EN and IT; light and dark;
+scripting on and off), and in Chromium and Firefox over the real stylesheets (`/tmp/d23/m.js`).
+Contact sheet of the four 320px bars, broken and working: `/tmp/d23/sheet-320.png`.
+
+#### 1. What it shows (placeholder)
+
+The brand's **initial** in a 30x30 tile where the mark would be: the first character of
+`ui.brand_name`, upper-cased ("BadBat75" gives "B"), bold, `--text` on `--accent-weak`, the
+`--r-ctl` corner. It is the mark's height, so the bar keeps its 30px phone height, and it is a
+tile with no border, so it reads as an avatar and not as a control (the brand is a `span`, not a
+link, §13.34 §11). It is the deployment's own letter rather than a generic picture because the
+words it stands in for are the deployment's name, and a person who sees "B" on the phone and
+"BadBat75" on the laptop recognises the same place (Nielsen 6). Contrast, computed from the
+palette: `--text` on `--accent-weak` over `--card` is 14.7:1 (light) and 10.7:1 (dark); `--accent` on the
+same tile was 4.06:1 (light) and 3.98:1 (dark), under WCAG 1.4.3's 4.5:1
+(<https://www.w3.org/WAI/WCAG22/Understanding/contrast-minimum.html>), which is why the letter is
+`--text`.
+
+#### 2. How it appears with no script (placeholder)
+
+A broken `img` with `alt=""` lays out **0px wide** (measured: Chromium and Firefox, both themes,
+every width), and a loaded one is its own width (96px for the suite's mark). The placeholder
+uses that and nothing else, so it needs no script and no new CSP source:
+
+```html
+<span class="brand">
+  <span class="mk"><img src="…" alt=""><span class="ph" aria-hidden="true">B</span></span>
+  <span class="t">BadBat75</span>
+</span>
+```
+
+```css
+.brand .mk{display:flex;flex:none}
+.brand .ph{display:none}
+@media (max-width:640px){
+  .brand .mk{overflow:hidden;min-width:30px}
+  .brand .ph{display:flex;align-items:center;justify-content:center;flex:none;width:30px;
+    height:30px;margin-right:-30px;border-radius:var(--r-ctl);background:var(--accent-weak);
+    color:var(--text);font-weight:700}
+}
+```
+
+The tile sits right after the image and its `-30px` right margin makes it add nothing to the
+`.mk` box, so `.mk` is as wide as the image and at least 30px. A loaded mark (W of 30px or more)
+puts the tile at x = W, wholly past the box's edge, and `overflow:hidden` clips it. A broken mark
+is 0px, so the tile sits at 0 inside a 30px box and shows. `brand_block` writes `span.mk` and
+`span.ph` only when a logo is set; with no logo the words show as they do today.
+
+Measured with it: on all three surfaces at 320 to 640, both languages, both themes, scripting on
+and off, the broken mark shows the whole 30px tile and the working mark shows none of it; the
+bar stays one row, 30px tall; no page scrolls sideways; the mark-to-pill gap at 320 is 55px on
+the console and 108px on `/account/`. Above 640px the image, the words, the name pill and the
+bar's height are identical to today's at 641 and 1280 on all three surfaces (96 measurements
+compared, no difference), which is the user's "leave it" for that width.
+
+**The one cost**: a mark narrower than it is tall (under 30px wide at 30px high) leaves a slice
+of the tile showing beside it (a 17px-wide mark showed 13px of it). No CSS can tell a loaded
+image from a broken one (there is no `:broken` pseudo-class), so the box can only be sized by
+the image; a portrait mark in a bar slot is rare and is the operator's to fix.
+
+**Safari is unmeasured**: the installed WebKit does not match this Playwright build, so the
+0px broken image is measured in Chromium and Firefox only. Unverified for WebKit.
+
+#### 3. Both surfaces, and the gate (placeholder)
+
+`brand_block` is the one brand of both shells (§13.28 §6), so the console, its `403` for a
+non-administrator, and `/account/` all get the tile from one change. The gate's own pages
+(`/auth/login`, `/auth/denied`, the error page) wear no bar: their mark sits above a card that
+also carries the brand's name in its `h1` or footer, and they have no phone rule that hides
+words, so a broken mark there costs a picture and never the name. They are untouched.
+
+#### 4. What a screen reader hears (placeholder)
+
+Unchanged: "BadBat75", once, from the clipped words. The tile is `aria-hidden="true"`, so the
+letter is never read as a second name, and the image keeps `alt=""`. Measured with Playwright's
+accessibility snapshot of `header` at 320, broken and working: `text: BadBat75` and no "B".
+`aria-hidden` on a non-focusable decoration is the documented use
+(<https://www.w3.org/TR/wai-aria-1.2/#aria-hidden>).
+
+#### 5. Alternatives rejected (placeholder)
+
+- **An `onerror` script** that removes a broken image so the words return (§13.34 §12g (b)).
+  Works, but adds an inline handler to every page of both programs under AGENTS.md's "used
+  sparingly" rule, does nothing with scripting off, and brings back the words a 320px bar has no
+  room for.
+- **Visible alt text** (`alt="BadBat75"`, styled). A broken image would show its alt, but a
+  loaded one would then name the deployment twice to a reader beside the words, and above 640px
+  a broken one would print the name twice on screen.
+- **`<object data=… >fallback</object>`**: the fallback is exactly the behaviour wanted, but
+  both programs' policies are `default-src 'none'` with no `object-src`, and an SVG in an
+  `object` is a document that can run script, which is a hole for a logo.
+- **The tile stacked under the image** (one grid cell, the image painted over it): a transparent
+  mark shows the letter through it, unless the image gets the bar's background, which breaks the
+  moment an operator's stylesheet gives the header another ground.
+- **A CSS background on `.brand`**: the letter would have to be the brand's, which means a
+  per-deployment `data:` image in a `style` attribute, which the hash-only CSP refuses.
+
+#### 6. Tests (placeholder)
+
+Rust (`src/bin/bb-auth-web.rs`):
+
+- `the_words_hide_with_a_logo_and_the_panel_rows_need_no_gap`: keep the clip-pattern checks; add
+  that `brand_block(name, Some(src), "")` holds `span class="mk"` with the `img` then
+  `span class="ph" aria-hidden="true"` whose text is the name's first character upper-cased
+  (`"badBat"` gives `B`), that `brand_block(name, None, "")` holds neither `mk` nor `ph`, and
+  that the 640px block's `.brand .ph` rule has `margin-right:-30px`, `width:30px`,
+  `height:30px` and `.brand .mk` has `overflow:hidden` and `min-width:30px`, while the
+  top-level `.brand .ph` is `display:none`. The "And only on a phone" loop is unchanged.
+- `only_the_palette_names_a_colour` already covers the tile's two tokens.
+
+e2e (`e2e/tests/settings.js`, `thePhoneHidesTheWordsAndTheConsoleKeepsThem`):
+
+- With the `404` mark, at 360 and 320 on the console, `/account/` and the `403`: `header .brand
+  .ph` is visible, its box is 30x30 and lies wholly inside `header .brand .mk`'s box, its text is
+  "B", the words stay the clipped strip (`brandWordsHidden`), and the bar is one row, at most
+  40px. At 1280 and 884, the tile computes `display:none` and the words are whole (today's
+  checks).
+- With the routed mark at 360: the tile's visible width inside `.mk` is 0 and the mark keeps its
+  96px.
+- The accessible name of `header .brand` is "BadBat75" (no "B"): `aria-hidden` on `.ph`.
+- `nojs.js` needs nothing new: the walk above has no script in it.
+
+`e2e/shots.js`: retake `header-logo-broken` (phone and `it`; its phone shot now shows the tile)
+and `header-logo`; `e2e/README.md`'s `phone` row, which says the broken mark leaves the brand
+empty, changes with it (docs agent).
+
+#### 7. Question for the user (placeholder)
+
+1. The tile shows the brand's **initial**. The alternative is one generic picture (a neutral
+   image glyph) for every deployment. Recommended: the initial, because it is the deployment's
+   own and carries over to the words a wider screen shows; the glyph says only "something is
+   missing", which the person cannot fix.

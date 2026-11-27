@@ -80,6 +80,9 @@ Rules are in `AGENTS.md`. Format of this file: `AGENTS.md`, under "Skills".
 - The `shots.js` fixture's dashboard raises only two warnings (user reaches nothing, group unreferenced); all five, with Tab focus, link targets and EN/IT light/dark/390 shots: `/tmp/rev20/p.js` (boots, edits `ctx.accessFile` before the first request).
 - A console page mocked over the real shell (admin bar, real CSS, CSP bypassed): `/tmp/d22/mock.js` (`ONLY=`, `CAND='<css>'`); the context needs `extraHTTPHeaders` `X-Auth-Email: admin@example.com`, or the shell is the `403` with an empty bar.
 
+- A broken versus a working logo on the real bar, with markup and CSS injected into the served page on all three surfaces (console, `/account/`, the `403`), scripting on and off, plus the header's aria snapshot: `/tmp/d23/real.js` (`INJECT=0` for today's page, to diff above a breakpoint); the same over the real stylesheets in Chromium and Firefox: `/tmp/d23/m.js`.
+- Firefox and Chromium for a cross-engine check are in `~/.cache/ms-playwright` (`firefox-1572/firefox/firefox`, `chromium-1255/chrome-linux64/chrome`): pass `executablePath`; the cached WebKit does not speak this Playwright's protocol.
+
 ## Pitfalls
 
 - `admin.css`'s `nav:not(.acct){flex-wrap:nowrap;min-width:max-content}` matches any `nav`, also one inside `main`: a second tab row needs its own `flex-wrap:wrap;min-width:0` or it scrolls sideways at 320.
@@ -136,3 +139,5 @@ Rules are in `AGENTS.md`. Format of this file: `AGENTS.md`, under "Skills".
 - "The brand as wide as at 1400" hides `.brand{max-width:14rem}`: with a logo the words get 118px at every width, so a brand over ~12 characters is cut even at 1280 with room to spare. Compare `.t`'s `clientWidth` with its `scrollWidth`, not with itself at 1400.
 - A broken `img alt=""` is a 0x30 box in Chromium, not its CSS box: a walk with `logo_url:'/img/logo.png'` (the test server's 404) measures no logo. Route a real SVG (`page.route('**/img/logo.svg', …)`).
 - The one-row check by children's centres misses a wrap inside the brand slot (`.selfserve-brand{flex-wrap:wrap}` made `/account/` 58px tall with every child still centred): also assert `.bar` height at most 40px.
+- `K::Members` is the lowercase column word ("members"): a heading from it reads lowercase beside `section_heading`'s capitalised ones. Name a heading's key by checking its `m(...)` string, not its name.
+- A `shots.js` fixture loop written `i < N - d.users.length` while pushing to `d.users` stops at half: `users-paged` made 32 rows, not 60. Read the sub-tab count in the shot before judging a pager.
