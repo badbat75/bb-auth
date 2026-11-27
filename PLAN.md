@@ -106,3 +106,16 @@ of the major, as `v1.99.8` was tagged a pre-release on 2026-11-25.
   section saying it is the release candidate of 2.0.0; `bash scripts/package.sh` built the
   packages from a clean tree; rpi-01 runs that build; and, each with the user's go-ahead, `v1.99.9`
   is tagged and published on GitHub as a pre-release.
+
+### 19. A long brand name is cut even where the bar has room
+
+Covers: R3. Found by the designer on 2026-11-27 while reviewing step 17, and older than it:
+`.brand{max-width:14rem}` in `src/assets/admin.css` leaves the name about 118px beside a logo at
+every width, so a brand over about 12 characters ("BadBat75 Operations Con…") is cut even at
+1280px with free room beside it, and a logo that answers 404 leaves an empty brand at 360px. The
+live "BadBat75" with its logo fits, so nothing on rpi-01 shows it today. Put after the release by
+the coordinator, since it changes no live page.
+
+- Done when: the designer has designed the brand's width (and the broken-logo case); tests pin a
+  long brand whole at desktop widths where the bar has room; the bar stays one row from 320 to
+  1400; and the designer has approved the screenshots.
