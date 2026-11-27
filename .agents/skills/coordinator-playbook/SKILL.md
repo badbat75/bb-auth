@@ -125,5 +125,7 @@ files outside the repo.
 - A release done by hand (CHANGELOG heading, tag, GitHub) skips the docs pass: afterwards grep the
   `*.md` files for the previous version and restore `## Unreleased` above the new section, or the
   next step's CHANGELOG entry has nowhere to go.
-- Appending a step to `PLAN.md` with python: strip the file's trailing newlines and write one, or
-  markdownlint fails MD012 on a doubled blank line at the end (it happened three times).
+- Appending a step to `PLAN.md` with python: an appended block that starts with `\n\n###` after
+  `rstrip` is fine only if the block itself ends without a blank line before its closing `'''`.
+  Finish every PLAN.md edit with `re.sub(r'\n{3,}', '\n\n', s)` before writing, or markdownlint
+  fails MD012 (it happened five times, the rstrip alone did not stop it).
