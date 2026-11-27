@@ -79,3 +79,27 @@ reversal's cost, stated in `docs/ARCHITECTURE.md` §13.12, is that strangers now
 process that writes both files, so two gaps found the same day are closed **first**, before the
 GUI is opened to anyone who is not an administrator: `bb-auth-web` can read the HMAC key, and it
 believes `X-Auth-Email` from any local process. The design is `docs/ARCHITECTURE.md` §13.
+
+### 22. The users page stays usable with many people and groups
+
+Covers: R3. Asked by the user on 2026-11-27: with many users and groups the users page, which
+stacks the groups, the roster and the `denied` list on one page, becomes unmanageable. The user
+chose all four of the coordinator's suggestions that day:
+
+1. **Three sub-pages instead of one long page**: People (the default), Groups and Denied, each at
+   its own URL (`/users`, `/users/groups`, `/users/denied`, or what the design settles on), with
+   in-page sub-tabs carrying a count, each list with its own filter and pager. The top bar keeps
+   its five tabs and the 883/884 breakpoint.
+2. **A user group gets a page of its own**: its members, the scopes that grant to it, the scopes
+   that exclude it, and its edit; the step 20 warning for a group then links there (§13.35's
+   answered question changes).
+3. **The two lists link**: the roster shows each person's groups, and a group's page offers the
+   roster filtered to its members.
+4. **Lists that scale**: the roster's filter also matches a uuid and an API key's id, and each
+   pager says which rows it shows out of how many.
+
+- Done when: the designer has designed all four in `docs/ARCHITECTURE.md` (routes, sub-tabs,
+  the group page, the filter's reach, the pager's count, both languages, phone width, scripting
+  off); tests pin each; `node e2e/run.js` and `nojs.js` are green; the old `/users` anchors and
+  the `/denied` route still land somewhere sensible; and the designer has approved the
+  screenshots.
