@@ -41,6 +41,11 @@ Rules are in `AGENTS.md`. Format of this file: `AGENTS.md`, under "Skills".
   `cargo fmt` dedent it, and expect the moved file to end up a few lines shorter than the range,
   because rustfmt rejoins lines that fit in 100 columns once they lose four spaces. Prove the code
   half is untouched with `diff <(git show :path | sed -n '1,Np') <(sed -n '1,N+2p' path)`.
+- In a §13.38 §10 move, every test edit lands in the **moved** `tests.rs`, not in the code file:
+  from 24-3 the library's `every_symbol_the_manual_names_still_exists` source list is in
+  `src/tests.rs`, so 24-4's new web paths are edited there. A crate root's `mod tests;` loads
+  `tests.rs` beside it, so the library's `include_str!("assets/…")` and `"../AGENTS.md"` paths need
+  no change; only a `bin` root that moved into a directory needs a `'../'` added.
 - A maud `(name)` **borrows**: `Render::render_to(&self)` (maud 0.27), so a `String` rendered inside
   one panel is still owned and can be passed by reference after the `html!`. No clone needed, and
   none of the `(expr)` sites move.
