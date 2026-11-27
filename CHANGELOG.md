@@ -24,6 +24,35 @@ Versions are the crate's (`Cargo.toml`); packages add a Debian revision
 
 Builds say 1.99.9 and their commit until the next release (plan W11).
 
+### Changed: the brand is as wide as the bar allows
+
+* **The brand's cap is the bar's width less the room the rest of the row keeps**, floored at
+  `14rem` (three rules: the surfaces with no tabs, `/account` and the `403`; the console below
+  884px; the console from 884px). The fixed `14rem` it replaces cut a name to "BadBat75
+  Operations Con…" at 1280px with 180px of empty bar standing beside it, which is what the
+  designer found on 2026-11-27 while reviewing 1.99.8 (plan step 19, docs/ARCHITECTURE.md
+  §13.34 §12). The 883/884px breakpoint is unchanged, and what the budget does not buy is
+  stated in §12g and accepted: a brand over about 28 characters **with** a logo is still cut on
+  the console at 1280, because the cap assumes the Italian tabs and the longest given name,
+  while `/account` and the `403` carry no tabs and show it whole.
+* **From 884px the brand is the part of the row that never gives** (`.brand{flex-shrink:0}`),
+  replacing the `nav.acct{flex-shrink:100}` of 1.99.9. A shrink factor is a multiplier and not a
+  budget, so that rule spent the name pill's room first: the person's name went at 883px while
+  the brand's words were being cut beside it.
+* **The brand's slot no longer wraps** on `/account`: a long brand with a mark made that bar
+  58px tall while the row count still reported one row, because every child of a centred flex
+  row keeps the same centre. The visual walks now assert the bar's **height** beside its row
+  count, which is what a wrap costs and the row count cannot see.
+* **At 640px and below the brand shows its words and hides the mark**, so a `ui.logo_url` that
+  answers `404` cannot leave a phone's bar without a name: a failed image is a 0px box, and the
+  rule that hid the words when a mark was present left the bar empty. This is the coordinator
+  taking §12g's option (a) on 2026-11-27 for the user to review. **The user has since chosen the
+  opposite** (the mark kept on phones, the words hidden, §13.34 §12g), and that reversal is not
+  built yet: this build hides the mark.
+
+Nothing here touches the cookie, the access file or the settings file, so an upgrade logs nobody
+out and needs no nginx line.
+
 ## 1.99.9 (2026-11-27, release candidate of 2.0.0)
 
 **Released on 2026-11-27 as `v1.99.9`, the release candidate of 2.0.0**, by the user's decision

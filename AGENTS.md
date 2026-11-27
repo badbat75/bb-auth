@@ -96,7 +96,26 @@ One crate, four targets, and the split is load-bearing:
   decision of 2026-11-26: the link led to the page the Dashboard tab already names, §13.34
   §10 §11), **five tabs** (Dashboard, Applications, Users, Audit and
   **Settings**, that one last) and one pill, the person's given name or else their first
-  address, which opens the **account menu**. That menu is a `details`, so it opens with markup
+  address, which opens the **account menu**. The brand's slot is **as wide as the bar allows**,
+  never a length of a brand: its cap is the bar's own width less the room the rest of the row
+  keeps, floored at `14rem` (plan step 19, 2026-11-27, §13.34 §12), because the fixed `14rem` cut
+  "BadBat75 Operations Con…" at 1280 with 180px of empty bar standing beside it. From 884px the
+  brand is the part of the row that never gives (`.brand{flex-shrink:0}`), which replaces 1.99.9's
+  `nav.acct{flex-shrink:100}`: a shrink factor is a multiplier and not a budget, so that rule
+  spent the name pill's room first, and the person's name went at 883 while the brand's words
+  were being cut beside it. The slot never wraps, on the console or on `/account`, and the bar's
+  **height** is asserted beside its row count: a wrapped brand made the `/account` bar 58px where
+  it is 36 (§13.34 §12a, measured) while the row count kept reporting **one row**, because every
+  child of a centred flex row keeps the same centre, and the page below loses 40px of it. At
+  **640px and below** the brand shows its words and hides the mark, so a
+  logo answering `404` cannot leave a phone's bar without a name: the coordinator took §13.34 §12g's
+  option (a) on 2026-11-27 for the user to review, and the user has since chosen the opposite (the
+  mark kept, the words hidden), a reversal **not built yet**, the tree still hiding the mark
+  (`the_mark_gives_way_on_a_phone_and_the_panel_rows_need_no_gap` pins that). What the budget does
+  not buy, and §13.34 §12g accepts: a brand over about 28 characters with a logo is still cut on
+  the console at 1280, because the cap assumes the Italian tabs and the longest given name, while
+  `/account` and the `403`, which carry no tabs, show it whole. That menu is a `details`, so it
+  opens with markup
   and closes when a row navigates away, and its rows are the caller's own things and nothing
   else: the caller's name and every address, then the one place ("Go to your account", on the
   console only), then Preferences nested and closed, then Sign out (§13.34 §3). At **883px and
@@ -434,7 +453,7 @@ passed, on code untouched since it passed, tells you nothing you did not already
 `cargo doc --no-deps` earns its place when an intra-doc link could have moved, which is a
 real risk when a type or a function is renamed and no risk at all when a border-radius
 changes. `node e2e/shots.js` takes a scene-name filter for the same reason: the full walk is
-291 shots at most across seven views (70 scenes, plus the 13 interaction states in the two views
+296 shots at most across seven views (71 scenes, plus the 13 interaction states in the two views
 that run them; a scene that cannot run in a view is reported `SKIPPED`), and a change to one
 page needs one of them.
 

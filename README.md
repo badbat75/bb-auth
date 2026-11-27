@@ -639,7 +639,12 @@ and every address of your roster row, "Go to your account", Preferences (theme a
 and Sign out. Nothing in that menu is about who reaches what, and the panel is one fixed width,
 the same box on this surface and on `/account`. At 883px and below the tabs move into the
 ☰'s own menu, never into the account one, so the bar never wraps; the two panels are one
-`details` group, so opening one closes the other with no script.
+`details` group, so opening one closes the other with no script. The name beside the logo is
+**as wide as the bar has room**: its slot takes what the rest of the row leaves it, never less
+than `14rem`, and above the breakpoint the brand is the part of the row that never gives, so a
+long brand is cut only where the bar is genuinely short. In a phone bar, 640px and below, the
+**name** shows and the logo is hidden: a logo that fails to load is a 0px box, and a bar whose
+only name came from an image would be a bar with no name.
 **Users** holds the three sections about people, in the order they nest: the user groups and
 who references each one, then the roster, then the `denied` veto. **Applications** lists each
 one with its area, its scope count and which credential classes get in anywhere inside it,
@@ -1178,7 +1183,7 @@ the social callback, the error page and the refusal page the gate serves, and ev
 | Setting | What it does |
 |---|---|
 | `stylesheet_url` | a stylesheet loaded **after** the built-in one, so it wins by source order. Absolute `https://`, or a path starting with `/` on this host |
-| `logo_url` | shown on the sign-in page above the name, and in the bar of both `bb-auth-web` surfaces beside it. Same two shapes. Empty = the name alone |
+| `logo_url` | shown on the sign-in page above the name, and in the bar of both `bb-auth-web` surfaces beside it. Same two shapes. In a phone bar (640px and below) the name shows and the logo is hidden, so a logo that does not load cannot leave the bar without a name. Empty = the name alone |
 | `brand_name` | what the estate calls this deployment: the sign-in page, and the bar of both `bb-auth-web` surfaces (the console's and `/account`'s). Empty = `bb-auth` |
 | `theme` | `system` (default), `light` or `dark`: which palette a page starts in. In `bb-auth-web` it is only the default, and each administrator's own Preferences box (in the account menu) overrides it, where the automatic choice reads "Auto (system)" |
 

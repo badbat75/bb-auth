@@ -37,7 +37,14 @@ Rules are in `AGENTS.md`. Format of this file: `AGENTS.md`, under "Skills".
 - To re-measure the `node e2e/shots.js` figures: scenes are the `['name', …]` entries between
   `const SCENES = [` and its `];`, interaction states the same inside `const STATES = [`, and
   the shot total is per `VIEWS` entry (a view with `states: true` runs both lists, the Italian
-  view runs its own `only` list, the last views run two each).
+  view runs its own `only` list, the last views run two each). A real run is the source: it ends
+  with `N screenshots -> …` (~5 minutes for the full walk) and rewrites `e2e/artifacts/visual/`,
+  which is gitignored, so read that line and `ls artifacts/visual/* | wc -l` per view. The
+  `['…` count needs **two** leading spaces and the block boundaries: a looser regex finds 11.
+- `e2e/README.md`'s area table is a ledger of counts and of files: `run.js`'s `AREAS` list is
+  the areas that exist, and each row's "N checks" is that area's line in the
+  `node e2e/run.js` summary (measured 2026-11-27: 11 areas, `settings 379/379`, total 1475).
+  The suite prints them all in ~3 minutes and never touches a repo file.
 
 ## Pitfalls
 
@@ -91,3 +98,15 @@ Rules are in `AGENTS.md`. Format of this file: `AGENTS.md`, under "Skills".
   the response body, and tests assert on body substrings: the proxy-secret refusal tests assert
   `!body.contains("Dashboard")`, and a CSS comment naming "the Dashboard tab" turned them red.
   Never write in a CSS asset comment a word a body-substring test forbids.
+- The design record runs **ahead of** the code, and the newest §13.x word is not what ships.
+  §13.34 §12g records the user reversing the phone brand rule on 2026-11-27 (commit b04706f,
+  docs only) while the CSS from 7f13066 still hides the mark at 640px and below. Check
+  `git log --oneline -N -- src/assets/admin.css` against the docs commits, and write what the
+  tree does, naming the reversal as **not built**.
+- An area's "N checks" in `e2e/README.md` goes stale by a **factor**, not by one: each check
+  inside a walk over widths × languages × names multiplies (the row said 74 where the run
+  reported 379). A green suite is no evidence about the number; only the summary line is.
+- README.md ("a server-rendered admin GUI that needs no JavaScript") and `e2e/README.md` ("no
+  page needing JavaScript") both contradict `AGENTS.md`'s "JavaScript is used sparingly" and
+  the two scripts (`SETTINGS_ONCHANGE`, `COPY_SCRIPT`). Found 2026-11-27, unfixed: it is not a
+  step-19 fact, so a bar edit left it alone.

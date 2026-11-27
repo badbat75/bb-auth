@@ -71,7 +71,10 @@ Rules are in `AGENTS.md`. Format of this file: `AGENTS.md`, under "Skills".
 - The breakpoint with a rule injected and a node removed: `/tmp/d17/edge2.js` (`NOTAG=1`, `EXTRA='<css>'`, four brands); the whole bar 1400 to 320 at a given breakpoint with shots: `/tmp/d17/ham.js` (`BP=`, `EXTRA=`, `SHOTS=`).
 - The real bar after step 17, no injection (span, cursor, hover, first Tab, one row 1400 to 320, ☰ exactly at 883, seven brands with a working, a 404 and no logo, EN/IT, light/dark): `/tmp/rev17/p.js`.
 - The brand's width on both surfaces with a CSS candidate injected (`CAND=` in the file, `ONLY=`, `SCHEMES=`, `STEP=`; reports cut-with-room above 884, row faults incl. bar height, pill minimums, phone cuts): `/tmp/d19/probe.js`; a broken versus a working logo per variant with shots: `/tmp/d19/broken.js`.
+- Reviewing the real bar with no injection: `CAND=today STEP=4 SCHEMES=light,dark node /tmp/d19/probe.js` (boots and stops its own server); a `cutWithRoom` line is a fault only if §13.34 §12 did not accept it (it accepts 86px with logo, long brand and "Ada" at 884 to 956).
 - The exact breakpoint for a bar label: `/tmp/d15b/edge.js` (strip forced visible, 1px steps 1100 to 641, light and dark, prints the widest failing width per brand, name and language). One row and no scroll alone never fail above 641, since the brand and name truncate: the binding test is the brand as wide as at 1400 and the name pill at least 128px.
+
+- The console's singular word for each object, in both languages, is in `K::Msg*Added` (`scope`/`scope`, `user`/`utente`, `user group`/`gruppo di utenti`); the plural tab headings differ (`Scopes` is "Ambiti"), so take a kind word from the messages, not the headings.
 
 ## Pitfalls
 
