@@ -122,3 +122,6 @@ files outside the repo.
 - A tester-then-coder script must stop when the tester's `opencode run` exits non-zero: the
   model server can answer `UnexpectedStatus: 500` at once (busy with another project's agent), and
   a script that carries on runs the coder against no new tests.
+- A release done by hand (CHANGELOG heading, tag, GitHub) skips the docs pass: afterwards grep the
+  `*.md` files for the previous version and restore `## Unreleased` above the new section, or the
+  next step's CHANGELOG entry has nowhere to go.
