@@ -34,7 +34,7 @@ as the column says. A requirement still open must be covered by a step.
 | W8 | Everything in English; only the conversation with the user may be in their language | Applies to every step |
 | W9 | Displayed text in the `K` translation table or the page templates, ready for more languages | Applies to every step |
 | W10 | Agents run only the tests of the part they work on, plus linter and format check; the tester runs the full suite once, on main after the merge, before installing | Applies to every step |
-| W11 | The version stays the same between releases; a deploy does not bump it, and the build string (`v<version>-g<commit>`) is what tells two deploys apart (the user's decision, 2026-11-25, replacing "the last deployed version plus one"). `v1.99.8` was tagged on 2026-11-25 as a pre-release of 2.0.0, `v1.99.9` on 2026-11-27 as its release candidate, `v1.99.10` the same day as the second, and `v1.99.11` the same day as the third | Applies to every step |
+| W11 | The version stays the same between releases; a deploy does not bump it, and the build string (`v<version>-g<commit>`) is what tells two deploys apart (the user's decision, 2026-11-25, replacing "the last deployed version plus one"). `v1.99.8` was tagged on 2026-11-25 as a pre-release of 2.0.0, `v1.99.9` on 2026-11-27 as its release candidate, `v1.99.10` the same day as the second, `v1.99.11` the same day as the third and `v1.99.12` that night as the fourth | Applies to every step |
 | W12 | JavaScript sparingly: HTML and CSS first, a small inline script only where it clearly improves an interaction, allowed by the page's CSP, never from another host (the user's rule, 2026-11-25, replacing "no page may need JavaScript"; stated in `AGENTS.md`) | Applies to every step |
 | W13 | The admin console and the account page share their front end: one width (1000px, the user's choice on 2026-11-25), one header, the same components, helpers and parameters; a thing the console already has is reused on `/account`, never rebuilt, and only what is genuinely different stays apart, with the reason written down (the user, 2026-11-25: "non reinventiamo l'acqua calda") | Every step touching either page |
 
@@ -66,7 +66,7 @@ The gate, the CLI (`bb-auth-adm`) and the admin GUI (`bb-auth-web`) are built an
 `AGENTS.md` and `CHANGELOG.md` say what they do. The agent structure (roles, skills, this plan) was added
 on 2026-11-23; the work before it is in `git log`. The self-service page is the `/account` section of `bb-auth-web`, live on rpi-01 since
 2026-11-24, with its key writes, header and theme since 2026-11-25. `v1.99.8` (g978eca8) is tagged, on GitHub as a
-pre-release; `v1.99.9` was tagged on 2026-11-27 as the release candidate of 2.0.0, `v1.99.10` the same day as the second release candidate and `v1.99.11` that evening as the third, all published on GitHub as pre-releases; rpi-01 runs `v1.99.11-g19b5494` since the evening of 2026-11-27 (the users tab as three sub-pages with a page per user group; self-service account deletion through the owner's worker, signing the browser out on completion; the two menus; the console's brand without its tag or link, as wide as the bar allows, and a phone bar that keeps the logo; dashboard warnings that name their kind; the AGPL licence) with `gate.landing_url` set to its `/account/` page and `gate.allow_unverified_social` on for `MicrosoftPersonal` alone. Google's `email_verified` is mapped in the pool (OpenTofu, through IT-Admin), so a Google sign-in proves its address. Microsoft's personal accounts send no claim Cognito accepts as a boolean (mapping `xms_edov` broke the sign-in, so the mapping was removed), so that one provider is the exception (the user, 2026-11-26).
+pre-release; `v1.99.9` was tagged on 2026-11-27 as the release candidate of 2.0.0, `v1.99.10` the same day as the second release candidate, `v1.99.11` that evening as the third and `v1.99.12` that night as the fourth, all published on GitHub as pre-releases; rpi-01 runs `v1.99.12-g187376e` since the night of 2026-11-27 (the source tree split into modules, with no behaviour change; before it, 1.99.11 brought the users tab as three sub-pages with a page per user group; self-service account deletion through the owner's worker, signing the browser out on completion; the two menus; the console's brand without its tag or link, as wide as the bar allows, and a phone bar that keeps the logo; dashboard warnings that name their kind; the AGPL licence) with `gate.landing_url` set to its `/account/` page and `gate.allow_unverified_social` on for `MicrosoftPersonal` alone. Google's `email_verified` is mapped in the pool (OpenTofu, through IT-Admin), so a Google sign-in proves its address. Microsoft's personal accounts send no claim Cognito accepts as a boolean (mapping `xms_edov` broke the sign-in, so the mapping was removed), so that one provider is the exception (the user, 2026-11-26).
 
 ## Next steps
 
@@ -80,11 +80,4 @@ process that writes both files, so two gaps found the same day are closed **firs
 GUI is opened to anyone who is not an administrator: `bb-auth-web` can read the HMAC key, and it
 believes `X-Auth-Email` from any local process. The design is `docs/ARCHITECTURE.md` §13.
 
-### 25. The fourth release candidate, 1.99.12
-
-Covers: the user's request of 2026-11-27 to carry step 25 (the GUI and the library split into
-modules, now built, §13.39) to its end and then cut a fourth release candidate.
-
-- Done when: version 1.99.12, its CHANGELOG heading, the full board on main, the packages, the
-  deploy to rpi-01, the push, the `v1.99.12` tag and a GitHub pre-release (1.0.0 stays Latest),
-  as for 1.99.11.
+There is no open step. New work goes here, in its place in the order.
