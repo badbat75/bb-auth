@@ -119,10 +119,20 @@ Rules are in `AGENTS.md`. Format of this file: `AGENTS.md`, under "Skills".
   `mod x;` block is rebuilt with `[a-z0-9_]+`: `[a-z]+` silently drops `i18n` from it.
 - A moved `include_str!("main.rs")` (the §6 path) leaves `+k_text` **three** times in the word diff
   (the `mod`, the `use`, the path) and `-main` once, beside the two of every other module name.
-- A §13.39 topic slice: the helpers that go back to the end of `tests.rs` are exactly the compiler's
-  `E0425` list (a topic cannot see a sibling's items, so anything two topics use is a parent item).
-  When scripting that move, match the item with `^(pub(\(crate\))? )?(fn|const) NAME` and take its
-  end as the first line that is exactly `}` **only when the matched line is a `fn`**.
+- A §13.39 topic slice (25-27..30, all 21 files in file order): `use super::*;`, a blank line,
+  `sed -n 'A,Bp'` of the range between two banners, delete `A,B`, rebuild the `mod x;` block. The
+  range's **end** walks back over the `// ===`/`// ---` separator lines above the next banner, and its
+  start walks up over them, so a banner travels with the topic it introduces. Then the one fix: the
+  helpers the compiler cannot find, moved unchanged to the end of `tests.rs` — the list is cargo's
+  `cannot find (function|type|const|value|…)`, `cannot find struct, variant or union type` **and**
+  `no method named` (a method names its owner, so that one is fixed by hand), and each item is found
+  by scanning every `tests/*.rs`, because a helper in a topic already moved is invisible to the
+  parent. Pull a **type** with every `impl` block naming it. Finish each topic with `cargo fmt` twice
+  and the five builds; `cargo test -- --list` leaf names (`sed 's/.*:://'`) prove the set of 344.
+- The item's end, scripted: walk characters, not lines, carrying string / comment / raw-string state
+  across newlines, and stop at a depth-0 `;` or the `}` that empties the stack. The access fixtures
+  here are `const X: &str = r#"{ "version": 1, … }"#;` whose closing `"#;` is **indented**, so any
+  column-0 scan runs off the item and swallows the rest of the file into `tests.rs`.
 - A §13.39 **GUI module** slice (25-14..19, six moves: `forms`, `dashboard`, `users`, `apps`,
   `audit_page`, `check`): the ranges in §13.39 §3 are line numbers of the old single file, so every
   move starts by re-finding both ends (`command grep -n '^fn page_dashboard'`). Each new file is
@@ -152,6 +162,19 @@ Rules are in `AGENTS.md`. Format of this file: `AGENTS.md`, under "Skills".
   after the last `}` (which is what "the line before the next banner" counts) leaves the next banner
   glued to the item above it in the root, and a two-range move a doubled blank at its join. Put one
   blank back above the banner and delete one at the join, before compiling.
+- Rebuilding the `mod x;` block by deleting every `^mod …;$` line and re-listing them **from the file
+   after the delete** leaves exactly one `mod` line, the module just added, with exit 0 and a green
+   build: every other topic file simply stops being compiled and its tests vanish. Read the `mod`
+   lines into a variable **before** deleting them.
+- A topic whose every item turned out to be shared is a file of its banner and nothing else, and its
+  `use super::*;` is then an `unused_imports` warning the five builds report. The import goes, the
+  banner stays (`tests/account.rs`, 20 lines, is that file).
+- A `use` written **mid-file** in a topic (the profile slice's `use bb_auth_core::NATIVE_USERNAME_HEADER;`)
+  travels with the topic and leaves the parent blind to the name its own tests use. The import is a
+  shared item: it moves to `tests.rs`, with the doc comment above it, and §8's residue already allows
+  a `use` line.
+- The pull loop searches **every** `tests/*.rs`, not the topic just moved: a helper a new topic needs
+  usually lives in a topic moved two slices ago, and pulling it from there is the documented fix.
 - The §5 loop prints `unused_imports: unused import: users::*` as an unplaced diagnostic on the
   round where every item of the new module is still private. It clears itself once the items are
   published; it is not a signal to drop the `use`. It is also the **tell** of the sibling case: a
