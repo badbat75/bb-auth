@@ -364,6 +364,74 @@ async function thePhoneHidesTheWordsAndTheConsoleKeepsThem(t, ctx, look) {
 }
 
 /**
+ * The phone's brand slot keeps the room its mark needs (§13.34 §12g's follow-up, found in the
+ * designer's review of step 19, 2026-11-27). Below 640 the words give way, so the mark **is** the
+ * brand, and the mark never shrinks (`.brand img` is `flex:none`). The slot does shrink: it is one
+ * of the bar's give. So on the phone's first line, where the ☰ and a name pill at its cap leave
+ * the row no slack, the slot is the piece the row spends and the mark is left standing outside the
+ * box shrunk under it. Measured here on 2026-11-27 at 320 with a mark and the long given name: an
+ * **87px** slot under a 96px mark (the designer's review measured 86px), the mark's right edge at
+ * x=147 and the name pill's left edge at x=145, so the deployment's logo paints over the left
+ * border of the one control the phone's whole panel is reached through.
+ *
+ * What is asserted is where the mark **ends** against where the pill **starts**: that is what a
+ * person sees, and it is the number that was wrong. The slot's own right edge is read beside it,
+ * because that is the mechanism (a slot narrower than the mark it holds), and the bar's row count
+ * and the document's sideways scroll ride along, because a fix that bought the mark's room by
+ * making the row overflow is the fault §13.28 §4 exists to catch.
+ *
+ * The mark has to be a real box. `routeLogo` answers it (§13.34 §12c): an image that never loaded
+ * is 0x30, sits inside any slot and overlaps nothing, so every clearance assertion in this walk
+ * would pass on a layout no deployment shows. The mark's box is therefore checked before the
+ * clearance is read. The long given name is the piece that crowds the row (§13.34 §10a's
+ * measurement string), and it needs `gate.profile_claims` configured to be read at all.
+ *
+ * 360 is walked beside 320 because it is the roomier phone width, where the row has slack today: a
+ * rule that stops the slot shrinking must not cost this width its scroll.
+ */
+async function thePhoneMarkStaysClearOfThePill(t, ctx, look) {
+  const wired = {
+    ...look,
+    gate: { ...(look.gate || {}), profile_claims: ['given_name'] },
+    ui: { ...(look.ui || {}), brand_name: 'BadBat75 Estate Services', logo_url: '/img/logo.svg' },
+  };
+  writeSettings(ctx, wired);
+  const context = await ctx.browser.newContext({
+    viewport: { width: 320, height: 800 },
+    extraHTTPHeaders: {
+      'X-Auth-Email': 'admin@example.com',
+      'X-Auth-Given-Name': 'Bartholomew-Alexander%20Montgomery',
+    },
+  });
+  await routeLogo(context);
+  const page = await context.newPage();
+  try {
+    for (const w of [320, 360]) {
+      await page.setViewportSize({ width: w, height: 800 });
+      await page.goto(`${ctx.base}/users?lang=en`);
+      const g = await brandGeometry(page);
+      const pill = await namePillGeometry(page);
+      // The setup, so a bar that quietly dropped the mark cannot pass by overlapping nothing.
+      t.check(`at ${w}: the bar carries the 96px mark`,
+        !!g.mark && g.mark.cw >= 96, JSON.stringify(g.mark));
+      if (!g.mark || !pill.pill) continue;
+      t.check(`at ${w}: the mark stays inside the brand slot`, g.brand.right >= g.mark.right,
+        `slot ${g.brand.w}px ending at ${g.brand.right}, mark ${g.mark.w}px ending at ${g.mark.right}`);
+      t.check(`at ${w}: the mark stops before the name pill`, g.mark.right <= pill.pill.x,
+        `mark ends at x=${g.mark.right}, the pill starts at x=${pill.pill.x}`);
+      const bar = await barGeometry(page);
+      t.eq(`at ${w}: the bar is one row, ${bar.height}px, no sideways scroll`,
+        [bar.rows, bar.height <= 40, bar.sideways === 0], [1, true, true]);
+    }
+  } finally {
+    // The settings file goes back as this walk found it: the area's other checks read it as the
+    // fixture wrote it, and the form's `rev` fingerprints its bytes.
+    await context.close();
+    writeSettings(ctx, look);
+  }
+}
+
+/**
  * The brand is whole where the bar has room (§13.34 §12e): "BadBat75 Operations Console" with a
  * mark that loads, on the console at 1280 and 1024 in both languages, with the short given name
  * and with the long one §10a measured. At each: the words are whole, the bar is one row of at
@@ -620,6 +688,11 @@ async function run(ctx, t) {
   // words are whole above 640 (§13.34 §12c's bug was that a 0-wide mark left the bar nameless at
   // every width) and a hidden strip at 360 and 320 (§13.34 §12g, the user's option (c)).
   await thePhoneHidesTheWordsAndTheConsoleKeepsThem(t, ctx, settings(ctx));
+  // The phone's first line with a mark that **loads**: the slot must not be shrunk out from under
+  // the mark, which is the piece that overflows onto the name pill at 320 (§13.34 §12g's
+  // follow-up). This writes a `ui` section and a profile claim, so it runs beside the walks above,
+  // before the form walk fingerprints the fixture's bytes.
+  await thePhoneMarkStaysClearOfThePill(t, ctx, settings(ctx));
   // `$$eval` is Playwright's, not JavaScript's eval: it runs this fixed function inside the
   // page over the matched elements, and nothing of it comes from the page under test.
   const openCount = () => page.$$eval('details.group', (ds) => ds.filter((d) => d.open).length);

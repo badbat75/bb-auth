@@ -265,7 +265,15 @@ const namePillGeometry = (page) =>
       const el = document.querySelector(sel);
       if (!el) return null;
       const r = el.getBoundingClientRect();
-      return { w: Math.round(r.width), cw: el.clientWidth, sw: Math.round(el.scrollWidth) };
+      return {
+        w: Math.round(r.width),
+        cw: el.clientWidth,
+        sw: Math.round(el.scrollWidth),
+        // The edges beside the width: a brand that overflows its own slot is measured by what it
+        // overlaps, and that is a position, not a length.
+        x: Math.round(r.left),
+        right: Math.round(r.right),
+      };
     };
     return { pill: box('.bar .who'), label: box('.bar .who .who-name') };
   });

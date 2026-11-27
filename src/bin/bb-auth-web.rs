@@ -36771,6 +36771,48 @@ mod tests {
         }
     }
 
+    /// §13.34 §12g's follow-up (the designer's review of step 19, 2026-11-27): on a phone the
+    /// words give way, so the **mark is the whole brand**, and the slot that holds it has to be as
+    /// wide as the mark. It is not. The slot is one of the bar's give (`min-width:0`, and the cap
+    /// above it), and the mark never shrinks (`.brand img` is `flex:none`), so on the phone's
+    /// crowded first line the slot is the piece the row spends, and the mark is left standing
+    /// outside the box that was shrunk under it. Measured at 320 with a mark and the long given
+    /// name: the slot came to **86px** in the designer's review and 87px in this suite's own run,
+    /// while the mark is capped at 96px; the mark's right edge landed at x=147 and the name pill's
+    /// left edge at x=145, so the brand paints over the left border of the one control the phone's
+    /// whole panel is reached through.
+    ///
+    /// `flex-shrink:0` is the row's arithmetic, the same reasoning the hidden words two rules up
+    /// already carry: a part that cannot shrink is not the part the row may spend. `:has(img)` is
+    /// what makes it safe, and it is the reason the rule is scoped to a slot carrying a mark: with
+    /// no `ui.logo_url` there is no mark, the phone shows the **words**, and a slot that cannot
+    /// shrink there spends the name pill's room instead of its own, which is the one control the
+    /// phone's whole panel is reached through (§13.28: the trigger is the identity). The rule
+    /// belongs in the phone arm alone, because above 640 the words share the slot and the cap's
+    /// arithmetic is the whole budget.
+    ///
+    /// Two facts about the reach of this pin, both measured on 2026-11-27 rather than assumed. It
+    /// is a stylesheet pin, so it says nothing about the layout: the browser's side, including the
+    /// 2px overlap and the mark's 96px box, is `thePhoneMarkStaysClearOfThePill` in
+    /// `e2e/tests/settings.js`. And it does **not** pin the `:has(img)` scoping: a `.brand` rule
+    /// with the same declaration, written in the same phone block, leaves the whole settings area
+    /// green (418/418), because every phone brand walk in that area runs on the fixture's built-in
+    /// brand, which is short, and a short brand under the cap never needs the slot to shrink. A
+    /// slice that needs the scoping defended has to add the walk that measures it (a long brand,
+    /// no logo, the long given name, at 320, reading the pill's floor).
+    #[test]
+    fn the_phone_brand_slot_with_a_mark_keeps_the_marks_room() {
+        let scoped = css_scoped(CSS);
+        let at = "@media(max-width:640px)";
+        let slot = rule_named(&scoped, at, ".brand:has(img)");
+        assert_eq!(
+            css_decl(&slot, "flex-shrink").as_deref(),
+            Some("0"),
+            "the phone's brand slot holds a mark that cannot shrink, so the slot must not shrink \
+             either, or the mark leaves the box and lands on the pill: {slot}"
+        );
+    }
+
     /// §13.28 §2: the panel's glyphs are the bar's glyphs, and the bar's rule does not reach
     /// them. `.bar .who svg` sizes the caret in the trigger; the panel's own rows (the sliders on
     /// the Preferences row, the door on Sign out) sit inside `details.settings`, so they are

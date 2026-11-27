@@ -565,6 +565,9 @@ details.navmenu .menu{left:0;right:auto}
      controls survive. */
   .brand:has(img) .t{position:absolute;width:1px;height:1px;overflow:hidden;
     clip-path:inset(50%);flex-shrink:0}
+  /* The slot that holds a mark which cannot shrink must not shrink itself, or the mark stands
+     outside the box the row spent under it and paints over the name pill's border at 320. */
+  .brand:has(img){flex-shrink:0}
   /* The id keeps its `nowrap` here, so this is where it pays for it: at .85em the 36 characters
      fit the width a 320px screen leaves once `main`'s padding is gone, which is what makes it
      move whole to a line of its own instead of pushing the page sideways. */
