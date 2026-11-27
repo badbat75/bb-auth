@@ -22,7 +22,7 @@ Versions are the crate's (`Cargo.toml`); packages add a Debian revision
 
 ## Unreleased
 
-Builds say 1.99.9 and their commit until the next release (plan W11).
+Builds say 1.99.10 and their commit until that release is tagged (plan W11, step 21).
 
 ### Changed: each dashboard warning names its kind, and links to it
 
