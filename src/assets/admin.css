@@ -21,7 +21,7 @@ header.top{background:var(--card);border-bottom:1px solid var(--card-border);pad
    and separating them with a rule or a tint would put back exactly the differentiating trait
    the pill object exists to remove. */
 /* `flex-wrap:nowrap` is the whole of "one row, always" (§13.28 §4), and it is a construction
-   and not an arithmetic: with `wrap` the row breaks whenever the brand, the four tabs and a
+   and not an arithmetic: with `wrap` the row breaks whenever the brand, the five tabs and a
    person's name together outgrow the width, which is every deployment's font and every roster
    and nothing this file can measure. What gives instead, in order, is the name pill (it shrinks
    to an ellipsis), then the brand's text (the same), and never the tabs or the logo, because a

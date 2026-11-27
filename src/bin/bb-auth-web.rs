@@ -36181,9 +36181,6 @@ mod tests {
     /// because a panel's floor was its trigger's width, and the account page's trigger carries a
     /// longer word than the console's name pill. One declared width, capped to the viewport, is
     /// the fix, so this asserts the **absence** of `min-width` as much as the presence of `width`.
-    ///
-    /// Red until the coder moves the breakpoint and scopes the give: `admin.css` breaks at 941px,
-    /// has no `min-width:884px` block, and leaves `nav.acct` shrinking in proportion.
     #[test]
     fn the_bar_stays_one_row_at_every_width() {
         let scoped = css_scoped(CSS);
