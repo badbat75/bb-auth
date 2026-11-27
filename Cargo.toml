@@ -138,6 +138,8 @@ strip = true
 # preflight scripts/deploy.sh runs and only when that preflight passes.
 [package.metadata.deb]
 maintainer = "Emiliano De Simoni <emiliano.desimoni@outlook.com>"
+# Shown in /usr/share/doc/<pkg>/copyright; without it cargo-deb writes "Copyright information missing".
+copyright = "2026, Emiliano De Simoni"
 section = "admin"
 priority = "optional"
 # There is no variant-less package: each variant below replaces this list.

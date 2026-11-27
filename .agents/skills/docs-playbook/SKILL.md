@@ -107,7 +107,3 @@ Rules are in `AGENTS.md`. Format of this file: `AGENTS.md`, under "Skills".
 - An area's "N checks" in `e2e/README.md` goes stale by a **factor**, not by one: each check
   inside a walk over widths × languages × names multiplies (the row said 74 where the run
   reported 379). A green suite is no evidence about the number; only the summary line is.
-- README.md ("a server-rendered admin GUI that needs no JavaScript") and `e2e/README.md` ("no
-  page needing JavaScript") both contradict `AGENTS.md`'s "JavaScript is used sparingly" and
-  the two scripts (`SETTINGS_ONCHANGE`, `COPY_SCRIPT`). Found 2026-11-27, unfixed: it is not a
-  step-19 fact, so a bar edit left it alone.

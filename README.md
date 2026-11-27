@@ -891,7 +891,7 @@ The gate records what it has answered, as JSON, one object per line, at
 `BB_AUTH_AUDIT_FILE` (default `/var/log/bb-auth/audit.jsonl`; **empty turns it off**).
 `bb-auth-web`'s **Audit** tab reads that file back: newest first, with a filter box, a
 credential filter, an outcome filter and a period, all of them in the query string, so the
-page needs no JavaScript, survives a language change and can be bookmarked. Refresh is a link
+page works with scripting off, survives a language change and can be bookmarked. Refresh is a link
 to the same address, because the file is read on every request. The times are shown in UTC,
 in the host's own zone, or in one you name (`Europe/Rome`, `+02:00`), chosen in the same row
 of controls and remembered per browser; the zones come from the host's database, so a host

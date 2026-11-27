@@ -24,6 +24,12 @@ Versions are the crate's (`Cargo.toml`); packages add a Debian revision
 
 Builds say 1.99.10 and their commit until the next release (plan W11).
 
+### Package copyright
+
+The three `.deb` packages now carry `Copyright 2026, Emiliano De Simoni` in
+`/usr/share/doc/<pkg>/copyright` (`copyright` in `[package.metadata.deb]`), where cargo-deb wrote
+"Copyright information missing". Packaging metadata only; the cookie format is unchanged.
+
 ## 1.99.10 (2026-11-27, second release candidate of 2.0.0)
 
 **Released on 2026-11-27 as `v1.99.10`, the second release candidate of 2.0.0**, by the user's
