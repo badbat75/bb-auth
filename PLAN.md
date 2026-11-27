@@ -80,42 +80,11 @@ process that writes both files, so two gaps found the same day are closed **firs
 GUI is opened to anyone who is not an administrator: `bb-auth-web` can read the HMAC key, and it
 believes `X-Auth-Email` from any local process. The design is `docs/ARCHITECTURE.md` §13.
 
-### 24. The tests move out of the four main source files
+### 25. The fourth release candidate, 1.99.12
 
-Covers: the user's request of 2026-11-27, after step 23. Each target keeps its unit tests in the
-same file as its code (`src/lib.rs`, `src/bin/bb-auth.rs`, `src/bin/bb-auth-adm.rs`,
-`src/bin/bb-auth-web.rs`), so an edit to the code also rebuilds the tests' codegen units (about
-11 MB for the GUI, §13.38). The tests move to files of their own, in all four targets (the
-user's choice). For the GUI this is §13.38's slices S1 and S2 and nothing past them; the rest of
-the split stays dropped.
+Covers: the user's request of 2026-11-27 to carry step 25 (the GUI and the library split into
+modules, now built, §13.39) to its end and then cut a fourth release candidate.
 
-- The architect extends §13.38 to the other three targets: the layout (Cargo's
-  `src/bin/<name>/main.rs` or a `#[path]` module), what moves, the paths that move with it
-  (`include_str!`, tests that read source files), and how `AGENTS.md` says where things live.
-- Done when: in each target the tests are a pure move (proved by §13.38's word-multiset diff),
-  every test still passes with the same counts per target, clippy, fmt and `cargo doc --no-deps`
-  are clean, `node e2e/run.js` is green, `scripts/package.sh` still builds the three packages, the
-  GUI's rebuild after a page edit is timed against §13.38's 0.72 s and 1.63 s, and `AGENTS.md`,
-  the playbooks and `e2e/README.md` name the new paths.
-
-### 25. The GUI and the library are split into modules, for manageability
-
-Covers: the user's request of 2026-11-27, after step 24. `src/bin/bb-auth-web/main.rs` keeps
-about 15,800 lines of code and `src/lib.rs` about 7,500 once their tests are out. The goal is
-manageability for people and for the agents, not build speed (§13.38 measured that a split
-saves about a second). The user approved going to the end of this step without stopping, then
-a fourth release candidate.
-
-- The architect revises §13.38 for this goal and adds the library: the GUI by area (routing and
-  responses, the `K` table, the shared layout and lists, each page family, the self-service page,
-  the writes), the library by the shared files it already describes (the access file in two
-  parts, reading and deciding, editing and writing; the settings file; the audit file; the
-  presentation contract; the shared response rules), and the gate stays one file. It must keep
-  `AGENTS.md`'s invariant that the library is the shared files and nothing else, and name what
-  `AGENTS.md` and rustdoc must say afterwards.
-- Done when: each slice is a pure move (the word-multiset diff), every test passes with the same
-  counts, clippy, fmt and `cargo doc --no-deps` are clean, `node e2e/run.js` is green, the docs
-  name the new layout, and then the release below is out.
-- Then the fourth release candidate, as the user asked on 2026-11-27: version 1.99.12, its
-  CHANGELOG heading, the full board on main, the packages, the deploy to rpi-01, the push, the
-  `v1.99.12` tag and a GitHub pre-release (1.0.0 stays Latest), as for 1.99.11.
+- Done when: version 1.99.12, its CHANGELOG heading, the full board on main, the packages, the
+  deploy to rpi-01, the push, the `v1.99.12` tag and a GitHub pre-release (1.0.0 stays Latest),
+  as for 1.99.11.

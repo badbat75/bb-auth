@@ -21,6 +21,13 @@
 //! byte for byte. Validate-before-write, atomic replace, mode and owner preserved: one
 //! implementation, here.
 //!
+//! The crate root is a list of **private modules**, one per shared file (`access`,
+//! `access_edit`, `settings`, `settings_refusal`, `audit`) beside the presentation contract
+//! (`presentation`) and the shared response rules (`response`). Each opens `use crate::*;`,
+//! and their items are re-exported flat, so every path is still `bb_auth_core::X` and
+//! `grep -rn "fn name" src/` still finds any item. The gate's code is not here: it is one
+//! file, `src/bin/bb-auth/main.rs`, read top to bottom.
+//!
 //! # Two files, and the line between them
 //!
 //! The access file answers **who reaches what**. The settings file holds the handful of

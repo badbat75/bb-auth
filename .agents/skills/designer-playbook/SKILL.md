@@ -9,8 +9,9 @@ Rules are in `AGENTS.md`. Format of this file: `AGENTS.md`, under "Skills".
 
 - Render the current pages with `node e2e/shots.js <scene-filter>` from the repo root; screenshots land in
   `e2e/artifacts/visual/{light,dark}/`. The full walk is long, so always pass a filter.
-- The self-service page is `/account/` in `src/bin/bb-auth-web.rs` (`handle_account`, `account_key_forms`,
-  `bearer_reveal`); its CSS is under `.selfserve` in `src/assets/admin.css`.
+- The self-service page is `/account/` in `src/bin/bb-auth-web/` (`handle_account` in `account.rs`,
+  the key rows in `account_keys.rs`, the reveal-once bearer in `writes.rs`'s `bearer_reveal`); its
+  CSS is under `.selfserve` in `src/assets/admin.css`.
 - The console's `403` (a non-administrator on `/admin/`) is the `forbidden` scene of `shots.js`.
 - A confirmation with no JavaScript is a GET page with a POST form on it (the console's `page_confirm`).
 - `shots.js` scenes for the account page: `account`, `account-menu`, `account-new`, `account-error`, `account-rm`.
@@ -43,7 +44,7 @@ Rules are in `AGENTS.md`. Format of this file: `AGENTS.md`, under "Skills".
 - To measure a CSS change without a server: `setContent` a minimal page with the three asset files
   inlined plus the delta, at 320/360/1280, and read `scrollWidth` and `getBoundingClientRect()`
   (example: `/tmp/d5g/m.js`).
-- Before proposing a new helper or rule, grep `bb-auth-web.rs` for a console one with a `View`
+- Before proposing a new helper or rule, grep `src/bin/bb-auth-web/` for a console one with a `View`
   argument: the account page copies those because it has no `View`, so the fix is a `View`-free
   core (`form_shell_at`, `page_confirm_at` are the precedent), not a third copy.
 - A mockup of a whole account flow with no server: `/tmp/d5b/gen.js` writes pages from the real CSS and a

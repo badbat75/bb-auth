@@ -24,6 +24,11 @@ Versions are the crate's (`Cargo.toml`); packages add a Debian revision
 
 Builds say 1.99.11 and their commit until the next release (plan W11).
 
+* **The tree is split into modules, with no behaviour change.** Every target is `main.rs` (the
+  library, its crate root) beside one module per area, the library's per shared file, and the
+  tests are one topic file per banner beside `tests.rs` (docs/ARCHITECTURE.md §13.39). No cookie,
+  file format, endpoint, page or message changed, so an upgrade logs nobody out.
+
 ## 1.99.11 (2026-11-27, third release candidate of 2.0.0)
 
 **Released on 2026-11-27 as `v1.99.11`, the third release candidate of 2.0.0**, by the user's

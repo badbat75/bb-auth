@@ -30,6 +30,23 @@ Rules are in `AGENTS.md`. Format of this file: `AGENTS.md`, under "Skills".
   `BB_AUTH_WEB_LISTEN=127.0.0.1:18091`. A unit test proves the parser; only the run proves the
   fatal path (exit 1, message naming the variable) and what the banner says.
 
+- `docs/ARCHITECTURE.md` §3 is the **current-state** file table, and each row carries UI facts in
+  prose beside the paths (the tab count, the bar's breakpoint, the script policy). When a code move
+  re-points a row, re-check those facts against `AGENTS.md` in the same edit: the row's prose is
+  copied forward from the previous rewrite and drifts silently (it said **four** tabs, 800px and
+  "no page needs JavaScript" long after the five tabs, the 883px bar and "JavaScript used
+  sparingly" shipped). `AGENTS.md` and the code win; §13's records do not.
+- Prose in this repo uses a typographic apostrophe (’), not `'`. The `edit` tool normalizes the
+  variant, so an `oldString` typed with `'` matches; a `python3` string compare does **not**, so
+  use the edit tool, or a regex with `.s`, for anything containing an apostrophe.
+- A docs run inside a code move (a plan step whose "Done when" is the §13.39 §8 word-multiset and
+  punctuation diff over `src/**/*.rs`) has to keep its own prose **out of that count**, and doc
+  comments are not exempt: a `//!` paragraph of 80 words moves the word list by 80 and the
+  bracket/backtick/hash/exclamation multiset by 22 backticks and 7 `!`. Show it by attribution
+  instead: no word removed, and every added word present on an added comment line
+  (`git diff -U0 -- src | grep '^+' | sed -E 's/^\+\s*(\/\/[!]?|\/\/|\*)\s*//' | tr -cs 'A-Za-z0-9_' '\n'`
+  as the whitelist). That is why docs prose belongs in Markdown where the check can see it, and a
+  doc comment is written once, not paraphrased in three files.
 - The CHANGELOG's released sections (`## 1.99.8 (…)`) are the record of that release. When
   unreleased work undoes a claim one of them makes, say so in a new `###` section under
   `## Unreleased` and name the release it replaces ("replacing the 1.99.8 compromise"): never
@@ -62,6 +79,11 @@ Rules are in `AGENTS.md`. Format of this file: `AGENTS.md`, under "Skills".
   refused as outside base `https://host`. So a documented catch-all is `https://host/*`, and a
   recipe that runs `scope add … --user X` needs `user add X` first, since a name not in the
   roster aborts that command.
+- `cargo test --bin bb-auth-web` with the **default** thread count is flaky on
+  `whoami_with_no_answer_changes_nothing_within_the_bound` (a silent fake intake, whose bound is a
+  client timeout): a full run reports 343 + 1 failed, the same test alone passes in 0.5 s, and
+  `--test-threads=4` gives the clean 344 in 14 s. Run the count that way before reporting it, and
+  never "fix" a green-alone test as though it were the docs' fault.
 - `npx markdownlint-cli2 "**/*.md" "#target" "#dist" "#e2e/node_modules"` is **not clean**: it
   reports ~22 pre-existing MD041 and MD032 errors in the `.agents/`, `.claude/` and `.opencode/`
   skill and agent files, because MD041 fires on their YAML frontmatter. Judge the run by whether

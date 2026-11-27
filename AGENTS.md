@@ -51,7 +51,11 @@ process cannot re-read its own environment.
 
 One crate, four targets, and the split is load-bearing:
 
-- **[src/lib.rs](src/lib.rs)** (`bb_auth_core`): **the files the programs share**. The
+- **[src/lib.rs](src/lib.rs)** (`bb_auth_core`) is the crate root, with **one private module
+  beside it per shared file** (`access`, `access_edit`, `settings`, `settings_refusal`,
+  `audit`, `presentation`, `response`): each opens `use crate::*;` and its items are
+  re-exported flat, so every path stays `bb_auth_core::X`. Root and modules together are
+  **the files the programs share**. The
   access file above all: its schema, its parser, the URL matcher, the two-level resolution
   (`Access::resolve`), the grant model (`decide` / `decide_api_key`), and how one is *edited
   and written* (`open_access_file`, `AccessWrite`, the document mutations). And
@@ -69,20 +73,22 @@ One crate, four targets, and the split is load-bearing:
   surfaces drift apart one edit at a time and nobody working inside either file can see it.
   What is *not* there is each program's **arrangement** of those components. Everything
   more than one program must agree on, byte for byte.
-- **[src/bin/bb-auth.rs](src/bin/bb-auth.rs)** — **the gate**, and everything the access file has no
+- **[src/bin/bb-auth/main.rs](src/bin/bb-auth/main.rs)** — **the gate**, and everything the access file has no
   opinion about: HTTP, the session cookie, id_token validation, the nginx contract, and the
   four pages it serves, and all four are templates in [src/assets/](src/assets/) whose
   `__BB_*__` placeholders `render_page` fills: the sign-in page, the social callback, the
   refusal page a `403` lands on and the error page a failed `/auth/session` lands on. A page
   is HTML, and HTML is edited, diffed and reviewed as HTML; the two small ones were built in a
   `format!` until somebody had to change one. Still **one file**
-  (about 8,000 lines), still read top to bottom. The GUI is about 40,300 and is navigated by
-  its section order rather than by that slogan.
-- **[src/bin/bb-auth-adm.rs](src/bin/bb-auth-adm.rs)** — the access-file admin CLI: CRUD over
+  (about 4,600 lines, measured 2026-11-27), still read top to bottom, with its tests beside it
+  in [src/bin/bb-auth/tests.rs](src/bin/bb-auth/tests.rs).
+- **[src/bin/bb-auth-adm/main.rs](src/bin/bb-auth-adm/main.rs)** — the access-file admin CLI: CRUD over
   `applications` / `scopes` / `user_groups` / `denied` / `users` / `api_keys`, key minting,
   and `can EMAIL URL` (would this credential get in?). It links the library, none of the gate.
-- **[src/bin/bb-auth-web.rs](src/bin/bb-auth-web.rs)** — the access-file admin GUI
-  (server-rendered, `maud`): the same CRUD as the CLI, made **only** through the library's
+- **[src/bin/bb-auth-web/](src/bin/bb-auth-web/)** — the access-file admin GUI
+  (server-rendered, `maud`), **`main.rs` plus one module per area**: the table in
+  docs/ARCHITECTURE.md §13.39 §3 lists each file and what it owns, and that is where a change
+  is looked for. The GUI is the same CRUD as the CLI, made **only** through the library's
   editing core, plus a **System settings** page over the settings file, in that file's own four
   sections: what the gate answers with, what the audit records and for how long, who
   administers this, and how the pages look (the last one being the gate's pages and the
@@ -350,6 +356,12 @@ crate root, the claim→header derivation on `ProfileClaim` and the attribute→
 Cognito flow the sign-in page runs on `LOGIN_HTML` and the OAuth leg on `CALLBACK_HTML`, and
 the palette's four arms and what an override may redefine on `THEME_CSS` (the file itself,
 [src/assets/theme.css](src/assets/theme.css)).
+Every target is `main.rs` (the library, its crate root) beside one module per area, one per
+shared file in the library, and each module opens `use crate::*;` with its items re-exported
+flat, so a path stays `bb_auth_core::X`. To find a symbol, `grep -rn "fn name" src/`: one
+tree, no path to remember. To add one, put it in the module of the area it belongs to; a new
+module is a new shared file and needs the argument in the invariant
+"The library is the shared files".
 Don't copy one into the other; when they disagree, the code wins. Rustdoc must stay
 warning-free — a broken intra-doc link is the cheapest rot detector this repo has, and it
 now spans two crates (a gate doc pointing at a moved type must be re-pointed, not
@@ -367,10 +379,12 @@ This repo is developed on Windows but the artifact is a Linux/aarch64 binary.
 
 ```powershell
 # Tests: unit tests in all four targets, run on the host, no network needed. The access
-# file and the writers (src/lib.rs), the gate including its token verifier and its router
-# over a real socket (src/bin/bb-auth.rs), the CLI's argument grammar (src/bin/bb-auth-adm.rs),
+# file and the writers (src/tests.rs, and one topic file beside it per test banner of the
+# library), the gate including its token verifier and its router over a real socket
+# (src/bin/bb-auth/tests.rs), the CLI's argument grammar (src/bin/bb-auth-adm/tests.rs),
 # and the GUI including the tests that drive it over a real socket, the console's and the
-# self-service page's alike (src/bin/bb-auth-web.rs). A handful are
+# self-service page's alike (src/bin/bb-auth-web/tests.rs, and one topic file beside it per
+# banner). A handful are
 # cfg(unix) (the SIGHUP reload's fail-soft, the writer's mode preservation, the audit file's
 # own mode) and therefore run on Linux, never on the development host (run them under WSL
 # before a release).
@@ -527,6 +541,11 @@ is fatal on failure, so reaching the `listening on …` line proves the fetch, t
 - **Comments and docs explain *why*, not *what***, in full sentences. A comment that restates
   the line below it is noise; a comment that records the reason a rule exists is why this
   codebase can be changed safely a year later.
+- **Name the module, not a line count.** Every target is `main.rs` (the library, its crate
+  root) beside one module per area, one per shared file in the library, each opening
+  `use crate::*;`, so to find a symbol run `grep -rn "fn name" src/` over the whole tree,
+  never one file at a time, and a new item goes in the module of the area it belongs to.
+  A number of lines is not a location, and a file's size is not a rule.
 - **Do not introduce new em-dashes.** Existing prose uses them freely and is left alone, but
   anything written from now on uses `:` for an apposition, `;` between two independent
   clauses, `,` for an aside, or parentheses. The sanctioned exception is a `—` that is *data*
@@ -670,12 +689,17 @@ section under-read itself by a fifth, and two of the seven are lockout-class.
   requires those to agree. What stays in a tool is what has an
   operator: flags, warnings, and the wording of a verdict. HTTP, the cookie, the JWT,
   the env, the nginx contract and the pages themselves are the **gate's**, and stay in
-  `src/bin/bb-auth.rs` and `src/assets/` — which is still one file, read top to bottom, plus
-  the four templates it fills. Do not move gate code into the library to "share" it
+  `src/bin/bb-auth/main.rs` and `src/assets/` — which is still one file, read top to bottom,
+  plus the four templates it fills. Do not move gate code into the library to "share" it
   with the CLI; the CLI has no business with any of it. The two authorization functions in
-  `bb-auth.rs` (`authorize`, `bearer_apikey`) are thin wrappers that add the log line
+  the gate (`authorize`, `bearer_apikey`) are thin wrappers that add the log line
   and the wall clock to the library's decision — keep them thin, and keep the rule in the
   library, or `bb-auth-adm can` starts answering a different question from the gate.
+  **A shared file that is not one of the existing modules is a new module beside the crate
+  root, and the argument above is the sentence that introduces it**: the module list *is*
+  the list of shared files, so a module is added when a file more than one program reads
+  gains an opinion, never for tidiness, and the tests beside it are the matching
+  `src/tests/<topic>.rs`.
 
 - **No editor may write a file the gate would reject.** Every mutation is
   serialized, re-parsed, and run through `compile_access` — the gate's own parser, on the
@@ -1567,7 +1591,8 @@ without a test that failed first is not done. Tests never touch real systems or 
 In the docs, keep what was measured, read in a source and assumed apart. Mark guesses as guesses.
 
 **Displayed text.** Text the admin GUI shows goes through the `K` translation table in
-`src/bin/bb-auth-web.rs`, and the pages' text lives in `src/assets/*.html`, never inline in logic. Logic
+`src/bin/bb-auth-web/i18n.rs`, whose strings are in `src/bin/bb-auth-web/k_text.rs`, and the
+pages' text lives in `src/assets/*.html`, never inline in logic. Logic
 must not depend on that text.
 
 ## Actions with real effects

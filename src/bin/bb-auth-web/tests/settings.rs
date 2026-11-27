@@ -370,11 +370,11 @@ fn unescape(src: &str) -> String {
 /// The Italian of every arm of `fn t`, with the keys that arm answers for.
 ///
 /// `K` has no list of its variants and none is added for a test, so the table is read
-/// where it is written: this file's own source, from the signature of `fn t` to the first
-/// brace at column 0 (rustfmt indents every inner block, so that brace closes the function),
-/// arm by arm. Each arm's third argument is the Italian. An arm that answers for several
-/// keys is reported under all of them, so a fault in a shared string names every key that
-/// shows it (§13.31 §10a).
+/// where it is written: `k_text.rs`, one directory up from this topic file, from the
+/// signature of `fn t` to the first brace at column 0 (rustfmt indents every inner
+/// block, so that brace closes the function), arm by arm. Each arm's third argument is
+/// the Italian. An arm that answers for several keys is reported under all of them, so a
+/// fault in a shared string names every key that shows it (§13.31 §10a).
 fn italian_k_strings() -> Vec<(String, String)> {
     const SRC: &str = include_str!("../k_text.rs");
     const HEAD: &str = "fn t(lang: Lang, key: K) -> &'static str {";

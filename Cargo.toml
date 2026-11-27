@@ -7,7 +7,7 @@ license = "AGPL-3.0-or-later"
 
 # The access file — schema, parser, URL matcher, grant model. The ONE thing the gate and
 # the admin CLI must agree on, so there is one implementation of it and both link this.
-# Everything else about the gate stays in src/bin/bb-auth.rs. Named `bb_auth_core` rather than
+# Everything else about the gate stays in src/bin/bb-auth/main.rs. Named `bb_auth_core` rather than
 # `bb_auth` because a lib and a bin with the same name collide in `cargo doc`.
 [lib]
 name = "bb_auth_core"
@@ -35,7 +35,7 @@ path = "src/bin/bb-auth-web/main.rs"
 # The one opt-in: the browser suite's harness (e2e/lib/server.js) builds bb-auth-web with this
 # so the process can be pointed at the fake Cognito of e2e/lib/cognito.js, which is a plain-HTTP
 # server on loopback and cannot be named through `gate.issuer` (§13.22). Deliberately NOT in
-# `default`: the switch is read by nothing a deployment builds, `bb-auth-web.rs` refuses to
+# `default`: the switch is read by nothing a deployment builds, `bb-auth-web` refuses to
 # compile it in a release, and scripts/package.sh refuses an artifact that carries the variable's
 # bytes. docs/ARCHITECTURE.md §13.24.
 [features]

@@ -1,6 +1,6 @@
 # bb-auth-web E2E suite
 
-Browser-level tests for the admin GUI (`src/bin/bb-auth-web.rs`), driven through a real
+Browser-level tests for the admin GUI (`src/bin/bb-auth-web/`), driven through a real
 Chromium so the contract is tested where it actually holds: pages that work with scripting off
 wherever that costs little, PRG on every mutation, `rev` optimistic locking, the reveal-once
 bearer, and the bilingual copy. The Rust unit tests pin the handlers; this suite pins what a

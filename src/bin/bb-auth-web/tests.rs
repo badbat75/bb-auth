@@ -1401,7 +1401,7 @@ const DELETE_CLOSE_IT: &str = "Questo browser resta connesso finché la sessione
 /// two constants are what the programs must agree on, and a builder that escaped the `?` and
 /// the `=` wrongly would satisfy a test that re-encoded them the same way. This is also the
 /// `rd` the gate's own pin decodes
-/// (`a_logout_with_the_deletion_rd_clears_and_lands_on_the_notice`, `src/bin/bb-auth.rs`), so
+/// (`a_logout_with_the_deletion_rd_clears_and_lands_on_the_notice`, `src/bin/bb-auth/tests.rs`), so
 /// the two tests meet in the middle of the wire.
 const DELETE_LOGOUT_LOCATION: &str = "/auth/logout?rd=%2Fauth%2Flogin%3Fnotice%3Daccount-deleted";
 

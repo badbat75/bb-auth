@@ -16,6 +16,19 @@ Rules are in `AGENTS.md`. Format of this file: `AGENTS.md`, under "Skills".
   touch: the word-multiset check then lists exactly the new list lines' words (for 24-1: `adm auth
   bb bin include_str main rs tests`) and `four`. Run `cargo fmt` twice; check `cargo metadata
   --no-deps` shows four targets (a stray `src/bin/tests.rs` would be a fifth binary).
+- A step 25 module split (docs/ARCHITECTURE.md §13.39 §7), one module per slice: `command grep -n`
+  both ends, write `use crate::*;`, a blank line and `sed -n 'A,Bp'` of the root into
+  `src/<module>.rs` (or `src/bin/<tool>/<module>.rs`), delete the range from the root, add `mod x;`
+  to the `mod` block and `use x::*;` (`pub use` in the library) to the glob block, then work
+  through the §13.39 §5 visibility table until its **five builds** are clean in that order
+  (`build`, `test --no-run`, `test --no-run --features e2e-fake-cognito --bin bb-auth-web`,
+  `doc --no-deps`, `clippy --all-targets`), then `cargo fmt` twice. A topic test file is the same
+  with `use super::*;`, and its only allowed fix is moving a helper the compiler cannot find,
+  unchanged, to the end of `tests.rs`. Never follow a compiler `help:` that renames to a similar
+  name, and never escape a bracket in a doc comment because rustdoc suggests it: both change code,
+  and the punctuation multiset of §13.39 §8.3 (a character class of six: open bracket, close
+  bracket, backtick, hash, exclamation) prints nothing while the tree is a pure move, so it
+  catches both.
 - A swept reference from `user_refs` is **marked**: a scope exclusion is `app/scope (excluded)`
   and the veto is `denied (excluded)`, both built from `EXCLUDED_REF`. `remove_user`
   **rewrites** an exclusion and the veto to the row's primary email (it drops them only for a
@@ -206,7 +219,9 @@ Rules are in `AGENTS.md`. Format of this file: `AGENTS.md`, under "Skills".
   word diff**, because `.` and `/` are word separators and the empty tokens are filtered out: the
   paths are checked by reading the lines. `pub(crate)` is invisible to the word diff (`pub`,
   `crate` are filtered) and to §13.39 §8.3's punctuation multiset (no parentheses in `[]\`#!`);
-  that punctuation check is what catches an escaped `[` in a moved doc comment.
+  that punctuation check is what catches an escaped open bracket in a moved doc comment. (Spell
+  those characters as words here: a literal backtick inside a code span is the MD038 this file's
+  one lint error used to be.)
 - A new `Config` field breaks the test module's `cfg_for` struct literal (the only one). Check the
   staged test first: when the staged test reads the new field it has usually added the line itself
   (8b-3's `account_logout_url`), and the task is clear. When it has not and the task forbids editing

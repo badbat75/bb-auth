@@ -57,8 +57,17 @@ Rules are in `AGENTS.md`. Format of this file: `AGENTS.md`, under "Skills".
   `panic!("PROBE\n{}", out.join("\n"))`, run it with `-- --nocapture`, then delete it. Cheaper than
   rewriting the real test with soft asserts and reverting it, and it shows which markings are
   **already** green, so the coder is not sent after a harness bug.
-- A test that walks this file's **own source** (`include_str!("bb-auth-web.rs")`) to read `fn t`'s
-  arms must match `=> m(`, not `=> m(lang, "`: rustfmt puts the two strings of a long arm on their
+- A test file lives beside the code it tests: `src/tests/<topic>.rs`, named after the library
+  module it covers (`access`, `access_edit`, `audit`, `presentation`, `settings`,
+  `settings_refusal`), declared as `mod <topic>;` in the block at the top of `src/tests.rs`; a
+  binary's are `src/bin/<tool>/tests/<topic>.rs` under the same shape. `tests.rs` opens
+  `use super::*;`, so a topic file inherits the crate's items and the helpers written in
+  `tests.rs`. A topic file is one directory deeper, so **every** path it reads with
+  `include_str!` needs one more `../` (a repo file: `../../AGENTS.md`; a source file of the same
+  target: `../k_text.rs`).
+- A test that reads a **source file's text** to walk `fn t`'s arms (`italian_k_strings`,
+  `include_str!("../k_text.rs")` from `src/bin/bb-auth-web/tests/settings.rs`) must match `=> m(`,
+  not `=> m(lang, "`: rustfmt puts the two strings of a long arm on their
   own lines, and the narrow pattern reads 231 of the 457 arms in silence. Assert the arm count
   against the `K` variant count, and read the literals with a real string-literal scanner plus an
   unescaper (rustfmt's `\` line continuation, `\"`, `\u{…}`), because the test compares words the
@@ -316,9 +325,9 @@ Rules are in `AGENTS.md`. Format of this file: `AGENTS.md`, under "Skills".
 - A long **given name** in the bar needs `gate.profile_claims: ['given_name']` written into the
   settings file: the header is read only where the deployment says the proxy fills it, so a walk
   that sends `X-Auth-Given-Name` alone measures the bar's easy case and passes on a broken layout.
-- The `admin.css` **field-measure** assertions (`input.f-*` `max-width`) live in `src/lib.rs`'s test
-  module (`the_header_shares_the_content_column`), not in `bb-auth-web`, because that test
-  already reads the stylesheet. To prove a new arm satisfiable without touching the
+- The `admin.css` **field-measure** assertions (`input.f-*` `max-width`) live in the library's
+  `src/tests/presentation.rs` (`the_header_shares_the_content_column`), not in `bb-auth-web`,
+  because that test already reads the stylesheet. To prove a new arm satisfiable without touching the
   repo's stylesheet, compile a replica of `without_comments`/`flat_rules`/`rules_named` in
   `/tmp/opencode` and run it against a `sed`-mutated copy of the CSS: red on the repo's file, green on
   the mutated one, neighbours still green.
@@ -327,7 +336,7 @@ Rules are in `AGENTS.md`. Format of this file: `AGENTS.md`, under "Skills".
 
 - A probe that injects a bogus backticked name into the rules text of
   `every_symbol_the_manual_names_still_exists` stays **green**: the probe line is in
-  `src/tests.rs`, which the walker reads, so the check finds its own literal. Assemble the name at
+  `src/tests/settings.rs`, which the walker reads, so the check finds its own literal. Assemble the name at
   run time, where no source spells it: `rules.replace("decide_api_key", &format!("{}z", "decide_api_key"))`.
 - §13.39 §8.1 pins the counts at **209 / 109 / 16 / 344** (346 with `e2e-fake-cognito`) at every step-25
   slice, so a slice that must hold them **cannot add a `#[test]`**: its failure paths go in the helper's
