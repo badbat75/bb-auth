@@ -251,6 +251,12 @@ Rules are in `AGENTS.md`. Format of this file: `AGENTS.md`, under "Skills".
   wrapped strip measures 76). Count the rows of the box that is **showing** (`getComputedStyle(el).display
   !== 'none'`): a `details` panel is a child of the bar too, and a five-row panel that hangs below
   the bar reads as a five-row bar.
+- Assert the bar's **height** beside its centre count, because the two blind spots differ: with
+  `.selfserve-brand` wrapping the name onto a second line the bar's children stay centred, so the
+  count says `1` while the bar is 58px (§13.34 §12a 2, measured). The heights a one-row bar measures
+  are 25px with no mark and 40px beside a 30px mark (`height:30px` plus 5px of padding), which is
+  why `barStaysOneRow` caps it at 40: the cap is a measured number, and a 30px mark is what
+  `routeLogo` answers.
 - Count a box's links by what **renders**, when the claim is about visibility:
   `document.querySelectorAll('nav.tabs a').length` counts the links inside a `display:none` strip
   (5, at every width), and the rows of a closed `details` are in the document as well. A rendered
@@ -274,6 +280,14 @@ Rules are in `AGENTS.md`. Format of this file: `AGENTS.md`, under "Skills".
   throws a CSP violation. For a text-ellipsis claim, read `scrollWidth` against `clientWidth`
   (`scrollWidth` past it is the ellipsis), and assert the bar's one row and `scrollWidth - clientWidth`
   of the document beside it, so a rule that bought the room by wrapping the bar cannot pass.
+- When the design prescribes the **stylesheet** edits, run that same proof twice in the copy: apply
+  the design's `admin.css` lines verbatim, then run the Rust stylesheet pins there (the stylesheets
+  are `include_str!`-embedded, and cargo tracks the asset as a build dependency, so the copy rebuilds
+  in seconds with `target/` rsynced) **and** the areas there. Green in the copy plus red in the repo
+  is the pair that says the test is red for the design's reason and not for a typo. The scratch
+  runner must take the repo root from `process.env` (`BB_REPO`), not from a hardcoded absolute path:
+  a runner that hardcodes it boots the **repo's** server, binary and CSS from inside the copy, and
+  the tell is a run byte-identical to the repo's.
 - A `shots.js` change is proved at the file level, since the runner asserts nothing: run the same
   scene twice, once with the scene that leaks before it and once alone, and compare the PNG's
   `md5sum` (a byte-identical pair is the fix, a pair that differs is the leak), then grep the log for
@@ -465,8 +479,14 @@ Rules are in `AGENTS.md`. Format of this file: `AGENTS.md`, under "Skills".
   `s.ui = { ...(s.ui || {}), brand_name: … }`.
 - `ui.logo_url` goes through `compile_asset_url`, which accepts **absolute https or a root-relative
   path and nothing else**: a `data:` logo in an e2e fixture is a startup refusal, not a broken image.
-  Use `/img/logo.png` — the 404 image is sized by its CSS box, which is the box the bar lays out, so
-  the geometry a one-row check measures is real.
+  And a root-relative path the suite does not answer is **not** sized by its CSS box: measured, an
+  `img alt=""` that fails to load is a **0x30 box** in Chromium (§13.34 §12a 3), so the brand's words
+  get the room the mark was meant to take, and every "is the name whole" check passes on a layout no
+  deployment shows. Answer the mark in the browser (`routeLogo`, `e2e/lib/harness.js`:
+  `context.route('**/img/logo.svg', …)` with a 120x36 SVG, so `.brand img` lays out 96x30). The
+  server cannot answer it: the origin is a TCP proxy onto the GUI's socket, and a path that is not a
+  GUI route comes back as the GUI's own `403`/`404`, never as bytes. Keep one scene of the broken
+  mark (`header-logo-broken`), which is the state §13.34 §12c is about.
 - Once the header's tab rows ride in the account panel, an unscoped `nav a.pill.on` or
   `nav a:not(.on)` is a **Playwright strict-mode violation** (the panel's rows are in the DOM while
   the panel is closed): scope the bar's strip as `header .bar > nav:not(.acct)`.

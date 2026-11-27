@@ -24,7 +24,7 @@
 
 const {
   doc, bytes, sha256, settings, writeSettings, api, submit, mainText,
-  openPreferences, barStaysOneRow, openBarMenu, menuIsOneSize, ACCT_MENU,
+  openPreferences, barStaysOneRow, openBarMenu, menuIsOneSize, ACCT_MENU, routeLogo,
   attr, text, count, prop,
 } = require('../lib/harness');
 const { PROFILE_HEADERS, profileSettingsBytes } = require('../lib/cognito');
@@ -712,18 +712,21 @@ async function run(ctx, t) {
   await page.setExtraHTTPHeaders({ 'X-Auth-Email': WHO });
   writeSettings(ctx, settingsBefore);
 
-  // The bar is one row here too, with the widest brand an operator can type. The logo is
-  // root-relative because `compile_asset_url` accepts no `data:` URL and this suite never
-  // reaches the network; a broken image is sized by its CSS box, which is the box laid out.
+  // The bar is one row here too, with the widest brand an operator can type. The mark is a path
+  // the **browser** answers (`routeLogo`), because the suite's server answers nothing that is not
+  // the GUI, and a mark that fails to load is a 0px-wide box: the words would get the room the
+  // mark was meant to take and the walk would measure a layout no deployment shows, which is the
+  // correction §13.34 §12c makes of the old comment here.
   const wideLook = settings(ctx);
   // The fixture carries no `ui` section at all (every page falls back to the built-in brand),
   // so this creates it rather than reaching into one.
   wideLook.ui = {
     ...(wideLook.ui || {}),
     brand_name: 'BadBat75 Operations Console',
-    logo_url: '/img/logo.png',
+    logo_url: '/img/logo.svg',
   };
   writeSettings(ctx, wideLook);
+  await routeLogo(page.context());
   await barStaysOneRow(t, page, ctx.origin, PAGE, 'account bar', false);
   writeSettings(ctx, settingsBefore);
 

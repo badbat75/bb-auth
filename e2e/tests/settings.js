@@ -13,6 +13,7 @@ const {
   bytes, doc, writeDoc, settings, settingsBytes, writeSettings,
   newPage, submit, mainText, formBytes, openPreferences, barStaysOneRow, barGeometry, headerLayout,
   openBarMenu, menuIsOpen, menuShape, menuIsOneSize, ACCT_MENU, NAV_MENU,
+  brandGeometry, namePillGeometry, brandWordsWhole, routeLogo,
   attr, text, count,
 } = require('../lib/harness');
 
@@ -273,7 +274,8 @@ async function brandStaysWhole(t, page, base) {
       t.check(`at ${width} ${lang}: the name "${name.word}" is not cut`, name.sw <= name.cw,
         `scrollWidth ${name.sw} past clientWidth ${name.cw}`);
       const g = await barGeometry(page);
-      t.eq(`at ${width} ${lang}: the bar is still one row`, [g.rows, g.kids > 1], [1, true]);
+      t.eq(`at ${width} ${lang}: the bar is one row, ${g.height}px tall`,
+        [g.rows, g.kids > 1, g.height <= 40], [1, true, true]);
       t.eq(`at ${width} ${lang}: the document does not scroll sideways`, g.sideways, 0);
     }
   }
@@ -284,20 +286,173 @@ async function brandStaysWhole(t, page, base) {
 }
 
 /**
- * The bar at the widths §13.34 §10 measured: 884, where the five tabs are still in the bar, and
- * 883, where they have moved into the ☰. A long brand, a logo and a long given name together are
- * the widest case the measurements name, and the Italian tab words are longer than the English
- * ones, so the bar's worst case is Italian. The three strings are the ones §10a wrote down
- * ("BadBat75 Estate Services" with a logo, and "Bartholomew-Alexander Montgomery"), because that
- * is the case the breakpoint was picked on: a longer brand than the one measured is a case no
- * measurement covers, and `.brand` is capped at `max-width:14rem`, so a name of more text than
- * that slot is cut at 1280 exactly as it is at 884, and "as wide as on a desktop" compares a box
- * the cap made, not one the bar made.
+ * The words survive a mark the server does not answer (§13.34 §12c): `logo_url` names a path
+ * nothing answers, its box is 0 wide, and the words are all the brand has. Three surfaces at the
+ * two narrowest widths, in English: the console as an administrator, the account page as its own
+ * person, and the console's `403` as a person who is not an administrator (the console's URL with
+ * a roster row that is not on `web.admins`).
  *
- * At 884 the brand's name is measured against its own width on a desktop, which is what the
- * breakpoint is measured **by**: `nav.acct{flex-shrink:100}` (§13.34 §10) is the rule that makes
- * the account end give the room the tag line used to absorb, and the name pill's floor of 128px
- * is the number the breakpoint was picked on.
+ * This is the shape the hidden-words mechanism shipped in: the words were taken out of the row by
+ * `position:absolute` "when a mark is present", and a mark that does not load is present, so the
+ * bar was left with no name at any width, not only on a phone. `position`, `clientWidth` and the
+ * text are read together for that reason: the box comparison alone saw nothing, because the
+ * 0-wide mark made the ellipsis.
+ *
+ * The last step is the answer §12d gives in its place, at 360 with a mark that **does** load
+ * (`routeLogo`): the mark computes `display:none` and the words are whole.
+ */
+async function brokenLogoKeepsTheName(t, ctx, look) {
+  const brand = 'BadBat75';
+  const broken = {
+    ...look,
+    ui: { ...(look.ui || {}), brand_name: brand, logo_url: '/img/logo.png' },
+  };
+  writeSettings(ctx, broken);
+  const context = await ctx.browser.newContext({ viewport: { width: 360, height: 800 } });
+  const page = await context.newPage();
+  try {
+    const surfaces = [
+      { at: `${ctx.base}/users`, email: 'admin@example.com', label: 'the console' },
+      { at: `${ctx.origin}/account/`, email: 'you@example.com', label: 'the account page' },
+      { at: `${ctx.base}/users`, email: 'you@example.com', label: "the non-administrator's 403" },
+    ];
+    for (const s of surfaces) {
+      await page.setExtraHTTPHeaders({ 'X-Auth-Email': s.email });
+      for (const w of [360, 320]) {
+        await page.setViewportSize({ width: w, height: 800 });
+        await page.goto(`${s.at}?lang=en`);
+        const g = await brandGeometry(page);
+        brandWordsWhole(t, brand, g, `${s.label} with a broken mark`, w);
+        const bar = await barGeometry(page);
+        t.eq(`${s.label} with a broken mark at ${w}: the bar is one row, ${bar.height}px tall`,
+          [bar.rows, bar.height <= 40], [1, true]);
+      }
+    }
+  } finally {
+    await context.close();
+  }
+  // The replacement mechanism, on a mark that answers: the phone hides the **mark**, and the
+  // words keep the slot.
+  const good = {
+    ...broken,
+    ui: { ...broken.ui, logo_url: '/img/logo.svg' },
+  };
+  writeSettings(ctx, good);
+  const marked = await ctx.browser.newContext({ viewport: { width: 360, height: 800 } });
+  await routeLogo(marked);
+  const page2 = await marked.newPage();
+  try {
+    await page2.setExtraHTTPHeaders({ 'X-Auth-Email': 'admin@example.com' });
+    await page2.goto(`${ctx.base}/users?lang=en`);
+    const g = await brandGeometry(page2);
+    t.eq('at 360 with a mark that loads: the mark gives way', g.mark && g.mark.display, 'none');
+    brandWordsWhole(t, brand, g, 'the console with a mark that loads', 360);
+  } finally {
+    await marked.close();
+    writeSettings(ctx, look);
+  }
+}
+
+/**
+ * The brand is whole where the bar has room (§13.34 §12e): "BadBat75 Operations Console" with a
+ * mark that loads, on the console at 1280 and 1024 in both languages, with the short given name
+ * and with the long one §10a measured. At each: the words are whole, the bar is one row of at
+ * most 40px with no sideways scroll, and the name pill is at the 128px floor. The floor is a
+ * measurement taken with the long name, so it is asserted with the long name; a short name makes
+ * a small pill and says nothing about the give.
+ *
+ * Then `/account/` at 1280 and 700 with "BadBat75 Estate Services" and the mark: whole name, bar
+ * at most 40px. The account page has no tabs, so it is the surface the long brand is whole on at
+ * every width (§13.34 §12g 2).
+ *
+ * A mark that does not load is not enough here: its box is 0 wide, the words get the room the
+ * mark was supposed to take, and every "is the name whole" assertion passes on a layout no
+ * deployment shows. The suite's server answers nothing that is not the GUI, so the browser
+ * answers the mark (`routeLogo`).
+ */
+async function brandHasRoom(t, ctx, look) {
+  const brand = 'BadBat75 Operations Console';
+  const wired = {
+    ...look,
+    gate: { ...(look.gate || {}), profile_claims: ['given_name'] },
+    ui: { ...(look.ui || {}), brand_name: brand, logo_url: '/img/logo.svg' },
+  };
+  writeSettings(ctx, wired);
+  for (const [given, who] of [
+    ['Ada', 'a short given name'],
+    ['Bartholomew-Alexander%20Montgomery', 'the long given name'],
+  ]) {
+    const context = await ctx.browser.newContext({
+      viewport: { width: 1280, height: 800 },
+      extraHTTPHeaders: { 'X-Auth-Email': 'admin@example.com', 'X-Auth-Given-Name': given },
+    });
+    await routeLogo(context);
+    const page = await context.newPage();
+    try {
+      for (const w of [1280, 1024]) {
+        for (const lang of ['en', 'it']) {
+          await page.setViewportSize({ width: w, height: 800 });
+          await page.goto(`${ctx.base}/users?lang=${lang}`);
+          const g = await brandGeometry(page);
+          brandWordsWhole(t, brand, g, `the console with ${who} in ${lang}`, w);
+          const bar = await barGeometry(page);
+          t.eq(`the console with ${who} in ${lang}: the bar is one row, ${bar.height}px, `
+            + 'no sideways scroll',
+            [bar.rows, bar.height <= 40, bar.sideways === 0], [1, true, true]);
+          if (who === 'the long given name') {
+            const pill = await namePillGeometry(page);
+            t.check(`the console at ${w} in ${lang} with ${who}: the name pill is at least 128px`,
+              !!pill && !!pill.pill && pill.pill.w >= 128, JSON.stringify(pill));
+          }
+        }
+      }
+    } finally {
+      await context.close();
+    }
+  }
+  // The account page, which has no tabs and so the widest cap of the three surfaces.
+  const estate = { ...wired, ui: { ...wired.ui, brand_name: 'BadBat75 Estate Services' } };
+  writeSettings(ctx, estate);
+  const acct = await ctx.browser.newContext({
+    viewport: { width: 1280, height: 800 },
+    extraHTTPHeaders: { 'X-Auth-Email': 'you@example.com' },
+  });
+  await routeLogo(acct);
+  const page = await acct.newPage();
+  try {
+    for (const w of [1280, 700]) {
+      await page.setViewportSize({ width: w, height: 800 });
+      await page.goto(`${ctx.origin}/account/?lang=en`);
+      const g = await brandGeometry(page);
+      brandWordsWhole(t, 'BadBat75 Estate Services', g, 'the account page', w);
+      const bar = await barGeometry(page);
+      t.eq(`the account page at ${w}: the bar is one row, ${bar.height}px tall`,
+        [bar.rows, bar.height <= 40], [1, true]);
+    }
+  } finally {
+    await acct.close();
+    writeSettings(ctx, look);
+  }
+}
+
+/**
+ * The bar at the widths §13.34 §10 measured: 884, where the five tabs are still in the bar, and
+ * 883, where they have moved into the ☰; plus 1280, the desktop reference the design's opening
+ * measurement is written from ("the name is cut at 118px of 224", "from 1400 down to 884"). A
+ * long brand, a logo and a long given name together are the widest case the measurements name,
+ * and the Italian tab words are longer than the English ones, so the bar's worst case is Italian.
+ * The three strings are the ones §10a wrote down ("BadBat75 Estate Services" with a logo, and
+ * "Bartholomew-Alexander Montgomery"), because that is the case the breakpoint was picked on.
+ *
+ * §13.34 §12 replaces the measurement this walk used to make. The old one compared the brand's
+ * box at 884 with its box at a desktop width, and a name the cap holds at both is equal at both
+ * while being cut at 884: **the equality is the ellipsis**. What is measured here instead is one
+ * box against its own text at one width (the words are whole: `scrollWidth` no greater than the
+ * box), and the name pill at the other end. The pill is the half the design hangs on, because the
+ * account end shrank **first** at 883 (`nav.acct{flex-shrink:100}`) and the brand was cut while
+ * the pill still had room to give: its floor of 128px, and 133px with this brand and name in
+ * Italian above the breakpoint (§13.34 §12b), is the number the breakpoint was picked on
+ * (§13.34 §10a), a measurement taken with this given name, so it is asserted with this name.
  *
  * `barStaysOneRow` counts the vertical centres of the bar's **children**, and a strip that wraps
  * inside its own `nav` leaves all of them centred on one line, so the wrap is invisible to
@@ -311,12 +466,12 @@ async function barAtTheWorstWidth(t, ctx, look) {
   const withName = JSON.parse(JSON.stringify(look));
   withName.gate = { ...(withName.gate || {}), profile_claims: ['given_name'] };
   // The fixture sets no `ui` section, so the widest case has to be written: the long brand and
-  // a logo are what the measurements name, in the spelling §10a measured (a brand the 14rem
-  // `.brand` cap can hold whole on a desktop, which is what the 884 check is measured against).
-  // The logo is root-relative, because `compile_asset_url` accepts no `data:` URL and a suite
-  // must not reach the network; a broken image is sized by its CSS box, which is the box the
-  // bar lays out.
-  withName.ui = { ...(withName.ui || {}), brand_name: 'BadBat75 Estate Services', logo_url: '/img/logo.png' };
+  // a mark are what the measurements name, in the spelling §10a measured. The mark is a path the
+  // **browser** answers (`routeLogo`), because the suite's server answers nothing that is not
+  // the GUI, and a mark that fails to load is a 0-wide box: the words get the room the mark was
+  // supposed to take, and every "is the name whole" assertion here would pass on a layout no
+  // deployment shows (§13.34 §12c).
+  withName.ui = { ...(withName.ui || {}), brand_name: 'BadBat75 Estate Services', logo_url: '/img/logo.svg' };
   writeSettings(ctx, withName);
   const context = await ctx.browser.newContext({
     viewport: { width: 884, height: 720 },
@@ -328,26 +483,16 @@ async function barAtTheWorstWidth(t, ctx, look) {
       'X-Auth-Given-Name': 'Bartholomew-Alexander%20Montgomery',
     },
   });
+  await routeLogo(context);
   const page = await context.newPage();
   try {
-    // The reference: the brand's name as wide as a desktop lays it out, in the language the
-    // bar's worst case is measured in. A name cut at 884 is a box narrower than this, so
-    // "as wide as here" is the promise, and `scrollWidth` past `clientWidth` is the ellipsis.
-    // The reference is checked to be whole first: the brand's slot is capped at `max-width:14rem`
-    // (§13.34 §10), so a brand wider than that is cut at 1280 as it is at 884, and comparing
-    // 884's box against a box the cap made measures nothing about the bar's give.
-    await page.setViewportSize({ width: 1280, height: 720 });
-    await page.goto(`${ctx.base}/users?lang=it`);
-    const desktop = await page.evaluate(() => {
-      const el = document.querySelector('header .brand .t');
-      return el
-        ? { sw: Math.round(el.scrollWidth), bw: Math.round(el.getBoundingClientRect().width) }
-        : { sw: 0, bw: 0 };
-    });
-    const desktopName = desktop.bw;
-    t.check(`the desktop bar lays the brand's name whole at ${desktopName}px`,
-      desktop.bw > 0 && desktop.sw <= desktop.bw, JSON.stringify(desktop));
-    for (const width of [884, 883]) {
+    // The widths the bar is widest at, in the language the bar is widest in. 884 and 883 are the
+    // breakpoint's own edge, where the five tabs are still in the bar (884) and where they are
+    // not (883); 1280 is the desktop reference the measurement §13.34 §12a opens with ("the name
+    // is cut at 118px of 224" at 1280, "from 1400 down to 884"). `brandHasRoom` is the walk that
+    // asserts the room at the desktop widths in both languages; here 1280 is the same case in the
+    // strings the breakpoint was picked on, so the cut the fix is about is measured in both.
+    for (const width of [1280, 884, 883]) {
       for (const lang of ['en', 'it']) {
         await page.setViewportSize({ width, height: 720 });
         await page.goto(`${ctx.base}/users?lang=${lang}`);
@@ -405,17 +550,38 @@ async function barAtTheWorstWidth(t, ctx, look) {
         t.eq(`at ${width} ${lang}: the document does not scroll sideways`, g.sideways, 0);
         t.check(`at ${width} ${lang}: the Sign out glyph is at most 24px`,
           Array.isArray(g.icon) && Math.max(...g.icon) <= 24, JSON.stringify(g.icon));
-        if (width === 884 && lang === 'it') {
-          // The width the breakpoint is measured by, in the language the bar is widest in: the
-          // brand's name is whole and as wide as the desktop lays it, and the name pill has not
-          // been squeezed under the 128px floor. Both are the account end's job
-          // (`nav.acct{flex-shrink:100}`, §13.34 §10), and neither is true when the brand and
-          // the pill shrink in proportion, which is what the tag line used to prevent.
-          t.check('at 884 it: the brand\'s name is whole and as wide as on a desktop',
-            Array.isArray(g.brand) && g.brand[0] <= g.brand[1] && g.brand[1] >= desktopName,
-            `name [scrollWidth ${g.brand && g.brand[0]}, box ${g.brand && g.brand[1]}] against \
-the desktop's ${desktopName}px`);
-          t.check('at 884 it: the name pill is at least 128px', g.pill >= 128, `${g.pill}px`);
+        // The widths the breakpoint is measured at, plus its desktop reference, in the language
+        // the bar is widest in. They promise different things, and the difference is §13.34 §12's
+        // arithmetic:
+        //
+        //  - 1280 is §12a's opening measurement: the 14rem cap leaves the words 118px beside the
+        //    mark with the bar's room standing empty, which is the fault the step is about. With
+        //    the bar's own budget as the cap, the words are whole here.
+        //  - 884, with the five tabs in the bar, is the tight case, and the design does **not**
+        //    promise the brand's words are whole there: the budget is the bar's content box at
+        //    884 less the 14rem the breakpoint was measured with, so "this brand is cut at 884"
+        //    is the design, not the fault. What the breakpoint rests on is the other end: the
+        //    name pill, whose smallest width above the breakpoint is 133px in Italian with this
+        //    given name (§13.34 §12b). That is the number to pin here, because the fix moves the
+        //    give onto the pill and a give that goes past the floor moves the breakpoint.
+        //  - 883, with the tabs in the ☰, is the loose case: the cap is `max(14rem,100% - 12.5rem)`,
+        //    which at 883 is roomier than this brand needs, so the words are whole and a cut is
+        //    the cap being a length of a brand again. Today it is cut at 118px of 191 **while the
+        //    pill stands over its floor**: the brand giving while the pill has room is the fault
+        //    §12 is about, and it is what these checks are red for.
+        if (lang === 'it') {
+          if (width === 884) {
+            t.check('at 884 it: the name pill stands at the 133px the breakpoint was measured on',
+              g.pill >= 133, `${g.pill}px`);
+          } else {
+            t.check(`at ${width} it: the brand's words are whole`,
+              Array.isArray(g.brand) && g.brand[1] > 0 && g.brand[0] <= g.brand[1],
+              `slot ${g.brand && g.brand[1]}px, words ${g.brand && g.brand[0]}px`);
+            if (width === 883) {
+              t.check('at 883 it: the name pill stands at its 128px floor',
+                g.pill >= 128, `${g.pill}px`);
+            }
+          }
         }
       }
     }
@@ -435,6 +601,16 @@ async function run(ctx, t) {
   // measurement was taken on (§13.34 §0). Later in this file the settings form writes a long
   // brand, and that state is walked by `barAtTheWorstWidth` at the widths the design named.
   await brandStaysWhole(t, page, ctx.base);
+  // The bar's room, at the widths the design says a long brand is whole at, with a mark the
+  // browser answers and the two given names the measurement names (§13.34 §12e). This writes a
+  // `ui` section and puts the file back, so it runs beside the built-in-look walk above and
+  // before the form walk, whose `rev` fingerprints the file's bytes.
+  await brandHasRoom(t, ctx, settings(ctx));
+  // A mark the server does not answer is the case the hidden-words mechanism surfaced in
+  // (§13.34 §12c): the mark's box is 0 wide, the words take the room the mark was meant to
+  // occupy, and the rule that hid the words "when a mark is present" hid them at 1280 as much as
+  // on a phone, because `position:absolute` is not a phone rule.
+  await brokenLogoKeepsTheName(t, ctx, settings(ctx));
   // `$$eval` is Playwright's, not JavaScript's eval: it runs this fixed function inside the
   // page over the matched elements, and nothing of it comes from the page under test.
   const openCount = () => page.$$eval('details.group', (ds) => ds.filter((d) => d.open).length);

@@ -5206,8 +5206,8 @@ fn top_bar(navn: Markup, brand: Markup, tabs: Markup, acct: Markup) -> Markup {
 /// One function because the mark and the name are one object on both surfaces: two call sites
 /// drawing the same pair is how a logo arrives in one bar and not the other, which is the drift
 /// this file keeps writing rules about. The `alt` is empty because the name beside the picture
-/// already says what it is, and it stays empty where the text is visually hidden on a phone
-/// (§4), since a reader is then the only one reading the name.
+/// already says what it is, and the words are on the row at every width now that a phone shows
+/// the words and not the mark (§13.34 §12c), so a reader hears the name once, from them.
 fn brand_block(name: &str, logo: Option<&str>, extra: &str) -> Markup {
     let cls = if extra.is_empty() {
         "brand".to_string()
@@ -32147,16 +32147,6 @@ mod tests {
             .clone()
     }
 
-    /// The declarations of the rule for `sel` inside the at-rule `at`.
-    fn scoped_rule(scoped: &[(String, String, String)], at: &str, sel: &str) -> String {
-        scoped
-            .iter()
-            .find(|(a, s, _)| a == at && s == sel)
-            .unwrap_or_else(|| panic!("admin.css has no rule for {sel} inside {at}"))
-            .2
-            .clone()
-    }
-
     /// The declarations of the rule inside at-rule `at` (`""` for the top level) whose selector
     /// list carries `sel` as one of its comma-parts, with a panic that says what is missing.
     ///
@@ -36171,10 +36161,13 @@ mod tests {
     /// fitting, and the tabs move into the ☰.
     ///
     /// The `@media(min-width:884px)` block is pinned with it, because it is what the breakpoint
-    /// is measured *by*: the tag line used to absorb the bar's shortfall inside the brand, and
-    /// with it gone the account end has to say so itself (`nav.acct{flex-shrink:100}`) above the
-    /// breakpoint, where the name pill's floor is 128px. Below it the ☰ regime keeps today's
-    /// proportional split, which is why the rule is scoped and not top level.
+    /// is measured *by*, and §13.34 §12d rewrote what is in it: the brand's slot takes
+    /// `flex-shrink:0` so a long name never costs the tabs their room, and the account end
+    /// carries the bar's give at the default rate. `nav.acct{flex-shrink:100}` used to sit there,
+    /// and a shrink factor is a multiplier, not a budget, so the account end gave 100 parts in
+    /// 101: the name pill lost the person's name at 883 while the brand's words were being cut
+    /// beside it, with the bar's own give unused. Below the breakpoint the ☰ regime keeps
+    /// proportional shrinking, which is why the rules are scoped and not top level.
     ///
     /// The panel is pinned here too, because §13.34 §0 measured what a floor did with no width:
     /// one rule produced a 230px panel on the console and a 286px panel on the account page,
@@ -36250,21 +36243,50 @@ mod tests {
              {navm}"
         );
 
-        // Above it, the account end is the bar's give, in its own block. Read with [`the_rule`]
-        // for the top level, whose `flex` shorthand needs its whitespace; the scoped reader is
-        // what sees inside an at-rule block.
+        // Above it, the bar's give, in its own block. §13.34 §12d: the brand's slot **never**
+        // shrinks, so the room the five tabs need is never taken from the deployment's name, and
+        // the account end carries the give at the default rate. The `nav.acct{flex-shrink:100}`
+        // that used to sit in this block is the bug this replaces: a shrink factor is a
+        // multiplier and not a budget, so the account end gave 100 parts in 101, and a long
+        // brand cost the name pill the person's name at 883 while the brand's words were being
+        // cut beside it. The rule is therefore an **absence**, because `flex-shrink:1` is the
+        // default: nothing in this block may name the account end's shrink at all.
+        //
+        // These rules are read with [`the_rule`] for the top level, whose `flex` shorthand needs
+        // its whitespace; the scoped reader is what sees inside an at-rule block.
         let at_desktop = "@media(min-width:884px)";
         assert!(
             scoped.iter().any(|(a, _, _)| a == at_desktop),
             "{at_desktop}: the give the tag line used to be is scoped to the widths the ☰ is not \
              in the bar: {media:?}"
         );
-        let acct_desktop = rule_named(&scoped, at_desktop, "nav.acct");
+        for (a, sel, body) in &scoped {
+            if a == at_desktop && sel.split(',').any(|p| p.trim() == "nav.acct") {
+                assert!(
+                    css_decl(body, "flex-shrink").is_none(),
+                    "{at_desktop}: the account end gives way at the default rate, so the brand is \
+                     never cut while the name pill has room left: {sel}: {body}"
+                );
+            }
+        }
+        let brand_desktop = rule_named(&scoped, at_desktop, ".brand");
         assert_eq!(
-            css_decl(&acct_desktop, "flex-shrink").as_deref(),
-            Some("100"),
-            "{at_desktop}: the account end gives way before the brand's name is cut: \
-             {acct_desktop}"
+            css_decl(&brand_desktop, "flex-shrink").as_deref(),
+            Some("0"),
+            "{at_desktop}: the brand's slot is the part of the bar that never gives: {brand_desktop}"
+        );
+        // Its cap is a **formula**, never the reading of one width: §13.34 §12a measured the tab
+        // strip at 334px in English and 359 in Italian against a brand cap of 224px, so the fixed
+        // part of the bar is 558px and the slot's box is `100% - 39.25rem`. At 884 that is 258px,
+        // the 2px of slack the measurement leaves; at 1280 it is 653px, the room this design stops
+        // spending a breakpoint over. A constant read off 884 is the number that cuts a name a
+        // wide bar has room to show.
+        let console_brand = rule_named(&scoped, at_desktop, ".bar:has(nav.tabs a) .brand");
+        assert_eq!(
+            css_decl(&console_brand, "max-width").as_deref(),
+            Some("calc(100%-39.25rem)"),
+            "{at_desktop}: the brand's slot is the bar's own width less what the tabs and the \
+             account end take: {console_brand}"
         );
         let acct = the_rule(CSS, "nav.acct").expect("admin.css styles the account end of the bar");
         assert!(
@@ -36333,6 +36355,14 @@ mod tests {
     /// shrinks with an ellipsis, then the brand's text; the tabs and the logo never shrink, and
     /// the identity is never hidden outright (the phone rule that did that hides the trigger
     /// now, because the name **is** the trigger).
+    ///
+    /// §13.34 §12 changes two of the numbers and swaps the phone's half. The brand's cap is a
+    /// `max()`, never the reading of one width: `14rem` is the floor (the longest name worth
+    /// reading) and `100% - 10.5rem` is what the narrowest bar that shows the tabs has left, so
+    /// a name that fits at 1280 is not cut at 884 by a constant somebody measured there. And
+    /// the phone hides the **mark**, not the words: the words are the name a reader hears, the
+    /// image has no `alt` to carry it, and a 0-wide broken image box made the ellipsis, which is
+    /// how the words ended up hidden at 1280 as much as at 320.
     #[test]
     fn the_bar_gives_room_by_shrinking_the_ellipsis_pieces() {
         let scoped = css_scoped(CSS);
@@ -36359,28 +36389,33 @@ mod tests {
             Some("0"),
             "the trigger ({sel}) is the bar's first give: {trigger}"
         );
+        // The brand's cap, in the form the design writes it: a floor and the room the bar has
+        // left, whichever is wider. `10.5rem` is the bar's own padding and gaps (32px) plus the
+        // mark's box (96px) rounded up, so the words are capped by the space the slot can
+        // actually take and not by a number read off one screenshot.
         let brand = top_rule(&scoped, ".brand");
         assert_eq!(
             css_decl(&brand, "max-width").as_deref(),
-            Some("14rem"),
-            "the brand is capped too: {brand}"
+            Some("max(14rem,100%-10.5rem)"),
+            "the brand's cap is a floor and the bar's room, not a constant: {brand}"
         );
         assert_eq!(
             css_decl(&brand, "min-width").as_deref(),
             Some("0"),
-            "{brand}"
+            "and a flex item with no `min-width` cannot shrink to it: {brand}"
         );
 
-        // The phone block: a tighter cap, and a logo that stands in for the brand's words.
+        // The phone block: a tighter cap on the name pill, and the mark gives way. The words stay
+        // on the row, because they are the deployment's name and there is no `alt` on the image
+        // to hand that name to a reader (§13.34 §12d, the user's option (a) of 2026-11-27).
         let at = "@media(max-width:640px)";
         trigger_cap(&scoped, at, "11rem");
-        let hidden = scoped_rule(&scoped, at, ".brand:has(img) .t");
-        for prop in ["position", "clip-path", "width"] {
-            assert!(
-                css_decl(&hidden, prop).is_some(),
-                "with a logo the brand's text is visually hidden by {prop}: {hidden}"
-            );
-        }
+        let mark = rule_named(&scoped, at, ".brand img");
+        assert_eq!(
+            css_decl(&mark, "display").as_deref(),
+            Some("none"),
+            "{at}: the mark gives way and the words stay: {mark}"
+        );
 
         // The rule that hid the identity on a phone hides the trigger outright now.
         for (a, sel, body) in &scoped {
@@ -36477,10 +36512,14 @@ mod tests {
         );
     }
 
-    /// §13.28 §4: with a mark in the bar the brand's words go, by the clip pattern `.vh` uses,
-    /// and **not** `display:none` or `visibility:hidden`: the words are the name a reader hears
-    /// while the image carries `alt=""`, so a rule that takes them out of the accessibility tree
-    /// takes the name away from the one technology the whole mechanism feeds.
+    /// §13.34 §12d and §12e, replacing §13.28 §4: the phone hides the deployment's **mark**, and
+    /// the brand's words stay on the row at every width. The words are the name a reader hears,
+    /// and the image carries `alt=""`, so the mechanism that hid them (`position:absolute` plus a
+    /// `clip-path`, the `.vh` pattern) took the name away from the one technology the whole
+    /// pattern feeds, and it was not a phone rule: `position:absolute` applies at 1280 too, so
+    /// a deployment with a logo had no brand name on the console at any width. The words are
+    /// therefore pinned **visible**: no rule that names them may set `position`, `clip-path` or
+    /// `display`, which is the claim, rather than one named property at one value.
     ///
     /// §13.34 §10 removes the tag line the 2026-11-26 review found left standing, so this pins
     /// the **absence** of a rule for it as much as the presence of the one for the name: a
@@ -36491,22 +36530,43 @@ mod tests {
     /// `margin-bottom:4px`, so a `gap` on the row stacks a second space between rows and the
     /// panel's rows stop reading as the one list they are.
     #[test]
-    fn the_words_hide_with_a_logo_and_the_panel_rows_need_no_gap() {
+    fn the_mark_gives_way_on_a_phone_and_the_panel_rows_need_no_gap() {
         let scoped = css_scoped(CSS);
-        let at = "@media(max-width:640px)";
-        let words = rule_named(&scoped, at, ".brand:has(img) .t");
-        for prop in ["position", "clip-path", "width"] {
-            assert!(
-                css_decl(&words, prop).is_some(),
-                "the brand's words are visually hidden by {prop}: {words}"
-            );
+
+        // The rule that hid the words is gone, at every width: a selector naming the words
+        // **because of** a mark is the mechanism, not a detail of it.
+        for (a, sel, _) in &scoped {
+            for part in sel.split(',') {
+                assert!(
+                    !part.contains(".brand:has(img)"),
+                    "{sel} in {a:?} hides the brand's words because a mark is present: that is \
+                     the mechanism §13.34 §12d deletes"
+                );
+            }
         }
-        for prop in ["display", "visibility"] {
-            assert!(
-                css_decl(&words, prop).is_none(),
-                "the words are hidden visually, not from the accessibility tree: {words}"
-            );
+
+        // Nothing that styles the words takes them out of the box, at any width. A word is
+        // hidden by *some* property, and which one is not the point, so the assertion is the
+        // absence of the three that do it.
+        for (a, sel, body) in &scoped {
+            if sel.split(',').any(|part| part.contains(".brand .t")) {
+                for prop in ["position", "clip-path", "display"] {
+                    assert!(
+                        css_decl(body, prop).is_none(),
+                        "{sel} in {a:?} sets {prop} on the brand's words, which is how they end \
+                         up standing alone under a mark: {body}"
+                    );
+                }
+            }
         }
+
+        // The mark gives way, and only on a phone (§13.34 §12d, the user's option (a)).
+        let mark = rule_named(&scoped, "@media(max-width:640px)", ".brand img");
+        assert_eq!(
+            css_decl(&mark, "display").as_deref(),
+            Some("none"),
+            "at 640px the bar shows the words and not the mark: {mark}"
+        );
 
         // No rule, at any width, names the tag line: `admin.css` styled `.brand .v` at the top
         // level and hid it under 641px, and both are the markup's own history now.
@@ -36526,6 +36586,36 @@ mod tests {
                     assert_eq!(
                         gap, "0",
                         "{sel} in {a} adds a second space between the panel's rows: {body}"
+                    );
+                }
+            }
+        }
+    }
+
+    /// §13.34 §12d: the brand's slot is a row that never wraps, on **both** surfaces. The bar is
+    /// `flex-wrap:nowrap`, but a child that wraps makes its own second line inside that row, and
+    /// every child of a centred flex row keeps the same centre, so the row count the suite
+    /// measures stays at one while the bar grows 40px taller and takes that much from the page
+    /// below it. `.selfserve-brand` carried `flex-wrap:wrap` to put the account id under the
+    /// mark, and the bar's brand slot is the same box.
+    #[test]
+    fn the_brand_slot_never_wraps() {
+        let scoped = css_scoped(CSS);
+        for (a, sel, body) in &scoped {
+            for part in sel.split(',') {
+                // The box a rule paints is its last compound, and the sheet names the
+                // account page's slot `.brand.selfserve-brand`, so both spellings count.
+                let last = part
+                    .rsplit(['>', '+', '~', ' '])
+                    .next()
+                    .unwrap_or(part)
+                    .trim();
+                if last.contains("brand") {
+                    assert_ne!(
+                        css_decl(body, "flex-wrap").as_deref(),
+                        Some("wrap"),
+                        "{sel} in {a:?} lets the brand's slot wrap, which grows the bar a second \
+                         line while its children stay centred: {body}"
                     );
                 }
             }

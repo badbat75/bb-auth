@@ -212,10 +212,117 @@ const barGeometry = (page) =>
     return {
       rows: centres.size,
       kids: kids.length,
+      height: Math.round(bar.getBoundingClientRect().height),
       sideways: de.scrollWidth - de.clientWidth,
       barScroll: bar.scrollWidth - bar.clientWidth,
     };
   });
+
+/**
+ * The brand slot as the browser lays it out: the slot's box, the words' box, the mark's box,
+ * and the computed style of each. A word is hidden by **some** property, and which one is not
+ * the point, so §13.34 §12e asks for the words to be visible (a box laid out, no text spilling
+ * out of it, the text read back) and not for one named property to have one value.
+ */
+const brandGeometry = (page) =>
+  page.evaluate(() => {
+    const box = (sel) => {
+      const el = document.querySelector(sel);
+      if (!el) return null;
+      const r = el.getBoundingClientRect();
+      const s = getComputedStyle(el);
+      return {
+        w: Math.round(r.width),
+        // `scrollWidth` past `clientWidth` is the ellipsis; `clientWidth` of 0 is a box with no
+        // room at all, which a `position:absolute` strip out of the row reports.
+        cw: el.clientWidth,
+        sw: Math.round(el.scrollWidth),
+        x: Math.round(r.left),
+        right: Math.round(r.right),
+        display: s.display,
+        position: s.position,
+      };
+    };
+    const words = document.querySelector('header .brand .t');
+    return {
+      brand: box('header .brand'),
+      words: box('header .brand .t'),
+      mark: box('header .brand img'),
+      text: words ? words.textContent.trim() : '',
+    };
+  });
+
+/**
+ * The name pill as the browser lays it out: the trigger's box and its label's box. The trigger
+ * is `.bar .who` (§13.28 §4: the bar's first give), and its floor of 128px is the number the
+ * 883/884 breakpoint was picked on (§13.34 §10a), so "the brand got its room" only means
+ * something when the pill is still standing at that floor.
+ */
+const namePillGeometry = (page) =>
+  page.evaluate(() => {
+    const box = (sel) => {
+      const el = document.querySelector(sel);
+      if (!el) return null;
+      const r = el.getBoundingClientRect();
+      return { w: Math.round(r.width), cw: el.clientWidth, sw: Math.round(el.scrollWidth) };
+    };
+    return { pill: box('.bar .who'), label: box('.bar .who .who-name') };
+  });
+
+/**
+ * Serve the deployment's mark on every page of this context (docs/ARCHITECTURE.md §13.34 §12c).
+ *
+ * A check of the brand slot with a mark configured is worthless if the mark does not load: a
+ * broken image box is 0x30 in Chromium, so the brand's words get the room the mark was
+ * supposed to take, and every "is the name whole" assertion passes on a layout the deployment
+ * never shows. The suite's server cannot answer for `/img/logo.svg`: the origin is a TCP proxy
+ * that forwards to the GUI over a unix socket, and a root-relative path that is not a route the
+ * GUI serves comes back as the GUI's own `403`/`404`, never as bytes. `context.route` is the
+ * browser answering, so the server, its access file and its fixtures are untouched.
+ *
+ * The mark is 120x36 and `.brand img` is `height:30px; max-width:96px`, so the box on the page
+ * is 96x30 at the SVG's aspect, and the bar's height is the mark's height plus its 5px of
+ * vertical padding, which is the height `barGeometry` reports.
+ */
+async function routeLogo(context) {
+  await context.route('**/img/logo.svg', (route) =>
+    route.fulfill({
+      status: 200,
+      contentType: 'image/svg+xml',
+      body:
+        '<svg xmlns="http://www.w3.org/2000/svg" width="120" height="36" viewBox="0 0 120 36">' +
+        '<rect width="120" height="36" rx="8" fill="#7f1d1d"/>' +
+        '<path d="M22 9l22 18H22z" fill="#fff"/></svg>',
+    }),
+  );
+}
+
+/**
+ * The brand's words are **whole**, not merely clipped: the box has room (`clientWidth` above 0),
+ * no text overflows it (`scrollWidth` no greater than `clientWidth`), the words are the bar's
+ * own row (not pulled out of it), the text reads the brand, and the words sit inside the
+ * viewport (§13.34 §12e).
+ *
+ * This replaces the desktop-width comparison the suite used to make. A name that fits the
+ * brand's cap at both widths is equal at both while being cut at the narrow one, so "as wide as
+ * at 1280" passes on the ellipsis: that equality **is** the ellipsis. `scrollWidth` past
+ * `clientWidth` is the ellipsis, and it is measurable at a single width. The `position` check is
+ * the shape the hidden-words mechanism shipped in: a `position:absolute` strip taken out of the
+ * row reports a 1px box and an ellipsis, which no box-to-box comparison sees (§13.34 §12c).
+ */
+function brandWordsWhole(t, brand, g, label, w) {
+  t.check(`${label} at ${w}: the brand's words are whole (${brand})`,
+    !!g.words && g.words.cw > 0 && g.words.sw <= g.words.cw,
+    JSON.stringify({ brand, w, words: g.words }));
+  t.check(`${label} at ${w}: the words are in the bar's row, not pulled out of it`,
+    !!g.words && g.words.position !== 'absolute' && g.words.position !== 'fixed',
+    JSON.stringify({ brand, w, words: g.words }));
+  t.check(`${label} at ${w}: the bar names the deployment (${brand})`,
+    !!g.words && g.text === brand, JSON.stringify({ brand, w, text: g.text }));
+  t.check(`${label} at ${w}: the words sit inside the viewport (${brand})`,
+    !!g.words && g.words.right <= w + 1,
+    JSON.stringify({ brand, w, words: g.words }));
+}
 
 /**
  * Which of the two tab strips is showing (§13.28 §4, §13.34): the bar's own, above the
@@ -252,9 +359,14 @@ const headerLayout = (page) =>
  * only speaks English measures the easy half.
  *
  * The caller sets the settings first: the widest case the measurements name is a long
- * `ui.brand_name` with a logo present, and the logo is a root-relative path, because
- * `compile_asset_url` accepts no `data:` URL and a suite must not reach the network. A broken
- * image is sized by its CSS box, which is the box the bar lays out, so the geometry is real.
+ * `ui.brand_name` with a logo present, and the logo has to be a URL the browser answers, which
+ * is what `routeLogo` is for (§13.34 §12c).
+ *
+ * The bar's **height** is asserted beside the row count, because the row count alone passes on
+ * a bar that grew: every child of a flex row with `align-items:center` has the same centre, so
+ * a brand that wraps its mark above its name is one row at 80px, and the page below loses 40px
+ * of it. A bar carrying a mark is 40px (the 30px mark plus the 5px of padding top and bottom);
+ * with no mark it is 25px (§13.34 §12a).
  */
 async function barStaysOneRow(t, page, base, path, label, tabs = true) {
   for (const width of [320, 360, 640, 641, 883, 884, 1024, 1280]) {
@@ -263,7 +375,8 @@ async function barStaysOneRow(t, page, base, path, label, tabs = true) {
       const sep = path.includes('?') ? '&' : '?';
       await page.goto(`${base}${path}${sep}lang=${lang}`);
       const g = await barGeometry(page);
-      t.eq(`${label} at ${width} ${lang}: one row`, [g.rows, g.kids > 1], [1, true]);
+      t.eq(`${label} at ${width} ${lang}: one row, ${g.height}px tall`,
+        [g.rows, g.kids > 1, g.height <= 40], [1, true, true]);
       t.eq(`${label} at ${width} ${lang}: the document does not scroll sideways`, g.sideways, 0);
       t.eq(`${label} at ${width} ${lang}: the bar does not scroll sideways`, g.barScroll, 0);
       const l = await headerLayout(page);
@@ -423,6 +536,7 @@ module.exports = {
   Checker, doc, bytes, writeDoc, settings, settingsBytes, writeSettings, sha256, newPage, submit,
   mainText, pageLang, api, resubmit, formBytes, setDuration, openPreferences, barGeometry,
   barStaysOneRow, headerLayout, openBarMenu, menuIsOpen, menuShape, menuIsOneSize,
+  brandGeometry, namePillGeometry, brandWordsWhole, routeLogo,
   ACCT_MENU, NAV_MENU,
   attr, text, count, prop,
 };

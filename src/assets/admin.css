@@ -44,14 +44,24 @@ header.top{background:var(--card);border-bottom:1px solid var(--card-border);pad
    deploy has just happened and not at all the rest of the time; the footer says it, where a
    person reading a deploy looks.
 
-   `min-width:0` and `max-width:14rem` are the bar's second give (§13.28 §4): the name pill
+   `min-width:0` and `max-width` are the bar's second give (§13.28 §4): the name pill
    shrinks first, and the brand's words shrink next, and a flex item with no `min-width` cannot
    shrink below its content at all, so without the first the second is a rule that never fires.
-   The cap is a measure of the longest brand worth reading, not of the width the bar can spare:
-   a brand longer than that is an operator's stylesheet's business, and the ellipsis is what
-   keeps it from taking the tabs' room. */
-.brand{display:flex;align-items:center;gap:10px;min-width:0;max-width:14rem;font-weight:600;
-  letter-spacing:.02em;line-height:1.2}
+   The cap is the bar's own width less the room the rest of the row keeps, and `14rem` is its
+   floor (§13.34 §12b): a constant read off one screenshot cuts a name a wide bar has room to
+   show, which is what `14rem` did at 1280 with 180px of empty bar standing beside it, and the
+   floor is what keeps the phone's proportional split the numbers it has today. `10.5rem` is
+   this surface's own row: the bar's padding (32px), its two gaps (40px) and the mark's box
+   (96px). This is the roomiest of the three caps, because the surfaces it rules, `/account/`
+   and the `403`, carry no tabs at all. */
+.brand{display:flex;align-items:center;gap:10px;min-width:0;max-width:max(14rem,100% - 10.5rem);
+  font-weight:600;letter-spacing:.02em;line-height:1.2}
+/* The console's cap is the same arithmetic with the console's row: at 883px and below the bar
+   carries the ☰ (30px) and its two gaps beside a name pill whose floor is 128px, and that is
+   12.5rem of room the rest of the row keeps. `:has(nav.tabs a)` reads the **tree**, not the
+   rendering, and the tab links are in the markup at every width (the 883px block hides the
+   strip), so this is the console's rule at every width the 884px block's is not. */
+.bar:has(nav.tabs a) .brand{max-width:max(14rem,100% - 12.5rem)}
 /* The name, cut with an ellipsis. The three companions are not decoration: `text-overflow`
    paints nothing without `overflow:hidden`, and neither does anything without
    `white-space:nowrap`, and a box that can wrap makes a second line in a bar that has none. */
@@ -159,18 +169,23 @@ nav.navm{display:none;flex:0 1 auto;min-width:0}
   nav.tabs{display:none}
   nav.navm{display:flex}
 }
-/* Above the breakpoint the account end is the bar's give, by name. The brand's tag line used to
-   be that give: `flex-shrink:100` inside the slot absorbed the bar's shortfall there, so the
-   name pill kept its room while the tag truncated. With the tag gone (§13.34 §10) a brand and a
-   name pill in proportion shrink together and the name is cut the moment the row runs short, so
-   the order the `.brand` comment already promises is said out loud here: the account end gives
-   way first, and the brand's words next. `100` is a margin, not a measurement, for the row does
-   all the arithmetic, and the name pill's floor is the 128px the 884px breakpoint was picked on.
-   It is scoped to the widths above the breakpoint, and not top level, because below it the ☰
-   regime wants today's proportional split: put everywhere, this rule let a long brand with no
-   logo squeeze the name pill to 52px at 320, where the split keeps it at 121px. */
+/* Above the breakpoint the brand's slot is the part of the bar that never gives (§13.34 §12b).
+   The cap below already reserves the name pill's floor, so a long brand never needs to shrink
+   here, and letting it share the shortfall in proportion cost it 1px, which is an ellipsis on a
+   name with room. `nav.acct{flex-shrink:100}` used to sit in this block, and it is the bug this
+   replaces: a shrink factor is a multiplier and not a budget, so the account end gave 100 parts
+   in 101 and the person's name went at 883 while the brand's words were being cut beside it. The
+   account end therefore gives at the default rate, which is why this block says nothing about
+   it. Both rules are scoped to the widths above the breakpoint, and not top level, because below
+   it the ☰ regime wants today's proportional split: put everywhere, the shrink rule let a long
+   brand with no logo squeeze the name pill to 52px at 320, where the split keeps it at 121px.
+   `39.25rem` is today's own geometry at the breakpoint and not a new measurement: at 884 the
+   bar's content box is 852px and 852 - 628 = 224px = 14rem, the brand box §10a measured the
+   breakpoint with, so every pixel the bar gains above 884 goes to the brand and the 883/884
+   breakpoint stands. */
 @media (min-width:884px){
-  nav.acct{flex-shrink:100}
+  .brand{flex-shrink:0}
+  .bar:has(nav.tabs a) .brand{max-width:calc(100% - 39.25rem)}
 }
 /* The page's one action, and the way out beside it, are one object and must be one height:
    `cancel` next to `Create key` at three quarters the height reads as a caption of the button
@@ -486,10 +501,11 @@ details.navmenu .menu{left:0;right:auto}
 /* The deployment's mark and name, in the bar's brand slot (§13.17). `margin:0` because the bar
    is a flex row with its own gap: a bottom margin here would push the bar's height, which is
    what the two controls at the other end are centred against. The mark, the name and the row
-   itself are `.brand`'s rules, one set for both surfaces (§13.28 §6); what is left here is the
-   arrangement of the account page's own slot, which is the only thing the two surfaces differ
-   on: the name and the id wrap under the mark instead of beside it. */
-.selfserve-brand{flex-wrap:wrap;margin:0}
+   itself are `.brand`'s rules, one set for both surfaces (§13.28 §6), and the slot is a row that
+   never wraps on either (§13.34 §12d): it used to wrap, which made the account bar 58px tall
+   with a long brand and a mark, inside a bar whose `flex-wrap:nowrap` keeps reporting one row
+   because every child of a centred flex row keeps the same centre. */
+.selfserve-brand{margin:0}
 /* The account id is one token, so the stylesheet can keep it whole: `white-space:nowrap` stops a
    36-character uuid breaking at a hyphen, and it moves to its own line under the addresses
    instead of ending in the middle of an id. The addresses beside it are deliberately not given
@@ -532,16 +548,16 @@ details.navmenu .menu{left:0;right:auto}
      that scrolls sideways is the clipped tab §13.17 named, and one row with a scroll is two
      dimensions, which is what WCAG 1.4.10 Reflow asks not to do. */
   nav.tabs{display:none}
-  /* With a mark in the bar, the brand's words are the part that can go: the logo says which
-     deployment this is, and a mark plus a name plus a trigger does not fit a 320px row. The
-     words are visually hidden, not removed, which is why the image keeps `alt=""`: a reader
-     hears the name the eye no longer has. Without a logo the text stays, and truncates. The
-     hiding is the clip pattern `.vh` uses, and not `display:none` or `visibility:hidden`: a
-     rule that took the words out of the accessibility tree would take the deployment's name
-     away from the one technology the whole mechanism feeds.
-     (§13.34 §10 removed the tag line that used to stand under the name, and the rule that hid
-     it with it: a 320px bar of that design showed a mark, an empty name and a label.) */
-  .brand:has(img) .t{position:absolute;width:1px;height:1px;overflow:hidden;clip-path:inset(50%)}
+  /* The mark gives way and the words stay (§13.34 §12c, the user's option (a) of 2026-11-27).
+     The words are the part that is always there: they come from the settings file and are
+     rendered by this program, while the mark comes from another host, and the rule for every
+     page this estate serves is that it is complete without a second host answering. The rule
+     that hid the words "when a mark is present" left a bar with no name at all the moment the
+     mark answered `404`, because a failed image is a 0px-wide box and the `img` element is
+     still there; and `position:absolute` is not a phone rule, so a deployment with a logo had
+     no brand name on the console at any width. The image keeps `alt=""` on every width, so a
+     reader hears the name once, from the words. */
+  .brand img{display:none}
   /* The id keeps its `nowrap` here, so this is where it pays for it: at .85em the 36 characters
      fit the width a 320px screen leaves once `main`'s padding is gone, which is what makes it
      move whole to a line of its own instead of pushing the page sideways. */

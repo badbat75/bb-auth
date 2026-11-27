@@ -25,7 +25,7 @@ const path = require('path');
 
 const { E2E_DIR, FIXTURE, SETTINGS_FIXTURE, boot } = require('./lib/server');
 const { submit, formBytes, resubmit, writeDoc, doc, setDuration, openPreferences,
-  openBarMenu, ACCT_MENU, NAV_MENU } = require('./lib/harness');
+  openBarMenu, routeLogo, ACCT_MENU, NAV_MENU } = require('./lib/harness');
 const { profileSettingsBytes, PROFILE_HEADERS } = require('./lib/cognito');
 const { DELETE } = require('./lib/intake');
 
@@ -55,6 +55,10 @@ const VIEWS = [
       // The account panel is the copy of this slice: its rows are translated words, and the
       // Italian spellings are the long ones that stress the bar's one row (§13.28 §4).
       'settings-menu-prefs', 'config-menu', 'nav-menu-it', 'forbidden-menu', 'account-menu-prefs',
+      // The bar's brand slot is measured in Italian, because the Italian tab words are the long
+      // ones, and a mark that loads and a mark that does not are the two shapes the words are
+      // read against (§13.34 §12).
+      'header-logo', 'header-logo-broken',
       // The self-service page is prose a person reads in their own language, so the copy of
       // the table's headings and the refusal is worth reading in Italian too.
       'account', 'account-stranger', 'account-new', 'account-new-scopes', 'account-error',
@@ -306,10 +310,24 @@ const SCENES = [
     await page.goto(ctx.base + '/config');
     await openBarMenu(page, NAV_MENU);
   }],
-  // The bar with the widest brand an operator can type and a logo present (§13.28 §4, §6):
-  // the one page shape that shows what the bar cuts when it runs out of room.
+  // The bar with the widest brand an operator can type and a mark that answers (§13.28 §4, §6,
+  // §13.34 §12): the page shape that shows what the bar cuts when it runs out of room, and on a
+  // phone the shape that shows the **mark** giving way while the words stay.
   ['header-logo', async (page, ctx) => {
     // The runner puts the fixture back before every scene, so this writes and walks away.
+    const s = JSON.parse(SETTINGS_FIXTURE);
+    s.ui = { ...(s.ui || {}), brand_name: 'BadBat75 Operations Console', logo_url: '/img/logo.svg' };
+    fs.writeFileSync(ctx.settingsFile, JSON.stringify(s, null, 2) + '\n');
+    // The mark is answered by the browser, because the suite's server answers nothing that is
+    // not the GUI, and a scene of a bar with a mark that does not load photographs the words
+    // with the mark's room to themselves (§13.34 §12c).
+    await routeLogo(page.context());
+    await page.goto(ctx.base + '/users');
+  }],
+  // The same bar with a mark the server does not answer (§13.34 §12c): the mark's box is 0
+  // wide, so the words are all the brand has, at every width. This is the shape the hidden-words
+  // mechanism shipped in, so it is the shape a reviewer has to see once, on every view.
+  ['header-logo-broken', async (page, ctx) => {
     const s = JSON.parse(SETTINGS_FIXTURE);
     s.ui = { ...(s.ui || {}), brand_name: 'BadBat75 Operations Console', logo_url: '/img/logo.png' };
     fs.writeFileSync(ctx.settingsFile, JSON.stringify(s, null, 2) + '\n');
