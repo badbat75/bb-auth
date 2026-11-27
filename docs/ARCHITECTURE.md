@@ -8481,6 +8481,16 @@ and acceptance for the second, and stand until the user reviews them.
    at 1280**, because the budget assumes the Italian tabs and the longest given name. Recommended:
    accept; `/account/` and the `403`, which have no tabs, show it whole.
 
+**The user reviewed the first answer on 2026-11-27 and turned it round: at 640px and below the bar
+keeps the mark and hides the words**, as it did before step 19 (the words stay in the markup,
+visually hidden, so a screen reader still reads the name). That overrules §12c and the phone rule
+of §12d, and it takes back the "words on a phone" checks of §12e. Between the two options left the
+coordinator chose (c), no script: a logo that does not load leaves the phone's brand empty. Only a
+wrong `ui.logo_url` causes that, the operator sees it on the first page, and the bar's other
+controls still work. The alternative, (b), would add an inline `onerror` script, and the
+"JavaScript is used sparingly" rule in AGENTS.md wants each script decided on purpose; an empty brand
+on a misconfigured phone is not worth one. The second answer stands.
+
 ### 13.35 Each dashboard warning names its kind (plan step 20, designed 2026-11-27)
 
 The user read "`@delete-test` referenced by nothing" on rpi-01's dashboard and could not tell
