@@ -80,17 +80,17 @@ process that writes both files, so two gaps found the same day are closed **firs
 GUI is opened to anyone who is not an administrator: `bb-auth-web` can read the HMAC key, and it
 believes `X-Auth-Email` from any local process. The design is `docs/ARCHITECTURE.md` §13.
 
-### 23. Split `bb-auth-web.rs` into modules
+### 23. The GUI's tests stop waiting out the intake timeout
 
-Covers: the user's request of 2026-11-27, after the third release candidate. The admin GUI is
-one file of about 40,300 lines, so any edit recompiles all of it, and that is a large part of
-why every test round of a slice is slow.
+Covers: the user's request of 2026-11-27 to make test rounds faster. The architect measured it
+(`docs/ARCHITECTURE.md` §13.38): compiling is not the cost (0.72 s to rebuild the binary after a
+markup edit, 1.63 s for the test build), the GUI's test run is (about 37 s), and 33 s of that is
+four tests waiting out the 5 s intake timeout, because the `account_port_intake_at` test helper
+never shortens it and every other writer queues behind it. The split of `bb-auth-web.rs` into
+modules was weighed (about 0.3 s per build and 0.9 s per test build saved, for 21 slices) and the
+user dropped it on 2026-11-27.
 
-- The architect designs the split in `docs/ARCHITECTURE.md`: the modules and what each owns
-  (routes, pages, forms, the `K` table, the account page, the tests beside what they test), what
-  stays in `main`, the order of moves, and how the claim "one file, read top to bottom" in
-  `AGENTS.md` changes. Behaviour must not change.
-- Done when: the code is moved in slices with no behaviour change; every slice keeps
-  `cargo test`, clippy, fmt, `cargo doc --no-deps` (no broken intra-doc link) and
-  `node e2e/run.js` green; an edit to one page's markup is measured to recompile faster than
-  before, with both times recorded; and `AGENTS.md` and the playbooks describe the new layout.
+- Done when: that helper sets a short intake timeout (500 ms in the architect's trial), with a
+  comment saying why; every test still passes, including the ones that assert the timeout's bound;
+  `cargo test --bin bb-auth-web` is timed before and after, with both numbers in the commit; and
+  `cargo test`, clippy and `cargo fmt --check` are clean. Behaviour of the program does not change.

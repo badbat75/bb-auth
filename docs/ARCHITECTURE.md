@@ -9106,6 +9106,9 @@ empty, changes with it (docs agent).
 
 ### 13.38 Splitting `bb-auth-web.rs` into files (plan step 23, designed 2026-11-27)
 
+**Decided by the user on 2026-11-27: step 23a only.** The split is not built; this section stays
+as the record of what it would have cost and bought.
+
 The user, on 2026-11-27: the GUI is one file, every edit recompiles all of it, and every test
 round of a slice is slow. The moves will be made by a small local model, so each one must be a
 mechanical cut and paste that `cargo` can check on its own. Behaviour does not change.
