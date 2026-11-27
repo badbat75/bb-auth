@@ -8938,6 +8938,7 @@ list. The review also needs a dark 390 shot of `/users`, which the `phone` view 
 
 All three taken as recommended, as the user asked on 2026-11-27 for the work to be carried
 through with the decisions reviewed afterwards.
+The user confirmed 1 and 3 later that day.
 
 1. The default sub-page is People. Should it rather be the last one the person opened (a cookie)?
    Recommended: no. A cookie makes the same URL show different pages, and the bar's Users tab

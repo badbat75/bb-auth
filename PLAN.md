@@ -104,3 +104,17 @@ chose all four of the coordinator's suggestions that day:
   the `/denied` route still land somewhere sensible; the designer has approved the
   screenshots; and the build runs on rpi-01 (the user gave the go-ahead for this deploy on
   2026-11-27, before the work; no tag or GitHub release is part of it).
+
+### 23. A broken logo leaves a placeholder on a phone, not an empty brand
+
+Covers: R3. The user's decision of 2026-11-27, reversing the coordinator's choice of §13.34
+§12g option (c): at 640px and below the bar hides the brand's words and keeps the mark, so a
+`ui.logo_url` that does not load left the phone's brand empty. It must show a placeholder
+instead.
+
+- Done when: the designer has designed the placeholder in `docs/ARCHITECTURE.md` (what it shows,
+  how it appears with no script or within the "JavaScript is used sparingly" rule, both themes,
+  both surfaces, and the screen-reader name, which stays the brand's words); tests pin it,
+  replacing `the_words_hide_with_a_logo_and_the_panel_rows_need_no_gap`'s empty-brand case;
+  `node e2e/run.js` is green; the designer has approved the screenshots; and the build runs on
+  rpi-01 with step 22's (the same go-ahead).
