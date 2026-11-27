@@ -127,5 +127,6 @@ files outside the repo.
   next step's CHANGELOG entry has nowhere to go.
 - Appending a step to `PLAN.md` with python: an appended block that starts with `\n\n###` after
   `rstrip` is fine only if the block itself ends without a blank line before its closing `'''`.
-  Finish every PLAN.md edit with `re.sub(r'\n{3,}', '\n\n', s)` before writing, or markdownlint
-  fails MD012 (it happened five times, the rstrip alone did not stop it).
+  Finish every PLAN.md edit with `s = re.sub(r'\n{3,}', '\n\n', s).rstrip('\n') + '\n'` as the
+  very last step before writing, and never add a newline after it, or markdownlint fails MD012
+  (it happened six times).
