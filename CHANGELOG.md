@@ -20,6 +20,10 @@ Versions are the crate's (`Cargo.toml`); packages add a Debian revision
 * **Rollback**: safe by construction while the cookie format is unchanged, because sessions
   are stateless and no state is packaged. See "Rollback" in [README.md](README.md).
 
+## Unreleased
+
+Builds say 1.99.9 and their commit until the next release (plan W11).
+
 ## 1.99.9 (2026-11-27, release candidate of 2.0.0)
 
 **Released on 2026-11-27 as `v1.99.9`, the release candidate of 2.0.0**, by the user's decision
