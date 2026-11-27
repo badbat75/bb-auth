@@ -94,3 +94,21 @@ user dropped it on 2026-11-27.
   comment saying why; every test still passes, including the ones that assert the timeout's bound;
   `cargo test --bin bb-auth-web` is timed before and after, with both numbers in the commit; and
   `cargo test`, clippy and `cargo fmt --check` are clean. Behaviour of the program does not change.
+
+### 24. The tests move out of the four main source files
+
+Covers: the user's request of 2026-11-27, after step 23. Each target keeps its unit tests in the
+same file as its code (`src/lib.rs`, `src/bin/bb-auth.rs`, `src/bin/bb-auth-adm.rs`,
+`src/bin/bb-auth-web.rs`), so an edit to the code also rebuilds the tests' codegen units (about
+11 MB for the GUI, §13.38). The tests move to files of their own, in all four targets (the
+user's choice). For the GUI this is §13.38's slices S1 and S2 and nothing past them; the rest of
+the split stays dropped.
+
+- The architect extends §13.38 to the other three targets: the layout (Cargo's
+  `src/bin/<name>/main.rs` or a `#[path]` module), what moves, the paths that move with it
+  (`include_str!`, tests that read source files), and how `AGENTS.md` says where things live.
+- Done when: in each target the tests are a pure move (proved by §13.38's word-multiset diff),
+  every test still passes with the same counts per target, clippy, fmt and `cargo doc --no-deps`
+  are clean, `node e2e/run.js` is green, `scripts/package.sh` still builds the three packages, the
+  GUI's rebuild after a page edit is timed against §13.38's 0.72 s and 1.63 s, and `AGENTS.md`,
+  the playbooks and `e2e/README.md` name the new paths.
