@@ -30,7 +30,7 @@ path = "src/bin/bb-auth-adm/main.rs"
 # gate. Deployed as its own hardened unit (deploy/bb-auth-web.service), optional like the CLI.
 [[bin]]
 name = "bb-auth-web"
-path = "src/bin/bb-auth-web.rs"
+path = "src/bin/bb-auth-web/main.rs"
 
 # The one opt-in: the browser suite's harness (e2e/lib/server.js) builds bb-auth-web with this
 # so the process can be pointed at the fake Cognito of e2e/lib/cognito.js, which is a plain-HTTP

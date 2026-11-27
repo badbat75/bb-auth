@@ -232,3 +232,8 @@ Rules are in `AGENTS.md`. Format of this file: `AGENTS.md`, under "Skills".
   any other width and on a `.brand img` rule at 640, and `e2e/tests/settings.js` reads the same pair
   at 1280, 884, 360 and 320, where `brandWordsHidden` wants the mark at its 96px cap. So
   `.brand img{flex:none}` is load-bearing for the e2e and not only for the Rust test.
+- §13.38 §6's word-multiset check reads `src/lib.rs` and the target's files, so it **cannot see the
+  library's source list**, which since 24-3 lives in `src/tests.rs`: §10e says the residue includes
+  that line's words, and the recipe's scope hides them. Run the same `words()` diff a second time
+  over `src/tests.rs` alone; on 24-4 the first showed only `-bb -auth -web +main` (the
+  `include_str!("main.rs")` in `tests.rs`) and the second the new entry's eight words.

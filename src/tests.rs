@@ -3726,14 +3726,15 @@ fn every_symbol_the_manual_names_still_exists() {
     // argument is made of (`ReadOnlyPaths`, `ReadWritePaths`, `SupplementaryGroups`).
     // Those are as real as a function, and as able to stop existing.
     let src = format!(
-        "{}{}{}{}{}{}{}{}{}{}",
+        "{}{}{}{}{}{}{}{}{}{}{}",
         include_str!("lib.rs"),
         include_str!("tests.rs"),
         include_str!("bin/bb-auth/main.rs"),
         include_str!("bin/bb-auth/tests.rs"),
         include_str!("bin/bb-auth-adm/main.rs"),
         include_str!("bin/bb-auth-adm/tests.rs"),
-        include_str!("bin/bb-auth-web.rs"),
+        include_str!("bin/bb-auth-web/main.rs"),
+        include_str!("bin/bb-auth-web/tests.rs"),
         include_str!("../Cargo.toml"),
         include_str!("../deploy/bb-auth.service"),
         include_str!("../deploy/bb-auth-web.service"),
