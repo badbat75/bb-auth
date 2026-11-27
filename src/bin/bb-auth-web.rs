@@ -5216,8 +5216,11 @@ fn top_bar(navn: Markup, brand: Markup, tabs: Markup, acct: Markup) -> Markup {
 /// One function because the mark and the name are one object on both surfaces: two call sites
 /// drawing the same pair is how a logo arrives in one bar and not the other, which is the drift
 /// this file keeps writing rules about. The `alt` is empty because the name beside the picture
-/// already says what it is, and the words are on the row at every width now that a phone shows
-/// the words and not the mark (§13.34 §12c), so a reader hears the name once, from them.
+/// already says what it is. At 640px and below the bar shows the **mark** and hides the words
+/// (§13.34 §12g, the user's reversal of 2026-11-27, which is the phone arm as §13.28 §4 wrote
+/// it), and the words are hidden visually only: `admin.css` clips them to a 1px box, so they
+/// stay in the accessibility tree and a reader hears the deployment's name from them, once. An
+/// `alt` naming the picture would say it twice to that reader.
 fn brand_block(name: &str, logo: Option<&str>, extra: &str) -> Markup {
     let cls = if extra.is_empty() {
         "brand".to_string()
@@ -36694,10 +36697,11 @@ mod tests {
     /// §13.34 §12 changes two of the numbers and swaps the phone's half. The brand's cap is a
     /// `max()`, never the reading of one width: `14rem` is the floor (the longest name worth
     /// reading) and `100% - 10.5rem` is what the narrowest bar that shows the tabs has left, so
-    /// a name that fits at 1280 is not cut at 884 by a constant somebody measured there. And
-    /// the phone hides the **mark**, not the words: the words are the name a reader hears, the
-    /// image has no `alt` to carry it, and a 0-wide broken image box made the ellipsis, which is
-    /// how the words ended up hidden at 1280 as much as at 320.
+    /// a name that fits at 1280 is not cut at 884 by a constant somebody measured there. And at
+    /// 640px and below the **words** give way while the mark stays, the shape the user
+    /// chose for §13.34 §12g on 2026-11-27, which puts the bar's phone arm back as it stood
+    /// before step 19 (option (c): no script, so a mark that answers `404` on a phone leaves the
+    /// brand with the empty box it paints).
     #[test]
     fn the_bar_gives_room_by_shrinking_the_ellipsis_pieces() {
         let scoped = css_scoped(CSS);
@@ -36740,17 +36744,24 @@ mod tests {
             "and a flex item with no `min-width` cannot shrink to it: {brand}"
         );
 
-        // The phone block: a tighter cap on the name pill, and the mark gives way. The words stay
-        // on the row, because they are the deployment's name and there is no `alt` on the image
-        // to hand that name to a reader (§13.34 §12d, the user's option (a) of 2026-11-27).
+        // The phone block: a tighter cap on the name pill, and the **words** give way while the
+        // mark stays, the shape the user chose for §13.34 §12g. The words go by the clip pattern,
+        // which is the row's own `flex-shrink:0`: with them off the row, the ellipsis pieces and
+        // nothing else are what gives, so the cap arithmetic above is the whole budget.
         let at = "@media(max-width:640px)";
         trigger_cap(&scoped, at, "11rem");
-        let mark = rule_named(&scoped, at, ".brand img");
+        let hidden = rule_named(&scoped, at, ".brand:has(img) .t");
         assert_eq!(
-            css_decl(&mark, "display").as_deref(),
-            Some("none"),
-            "{at}: the mark gives way and the words stay: {mark}"
+            css_decl(&hidden, "flex-shrink").as_deref(),
+            Some("0"),
+            "the words that go must not be the part that shrinks, or the row spends room on a \
+             name nobody sees: {hidden}"
         );
+        for (a, sel, body) in &scoped {
+            if a == at && sel.contains(".brand img") {
+                panic!("{sel} at {at} is the rule §13.34 §12g's reversal takes back: {body}");
+            }
+        }
 
         // The rule that hid the identity on a phone hides the trigger outright now.
         for (a, sel, body) in &scoped {
@@ -36847,14 +36858,19 @@ mod tests {
         );
     }
 
-    /// §13.34 §12d and §12e, replacing §13.28 §4: the phone hides the deployment's **mark**, and
-    /// the brand's words stay on the row at every width. The words are the name a reader hears,
-    /// and the image carries `alt=""`, so the mechanism that hid them (`position:absolute` plus a
-    /// `clip-path`, the `.vh` pattern) took the name away from the one technology the whole
-    /// pattern feeds, and it was not a phone rule: `position:absolute` applies at 1280 too, so
-    /// a deployment with a logo had no brand name on the console at any width. The words are
-    /// therefore pinned **visible**: no rule that names them may set `position`, `clip-path` or
-    /// `display`, which is the claim, rather than one named property at one value.
+    /// §13.34 §12g, the user's option (c) of 2026-11-27, restoring the shape of §13.28 §4: at
+    /// 640px and below a bar that carries a mark hides the brand's **words**, and the mark stays.
+    /// The words go by the clip pattern (`base.css`'s `.vh`: a 1px box, `overflow:hidden`, a
+    /// `clip-path`), and the two properties that would take them out of the accessibility tree,
+    /// `display` and `visibility`, must not appear on it. That pairing is the whole decision: the
+    /// image carries `alt=""`, so the words are the bar's only name, and hiding them from a reader
+    /// too is the empty brand §12g's option (b) was built to avoid, while option (c)'s accepted
+    /// cost is only the **sightless** case of a mark that answers `404` on a phone.
+    ///
+    /// The pattern lives inside the phone arm and nowhere else. `position:absolute` is not a
+    /// width, so a rule at the top level takes the words out of the row at 1280 as much as at 320,
+    /// which is the §12c bug: a deployment with a logo had no brand name on the console at any
+    /// width, and a broken mark made that bar nameless everywhere.
     ///
     /// §13.34 §10 removes the tag line the 2026-11-26 review found left standing, so this pins
     /// the **absence** of a rule for it as much as the presence of the one for the name: a
@@ -36865,42 +36881,51 @@ mod tests {
     /// `margin-bottom:4px`, so a `gap` on the row stacks a second space between rows and the
     /// panel's rows stop reading as the one list they are.
     #[test]
-    fn the_mark_gives_way_on_a_phone_and_the_panel_rows_need_no_gap() {
+    fn the_words_hide_with_a_logo_and_the_panel_rows_need_no_gap() {
         let scoped = css_scoped(CSS);
+        let at = "@media(max-width:640px)";
 
-        // The rule that hid the words is gone, at every width: a selector naming the words
-        // **because of** a mark is the mechanism, not a detail of it.
-        for (a, sel, _) in &scoped {
-            for part in sel.split(',') {
-                assert!(
-                    !part.contains(".brand:has(img)"),
-                    "{sel} in {a:?} hides the brand's words because a mark is present: that is \
-                     the mechanism §13.34 §12d deletes"
+        // The phone's rule: the words exist to be hidden, and hidden by the pattern that keeps
+        // them in the accessibility tree.
+        let hidden = rule_named(&scoped, at, ".brand:has(img) .t");
+        for (prop, want) in [
+            ("position", "absolute"),
+            ("width", "1px"),
+            ("height", "1px"),
+            ("overflow", "hidden"),
+            ("clip-path", "inset(50%)"),
+        ] {
+            assert_eq!(
+                css_decl(&hidden, prop).as_deref(),
+                Some(want),
+                "the words are hidden by the clip pattern, and {prop} is part of it: {hidden}"
+            );
+        }
+        for prop in ["display", "visibility"] {
+            assert!(
+                css_decl(&hidden, prop).is_none(),
+                "the words carry the bar's only name (the image's `alt` is empty), and {prop} \
+                 takes that name out of the accessibility tree: {hidden}"
+            );
+        }
+
+        // And only on a phone: a bar with room shows its name.
+        for (a, sel, body) in &scoped {
+            if a != at && sel.split(',').any(|part| part.contains(".brand:has(img)")) {
+                panic!(
+                    "{sel} in {a:?} hides the brand's words where the bar has the room to \
+                       show them: {body}"
                 );
             }
         }
 
-        // Nothing that styles the words takes them out of the box, at any width. A word is
-        // hidden by *some* property, and which one is not the point, so the assertion is the
-        // absence of the three that do it.
-        for (a, sel, body) in &scoped {
-            if sel.split(',').any(|part| part.contains(".brand .t")) {
-                for prop in ["position", "clip-path", "display"] {
-                    assert!(
-                        css_decl(body, prop).is_none(),
-                        "{sel} in {a:?} sets {prop} on the brand's words, which is how they end \
-                         up standing alone under a mark: {body}"
-                    );
-                }
-            }
-        }
-
-        // The mark gives way, and only on a phone (§13.34 §12d, the user's option (a)).
-        let mark = rule_named(&scoped, "@media(max-width:640px)", ".brand img");
-        assert_eq!(
-            css_decl(&mark, "display").as_deref(),
-            Some("none"),
-            "at 640px the bar shows the words and not the mark: {mark}"
+        // The mark's own name is empty, because the words beside it say what it is, and on a
+        // phone they are the only name the bar has.
+        let brand =
+            brand_block("BadBat75 Operations Console", Some("/img/logo.svg"), "").into_string();
+        assert!(
+            brand.contains("alt=\"\""),
+            "the mark names itself, so the words the bar hides are not its only name: {brand}"
         );
 
         // No rule, at any width, names the tag line: `admin.css` styled `.brand .v` at the top

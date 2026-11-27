@@ -244,6 +244,13 @@ Rules are in `AGENTS.md`. Format of this file: `AGENTS.md`, under "Skills".
   `rule_named(scoped, at, sel)` does that; `the_rule(CSS, sel)` already does it and **keeps the
   whitespace**, which is the only way to read a multi-token shorthand (`flex:0 1 auto` reaches
   `css_scoped` as `01auto`, and `css_decl` on that answers `01auto`, a value nothing can assert).
+- When a slice **reverses** a rule inside an `@media` block, pin both halves in one test: the rule
+  that must now exist (`rule_named(scoped, "@media(max-width:640px)", ".brand:has(img) .t")`, whose
+  panic is the good red) and the rule that must be **gone**, which no lookup can say: walk
+  `css_scoped` and `panic!` on `a == at && sel.contains(".brand img")`. Pin the hidden half's
+  properties too (`display` and `visibility` absent beside `position:absolute`), because a rule
+  that hides a thing from eyes and a rule that hides it from a reader differ by exactly those two,
+  and a 1px `clip-path` strip is the only one that keeps an `alt=""` image's bar named.
 - A bar-geometry check belongs beside `barStaysOneRow`, not inside it: that helper counts the
   vertical centres of `.bar`'s **children**, so a tab strip that wraps inside its own `nav` leaves
   all three children centred on one line and the wrap is invisible. Read the strip's own rows

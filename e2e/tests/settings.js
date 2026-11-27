@@ -13,7 +13,7 @@ const {
   bytes, doc, writeDoc, settings, settingsBytes, writeSettings,
   newPage, submit, mainText, formBytes, openPreferences, barStaysOneRow, barGeometry, headerLayout,
   openBarMenu, menuIsOpen, menuShape, menuIsOneSize, ACCT_MENU, NAV_MENU,
-  brandGeometry, namePillGeometry, brandWordsWhole, routeLogo,
+  brandGeometry, namePillGeometry, brandWordsWhole, brandWordsHidden, routeLogo,
   attr, text, count,
 } = require('../lib/harness');
 
@@ -286,22 +286,26 @@ async function brandStaysWhole(t, page, base) {
 }
 
 /**
- * The words survive a mark the server does not answer (§13.34 §12c): `logo_url` names a path
- * nothing answers, its box is 0 wide, and the words are all the brand has. Three surfaces at the
- * two narrowest widths, in English: the console as an administrator, the account page as its own
- * person, and the console's `403` as a person who is not an administrator (the console's URL with
- * a roster row that is not on `web.admins`).
+ * The bar's brand at the phone widths and above them (§13.34 §12g, the user's option (c) of
+ * 2026-11-27): at 640px and below the mark stays on the row and the **words** go, and above the
+ * phone the words are on the row. Three surfaces, in English: the console as an administrator,
+ * the account page as its own person, and the console's `403` as a person who is not an
+ * administrator (the console's URL with a roster row that is not on `web.admins`).
  *
- * This is the shape the hidden-words mechanism shipped in: the words were taken out of the row by
- * `position:absolute` "when a mark is present", and a mark that does not load is present, so the
- * bar was left with no name at any width, not only on a phone. `position`, `clientWidth` and the
- * text are read together for that reason: the box comparison alone saw nothing, because the
- * 0-wide mark made the ellipsis.
+ * The words go by the clip pattern `base.css`'s `.vh` uses, and the check reads the box and the
+ * document's own string together for that reason. The image's `alt` is empty, so the words are
+ * the bar's only name: a 1px box is the phone layout, and the same words read out to a reader is
+ * the part that makes it a layout rather than a lost name. `display` and `visibility` are read
+ * beside `position` because a rule that hides them from a reader is the failure §12g's option (b)
+ * was built to avoid, and the box comparison alone cannot see the difference.
  *
- * The last step is the answer §12d gives in its place, at 360 with a mark that **does** load
- * (`routeLogo`): the mark computes `display:none` and the words are whole.
+ * `logo_url` naming a path nothing answers is the walk that pins the other half, the §13.34 §12c
+ * bug: the mechanism once lived at the top level, so a mark that does not load (present, and 0
+ * wide) left the bar with no name at 1280 as much as at 320. Above the phone the words are whole
+ * here, and the empty brand a broken mark leaves **on a phone** is the cost option (c) accepts
+ * with no script to catch it.
  */
-async function brokenLogoKeepsTheName(t, ctx, look) {
+async function thePhoneHidesTheWordsAndTheConsoleKeepsThem(t, ctx, look) {
   const brand = 'BadBat75';
   const broken = {
     ...look,
@@ -318,21 +322,23 @@ async function brokenLogoKeepsTheName(t, ctx, look) {
     ];
     for (const s of surfaces) {
       await page.setExtraHTTPHeaders({ 'X-Auth-Email': s.email });
-      for (const w of [360, 320]) {
+      for (const w of [1280, 884, 360, 320]) {
         await page.setViewportSize({ width: w, height: 800 });
         await page.goto(`${s.at}?lang=en`);
         const g = await brandGeometry(page);
-        brandWordsWhole(t, brand, g, `${s.label} with a broken mark`, w);
+        const label = `${s.label} with a mark that does not load`;
+        if (w > 640) brandWordsWhole(t, brand, g, label, w);
+        else brandWordsHidden(t, brand, g, label, w);
         const bar = await barGeometry(page);
-        t.eq(`${s.label} with a broken mark at ${w}: the bar is one row, ${bar.height}px tall`,
-          [bar.rows, bar.height <= 40], [1, true]);
+        t.eq(`${label} at ${w}: the bar is one row, ${bar.height}px tall`,
+          [bar.rows, bar.height <= 40, bar.sideways === 0], [1, true, true]);
       }
     }
   } finally {
     await context.close();
   }
-  // The replacement mechanism, on a mark that answers: the phone hides the **mark**, and the
-  // words keep the slot.
+  // The same bar on a phone with a mark that **answers** (`routeLogo`): the mark is the whole
+  // brand, at the 96px the sheet caps it at, and the words are the hidden strip beside it.
   const good = {
     ...broken,
     ui: { ...broken.ui, logo_url: '/img/logo.svg' },
@@ -345,8 +351,12 @@ async function brokenLogoKeepsTheName(t, ctx, look) {
     await page2.setExtraHTTPHeaders({ 'X-Auth-Email': 'admin@example.com' });
     await page2.goto(`${ctx.base}/users?lang=en`);
     const g = await brandGeometry(page2);
-    t.eq('at 360 with a mark that loads: the mark gives way', g.mark && g.mark.display, 'none');
-    brandWordsWhole(t, brand, g, 'the console with a mark that loads', 360);
+    brandWordsHidden(t, brand, g, 'the console with a mark that loads', 360);
+    t.check('at 360 with a mark that loads: the mark has the room it is capped at',
+      !!g.mark && g.mark.cw >= 96, JSON.stringify(g.mark));
+    const bar = await barGeometry(page2);
+    t.eq('at 360 with a mark that loads: the bar is one row, the mark\'s 35px',
+      [bar.rows, bar.height <= 40], [1, true]);
   } finally {
     await marked.close();
     writeSettings(ctx, look);
@@ -606,11 +616,10 @@ async function run(ctx, t) {
   // `ui` section and puts the file back, so it runs beside the built-in-look walk above and
   // before the form walk, whose `rev` fingerprints the file's bytes.
   await brandHasRoom(t, ctx, settings(ctx));
-  // A mark the server does not answer is the case the hidden-words mechanism surfaced in
-  // (§13.34 §12c): the mark's box is 0 wide, the words take the room the mark was meant to
-  // occupy, and the rule that hid the words "when a mark is present" hid them at 1280 as much as
-  // on a phone, because `position:absolute` is not a phone rule.
-  await brokenLogoKeepsTheName(t, ctx, settings(ctx));
+  // The phone arm and the desktop arm of the brand, on a mark the server does not answer: the
+  // words are whole above 640 (§13.34 §12c's bug was that a 0-wide mark left the bar nameless at
+  // every width) and a hidden strip at 360 and 320 (§13.34 §12g, the user's option (c)).
+  await thePhoneHidesTheWordsAndTheConsoleKeepsThem(t, ctx, settings(ctx));
   // `$$eval` is Playwright's, not JavaScript's eval: it runs this fixed function inside the
   // page over the matched elements, and nothing of it comes from the page under test.
   const openCount = () => page.$$eval('details.group', (ds) => ds.filter((d) => d.open).length);

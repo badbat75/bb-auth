@@ -240,6 +240,7 @@ const brandGeometry = (page) =>
         x: Math.round(r.left),
         right: Math.round(r.right),
         display: s.display,
+        visibility: s.visibility,
         position: s.position,
       };
     };
@@ -323,6 +324,29 @@ function brandWordsWhole(t, brand, g, label, w) {
     !!g.words && g.words.right <= w + 1,
     JSON.stringify({ brand, w, words: g.words }));
 }
+
+/**
+ * The brand as the bar shows it **on a phone** (docs/ARCHITECTURE.md §13.34 §12g, the user's
+ * option (c) of 2026-11-27): the mark is on the row, and the words are out of it, hidden by the
+ * clip pattern `base.css`'s `.vh` uses. The pair of claims is the point. The mark shows, because
+ * a bar that hides its mark is the rule the reversal takes back. The words are a 1px box, and
+ * `display` on them is not `none` and `visibility` is not `hidden`: the image's `alt` is empty,
+ * so those words are the bar's only name, and a rule that hides them from a reader leaves an
+ * estate-wide accessibility failure, not a phone layout.
+ */
+function brandWordsHidden(t, brand, g, label, w) {
+  t.check(`${label} at ${w}: the mark is on the row`,
+    !!g.mark && g.mark.display !== 'none', JSON.stringify({ brand, w, mark: g.mark }));
+  t.check(`${label} at ${w}: the words are a strip out of the row, not a box with no room`,
+    !!g.words && g.words.position === 'absolute' && g.words.cw <= 1,
+    JSON.stringify({ brand, w, words: g.words }));
+  t.check(`${label} at ${w}: the words are hidden from eyes only`,
+    !!g.words && g.words.display !== 'none' && g.words.visibility !== 'hidden',
+    JSON.stringify({ brand, w, words: g.words }));
+  t.check(`${label} at ${w}: the bar names the deployment to a reader (${brand})`,
+    !!g.words && g.text === brand, JSON.stringify({ brand, w, text: g.text }));
+}
+
 
 /**
  * Which of the two tab strips is showing (§13.28 §4, §13.34): the bar's own, above the
@@ -536,7 +560,7 @@ module.exports = {
   Checker, doc, bytes, writeDoc, settings, settingsBytes, writeSettings, sha256, newPage, submit,
   mainText, pageLang, api, resubmit, formBytes, setDuration, openPreferences, barGeometry,
   barStaysOneRow, headerLayout, openBarMenu, menuIsOpen, menuShape, menuIsOneSize,
-  brandGeometry, namePillGeometry, brandWordsWhole, routeLogo,
+  brandGeometry, namePillGeometry, brandWordsWhole, brandWordsHidden, routeLogo,
   ACCT_MENU, NAV_MENU,
   attr, text, count, prop,
 };

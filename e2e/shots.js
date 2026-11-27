@@ -312,7 +312,8 @@ const SCENES = [
   }],
   // The bar with the widest brand an operator can type and a mark that answers (§13.28 §4, §6,
   // §13.34 §12): the page shape that shows what the bar cuts when it runs out of room, and on a
-  // phone the shape that shows the **mark** giving way while the words stay.
+  // phone the shape that shows the **words** giving way while the mark stays (§13.34 §12g, the
+  // user's option (c)).
   ['header-logo', async (page, ctx) => {
     // The runner puts the fixture back before every scene, so this writes and walks away.
     const s = JSON.parse(SETTINGS_FIXTURE);
@@ -325,8 +326,9 @@ const SCENES = [
     await page.goto(ctx.base + '/users');
   }],
   // The same bar with a mark the server does not answer (§13.34 §12c): the mark's box is 0
-  // wide, so the words are all the brand has, at every width. This is the shape the hidden-words
-  // mechanism shipped in, so it is the shape a reviewer has to see once, on every view.
+  // wide, so above the phone the words are all the brand has. At 640 and below the words are
+  // hidden behind that empty box, the cost §13.34 §12g's option (c) accepts with no script to
+  // catch it, so this is the shape a reviewer has to see once, on every view.
   ['header-logo-broken', async (page, ctx) => {
     const s = JSON.parse(SETTINGS_FIXTURE);
     s.ui = { ...(s.ui || {}), brand_name: 'BadBat75 Operations Console', logo_url: '/img/logo.png' };

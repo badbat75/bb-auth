@@ -76,6 +76,8 @@ Rules are in `AGENTS.md`. Format of this file: `AGENTS.md`, under "Skills".
 
 - The console's singular word for each object, in both languages, is in `K::Msg*Added` (`scope`/`scope`, `user`/`utente`, `user group`/`gruppo di utenti`); the plural tab headings differ (`Scopes` is "Ambiti"), so take a kind word from the messages, not the headings.
 
+- The `shots.js` fixture's dashboard raises only two warnings (user reaches nothing, group unreferenced); all five, with Tab focus, link targets and EN/IT light/dark/390 shots: `/tmp/rev20/p.js` (boots, edits `ctx.accessFile` before the first request).
+
 ## Pitfalls
 
 - `.menu` is shrink-to-fit (absolute, `min-width` only), so the same panel is a different width wherever its longest row differs: compare the computed width on both surfaces, not the classes.

@@ -548,16 +548,23 @@ details.navmenu .menu{left:0;right:auto}
      that scrolls sideways is the clipped tab §13.17 named, and one row with a scroll is two
      dimensions, which is what WCAG 1.4.10 Reflow asks not to do. */
   nav.tabs{display:none}
-  /* The mark gives way and the words stay (§13.34 §12c, the user's option (a) of 2026-11-27).
-     The words are the part that is always there: they come from the settings file and are
-     rendered by this program, while the mark comes from another host, and the rule for every
-     page this estate serves is that it is complete without a second host answering. The rule
-     that hid the words "when a mark is present" left a bar with no name at all the moment the
-     mark answered `404`, because a failed image is a 0px-wide box and the `img` element is
-     still there; and `position:absolute` is not a phone rule, so a deployment with a logo had
-     no brand name on the console at any width. The image keeps `alt=""` on every width, so a
-     reader hears the name once, from the words. */
-  .brand img{display:none}
+  /* The words give way and the mark stays (§13.34 §12g, the user's reversal of 2026-11-27,
+     which is the phone arm as §13.28 §4 wrote it). The mark is the deployment's face, and the
+     words are the part a 320px row has no room for once the trigger and the sign-out pill are
+     counted. They are hidden and not removed, by the clip pattern `base.css`'s `.vh` uses, and
+     that pairing is the whole decision: the image's `alt` is empty because the name beside it
+     says what it is, so the words are the bar's only name, and `display:none` or
+     `visibility:hidden` here would take that name away from the one technology the pattern
+     feeds. `flex-shrink:0` is the row's arithmetic: a word taken out of the row must not also
+     be the part that shrinks, so the ellipsis pieces and the name pill stay the bar's give and
+     the cap above stays the whole budget. The rule lives in this width and nowhere else,
+     because `position:absolute` is not a phone rule and a top-level one left a deployment with
+     a logo with no brand name at any width (§13.34 §12c). What it costs is §12g's option (c),
+     chosen with no script: a mark that answers `404` is present and 0px wide, so a phone's
+     brand is then empty, which only a wrong `ui.logo_url` causes and which the bar's other
+     controls survive. */
+  .brand:has(img) .t{position:absolute;width:1px;height:1px;overflow:hidden;
+    clip-path:inset(50%);flex-shrink:0}
   /* The id keeps its `nowrap` here, so this is where it pays for it: at .85em the 36 characters
      fit the width a 320px screen leaves once `main`'s padding is gone, which is what makes it
      move whole to a line of its own instead of pushing the page sideways. */

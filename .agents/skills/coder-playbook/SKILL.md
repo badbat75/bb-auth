@@ -198,3 +198,9 @@ Rules are in `AGENTS.md`. Format of this file: `AGENTS.md`, under "Skills".
   an error: only `Error::Timeout` means Cognito did not answer, and a redirect is handled as a refusal.
 - On an `/account` page the body's first `class="lede"` is the bar's menu, not the page's lede; a
   test or helper looking for the page's lede must skip the header.
+- The bar's phone brand arm is `.brand:has(img) .t` (the words clipped to a 1px box, the mark kept,
+  §13.34 §12g option (c)) and it lives **inside** `@media (max-width:640px)`:
+  `the_words_hide_with_a_logo_and_the_panel_rows_need_no_gap` panics on a `.brand:has(img)` rule at
+  any other width and on a `.brand img` rule at 640, and `e2e/tests/settings.js` reads the same pair
+  at 1280, 884, 360 and 320, where `brandWordsHidden` wants the mark at its 96px cap. So
+  `.brand img{flex:none}` is load-bearing for the e2e and not only for the Rust test.
