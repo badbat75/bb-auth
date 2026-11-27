@@ -48,25 +48,10 @@ header.top{background:var(--card);border-bottom:1px solid var(--card-border);pad
    keeps it from taking the tabs' room. */
 .brand{display:flex;align-items:center;gap:10px;min-width:0;max-width:14rem;font-weight:600;
   letter-spacing:.02em;line-height:1.2}
-a.brand{color:inherit;text-decoration:none}
-a.brand:hover{text-decoration:underline}
 /* The name, cut with an ellipsis. The three companions are not decoration: `text-overflow`
    paints nothing without `overflow:hidden`, and neither does anything without
    `white-space:nowrap`, and a box that can wrap makes a second line in a bar that has none. */
 .brand .t{min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
-/* The tag line is cut with the name, by the same three companions and for the same reason: it
-   is the second line of the brand's text, and a truncated "Administ…" says the same thing the
-   whole word does about which surface this is. It is cut **first**, though, and that is
-   §13.34 §0's fix: a flex row splits a shortfall in proportion to each item's base size, so
-   the two lines used to give way together and a phone's bar (narrowed by the ☰ the same
-   section adds) read "bb-a…" beside "Administrati…". The name is the deployment's identity and
-   the one copy of it on the page, the tag is a label that says which surface this is, and the
-   words of the label are said again in the page's own heading: the tag gives way and the name
-   stays whole. `flex-shrink:100` is a margin, not a measurement, for the row does all the
-   arithmetic; both lines keep `min-width:0`, so the tag can go to nothing while the name is
-   never cut. */
-.brand .v{display:block;color:var(--muted);font-weight:400;font-size:.85em;min-width:0;
-  overflow:hidden;text-overflow:ellipsis;white-space:nowrap;flex-shrink:100}
 /* One rule sizes the mark on both surfaces (§13.28 §6), and **height** is the bound: a logo is
    whatever shape the operator uploaded, and a rule keyed on width lets a wide wordmark eat the
    tabs' room, which is the same room the ellipsis pieces are fighting for. 96px is the width the
@@ -98,11 +83,11 @@ nav.acct{flex:0 1 auto;min-width:0;align-items:center;gap:6px;margin-left:auto}
 /* The bar's navigation menu (§13.34 §2), and outside its breakpoint it is not in the bar at
    all: the five tabs are already there, and a ☰ beside them is a trigger that opens a copy of
    what the eye is reading. `display:none` is also what makes it cost the bar no room, which is
-   what the 942px measurement was taken with. The two declarations after it are the ☰'s share of
+   what the 884px measurement was taken with. The two declarations after it are the ☰'s share of
    the bar, and they are the same pair the account end carries: `nav` is `flex:1 1 auto`, which
    is right for the strip (the design says it takes the room that is left) and wrong here, where
-   it measured 529px wide at 941px with a 30px trigger inside it, pushing the brand off the
-   column's edge. `min-width:0` is the other half: `nav:not(.acct)` floors every bar row at
+   it measured 529px wide at the breakpoint with a 30px trigger inside it, pushing the brand off
+   the column's edge. `min-width:0` is the other half: `nav:not(.acct)` floors every bar row at
    `max-content`, which is the rule that stops a strip being squeezed into cut tabs, and a
    trigger has nothing to be cut. */
 nav.navm{display:none;flex:0 1 auto;min-width:0}
@@ -155,20 +140,33 @@ nav.navm{display:none;flex:0 1 auto;min-width:0}
    and each carries its own `margin-bottom:4px`: a gap on the row stacks a second space between
    them, and the panel's rows stop reading as the one list they are. */
 .menu-tabs{display:flex;flex-direction:column;gap:0}
-/* The one breakpoint for the tabs, and the number is the bar's width and not a device: at 941px
+/* The one breakpoint for the tabs, and the number is the bar's width and not a device: at 883px
    the brand, the five tabs (the Italian "Impostazioni" is the widest of the five words), a
    person's name and the ☰'s trigger stop fitting on a row that cannot wrap, and the thing a bar
-   must never do is cut a tab (§13.34 §0 measured 942 as the narrowest width that holds). Below
-   it the bar's strip is hidden and the ☰'s panel is the navigation, which is the compromise the
-   user accepted on 2026-11-25 and §13.34 kept: the tabs move one tap away rather than onto a
-   second row. Both halves are declarations, so the pair cannot be half-written: a strip hidden
-   with nothing to replace it is a bar with no navigation and no tabs. The strip is named
-   `nav.tabs` rather than written `nav:not(.acct)`, because with the ☰ in the bar the `:not`
-   would hide that too, leaving a bar whose only navigation is a trigger with no strip beside
-   it. */
-@media (max-width:941px){
+   must never do is cut a tab (§13.34 §10a measured 884 as the narrowest width that holds, once
+   the brand's tag line was gone). Below it the bar's strip is hidden and the ☰'s panel is the
+   navigation, which is the compromise the user accepted on 2026-11-25 and §13.34 kept: the tabs
+   move one tap away rather than onto a second row. Both halves are declarations, so the pair
+   cannot be half-written: a strip hidden with nothing to replace it is a bar with no navigation
+   and no tabs. The strip is named `nav.tabs` rather than written `nav:not(.acct)`, because with
+   the ☰ in the bar the `:not` would hide that too, leaving a bar whose only navigation is a
+   trigger with no strip beside it. */
+@media (max-width:883px){
   nav.tabs{display:none}
   nav.navm{display:flex}
+}
+/* Above the breakpoint the account end is the bar's give, by name. The brand's tag line used to
+   be that give: `flex-shrink:100` inside the slot absorbed the bar's shortfall there, so the
+   name pill kept its room while the tag truncated. With the tag gone (§13.34 §10) a brand and a
+   name pill in proportion shrink together and the name is cut the moment the row runs short, so
+   the order the `.brand` comment already promises is said out loud here: the account end gives
+   way first, and the brand's words next. `100` is a margin, not a measurement, for the row does
+   all the arithmetic, and the name pill's floor is the 128px the 884px breakpoint was picked on.
+   It is scoped to the widths above the breakpoint, and not top level, because below it the ☰
+   regime wants today's proportional split: put everywhere, this rule let a long brand with no
+   logo squeeze the name pill to 52px at 320, where the split keeps it at 121px. */
+@media (min-width:884px){
+  nav.acct{flex-shrink:100}
 }
 /* The page's one action, and the way out beside it, are one object and must be one height:
    `cancel` next to `Create key` at three quarters the height reads as a caption of the button
@@ -526,7 +524,7 @@ details.navmenu .menu{left:0;right:auto}
   .bar .who{max-width:11rem}
   /* `nav.tabs` names the strip by name, and that is the whole rule: the account row is a `nav`
      too, and so is the ☰, and this is about the tabs alone. They are in the ☰'s panel at this
-     width (the 941px block above moved them), so the strip is not hidden and scrolled: a row
+     width (the 883px block above moved them), so the strip is not hidden and scrolled: a row
      that scrolls sideways is the clipped tab §13.17 named, and one row with a scroll is two
      dimensions, which is what WCAG 1.4.10 Reflow asks not to do. */
   nav.tabs{display:none}
@@ -534,12 +532,12 @@ details.navmenu .menu{left:0;right:auto}
      deployment this is, and a mark plus a name plus a trigger does not fit a 320px row. The
      words are visually hidden, not removed, which is why the image keeps `alt=""`: a reader
      hears the name the eye no longer has. Without a logo the text stays, and truncates. The
-     tag line goes with the name: the 2026-11-26 review found a 320px bar showing a mark, an
-     empty name and the label standing under it. The two rules below are **one mechanism
-     spelled twice**, and the test compares their declarations property by property, so a
-     change to one is a change to the other. */
+     hiding is the clip pattern `.vh` uses, and not `display:none` or `visibility:hidden`: a
+     rule that took the words out of the accessibility tree would take the deployment's name
+     away from the one technology the whole mechanism feeds.
+     (§13.34 §10 removed the tag line that used to stand under the name, and the rule that hid
+     it with it: a 320px bar of that design showed a mark, an empty name and a label.) */
   .brand:has(img) .t{position:absolute;width:1px;height:1px;overflow:hidden;clip-path:inset(50%)}
-  .brand:has(img) .v{position:absolute;width:1px;height:1px;overflow:hidden;clip-path:inset(50%)}
   /* The id keeps its `nowrap` here, so this is where it pays for it: at .85em the 36 characters
      fit the width a 320px screen leaves once `main`'s padding is gone, which is what makes it
      move whole to a line of its own instead of pushing the page sideways. */

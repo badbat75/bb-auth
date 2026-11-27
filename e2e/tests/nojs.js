@@ -37,10 +37,10 @@ async function revealKey(page, base, user, id) {
  *  the one the layout engine made. */
 async function iconBoxes(page) {
   return page.$$eval('.pill.ico', (els) => els.filter((el) => {
-    // Measure a target where it is **laid out**. The bar's ☰ is `display:none` above the 941px
-    // breakpoint (§13.34 §2), and a box inside a box that generates no box measures 0×0, so a
-    // size check on it at desktop width measures nothing. The same is true of the reveal's copy
-    // button before its script unhides it.
+    // Measure a target where it is **laid out**. The bar's ☰ is `display:none` above the 883px
+    // breakpoint (§13.34 §2, as §10 moves it), and a box inside a box that generates no box
+    // measures 0×0, so a size check on it at desktop width measures nothing. The same is true of
+    // the reveal's copy button before its script unhides it.
     const r = el.getBoundingClientRect();
     return r.width > 0 && r.height > 0;
   }).map((el) => {
@@ -259,7 +259,7 @@ async function run(ctx, t) {
       await page.setViewportSize({ width, height: 900 });
       await acct8d.setViewportSize({ width, height: 900 });
       await page.goto(ctx.base + '/');
-      if (width <= 941) {
+      if (width <= 883) {
         // §13.34 §2: at and below the breakpoint the ☰ is the bar's **first** child, so the box
         // that shares the page's left edge on the console is the ☰, and the brand sits behind it.
         // The account page has no ☰ (§4), so there the brand keeps the edge at every width.
@@ -510,10 +510,10 @@ async function run(ctx, t) {
 
     // At phone width the ☰ is the only navigation the console has, and a `details` is HTML,
     // not script: it opens with markup, its rows are plain links, and scripting off changes
-    // nothing about reaching a page (§13.28 §4, §13.34 §2). 360 is a phone, 941 the widest
+    // nothing about reaching a page (§13.28 §4, §13.34 §2). 360 is a phone, 883 the widest
     // width that takes this path.
     const navTab = `${NAV_MENU} .menu-tabs a`;
-    for (const width of [360, 941]) {
+    for (const width of [360, 883]) {
       await page.setViewportSize({ width, height: 760 });
       await page.goto(ctx.base + '/users?lang=en');
       const l = await headerLayout(page);

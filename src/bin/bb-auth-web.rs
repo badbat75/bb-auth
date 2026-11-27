@@ -862,12 +862,6 @@ enum K {
     NotFoundBody,
     FileErrorTitle,
     FileErrorHint,
-    // The second line of the bar's brand. It used to be the version, which says what this
-    // binary happens to be; the footer says that, where a person reading a deploy looks. What
-    // the bar has to say is what this surface *is*, because the deployment's name is now the
-    // first line on both surfaces and the name alone would not tell an administrator's bar
-    // from a person's page.
-    ConsoleTag,
     SignOut,
     // --- the settings menu ---
     Settings,
@@ -2266,7 +2260,6 @@ fn t(lang: Lang, key: K) -> &'static str {
             "Ogni pagina qui rilegge il file a ogni richiesta, quindi correggerlo ha effetto \
              subito — senza riavvio né reload.",
         ),
-        K::ConsoleTag => m(lang, "Administration", "Amministrazione"),
         K::SignOut => m(lang, "Sign out", "Esci"),
         K::Settings => m(lang, "Preferences", "Preferenze"),
         K::AccountMenu => m(lang, "account menu", "menu dell'account"),
@@ -5187,9 +5180,9 @@ fn who(given_name: Option<&str>, email_header: &str) -> Who {
 /// Factored out of [`shell`] because the self-service page wears the same bar (§13.17), and
 /// two copies of one bar is how two surfaces drift a pixel at a time, each editor changing the
 /// file in front of them. The slots are markup and not a type because that is all the two
-/// surfaces differ on: the account page has no tabs to move and no ☰ to move them in, and names
-/// the operator's brand where the console names the tool. Every class is `admin.css`'s already,
-/// so a slot that arrives with one of its own is the thing to fix.
+/// surfaces differ on: the account page has no tabs to move and no ☰ to move them in. Every
+/// class is `admin.css`'s already, so a slot that arrives with one of its own is the thing to
+/// fix.
 fn top_bar(navn: Markup, brand: Markup, tabs: Markup, acct: Markup) -> Markup {
     html! {
         header class="top" {
@@ -5203,43 +5196,30 @@ fn top_bar(navn: Markup, brand: Markup, tabs: Markup, acct: Markup) -> Markup {
     }
 }
 
-/// The brand slot of both shells: the operator's mark, the name, and the console's tag
-/// (§13.28 §6, §7). `href` is `Some` on the console, where the brand is the way home, and
-/// `None` on the self-service page, whose visitor came to the estate for that one page and has
-/// no home in this program to go back to. `extra` carries the page's own class
-/// (`selfserve-brand`), which is arrangement and not the slot's own shape.
+/// The brand slot of both shells: the operator's mark and the name (§13.28 §6, §7, as §13.34
+/// §10 and §11 end it). It is a `span` on **every** surface, with no `href`: `/account/` is the
+/// only page of its surface and the `403` names a console the caller may not open, and the
+/// console's Dashboard tab beside the slot is the way home, so a link there would name a page the
+/// bar already names. `extra` carries the page's own class (`selfserve-brand`), which is
+/// arrangement and not the slot's own shape.
 ///
 /// One function because the mark and the name are one object on both surfaces: two call sites
 /// drawing the same pair is how a logo arrives in one bar and not the other, which is the drift
 /// this file keeps writing rules about. The `alt` is empty because the name beside the picture
 /// already says what it is, and it stays empty where the text is visually hidden on a phone
 /// (§4), since a reader is then the only one reading the name.
-fn brand_block(
-    name: &str,
-    tag: Option<&str>,
-    logo: Option<&str>,
-    href: Option<&str>,
-    extra: &str,
-) -> Markup {
+fn brand_block(name: &str, logo: Option<&str>, extra: &str) -> Markup {
     let cls = if extra.is_empty() {
         "brand".to_string()
     } else {
         format!("brand {extra}")
     };
-    let inner = html! {
-        @if let Some(src) = logo {
-            img src=(src) alt="";
-        }
-        span class="t" { (name) }
-        @if let Some(t) = tag {
-            span class="v" { (t) }
-        }
-    };
     html! {
-        @if let Some(h) = href {
-            a class=(cls) href=(h) { (inner) }
-        } @else {
-            span class=(cls) { (inner) }
+        span class=(cls) {
+            @if let Some(src) = logo {
+                img src=(src) alt="";
+            }
+            span class="t" { (name) }
         }
     }
 }
@@ -5565,18 +5545,19 @@ fn shell_named(
         (Route::Config, v.t(K::ConfigTab)),
     ];
     let current = v.at.tab();
-    // The brand is the way home, but only when there is a home to go to: the 403 page has no
-    // nav for the same reason, so there the brand is a plain inert span. The two lines are the
-    // deployment's name over what this surface is (`K::ConsoleTag`), which is what makes the
-    // console's bar and `/account/` name the same deployment in the same shape (§13.18).
+    // The brand says the deployment's name, in one line, in one shape on every surface: no tag
+    // under it (§13.34 §10) and no link on it (§13.34 §11, the user's decision). The name is
+    // `ui.brand_name` so the console's bar and `/account/` name the same deployment (§13.18),
+    // and the tag is gone because what it said is said by the five tabs, the page's `h1` and the
+    // `<title>`, and on a 1280px screen it was the word being cut. A link would lead to the page
+    // the Dashboard tab beside it already names, so the slot is a `span` here as it is on
+    // `/account/` and on the `403`.
     let name = v
         .look
         .brand
         .map(str::to_string)
         .unwrap_or_else(|| DEFAULT_ACCOUNT_BRAND.to_string());
-    let tag = v.t(K::ConsoleTag);
-    let home = v.href(&Route::Dashboard);
-    let brand = brand_block(&name, Some(tag), logo, v.admin.map(|_| home.as_str()), "");
+    let brand = brand_block(&name, logo, "");
     // The strip, and the same four rows inside the panel, from one loop (§13.28 §4): moving one
     // element between the bar and a closed `details` cannot be done in CSS, so the links are
     // emitted twice and exactly one copy is displayed. `aria-current="page"` is the word a
@@ -10562,8 +10543,9 @@ fn account_shell(prefs: &AccountPrefs, title: &str, content: Markup, look: Accou
     // where every session starts and what the other options are departures from.
     let brand_name = look.brand.unwrap_or(DEFAULT_ACCOUNT_BRAND);
     // The brand slot: the operator's mark and name, worn as the page showed them before the bar
-    // existed. Not a link, because this page is the only one this person reached the estate for.
-    let brand = brand_block(brand_name, None, look.logo, None, "selfserve-brand");
+    // existed, and now worn the same way on every surface, the console's bar included
+    // (§13.34 §11).
+    let brand = brand_block(brand_name, look.logo, "selfserve-brand");
     // The account end: one menu, built by the console's own function, so the two surfaces cannot
     // drift. No places: this page has no tabs to move and offers no console page (§13.28 §2), so
     // the panel is who the caller is, the Preferences box, and Sign out.
@@ -26005,6 +25987,40 @@ mod tests {
         all.into_iter().next().unwrap()
     }
 
+    /// The bar's brand slot, as one shape for **every** surface (§13.34 §10 as §11 overruled
+    /// it): a `span.brand`, no `href`, no link inside it, no tag line under the name.
+    ///
+    /// The span is the user's decision, and it holds on the console too: the brand leads to the
+    /// page the Dashboard tab beside it already names, so it adds no destination, and the two
+    /// reasons `/account/` and the `403` had it that way (a link to the page already open, a
+    /// link to a page the caller may not open) apply to the same bar. Reading it as one reader
+    /// is the point: a bar whose console half is checked as a link and whose account half as a
+    /// span is a suite that passes on two shapes of one function.
+    ///
+    /// Returns the element, so the caller reads the name out of it.
+    fn the_brand(top: &str, label: &str) -> String {
+        let brands = controls_with_class(top, "span", "brand");
+        assert_eq!(brands.len(), 1, "{label}: one span.brand in the bar: {top}");
+        assert!(
+            controls_with_class(top, "a", "brand").is_empty(),
+            "{label}: the brand is not a link on any surface: {top}"
+        );
+        let brand = brands.into_iter().next().unwrap();
+        assert!(
+            attr(open_tag(&brand), "href").is_none(),
+            "{label}: and carries no href of its own: {brand}"
+        );
+        assert!(
+            !brand.contains("<a "),
+            "{label}: nothing inside the brand is a link: {brand}"
+        );
+        assert!(
+            controls_with_class(&brand, "span", "v").is_empty(),
+            "{label}: the bar carries no tag line under the name: {brand}"
+        );
+        brand
+    }
+
     /// Every `class="…"` value inside `markup`, in document order. Two surfaces built from one
     /// function have the same list; a slot that arrives with a class of its own shows up here.
     fn class_values(markup: &str) -> Vec<String> {
@@ -26053,26 +26069,25 @@ mod tests {
             "account: the same `div.bar` inside the header: {a_top}"
         );
 
-        // Brand slot: the console's is a link home, the account's an inert span that wears the
-        // operator's brand (here the default, nothing configured).
-        assert!(c_top.contains("<a class=\"brand\""), "{c_top}");
-        let brands = controls_with_class(&a_top, "span", "brand");
-        assert_eq!(brands.len(), 1, "account: one span.brand: {a_top}");
+        // Brand slot: one shape on both surfaces (§13.34 §10 as §11 overruled it), differing
+        // only in the account page's own arrangement class.
+        let c_brand = the_brand(&c_top, "console");
         assert!(
-            attr(open_tag(&brands[0]), "class")
+            attr(open_tag(&c_brand), "class")
+                .is_some_and(|c| c.split_whitespace().collect::<Vec<_>>() == vec!["brand"]),
+            "the console's brand slot carries the slot's own class and nothing else: {c_brand}"
+        );
+        let a_brand = the_brand(&a_top, "account");
+        assert!(
+            attr(open_tag(&a_brand), "class")
                 .is_some_and(|c| c.split_whitespace().any(|w| w == "selfserve-brand")),
             "the account's brand slot is `span.brand.selfserve-brand`: {}",
-            brands[0]
+            a_brand
         );
         assert!(
-            !brands[0].contains("<a "),
-            "the page is the only one, so its brand is not a link: {}",
-            brands[0]
-        );
-        assert!(
-            visible_text(&brands[0]).contains(DEFAULT_ACCOUNT_BRAND),
+            visible_text(&a_brand).contains(DEFAULT_ACCOUNT_BRAND),
             "the brand names the deployment: {}",
-            brands[0]
+            a_brand
         );
         assert!(
             !acct_page.body.contains("<header class=\"selfserve-brand\""),
@@ -26092,7 +26107,7 @@ mod tests {
             "console: the bar keeps five tabs: {}",
             the_tab_nav(&console.body, "console")
         );
-        // §13.34 §2 gives the strip its own class so the 941px rule can name it, and §4 says
+        // §13.34 §2 gives the strip its own class so the 883px rule can name it, and §4 says
         // `/account/` keeps that element empty: the same header, with nothing in the strip.
         assert!(
             a_top.contains("<nav class=\"tabs\"></nav>"),
@@ -26105,7 +26120,7 @@ mod tests {
         // §13.34 §4: and no ☰ either. The navigation menu belongs to the console's tabs, and this
         // page has none, so a ☰ here would be a control that opens on an empty box. Read the
         // header's markup, not the page: every page inlines `admin.css`, whose rules name
-        // `details.navmenu` at the top level and in the 941 block, so a substring over the whole
+        // `details.navmenu` at the top level and in the 883 block, so a substring over the whole
         // document is true of the stylesheet, not of the markup.
         assert!(
             !a_top.contains("<nav class=\"navm\"") && !a_top.contains("navmenu"),
@@ -28437,59 +28452,35 @@ mod tests {
         cleanup(&path);
     }
 
-    /// 8d-3 (§13.18, "The two brands agree"): the console's bar and the account's name the
-    /// deployment alike, `ui.brand_name` else `bb-auth`. The console's second line is
-    /// `K::ConsoleTag`, and the version lives in the footer only.
+    /// 8d-3 (§13.18, "The two brands agree") as §13.34 §10 ends it: the console's bar and the
+    /// account's name the deployment alike, `ui.brand_name` else `bb-auth`, in **one shape** and
+    /// with **one line**. The tag line is gone, so what the two bars agree on is the name, and
+    /// the name is the whole of what the slot says: the version lives in the footer only.
     ///
-    /// Red until the coder adds `K::ConsoleTag` (E0599, the module does not compile), then until
-    /// the console brand reads the settings.
+    /// The shape is pinned in both languages, because the tag was the only translated word in
+    /// the slot: an English-only check passes on an Italian bar that still says Amministrazione.
+    ///
+    /// Red until the coder drops the tag and the link: the console's bar emits `a.brand`, and a
+    /// `span.v` under the name, so `the_brand` fails on the console's own slot.
     #[test]
     fn both_bars_name_the_deployment() {
-        assert_eq!(t(Lang::En, K::ConsoleTag), "Administration");
-        assert_eq!(t(Lang::It, K::ConsoleTag), "Amministrazione");
-
-        for (name, settings, want, other) in [
-            (
-                "brands-default",
-                ACCOUNT_SETTINGS,
-                DEFAULT_ACCOUNT_BRAND,
-                "BadBat75",
-            ),
-            (
-                "brands-set",
-                ACCOUNT_SETTINGS_BRAND,
-                "BadBat75",
-                DEFAULT_ACCOUNT_BRAND,
-            ),
+        for (name, settings, want) in [
+            ("brands-default", ACCOUNT_SETTINGS, DEFAULT_ACCOUNT_BRAND),
+            ("brands-set", ACCOUNT_SETTINGS_BRAND, "BadBat75"),
         ] {
             let path = account_scratch(name, settings);
             let port = account_port(&path);
             let base = format!("http://127.0.0.1:{port}{ACCOUNT_PATH}/");
-            for (lang, cookie) in [(Lang::En, "lang=en"), (Lang::It, "lang=it")] {
+            for cookie in ["lang=en", "lang=it"] {
                 let c = console_get(port, "admin@x.com", &[("Cookie", cookie)]);
                 assert_eq!(c.status, 200, "{}", account_readable(&c.body));
                 let top = the_header_bar(&c.body, "console");
-                let brands = controls_with_class(&top, "a", "brand");
-                assert_eq!(brands.len(), 1, "{name}/{cookie}: one a.brand: {top}");
-                let text = visible_text(&brands[0]);
-                assert!(
-                    text.contains(want) && !text.contains("bb-auth-web"),
-                    "{name}/{cookie}: the console brand is the deployment's name, not the \
-                     tool's: {}",
-                    brands[0]
-                );
-                if name == "brands-set" {
-                    assert!(!text.contains(other), "{name}/{cookie}: {text}");
-                }
-                assert!(
-                    text.contains(t(lang, K::ConsoleTag)),
-                    "{name}/{cookie}: the second line is the tag: {}",
-                    brands[0]
-                );
-                assert!(
-                    !text.contains(env!("CARGO_PKG_VERSION")),
-                    "{name}/{cookie}: the version is no longer in the brand: {}",
-                    brands[0]
+                let brand = the_brand(&top, &format!("{name}/{cookie}"));
+                assert_eq!(
+                    visible_text(&brand).trim(),
+                    want,
+                    "{name}/{cookie}: the console's brand says the deployment's name and \
+                     nothing else: {brand}"
                 );
                 let footer = elements(&c.body, "<footer", "</footer>");
                 assert_eq!(footer.len(), 1);
@@ -28502,15 +28493,49 @@ mod tests {
             let a = account_call_with(&base, Some("bob@x.com"), &[]);
             assert_eq!(a.status, 200, "{}", account_readable(&a.body));
             let top = the_header_bar(&a.body, "account");
-            let brands = controls_with_class(&top, "span", "brand");
-            assert_eq!(brands.len(), 1, "{name}: {top}");
-            let text = visible_text(&brands[0]);
-            assert!(text.contains(want), "{name}: account brand: {}", brands[0]);
-            if name == "brands-set" {
-                assert!(!text.contains(other), "{name}: {text}");
-            }
+            let brand = the_brand(&top, name);
+            assert_eq!(
+                visible_text(&brand).trim(),
+                want,
+                "{name}: the account's brand says the same thing in the same shape: {brand}"
+            );
             cleanup(&path);
         }
+    }
+
+    /// §13.34 §10 as §11 overruled it: the page a non-administrator lands on names **only the
+    /// deployment**. That bar has no tab strip and no home to link to, and its brand's tag line
+    /// was the one word saying what this surface is; with the tag gone the bar says the
+    /// deployment's name, in a span, and nothing else. Pinned in both languages, because the tag
+    /// was the only translated word in the slot and it is the Italian page an English-only check
+    /// waves through.
+    ///
+    /// Green today, and kept as the pin the other two are: the `403`'s brand is the self-service
+    /// page's slot (§13.34 §11), which is already a `span.brand` with no `href` and no second
+    /// line, so nothing here goes red until the console changes. Its job is to stay red if the
+    /// tag comes back on **this** page, whose bar is built by the same function the console's
+    /// change touches.
+    #[test]
+    fn the_forbidden_bar_names_only_the_deployment() {
+        let path = account_scratch_full_settings("forbidden-brand", ACCOUNT_SETTINGS_BRAND);
+        let port = account_port(&path);
+        for cookie in ["lang=en", "lang=it"] {
+            let g = console_get(port, "bob@x.com", &[("Cookie", cookie)]);
+            assert_eq!(
+                g.status,
+                403,
+                "a non-administrator is refused the console: {}",
+                account_readable(&g.body)
+            );
+            let top = the_header_bar(&g.body, "403");
+            let brand = the_brand(&top, &format!("403/{cookie}"));
+            assert_eq!(
+                visible_text(&brand).trim(),
+                "BadBat75",
+                "the refused bar's only word is the deployment's name: {brand}"
+            );
+        }
+        cleanup(&path);
     }
 
     /// 8d-3 (§13.18, "The account id on a phone"): the id is `code.uid`, a single token the
@@ -32661,7 +32686,7 @@ mod tests {
 
         // A page the visitor cannot use has no tabs to reach, so it carries no ☰ at all: the
         // console's `403` is not a console page, and `/account/` never was one (§13.34 §2). Read
-        // the header's markup: every page inlines `admin.css`, whose top-level and 941-block
+        // the header's markup: every page inlines `admin.css`, whose top-level and 883-block
         // rules name `details.navmenu`, so a substring over the whole document reports the
         // stylesheet, not the page.
         let denied = console_get(port, "bob@x.com", &[]);
@@ -36060,10 +36085,9 @@ mod tests {
         let g = console_get(port, "admin@x.com", &[]);
         assert_eq!(g.status, 200, "{}", account_readable(&g.body));
         let top = the_header_bar(&g.body, "console");
-        let brand = controls_with_class(&top, "a", "brand");
-        assert_eq!(brand.len(), 1, "{top}");
-        let img = elements(&brand[0], "<img", ">");
-        assert_eq!(img.len(), 1, "the brand holds the logo: {}", brand[0]);
+        let brand = the_brand(&top, "console");
+        let img = elements(&brand, "<img", ">");
+        assert_eq!(img.len(), 1, "the brand holds the logo: {}", brand);
         assert_eq!(
             attr(open_tag(&img[0]), "src").as_deref(),
             Some("https://assets.badbat75.com/logo.png"),
@@ -36077,9 +36101,9 @@ mod tests {
             img[0]
         );
         assert!(
-            brand[0].find("<img").unwrap() < brand[0].find("BadBat75").unwrap(),
+            brand.find("<img").unwrap() < brand.find("BadBat75").unwrap(),
             "the logo is left of the name: {}",
-            brand[0]
+            brand
         );
         let csp = g.header("Content-Security-Policy").expect("a policy");
         assert!(
@@ -36143,11 +36167,17 @@ mod tests {
         cleanup(&path);
     }
 
-    /// §13.28 §4 as §13.34 moves it: the bar is **one row by construction**, and the breakpoint
-    /// where the tabs leave it is the measured one. `flex-wrap:nowrap` means no operator's font,
-    /// brand or person's name can make a second line; at 941px the five-tab worst case (the
-    /// Italian words, with the longest name the estate measured) stops fitting, and the tabs
-    /// move into the ☰.
+    /// §13.28 §4 as §13.34 §10 moves it: the bar is **one row by construction**, and the
+    /// breakpoint where the tabs leave it is the measured one. `flex-wrap:nowrap` means no
+    /// operator's font, brand or person's name can make a second line; at 883px the five-tab
+    /// worst case (Italian, the longest brand measured, a logo, the longest given name) stops
+    /// fitting, and the tabs move into the ☰.
+    ///
+    /// The `@media(min-width:884px)` block is pinned with it, because it is what the breakpoint
+    /// is measured *by*: the tag line used to absorb the bar's shortfall inside the brand, and
+    /// with it gone the account end has to say so itself (`nav.acct{flex-shrink:100}`) above the
+    /// breakpoint, where the name pill's floor is 128px. Below it the ☰ regime keeps today's
+    /// proportional split, which is why the rule is scoped and not top level.
     ///
     /// The panel is pinned here too, because §13.34 §0 measured what a floor did with no width:
     /// one rule produced a 230px panel on the console and a 286px panel on the account page,
@@ -36155,8 +36185,8 @@ mod tests {
     /// longer word than the console's name pill. One declared width, capped to the viewport, is
     /// the fix, so this asserts the **absence** of `min-width` as much as the presence of `width`.
     ///
-    /// Red until the coder writes the CSS: `admin.css` breaks at 800px, shows the ☰ nowhere, and
-    /// floors the panel at a measured width.
+    /// Red until the coder moves the breakpoint and scopes the give: `admin.css` breaks at 941px,
+    /// has no `min-width:884px` block, and leaves `nav.acct` shrinking in proportion.
     #[test]
     fn the_bar_stays_one_row_at_every_width() {
         let scoped = css_scoped(CSS);
@@ -36180,10 +36210,10 @@ mod tests {
             "the bar cannot make a second row: {bar}"
         );
 
-        // The breakpoint is 941px, and the one it replaced is **gone**: a stale 800px block
-        // hides the strip at a width where the ☰ is still hidden, which is a bar with no
-        // navigation and no tabs.
-        let at = "@media(max-width:941px)";
+        // The breakpoint is 883px, and the one it replaced is **gone**: a stale 941px block
+        // hides the strip at a width where the ☰ is the only navigation, which is a bar with
+        // tabs and no room for them, and a 900px window that the measurement says fits.
+        let at = "@media(max-width:883px)";
         let media: Vec<&String> = scoped
             .iter()
             .map(|(a, _, _)| a)
@@ -36193,12 +36223,12 @@ mod tests {
             scoped.iter().any(|(a, _, _)| a == at),
             "{at}: admin.css breaks where the five tabs stop fitting: {media:?}"
         );
-        assert!(
-            !media
-                .iter()
-                .any(|a| a.as_str() == "@media(max-width:800px)"),
-            "the 800px block moved to 941px, it did not join it: {media:?}"
-        );
+        for stale in ["@media(max-width:941px)", "@media(max-width:800px)"] {
+            assert!(
+                !media.iter().any(|a| a.as_str() == stale),
+                "the {stale} block moved to 883px, it did not join it: {media:?}"
+            );
+        }
 
         // In it, the strip is out and the ☰ is in. Both by declaration, so the pair cannot be
         // half-written: a strip hidden with nothing to replace it is a bar with no navigation.
@@ -36224,6 +36254,33 @@ mod tests {
             Some("none"),
             "outside the breakpoint the ☰ is not in the bar at all, so it costs the bar no room: \
              {navm}"
+        );
+
+        // Above it, the account end is the bar's give, in its own block. Read with [`the_rule`]
+        // for the top level, whose `flex` shorthand needs its whitespace; the scoped reader is
+        // what sees inside an at-rule block.
+        let at_desktop = "@media(min-width:884px)";
+        assert!(
+            scoped.iter().any(|(a, _, _)| a == at_desktop),
+            "{at_desktop}: the give the tag line used to be is scoped to the widths the ☰ is not \
+             in the bar: {media:?}"
+        );
+        let acct_desktop = rule_named(&scoped, at_desktop, "nav.acct");
+        assert_eq!(
+            css_decl(&acct_desktop, "flex-shrink").as_deref(),
+            Some("100"),
+            "{at_desktop}: the account end gives way before the brand's name is cut: \
+             {acct_desktop}"
+        );
+        let acct = the_rule(CSS, "nav.acct").expect("admin.css styles the account end of the bar");
+        assert!(
+            acct.contains("flex:0 1 auto"),
+            "the account end shrinks, and the scoped rule narrows that, it does not replace it: \
+             {acct}"
+        );
+        assert!(
+            acct.contains("min-width:0"),
+            "the account end can shrink below its content: {acct}"
         );
 
         // The panel is **one width**, declared, with a viewport cap for the narrowest phone, and
@@ -36426,41 +36483,46 @@ mod tests {
         );
     }
 
-    /// §13.28 §4: with a mark in the bar the brand's words go, and the 2026-11-26 review found
-    /// the tag line left standing. `.brand:has(img) .t` hides the name; `.brand .v`, the line
-    /// under it, stayed, so a 320px bar showed a mark, an empty name and the label. The hiding is
-    /// **visual**, by the clip pattern `.vh` uses, and not `display:none` or `visibility:hidden`:
-    /// the words are the name a reader hears while the image carries `alt=""`, so a rule that
-    /// takes them out of the accessibility tree takes the name away from the one technology the
-    /// whole mechanism feeds.
+    /// §13.28 §4: with a mark in the bar the brand's words go, by the clip pattern `.vh` uses,
+    /// and **not** `display:none` or `visibility:hidden`: the words are the name a reader hears
+    /// while the image carries `alt=""`, so a rule that takes them out of the accessibility tree
+    /// takes the name away from the one technology the whole mechanism feeds.
+    ///
+    /// §13.34 §10 removes the tag line the 2026-11-26 review found left standing, so this pins
+    /// the **absence** of a rule for it as much as the presence of the one for the name: a
+    /// stylesheet rule naming an element no page renders is the half of that fix nobody keeps
+    /// fixed, and the slot's second line comes back one edit at a time.
     ///
     /// And the panel's tab rows need no gap (§13.28 §2): `.menu .pill` carries
     /// `margin-bottom:4px`, so a `gap` on the row stacks a second space between rows and the
     /// panel's rows stop reading as the one list they are.
     #[test]
-    fn the_tag_line_hides_with_the_words_and_the_panel_rows_need_no_gap() {
+    fn the_words_hide_with_a_logo_and_the_panel_rows_need_no_gap() {
         let scoped = css_scoped(CSS);
         let at = "@media(max-width:640px)";
         let words = rule_named(&scoped, at, ".brand:has(img) .t");
-        let tag = rule_named(&scoped, at, ".brand:has(img) .v");
         for prop in ["position", "clip-path", "width"] {
             assert!(
-                css_decl(&tag, prop).is_some(),
-                "the tag line is visually hidden by {prop}, as the name is: {tag}"
-            );
-            // The same mechanism, not a second one: two ways of hiding the same two lines are two
-            // rules to keep in step, and one of them drifts.
-            assert_eq!(
-                css_decl(&tag, prop).as_deref(),
-                css_decl(&words, prop).as_deref(),
-                "the tag line hides the way the name does: {tag} / {words}"
+                css_decl(&words, prop).is_some(),
+                "the brand's words are visually hidden by {prop}: {words}"
             );
         }
         for prop in ["display", "visibility"] {
             assert!(
-                css_decl(&tag, prop).is_none(),
-                "the tag line is hidden visually, not from the accessibility tree: {tag}"
+                css_decl(&words, prop).is_none(),
+                "the words are hidden visually, not from the accessibility tree: {words}"
             );
+        }
+
+        // No rule, at any width, names the tag line: `admin.css` styled `.brand .v` at the top
+        // level and hid it under 641px, and both are the markup's own history now.
+        for (a, sel, _) in &scoped {
+            for part in sel.split(',') {
+                assert!(
+                    !part.contains(".brand .v") && !part.contains(".brand:has(img) .v"),
+                    "{sel} in {a:?} styles a tag line the bar no longer has"
+                );
+            }
         }
 
         // No `.menu-tabs` rule, at any width, stacks a gap on top of the rows' own margin.

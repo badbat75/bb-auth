@@ -182,7 +182,7 @@ async function openPreferences(page) {
  */
 /** The tab links the bar **renders**: how many rows they stack into, and how many there are.
  *  `rows` counts distinct vertical centres, so a strip that is showing is **one** row, and the
- *  count is what says the row carries all five. A strip hidden by the 941 block generates no
+ *  count is what says the row carries all five. A strip hidden by the 883 block generates no
  *  box, so both are 0. */
 const barTabRows = (page) =>
   page.evaluate(() => {
@@ -245,10 +245,10 @@ const headerLayout = (page) =>
 
 /**
  * The bar is on one row, and the document does not scroll sideways, at every width the design
- * measured (§13.28 §4, §13.34): 320, 360, 640, 641, 941, 942, 1024, 1280. The breakpoint is on
- * the inside, so 941 and 942 are the pair that says where it is. Each width is measured in both
- * languages: the Italian words are the longer ones ("Impostazioni" against "Settings", and the
- * account menu's "Menu di navigazione"), so the bar's worst case is Italian and a walk that
+ * measured (§13.28 §4, §13.34 §10): 320, 360, 640, 641, 883, 884, 1024, 1280. The breakpoint
+ * on the inside, so 883 and 884 are the pair that says where it is. Each width is measured in
+ * both languages: the Italian words are the longer ones ("Impostazioni" against "Settings", and
+ * the account menu's "Menu di navigazione"), so the bar's worst case is Italian and a walk that
  * only speaks English measures the easy half.
  *
  * The caller sets the settings first: the widest case the measurements name is a long
@@ -257,7 +257,7 @@ const headerLayout = (page) =>
  * image is sized by its CSS box, which is the box the bar lays out, so the geometry is real.
  */
 async function barStaysOneRow(t, page, base, path, label, tabs = true) {
-  for (const width of [320, 360, 640, 641, 941, 942, 1024, 1280]) {
+  for (const width of [320, 360, 640, 641, 883, 884, 1024, 1280]) {
     await page.setViewportSize({ width, height: 720 });
     for (const lang of ['en', 'it']) {
       const sep = path.includes('?') ? '&' : '?';
@@ -268,7 +268,7 @@ async function barStaysOneRow(t, page, base, path, label, tabs = true) {
       t.eq(`${label} at ${width} ${lang}: the bar does not scroll sideways`, g.barScroll, 0);
       const l = await headerLayout(page);
       if (tabs) {
-        const inMenu = width <= 941;
+        const inMenu = width <= 883;
         // The two boxes swap: above the breakpoint the strip shows and the ☰ takes no room, at
         // and below it the strip is out and the ☰ is in. Their **rows** are not measured here: a
         // closed `details` renders nothing, and a child of a `display:none` box keeps its own

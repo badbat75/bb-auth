@@ -106,12 +106,12 @@ async function panelWalk(t, page, ctx) {
       (await text(page, 'main h1')).includes(heading), await text(page, 'main h1'));
 
     // The ☰ is `display:none` at desktop width (§13.34 §2: the strip is the navigation there), so
-    // its rows are opened and read at 941, the widest width that takes the phone path. A click on
-    // a box the bar hides is a click on nothing, and times out.
-    await page.setViewportSize({ width: 941, height: 760 });
+    // its rows are opened and read at 883, the widest width that takes the phone path (§13.34 §10
+    // measured it). A click on a box the bar hides is a click on nothing, and times out.
+    await page.setViewportSize({ width: 883, height: 760 });
     t.eq(`the ☰ is closed, so its rows are not marked until it opens (${lang})`,
       await menuIsOpen(page, NAV_MENU), false);
-    t.eq(`the ☰ opens at 941 (${lang})`, await openBarMenu(page, NAV_MENU), true);
+    t.eq(`the ☰ opens at 883 (${lang})`, await openBarMenu(page, NAV_MENU), true);
     t.eq(`the ☰ marks the same page the strip does (${lang})`, (await text(page, navCurrent)).trim(), tab);
     t.eq(`and its row carries the tab's word, not the page's (${lang})`,
       (await text(page, `${navTab}[href$="/config"]`)).trim(), tab);
@@ -157,8 +157,8 @@ async function panelWalk(t, page, ctx) {
   // At and below the breakpoint the strip is gone and the ☰ is the only navigation the console
   // has (§13.34 §2), so the rows that reach every page live there. A walk that only checked the
   // desktop bar would not notice a console that becomes unusable on a phone. 360 is a phone,
-  // 941 is the widest width that takes this path, the number §0 measured.
-  for (const width of [360, 941]) {
+  // 883 is the widest width that takes this path, the number §10 measured.
+  for (const width of [360, 883]) {
     await page.setViewportSize({ width, height: 760 });
     await page.goto(ctx.base + '/users?lang=en');
     const l = await headerLayout(page);
@@ -207,18 +207,18 @@ async function panelWalk(t, page, ctx) {
   // bar, the keyboard reaches the second trigger with the first open, and opening it has to
   // close the other, with no script. Measured in Edge: two `details` with one `name` keep only
   // the one just opened.
-  await page.setViewportSize({ width: 941, height: 760 });
+  await page.setViewportSize({ width: 883, height: 760 });
   await page.goto(ctx.base + '/users?lang=en');
-  t.eq('at 941: the ☰ opens on a click', await openBarMenu(page, NAV_MENU), true);
+  t.eq('at 883: the ☰ opens on a click', await openBarMenu(page, NAV_MENU), true);
   const trig = page.locator(`${ACCT_MENU} > summary`);
   if ((await trig.count()) === 1) {
     await trig.focus();
     await page.keyboard.press('Enter');
     const both = await Promise.all([menuShape(page, ACCT_MENU), menuShape(page, NAV_MENU)]);
-    t.eq('at 941: Enter on the account trigger opens it', both[0] && both[0].open, true);
+    t.eq('at 883: Enter on the account trigger opens it', both[0] && both[0].open, true);
     t.eq('and the ☰ closes: the two bar menus are one group', both[1] && both[1].open, false);
   } else {
-    t.check('at 941: Enter on the account trigger opens it', false, 'no account trigger to focus');
+    t.check('at 883: Enter on the account trigger opens it', false, 'no account trigger to focus');
     t.check('and the ☰ closes: the two bar menus are one group', false, 'no account trigger');
   }
   // The ☰ is a touch target, not a glyph: at phone width it is the only way to the tabs.
@@ -227,14 +227,14 @@ async function panelWalk(t, page, ctx) {
     const r = s ? s.getBoundingClientRect() : null;
     return r ? [Math.round(r.width), Math.round(r.height)] : null;
   });
-  t.check('at 941: the ☰ is at least 30px tall (WCAG 2.5.8)',
+  t.check('at 883: the ☰ is at least 30px tall (WCAG 2.5.8)',
     Array.isArray(target) && target[1] >= 30, JSON.stringify(target));
   await page.setViewportSize({ width: 1280, height: 900 });
 
   // The bar at every width the design measured, with scripting on, in both languages (§13.28
-  // §4, §13.34 §2): 320 is the narrowest phone, 941 and 942 are the breakpoint's pair, 1280 is
-  // the desktop strip. The same walk with scripting off lives in `nojs.js`, because a `details`
-  // is markup and the bar has to behave the same with no script.
+  // §4, §13.34 §2): 320 is the narrowest phone, 883 and 884 are the breakpoint's pair (§13.34
+  // §10), 1280 is the desktop strip. The same walk with scripting off lives in `nojs.js`, because
+  // a `details` is markup and the bar has to behave the same with no script.
   await barStaysOneRow(t, page, ctx.base, '/users', 'console bar');
 
   // The two menus are the same box on both surfaces (§13.34 §3), which is the measurement the
@@ -244,18 +244,15 @@ async function panelWalk(t, page, ctx) {
 
 /**
  * The brand's **name**, whole at the phone widths §13.34 §0 walked, in both languages, with the
- * bar on one row. `.brand .t` is the name and `.brand .v` the tag under it; both carry
- * `min-width:0`, so a brand with no room left splits the shortfall between the two lines and the
- * name is the one that gets cut, "bb-au…", at 320, 360 and 390. The name is the piece with no
- * second copy anywhere on the page, and the fix the design review asked for is that the **tag**
- * gives up its room first. This is the measurement of that: `scrollWidth` past `clientWidth` is
- * the ellipsis, so equal numbers on the name is the name being whole.
+ * bar on one row. `.brand .t` carries `min-width:0`, so a brand with no room left is the piece
+ * that gets cut, "bb-au…", at 320, 360 and 390. The name is the piece with no second copy
+ * anywhere on the page, so this is the measurement of it: `scrollWidth` past `clientWidth` is
+ * the ellipsis, and equal numbers is the name being whole.
  *
- * The tag is deliberately not asserted: cutting "Amminist…" is what the stylesheet says to do,
- * and whether the fixture's word is short enough to survive at a width is a fact about the
- * fixture's word. The bar's one row is asserted beside every width, because a rule that bought
- * the name's room by making the bar wrap is this fix turned into the fault §13.28 §4 exists to
- * catch.
+ * §13.34 §10 removed the tag line that used to share the slot, so there is one line here to
+ * measure and nothing beside it to write a sentence about. The bar's one row is asserted beside
+ * every width, because a rule that bought the name's room by making the bar wrap is this fix
+ * turned into the fault §13.28 §4 exists to catch.
  */
 async function brandStaysWhole(t, page, base) {
   for (const width of [320, 360, 390]) {
@@ -287,10 +284,20 @@ async function brandStaysWhole(t, page, base) {
 }
 
 /**
- * The bar at the widths §13.34 §0 measured: 942, where the five tabs are still in the bar, and
- * 941, where they have moved into the ☰. A long brand, a logo and a long given name together
- * are the widest case the measurements name, and the Italian tab words are longer than the
- * English ones, so the bar's worst case is Italian.
+ * The bar at the widths §13.34 §10 measured: 884, where the five tabs are still in the bar, and
+ * 883, where they have moved into the ☰. A long brand, a logo and a long given name together are
+ * the widest case the measurements name, and the Italian tab words are longer than the English
+ * ones, so the bar's worst case is Italian. The three strings are the ones §10a wrote down
+ * ("BadBat75 Estate Services" with a logo, and "Bartholomew-Alexander Montgomery"), because that
+ * is the case the breakpoint was picked on: a longer brand than the one measured is a case no
+ * measurement covers, and `.brand` is capped at `max-width:14rem`, so a name of more text than
+ * that slot is cut at 1280 exactly as it is at 884, and "as wide as on a desktop" compares a box
+ * the cap made, not one the bar made.
+ *
+ * At 884 the brand's name is measured against its own width on a desktop, which is what the
+ * breakpoint is measured **by**: `nav.acct{flex-shrink:100}` (§13.34 §10) is the rule that makes
+ * the account end give the room the tag line used to absorb, and the name pill's floor of 128px
+ * is the number the breakpoint was picked on.
  *
  * `barStaysOneRow` counts the vertical centres of the bar's **children**, and a strip that wraps
  * inside its own `nav` leaves all of them centred on one line, so the wrap is invisible to
@@ -304,23 +311,43 @@ async function barAtTheWorstWidth(t, ctx, look) {
   const withName = JSON.parse(JSON.stringify(look));
   withName.gate = { ...(withName.gate || {}), profile_claims: ['given_name'] };
   // The fixture sets no `ui` section, so the widest case has to be written: the long brand and
-  // a logo are what the measurements name. The logo is root-relative, because
-  // `compile_asset_url` accepts no `data:` URL and a suite must not reach the network; a broken
-  // image is sized by its CSS box, which is the box the bar lays out.
-  withName.ui = { ...(withName.ui || {}), brand_name: 'BadBat75 Operations Console', logo_url: '/img/logo.png' };
+  // a logo are what the measurements name, in the spelling §10a measured (a brand the 14rem
+  // `.brand` cap can hold whole on a desktop, which is what the 884 check is measured against).
+  // The logo is root-relative, because `compile_asset_url` accepts no `data:` URL and a suite
+  // must not reach the network; a broken image is sized by its CSS box, which is the box the
+  // bar lays out.
+  withName.ui = { ...(withName.ui || {}), brand_name: 'BadBat75 Estate Services', logo_url: '/img/logo.png' };
   writeSettings(ctx, withName);
   const context = await ctx.browser.newContext({
-    viewport: { width: 942, height: 720 },
+    viewport: { width: 884, height: 720 },
     extraHTTPHeaders: {
       'X-Auth-Email': 'admin@example.com',
-      // Percent-encoded, as the gate sends a profile claim, and long enough to sit the trigger
-      // at its cap: a short name leaves the bar room and the wrap never happens.
-      'X-Auth-Given-Name': 'Christopher%20Maximilian',
+      // Percent-encoded, as the gate sends a profile claim, and the long name §10a measured:
+      // it is the one that sits the trigger at its cap, and a short name leaves the bar room and
+      // the squeeze the rule exists to prevent never happens.
+      'X-Auth-Given-Name': 'Bartholomew-Alexander%20Montgomery',
     },
   });
   const page = await context.newPage();
   try {
-    for (const width of [942, 941]) {
+    // The reference: the brand's name as wide as a desktop lays it out, in the language the
+    // bar's worst case is measured in. A name cut at 884 is a box narrower than this, so
+    // "as wide as here" is the promise, and `scrollWidth` past `clientWidth` is the ellipsis.
+    // The reference is checked to be whole first: the brand's slot is capped at `max-width:14rem`
+    // (§13.34 §10), so a brand wider than that is cut at 1280 as it is at 884, and comparing
+    // 884's box against a box the cap made measures nothing about the bar's give.
+    await page.setViewportSize({ width: 1280, height: 720 });
+    await page.goto(`${ctx.base}/users?lang=it`);
+    const desktop = await page.evaluate(() => {
+      const el = document.querySelector('header .brand .t');
+      return el
+        ? { sw: Math.round(el.scrollWidth), bw: Math.round(el.getBoundingClientRect().width) }
+        : { sw: 0, bw: 0 };
+    });
+    const desktopName = desktop.bw;
+    t.check(`the desktop bar lays the brand's name whole at ${desktopName}px`,
+      desktop.bw > 0 && desktop.sw <= desktop.bw, JSON.stringify(desktop));
+    for (const width of [884, 883]) {
       for (const lang of ['en', 'it']) {
         await page.setViewportSize({ width, height: 720 });
         await page.goto(`${ctx.base}/users?lang=${lang}`);
@@ -332,8 +359,8 @@ async function barAtTheWorstWidth(t, ctx, look) {
         const g = await page.evaluate((acct) => {
           const box = (el) => (el ? el.getBoundingClientRect() : null);
           const bar = document.querySelector('header .bar');
-          // Whichever navigation box is showing is the one counted: at 942 that is the bar's
-          // strip, at 941 the ☰ trigger. The ☰'s **panel** is deliberately not measured: it is
+          // Whichever navigation box is showing is the one counted: at 884 that is the bar's
+          // strip, at 883 the ☰ trigger. The ☰'s **panel** is deliberately not measured: it is
           // a column that hangs below the bar, so its rows are not the bar's, and counting them
           // would read a five-row panel as a five-row bar.
           const visible = (sel) => {
@@ -352,6 +379,10 @@ async function barAtTheWorstWidth(t, ctx, look) {
           ).size;
           const icon = box(document.querySelector(`${acct} .menu a.pill svg.i-out`));
           const name = document.querySelector(`${acct} > summary .who-name`);
+          // The name pill's box is the trigger, not the word inside it: the word is cut with an
+          // ellipsis, and the number the breakpoint was picked on is the box's width.
+          const trig = box(document.querySelector(`${acct} > summary`));
+          const brandEl = document.querySelector('header .brand .t');
           const de = document.documentElement;
           return {
             barH: Math.round(box(bar).height),
@@ -359,17 +390,33 @@ async function barAtTheWorstWidth(t, ctx, look) {
             sideways: de.scrollWidth - de.clientWidth,
             icon: icon ? [Math.round(icon.width), Math.round(icon.height)] : null,
             name: name ? name.textContent.trim() : '',
-            logo: !!document.querySelector('header a.brand img'),
+            logo: !!document.querySelector('header .brand img'),
+            pill: trig ? Math.round(trig.width) : 0,
+            brand: brandEl
+              ? [Math.round(brandEl.scrollWidth), Math.round(brandEl.getBoundingClientRect().width)]
+              : null,
           };
         }, ACCT_MENU);
         // The setup, so a bar that quietly dropped the name or the mark cannot pass by being narrow.
         t.check(`at ${width} ${lang}: the bar carries the given name and the logo`,
-          g.name.startsWith('Christopher') && g.logo, JSON.stringify(g));
+          g.name.startsWith('Bartholomew') && g.logo, JSON.stringify(g));
         t.check(`at ${width} ${lang}: the bar is one row tall`, g.barH <= 40, `bar height ${g.barH}px`);
         t.eq(`at ${width} ${lang}: the navigation is one row`, g.stripRows, 1);
         t.eq(`at ${width} ${lang}: the document does not scroll sideways`, g.sideways, 0);
         t.check(`at ${width} ${lang}: the Sign out glyph is at most 24px`,
           Array.isArray(g.icon) && Math.max(...g.icon) <= 24, JSON.stringify(g.icon));
+        if (width === 884 && lang === 'it') {
+          // The width the breakpoint is measured by, in the language the bar is widest in: the
+          // brand's name is whole and as wide as the desktop lays it, and the name pill has not
+          // been squeezed under the 128px floor. Both are the account end's job
+          // (`nav.acct{flex-shrink:100}`, §13.34 §10), and neither is true when the brand and
+          // the pill shrink in proportion, which is what the tag line used to prevent.
+          t.check('at 884 it: the brand\'s name is whole and as wide as on a desktop',
+            Array.isArray(g.brand) && g.brand[0] <= g.brand[1] && g.brand[1] >= desktopName,
+            `name [scrollWidth ${g.brand && g.brand[0]}, box ${g.brand && g.brand[1]}] against \
+the desktop's ${desktopName}px`);
+          t.check('at 884 it: the name pill is at least 128px', g.pill >= 128, `${g.pill}px`);
+        }
       }
     }
     await page.setViewportSize({ width: 1280, height: 900 });
