@@ -388,6 +388,13 @@ Rules are in `AGENTS.md`. Format of this file: `AGENTS.md`, under "Skills".
   "borrow of partially moved value", and it lands on the coder's stub, not on the tests.
 
 - A test polling a stub in another thread hung forever.
+- `Duration >= 400` compiles and compares **400 seconds** (std's `PartialOrd<u64>` for `Duration`),
+  so a timing floor of milliseconds must be spelled `Duration::from_millis(400)`; a bare integer
+  makes the assert red on a correct 0.5 s call.
+- A parked intake call is bounded by **`cfg.intake_timeout`**, so every test server that aims the
+  intake at a fake sets it to `TEST_INTAKE_TIMEOUT` (500 ms) in `account_port_intake_at`; the
+  production 5 s stays pinned on a plain `cfg_for` config, and the bound test caps at
+  `8 * TEST_INTAKE_TIMEOUT` so a caller honouring the 5 s fails.
 - The console's mint (`Route::KeyAdd`) refuses **only an empty `id`**: `0d`, `never` and a long
   window all mint a key, because the duration is the library's to judge. So a "bad field" probe
   aimed at the console writes a key, and the page's `rev` is stale for the next request, which

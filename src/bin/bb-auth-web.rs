@@ -35620,6 +35620,16 @@ mod tests {
         path
     }
 
+    /// The intake bound for every server built by [`account_port_intake_at`]. The fake intakes
+    /// here answer at once or park forever, so the production 5 s bound bought nothing and made
+    /// every writer queue behind a parked call on `WRITE_PERMIT` (plan step 23, §13.38: four
+    /// tests of the 37 s run were five seconds each). 500 ms is generous for a loopback answer
+    /// and cheap for a park. The production 5 s stays pinned by
+    /// `delete_intake_without_a_secret_starts_and_sends_no_secret_header` on a plain `cfg_for`
+    /// config, and the bound test multiplies this constant, so shortening it here is what makes
+    /// that test fail a caller still bound at 5 s.
+    const TEST_INTAKE_TIMEOUT: Duration = Duration::from_millis(500);
+
     /// The GUI served with the intake pointing at a **live** listener, so a request the page
     /// sends is a request a test can count. 7c's `FakeIntake` is the full version of this; 7b
     /// needs only "did the page send anything", and a page that sends nothing is proved by a
@@ -35628,6 +35638,7 @@ mod tests {
         let mut cfg = cfg_for(path, ADMIN_BASE);
         cfg.delete_intake = Some(intake.to_string());
         cfg.delete_secret = Some(TEST_SECRET.to_string());
+        cfg.intake_timeout = TEST_INTAKE_TIMEOUT;
         let server = Server::http("127.0.0.1:0").expect("bind an ephemeral port");
         let port = server.server_addr().to_ip().expect("an ip address").port();
         std::thread::spawn(move || {
@@ -37143,8 +37154,16 @@ mod tests {
             "an intake that never answers is a 504: {}",
             account_readable(&g.body)
         );
+        // The pair `a_silent_cognito_answers_within_the_bound_and_frees_the_worker` spells:
+        // it waited for the bound, and not past it. The bound is `TEST_INTAKE_TIMEOUT` (500 ms)
+        // and the cap is 8 of them, so a caller still honouring the production 5 s would fail
+        // this: the assertion is sensitive to the configured bound, not just to a hang.
         assert!(
-            took < 4 * COGNITO_TIMEOUT,
+            took >= std::time::Duration::from_millis(400),
+            "it waited for the bound, it did not answer early: {took:?}"
+        );
+        assert!(
+            took < 8 * TEST_INTAKE_TIMEOUT,
             "the bound is the client's timeout, not the socket's: {took:?}"
         );
         assert_eq!(
