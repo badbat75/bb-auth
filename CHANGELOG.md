@@ -22,11 +22,20 @@ Versions are the crate's (`Cargo.toml`); packages add a Debian revision
 
 ## Unreleased
 
-Builds say 1.99.11 and their commit until the next release (plan W11).
+Builds say 1.99.12 and their commit until the next release (plan W11).
 
-* **The tree is split into modules, with no behaviour change.** Every target is `main.rs` (the
-  library, its crate root) beside one module per area, the library's per shared file, and the
-  tests are one topic file per banner beside `tests.rs` (docs/ARCHITECTURE.md §13.39). No cookie,
+## 1.99.12 (2026-11-27, fourth release candidate of 2.0.0)
+
+**Released on 2026-11-27 as `v1.99.12`, the fourth release candidate of 2.0.0**, by the user's
+decision of that day: like `v1.99.11` it is tagged and pushed to GitHub with its GitHub release
+marked pre-release (1.0.0 stays the latest release), and its packages are installed on rpi-01.
+
+* **The source tree is split into modules, with no behaviour change.** The library is its crate
+  root plus one private module per shared file, re-exported so every `bb_auth_core` path stays
+  where it was. The admin GUI is `src/bin/bb-auth-web/main.rs` plus one module per area. The
+  gate and the CLI are each still one file of code, now `src/bin/<name>/main.rs`. Every target
+  keeps its tests in a `tests.rs` beside its code, and the library and the GUI split theirs
+  further into one file per topic (docs/ARCHITECTURE.md §13.38 §10 and §13.39). No cookie,
   file format, endpoint, page or message changed, so an upgrade logs nobody out.
 
 ## 1.99.11 (2026-11-27, third release candidate of 2.0.0)
