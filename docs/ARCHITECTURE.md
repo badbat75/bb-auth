@@ -9103,3 +9103,279 @@ empty, changes with it (docs agent).
    image glyph) for every deployment. Recommended: the initial, because it is the deployment's
    own and carries over to the words a wider screen shows; the glyph says only "something is
    missing", which the person cannot fix.
+
+### 13.38 Splitting `bb-auth-web.rs` into files (plan step 23, designed 2026-11-27)
+
+The user, on 2026-11-27: the GUI is one file, every edit recompiles all of it, and every test
+round of a slice is slow. The moves will be made by a small local model, so each one must be a
+mechanical cut and paste that `cargo` can check on its own. Behaviour does not change.
+
+What was read: `PLAN.md` step 23; `AGENTS.md` (the `bb-auth-web` paragraph, "Where documentation
+lives", the invariant "The library is the shared files, and nothing else"); `Cargo.toml` (the
+`[[bin]]` paths and `[profile.release]`); `src/bin/bb-auth-web.rs` at `95b2159` (40,485 lines,
+with production code at 1-15,813 and `mod tests` at 15,814-40,485: 347 `#[test]`s and 731 helper
+items); the two tests that read source files with `include_str!` (`italian_k_strings` in the GUI,
+`every_symbol_the_manual_names_still_exists` in `src/lib.rs`); `e2e/lib/server.js` (it builds
+`--bin bb-auth-web` by name, not by path).
+
+#### 1. What a rebuild costs today (measured)
+
+All on this machine (24 threads, load average 8 to 10 from other users, rustc 1.100.0), in a copy
+of the tree at `/tmp/claude-1000/bbcopy` with `CARGO_TARGET_DIR=/tmp/claude-1000/bbtarget`, so
+`target/` was not touched. Each edit was a one-word change to a literal inside `page_groups`'s
+`html!` (`th { "name" }`, then back again), timed with `date` around the command. Six runs each:
+
+| Command, after the edit | Time (spread) |
+|---|---|
+| `cargo build --bin bb-auth-web` | 0.70-0.89 s (median 0.72) |
+| `cargo test --bin bb-auth-web --no-run` | 1.61-1.68 s (median 1.63; the first run after a build 2.5 s) |
+| `cargo clippy --all-targets` | 0.71-0.77 s |
+| inserting a comment line instead of changing a literal: build / test `--no-run` | 0.33-1.03 s / 1.52-2.43 s |
+| **running** `cargo test --bin bb-auth-web` (already compiled) | **37.4-37.9 s** (three runs) |
+| running the whole `cargo test` (all four targets) | 38.4 s, of which the GUI's suite is 37.9 s |
+
+**Compiling is not what makes a round slow. Running the GUI's tests is.** With
+`--report-time` (`RUSTC_BOOTSTRAP=1 <test binary> -Z unstable-options --report-time --format
+json`), run one test at a time, the 347 tests add up to 43.0 s, and four tests take 37.5 s of
+that: `each_delete_outcome_states_its_result_in_the_h1` (21.2 s),
+`whoami_with_no_answer_changes_nothing_within_the_bound`, `the_delete_flow_carries_no_script`
+and `a_second_address_unanswered_says_some_may_be_queued` (5.4-5.5 s each). Each one waits out
+the full 5 s `intake_timeout` against a fake intake that does not answer: `cfg_for` sets it to
+`COGNITO_TIMEOUT`, and `account_port_intake_at` never shortens it, although the field's doc
+comment says the tests do. Run in parallel, the suite still takes about 37 s, and 38 tests report
+5-31 s each, because `WRITE_PERMIT` is held across each of those waits and every other writer
+queues behind it.
+
+**Measured fix:** one line in `account_port_intake_at`,
+`cfg.intake_timeout = std::time::Duration::from_millis(500);`. All 344 tests pass, and the run
+falls from **37.4 s to 4.5 s** (two runs, 4.47 s and 4.49 s). That saves about 33 s every time the
+suite runs, which is about 30 times what the split below saves in compile time, so it is proposed
+first, as its own step (§7, 23a). `delete_intake_without_a_secret_starts_and_sends_no_secret_header`
+keeps asserting the production 5 s on `cfg_for`, which this does not change.
+
+#### 2. What Rust gives a single crate (read, then measured)
+
+- Read: modules in a binary target are still **one crate**, and one crate is one `rustc`
+  invocation. In dev and test builds, `incremental` is on and `codegen-units` defaults to 256
+  (Cargo book, "Profiles": "The default is 256 for incremental builds, and 16 for non-incremental
+  builds"; `dev` has `incremental = true`, and `test` inherits `dev`).
+  <https://doc.rust-lang.org/cargo/reference/profiles.html>
+- Read: "For better incremental build times, the CGU partitioner creates two CGU for each source
+  level modules", one for non-generic code and one, "volatile", for monomorphized instances
+  (rustc dev guide, "Monomorphization"). <https://rustc-dev-guide.rust-lang.org/backend/monomorph.html>
+  So one module today means one stable CGU of about 3 MB for all the production code, and one of
+  about 11 MB for all the tests.
+- Measured (in a scratch prototype, `/tmp/claude-1000/bbproto`; the object files written by a
+  build were listed by modification time from the incremental session directory, with
+  `-Z human-readable-cgu-names`): a literal changed in `page_groups` makes rustc re-generate the
+  root CGU, its volatile CGU **and the whole `tests` CGU**, although no test changed. The
+  measurements fit this explanation, which is **inferred and not read in a source**: positions are
+  kept as byte offsets within each file, so any edit that changes a length shifts every item after
+  it in the same file. Three results support it. With the `audit` section as a `mod` **inside the
+  same file**, an edit to `page_audit` still rebuilt the root and the tests. Changing
+  `AUDIT_READ_CAP` from `5_000` to `5_001` (same length) rebuilt only the audit CGU. Appending
+  a comment `// x` to the end of one line rebuilt the root.
+- Measured: with the audit section in its **own file**
+  (`src/bin/bb-auth-web/audit_page.rs`), an edit to `page_audit` rebuilds only `audit_page.o` and
+  its volatile CGU. Build **0.40-0.41 s** (against 0.72), test `--no-run` **0.71-0.74 s**
+  (against 1.63), clippy 0.67-0.69 s (against 0.74). Moving `mod tests` into its own file without
+  splitting it is not enough: an edit in the root still rebuilt the tests CGU (1.60-1.69 s),
+  because the tests inline constants that sit after the edit in the root file. An edit to one
+  test rebuilds the whole 11 MB tests CGU (1.58 s).
+
+**Honest expected saving:** about 0.3 s per `cargo build` and about 0.9 s per
+`cargo test --no-run` after editing one page, or roughly half of a compile that was already under
+two seconds. About 0.4 s is the floor: macro expansion, type checking and linking happen per
+crate. Clippy saves almost nothing (0.05 s). Measured on one moved section and estimated for the
+rest. Each slice records its own time (§6), so the estimate is checked as the work goes.
+
+#### 3. Alternatives rejected
+
+- **Move code into `bb_auth_core`.** This breaks the invariant (the library holds what more than
+  one program has an opinion about, and pages are the GUI's alone). It is also slower: an edit to
+  the library recompiles all three binaries.
+- **A GUI-only library target plus a thin `main`.** This is still one crate holding the same code,
+  with the same CGUs and the same incremental behaviour, plus a second target to keep in
+  `Cargo.toml` and in `cargo doc`. It gains nothing over files.
+- **A crate per page family (a workspace).** Pages, the shell, `K` and `View` depend on each
+  other, so this means a layered crate graph, `pub` APIs and a workspace. It would add complexity
+  where the measured gain is under 0.4 s per edit.
+- **Modules inside the one file.** Measured above: they do not isolate an edit.
+- **Tests beside the code they test (`mod tests` in each file).** Most tests drive `handle` over
+  a socket, so sorting 347 tests by "the module they test" is judgement, not a mechanical move,
+  and most of them would land in `main.rs`. Rejected for this step. Tests that clearly belong to
+  one file can move later.
+- **Reordering items within a file, or tidying while moving.** Rejected because a reordered move
+  cannot be checked mechanically (§6).
+
+#### 4. The shape
+
+The Cargo convention for a binary with several files is `src/bin/<name>/main.rs` with the
+modules beside it (Cargo book, "Package Layout":
+<https://doc.rust-lang.org/cargo/guide/project-layout.html>). The `[[bin]]` path becomes
+`src/bin/bb-auth-web/main.rs`. A module file **must not** be a direct child of `src/bin/`, because
+`src/bin/*.rs` is where Cargo discovers binaries automatically. All files sit in one flat
+directory with no `mod.rs`, so there are no path rules to learn. Line numbers below are as of
+`95b2159`. Each range starts at a section banner or a named item, and ends just before the next
+one.
+
+| File | Range today (first item to last item) | About |
+|---|---|---|
+| `main.rs` | the crate doc, `use`s and top consts (1-461, which keeps `CSS`, `WRITE_LOCK`, the scripts and the cookie names); "The request" (`anon_view`, `handle`, `find_key`, `main`); the `mod`/`use` lines | 1,500 |
+| `i18n.rs` | "Language" banner to just before the "Config" banner: `Lang`, `LangPref`, the theme, groups and time zone preferences, `K`, `m`, `t`, `Msg` | 3,000 |
+| `config.rs` | "Config" banner up to "Routing", including `e2e_cognito_endpoint` and its `compile_error!` | 780 |
+| `routes.rs` | "Routing" | 350 |
+| `http.rs` | "HTTP helpers" | 370 |
+| `listing.rs` | "Filtering and paging a list" | 220 |
+| `shell.rs` | "The shell" (`Look`, `View`, `top_bar`, `account_menu`, `shell*`, `list_panel` … `url_list_marked`) | 870 |
+| `forms.rs` | "Form furniture" (`Refusal` … `page_missing`) | 860 |
+| `pages.rs` | "Key expiry" and "Pages" (`Expiry` … `denied_list`) | 1,100 |
+| `audit.rs` | "The audit page", `AUDIT_PERIODS` … `audit_where` | 540 |
+| `check.rs` | `check_field` … `verdict` (the end of that banner) | 190 |
+| `edit.rs` | "Editing pages", `UserForm` … `edited_file` | 420 |
+| `settings_page.rs` | `ConfigForm` … `page_config` | 600 |
+| `outcomes.rs` | `DenyForm` … `page_file_error` | 200 |
+| `mutate.rs` | "Mutations" | 850 |
+| `account.rs` | "The self-service page", `AccountLook` … `account_claims` | 430 |
+| `account_keys.rs` | `ACCOUNT_MAX_KEYS` … `account_key_line`, then `AccountKeyOp` … `account_key_post` (two ranges, the second appended) | 750 |
+| `account_delete.rs` | `page_account_confirm` … `account_delete_post` | 830 |
+| `account_page.rs` | `code_list` … `handle_account` | 640 |
+| `account_profile.rs` | `PROFILE_VALUE_MAX` … `account_profile_code_post` (the Cognito client included) | 1,440 |
+| `tests.rs` | the fixtures and helpers at the top of today's `mod tests` (15,814-16,110), helpers no topic file owns, and one `mod <topic>;` line per topic file | 300+ |
+| `tests/<topic>.rs` | one file per banner of today's test module (§5) | 165-3,600 each |
+
+**Visibility is by globs, so names resolve exactly as they do in one file.** Every module file
+starts with `use crate::*;`. `main.rs` declares `mod x;` and then `use x::*;` for each one, and
+`tests.rs`'s existing `use super::*;` keeps working through those globs (measured: the prototype's
+moved `audit_page` was reached by the tests with no change to them). Inside a moved range, the
+only edit is adding `pub(crate)` where the **compiler names** an item as private: E0603 (item),
+E0616 and E0451 (field), E0624 (method). Nothing is made `pub(crate)` in advance, because a trait
+impl's `fn` must not take it (E0449). Two moved items can never collide by name, since they shared
+one namespace before the move.
+
+**The tests split without any change in visibility.** A topic file is a child of `tests`, and a
+child module sees its parent's private items, so `use super::*;` at the top of each topic file
+reaches every fixture in `tests.rs`. Each topic file is a range of today's test module, starting at
+one banner and ending before the next. When a helper defined in one topic range is used by
+another, the compiler reports "cannot find … in this scope", and the fix is always the same: move
+that helper back up into `tests.rs`.
+
+**Doc links survive the same way.** `cargo doc` documents a binary's private items, and the globs
+put every name in scope in every file, so `[`decide`]` and `[`View`]` resolve wherever they are
+written. Measured on the prototype: `cargo doc --no-deps`, 0 warnings.
+
+Three things read a file **by path** and move with it:
+
+1. `include_str!("../assets/admin.css")` in `main.rs` becomes `"../../assets/admin.css"` (the
+   path is relative to the file).
+2. `italian_k_strings` reads `fn t` with `include_str!("bb-auth-web.rs")`. It becomes
+   `include_str!("main.rs")` in slice S1, and `include_str!("../i18n.rs")` when `K` moves (P1)
+   and the test lives in `tests/`. A path relative to a file under `tests/` gets a `../`.
+3. `every_symbol_the_manual_names_still_exists` in `src/lib.rs` concatenates the sources with
+   `include_str!`. Slice S1 changes it once to read every `*.rs` file under
+   `src/bin/bb-auth-web/` at run time (`std::fs::read_dir` on
+   `concat!(env!("CARGO_MANIFEST_DIR"), "/src/bin/bb-auth-web")`), so no later slice has to touch
+   the library. Each library edit recompiles all three binaries, and a new file left off a fixed
+   list fails the test for a reason that has nothing to do with the move.
+
+#### 5. The order of moves
+
+Each slice is a pure move plus the `pub(crate)` lines the compiler asks for. The order is fixed:
+the tests leave `main.rs` first, so later production moves never shift the tests' byte positions.
+Production modules can then move in any order, because the globs keep every name in scope.
+
+- **S1, the layout.** `git mv src/bin/bb-auth-web.rs src/bin/bb-auth-web/main.rs`; the `[[bin]]`
+  path and the comment beside it in `Cargo.toml`; the two `include_str!` paths in §4 (1, 2); the
+  library test in §4 (3). Prototype: all four targets' tests and `cargo doc` were green.
+- **S2, the tests out of `main.rs`.** Cut the body of `mod tests { … }` **verbatim** into
+  `tests.rs`, leave `#[cfg(test)] mod tests;`, and run `cargo fmt`. Never remove indentation by
+  hand: raw-string fixtures keep their bytes, and rustfmt does not touch the content of a string.
+- **P1-P12, the production files**, one slice each, with the files of §4 in this grouping: P1
+  `i18n`; P2 `config`; P3 `routes` and `http`; P4 `listing` and `shell`; P5 `forms`; P6 `pages`;
+  P7 `audit` and `check`; P8 `edit`, `settings_page` and `outcomes`; P9 `mutate`; P10 `account`
+  and `account_keys`; P11 `account_delete` and `account_page`; P12 `account_profile`. What is left
+  in `main.rs` is the table's first row.
+- **T1-T5, the tests into topic files** under `tests/`, by today's banners (line numbers as of
+  `95b2159`). T1: `settings` (16,111, both settings banners), `config` (17,747), `routing`
+  (18,051). T2: `rendering` (19,445, including the users tab and group pages), `mutations`
+  (22,115), `server` (22,839), `document` (38,832). T3: `account` (23,298 and 25,063),
+  `account_keys` (25,465 and 26,303), `account_keys_ui` (27,112). T4: `account_profile` (30,676
+  and 33,096), `e2e_switch` (34,036). T5: `account_delete` (35,523, 36,291 and 37,534),
+  `account_delete_partial` (38,998 and 39,484). `tests.rs` keeps 15,814-16,110 and every helper
+  that the compiler sends back up.
+- **D, the docs** (the docs agent): see §8.
+
+That makes **21 slices**: 23a, S1, S2, P1-P12, T1-T5 and D.
+
+#### 6. How each slice is shown to hold
+
+Every slice runs these checks, one build at a time, with `-j 4` or less, because the machine is
+shared:
+
+1. `cargo test` (all four targets), `cargo clippy --all-targets`, `cargo fmt --check`, and
+   `cargo doc --no-deps` with zero warnings. Then `node e2e/run.js`, which the plan's "Done when"
+   asks for at every slice.
+2. **A pure-move check, with no judgement in it.** The multiset of words in the GUI's sources
+   (plus `src/lib.rs`) is the same before and after, apart from the words a move adds:
+
+   ```bash
+   words() { tr -cs 'A-Za-z0-9_' '\n' | grep -vxE 'pub|crate|super|mod|use|' | sort; }
+   before() { git show HEAD:src/lib.rs
+              git ls-tree -r --name-only HEAD src/bin | grep bb-auth-web \
+                | while read -r f; do git show "HEAD:$f"; done; }
+   after() { cat src/lib.rs $(git ls-files -co --exclude-standard src/bin | grep bb-auth-web); }
+   diff <(before | words) <(after | words)
+   ```
+
+   The output may list only the new module names (twice each: `mod x;` and `use x::*;`) and the
+   words of a changed `include_str!` path. On the prototype it listed exactly `audit_page` ×2,
+   `main` ×2, and `bb`, `auth`, `web` going away. Anything else means the slice changed code and
+   is not a move. The check is insensitive to rustfmt re-wrapping a longer signature.
+3. **The rebuild time**, recorded in the commit message, measured the way §1 was: a one-word
+   literal change inside `page_groups`'s `html!` and back, three times, timing `cargo build --bin
+   bb-auth-web` and `cargo test --bin bb-auth-web --no-run`. The baseline is 0.72 s and 1.63 s.
+   For `page_groups` the times should stay the same until P6 moves it out of `main.rs`, and then
+   fall towards 0.4 s and 0.75 s. Step 23's "Done when" is met when the final measurement beats the
+   baseline. After S2, also time a one-word edit inside one test, against 1.58 s (one 11 MB CGU),
+   and again after T5.
+
+#### 7. Steps proposed for `PLAN.md`
+
+- **23a (new, first; tester, test-only):** shorten `intake_timeout` in `account_port_intake_at`
+  to 500 ms, and correct that field's doc comment, which already claims the tests shorten it.
+  Done when the GUI's suite runs in under 10 s, against 37 s today (measured 4.5 s), all green,
+  and the production 5 s is still asserted. This is a harness change, not a behaviour change, so
+  the test-first rule applies as "the measured time before and after", not as a red test.
+- **23b-23t:** the slices of §5, coder or tester as the file says (production files to the coder,
+  test files to the tester), each with the checks of §6. Every brief names the range by its first
+  and last item and its banner, and the target file.
+- **23u (docs):** §8.
+
+No requirement changes.
+
+#### 8. What changes in the docs (slice D)
+
+- `AGENTS.md`, "What this is": the `bb-auth-web` bullet links `src/bin/bb-auth-web/main.rs` and
+  says the GUI is **one crate in one directory, one file per section, with every file opening
+  `use crate::*;`**, so a name means what it meant when everything was in one file. Search for a
+  name with `grep -rn` over the directory. The figure "about 29,300 lines" (in the gate's bullet)
+  goes, and so does any count of the GUI's lines, since a count drifts and helps no reader. The
+  gate stays "one file, read top to bottom". That claim is the gate's alone, and the split leaves
+  it unchanged.
+- `AGENTS.md`, Commands: the comment on `cargo test` names the directory. The table row for
+  `maud` markup is unchanged.
+- `AGENTS.md`, "Displayed text": `K` lives in `src/bin/bb-auth-web/i18n.rs`.
+- `docs/ARCHITECTURE.md`'s file table (the `src/bin/bb-auth-web.rs` row): the directory, plus a
+  short table like §4's. Earlier subsections that cite `bb-auth-web.rs` are records of their time
+  and stay as written.
+- `e2e/README.md` line 3 and the `Cargo.toml` comment: the new path.
+- The playbooks: the tester's `include_str!("bb-auth-web.rs")` pitfall points to `i18n.rs`, and the
+  designer's "grep `bb-auth-web.rs`" becomes a grep over the directory.
+
+#### 9. Open questions for the user
+
+1. Is it acceptable that the expected compile gain is about 1 s per edit, and that the change that
+   actually shortens a test round is 23a, a one-line harness change and not part of the split? If
+   23a alone is enough, the split can stop after S2, or be dropped.
+2. Tests in topic files under `tests/` (recommended, a mechanical move), or beside the code they
+   test (judgement for each of 347 tests, most of which would land in `main.rs`)?

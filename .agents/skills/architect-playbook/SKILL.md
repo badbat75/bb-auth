@@ -51,6 +51,14 @@ Rules are in `AGENTS.md`. Format of this file: `AGENTS.md`, under "Skills".
   `rd`: it cannot clear the gate's cookie (no cookie name), and any page it serves after the
   logout is gated, so the landing page must be the gate's own (§13.32).
 
+- To measure a rebuild, copy the tree (`git ls-files | tar -cf - -T - | tar -xf - -C <dir>`) and
+  build there with a scratch `CARGO_TARGET_DIR`, so `target/` and the tree stay untouched. Slow
+  tests: `RUSTC_BOOTSTRAP=1 <test binary> --test-threads=1 -Z unstable-options --report-time
+  --format json`. Which CGUs rebuilt: build with `-Z human-readable-cgu-names` and list the `*.o`
+  files newer than a marker in the newest `target/debug/incremental/<crate>-*/s-*` (§13.38).
+- rustc's incremental build isolates an edit **per file**, not per module: a length change shifts
+  every later item in the same file and rebuilds its CGU (measured, §13.38 §2).
+
 ## Pitfalls
 
 - A stale session cookie after a user is deleted reaches only `anonymous` and `authenticated`
@@ -100,3 +108,6 @@ Rules are in `AGENTS.md`. Format of this file: `AGENTS.md`, under "Skills".
   reaches the native one. Act on a session's Cognito user by its `cognito:username`, never its email.
 - A GUI test's `body.contains("landing_url")` passes on the input's `name=`: assert on the
   `div.err` text when the point is what the refusal says.
+- Never run awk with `getline` over `src/bin/bb-auth-web.rs`: on 2026-11-27 one such command grew
+  to about 17 GB of RAM in 40 seconds on this shared host, and other sessions' jobs were killed.
+  Use `grep -n -A1` or `sed -n`, wrap heavy commands in `timeout`, and build with `-j 4` or less.
