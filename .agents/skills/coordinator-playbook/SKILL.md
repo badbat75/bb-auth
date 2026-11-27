@@ -125,3 +125,5 @@ files outside the repo.
 - A release done by hand (CHANGELOG heading, tag, GitHub) skips the docs pass: afterwards grep the
   `*.md` files for the previous version and restore `## Unreleased` above the new section, or the
   next step's CHANGELOG entry has nowhere to go.
+- Appending a step to `PLAN.md` with python: strip the file's trailing newlines and write one, or
+  markdownlint fails MD012 on a doubled blank line at the end (it happened three times).
