@@ -37,6 +37,10 @@ Rules are in `AGENTS.md`. Format of this file: `AGENTS.md`, under "Skills".
   `Subject::Key` arm asks (`denied_users`, `excluded_users`, `credentials.api_key`, `members`),
   because the identifier helpers resolve an email and a uuid resolves to nothing.
 - Run `cargo fmt` before `cargo fmt --check`: rustfmt splits long method chains.
+- A §13.38 §10 pure-move slice (24-x): cut the test body with `sed -n 'A,Bp'` (never a dedent), let
+  `cargo fmt` dedent it, and expect the moved file to end up a few lines shorter than the range,
+  because rustfmt rejoins lines that fit in 100 columns once they lose four spaces. Prove the code
+  half is untouched with `diff <(git show :path | sed -n '1,Np') <(sed -n '1,N+2p' path)`.
 - A maud `(name)` **borrows**: `Render::render_to(&self)` (maud 0.27), so a `String` rendered inside
   one panel is still owned and can be passed by reference after the `html!`. No clone needed, and
   none of the `(expr)` sites move.

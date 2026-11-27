@@ -11221,9 +11221,10 @@ mod tests {
         // argument is made of (`ReadOnlyPaths`, `ReadWritePaths`, `SupplementaryGroups`).
         // Those are as real as a function, and as able to stop existing.
         let src = format!(
-            "{}{}{}{}{}{}{}{}",
+            "{}{}{}{}{}{}{}{}{}",
             include_str!("lib.rs"),
-            include_str!("bin/bb-auth.rs"),
+            include_str!("bin/bb-auth/main.rs"),
+            include_str!("bin/bb-auth/tests.rs"),
             include_str!("bin/bb-auth-adm/main.rs"),
             include_str!("bin/bb-auth-adm/tests.rs"),
             include_str!("bin/bb-auth-web.rs"),

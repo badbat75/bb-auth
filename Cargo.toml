@@ -15,7 +15,7 @@ path = "src/lib.rs"
 
 [[bin]]
 name = "bb-auth"
-path = "src/bin/bb-auth.rs"
+path = "src/bin/bb-auth/main.rs"
 
 # The access-file admin CLI: CRUD over applications / scopes / user_groups / denied /
 # users / api_keys,
