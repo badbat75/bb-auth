@@ -43,10 +43,12 @@ const VIEWS = [
   { tag: 'light', colorScheme: 'light', viewport: { width: 1280, height: 900 }, states: true },
   { tag: 'dark', colorScheme: 'dark', viewport: { width: 1280, height: 900 }, states: true },
   { tag: 'phone', colorScheme: 'light', viewport: { width: 390, height: 844 } },
-  // The phone in the **dark** arm, for the one shape the light phone cannot show. §13.36 §5:
-  // the sub-tab row wraps at a phone width, and the review reads the wrap against the palette's
-  // dark arm, where a chip's fill and the row's border are the only things separating one
-  // wrapped line from the next.
+  // The phone in the **dark** arm. §13.36 §5 asks the users sub-pages to be shot in both themes,
+  // because the sub-tab row is built from the bar's tab tokens and the chip is a `.pill`, so in
+  // the dark arm the `--card` border and a pill's fill are the only things telling the row apart
+  // from the page behind it. The designer measured the row **one line** (30px) at 390 and at 320
+  // with real counts, so this view reads a row, not a wrap: two lines appear only at 320 with
+  // four-digit counts, which no fixture of this suite reaches.
   {
     tag: 'phone-dark',
     colorScheme: 'dark',
@@ -224,7 +226,14 @@ const SCENES = [
   // both controls are live and the sentence reads `rows 26–50 of 60`.
   ['users-paged', async (page, ctx) => {
     const d = doc(ctx);
-    for (let i = 0; i < 60 - d.users.length; i++) {
+    // The count is taken **before** the loop, not in its condition. A condition is re-read on
+    // every pass, and each push grows `d.users.length`, so the live expression stops at half the
+    // target: measured on the fixture's 4 rows, 28 pushes and 32 rows, which is two pages, where
+    // `?up=2` is the **last** one. Measured there: `rows 26–32 of 32`, one arrow live and one
+    // `pill off`, so the scene photographed the end of the list, not the middle page its comment
+    // describes.
+    const rows = 25 * 2 + 10; // three pages of `PAGE_SIZE` (25), so `up=2` has a page each side
+    for (let i = 0, n = rows - d.users.length; i < n; i++) {
       d.users.push({
         // Canonical lowercase 8-4-4-4-12, which is what the gate insists on: the first group
         // is one 32-bit number in hex, so it is exactly eight characters, and the version and

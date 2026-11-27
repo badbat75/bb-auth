@@ -194,10 +194,20 @@ Rules are in `AGENTS.md`. Format of this file: `AGENTS.md`, under "Skills".
   that box, but `transform`, `filter`, `perspective` or `will-change` on `header.top`, `.bar`,
   `nav.acct` or `details.settings` does, quietly and only in a browser. `an_open_menu_closes_on_a_click_outside_it`
   is where that lands red; keep any such property off those four selectors.
+- To read a page from the e2e server without a browser, `require('e2e/lib/server').boot()` plus
+  harness `api(ctx, '/admin/users?up=2')`: `api` is what adds `X-Auth-Email`, and a plain
+  `fetch(ctx.base + …)` reaches the `no identity` card, which reads as "no pager, no links".
+  Call `stop()` (it kills the child by PID) and prove it with `pgrep -a bb-auth-web`.
 - ureq 3 with `http_status_as_error(false)` and `max_redirects(0)` returns a `3xx` as a response, not
   an error: only `Error::Timeout` means Cognito did not answer, and a redirect is handled as a refusal.
 - On an `/account` page the body's first `class="lede"` is the bar's menu, not the page's lede; a
   test or helper looking for the page's lede must skip the header.
+- A designer's "remove this control" fix can collide with an **e2e** assertion that pins the very
+  control as it stood (step 22: `nojs.js` reads `main nav.sub a[aria-current="page"]` on
+  `/groups/admins`, and the fix drops that row from the group page). The staged Rust test demands
+  the row absent, so the pair is mutually exclusive and no production code answers both: report the
+  e2e label by name for the tester, and note that `words()`-style helpers return `''` on an absent
+  selector, which reads as `got "", want "Gruppi (2)"`.
 - The bar's phone brand arm is `.brand:has(img) .t` (the words clipped to a 1px box, the mark kept,
   §13.34 §12g option (c)) and it lives **inside** `@media (max-width:640px)`:
   `the_words_hide_with_a_logo_and_the_panel_rows_need_no_gap` panics on a `.brand:has(img)` rule at

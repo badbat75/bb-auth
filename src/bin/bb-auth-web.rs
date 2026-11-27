@@ -758,6 +758,11 @@ enum K {
     Groups,
     Apps,
     Scopes,
+    /// The group page's members **section heading** (§13.36 §2 item 3, as the screenshot review
+    /// of plan step 22 read it). Not `K::Members`: that is the Groups list's lowercase *column*
+    /// word, and a heading borrowing it reads as a table label, in Italian by a capital alone.
+    /// Title case like the `Scopes` heading above it, because every heading is the section's word.
+    MembersHeading,
     Users,
     /// The users tab's People sub-page, and the word its section heading carries. The tab's
     /// own word is `K::Users`, and the roster's heading used to repeat it, so the heading said
@@ -933,6 +938,11 @@ enum K {
     /// The roster's box, and the only one that says what it searches: the reach (every email,
     /// the uuid, every key id) was never readable off a box that said "filter" (§13.36 §4).
     FilterPeople,
+    /// The group page's member box (§13.36 §4, one list along). Its list filters a member's
+    /// label and uuid and nothing else, so it cannot borrow `K::FilterPeople`, whose sentence
+    /// promises a key id this list holds no key in: a box promising a search that answers
+    /// nothing is the failure mode §4 exists to close.
+    FilterMembers,
     FilterClear,
     PagePrev,
     PageNext,
@@ -1957,6 +1967,7 @@ fn t(lang: Lang, key: K) -> &'static str {
         K::Groups => m(lang, "User groups", "Gruppi di utenti"),
         K::Apps => m(lang, "Applications", "Applicazioni"),
         K::Scopes => m(lang, "Scopes", "Ambiti"),
+        K::MembersHeading => m(lang, "Members", "Membri"),
         K::Users => m(lang, "Users", "Utenti"),
         K::People => m(lang, "People", "Persone"),
         K::GroupsTab => m(lang, "Groups", "Gruppi"),
@@ -2461,6 +2472,7 @@ fn t(lang: Lang, key: K) -> &'static str {
 
         K::Filter => m(lang, "filter", "filtro"),
         K::FilterPeople => m(lang, "email, uuid or key id", "email, uuid o id chiave"),
+        K::FilterMembers => m(lang, "email or uuid", "email o uuid"),
         K::FilterClear => m(lang, "clear the filter", "azzera il filtro"),
         K::PagePrev => m(lang, "previous", "precedente"),
         K::PageNext => m(lang, "next", "successiva"),
@@ -7560,10 +7572,12 @@ fn page_group(v: &View, doc: &AccessFile, name: &str) -> (u16, Markup) {
                 " "
                 span class="muted mono" { "user_groups" }
             }
-            // The page belongs to the Groups sub-tab (`parent()` says so), and the row is what
-            // marks that: the sub-tab lights the page a route is reached from, and the group
-            // page is the Groups tab's detail view (§13.36 §2).
-            (users_subnav(v, doc))
+            // No Users sub-tab row (§13.36 §2, as the screenshot review of plan step 22 read
+            // it): this is the person page's shape, and that page has none. The row's job is to
+            // say which of the three lists is showing, and on a page about one object the `h1`
+            // has already said it, while the row pushes the page's answer, the scopes that name
+            // the group, down the screen. The bar above still lights the Users tab, and the
+            // back link below is the one thing here naming the list this page is a row of.
             p class="lede" { (back(v, &Route::Groups)) }
             p class="pills" {
                 (act(v, &Route::GroupEdit(name.trim().to_string()), v.t(K::Edit)))
@@ -7583,13 +7597,20 @@ fn page_group(v: &View, doc: &AccessFile, name: &str) -> (u16, Markup) {
                 }
             }
 
-            h2 { (v.t(K::Members)) }
+            // The section's word, in title case like the `Scopes` heading above it, and not the
+            // Groups list's lowercase column word `K::Members` this heading used to borrow: a
+            // heading that reads as a table label is the screenshot review's finding (§13.36 §2
+            // item 3). The list's column keeps the lowercase word, because a column label is
+            // not a heading.
+            h2 { (v.t(K::MembersHeading)) }
             p class="primary" {
                 a class="pill" href=(format!("{}?ug={}", v.href(&Route::Users), name.trim())) {
                     (v.t(K::GroupInRoster))
                 }
             }
-            (list_controls_named(v, &lm, shown.len(), members.len(), K::FilterPeople))
+            // The box says what *this* list searches, a member's label and uuid, and not the
+            // roster's wider reach (§13.36 §4): a key id is not in this list to find.
+            (list_controls_named(v, &lm, shown.len(), members.len(), K::FilterMembers))
             (list_panel(v, members.len(), shown.len(), html! {
                 ul class="plain" {
                     @for m in &shown[start..end] {
@@ -20665,6 +20686,18 @@ mod tests {
     /// `aria-label` are the same string, which makes WCAG 2.5.3 Label in Name trivially true.
     const FILTER_PEOPLE_EN: &str = "email, uuid or key id";
     const FILTER_PEOPLE_IT: &str = "email, uuid o id chiave";
+    /// The group page's **members heading** (§13.36 §2 item 3, as the designer read the
+    /// screenshots of plan step 22): the section's word, title case like the `Scopes` heading
+    /// above it, and not the Groups list's lowercase column word `K::Members` the heading
+    /// borrowed. Spelled as words and not a `K` variant, because naming a variant the enum has
+    /// not got is a compile error for the whole target, a red that says nothing about a page.
+    const MEMBERS_HEADING_EN: &str = "Members";
+    const MEMBERS_HEADING_IT: &str = "Membri";
+    /// The group page's **member box** (§13.36 §4's rule, one list along): it searches a
+    /// member's email and uuid, and nothing else, so it cannot borrow `K::FilterPeople`, whose
+    /// sentence promises a key id this list has no key in.
+    const FILTER_MEMBERS_EN: &str = "email or uuid";
+    const FILTER_MEMBERS_IT: &str = "email o uuid";
 
     /// A fixture whose three counts are things a test can read straight off it: four people,
     /// two groups, one veto. `@admins` is referenced by `mpa/admin`, `@staff` by nothing, which
@@ -21450,13 +21483,16 @@ mod tests {
             "and the way back to the list: {main}"
         );
 
-        // The two sections, in the order the design gives them, each under its own heading.
+        // The two sections, in the order the design gives them, each under its own heading. The
+        // members heading is the section's word in title case, the pair the screenshot review of
+        // plan step 22 asked for; `the_group_pages_members_heading_is_the_sections_word` pins the
+        // words themselves, so this one is about the order.
         let h2 = elements(&main, "<h2", "</h2>");
         assert_eq!(
             h2.iter().map(|h| visible_text(h)).collect::<Vec<_>>(),
             [
                 format!("{} scopes", t(Lang::En, K::Scopes)),
-                t(Lang::En, K::Members).to_string(),
+                MEMBERS_HEADING_EN.to_string(),
             ],
             "scopes, then members: {main}"
         );
@@ -21465,11 +21501,9 @@ mod tests {
             r#"<span class="muted mono">scopes</span>"#,
             "the scopes panel",
         );
-        let members = panel_after(
-            &main,
-            &format!("<h2>{}</h2>", t(Lang::En, K::Members)),
-            "the members panel",
-        );
+        // The panel is cut from the heading **as the page spells it**, so a change to the
+        // heading's wording reddens the heading assertion above and not this lookup too.
+        let members = panel_after(&main, &h2[1], "the members panel");
         for id in ["mpa/admin", "mpa/gate"] {
             assert!(
                 scopes.contains(&format!("<a href=\"/apps/mpa\"><code>{id}</code></a>")),
@@ -21610,6 +21644,130 @@ mod tests {
             "it is the muted sentence, as the warning's line is: {panel}"
         );
         assert!(!panel.contains(KIND_GROUP), "no kind label: {panel}");
+    }
+
+    #[test]
+    fn the_group_page_carries_no_users_sub_tabs() {
+        // §13.36 §2, as the designer read the screenshots of plan step 22: a group's page is the
+        // **person page's** shape, and the person page has no row of sub-tabs. The row belongs to
+        // the three list pages, where it says which of the three is showing; on a page about one
+        // object it says again what the `h1` has already said, and it pushes the page's answer
+        // (the scopes that name the group) down the screen. The row goes; the back link stays,
+        // because that is the one thing on the page saying "this is a row of the Groups list".
+        let (status, html) =
+            console_page("group-no-subnav", GROUP_PAGE, "/groups/admins", "lang=en");
+        assert_eq!(status, 200, "a group is a page of its own");
+        let main = the_main(&html);
+        assert!(
+            elements(&main, r#"<nav class="sub""#, "</nav>").is_empty(),
+            "a group's page carries no Users sub-tab row: {main}"
+        );
+        let lede = element_containing(&main, r#"class="lede""#, "</p>");
+        assert!(
+            lede.contains(r#"href="/groups""#),
+            "and keeps the way back to the list it is a row of: {lede}"
+        );
+        // The page still sits under the Users tab, which is what the row pointed at: the bar
+        // lights it, so dropping the row costs the duplicate and not the way back.
+        let tabs = elements(&html, r#"<nav class="tabs""#, "</nav>");
+        assert_eq!(tabs.len(), 1, "the bar keeps its strip: {html}");
+        assert!(
+            tabs[0].contains(r#"<a class="pill on" href="/users" aria-current="page">"#),
+            "and lights Users for this page: {tabs:?}"
+        );
+
+        // The three list pages keep their row, and the person page, the shape this page copies,
+        // has never had one. Both asserted beside the fix so a repair removes the row from the
+        // **detail** pages, and not from the pages that answer with it.
+        for path in ["/users", "/groups", "/denied"] {
+            let (status, html) = console_page("subs-keep-row", SUBS, path, "lang=en");
+            assert_eq!(status, 200, "{path} is a page");
+            let (_, links) = sub_tabs(&the_main(&html));
+            assert_eq!(links.len(), 3, "{path} keeps its three sub-tabs: {html}");
+        }
+        let (status, html) = console_page(
+            "person-no-subnav",
+            GROUP_PAGE,
+            &format!("/users/{BOB}"),
+            "lang=en",
+        );
+        assert_eq!(status, 200, "a person is a page");
+        assert!(
+            elements(&the_main(&html), r#"<nav class="sub""#, "</nav>").is_empty(),
+            "the person page, whose shape the group page copies, carries none: {html}"
+        );
+    }
+
+    #[test]
+    fn the_group_pages_members_heading_is_the_sections_word() {
+        // §13.36 §2 item 3, as the designer read the screenshots of plan step 22: the members
+        // heading reads the Groups list's **column** word, because it borrowed `K::Members`.
+        // Every other heading is the section's word in title case (the `Scopes` heading above
+        // it), and in Italian a heading and a column label then differ by a capital alone, so
+        // the page's second section reads as a table label. The heading is its own word; the
+        // list's column keeps the lowercase one, because a column label is not a heading.
+        for (lang, heading) in [
+            ("lang=en", MEMBERS_HEADING_EN),
+            ("lang=it", MEMBERS_HEADING_IT),
+        ] {
+            let (status, html) =
+                console_page("group-members-heading", GROUP_PAGE, "/groups/admins", lang);
+            assert_eq!(status, 200, "a group is a page of its own");
+            let h2 = elements(&the_main(&html), "<h2", "</h2>");
+            assert_eq!(h2.len(), 2, "the scopes section, then the members: {html}");
+            assert_eq!(
+                visible_text(&h2[1]),
+                heading,
+                "the members section is headed by the section's own word, in the reader's \
+                 language: {:?}",
+                h2.iter().map(|h| visible_text(h)).collect::<Vec<_>>()
+            );
+        }
+        // The Groups list's column keeps the file's word: the fix is the heading's alone, and a
+        // label that grew a capital mid-table reads as a heading.
+        let (_, html) = console_page("groups-column-word", SUBS, "/groups", "lang=en");
+        let head = elements(&the_main(&html), "<thead", "</thead>");
+        assert_eq!(head.len(), 1, "the group list is a table: {html}");
+        assert_eq!(
+            visible_text(&elements(&head[0], "<th", "</th>")[1]),
+            t(Lang::En, K::Members),
+            "the members column is untouched by the new heading"
+        );
+    }
+
+    #[test]
+    fn the_group_member_box_says_email_or_uuid() {
+        // §13.36 §4's rule is that a box says what its list searches. The group page's member
+        // box borrows the roster's sentence, and the roster earns that sentence because
+        // `l_keeps_user` reads every email, the uuid **and** each key's id. The member list
+        // filters a member's label and uuid, so the third thing this box promises is a search
+        // that answers nothing, which is the failure mode §4 exists to close.
+        for (lang, members, people) in [
+            ("lang=en", FILTER_MEMBERS_EN, FILTER_PEOPLE_EN),
+            ("lang=it", FILTER_MEMBERS_IT, FILTER_PEOPLE_IT),
+        ] {
+            let (status, html) =
+                console_page("group-members-box", GROUP_PAGE, "/groups/admins", lang);
+            assert_eq!(status, 200, "a group is a page of its own");
+            let tag = field_tag(&the_main(&html), "mq");
+            for name in ["placeholder", "aria-label"] {
+                assert_eq!(
+                    attr(&tag, name).as_deref(),
+                    Some(members),
+                    "the box says what the member list searches, and the visible hint and the \
+                     name are one string, which is what makes WCAG 2.5.3 Label in Name true by \
+                     construction: {tag}"
+                );
+            }
+            // The roster keeps the wider sentence, because the reach that earns it is its own.
+            let (_, html) = console_page("roster-box-word", SUBS, "/users", lang);
+            let roster = field_tag(&the_main(&html), "uq");
+            assert_eq!(
+                attr(&roster, "placeholder").as_deref(),
+                Some(people),
+                "the roster's box keeps the reach it has: {roster}"
+            );
+        }
     }
 
     #[test]

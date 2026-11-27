@@ -692,9 +692,12 @@ async function run(ctx, t) {
     };
     await sub('/admin/groups', 'Gruppi (2)');
     // §13.36 §2 §3: the group list is a table whose name cell links the group's **page**,
-    // the group page belongs to the Gruppi sub-tab, and its pill lands on the roster
-    // filtered to that group, which belongs to Persone. Every hop is a link, so every
-    // hop works with scripting off, and the marks follow the page, not the tab it came from.
+    // and that page's pill lands on the roster filtered to the group. Every hop is a link,
+    // so every hop works with scripting off. The group page carries **no** Users sub-tab
+    // row: the designer's review of plan step 22 read the row as saying again what the page's
+    // own `h1` has said, and `the_group_page_carries_no_users_sub_tabs` pins its absence.
+    // The way back is the lede pill, and the row that marks Gruppi is the list's, not the
+    // page's.
     const glink = 'main tbody a[href="/admin/groups/admins"]';
     if (!(await page.locator(glink).count())) {
       t.check('the group list names each group with a link to its page', false, glink);
@@ -702,8 +705,23 @@ async function run(ctx, t) {
       await Promise.all([page.waitForNavigation(), page.click(glink)]);
       t.check('the name cell opens the group page with scripting off',
         page.url().endsWith('/admin/groups/admins'), page.url());
-      t.eq('and the group page marks the Gruppi tab',
-        await words('main nav.sub a[aria-current="page"]'), 'Gruppi (2)');
+      t.eq('the group page carries no Users sub-tab row',
+        await page.locator('main nav.sub').count(), 0);
+      const back = 'main .lede a.pill[href="/admin/groups"]';
+      if (!(await page.locator(back).count())) {
+        t.check('the group page carries the way back to the Groups list', false, back);
+      } else {
+        await Promise.all([page.waitForNavigation(), page.click(back)]);
+        t.check('the back link navigates with scripting off',
+          page.url().endsWith('/admin/groups'), page.url());
+        t.eq('and the list it lands on marks the Gruppi tab',
+          await words('main nav.sub a[aria-current="page"]'), 'Gruppi (2)');
+        // The walk continues on the group page, so the way forward from the list is walked
+        // too: it is the same link the walk arrived by, from the page the back link lands on.
+        await Promise.all([page.waitForNavigation(), page.click(glink)]);
+        t.check('and the group page is reachable from the list again',
+          page.url().endsWith('/admin/groups/admins'), page.url());
+      }
     }
     const pill = 'main a[href$="/users?ug=admins"]';
     const hasPill = (await page.locator(pill).count()) === 1;

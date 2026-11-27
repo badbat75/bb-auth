@@ -239,8 +239,11 @@ async function panelWalk(t, page, ctx) {
   await barStaysOneRow(t, page, ctx.base, '/users', 'console bar');
   // The group list is a page of its own now (§13.36 §1), and it carries the sub-tab row the
   // bar's `nav:not(.acct)` rule reaches, so the bar is measured on it too. The group's **page**
-  // (§13.36 §2) carries the same row plus a head with pills, so the bar is measured there as
-  // well: the head is below the bar, and a bar that quietly grew is this page's regression.
+  // (§13.36 §2) carries no sub-tab row since the plan step 22 screenshot review removed it
+  // (`the_group_page_carries_no_users_sub_tabs` pins it): it is the person page's shape, and a
+  // row naming the three lists says again what the page's own `h1` has said. The bar is
+  // measured there as well: the bar's one row does not ride on the sub-tab row, the page keeps
+  // its head with pills, and a bar that quietly grew is this page's regression.
   await barStaysOneRow(t, page, ctx.base, '/groups', 'console bar, group list');
   await barStaysOneRow(t, page, ctx.base, '/groups/admins', 'console bar, group page');
 
