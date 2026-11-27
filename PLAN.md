@@ -101,5 +101,6 @@ chose all four of the coordinator's suggestions that day:
 - Done when: the designer has designed all four in `docs/ARCHITECTURE.md` (routes, sub-tabs,
   the group page, the filter's reach, the pager's count, both languages, phone width, scripting
   off); tests pin each; `node e2e/run.js` and `nojs.js` are green; the old `/users` anchors and
-  the `/denied` route still land somewhere sensible; and the designer has approved the
-  screenshots.
+  the `/denied` route still land somewhere sensible; the designer has approved the
+  screenshots; and the build runs on rpi-01 (the user gave the go-ahead for this deploy on
+  2026-11-27, before the work; no tag or GitHub release is part of it).
