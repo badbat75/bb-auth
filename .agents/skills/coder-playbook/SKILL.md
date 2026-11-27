@@ -98,6 +98,17 @@ Rules are in `AGENTS.md`. Format of this file: `AGENTS.md`, under "Skills".
   mints two secrets and shows the second. The ownership check comes free: `key_mut` resolves the
   row from the caller's uuid first, so a key filed under another person is simply not found, and
   the self-service page answers every miss with one sentence so it is not an id-enumeration oracle.
+- A §13.39 module move (step 25): `use crate::*;`, a blank line, `sed -n 'A,Bp'` of the root, delete
+  `A,B` **plus the blank line that followed it**, add `mod x;` and `pub use x::*;` to the two blocks
+  (kept sorted, as the existing ones are), then `pub(crate)` on exactly the items a compiler
+  `note: crate::m::x exists but is inaccessible` names, then `cargo fmt` twice. Re-find both ends
+  with `command grep -n '^// Banner$'` **before each move**: every move shifts all later lines. The
+  banner's text line is `// <Name>`, so the range starts one line above it and ends three lines
+  above the **next** banner's text line.
+- A §13.39 topic slice: the helpers that go back to the end of `tests.rs` are exactly the compiler's
+  `E0425` list (a topic cannot see a sibling's items, so anything two topics use is a parent item).
+  When scripting that move, match the item with `^(pub(\(crate\))? )?(fn|const) NAME` and take its
+  end as the first line that is exactly `}` **only when the matched line is a `fn`**.
 
 ## Pitfalls
 
@@ -105,6 +116,18 @@ Rules are in `AGENTS.md`. Format of this file: `AGENTS.md`, under "Skills".
   `#[derive]`/`#[serde]` attribute lines, so the upward walk to the range's top must step over
   lines starting `#[` as well as `///`, and a range that starts at a banner also carries the
   `// ---` dashes. Stopping the walk at the first attribute line leaves the attributes behind.
+- The same walk scripted: a regex of `^fn NAME` matches a plain `fn` and **misses**
+  `pub(crate) fn NAME`, so a mover that treats an unmatched line as a one-line item "moves" the
+  signature, leaves the body orphaned in the topic file, and the tree still looks plausible until
+  `cargo test --no-run`. Count the moved lines and check the source file compiles after each item.
+- `timeout` cannot exec a shell builtin: `timeout 60 command grep -n …` dies with
+  `failed to execute process: No such file or directory`. Wrap `cargo` in `timeout` and run
+  `command grep` bare, which is cheap on these files.
+- §13.39 §6's `include_str!` path change (`assets/…` → `../assets/…`) is **invisible to §13.38 §6's
+  word diff**, because `.` and `/` are word separators and the empty tokens are filtered out: the
+  paths are checked by reading the lines. `pub(crate)` is invisible to the word diff (`pub`,
+  `crate` are filtered) and to §13.39 §8.3's punctuation multiset (no parentheses in `[]\`#!`);
+  that punctuation check is what catches an escaped `[` in a moved doc comment.
 - A new `Config` field breaks the test module's `cfg_for` struct literal (the only one). Check the
   staged test first: when the staged test reads the new field it has usually added the line itself
   (8b-3's `account_logout_url`), and the task is clear. When it has not and the task forbids editing
