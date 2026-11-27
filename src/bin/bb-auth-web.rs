@@ -774,6 +774,13 @@ enum K {
     Expires,
     Warnings,
     NoWarnings,
+    /// The kind word that opens a dashboard warning (§13.35). The warnings list mixes scopes,
+    /// people and groups in one list, and an identifier such as `@delete-test` does not say on
+    /// its own which of the three it is. Capitalised because it opens the list item; the words
+    /// are the console's own singular for that object, as its add/save messages use them.
+    KindScope,
+    KindUser,
+    KindGroup,
     WarnNoScope,
     WarnEnrolledAndDenied,
     ReferencedBy,
@@ -1939,6 +1946,9 @@ fn t(lang: Lang, key: K) -> &'static str {
         K::Expires => m(lang, "expires", "scade il"),
         K::Warnings => m(lang, "Warnings", "Avvisi"),
         K::NoWarnings => m(lang, "nothing to report", "nulla da segnalare"),
+        K::KindScope => m(lang, "Scope", "Scope"),
+        K::KindUser => m(lang, "User", "Utente"),
+        K::KindGroup => m(lang, "User group", "Gruppo di utenti"),
         K::WarnNoScope => m(
             lang,
             "reaches nothing: no scope lists them",
@@ -6849,6 +6859,13 @@ fn label_of(doc: &AccessFile, key: &str) -> String {
 /// Shadowing is a heuristic, and it needs an operator to explain itself to; it earns its
 /// place here because the alternative (a scope that answers for nothing, with nobody
 /// noticing) is worse.
+///
+/// Each warning reads kind, identifier, sentence (§13.35): one list mixes scopes, people and
+/// groups, and `@delete-test` on its own does not say which of the three it is. The identifier
+/// is a link wherever the object has a page of its own (a scope to its application, because a
+/// shadowed scope is explained only by the scopes listed above it there; a person to their
+/// page); a user group links to nothing, because its only `GET` is the edit form, which cannot
+/// fix "nothing references me".
 fn page_dashboard(v: &View, doc: &AccessFile, access: &Access) -> Markup {
     let n = now();
     let scope_count: usize = doc.applications.iter().map(|a| a.scopes.len()).sum();
@@ -6867,7 +6884,11 @@ fn page_dashboard(v: &View, doc: &AccessFile, access: &Access) -> Markup {
         for (si, s) in a.scopes.iter().enumerate() {
             if shadowing_scope(&a.scopes[..si], &s.urls).is_some() {
                 warnings.push(html! {
-                    code { (a.name.trim()) "/" (s.name.trim()) } " " (v.t(K::WarnShadowed))
+                    (v.t(K::KindScope)) " "
+                    a href=(v.href(&Route::App(a.name.trim().to_string()))) {
+                        code { (a.name.trim()) "/" (s.name.trim()) }
+                    }
+                    " " (v.t(K::WarnShadowed))
                 });
             }
         }
@@ -6876,7 +6897,11 @@ fn page_dashboard(v: &View, doc: &AccessFile, access: &Access) -> Markup {
         for s in &a.scopes {
             if s.access == bb_auth_core::AccessKind::Restricted && s.members.is_empty() {
                 warnings.push(html! {
-                    code { (a.name) "/" (s.name) } " " (v.t(K::WarnNoMembers))
+                    (v.t(K::KindScope)) " "
+                    a href=(v.href(&Route::App(a.name.trim().to_string()))) {
+                        code { (a.name) "/" (s.name) }
+                    }
+                    " " (v.t(K::WarnNoMembers))
                 });
             }
         }
@@ -6884,15 +6909,26 @@ fn page_dashboard(v: &View, doc: &AccessFile, access: &Access) -> Markup {
     for u in &doc.users {
         let uuid = u.uuid.trim().to_ascii_lowercase();
         if access.scopes_for(&uuid).is_empty() {
-            warnings.push(html! { code { (user_label(u)) } " " (v.t(K::WarnNoScope)) });
+            warnings.push(html! {
+                (v.t(K::KindUser)) " "
+                a href=(v.href(&Route::User(uuid.clone()))) { code { (user_label(u)) } }
+                " " (v.t(K::WarnNoScope))
+            });
         }
         if access.denied_users.contains(&uuid) {
-            warnings.push(html! { code { (user_label(u)) } " " (v.t(K::WarnEnrolledAndDenied)) });
+            warnings.push(html! {
+                (v.t(K::KindUser)) " "
+                a href=(v.href(&Route::User(uuid))) { code { (user_label(u)) } }
+                " " (v.t(K::WarnEnrolledAndDenied))
+            });
         }
     }
     for name in doc.user_groups.keys() {
         if user_group_refs(doc, name).is_empty() {
-            warnings.push(html! { code { "@" (name) } " " (v.t(K::ReferencedByNothing)) });
+            warnings.push(html! {
+                (v.t(K::KindGroup)) " "
+                code { "@" (name) } " " (v.t(K::ReferencedByNothing))
+            });
         }
     }
 
@@ -19772,6 +19808,305 @@ mod tests {
         assert!(html.contains("reaches nothing"), "{html}");
         assert!(html.contains("@unused"));
         assert!(html.contains("referenced by nothing"));
+        // §13.35: a line says **what kind of thing** it is about before it names one, and the
+        // identifier is a link wherever the object has a page of its own. The two warnings
+        // this fixture raises are one person and one user group. The messages print the
+        // warnings list and not the page: the shell inlines three stylesheets, and a document
+        // dump buries the one line that is wrong.
+        let items = warning_items(&html);
+        for (needle, want) in [
+            (
+                "@unused",
+                format!("User group @unused {}", t(Lang::En, K::ReferencedByNothing)),
+            ),
+            (
+                "nowhere@x.com",
+                format!("User nowhere@x.com {}", t(Lang::En, K::WarnNoScope)),
+            ),
+        ] {
+            assert_eq!(
+                visible_text(&warning_line(&items, needle)),
+                want,
+                "{}",
+                warning_words(&items)
+            );
+        }
+        assert!(
+            warning_line(&items, "nowhere@x.com").contains(&format!(
+                "<a href=\"/users/{NOWHERE}\"><code>nowhere@x.com</code></a>"
+            )),
+            "the person line links to the page of that person: {}",
+            warning_line(&items, "nowhere@x.com")
+        );
+    }
+
+    /// A file that raises **all five** dashboard warnings at once, so the kind of each can be
+    /// pinned on one rendered page: `mpa/old` is shadowed by the `mpa/wide` scope listed above
+    /// it, `mpa/empty` is `restricted` and lists nobody, `nowhere@x.com` is in no scope,
+    /// `gone@x.com` is enrolled and denied, and `@unused` is referenced by nothing.
+    ///
+    /// Each identifier is named by exactly **one** warning, which is what makes "the line that
+    /// names X" a lookup with one answer: the denied row is a member of `mpa/private` through
+    /// `@admins`, so its line is the veto and not "reaches nothing"; Bob reaches that scope
+    /// too; and `@admins` is referenced while `@unused` is not.
+    const DASH_KINDS: &str = r#"{ "version": 1,
+      "applications": [
+        { "name": "mpa", "base": ["https://app.x.com/mpa"],
+          "scopes": [
+            { "name": "empty", "urls": ["https://app.x.com/mpa/empty/*"], "access": "restricted" },
+            { "name": "private", "urls": ["https://app.x.com/mpa/private/*"], "access": "restricted",
+              "groups": ["@admins"], "users": ["22222222-2222-2222-2222-222222222222"] },
+            { "name": "wide", "urls": ["https://app.x.com/mpa/*"], "access": "authenticated" },
+            { "name": "old", "urls": ["https://app.x.com/mpa/old/*"], "access": "authenticated" }
+          ] }
+      ],
+      "user_groups": {
+        "admins": ["8f14e45f-ceea-467a-9f79-3b4e5c6d7a8b"],
+        "unused": ["11111111-1111-1111-1111-111111111111"]
+      },
+      "denied": ["gone@x.com"],
+      "users": [
+        { "uuid": "8f14e45f-ceea-467a-9f79-3b4e5c6d7a8b", "emails": ["Bob@X.com"] },
+        { "uuid": "11111111-1111-1111-1111-111111111111", "emails": ["nowhere@x.com"] },
+        { "uuid": "22222222-2222-2222-2222-222222222222", "emails": ["gone@x.com"] }
+      ]
+    }"#;
+
+    /// The uuid of the row that is enrolled and denied.
+    const GONE: &str = "22222222-2222-2222-2222-222222222222";
+
+    /// The kind words §13.35 adds (`K::KindScope`, `K::KindUser`, `K::KindGroup`), spelled
+    /// here as the design's table spells them, EN and IT. They are written as words and not
+    /// as `K` variants because the variants do not exist yet: naming one is a compile error
+    /// for the whole target, which is a red that proves nothing about the page. Once the
+    /// table carries them, these consts are the design's answer the coder must match.
+    const KIND_SCOPE: &str = "Scope";
+    const KIND_USER: &str = "User";
+    const KIND_GROUP: &str = "User group";
+    const KIND_SCOPE_IT: &str = "Scope";
+    const KIND_USER_IT: &str = "Utente";
+    const KIND_GROUP_IT: &str = "Gruppo di utenti";
+
+    /// The dashboard's warnings list, as `<li>` elements in document order. The scope is the
+    /// panel, not the `ul`: `panel warn` is on this page alone, and `ul.plain` is a component
+    /// the users page and the bar's menus use too.
+    fn warning_items(html: &str) -> Vec<String> {
+        let panel = element_containing(html, "class=\"panel warn\"", "</div>");
+        elements(&panel, "<li", "</li>")
+    }
+
+    /// The one warning line that names `needle`. A line that is not there is the failure this
+    /// family is about, so the message says what the page does show.
+    fn warning_line(items: &[String], needle: &str) -> String {
+        items
+            .iter()
+            .find(|li| visible_text(li).contains(needle))
+            .cloned()
+            .unwrap_or_else(|| panic!("no warning names {needle}: {}", warning_words(items)))
+    }
+
+    /// Every warning line's words, on one printable line, for a failure message that must not
+    /// dump the whole document (the shell inlines three stylesheets).
+    fn warning_words(items: &[String]) -> String {
+        items
+            .iter()
+            .map(|li| visible_text(li))
+            .collect::<Vec<_>>()
+            .join(" | ")
+    }
+
+    /// §13.35 §1: each of the five warnings opens with the word for the kind of thing it is
+    /// about. The user read "`@delete-test` referenced by nothing" on a live dashboard and
+    /// could not tell a user group from a scope, so the line says kind, identifier, sentence,
+    /// and the sentence is the predicate the page already said, unchanged.
+    #[test]
+    fn each_dashboard_warning_names_its_kind_first() {
+        let html = render_of("dash-kinds", DASH_KINDS, Route::Dashboard, "");
+        let items = warning_items(&html);
+        assert_eq!(
+            items.len(),
+            5,
+            "the fixture raises all five: {}",
+            warning_words(&items)
+        );
+        for li in &items {
+            let words = visible_text(li);
+            assert!(
+                words.starts_with(KIND_SCOPE)
+                    || words.starts_with(KIND_GROUP)
+                    || words.starts_with(KIND_USER),
+                "a warning opens with the kind of thing it names: {words}"
+            );
+        }
+        // And the right kind on the right line: "User group" starts with "User ", so the
+        // loop above is a shape check and this table is the answer.
+        for (needle, want) in [
+            (
+                "mpa/old",
+                format!("{KIND_SCOPE} mpa/old {}", t(Lang::En, K::WarnShadowed)),
+            ),
+            (
+                "mpa/empty",
+                format!("{KIND_SCOPE} mpa/empty {}", t(Lang::En, K::WarnNoMembers)),
+            ),
+            (
+                "nowhere@x.com",
+                format!("{KIND_USER} nowhere@x.com {}", t(Lang::En, K::WarnNoScope)),
+            ),
+            (
+                "gone@x.com",
+                format!(
+                    "{KIND_USER} gone@x.com {}",
+                    t(Lang::En, K::WarnEnrolledAndDenied)
+                ),
+            ),
+            (
+                "@unused",
+                format!(
+                    "{KIND_GROUP} @unused {}",
+                    t(Lang::En, K::ReferencedByNothing)
+                ),
+            ),
+        ] {
+            assert_eq!(
+                visible_text(&warning_line(&items, needle)),
+                want,
+                "{}",
+                warning_words(&items)
+            );
+        }
+        // The group line byte for byte as §13.35 renders it: the kind, the identifier in
+        // `code`, the predicate, and nothing else.
+        assert!(
+            items.iter().any(|li| {
+                li == &format!(
+                    "<li>{KIND_GROUP} <code>@unused</code> {}</li>",
+                    t(Lang::En, K::ReferencedByNothing)
+                )
+            }),
+            "the group line, with no link of its own: {}",
+            items.join(" | ")
+        );
+    }
+
+    /// §13.35 §3: the same five lines, in Italian. "Scope" is the console's own singular in
+    /// both languages (the design's table), and the predicates already read with a masculine
+    /// subject, which is why no predicate key changes: the predicates below are read from the
+    /// table, and only the kind words are spelled here.
+    #[test]
+    fn dashboard_warning_kinds_are_translated() {
+        let path = scratch("dash-kinds-it", DASH_KINDS);
+        let cfg = cfg_for(&path, "");
+        let (doc, access) = open_access_file(&cfg.access_path).unwrap();
+        let mut v = view(&cfg, Route::Dashboard, "REV");
+        v.lang = Lang::It;
+        let html = shell(&v, "t", page_dashboard(&v, &doc, &access)).into_string();
+        let items = warning_items(&html);
+        assert_eq!(items.len(), 5, "{}", warning_words(&items));
+        assert!(
+            html.contains(t(Lang::It, K::Warnings)),
+            "the page is Italian: {}",
+            warning_words(&items)
+        );
+        for (needle, want) in [
+            (
+                "mpa/old",
+                format!("{KIND_SCOPE_IT} mpa/old {}", t(Lang::It, K::WarnShadowed)),
+            ),
+            (
+                "mpa/empty",
+                format!(
+                    "{KIND_SCOPE_IT} mpa/empty {}",
+                    t(Lang::It, K::WarnNoMembers)
+                ),
+            ),
+            (
+                "nowhere@x.com",
+                format!(
+                    "{KIND_USER_IT} nowhere@x.com {}",
+                    t(Lang::It, K::WarnNoScope)
+                ),
+            ),
+            (
+                "gone@x.com",
+                format!(
+                    "{KIND_USER_IT} gone@x.com {}",
+                    t(Lang::It, K::WarnEnrolledAndDenied)
+                ),
+            ),
+            (
+                "@unused",
+                format!(
+                    "{KIND_GROUP_IT} @unused {}",
+                    t(Lang::It, K::ReferencedByNothing)
+                ),
+            ),
+        ] {
+            assert_eq!(
+                visible_text(&warning_line(&items, needle)),
+                want,
+                "{}",
+                warning_words(&items)
+            );
+        }
+        cleanup(&path);
+    }
+
+    /// §13.35 §2: the identifier becomes a link to the page of the thing it names, so the
+    /// operator no longer has to find it by hand. A scope links to **its application's** page,
+    /// because a shadowed scope is explained only by the scopes listed above it there. A
+    /// person links to their own page. A user group links to nothing, because it has no page:
+    /// its only `GET` is the edit form, which cannot fix "nothing references me".
+    #[test]
+    fn a_dashboard_warning_links_to_the_page_of_what_it_names() {
+        let html = render_of("dash-kind-links", DASH_KINDS, Route::Dashboard, "");
+        let items = warning_items(&html);
+        for id in ["mpa/old", "mpa/empty"] {
+            assert!(
+                warning_line(&items, id)
+                    .contains(&format!("<a href=\"/apps/mpa\"><code>{id}</code></a>")),
+                "a scope line links its identifier to the application page: {}",
+                warning_line(&items, id)
+            );
+        }
+        for (id, uuid) in [("nowhere@x.com", NOWHERE), ("gone@x.com", GONE)] {
+            assert!(
+                warning_line(&items, id)
+                    .contains(&format!("<a href=\"/users/{uuid}\"><code>{id}</code></a>")),
+                "a person line links its identifier to that person's page: {}",
+                warning_line(&items, id)
+            );
+        }
+        let group = warning_line(&items, "@unused");
+        assert!(
+            !group.contains("<a "),
+            "a group has no page of its own, so its line carries no link: {group}"
+        );
+    }
+
+    /// §13.35 §1: the kind prefix is the **dashboard's** and not the group panel's. On the
+    /// users page the heading above the panel already says the object is a user group, so
+    /// prefixing the kind there would repeat the heading on every panel. This is the other
+    /// use of `K::ReferencedByNothing`, and it stays as it was.
+    #[test]
+    fn the_group_panel_still_says_referenced_by_nothing_alone() {
+        let html = render_of("dash-kinds-users", DASH_KINDS, Route::Users, "");
+        let at = html
+            .find("<code>@unused</code>")
+            .expect("the groups section shows the group it lists");
+        let tail = &html[at..];
+        let open = tail.find("<p").expect("the panel says what references it");
+        let close = tail.find("</p>").expect("the sentence closes") + "</p>".len();
+        let line = &tail[open..close];
+        assert_eq!(
+            visible_text(line),
+            t(Lang::En, K::ReferencedByNothing),
+            "{line}"
+        );
+        assert!(
+            !line.contains(KIND_GROUP),
+            "the panel sits under its heading, so it names no kind: {line}"
+        );
     }
 
     #[test]
