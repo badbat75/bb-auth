@@ -97,3 +97,25 @@ the split stays dropped.
   are clean, `node e2e/run.js` is green, `scripts/package.sh` still builds the three packages, the
   GUI's rebuild after a page edit is timed against §13.38's 0.72 s and 1.63 s, and `AGENTS.md`,
   the playbooks and `e2e/README.md` name the new paths.
+
+### 25. The GUI and the library are split into modules, for manageability
+
+Covers: the user's request of 2026-11-27, after step 24. `src/bin/bb-auth-web/main.rs` keeps
+about 15,800 lines of code and `src/lib.rs` about 7,500 once their tests are out. The goal is
+manageability for people and for the agents, not build speed (§13.38 measured that a split
+saves about a second). The user approved going to the end of this step without stopping, then
+a fourth release candidate.
+
+- The architect revises §13.38 for this goal and adds the library: the GUI by area (routing and
+  responses, the `K` table, the shared layout and lists, each page family, the self-service page,
+  the writes), the library by the shared files it already describes (the access file in two
+  parts, reading and deciding, editing and writing; the settings file; the audit file; the
+  presentation contract; the shared response rules), and the gate stays one file. It must keep
+  `AGENTS.md`'s invariant that the library is the shared files and nothing else, and name what
+  `AGENTS.md` and rustdoc must say afterwards.
+- Done when: each slice is a pure move (the word-multiset diff), every test passes with the same
+  counts, clippy, fmt and `cargo doc --no-deps` are clean, `node e2e/run.js` is green, the docs
+  name the new layout, and then the release below is out.
+- Then the fourth release candidate, as the user asked on 2026-11-27: version 1.99.12, its
+  CHANGELOG heading, the full board on main, the packages, the deploy to rpi-01, the push, the
+  `v1.99.12` tag and a GitHub pre-release (1.0.0 stays Latest), as for 1.99.11.
