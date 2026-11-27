@@ -80,6 +80,8 @@ Rules are in `AGENTS.md`. Format of this file: `AGENTS.md`, under "Skills".
 
 ## Pitfalls
 
+- A bar's brand shrinks below its fixed-width mark at 320 with a long given name, so the `img` overflows onto the pill; measure the img's right against `nav.acct`'s left, not only the brand box (`/tmp/d19b/s320.js`, `/tmp/d19b/a11y.js` for the a11y tree and the broken-img gap).
+
 - `.menu` is shrink-to-fit (absolute, `min-width` only), so the same panel is a different width wherever its longest row differs: compare the computed width on both surfaces, not the classes.
 - A bar check that injects CSS with `addStyleTag` fails on the hash-only CSP: create the context with `bypassCSP: true`.
 

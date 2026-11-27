@@ -24,6 +24,17 @@ Versions are the crate's (`Cargo.toml`); packages add a Debian revision
 
 Builds say 1.99.9 and their commit until the next release (plan W11).
 
+### Changed: each dashboard warning names its kind, and links to it
+
+* **Each of the five dashboard warnings opens with its kind**, then the identifier, then the
+  sentence it already said: *Scope*, *User*, *User group* (Italian *Scope*, *Utente*, *Gruppo di
+  utenti*), the console's own words for each object. A scope links to its application's page, a
+  person to their own page, and a user group has no page, so its line carries no link. The user
+  asked for this on 2026-11-27, reading "`@delete-test` referenced by nothing" on rpi-01 with no
+  way to tell a group from a person (plan step 20, docs/ARCHITECTURE.md §13.35). The groups
+  panel's own "referenced by nothing" line is unchanged, because its heading already names the
+  kind.
+
 ### Changed: the brand is as wide as the bar allows
 
 * **The brand's cap is the bar's width less the room the rest of the row keeps**, floored at
@@ -43,12 +54,12 @@ Builds say 1.99.9 and their commit until the next release (plan W11).
   58px tall while the row count still reported one row, because every child of a centred flex
   row keeps the same centre. The visual walks now assert the bar's **height** beside its row
   count, which is what a wrap costs and the row count cannot see.
-* **At 640px and below the brand shows its words and hides the mark**, so a `ui.logo_url` that
-  answers `404` cannot leave a phone's bar without a name: a failed image is a 0px box, and the
-  rule that hid the words when a mark was present left the bar empty. This is the coordinator
-  taking §12g's option (a) on 2026-11-27 for the user to review. **The user has since chosen the
-  opposite** (the mark kept on phones, the words hidden, §13.34 §12g), and that reversal is not
-  built yet: this build hides the mark.
+* **At 640px and below the bar keeps the mark and hides the brand's words**, the user's reversal
+  (2026-11-27, built) of the phone rule of the first answer, §12g's option (a). The words are
+  hidden visually only, by the clip pattern `base.css`'s `.vh` uses, so a screen reader still
+  reads the name the mark's empty `alt` does not carry. What it costs is §12g's option (c),
+  chosen with no script: a `ui.logo_url` that answers `404` leaves the phone's brand empty, which
+  only a wrong setting causes and which the bar's other controls survive.
 
 Nothing here touches the cookie, the access file or the settings file, so an upgrade logs nobody
 out and needs no nginx line.

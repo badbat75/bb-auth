@@ -107,11 +107,14 @@ One crate, four targets, and the split is load-bearing:
   **height** is asserted beside its row count: a wrapped brand made the `/account` bar 58px where
   it is 36 (§13.34 §12a, measured) while the row count kept reporting **one row**, because every
   child of a centred flex row keeps the same centre, and the page below loses 40px of it. At
-  **640px and below** the brand shows its words and hides the mark, so a
-  logo answering `404` cannot leave a phone's bar without a name: the coordinator took §13.34 §12g's
-  option (a) on 2026-11-27 for the user to review, and the user has since chosen the opposite (the
-  mark kept, the words hidden), a reversal **not built yet**, the tree still hiding the mark
-  (`the_mark_gives_way_on_a_phone_and_the_panel_rows_need_no_gap` pins that). What the budget does
+  **640px and below** the bar keeps the mark and hides the brand's words, the words being the part
+  a 320px row has no room for once the trigger and the sign-out pill are counted, and hides them
+  visually only, by the clip pattern `base.css`'s `.vh` uses, because the mark's `alt` is empty and
+  the words are the bar's only name for a screen reader: the user's reversal (2026-11-27, built)
+  of the phone rule the coordinator had taken from §13.34 §12g's option (a). The cost is §12g's
+  option (c), chosen with no script: a logo answering `404` leaves the phone's brand empty, which
+  only a wrong `ui.logo_url` causes
+  (`the_words_hide_with_a_logo_and_the_panel_rows_need_no_gap` pins that). What the budget does
   not buy, and §13.34 §12g accepts: a brand over about 28 characters with a logo is still cut on
   the console at 1280, because the cap assumes the Italian tabs and the longest given name, while
   `/account` and the `403`, which carry no tabs, show it whole. That menu is a `details`, so it

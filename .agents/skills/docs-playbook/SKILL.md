@@ -43,15 +43,16 @@ Rules are in `AGENTS.md`. Format of this file: `AGENTS.md`, under "Skills".
   `['…` count needs **two** leading spaces and the block boundaries: a looser regex finds 11.
 - `e2e/README.md`'s area table is a ledger of counts and of files: `run.js`'s `AREAS` list is
   the areas that exist, and each row's "N checks" is that area's line in the
-  `node e2e/run.js` summary (measured 2026-11-27: 11 areas, `settings 379/379`, total 1475).
+  `node e2e/run.js` summary (measured 2026-11-27 after step 19: 11 areas, `settings 410/410`,
+  total 1506; a step that rewrites one area's walk moves that area's count by tens).
   The suite prints them all in ~3 minutes and never touches a repo file.
 
 ## Pitfalls
 
 - A source about something similar looks like a source, but is only a hint.
-- Rewriting a Markdown table row brings its existing em-dash into the `+` side of the diff, so the
-  `grep -c '—'` check counts it as new. Keep the dash only where it is data (a `—` cell); in prose,
-  replace it.
+- A prose re-wrap of a Markdown line, not only a table row, brings its existing em-dash into the
+  `+` side of the diff, so the added-lines em-dash grep counts it as new. Keep the dash only
+  where it is data (a cell meaning "not applicable"); in prose, replace it (parentheses work).
 - A scope pattern must match its application's base **including the scheme**: `*://host/*` is
   refused as outside base `https://host`. So a documented catch-all is `https://host/*`, and a
   recipe that runs `scope add … --user X` needs `user add X` first, since a name not in the
