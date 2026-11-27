@@ -7,6 +7,15 @@ Rules are in `AGENTS.md`. Format of this file: `AGENTS.md`, under "Skills".
 
 ## How to
 
+- A step 24 move (docs/ARCHITECTURE.md §13.38 §10), one target per slice: `git mv src/bin/X.rs
+  src/bin/X/main.rs`; `sed -n 'A,Bp'` the body of `mod tests` (from `use super::*;` to the line
+  before its closing `}`) into `src/bin/X/tests.rs`; leave `#[cfg(test)]` + `mod tests;` under the
+  `// Tests` banner; follow the `[[bin]] path` in `Cargo.toml`. The library's
+  `every_symbol_the_manual_names_still_exists` takes one `include_str!` per new file **and one more
+  `{}` in its `format!`**, and its comment's count word (`four`) is the only prose a move should
+  touch: the word-multiset check then lists exactly the new list lines' words (for 24-1: `adm auth
+  bb bin include_str main rs tests`) and `four`. Run `cargo fmt` twice; check `cargo metadata
+  --no-deps` shows four targets (a stray `src/bin/tests.rs` would be a fifth binary).
 - A swept reference from `user_refs` is **marked**: a scope exclusion is `app/scope (excluded)`
   and the veto is `denied (excluded)`, both built from `EXCLUDED_REF`. `remove_user`
   **rewrites** an exclusion and the veto to the row's primary email (it drops them only for a

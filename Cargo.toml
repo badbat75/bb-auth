@@ -22,7 +22,7 @@ path = "src/bin/bb-auth.rs"
 # validated with the gate's own parser before it writes. Links the lib, none of the gate.
 [[bin]]
 name = "bb-auth-adm"
-path = "src/bin/bb-auth-adm.rs"
+path = "src/bin/bb-auth-adm/main.rs"
 
 # The access-file admin GUI: the same file, server-rendered, read and write. Every edit goes
 # through the library's AccessWrite, exactly as bb-auth-adm's does. Loopback only, behind the
