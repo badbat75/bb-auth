@@ -22,7 +22,13 @@ Versions are the crate's (`Cargo.toml`); packages add a Debian revision
 
 ## Unreleased
 
-Builds say 1.99.10 and their commit until the next release (plan W11).
+Builds say 1.99.11 and their commit until the next release (plan W11).
+
+## 1.99.11 (2026-11-27, third release candidate of 2.0.0)
+
+**Released on 2026-11-27 as `v1.99.11`, the third release candidate of 2.0.0**, by the user's
+decision of that day: like `v1.99.10` it is tagged and pushed to GitHub with its GitHub release
+marked pre-release (1.0.0 stays the latest release), and its packages are installed on rpi-01.
 
 ### Changed: the Users tab is three sub-pages, and every user group has a page
 
