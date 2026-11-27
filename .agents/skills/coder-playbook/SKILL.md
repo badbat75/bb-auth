@@ -123,9 +123,35 @@ Rules are in `AGENTS.md`. Format of this file: `AGENTS.md`, under "Skills".
   `E0425` list (a topic cannot see a sibling's items, so anything two topics use is a parent item).
   When scripting that move, match the item with `^(pub(\(crate\))? )?(fn|const) NAME` and take its
   end as the first line that is exactly `}` **only when the matched line is a `fn`**.
+- A §13.39 **GUI module** slice (25-14..19, six moves: `forms`, `dashboard`, `users`, `apps`,
+  `audit_page`, `check`): the ranges in §13.39 §3 are line numbers of the old single file, so every
+  move starts by re-finding both ends (`command grep -n '^fn page_dashboard'`). Each new file is
+  `use crate::*;`, a blank line, then `sed -n 'A,Bp'`; `users` is **two** ranges (the People/Groups
+  block and `page_denied` + `denied_list`) concatenated in file order. The root's `mod`/`use` blocks
+  stay alphabetically sorted.
+- Run the §5 loop off `cargo … --message-format=json`: the `note:` of every E0425/E0433
+  ("`x` exists but is inaccessible") and the span labelled `defined here` of E0624/E0616/E0451 carry
+  a **primary span at the item's definition line**, so the loop edits files by `(file, line)` and
+  needs no parsing of prose. Skip a span labelled `similarly named` (it is a candidate, not the
+  cause) and never publish a `fn` inside a top-level `impl … for …` (E0449). `cargo fmt` goes
+  **before** the loop and after it, twice: the loop's line numbers are the file's, and `fmt` moves them.
+- Prove the five builds with a script that `touch`es the target's files first (`touch
+  src/bin/bb-auth-web/*.rs`): a warm cache replays nothing and reports `warnings=0` for a build that
+  never ran. Count with `--message-format=short | grep -c ': warning'`, never `^warning` (the short
+  format prefixes each warning with its path).
 
 ## Pitfalls
 
+- The blank line above a section banner belongs to the **banner**. A move that ends on the blank
+  after the last `}` (which is what "the line before the next banner" counts) leaves the next banner
+  glued to the item above it in the root, and a two-range move a doubled blank at its join. Put one
+  blank back above the banner and delete one at the join, before compiling.
+- The §5 loop prints `unused_imports: unused import: users::*` as an unplaced diagnostic on the
+  round where every item of the new module is still private. It clears itself once the items are
+  published; it is not a signal to drop the `use`.
+- E0451 and E0616 about a struct's **fields** (`FieldOpts`, `Zone`) name no location at all, and
+  `--message-format=json` gives no definition span for them either: publish those lines by reading
+  the `struct` block in the module's own file.
 - A pure-move range that starts at an item's doc comment: the `///` block sits **above** the
   `#[derive]`/`#[serde]` attribute lines, so the upward walk to the range's top must step over
   lines starting `#[` as well as `///`, and a range that starts at a banner also carries the
