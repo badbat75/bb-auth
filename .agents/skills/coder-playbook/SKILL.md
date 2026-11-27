@@ -129,12 +129,18 @@ Rules are in `AGENTS.md`. Format of this file: `AGENTS.md`, under "Skills".
   `use crate::*;`, a blank line, then `sed -n 'A,Bp'`; `users` is **two** ranges (the People/Groups
   block and `page_denied` + `denied_list`) concatenated in file order. The root's `mod`/`use` blocks
   stay alphabetically sorted.
-- Run the §5 loop off `cargo … --message-format=json`: the `note:` of every E0425/E0433
-  ("`x` exists but is inaccessible") and the span labelled `defined here` of E0624/E0616/E0451 carry
-  a **primary span at the item's definition line**, so the loop edits files by `(file, line)` and
-  needs no parsing of prose. Skip a span labelled `similarly named` (it is a candidate, not the
-  cause) and never publish a `fn` inside a top-level `impl … for …` (E0449). `cargo fmt` goes
-  **before** the loop and after it, twice: the loop's line numbers are the file's, and `fmt` moves them.
+- Run the §5 loop off `cargo … --message-format=json`, and take the fix site **by code, not by
+  shape**: E0603/E0624 carry a secondary span labelled `defined here` at the item, while E0425/E0433
+  ("cannot find function `x` in this scope") and E0616/E0451 carry **only the use site**, so those
+  items are published by the name the message prints (E0451 packs several fields into one sentence,
+  "fields `a`, `b` and `c` of struct `m::S`", and E0616 names the struct, so a field is found by
+  walking the `struct` block in its own file). The note "x exists but is inaccessible" shows up
+  only beside a similar-name candidate, so a loop that reads notes alone fixes nothing. Never publish
+  a `fn` inside a top-level `impl … for …` (E0449), never an item in the crate root (a child sees the
+  root's private items), never anything in `tests.rs`, and never the item a clippy
+  `priv_within_module` span names: that message's "type `T` is more private than the item …" names
+  `T`, and `T` is what gets `pub(crate)`. `cargo fmt` goes **before** the loop and after it, twice:
+  the loop's line numbers are the file's, and `fmt` moves them.
 - Prove the five builds with a script that `touch`es the target's files first (`touch
   src/bin/bb-auth-web/*.rs`): a warm cache replays nothing and reports `warnings=0` for a build that
   never ran. Count with `--message-format=short | grep -c ': warning'`, never `^warning` (the short
@@ -148,7 +154,10 @@ Rules are in `AGENTS.md`. Format of this file: `AGENTS.md`, under "Skills".
   blank back above the banner and delete one at the join, before compiling.
 - The §5 loop prints `unused_imports: unused import: users::*` as an unplaced diagnostic on the
   round where every item of the new module is still private. It clears itself once the items are
-  published; it is not a signal to drop the `use`.
+  published; it is not a signal to drop the `use`. It is also the **tell** of the sibling case: a
+  private item in a child module is invisible to the crate root, so the root's `use x::*;` imports
+  nothing for it and the caller in another module gets `E0425` — the fix is `pub(crate)` on the item
+  in its own module, not a path change at the call.
 - E0451 and E0616 about a struct's **fields** (`FieldOpts`, `Zone`) name no location at all, and
   `--message-format=json` gives no definition span for them either: publish those lines by reading
   the `struct` block in the module's own file.
@@ -163,6 +172,13 @@ Rules are in `AGENTS.md`. Format of this file: `AGENTS.md`, under "Skills".
 - `timeout` cannot exec a shell builtin: `timeout 60 command grep -n …` dies with
   `failed to execute process: No such file or directory`. Wrap `cargo` in `timeout` and run
   `command grep` bare, which is cheap on these files.
+- Inserting the `mod x;` / `use x::*;` lines with `sed -i 's/^mod y;$/mod y;\nmod x;/'` on this host
+  wrote a **literal `\n`** into the `mod` block and left the `use` block untouched, both with exit 0.
+  Read both blocks back (`command grep -n '^mod \|^use .*::\*;'`) after every insertion, and fix a
+  miss with the edit tool. The same shape of silent miss lands in a scripted `pub(crate)` pass: a
+  maud argument line (`row: Option<&NewKeyRow>,`) reads as a struct field and becomes
+  `pub(crate) row: …` inside a `fn` signature, which is a syntax error. Audit every `pub(crate)`
+  against a definition or a field line before compiling.
 - §13.39 §6's `include_str!` path change (`assets/…` → `../assets/…`) is **invisible to §13.38 §6's
   word diff**, because `.` and `/` are word separators and the empty tokens are filtered out: the
   paths are checked by reading the lines. `pub(crate)` is invisible to the word diff (`pub`,
