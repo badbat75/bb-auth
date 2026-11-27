@@ -22,7 +22,13 @@ Versions are the crate's (`Cargo.toml`); packages add a Debian revision
 
 ## Unreleased
 
-Builds say 1.99.10 and their commit until that release is tagged (plan W11, step 21).
+Builds say 1.99.10 and their commit until the next release (plan W11).
+
+## 1.99.10 (2026-11-27, second release candidate of 2.0.0)
+
+**Released on 2026-11-27 as `v1.99.10`, the second release candidate of 2.0.0**, by the user's
+decision of that day: like `v1.99.9` it is tagged and pushed to GitHub with its GitHub release
+marked pre-release (1.0.0 stays the latest release), and its packages are installed on rpi-01.
 
 ### Changed: each dashboard warning names its kind, and links to it
 

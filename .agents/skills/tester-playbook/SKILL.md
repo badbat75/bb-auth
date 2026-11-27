@@ -572,3 +572,7 @@ Rules are in `AGENTS.md`. Format of this file: `AGENTS.md`, under "Skills".
   but a fragment whose content ends in `]` has no `"` before the `#`, so the literal runs on to the next
   `"#` in the file and swallows the code after it. The compiler reports `unexpected closing delimiter`
   hundreds of lines away, at the end of the test module. Build a JSON fragment with escaped strings.
+- A cached `cargo doc --no-deps` prints nothing and so reports 0 warnings without rustdoc running:
+  for the board, run it with a scratch `CARGO_TARGET_DIR` (e.g. `/tmp/opencode/board-doc-target`).
+- `pgrep -f bb-auth-web` matches the shell that runs it; check leftover servers with
+  `pgrep -x bb-auth-web`.

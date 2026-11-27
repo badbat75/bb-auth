@@ -28,7 +28,7 @@ point: what is left below is the part that needs a person.
    being released. `package.sh` refuses a dirty tree, and every binary bakes in
    the commit, so `bb-auth --version` on the host reads `v<version>-g<commit>` and names the
    exact bytes whether or not anybody tagged them. **A release or pre-release is tagged**
-   (`v1.99.8` and `v1.99.9` are pre-releases, pushed to GitHub); **the builds between two releases are not**, on purpose, because a tag says "you
+   (`v1.99.8`, `v1.99.9` and `v1.99.10` are pre-releases, pushed to GitHub); **the builds between two releases are not**, on purpose, because a tag says "you
    can install this and go back to it" and an unreleased build is not making that promise. An
    untagged build's handle is the commit `--version` prints, which is what a rollback uses
    instead.
