@@ -78,8 +78,12 @@ Rules are in `AGENTS.md`. Format of this file: `AGENTS.md`, under "Skills".
 - The console's singular word for each object, in both languages, is in `K::Msg*Added` (`scope`/`scope`, `user`/`utente`, `user group`/`gruppo di utenti`); the plural tab headings differ (`Scopes` is "Ambiti"), so take a kind word from the messages, not the headings.
 
 - The `shots.js` fixture's dashboard raises only two warnings (user reaches nothing, group unreferenced); all five, with Tab focus, link targets and EN/IT light/dark/390 shots: `/tmp/rev20/p.js` (boots, edits `ctx.accessFile` before the first request).
+- A console page mocked over the real shell (admin bar, real CSS, CSP bypassed): `/tmp/d22/mock.js` (`ONLY=`, `CAND='<css>'`); the context needs `extraHTTPHeaders` `X-Auth-Email: admin@example.com`, or the shell is the `403` with an empty bar.
 
 ## Pitfalls
+
+- `admin.css`'s `nav:not(.acct){flex-wrap:nowrap;min-width:max-content}` matches any `nav`, also one inside `main`: a second tab row needs its own `flex-wrap:wrap;min-width:0` or it scrolls sideways at 320.
+- A `.pill` is inline-flex, so the space before a child element (`group <code>@x</code>`) collapses: keep a pill's words one text node.
 
 - A bar's brand shrinks below its fixed-width mark at 320 with a long given name, so the `img` overflows onto the pill; measure the img's right against `nav.acct`'s left, not only the brand box (`/tmp/d19b/s320.js`, `/tmp/d19b/a11y.js` for the a11y tree and the broken-img gap).
 

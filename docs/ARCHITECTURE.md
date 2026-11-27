@@ -8590,3 +8590,360 @@ to be carried to its end with the decisions reviewed afterwards.
 
 1. Should a user group get a page (or an anchor on the Users page) so line 5 can link too?
    Recommended: no, not for this step; the group is one search away in the Users page's filter.
+
+   Changed by §13.36 (plan step 22, the user's choice of 2026-11-27): a group now has a page,
+   `/groups/{name}`, and line 5 links to it.
+
+### 13.36 The users page in three sub-pages, a page per group, and lists that say how many (plan step 22, designed 2026-11-27)
+
+The user, on 2026-11-27: with many people and groups the users page, which stacks
+`user_groups`, the roster and `denied` on one long page, is unmanageable. They chose all four
+points of plan step 22. Read for this design: `page_users`, `groups_section`, `page_denied`,
+`denied_list`, `l_keeps_user`, `Listing`, `list_controls_with`, `Route` (`path`, `tab`,
+`parent`, `title`, `route`), the group arms of `mutate`, `user_group_refs` and `group_ref` in
+the library, `page_dashboard`'s counts and warnings, the `nav`, `.pill.on`, `td.pills` and
+`.listctl` rules in `base.css` and `admin.css`, and `shots.js users` (light, dark, phone, `it`).
+Mockups over the real console shell and the real CSS: `/tmp/d22/mock.js` (boots the e2e server,
+swaps `<main>`, shoots EN light/dark at 1280 and 390, EN and IT light at 320; 56 shots in
+`/tmp/d22/*.png`, the measures printed per shot).
+
+**What this reverses, and why.** The users page put groups and the veto on the roster's page
+because "a group only means anything in terms of the roster", and "a list that is usually three
+lines long does not earn a tab". The second premise is what failed: with many groups, each
+group's panel listing every member, the roster begins a screen or more below the top, and the
+`denied` list several screens further. The first premise still holds, and this design keeps it
+by keeping all three **under the one Users tab** and linking them both ways (§3), instead of
+moving groups or `denied` into the bar: the bar keeps its five tabs and its 883/884 breakpoint
+(§13.34), and "every tab is a noun" still holds, since a sub-page is a section of that noun.
+
+#### 1. Three sub-pages, under the one tab (users page)
+
+**Routes. The three already exist, so none moves.** People is `/users` (the default: the bar's
+Users tab still goes there), Groups is `/groups`, Denied is `/denied`. `/groups` resolves to
+`Route::Users` today and `/denied` is `page_denied`, so every bookmark, PRG redirect and form
+URL already points at the page it will now show; the group forms stay at `/groups/+add`,
+`/groups/{name}/edit` and `/groups/{name}/rm`. The plan's `/users/groups` was rejected for that
+reason: it would move two working URLs to make three look alike, and `/users/{x}` is the person
+route, which would have to give up two names to literal arms.
+
+- `Route::Groups` (new): `/groups`, `route()` maps `["groups"]` to it instead of `Route::Users`.
+- `Route::Denied` (exists): unchanged path.
+- `tab()`: `Groups`, `Group(_)` (§2) and `Denied` light the Users tab, as `Denied` and the group
+  forms already do.
+- `title()`: `Groups` and `Group(_)` are `user_groups`, `Denied` stays `denied`, People stays
+  `users`.
+
+**One shape for all three pages**, top to bottom:
+
+1. `h1` "Users" / "Utenti" (`K::Users`), the tab's word, identical on the three, so the page
+   says which tab it is under. The `h1`'s lede (`K::UsersIntro`) moves down to People's section,
+   because it describes the roster only and would be wrong on the other two.
+2. The **sub-tabs**: `nav class="sub" aria-label=(K::UsersSections)`, three `a.pill` links in
+   this order, each the section's short word and its **whole** count (never the filtered one, so
+   the number does not change while the person types):
+   - `People (4)` / `Persone (4)`, `K::People`, `doc.users.len()`, href `/users`
+   - `Groups (2)` / `Gruppi (2)`, `K::GroupsTab`, `doc.user_groups.len()`, href `/groups`,
+     `id="user_groups"`
+   - `Denied (1)` / `Bloccati (1)`, `K::Denied` (exists), `doc.denied.len()`, href `/denied`,
+     `id="denied"`
+
+   The current one is `class="pill on"` and `aria-current="page"`, the others plain `pill`:
+   exactly the bar's tab markup, so a sub-tab looks and behaves like the tab above it, one size
+   down (`nav .pill`, `.pill.on` in `base.css`; Nielsen 4). Each label is one text node
+   (`(label) " (" (n) ")"`): a `span` inside a flex `.pill` loses the space before it, which the
+   mockup hit on the group chip below. `GroupsTab` is not `K::Groups` ("User groups" / "Gruppi
+   di utenti") for the bar's reason (`K::ConfigTab` versus `K::Config`): the row must fit a
+   phone, and the section's `h2` spells the name out.
+3. The section: `h2 { section_heading(label, file key) }`, `p.lede.sub`, `+ add`, the list's
+   controls and the list, as each section is rendered today. People's `h2` becomes `People
+   users` (`K::People`), so the sub-tab's word and the heading it lands on are the same word
+   (today it repeats the `h1`'s "Users"); Groups' is `User groups user_groups`; Denied's is
+   `Denied denied`, and `page_denied`'s own `h1` goes, since the shared `h1` is now "Users".
+
+`page_users` becomes three page functions over one helper that renders items 1 and 2 (the coder
+names it; `users_subnav(v, doc)` is a suggestion). `groups_section` and `denied_list` are no
+longer rendered on `/users`, and the comment that says they are must go.
+
+**The CSS, one rule in `admin.css`, measured.** The bar's `nav:not(.acct){flex-wrap:nowrap;
+min-width:max-content}` matches any `nav`, so it reaches this one too, and at 320px with
+four-digit counts the row is wider than the column: 7px of sideways scroll in English and 17px
+in Italian (`CAND='.listctl .pager{flex-wrap:wrap}' ONLY=people-many node /tmp/d22/mock.js`).
+So:
+
+```css
+main nav.sub{flex-wrap:wrap;min-width:0;margin:0 0 18px}
+```
+
+With it, no shot from 320 to 1280 scrolls sideways (both languages, both themes); the row is
+one line (30px) everywhere except 320 with four-digit counts, where it takes two (63px), which
+is the honest cost of a count that long. Nothing else is new: the unselected sub-tab keeps the
+bar's `--card` border, which on the page's `--bg` reads as a faint box (seen in both themes),
+and that is the affordance a tab row inside the page needs.
+
+**Old links.**
+
+- `/users#user_groups`, `/users#denied`: a fragment never reaches the server, so no redirect can
+  serve it. The Groups and Denied sub-tabs carry `id="user_groups"` and `id="denied"`, so such a
+  link scrolls to, and starts keyboard navigation at, the link to the page it meant
+  (<https://html.spec.whatwg.org/multipage/browsing-the-web.html#scroll-to-the-fragment-identifier>).
+  No element carried those ids before, so this is two attributes, no behaviour.
+- `/groups`: now the Groups page (it was `/users`).
+- `/denied`: the Denied page, with the shared `h1` and sub-tabs.
+- The dashboard's count row: `user_groups` links to `Route::Groups` (it links to `/users` now);
+  `users` and `denied` keep their targets.
+
+**PRG and cancel**, so a form lands where its object is shown:
+
+| Action | `303` to, today | `303` to, after | `parent()` (cancel, `409` back), after |
+| --- | --- | --- | --- |
+| group add | `/users` | `/groups/{name}` | `/groups` |
+| group edit | `/users` | `/groups/{name}` | `/groups/{name}` |
+| group remove | `/users` | `/groups` | `/groups/{name}` |
+| denied add, remove | `/denied` | unchanged | unchanged (`/denied`) |
+| user add, remove | unchanged | unchanged | unchanged |
+
+The `?msg=` notice already renders on any page, so the moved targets need nothing more.
+
+#### 2. A page per group (users page)
+
+`Route::Group(String)` at `/groups/{name}`, matched after `["groups", ACTION_ADD]`. A group
+name is `[A-Za-z0-9_-]` (`compile_access`), so no name can spell `+add`. An unknown name is
+`404` through `page_missing(v, K::NoSuchGroup, name, &Route::Groups)`, as the edit form's is.
+
+Top to bottom (mockups `group-*.png`, `group-none-*.png`):
+
+1. `h1 { code { "@" (name) } " " span.muted.mono { "user_groups" } }`, then `p.lede` with
+   `back(v, &Route::Groups)`, then `p.pills` with `act(GroupEdit)` and `act_rm(GroupRm)`: the
+   person page's head, with the existing forms. The edit and the removal are the **existing**
+   `page_group_form` and the `GroupRm` confirmation, unchanged; only where they return changes
+   (§1). The removal still refuses while a scope references the group, and its refusal still
+   names the referrers.
+2. `h2 { section_heading(K::Scopes, "scopes") }`, then a panel: every scope that names the
+   group, in file order, each `li { a href=(Route::App(app)) { code { app "/" scope } } }`, and a
+   scope that **excludes** it also carries `tag("bad", "excluded")` after the link. The words
+   are the file's (`EXCLUDED_REF`, which `user_group_refs` already prints), and they are words
+   beside the link, not a colour (WCAG 1.4.1). Scopes come before members because they are why
+   the group matters, and because the dashboard's "referenced by nothing" lands here (§13.35
+   line 5): its answer is the first thing under the head. Empty: the panel says
+   `K::ReferencedByNothing` in `span.muted`, the same words as the warning that linked here.
+   The list must agree with `user_group_refs` entry for entry; the coder decides whether that is
+   a structured variant of it in the library or a parse of its strings, but not a third walk of
+   `group_ref` with its own rule.
+3. `h2 { (K::Members) }`, then `p.primary` with one pill, "show them in People" / "mostrali in
+   Persone" (`K::GroupInRoster`), to `/users?ug={name}` (§3), then the members as
+   `groups_section` lists them today (a link with the person's label where a roster row resolves
+   the uuid, the uuid in `code.bad` with `tag("bad", K::UnknownMember)` where none does), behind
+   their own `Listing` with prefix `m` (filter over label and uuid, pager), so a group of a
+   thousand people is a page and not a scroll. Empty group: `list_panel`'s `K::None`.
+
+**Warning link** (§13.35 §2, line 5): `li { (kind) " " a href=(Route::Group(name)) { code {
+"@" (name) } } " " (predicate) }`, the same shape as the other four lines.
+
+**The Groups list** stops stacking a panel per group, which is what made it long: it becomes a
+table, one row per group, columns `name` (the file's word, as the applications table heads its
+first column), `K::Members`, `K::Scopes`, and the row's actions:
+
+- `name`: `a href=(Route::Group(n)) { code { "@" (n) } }`
+- members: the count
+- scopes: the same links and `excluded` tags as the group page, separated by a space; with none,
+  `span.muted` `K::ReferencedByNothing` (the muted line `the_group_panel_still_says_referenced_by_nothing_alone`
+  pins moves into this cell, still without the "User group" kind before it)
+- actions: `td class="pills" { span class="pills" { edit remove } }`. The inner `span` is not
+  decoration: `td.pills` is a table cell with no gap, and two pills straight in it touch, which
+  the mockup shows (`groups-en-light-1280.png`); `.pills` has the `gap:6px`.
+
+The filter keeps today's reach (`@name` and each member's label), so "which group is bob in?"
+still finds the row, now also answered by the roster's own column (§3).
+
+#### 3. The two lists link (users page)
+
+**The roster's groups column.** Between `emails` and `api_keys`, header and `data-label`
+`K::ColGroups` ("groups" / "gruppi", lowercase like the `emails` column beside it). The cell
+lists every group whose members hold the row's uuid, in the file's order, each
+`a href=(Route::Group(n)) { code { "@" (n) } }`, one space apart; none is `span.muted` `K::None`.
+The membership map is built once per request (uuid to group names), not per row. A group link
+goes to the **group's page**, not to the filter: every other `@name` and `app/scope` in the
+console is a link to its object's page, and a link that filtered here would be the one that
+behaved differently (Nielsen 4). The filter is one click from that page.
+
+**The roster filtered by group: `ug={name}`**, read beside `uq`/`up` and namespaced with the
+roster's `u` like them.
+
+- Exact name, never a substring, so `@staff` does not also show `@staff-old`.
+- **AND** with the text filter: `/users?ug=admins&uq=bot` shows the members of `@admins`
+  whose label, uuid or key id contains `bot`.
+- Setting it, from the group page's pill, carries no `up`, so the result starts on page 1, the
+  rule `list_controls` already applies to a new text filter. The text filter's form keeps
+  `ug` through `preserved_query`'s hidden inputs and its `×` keeps it too (`listing_href`
+  drops only `uq` and `up`), so typing narrows the group rather than leaving it.
+- While it is set, the roster's control row opens with a chip, `a.pill`, text
+  "group: @admins ×" / "gruppo: @admins ×" (`K::GroupFilter` filled with the name, one text
+  node), `title=(K::GroupFilterClear)` "show every group" / "mostra tutti i gruppi", whose
+  href is this URL without `ug` and `up`. It is rendered inside the same form through
+  `list_controls_with`'s `extra`, with `"ug"` in `owned` and a hidden `ug` input beside it, so
+  one Apply submits both and `ug` is not sent twice.
+- A name that is no group (a stale bookmark after a removal) is a filter that matches nobody:
+  the chip names it, the panel says `K::NoMatch`, the `×` clears it. No `404`: the page exists,
+  the filter is what is wrong.
+- No group `select` in the control row: with many groups a list box of all of them is the
+  scrolling this step is removing, and the group page and the roster's column are two ways in
+  that need no new control. A `select` was the alternative rejected.
+
+#### 4. Lists that say how many (users page)
+
+**The filter's reach is already uuid and key id**: `l_keeps_user` searches every email, the uuid
+and each key's id. What is missing is that nobody can know it (Nielsen 6 and 10): the box says
+"filter". So the roster's box, only, says what it searches: placeholder **and** `aria-label`
+`K::FilterPeople`, "email, uuid or key id" / "email, uuid o id chiave". The name and the
+visible hint are the same string, which keeps WCAG 2.5.3 Label in Name trivially true
+(<https://www.w3.org/WAI/WCAG22/Understanding/label-in-name.html>); the field is `type=search`,
+so it is announced as a search field without the word "filter". This needs a placeholder
+argument on `list_controls_with` (the other lists keep `K::Filter`); no behaviour changes, and
+a test pins the reach that was never pinned.
+
+**The pager's count**, in the shared `list_controls_with`, so every list says it the same way:
+
+- `K::PagerRows` "rows {0}–{1} of {2}" / "righe {0}–{1} di {2}", filled with the first row's
+  1-based number, the last's, and the matched count.
+- `K::PagerRowsFiltered` "rows {0}–{1} of {2} (filtered from {3})" / "righe {0}–{1} di {2}
+  (filtrate da {3})", the same plus the list's whole length, used while any filter is set (the
+  text, or on the roster `ug`).
+- Shown when the list has a matching row **and** either there is more than one page or a filter
+  is set; on one unfiltered page every row is in view, and on the users sub-pages the sub-tab
+  already says the total. With no matching row there is no count: the panel's `K::NoMatch`
+  already says it.
+- It **replaces** both "page 2/5" (`K::Page`, then unused, removed) and the bare "matched/total"
+  span shown while filtering, so one sentence says what two fragments said.
+- `{0}–{1}` uses an en dash: data, a range, not prose punctuation.
+- **Order, measured.** Inside `span.pager` the text comes first, then ← previous, then next →,
+  and `.listctl .pager` gets `flex-wrap:wrap`. With the text between the two buttons, at 320px
+  the Italian filtered sentence was squeezed into a column one word wide between them
+  (`people-many-it-light-320.png`, first run); text first, it is one line and the two buttons
+  sit under it, with no sideways scroll. At 1280 it reads "rows 101–125 of 1180 (filtered from
+  1234) ← previous next →" on the line under the filter.
+
+```css
+.listctl .pager{flex-wrap:wrap}
+```
+
+#### 5. Phone, themes, scripting off (users page)
+
+- **Phone**: measured at 390 and 320, no sideways scroll on any of the seven mockups in either
+  language; the roster's stacked cards gain a `gruppi` / `groups` label like the other cells;
+  the sub-tab row is one line at both widths with real counts and two lines at 320 only with
+  four-digit counts.
+- **Themes**: nothing names a colour; the sub-tabs are the bar's tab tokens and the chip is a
+  `.pill`. Shot in both.
+- **Scripting off**: nothing here has or needs a script. The sub-tabs are links, the filters
+  `GET` forms, the chip and the pager links; `nojs.js` proves it on the three pages.
+- **Keyboard and reader**: the sub-tab `nav` is the page's fourth navigation landmark, so it is
+  named (`K::UsersSections`, "Users sections" / "Sezioni di Utenti"), as the APG asks of more
+  than one landmark of a kind (<https://www.w3.org/WAI/ARIA/apg/practices/landmark-regions/>).
+  Tab order: bar, `h1` has no stop, the three sub-tabs, then `+ add`.
+- **A trade, stated**: on `/groups` the bar's Users tab and the Groups sub-tab both carry
+  `aria-current="page"`. ARIA allows one current element per set
+  (<https://www.w3.org/TR/wai-aria-1.2/#aria-current>), and these are two sets, each named; the
+  bar already marks Users current on a person's page whose URL is not `/users`. Changing the
+  bar's tab to `aria-current="true"` on a sub-page would be more exact and would touch the shared
+  header on every page, so it is left as it is.
+
+#### 6. Words (users page)
+
+| New key | English | Italian |
+| --- | --- | --- |
+| `K::People` | People | Persone |
+| `K::GroupsTab` | Groups | Gruppi |
+| `K::UsersSections` | Users sections | Sezioni di Utenti |
+| `K::ColGroups` | groups | gruppi |
+| `K::GroupInRoster` | show them in People | mostrali in Persone |
+| `K::GroupFilter` | group: {0} | gruppo: {0} |
+| `K::GroupFilterClear` | show every group | mostra tutti i gruppi |
+| `K::FilterPeople` | email, uuid or key id | email, uuid o id chiave |
+| `K::PagerRows` | rows {0}–{1} of {2} | righe {0}–{1} di {2} |
+| `K::PagerRowsFiltered` | rows {0}–{1} of {2} (filtered from {3}) | righe {0}–{1} di {2} (filtrate da {3}) |
+
+`K::Page` is removed. "Bloccati" stays the Denied word, as the console already says it.
+
+#### 7. What was removed, and the alternatives rejected (users page)
+
+Removed: the stacked page; the per-group panels with their full member lists (now a count, and
+the list on the group's page); `page_denied`'s own `h1`; "page n/m" and "matched/total". Rejected:
+`/users/groups` and `/users/denied` (two URLs moved for symmetry, §1); Groups and Denied as bar
+tabs (a sixth and seventh tab breaks the 883 breakpoint and the noun rule's reading of the bar);
+a group `select` on the roster (§3); a `?ug=` link in the roster's column instead of the group
+page (§3); a filter that matches `@name` as a substring of the roster's text, which needs no new
+parameter but cannot tell `@staff` from `@staff-old` and is invisible until somebody guesses it.
+
+#### 8. Tests and scenes (users page)
+
+Rust, in `src/bin/bb-auth-web.rs`:
+
+- `route_maps_the_three_sub_pages_and_a_group`: `/groups` is `Route::Groups`, `/groups/admins`
+  is `Route::Group("admins")`, `/groups/+add` still `GroupAdd`, `/denied` still `Denied`; each
+  `path()` round-trips; `tab()` of `Groups`, `Group(_)`, `Denied` is `Users`; `title()` of
+  `Groups` and `Group(_)` is `user_groups`. Replace the `route("/groups", "")` assertion that
+  expects `Route::Users`, and add both new routes to the exhaustive route lists near the test of
+  every route.
+- `each_users_sub_page_carries_the_three_sub_tabs_with_counts`: on `/users`, `/groups` and
+  `/denied`, `main nav.sub[aria-label]` holds three links in the order People, Groups, Denied,
+  texts `People (4)`, `Groups (2)`, `Denied (1)` for the fixture, exactly one `aria-current="page"`
+  inside it, on the link for that page, and `id="user_groups"` and `id="denied"` on the second and
+  third.
+- `the_users_sub_page_shows_only_its_own_list`: `/users` has no `user_groups` and no `denied`
+  section, `/groups` no roster, `/denied` neither.
+- `group_writes_land_on_the_group_or_the_list`: the `Location:` of add (`/groups/{name}?msg=`),
+  edit (same), remove (`/groups?msg=`), and `parent()` of each group route per §1's table.
+- `a_group_page_lists_scopes_then_members`: `@admins` shows `app1/admin` linked to `/apps/app1`
+  before the members, each member linked to their person page; a scope that excludes the group
+  carries the `excluded` tag; the scopes listed equal `user_group_refs`; an unknown member shows
+  `UnknownMember`; `GET /groups/nope` is `404`.
+- `a_group_nothing_references_says_so_on_its_page`: `@staff`'s scopes panel is
+  `referenced by nothing`.
+- `the_groups_list_is_a_table_of_counts`: one `tr` per group, the members count, the scope links,
+  `referenced by nothing` alone in `@staff`'s cell (replaces
+  `the_group_panel_still_says_referenced_by_nothing_alone`), and `span.pills` holding edit and
+  remove.
+- `a_dashboard_warning_links_to_the_page_of_what_it_names`: extend, the group line now holds
+  `<a href="…/groups/unused"><code>@unused</code></a>`.
+- `the_roster_shows_each_persons_groups`: `you@` row's groups cell links `@admins` to
+  `/groups/admins`; `bot@` row reads `none`; with `lang=it` the header is `gruppi`.
+- `the_roster_filters_by_group_exactly_and_with_the_text`: `ug=admins` keeps `you@` and
+  `suspended@` only; `ug=staf` keeps nobody (`NoMatch`) and still shows the chip; `ug=admins&uq=you`
+  keeps `you@` only; the chip's href drops `ug` and `up` and keeps the rest; the filter form holds
+  exactly one `ug` input.
+- `the_roster_filter_reaches_the_uuid_and_a_key_id`: `uq=` a fragment of `bot@`'s uuid, and
+  `uq=laptop` (its key id), each keep `bot@` alone; the box's placeholder and `aria-label` are
+  `FilterPeople` in both languages.
+- `the_pager_says_which_rows_of_how_many`: a fixture of 60 people: page 1 reads
+  `rows 1–25 of 60`, `up=3` reads `rows 51–60 of 60`; a filter matching 30 reads
+  `rows 1–25 of 30 (filtered from 60)`; one unfiltered page shows no count; a filter that matches
+  nothing shows no count; `it` reads `righe 1–25 di 60`; the text precedes the two pager controls;
+  no `page 1/3` text anywhere.
+
+e2e (`node e2e/run.js`): in `crud.js`, after group add/edit/remove, assert the landing URL per
+§1's table. In `nojs.js`: the existing roster-filter check (line ~649) loses "the groups section
+beside it" and instead asserts that the sub-tabs navigate with scripting off (`/users` to
+`/groups` to `/denied`, each `aria-current` right), that `/groups/admins`' "show them in People"
+lands on the filtered roster, and that the text filter submitted there keeps `ug`; add `/groups`,
+`/groups/admins` and `/denied` to the list of pages checked for no script (line ~109). In
+`settings.js`, `barStaysOneRow` on `/groups`.
+
+`shots.js`: retake `users`, `groups` and `denied` (all now sub-pages; `groups` already exists at
+`/groups`) and `dashboard`; add `group-detail` (`/groups/admins`), `users-by-group`
+(`/users?ug=admins`) and `users-paged` (a fixture or a scene that writes enough rows for three
+pages, at `?up=2`), and add `groups`, `group-detail` and `users-by-group` to the `it` view's
+list. The review also needs a dark 390 shot of `/users`, which the `phone` view does not take.
+
+#### 9. Questions for the user (users page), answered by the coordinator
+
+All three taken as recommended, as the user asked on 2026-11-27 for the work to be carried
+through with the decisions reviewed afterwards.
+
+1. The default sub-page is People. Should it rather be the last one the person opened (a cookie)?
+   Recommended: no. A cookie makes the same URL show different pages, and the bar's Users tab
+   would stop being predictable; People is the list most visits are for.
+2. Each sub-tab's count is the whole list, never the filtered result. Recommended as designed:
+   the filtered count is in the pager line, and a tab whose number changes as you type reads as
+   the data changing.
+3. A group link in the roster opens the group's page, not the filtered roster. Recommended as
+   designed (§3); the alternative makes it one click shorter to see the members as a table.
