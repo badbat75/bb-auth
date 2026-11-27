@@ -8480,3 +8480,103 @@ and acceptance for the second, and stand until the user reviews them.
 2. **A brand longer than about 28 characters with a logo (40 without) is still cut on the console
    at 1280**, because the budget assumes the Italian tabs and the longest given name. Recommended:
    accept; `/account/` and the `403`, which have no tabs, show it whole.
+
+### 13.35 Each dashboard warning names its kind (plan step 20, designed 2026-11-27)
+
+The user read "`@delete-test` referenced by nothing" on rpi-01's dashboard and could not tell
+what `@delete-test` was. Each of the five warnings `page_dashboard` pushes is an identifier in
+`code` followed by a `K` predicate, and nothing says whether the identifier is a scope, a person
+or a group. Read for this design: `page_dashboard`, the five `K` predicates, `groups_section`
+(the other use of `K::ReferencedByNothing`), `Route::path`, the console's own singular words for
+each kind (`K::MsgScopeAdded`, `K::MsgUserAdded`, `K::MsgGroupAdded`, `K::NoSuch*`), and the
+`li a` rules in `base.css`. No shot was taken for the design: the change is words and one link
+per line, and the review shot comes after the code.
+
+#### 1. Words (warning kinds)
+
+Each line becomes **kind, identifier, predicate**. The kind is one new `K` key, capitalised
+because it now opens the list item, and its words are the ones the console already uses for that
+object in its add/save/remove messages, so the dashboard says what the tabs and forms say:
+
+| New key | English | Italian |
+| --- | --- | --- |
+| `K::KindScope` | Scope | Scope |
+| `K::KindUser` | User | Utente |
+| `K::KindGroup` | User group | Gruppo di utenti |
+
+The five lines, as rendered (identifier in `code`, the predicate key unchanged):
+
+| # | English | Italian |
+| --- | --- | --- |
+| 1 | Scope `mpa/old` unreachable: an earlier scope of this application already covers every url it has | Scope `mpa/old` irraggiungibile: uno scope precedente di questa applicazione copre già ogni url che ha |
+| 2 | Scope `mpa/admin` restricted and lists nobody: it admits no one | Scope `mpa/admin` ristretto e non elenca nessuno: non ammette nessuno |
+| 3 | User `bob@x.com` reaches nothing: no scope lists them | Utente `bob@x.com` non raggiunge nulla: nessuno scope lo elenca |
+| 4 | User `bob@x.com` is in users and in denied — denied wins, on every credential | Utente `bob@x.com` è in users e in denied — vince denied, su ogni credenziale |
+| 5 | User group `@delete-test` referenced by nothing | Gruppo di utenti `@delete-test` referenziato da nulla |
+
+Italian "scope" stays the console's singular (it is "scope" in every message and in the
+predicates themselves; "Ambiti" is only the plural heading), and the predicates already agree
+with a masculine subject, so no predicate key changes. The em-dash in line 4 is existing text and
+is left alone. "Application" gets no key: no warning is about an application, and a scope's
+identifier `app/scope` already names its application, which is how the file and both editors
+name a scope.
+
+**`K::ReferencedByNothing` at its other use does not change.** In `groups_section` it is the
+muted line under a group's own panel, inside the "User groups" section, where the heading already
+says what the object is; prefixing the kind there would repeat the heading on every panel.
+
+#### 2. Links (warning kinds)
+
+The identifier becomes a link where the object has a page of its own, exactly as the key table
+above it already links its owner (`a href=… { … }` in a `td`):
+
+- lines 1 and 2: `a href=(v.href(&Route::App(app)))` around the `code`. The application page,
+  not the scope's edit form, because a shadowed scope is explained only by the earlier scopes
+  listed above it, and that page shows them in file order (the empty restricted scope is already
+  tagged there too).
+- lines 3 and 4: `a href=(v.href(&Route::User(uuid)))` around the `code`, the uuid trimmed and
+  lowercased as the key table does.
+- line 5: **no link**. A group has no page of its own; its only `GET` is the edit form, which
+  cannot fix "nothing references it" (the fix is on a scope, or the group's removal), and a link
+  to the whole Users page would land somewhere that does not show the group in view.
+
+Markup per line: `li { (kind) " " a href=… { code { … } } " " (predicate) }`, and for line 5
+`li { (kind) " " code { "@" (name) } " " (predicate) }`.
+
+Heuristics: the kind word is match with the real world and consistency (Nielsen 2, 4), and the
+link is recognition rather than recall (6): the operator no longer has to find the object by hand.
+WCAG 2.4.4 Link Purpose (In Context) is met because the link's list item gives its context
+(<https://www.w3.org/WAI/WCAG22/Understanding/link-purpose-in-context.html>). The trade: `li a`
+in `base.css` drops the underline until hover, so the link is told apart by colour and by the
+monospace face; that is the console's existing list-link style (technique G183 asks for 3:1
+against the text plus a cue on hover or focus,
+<https://www.w3.org/WAI/WCAG22/Techniques/general/G183>), and it is kept for consistency rather
+than restyled in this step.
+
+#### 3. Tests and scene (warning kinds)
+
+Rust, in `src/bin/bb-auth-web.rs`, on the rendered dashboard (a fixture that raises all five,
+inline if `dash` does not):
+
+- `each_dashboard_warning_names_its_kind_first`: every `li` of the warnings list starts with
+  "Scope ", "User " or "User group "; and the group line is exactly
+  `<li>User group <code>@unused</code> referenced by nothing</li>`.
+- `dashboard_warning_kinds_are_translated`: with `lang=it`, "Scope ", "Utente " and
+  "Gruppo di utenti " open the same lines.
+- `a_dashboard_warning_links_to_the_page_of_what_it_names`: the scope lines hold
+  `<a href="…/apps/mpa"><code>mpa/…</code></a>`, the user lines `<a href="…/users/<uuid>">`
+  around the `code`, and the group line holds no `<a`.
+- `the_group_panel_still_says_referenced_by_nothing_alone`: the users page's group panel reads
+  "referenced by nothing" with no "User group" before it.
+
+Extend, not replace, `dashboard_counts_expiries_and_warnings`. Scene to retake for the review:
+`node e2e/shots.js dashboard` (light, dark, phone and `it`); the fixture's dashboard shows at
+least lines 3 and 5.
+
+#### 4. Questions for the user (warning kinds), answered by the coordinator
+
+Taken as recommended (no group page in this step), as the user asked on 2026-11-27 for the plan
+to be carried to its end with the decisions reviewed afterwards.
+
+1. Should a user group get a page (or an anchor on the Users page) so line 5 can link too?
+   Recommended: no, not for this step; the group is one search away in the Users page's filter.
