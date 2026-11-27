@@ -21,12 +21,11 @@ async function run(ctx, t) {
     await page.fill('input[name=name]', 'testgrp');
     await page.fill('textarea[name=members]', 'you@example.com');
     await submit(page);
-    // §13.36 §1: a group write lands where its object is shown, which is now the group list and
-    // not the roster's page. Slice B adds the group's own page, and then the add and the edit
-    // land on `/admin/groups/testgrp?msg=` (the page that shows the membership the form just
-    // wrote); the removal stays here, because the group it named is gone.
-    t.check('group add lands on the group list via PRG',
-      page.url().endsWith('/admin/groups?msg=group-added'), page.url());
+    // §13.36 §1: a group write lands where its object is shown. Add and edit land on the
+    // group's **own page**, which is the page that shows the membership the form just wrote;
+    // the removal lands on the list, because the page it was on no longer exists.
+    t.check('group add lands on the group page via PRG',
+      page.url().endsWith('/admin/groups/testgrp?msg=group-added'), page.url());
     t.check('and shows the flash', (await page.locator('.flash').innerText()).includes('group added'));
     t.eq('group add resolves the email to the uuid the file stores', doc(ctx).user_groups.testgrp, [YOU]);
     await t.shot(page, 'group-added');
@@ -34,8 +33,8 @@ async function run(ctx, t) {
     await page.goto(ctx.base + '/groups/testgrp/edit');
     await page.fill('textarea[name=members]', 'you@example.com\nbot@example.com');
     await submit(page);
-    t.check('group edit lands on the group list with msg=group-saved',
-      page.url().endsWith('/admin/groups?msg=group-saved'), page.url());
+    t.check('group edit lands on the group page with msg=group-saved',
+      page.url().endsWith('/admin/groups/testgrp?msg=group-saved'), page.url());
     t.eq('group edit rewrites the membership', doc(ctx).user_groups.testgrp, [YOU, BOT]);
 
     await page.goto(ctx.base + '/groups/testgrp/rm');

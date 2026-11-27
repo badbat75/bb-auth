@@ -51,7 +51,7 @@ const VIEWS = [
     tag: 'phone-dark',
     colorScheme: 'dark',
     viewport: { width: 390, height: 844 },
-    only: ['users'],
+    only: ['users', 'group-detail'],
   },
   {
     tag: 'it',
@@ -59,7 +59,8 @@ const VIEWS = [
     viewport: { width: 1280, height: 900 },
     lang: 'it',
     // Only where there is something to read: a form's field measures do not change.
-    only: ['dashboard', 'users', 'groups', 'denied', 'apps', 'app-detail', 'can-authorized',
+    only: ['dashboard', 'users', 'groups', 'group-detail', 'users-by-group', 'denied',
+      'apps', 'app-detail', 'can-authorized',
       'can-denied', 'can-on-a-person', 'user-rm', 'key-minted', 'error-refused', 'conflict',
       'conflict-mint', 'forbidden', 'settings-menu', 'config-landing-refused',
       // The account panel is the copy of this slice: its rows are translated words, and the
@@ -205,12 +206,18 @@ const SCENES = [
   // ---- the read-only inventory -------------------------------------------
   ['dashboard', go('/')],
   ['groups', go('/groups')],
+  // The group's own page (§13.36 §2): scopes first, then members, the roster pill, the
+  // exclusion tag in words. The list is a table of counts, this is the roll call.
+  ['group-detail', go('/groups/admins')],
   ['apps', go('/apps')],
   // The application detail page: the one place the scopes appear in file order, with the
   // reorder buttons that make that order editable.
   ['app-detail', go('/apps/app1')],
   ['denied', go('/denied')],
   ['users', go('/users')],
+  // The roster reached from a group's page (§13.36 §3): the `ug` filter, its chip, and the
+  // groups column that answers "is this person an admin?" without a second page.
+  ['users-by-group', go('/users?ug=admins')],
   // The roster over three pages (§13.36 §4). The pager's sentence exists only once the list is
   // long enough to page, so the scene grows the roster out of band (that is a file, and the
   // runner puts the fixture back before the next scene) and stands on the middle page, where

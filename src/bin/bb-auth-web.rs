@@ -281,8 +281,8 @@ use bb_auth_core::{
     Dur, GateSettings, GuardedSetting, HeaderFault, PrepareError, RequestSite, ScopeSpec,
     SealedKey, SettingKey, Settings, SettingsFile, SettingsRefusal, SettingsWrite,
     SocialButtonSpec, Subject, UiTheme, UrlFault, UserSpec, WiredButton, Written, BASE_CSS,
-    DEFAULT_AUDIT_FILE, IDENTITY_ATTRS, IDENTITY_HEADER, MAX_BRAND_NAME, MAX_SESSION_TTL,
-    MIN_SESSION_TTL, PAGE_SECURITY_HEADERS, SOCIAL_IDPS, THEME_CSS,
+    DEFAULT_AUDIT_FILE, EXCLUDED_REF, IDENTITY_ATTRS, IDENTITY_HEADER, MAX_BRAND_NAME,
+    MAX_SESSION_TTL, MIN_SESSION_TTL, PAGE_SECURITY_HEADERS, SOCIAL_IDPS, THEME_CSS,
 };
 use maud::{html, Markup, PreEscaped, DOCTYPE};
 use sha2::{Digest, Sha256};
@@ -800,6 +800,15 @@ enum K {
     NoSuchUser,
     UsersIntro,
     GroupsIntro,
+    /// The group page's pill that asks the roster for the group's members (§13.36 §2). It
+    /// names the page it lands on, because the members are already on this one: the pill asks
+    /// to see them **as roster rows**, which is the one thing this page cannot show.
+    GroupInRoster,
+    /// The roster's chip naming the group its rows are filtered to (§13.36 §3). `{0}` is the
+    /// group's name, spelled as the file spells it, `@` included.
+    GroupFilter,
+    /// The chip's name for what its `×` does: the whole filter, not one row.
+    GroupFilterClear,
     AppsIntro,
     ScopesIntro,
     DeniedIntro,
@@ -958,6 +967,9 @@ enum K {
     CredNoneNeeded,
     Uuid,
     Emails,
+    /// The roster's groups column (§13.36 §3): the groups that name this person. Lowercase
+    /// like the `emails` column beside it, because it names the file's `user_groups` section.
+    ColGroups,
     AddEmail,
     ConfirmEmailRm,
     NoScopes,
@@ -1987,6 +1999,10 @@ fn t(lang: Lang, key: K) -> &'static str {
         K::Members => m(lang, "members", "membri"),
         K::Uuid => m(lang, "uuid", "uuid"),
         K::Emails => m(lang, "emails", "email"),
+        K::ColGroups => m(lang, "groups", "gruppi"),
+        K::GroupInRoster => m(lang, "show them in People", "mostrali in Persone"),
+        K::GroupFilter => m(lang, "group: {0}", "gruppo: {0}"),
+        K::GroupFilterClear => m(lang, "show every group", "mostra tutti i gruppi"),
         K::AccessWord => m(lang, "access", "accesso"),
         K::Credentials => m(lang, "credentials", "credenziali"),
         K::LoginUrl => m(lang, "login_url", "login_url"),
@@ -4263,6 +4279,10 @@ enum Route {
     KeyRm(String, String),
 
     GroupAdd,
+    /// One group's own page at `/groups/{name}` (§13.36 §2): the scopes that name it first,
+    /// then its members. Matched after the `+add` arm; a group name is `[A-Za-z0-9_-]`, so
+    /// no name can spell `+add` and the two arms cannot trade a URL.
+    Group(String),
     GroupEdit(String),
     GroupRm(String),
 
@@ -4315,6 +4335,7 @@ impl Route {
             Route::KeyRm(u, i) => format!("/users/{}/keys/{}/rm", seg(u), seg(i)),
 
             Route::GroupAdd => format!("/groups/{ACTION_ADD}"),
+            Route::Group(n) => format!("/groups/{}", seg(n)),
             Route::GroupEdit(n) => format!("/groups/{}/edit", seg(n)),
             Route::GroupRm(n) => format!("/groups/{}/rm", seg(n)),
 
@@ -4352,7 +4373,9 @@ impl Route {
             | Route::ScopeEdit(..)
             | Route::ScopeRm(..)
             | Route::ScopeMove(..) => Route::Apps,
-            Route::GroupAdd | Route::GroupEdit(_) | Route::GroupRm(_) => Route::Users,
+            Route::Group(_) | Route::GroupAdd | Route::GroupEdit(_) | Route::GroupRm(_) => {
+                Route::Users
+            }
             other => other.clone(),
         }
     }
@@ -4380,7 +4403,12 @@ impl Route {
             | Route::AppEdit(a)
             | Route::AppRm(a) => Route::App(a.clone()),
             Route::AppAdd => Route::Apps,
-            Route::GroupAdd | Route::GroupEdit(_) | Route::GroupRm(_) => Route::Groups,
+            // §13.36 §1's table: the add form cancels to the list, because the group it is
+            // about to make did not exist when the form was opened. The edit and the removal
+            // cancel to the group's own page, which is the page that shows the membership the
+            // form is about to write, and the page a removal is about to take away.
+            Route::Group(_) | Route::GroupAdd => Route::Groups,
+            Route::GroupEdit(n) | Route::GroupRm(n) => Route::Group(n.clone()),
             Route::DenyAdd | Route::DenyRm(_) => Route::Denied,
             other => other.clone(),
         }
@@ -4393,9 +4421,11 @@ impl Route {
     fn title(&self) -> &'static str {
         match self {
             Route::Denied | Route::DenyAdd | Route::DenyRm(_) => "denied",
-            Route::Groups | Route::GroupAdd | Route::GroupEdit(_) | Route::GroupRm(_) => {
-                "user_groups"
-            }
+            Route::Groups
+            | Route::Group(_)
+            | Route::GroupAdd
+            | Route::GroupEdit(_)
+            | Route::GroupRm(_) => "user_groups",
             _ => match self.tab() {
                 Route::Apps => "applications",
                 Route::Users => "users",
@@ -4467,9 +4497,12 @@ fn route(path: &str, base: &str) -> Option<Route> {
         ["apps", a, "scopes", n, "move"] if !a.is_empty() => Some(Route::ScopeMove(s(a), s(n))),
 
         // The group list is a page of its own, under the Users tab (§13.36 §1). It has
-        // always had this URL; what changed is what the URL shows.
+        // always had this URL; what changed is what the URL shows. One group is a page too
+        // (§13.36 §2), matched **after** `+add`, which is what makes a name that spells the
+        // action impossible: a group name is `[A-Za-z0-9_-]`, so it carries no `+`.
         ["groups"] => Some(Route::Groups),
         ["groups", ACTION_ADD] => Some(Route::GroupAdd),
+        ["groups", n] if !n.is_empty() => Some(Route::Group(s(n))),
         ["groups", n, "edit"] if !n.is_empty() => Some(Route::GroupEdit(s(n))),
         ["groups", n, "rm"] if !n.is_empty() => Some(Route::GroupRm(s(n))),
 
@@ -4935,6 +4968,11 @@ struct Listing {
     q: String,
     /// 0-based, as requested. [`Listing::window`] is what clamps it to what exists.
     page: usize,
+    /// Whether the list is narrowed by something **besides** the box: the roster's group chip
+    /// (§13.36 §5), which is a filter no field of the panel shows. A filter no box shows is a
+    /// filter no box clears, so it has to count for the sentence the pager prints, and the
+    /// panel answers it with a chip of its own.
+    filtered: bool,
 }
 
 impl Listing {
@@ -4948,6 +4986,8 @@ impl Listing {
             q: q.trim().to_lowercase(),
             // Pages are 1-based in the URL, where a human reads them, and 0-based here.
             page: page.saturating_sub(1),
+            // A caller whose list is narrowed by something outside the box says so.
+            filtered: false,
         }
     }
 
@@ -5053,10 +5093,12 @@ fn list_controls_with(
     let (start, end, page, pages) = l.window(matched);
     let q_name = l.q_name();
     let p_name = l.p_name();
+    // Anything narrowing this list, from the box or from a control that is not a field.
+    let narrowed = !l.q.is_empty() || l.filtered;
     // One sentence says where in the list this page sits, in place of the "page 2/5" fragment
     // and the bare "matched/total" span (§13.36 §4): the first row shown, the last, how many
-    // matched, and while a filter is set, the list's whole length beside it.
-    let rows = if l.q.is_empty() {
+    // matched, and while anything narrows the list, the list's whole length beside it.
+    let rows = if !narrowed {
         fill(
             t(v.lang, K::PagerRows),
             &[
@@ -5087,12 +5129,16 @@ fn list_controls_with(
                 (extra)
                 input type="search" name=(q_name) value=(l.q) placeholder=(v.t(ph))
                       aria-label=(v.t(ph));
+                // The page a submit lands on, spelled out rather than left to the absence of
+                // `p`: a new filter belongs at the top of its results, and a field carrying the
+                // first page says that to whoever reads the form.
+                input type="hidden" name=(p_name) value="1";
                 button type="submit" class="pill" { (v.t(K::Apply)) }
                 @if !l.q.is_empty() {
                     a class="pill" href=(listing_href(v, l, &[])) title=(v.t(K::FilterClear)) { "×" }
                 }
             }
-            @if matched > 0 && (pages > 1 || !l.q.is_empty()) {
+            @if matched > 0 && (pages > 1 || narrowed) {
                 span class="pager" {
                     // The words first, the two controls after them. With the sentence standing
                     // between them it was squeezed into a column one word wide at 320px in
@@ -6935,8 +6981,8 @@ fn label_of(doc: &AccessFile, key: &str) -> String {
 /// groups, and `@delete-test` on its own does not say which of the three it is. The identifier
 /// is a link wherever the object has a page of its own (a scope to its application, because a
 /// shadowed scope is explained only by the scopes listed above it there; a person to their
-/// page); a user group links to nothing, because its only `GET` is the edit form, which cannot
-/// fix "nothing references me".
+/// page; a user group to its own page, §13.36 §2, where "nothing references me" is answered by
+/// the scopes panel first under the head).
 fn page_dashboard(v: &View, doc: &AccessFile, access: &Access) -> Markup {
     let n = now();
     let scope_count: usize = doc.applications.iter().map(|a| a.scopes.len()).sum();
@@ -6998,7 +7044,8 @@ fn page_dashboard(v: &View, doc: &AccessFile, access: &Access) -> Markup {
         if user_group_refs(doc, name).is_empty() {
             warnings.push(html! {
                 (v.t(K::KindGroup)) " "
-                code { "@" (name) } " " (v.t(K::ReferencedByNothing))
+                a href=(v.href(&Route::Group(name.clone()))) { code { "@" (name) } }
+                " " (v.t(K::ReferencedByNothing))
             });
         }
     }
@@ -7121,10 +7168,63 @@ fn users_subnav(v: &View, doc: &AccessFile) -> Markup {
 /// it is under, and the `h2` is the sub-tab's, so the link a person followed and the heading
 /// they landed on are the same word. The filter and the pager are namespaced (`u`), as on
 /// the other two pages, because all three lists live in one query string.
+///
+/// A row carries the **groups naming it**, as links to each group's page (§13.36 §5): the
+/// file writes membership on the side of the group, and a roster that shows only emails asks
+/// "which of these is an administrator?" with no way to answer. Beside the box, the
+/// `?ug=` chip answers "who is in this group?" from the other side, on the group's page.
 fn page_users(v: &View, doc: &AccessFile, access: &Access) -> Markup {
-    let lu = Listing::read("u", v.query);
-    let rows: Vec<&UserSpec> = doc.users.iter().filter(|u| l_keeps_user(&lu, u)).collect();
+    let mut lu = Listing::read("u", v.query);
+    // The group filter: `ug` names one `user_groups` entry **exactly** (a group name is a
+    // `[A-Za-z0-9_-]` word, so a substring test on a name would invent matches), and it is
+    // ANDed with the box rather than replacing it. A name the file has not got narrows to
+    // nobody, which is what the panel's `no matches for this filter` says; the page is not an
+    // error, because the chip is a link and links rot.
+    let group = query_param(v.query, "ug").unwrap_or_default();
+    let group = group.trim().to_string();
+    let members = doc
+        .user_groups
+        .get(&group)
+        .map(|ms| ms.iter().map(|m| m.trim().to_ascii_lowercase()).collect())
+        .or_else(|| (!group.is_empty()).then(Vec::new));
+    lu.filtered = !group.is_empty();
+    let rows: Vec<&UserSpec> = doc
+        .users
+        .iter()
+        .filter(|u| l_keeps_user(&lu, u))
+        .filter(|u| {
+            members
+                .as_ref()
+                .is_none_or(|ms| ms.iter().any(|m| *m == u.uuid.trim().to_ascii_lowercase()))
+        })
+        .collect();
     let (start, end, _, _) = lu.window(rows.len());
+    // The membership map, built **once per request** (§13.36 §3): walking the groups per row
+    // would read the whole section once per row of the page. The names come out in the file's
+    // order, which for a `BTreeMap` is alphabetical.
+    let mut by_uuid: std::collections::BTreeMap<String, Vec<String>> =
+        std::collections::BTreeMap::new();
+    for (name, ms) in &doc.user_groups {
+        for m in ms {
+            by_uuid
+                .entry(m.trim().to_ascii_lowercase())
+                .or_default()
+                .push(name.clone());
+        }
+    }
+    // The chip: what the list is narrowed to, and the one control that clears it. It rides in
+    // the same form as the box, so Apply keeps the group with the text, and the group is
+    // `owned` so the form carries it once.
+    let chip = if group.is_empty() {
+        html! {}
+    } else {
+        html! {
+            input type="hidden" name="ug" value=(group);
+            a class="pill" href=(clear_group_href(v, &lu)) title=(v.t(K::GroupFilterClear)) {
+                (fill(v.t(K::GroupFilter), &[format!("@{group}").as_str()])) " ×"
+            }
+        }
+    };
     html! {
         h1 { (v.t(K::Users)) }
         (users_subnav(v, doc))
@@ -7132,22 +7232,44 @@ fn page_users(v: &View, doc: &AccessFile, access: &Access) -> Markup {
         h2 { (section_heading(v.t(K::People), "users")) }
         p class="lede sub" { (v.t(K::UsersIntro)) }
         p class="primary" { (act(v, &Route::UserAdd, &format!("+ {}", v.t(K::Add)))) }
-        (list_controls_named(v, &lu, rows.len(), doc.users.len(), K::FilterPeople))
+        (list_controls_with(
+            v,
+            &lu,
+            rows.len(),
+            doc.users.len(),
+            &["ug"],
+            chip,
+            K::FilterPeople,
+        ))
         (list_panel(v, doc.users.len(), rows.len(), html! {
                 table {
                     thead { tr {
                         th { (v.t(K::Emails)) }
+                        th { (v.t(K::ColGroups)) }
                         th { "api_keys" }
                         th {}
                     } }
                     tbody {
                         @for u in &rows[start..end] {
                             @let uuid = u.uuid.trim().to_ascii_lowercase();
+                            @let groups = by_uuid.get(&uuid).cloned().unwrap_or_default();
                             tr {
                                 td data-label=(v.t(K::Emails)) {
                                     a href=(v.href(&Route::User(uuid.clone()))) { (user_label(u)) }
                                     @if access.denied_users.contains(&uuid) {
                                         " " (tag("bad", "denied"))
+                                    }
+                                }
+                                td data-label=(v.t(K::ColGroups)) {
+                                    @if groups.is_empty() {
+                                        span class="muted" { (v.t(K::None)) }
+                                    } @else {
+                                        @for (at, g) in groups.iter().enumerate() {
+                                            @if at > 0 { ", " }
+                                            a href=(v.href(&Route::Group(g.clone()))) {
+                                                code { "@" (g) }
+                                            }
+                                        }
                                     }
                                 }
                                 td data-label="api_keys" { (u.api_keys.len()) }
@@ -7160,6 +7282,25 @@ fn page_users(v: &View, doc: &AccessFile, access: &Access) -> Markup {
                 }
         }))
 
+    }
+}
+
+/// The roster's own URL with the **group** filter dropped and everything else kept, the
+/// chip's href (§13.36 §5). [`listing_href`] cannot answer this one: it clears the box and
+/// the page of its own list, and a chip that clears the text the operator typed would be a
+/// control that destroys a filter nobody asked it to destroy.
+fn clear_group_href(v: &View, l: &Listing) -> String {
+    let mut ser = form_urlencoded::Serializer::new(String::new());
+    for (k, val) in form_urlencoded::parse(v.query.as_bytes()) {
+        if k != "ug" && k != l.p_name() {
+            ser.append_pair(&k, &val);
+        }
+    }
+    let q = ser.finish();
+    if q.is_empty() {
+        v.href(&v.at)
+    } else {
+        format!("{}?{q}", v.href(&v.at))
     }
 }
 
@@ -7295,15 +7436,14 @@ fn page_user(v: &View, doc: &AccessFile, access: &Access, key: &str) -> (u16, Ma
 
 /// `/groups`: the `user_groups` list, the users tab's Groups sub-page (§13.36 §1).
 ///
-/// Each entry, who it references, and everything that names it. Members are people: an email
-/// where a roster row still resolves it, the raw uuid where none does, and flagged when it
-/// matches nobody at all. The names are **not** links: each page here shows one list, and a
-/// name in a group is a row of the *roster*, whose page is People's (§13.36 §1), so a link
-/// would put another page's list one click from this one.
+/// **A table, one row per group** (§13.36 §3). The list used to be one panel per group, which
+/// put a name, a count and a reference list into prose a row at a time and said nothing about
+/// how big each group is; a column answers "how big is each?" at a glance, and the names are
+/// links to the page each one is about (§13.36 §2). The filter keeps the old reach (`@name`
+/// and each member's label), because "which group is bob in?" is still the question this list
+/// is opened to answer.
 fn page_groups(v: &View, doc: &AccessFile) -> Markup {
     let l = Listing::read("g", v.query);
-    // A group is searchable by its own name and by who is in it, because "which group is
-    // bob in?" is the question this list is usually opened to answer.
     let rows: Vec<(&String, &Vec<String>)> = doc
         .user_groups
         .iter()
@@ -7323,46 +7463,41 @@ fn page_groups(v: &View, doc: &AccessFile) -> Markup {
         p class="lede sub" { (v.t(K::GroupsIntro)) }
         p class="primary" { (act(v, &Route::GroupAdd, &format!("+ {}", v.t(K::Add)))) }
         (list_controls(v, &l, rows.len(), doc.user_groups.len()))
-        (list_rows(v, doc.user_groups.len(), rows.len(), html! {
-            @for (name, members) in &rows[start..end] {
-                @let refs = user_group_refs(doc, name);
-                div class="panel" {
-                    h3 class="tight" {
-                        code { "@" (name) }
-                        " "
-                        span class="pills" {
-                            (act(v, &Route::GroupEdit((*name).clone()), v.t(K::Edit)))
-                            (act_rm(v, &Route::GroupRm((*name).clone()), v.t(K::Remove)))
-                        }
-                    }
-                    p class="muted" {
-                        @if refs.is_empty() {
-                            (v.t(K::ReferencedByNothing))
-                        } @else {
-                            (v.t(K::ReferencedBy)) " "
-                            @for (i, r) in refs.iter().enumerate() {
-                                @if i > 0 { ", " }
-                                code { (r) }
+        (list_panel(v, doc.user_groups.len(), rows.len(), html! {
+            table {
+                thead { tr {
+                    // `name` is the file's word, as the applications table heads its first
+                    // column with it: the group's name is a key of the document, not a label.
+                    th { "name" }
+                    th { (v.t(K::Members)) }
+                    th { (v.t(K::Scopes)) }
+                    th {}
+                } }
+                tbody {
+                    @for (name, members) in &rows[start..end] {
+                        @let refs = user_group_refs(doc, name);
+                        tr {
+                            td data-label="name" {
+                                a href=(v.href(&Route::Group((*name).clone()))) {
+                                    code { "@" (name) }
+                                }
                             }
-                        }
-                    }
-                    p class="muted" { (v.t(K::Members)) }
-                    @if members.is_empty() {
-                        p class="muted" { (v.t(K::None)) }
-                    } @else {
-                        ul class="plain" {
-                            @for m in members.iter() {
-                                @let uuid = m.trim().to_ascii_lowercase();
-                                li {
-                                    @match user_pos(doc, &uuid) {
-                                        Some(i) => {
-                                            code { (user_label(&doc.users[i])) }
-                                        }
-                                        None => {
-                                            code class="bad" { (uuid) }
-                                            " " (tag("bad", v.t(K::UnknownMember)))
-                                        }
+                            td data-label=(v.t(K::Members)) { (members.len()) }
+                            td data-label=(v.t(K::Scopes)) {
+                                @if refs.is_empty() {
+                                    span class="muted" { (v.t(K::ReferencedByNothing)) }
+                                } @else {
+                                    @for r in refs.iter() {
+                                        (scope_ref_link(v, r)) " "
                                     }
+                                }
+                            }
+                            td class="pills" {
+                                // The inner `span` is not decoration: `td.pills` is a table
+                                // cell with no gap, and two pills straight in it touch.
+                                span class="pills" {
+                                    (act(v, &Route::GroupEdit((*name).clone()), v.t(K::Edit)))
+                                    (act_rm(v, &Route::GroupRm((*name).clone()), v.t(K::Remove)))
                                 }
                             }
                         }
@@ -7371,6 +7506,112 @@ fn page_groups(v: &View, doc: &AccessFile) -> Markup {
             }
         }))
     }
+}
+
+/// One entry of [`user_group_refs`] as a page shows it: the scope as a link to the application
+/// that owns it (a scope has no page of its own, and an application lists its scopes), and a
+/// scope that keeps the group **out** carrying the file's own word beside the link.
+///
+/// The words come from [`EXCLUDED_REF`], which is what `user_group_refs` appends, so this page
+/// and the removal's refusal cannot disagree about which references they are listing; and they
+/// are words and not a colour, so a reader who does not see colour hears them (WCAG 1.4.1).
+fn scope_ref_link(v: &View, entry: &str) -> Markup {
+    let marker = format!(" ({EXCLUDED_REF})");
+    let (at, excluded) = match entry.strip_suffix(marker.as_str()) {
+        Some(rest) => (rest, true),
+        None => (entry, false),
+    };
+    let app = at.split('/').next().unwrap_or_default().trim().to_string();
+    html! {
+        a href=(v.href(&Route::App(app))) { code { (at.trim()) } }
+        @if excluded {
+            " " (tag("bad", EXCLUDED_REF))
+        }
+    }
+}
+
+/// `/groups/{name}`: one `user_groups` entry (§13.36 §2).
+///
+/// Scopes come **before** members: the scopes are why the group matters, and this is the page
+/// the dashboard's "referenced by nothing" warning links to, so its answer is the first thing
+/// under the head. The two writes are the **existing** forms, reached from here; only where
+/// they return changed (§1).
+fn page_group(v: &View, doc: &AccessFile, name: &str) -> (u16, Markup) {
+    let Some(members) = doc.user_groups.get(name.trim()) else {
+        return (
+            404,
+            page_missing(v, v.t(K::NoSuchGroup), name.trim(), &Route::Groups),
+        );
+    };
+    let refs = user_group_refs(doc, name.trim());
+    // The members behind a `Listing` of their own prefix, so a group of a thousand people is a
+    // page and not a scroll, and the scopes panel above has no control row of its own.
+    let lm = Listing::read("m", v.query);
+    let shown: Vec<&String> = members
+        .iter()
+        .filter(|m| lm.keeps(&format!("{} {}", m.trim(), label_of(doc, m))))
+        .collect();
+    let (start, end, _, _) = lm.window(shown.len());
+    (
+        200,
+        html! {
+            h1 {
+                code { "@" (name.trim()) }
+                " "
+                span class="muted mono" { "user_groups" }
+            }
+            // The page belongs to the Groups sub-tab (`parent()` says so), and the row is what
+            // marks that: the sub-tab lights the page a route is reached from, and the group
+            // page is the Groups tab's detail view (§13.36 §2).
+            (users_subnav(v, doc))
+            p class="lede" { (back(v, &Route::Groups)) }
+            p class="pills" {
+                (act(v, &Route::GroupEdit(name.trim().to_string()), v.t(K::Edit)))
+                (act_rm(v, &Route::GroupRm(name.trim().to_string()), v.t(K::Remove)))
+            }
+
+            h2 { (section_heading(v.t(K::Scopes), "scopes")) }
+            div class="panel" {
+                @if refs.is_empty() {
+                    span class="muted" { (v.t(K::ReferencedByNothing)) }
+                } @else {
+                    ul class="plain" {
+                        @for r in refs.iter() {
+                            li { (scope_ref_link(v, r)) }
+                        }
+                    }
+                }
+            }
+
+            h2 { (v.t(K::Members)) }
+            p class="primary" {
+                a class="pill" href=(format!("{}?ug={}", v.href(&Route::Users), name.trim())) {
+                    (v.t(K::GroupInRoster))
+                }
+            }
+            (list_controls_named(v, &lm, shown.len(), members.len(), K::FilterPeople))
+            (list_panel(v, members.len(), shown.len(), html! {
+                ul class="plain" {
+                    @for m in &shown[start..end] {
+                        @let uuid = m.trim().to_ascii_lowercase();
+                        li {
+                            @match user_pos(doc, &uuid) {
+                                Some(i) => {
+                                    a href=(v.href(&Route::User(uuid.clone()))) {
+                                        (user_label(&doc.users[i]))
+                                    }
+                                }
+                                None => {
+                                    code class="bad" { (uuid) }
+                                    " " (tag("bad", v.t(K::UnknownMember)))
+                                }
+                            }
+                        }
+                    }
+                }
+            }))
+        },
+    )
 }
 
 /// `/apps` — the applications, with their base, their scope count, and which credential
@@ -10321,16 +10562,18 @@ fn mutate(v: &View, form: &Form) -> Outcome {
 
         Route::GroupAdd => {
             let f = GroupForm::read(form);
-            let r = (|| -> Result<(), Refusal> {
+            let r = (|| -> Result<String, Refusal> {
                 let name = f.name.trim().to_string();
                 let members =
                     parse_group_members(&doc, &f.members).map_err(|e| Refusal::on("members", e))?;
                 add_user_group(&mut doc, &name, members).map_err(|e| Refusal::on("name", e))?;
                 commit(v, &doc, "group add", &format!("@{name}"))?;
-                Ok(())
+                Ok(name)
             })();
             match r {
-                Ok(()) => Outcome::Done(Route::Groups, Msg::GroupAdded),
+                // The group's own page (§13.36 §1): the add form names the members, and the
+                // page that shows them is where an operator checks what they typed.
+                Ok(name) => Outcome::Done(Route::Group(name), Msg::GroupAdded),
                 Err(e) => Outcome::Page(400, title, page_group_form(v, None, &f, Some(&e))),
             }
         }
@@ -10347,7 +10590,7 @@ fn mutate(v: &View, form: &Form) -> Outcome {
                 Ok(())
             })();
             match r {
-                Ok(()) => Outcome::Done(Route::Groups, Msg::GroupSaved),
+                Ok(()) => Outcome::Done(Route::Group(target.trim().to_string()), Msg::GroupSaved),
                 Err(e) => Outcome::Page(400, title, page_group_form(v, Some(target), &f, Some(&e))),
             }
         }
@@ -15020,6 +15263,10 @@ fn handle(mut req: Request, cfg: &Config) {
         Route::Denied => (200, page_denied(&v, &doc), title),
         Route::Users => (200, page_users(&v, &doc, &access), title),
         Route::Groups => (200, page_groups(&v, &doc), title),
+        Route::Group(n) => {
+            let (status, content) = page_group(&v, &doc, n);
+            (status, content, title)
+        }
         // It reads the access file for one thing only: what the roster calls a uuid an event
         // recorded. Every other page here is *about* that file; this one borrows a name from
         // it.
@@ -19090,6 +19337,7 @@ mod tests {
                 Route::DenyRm(_) => 27,
                 Route::Audit => 28,
                 Route::Groups => 29,
+                Route::Group(_) => 30,
             }
         }
         let seen: std::collections::HashSet<usize> = every_route().iter().map(variant).collect();
@@ -20097,16 +20345,21 @@ mod tests {
                 warning_words(&items)
             );
         }
-        // The group line byte for byte as §13.35 renders it: the kind, the identifier in
-        // `code`, the predicate, and nothing else.
+        // The group line byte for byte as the page renders it: the kind, the identifier in
+        // `code`, the predicate, and nothing else. The identifier sits inside a link to
+        // `/groups/unused`, which §13.36 §2 added: §13.35 left this line plain only because a
+        // group had no page of its own to land on, and the group page's scopes panel is the
+        // answer to "referenced by nothing", so the warning is now one click from its own
+        // remedy. The byte-for-byte shape still matters: it is what says the line carries no
+        // third element, no count and no panel of its own.
         assert!(
             items.iter().any(|li| {
                 li == &format!(
-                    "<li>{KIND_GROUP} <code>@unused</code> {}</li>",
+                    "<li>{KIND_GROUP} <a href=\"/groups/unused\"><code>@unused</code></a> {}</li>",
                     t(Lang::En, K::ReferencedByNothing)
                 )
             }),
-            "the group line, with no link of its own: {}",
+            "the group line, linking the group's page: {}",
             items.join(" | ")
         );
     }
@@ -20176,9 +20429,9 @@ mod tests {
 
     /// §13.35 §2: the identifier becomes a link to the page of the thing it names, so the
     /// operator no longer has to find it by hand. A scope links to **its application's** page,
-    /// because a shadowed scope is explained only by the scopes listed above it there. A
-    /// person links to their own page. A user group links to nothing, because it has no page:
-    /// its only `GET` is the edit form, which cannot fix "nothing references me".
+    /// because a shadowed scope is explained only by the scopes listed above it there. A person
+    /// links to their own page. A user group links to its own page (§13.36 §2), which is where
+    /// "nothing references me" is answered: the scopes panel, first under the head.
     #[test]
     fn a_dashboard_warning_links_to_the_page_of_what_it_names() {
         let html = render_of("dash-kind-links", DASH_KINDS, Route::Dashboard, "");
@@ -20199,40 +20452,11 @@ mod tests {
                 warning_line(&items, id)
             );
         }
-        let group = warning_line(&items, "@unused");
         assert!(
-            !group.contains("<a "),
-            "a group has no page of its own, so its line carries no link: {group}"
-        );
-    }
-
-    /// §13.35 §1: the kind prefix is the **dashboard's** and not the group panel's. On the
-    /// users page the heading above the panel already says the object is a user group, so
-    /// prefixing the kind there would repeat the heading on every panel. This is the other
-    /// use of `K::ReferencedByNothing`, and it stays as it was.
-    #[test]
-    fn the_group_panel_still_says_referenced_by_nothing_alone() {
-        // §13.35 §1: the sentence stands alone, with no kind label, because the heading above it
-        // names the kind. Slice A moved the groups onto a page of their own (§13.36 §1), so this
-        // walks there; slice B replaces it with `the_groups_list_is_a_table_of_counts`, the same
-        // claim read out of a table row instead of a panel.
-        let (status, html) = console_page("dash-kinds-groups", DASH_KINDS, "/groups", "lang=en");
-        assert_eq!(status, 200, "the group list is a page of its own");
-        let at = html
-            .find("<code>@unused</code>")
-            .expect("the group list shows the group it lists");
-        let tail = &html[at..];
-        let open = tail.find("<p").expect("the panel says what references it");
-        let close = tail.find("</p>").expect("the sentence closes") + "</p>".len();
-        let line = &tail[open..close];
-        assert_eq!(
-            visible_text(line),
-            t(Lang::En, K::ReferencedByNothing),
-            "{line}"
-        );
-        assert!(
-            !line.contains(KIND_GROUP),
-            "the panel sits under its heading, so it names no kind: {line}"
+            warning_line(&items, "@unused")
+                .contains(r#"<a href="/groups/unused"><code>@unused</code></a>"#),
+            "and a group line links the group's page, which is the answer to its own warning: {}",
+            warning_line(&items, "@unused")
         );
     }
 
@@ -20529,13 +20753,116 @@ mod tests {
             .join(",")
     }
 
+    /// A file that gives a group's page everything §13.36 §2 says it has to show: `@admins` is
+    /// named by two scopes; `@outsiders` is named by one of them **as an exclusion**, which is
+    /// the reference the page has to say is a keeping-out and not a letting-in; `@empty` is
+    /// referenced and has no members at all; and `@admins` carries a uuid no roster row has,
+    /// which the page has to name as nobody rather than as a name with no link.
+    const GROUP_PAGE: &str = r#"{ "version": 1,
+      "applications": [
+        { "name": "mpa", "base": ["https://app.x.com/mpa"],
+          "scopes": [
+            { "name": "admin", "urls": ["https://app.x.com/mpa/admin/*"], "access": "restricted",
+              "groups": ["@admins"] },
+            { "name": "gate", "urls": ["https://app.x.com/mpa/gate/*"], "access": "restricted",
+              "groups": ["@admins", "@empty"], "excluded": ["@outsiders"] }
+          ] }
+      ],
+      "user_groups": {
+        "admins": ["8f14e45f-ceea-467a-9f79-3b4e5c6d7a8b",
+                   "22222222-2222-4222-8222-222222222222",
+                   "99999999-9999-4999-8999-999999999999"],
+        "empty": [],
+        "outsiders": ["33333333-3333-4333-8333-333333333333"]
+      },
+      "denied": [],
+      "users": [
+        { "uuid": "8f14e45f-ceea-467a-9f79-3b4e5c6d7a8b", "emails": ["Bob@X.com"] },
+        { "uuid": "22222222-2222-4222-8222-222222222222", "emails": ["you@x.com"] },
+        { "uuid": "33333333-3333-4333-8333-333333333333", "emails": ["suspended@x.com"] }
+      ]
+    }"#;
+
+    /// A roster where one person is in **two** groups and one in none, for the roster's groups
+    /// column (§13.36 §3): two links have a file order to get right, and none has an empty
+    /// state. The group names are spelled so that the file's order is **not** the order they
+    /// were written in: `user_groups` is a `BTreeMap`, so the file's order is alphabetical, and
+    /// a page that emitted insertion order would read alpha, beta.
+    const ROSTER_GROUPS: &str = r#"{ "version": 1,
+      "applications": [
+        { "name": "mpa", "base": ["https://app.x.com/mpa"],
+          "scopes": [
+            { "name": "admin", "urls": ["https://app.x.com/mpa/admin/*"], "access": "restricted",
+              "groups": ["@admins"] },
+            { "name": "desk", "urls": ["https://app.x.com/mpa/desk/*"], "access": "restricted",
+              "groups": ["@staff"] },
+            { "name": "ops", "urls": ["https://app.x.com/mpa/ops/*"], "access": "restricted",
+              "groups": ["@beta", "@alpha"] }
+          ] }
+      ],
+      "user_groups": {
+        "beta": ["11111111-1111-1111-1111-111111111111"],
+        "alpha": ["11111111-1111-1111-1111-111111111111"],
+        "admins": ["8f14e45f-ceea-467a-9f79-3b4e5c6d7a8b",
+                   "22222222-2222-4222-8222-222222222222"],
+        "staff": ["33333333-3333-4333-8333-333333333333"]
+      },
+      "denied": [],
+      "users": [
+        { "uuid": "8f14e45f-ceea-467a-9f79-3b4e5c6d7a8b", "emails": ["Bob@X.com"] },
+        { "uuid": "11111111-1111-1111-1111-111111111111", "emails": ["nowhere@x.com"] },
+        { "uuid": "22222222-2222-4222-8222-222222222222", "emails": ["you@x.com"] },
+        { "uuid": "33333333-3333-4333-8333-333333333333", "emails": ["suspended@x.com"] },
+        { "uuid": "44444444-4444-4444-8444-444444444444", "emails": ["nofile@x.com"] }
+      ]
+    }"#;
+
+    /// The roster rows of [`SUBS`] that have no constant of their own yet: the two the group
+    /// page and the roster's column have to name in an href.
+    const YOU_UUID: &str = "22222222-2222-4222-8222-222222222222";
+    const YOU_RM: &str = "/users/22222222-2222-4222-8222-222222222222/rm";
+    const STAFF_RM: &str = "/users/33333333-3333-4333-8333-333333333333/rm";
+
+    /// The words §13.36 §6 adds, spelled exactly as the design's table spells them, EN and IT.
+    /// They are words and not `K` variants because the variants do not exist yet: naming one is
+    /// a compile error for the whole target, which is a red that says nothing about a page.
+    /// Once the table carries them, these consts are the answer the coder has to match.
+    const COL_GROUPS_EN: &str = "groups";
+    const COL_GROUPS_IT: &str = "gruppi";
+    const GROUP_IN_ROSTER_EN: &str = "show them in People";
+    const GROUP_IN_ROSTER_IT: &str = "mostrali in Persone";
+    const GROUP_FILTER_EN: &str = "group: ";
+    const GROUP_FILTER_IT: &str = "gruppo: ";
+    const GROUP_FILTER_CLEAR_EN: &str = "show every group";
+    const GROUP_FILTER_CLEAR_IT: &str = "mostra tutti i gruppi";
+
+    /// The panel a section heading introduces: the first `div.panel` after `needle`.
+    /// [`nested_block`] counts the nested `div`s, so a panel that holds a table ends where the
+    /// page ends it and not at the first `</div>`.
+    fn panel_after(html: &str, needle: &str, label: &str) -> String {
+        let at = html
+            .find(needle)
+            .unwrap_or_else(|| panic!("{label}: the page carries no {needle:?}: {html}"));
+        nested_block(&html[at..], "<div class=\"panel\"", "div")
+    }
+
+    /// The cells of one table row, as `<td …>…</td>` elements, in document order.
+    fn row_cells(row: &str) -> Vec<String> {
+        elements(row, "<td", "</td>")
+    }
+
+    /// A page's list-control row: the filter form and the pager above a list.
+    fn the_listctl(main: &str) -> String {
+        nested_block(main, "div class=\"listctl\"", "div")
+    }
+
     #[test]
-    fn route_maps_the_three_sub_pages() {
+    fn route_maps_the_three_sub_pages_and_a_group() {
         // §13.36 §1: People, Groups and Denied are three pages under the one Users tab, and the
         // three URLs already exist, so none of them moves. Every assertion runs through `path()`,
         // `tab()` and `title()` rather than naming `Route::Groups`: a test that named a variant
         // the code does not have is a compile error that reddens the whole target, which says
-        // nothing about the route.
+        // nothing about the route. §13.36 §2 adds the fourth route the same way.
         let groups = route("/groups", "").expect("/groups is a page");
         assert_eq!(
             groups.path(),
@@ -20558,6 +20885,41 @@ mod tests {
             "and names the section it edits"
         );
 
+        // §13.36 §2: one group is a page too, at `/groups/{name}`, matched after the `+add`
+        // arm. A group name is `[A-Za-z0-9_-]`, so no name can spell `+add` and the two arms
+        // cannot trade a URL.
+        let grp = route("/groups/admins", "").expect("a group is a page");
+        assert_eq!(
+            grp.path(),
+            "/groups/admins",
+            "the URL is the name, as a row links it"
+        );
+        assert_eq!(
+            route(&grp.path(), ""),
+            Some(grp.clone()),
+            "path() and route() are inverses"
+        );
+        assert_eq!(
+            grp.tab(),
+            Route::Users,
+            "it lights the Users tab, so the bar keeps its five tabs"
+        );
+        assert_eq!(
+            grp.title(),
+            "user_groups",
+            "and names the section it edits, as the list does"
+        );
+        assert_eq!(
+            grp.parent().path(),
+            "/groups",
+            "it is reached from, and cancels back to, the list it is a row of"
+        );
+        assert_eq!(
+            route("/groups/+add", ""),
+            Some(Route::GroupAdd),
+            "the new arm is after `+add`, which is why a name can never reach the form"
+        );
+
         let people = route("/users", "").expect("People is the tab's default");
         assert_eq!(
             people.path(),
@@ -20571,12 +20933,15 @@ mod tests {
         assert_eq!(denied.tab(), Route::Users);
         assert_eq!(denied.title(), "denied");
 
-        // The group forms already live under /groups and stay there. Their `parent()` is the
-        // group list, because that is the page that shows the group a form just changed.
-        for at in [
-            Route::GroupAdd,
-            Route::GroupEdit("admins".to_string()),
-            Route::GroupRm("admins".to_string()),
+        // The group forms already live under /groups and stay there. §1's table moves their
+        // `parent()` (the cancel target and the `409` back): add goes back to the list, because
+        // the group it made did not exist when the operator opened the form, and the edit and
+        // the removal go back to the group's page, which is the page that shows the membership
+        // the form is about to write, and the group the removal is about to take away.
+        for (at, parent) in [
+            (Route::GroupAdd, "/groups"),
+            (Route::GroupEdit("admins".to_string()), "/groups/admins"),
+            (Route::GroupRm("admins".to_string()), "/groups/admins"),
         ] {
             assert_eq!(
                 route(&at.path(), ""),
@@ -20587,8 +20952,9 @@ mod tests {
             assert_eq!(at.title(), "user_groups", "{at:?} edits user_groups");
             assert_eq!(
                 at.parent().path(),
-                "/groups",
-                "{at:?} is reached from, and cancels back to, the group list"
+                parent,
+                "{at:?} cancels back to {}",
+                parent
             );
         }
         assert_eq!(Route::GroupAdd.path(), format!("/groups/{ACTION_ADD}"));
@@ -20731,8 +21097,13 @@ mod tests {
         let (_, html) = console_page("subs-only-users", SUBS, "/users", "lang=en");
         let main = the_main(&html);
         assert!(main.contains(NOWHERE_RM), "the roster is here: {main}");
+        // What must be absent is the **section**, not the word: §13.36 §3 gives the roster a
+        // groups column, so `@admins` is legitimately on this page as a cell of a row. The
+        // section heading's file key (`section_heading`) and the section's own `+ add` are what
+        // say a section is here, and the sub-tab row's `id="user_groups"` is neither.
         for gone in [
-            "@admins",
+            "<span class=\"muted mono\">user_groups</span>",
+            "<span class=\"muted mono\">denied</span>",
             "spammer@x.com",
             &format!("/groups/{ACTION_ADD}"),
             &format!("/denied/{ACTION_ADD}"),
@@ -20770,11 +21141,12 @@ mod tests {
 
     #[test]
     fn group_writes_land_on_the_group_or_the_list() {
-        // §13.36 §1's PRG table: a form lands where its object is shown. The table's add and
-        // edit rows name `/groups/{name}`, which is the group's **own page** (slice B of plan
-        // step 22); this slice moves the three writes off `/users` and nothing more, so all
-        // three land on the group list, and when the group page arrives the add and edit rows
-        // below move to `/groups/staff?msg=…` and nothing else here changes.
+        // §13.36 §1's PRG table: a form lands where its object is shown. Add and edit land on
+        // the group's **own page**, which is the page that shows the membership the form just
+        // wrote; a removal lands on the list, because the page it was on no longer exists. The
+        // `?msg=` notice renders on any page, so the moved targets need nothing more.
+        // `parent()` of each route, the other half of the same table, is pinned by
+        // `route_maps_the_three_sub_pages_and_a_group`.
         let path = scratch("group-prg", SUBS);
         let cfg = cfg_for(&path, "");
         let got = post(
@@ -20786,7 +21158,7 @@ mod tests {
                 ("members", "you@x.com"),
             ],
         );
-        assert_eq!(got.location(), "/groups?msg=group-added");
+        assert_eq!(got.location(), "/groups/newest?msg=group-added");
         let got = post(
             &cfg,
             Route::GroupEdit("staff".to_string()),
@@ -20796,7 +21168,7 @@ mod tests {
                 ("members", "suspended@x.com"),
             ],
         );
-        assert_eq!(got.location(), "/groups?msg=group-saved");
+        assert_eq!(got.location(), "/groups/staff?msg=group-saved");
         let got = post(
             &cfg,
             Route::GroupRm("newest".to_string()),
@@ -21011,6 +21383,497 @@ mod tests {
             rule.contains("flex-wrap:wrap"),
             "the pager sentence wraps under its own buttons, which is what keeps 320px free of \
              sideways scroll: {rule}"
+        );
+    }
+
+    // --- one page per group, the roster's groups column, the group filter (§13.36 §2, §3, §5,
+    //     §6, plan step 22 slice B) --------------------------------------------------------
+
+    /// The roster row that carries `href` among its actions. A row is in the table when its
+    /// action is, which is what §13.36 §3's claims about a **row** are about: the address of a
+    /// person appears in the group's own member list too, and a page that shows one list cannot
+    /// be told from one that shows the other by an address alone.
+    fn row_with(html: &str, href: &str, label: &str) -> String {
+        elements(html, "<tr", "</tr>")
+            .into_iter()
+            .find(|r| r.contains(href))
+            .unwrap_or_else(|| panic!("{label}: no row carries {href}: {html}"))
+    }
+
+    /// The roster's group chip: the pill in the control row that names the group the list is
+    /// filtered to, and clears it (§13.36 §3).
+    fn group_chip(main: &str) -> String {
+        let ctl = the_listctl(main);
+        elements(&ctl, "<a ", "</a>")
+            .into_iter()
+            .find(|a| {
+                let text = visible_text(a);
+                text.starts_with(GROUP_FILTER_EN) || text.starts_with(GROUP_FILTER_IT)
+            })
+            .unwrap_or_else(|| {
+                panic!("the control row names the group the list is filtered to: {ctl}")
+            })
+    }
+
+    #[test]
+    fn a_group_page_lists_scopes_then_members() {
+        // §13.36 §2: one group is a page at `/groups/{name}`, and it answers first the question
+        // the dashboard's "referenced by nothing" warning was sent to ask: the scopes that name
+        // the group come **before** its members, because the scopes are why the group matters.
+        // Everything is read over a socket, because the page is reached by URL and `render_of`'s
+        // match is over the routes the code has, which does not have this one yet.
+        let (status, html) = console_page("group-page", GROUP_PAGE, "/groups/admins", "lang=en");
+        assert_eq!(status, 200, "a group is a page of its own");
+        let main = the_main(&html);
+
+        // The head is the person page's head: the name as the file spells it, the section it
+        // edits, the way back to the list it is a row of, and the two writes the file already
+        // has forms for. Nothing is asked of the forms, only of where they return (§1's table).
+        let h1 = elements(&main, "<h1", "</h1>");
+        assert_eq!(h1.len(), 1, "one `h1` on a group's page: {main}");
+        assert!(
+            h1[0].contains("<code>@admins</code>"),
+            "the head names the group as the file spells it: {h1:?}"
+        );
+        assert!(
+            h1[0].contains(r#"<span class="muted mono">user_groups</span>"#),
+            "and the section it edits, as every section page does: {h1:?}"
+        );
+        for href in ["/groups/admins/edit", "/groups/admins/rm"] {
+            assert!(
+                main.contains(href),
+                "the page offers the {href} form: {main}"
+            );
+        }
+        assert!(
+            main.contains(r#"href="/groups""#),
+            "and the way back to the list: {main}"
+        );
+
+        // The two sections, in the order the design gives them, each under its own heading.
+        let h2 = elements(&main, "<h2", "</h2>");
+        assert_eq!(
+            h2.iter().map(|h| visible_text(h)).collect::<Vec<_>>(),
+            [
+                format!("{} scopes", t(Lang::En, K::Scopes)),
+                t(Lang::En, K::Members).to_string(),
+            ],
+            "scopes, then members: {main}"
+        );
+        let scopes = panel_after(
+            &main,
+            r#"<span class="muted mono">scopes</span>"#,
+            "the scopes panel",
+        );
+        let members = panel_after(
+            &main,
+            &format!("<h2>{}</h2>", t(Lang::En, K::Members)),
+            "the members panel",
+        );
+        for id in ["mpa/admin", "mpa/gate"] {
+            assert!(
+                scopes.contains(&format!("<a href=\"/apps/mpa\"><code>{id}</code></a>")),
+                "a scope that names the group is a link to the application that owns it: {scopes}"
+            );
+        }
+        assert!(
+            main.find("mpa/admin") < main.find("mpa/gate"),
+            "and in the file's order: {main}"
+        );
+        assert!(
+            main.find("mpa/gate") < main.find("bob@x.com"),
+            "the whole scopes section stands above the members, which is why the warning that \
+             linked here is answered by the first thing under the head: {main}"
+        );
+
+        // The panel agrees with the library's list entry for entry, which is the rule §2 states
+        // so that this page and the removal's refusal cannot answer "who names me?" twice.
+        let doc: AccessFile = serde_json::from_str(GROUP_PAGE).expect("the fixture parses");
+        let refs = user_group_refs(&doc, "admins");
+        assert_eq!(refs, ["mpa/admin", "mpa/gate"], "the fixture's references");
+        assert_eq!(
+            elements(&scopes, "<li", "</li>").len(),
+            refs.len(),
+            "one line per reference, no more: {scopes}"
+        );
+
+        // A scope that keeps the group **out** is on the list as much as one that lets it in,
+        // and says so in words beside the link. Those words are the file's own (`EXCLUDED_REF`,
+        // which `user_group_refs` already prints) and not a colour, so a reader who does not see
+        // colour hears them too (WCAG 1.4.1).
+        let (status, html) =
+            console_page("group-page-out", GROUP_PAGE, "/groups/outsiders", "lang=en");
+        assert_eq!(
+            status, 200,
+            "a group named only as an exclusion is a page too"
+        );
+        let scopes = panel_after(
+            &the_main(&html),
+            r#"<span class="muted mono">scopes</span>"#,
+            "the exclusion's scopes panel",
+        );
+        assert!(
+            scopes.contains(r#"<a href="/apps/mpa"><code>mpa/gate</code></a>"#),
+            "{scopes}"
+        );
+        assert!(
+            scopes.contains(r#"<span class="tag bad">excluded</span>"#),
+            "the reference is a keeping-out, and the page says so beside the link: {scopes}"
+        );
+
+        // The members: the pill that asks the roster for them (§3), landing on page 1, and the
+        // members behind a filter and a pager of their **own** prefix, so a group of a thousand
+        // people is a page and not a scroll.
+        let pill = element_containing(&main, GROUP_IN_ROSTER_EN, "</a>");
+        assert_eq!(
+            attr(open_tag(&pill), "href").as_deref(),
+            Some("/users?ug=admins"),
+            "the pill lands on the roster filtered by this group, starting at the first page: \
+             {pill}"
+        );
+        assert_eq!(
+            main.matches("<div class=\"listctl\"").count(),
+            1,
+            "the members list has its own control row, and the scopes panel has none: {main}"
+        );
+        for name in ["mq", "mp"] {
+            let tag = field_tag(&main, name);
+            assert!(
+                tag.contains(&format!("name=\"{name}\"")),
+                "the members' Listing is prefixed `m`, so it never borrows the roster's `u`: {tag}"
+            );
+        }
+        for (uuid, label) in [(BOB, "bob@x.com"), (YOU_UUID, "you@x.com")] {
+            assert!(
+                members.contains(&format!("<a href=\"/users/{uuid}\">{label}</a>")),
+                "a member a roster row resolves is a link to that person's page: {members}"
+            );
+        }
+        // A member no row resolves is named as nobody, in the file's spelling, with the words
+        // beside it. The gate refuses such a file, so this is a file mid-edit, and the page says
+        // what is wrong rather than showing a name that leads nowhere.
+        assert!(
+            members.contains(r#"<code class="bad">99999999-9999-4999-8999-999999999999</code>"#),
+            "an unknown member keeps the uuid the file wrote: {members}"
+        );
+        assert!(
+            members.contains(&format!(
+                "<span class=\"tag bad\">{}</span>",
+                t(Lang::En, K::UnknownMember)
+            )),
+            "and is labelled as one, not left bare: {members}"
+        );
+
+        // The pill's words are the console's, in the reader's language: Italian is the long
+        // spelling, and this is the surface where §13.34 §0's lesson about translated length bites.
+        let (_, html) = console_page("group-page-it", GROUP_PAGE, "/groups/admins", "lang=it");
+        let main = the_main(&html);
+        let pill = element_containing(&main, GROUP_IN_ROSTER_IT, "</a>");
+        assert_eq!(
+            attr(open_tag(&pill), "href").as_deref(),
+            Some("/users?ug=admins"),
+            "the Italian pill leads to the same filtered roster: {pill}"
+        );
+
+        // An unknown name is the `404` the edit form already answers, and it names the name.
+        let (status, html) = console_page("group-page-none", GROUP_PAGE, "/groups/nope", "lang=en");
+        assert_eq!(status, 404, "no group, no page");
+        assert!(
+            html.contains(t(Lang::En, K::NoSuchGroup)) && html.contains("nope"),
+            "and the page says which name is missing: {html}"
+        );
+    }
+
+    #[test]
+    fn a_group_nothing_references_says_so_on_its_page() {
+        // §13.36 §2: the empty state of the scopes panel is the **same sentence** as the
+        // dashboard warning that linked here, because the warning's answer is this panel. It
+        // carries no kind label, for the reason §13.35 §1 gave: the heading above it names the
+        // kind, so a label would repeat the heading.
+        let (status, html) = console_page("group-page-unused", SUBS, "/groups/staff", "lang=en");
+        assert_eq!(
+            status, 200,
+            "a group nothing references is a page of its own"
+        );
+        let panel = panel_after(
+            &the_main(&html),
+            r#"<span class="muted mono">scopes</span>"#,
+            "the empty scopes panel",
+        );
+        assert_eq!(
+            visible_text(&panel),
+            t(Lang::En, K::ReferencedByNothing),
+            "one sentence and nothing beside it: {panel}"
+        );
+        assert!(
+            panel.contains(r#"<span class="muted">"#),
+            "it is the muted sentence, as the warning's line is: {panel}"
+        );
+        assert!(!panel.contains(KIND_GROUP), "no kind label: {panel}");
+    }
+
+    #[test]
+    fn the_groups_list_is_a_table_of_counts() {
+        // §13.36 §2: the list stops stacking a panel per group, which is what made the page
+        // long. One row per group, and the members are a **count**: the list's job is "how many,
+        // and where is this named", and the roll call is on the group's own page. This replaces
+        // `the_group_panel_still_says_referenced_by_nothing_alone`, whose muted sentence moves
+        // into the scopes cell, kindless as it was.
+        let (status, html) = console_page("groups-table", SUBS, "/groups", "lang=en");
+        assert_eq!(status, 200, "the group list is a page");
+        let main = the_main(&html);
+        let head = elements(&main, "<thead", "</thead>");
+        assert_eq!(head.len(), 1, "the group list is a table: {main}");
+        assert_eq!(
+            elements(&head[0], "<th", "</th>")
+                .iter()
+                .map(|h| visible_text(h))
+                .collect::<Vec<_>>(),
+            ["name", t(Lang::En, K::Members), t(Lang::En, K::Scopes), "",],
+            "the file's word for the first column, as the applications table heads its own"
+        );
+        let rows = elements(&the_tbody(&main, "the group list"), "<tr", "</tr>");
+        assert_eq!(rows.len(), 2, "one row per group: {main}");
+
+        let cells = row_cells(&rows[0]);
+        assert_eq!(cells.len(), 4, "{cells:?}");
+        assert!(
+            cells[0].contains(r#"<a href="/groups/admins"><code>@admins</code></a>"#),
+            "the name links the group's page: {cells:?}"
+        );
+        assert_eq!(
+            visible_text(&cells[1]),
+            "2",
+            "the members are a count, not a list: {cells:?}"
+        );
+        assert!(
+            cells[2].contains(r#"<a href="/apps/mpa"><code>mpa/admin</code></a>"#),
+            "the scopes cell carries the same links as the group page: {cells:?}"
+        );
+        // The row's actions, and the inner `span` is not decoration: `td.pills` is a table cell
+        // with no gap, and two pills standing straight in it touch (mockup, 1280).
+        assert_eq!(
+            attr(open_tag(&cells[3]), "class").as_deref(),
+            Some("pills"),
+            "{cells:?}"
+        );
+        assert!(cells[3].contains(r#"<span class="pills">"#), "{cells:?}");
+        for href in ["/groups/admins/edit", "/groups/admins/rm"] {
+            assert!(cells[3].contains(href), "the row offers {href}: {cells:?}");
+        }
+
+        let cells = row_cells(&rows[1]);
+        assert!(
+            cells[0].contains(r#"<a href="/groups/staff"><code>@staff</code></a>"#),
+            "{cells:?}"
+        );
+        assert_eq!(
+            visible_text(&cells[2]),
+            t(Lang::En, K::ReferencedByNothing),
+            "the sentence the panel used to carry, in its cell: {cells:?}"
+        );
+        assert!(cells[2].contains(r#"<span class="muted">"#), "{cells:?}");
+        assert!(
+            !cells[2].contains(KIND_GROUP),
+            "the table's heading names the kind, so the cell names none: {cells:?}"
+        );
+
+        // A reference that keeps people out is told apart in the cell too, in words.
+        let (_, html) = console_page("groups-table-out", GROUP_PAGE, "/groups", "lang=en");
+        let rows = elements(
+            &the_tbody(&the_main(&html), "the group list"),
+            "<tr",
+            "</tr>",
+        );
+        let row = rows
+            .iter()
+            .find(|r| r.contains("@outsiders"))
+            .expect("a group named only as an exclusion is listed");
+        let cell = &row_cells(row)[2];
+        assert!(
+            cell.contains(r#"<a href="/apps/mpa"><code>mpa/gate</code></a>"#),
+            "{cell}"
+        );
+        assert!(
+            cell.contains(r#"<span class="tag bad">excluded</span>"#),
+            "the list says which reference is a keeping-out: {cell}"
+        );
+    }
+
+    #[test]
+    fn the_roster_shows_each_persons_groups() {
+        // §13.36 §3: the two lists link. A roster row says which groups name that person, so
+        // "is bob an admin?" is answered on the page the operator already has open, and every
+        // group link goes to the group's page, like every other `@name` and `app/scope` in the
+        // console: a link that filtered here would be the one that behaved differently.
+        let (status, html) = console_page("roster-groups", ROSTER_GROUPS, "/users", "lang=en");
+        assert_eq!(status, 200, "the roster is a page");
+        let main = the_main(&html);
+
+        // The column sits between the addresses and the keys, so a phone reading the row as a
+        // stack of labelled cells reads the same order the table shows.
+        let head = elements(&main, "<thead", "</thead>");
+        assert_eq!(
+            elements(&head[0], "<th", "</th>")[..3]
+                .iter()
+                .map(|h| visible_text(h))
+                .collect::<Vec<_>>(),
+            [t(Lang::En, K::Emails), COL_GROUPS_EN, "api_keys",],
+            "the new column is between the two it was put between: {main}"
+        );
+
+        let cells = row_cells(&row_with(&main, BOB_RM, "bob's row"));
+        assert_eq!(
+            attr(open_tag(&cells[1]), "data-label").as_deref(),
+            Some(COL_GROUPS_EN),
+            "a phone's stacked cell needs the column's word: {cells:?}"
+        );
+        assert!(
+            cells[1].contains(r#"<a href="/groups/admins"><code>@admins</code></a>"#),
+            "the group is a link to its page: {cells:?}"
+        );
+        assert!(!cells[1].contains('?'), "and not to a filter: {cells:?}");
+
+        // Two groups, in the file's order and not the order they were written in: the fixture
+        // spells `beta` before `alpha`, so a page that emitted insertion order reads beta.
+        let cells = row_cells(&row_with(
+            &main,
+            "/users/11111111-1111-1111-1111-111111111111/rm",
+            "the row in two groups",
+        ));
+        let alpha = cells[1]
+            .find("/groups/alpha")
+            .unwrap_or_else(|| panic!("alpha names this person: {cells:?}"));
+        let beta = cells[1]
+            .find("/groups/beta")
+            .unwrap_or_else(|| panic!("beta names this person: {cells:?}"));
+        assert!(
+            alpha < beta,
+            "the cell lists them in the file's order: {cells:?}"
+        );
+        assert!(!cells[1].contains('?'), "and both link the page: {cells:?}");
+
+        // A person in no group is a word, not a blank: an empty cell reads as a page that
+        // forgot to fill it in.
+        let cells = row_cells(&row_with(
+            &main,
+            "/users/44444444-4444-4444-8444-444444444444/rm",
+            "the row in no group",
+        ));
+        assert_eq!(
+            visible_text(&cells[1]),
+            t(Lang::En, K::None),
+            "the empty state says none: {cells:?}"
+        );
+        assert!(cells[1].contains(r#"<span class="muted">"#), "{cells:?}");
+
+        // Italian, which is where a new column's word has to be there as well.
+        let (_, html) = console_page("roster-groups-it", ROSTER_GROUPS, "/users", "lang=it");
+        let main = the_main(&html);
+        let head = elements(&main, "<thead", "</thead>");
+        assert_eq!(
+            visible_text(&elements(&head[0], "<th", "</th>")[1]),
+            COL_GROUPS_IT,
+            "{main}"
+        );
+        let cells = row_cells(&row_with(&main, BOB_RM, "bob's row in Italian"));
+        assert_eq!(
+            attr(open_tag(&cells[1]), "data-label").as_deref(),
+            Some(COL_GROUPS_IT),
+            "{cells:?}"
+        );
+    }
+
+    #[test]
+    fn the_roster_filters_by_group_exactly_and_with_the_text() {
+        // §13.36 §3: `ug={name}` is the roster's group filter. **Exact** (`@staff` must not
+        // carry `@staff-old`'s rows), **AND** with the text filter, and it says it is set in a
+        // chip that clears it, so an operator who arrived from a group page knows which rows
+        // they are looking at.
+        let (status, html) = console_page("ug-exact", SUBS, "/users?ug=admins", "lang=en");
+        assert_eq!(status, 200, "a group name is a filter, never a 404");
+        let main = the_main(&html);
+        for href in [BOB_RM, YOU_RM] {
+            assert!(
+                main.contains(href),
+                "the members of `@admins` are the rows on the page: {main}"
+            );
+        }
+        for href in [NOWHERE_RM, STAFF_RM] {
+            assert!(!main.contains(href), "and nobody else is: {main}");
+        }
+        let chip = group_chip(&main);
+        assert_eq!(
+            visible_text(&chip),
+            format!("{GROUP_FILTER_EN}@admins ×"),
+            "one text node: {chip}"
+        );
+        assert_eq!(
+            attr(open_tag(&chip), "title").as_deref(),
+            Some(GROUP_FILTER_CLEAR_EN),
+            "the pill says what it clears: {chip}"
+        );
+
+        // The text filter narrows the group rather than leaving it, and the chip's `×` clears
+        // the group and keeps everything else, so the two filters answer one question.
+        let (status, html) =
+            console_page("ug-and-text", SUBS, "/users?ug=admins&uq=you", "lang=en");
+        assert_eq!(status, 200);
+        let main = the_main(&html);
+        assert!(main.contains(YOU_RM), "{main}");
+        assert!(!main.contains(BOB_RM), "the two filters are AND: {main}");
+        let chip = group_chip(&main);
+        let href = attr(open_tag(&chip), "href").expect("the chip is a link");
+        assert!(
+            !href.contains("ug=") && !href.contains("up="),
+            "the × drops the group and its page: {href}"
+        );
+        assert!(
+            href.contains("uq=you"),
+            "and keeps the rest of the query, including the page the person is on: {href}"
+        );
+        // The form carries the group once, as a hidden field beside the chip, so one Apply
+        // submits both and `ug` is not sent twice.
+        let ctl = the_listctl(&main);
+        assert_eq!(ctl.matches("name=\"ug\"").count(), 1, "exactly one: {ctl}");
+        assert!(
+            field_tag(&ctl, "ug").contains(r#"value="admins""#),
+            "so a filter typed here stays in the group: {ctl}"
+        );
+        // No group list box: with many groups a box of all of them is the scrolling this step
+        // is removing, and the group page and the roster's column are the two ways in.
+        assert!(!ctl.contains("<select"), "no `select` of groups: {ctl}");
+
+        // A name that is no group (the bookmark a removal leaves behind) matches nobody and says
+        // so, chip included: the page exists, the filter is what is wrong.
+        let (status, html) = console_page("ug-stale", SUBS, "/users?ug=staf", "lang=en");
+        assert_eq!(status, 200, "a stale group name is not a 404");
+        let main = the_main(&html);
+        assert!(main.contains(t(Lang::En, K::NoMatch)), "{main}");
+        assert_eq!(
+            visible_text(&group_chip(&main)),
+            format!("{GROUP_FILTER_EN}@staf ×"),
+            "the chip still names what to clear: {main}"
+        );
+        for href in [BOB_RM, YOU_RM, NOWHERE_RM, STAFF_RM] {
+            assert!(
+                !main.contains(href),
+                "`@staf` is not `@staff`, so an exact name matches nobody: {main}"
+            );
+        }
+
+        // Italian.
+        let (_, html) = console_page("ug-it", SUBS, "/users?ug=admins", "lang=it");
+        let main = the_main(&html);
+        assert_eq!(
+            visible_text(&group_chip(&main)),
+            format!("{GROUP_FILTER_IT}@admins ×"),
+            "the chip in the reader's language"
+        );
+        assert_eq!(
+            attr(open_tag(&group_chip(&main)), "title").as_deref(),
+            Some(GROUP_FILTER_CLEAR_IT),
+            "and the pill's name for what it clears is translated too: {main}"
         );
     }
 
@@ -24185,6 +25048,7 @@ mod tests {
                 Route::DenyAdd => 27,
                 Route::DenyRm(_) => 28,
                 Route::Groups => 29,
+                Route::Group(_) => 30,
             }
         }
         let routes = account_every_route();

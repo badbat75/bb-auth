@@ -79,7 +79,9 @@ Rules are in `AGENTS.md`. Format of this file: `AGENTS.md`, under "Skills".
   strings **verbatim** in the test's local consts (the test module may not add `K` variants). A
   paraphrased const is red after the coder lands the table, and reads like a broken implementation.
   Pin **both** languages: a stub (or a coder) that paraphrases the Italian, "hai acceduto" for the
-  design's "hai effettuato l'accesso", is caught only by the IT assert.
+  design's "hai effettuato l'accesso", is caught only by the IT assert. And **use** the IT const in
+  the same slice: clippy counts the test target, and an unused `…_IT` const is a `dead_code` warning
+  that fails `cargo clippy --all-targets`.
 - To drive a route the code **does not have yet**, go over the socket and never name the route:
   `console_page(name, fixture, path, lang)` (`scratch` + `serve` + `get_with_secret` +
   `IDENTITY_HEADER` + a `lang` cookie) returns `(status, body)`, and a route check goes through the

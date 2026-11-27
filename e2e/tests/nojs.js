@@ -106,8 +106,9 @@ async function run(ctx, t) {
   const { context, page } = await newPage(ctx);
   try {
     // Zero scripts, sampled across page shapes: dashboard, list, form. The users tab's three
-    // sub-pages are each a page shape of their own now (§13.36 §1), so all three are sampled.
-    for (const p of ['/', '/users', '/groups', '/denied', '/apps', '/apps/app1', '/audit', '/users/b3f1c8a2-4e77-4f1a-9c0d-1e2f3a4b5c6d/keys/+add']) {
+    // sub-pages are each a page of their own now (§13.36 §1), and so is a group (§13.36 §2),
+    // so all four are sampled.
+    for (const p of ['/', '/users', '/groups', '/groups/admins', '/denied', '/apps', '/apps/app1', '/audit', '/users/b3f1c8a2-4e77-4f1a-9c0d-1e2f3a4b5c6d/keys/+add']) {
       await page.goto(ctx.base + p);
       t.eq(`no <script> on ${p}`, await page.locator('script').count(), 0);
       // And exactly one kind of handler, on exactly the two controls entitled to it.
@@ -677,19 +678,88 @@ async function run(ctx, t) {
       ['Persone (4)', 'Gruppi (2)', 'Bloccati (2)']);
     t.eq('and marks the page it is standing on',
       await words('main nav.sub a[aria-current="page"]'), 'Persone (4)');
-    for (const [href, mark] of [['/admin/groups', 'Gruppi (2)'],
-      ['/admin/denied', 'Bloccati (2)']]) {
+    const sub = async (href, mark) => {
       const link = `main nav.sub a[href="${href}"]`;
       if (!(await page.locator(link).count())) {
         t.check(`the ${href} sub-tab is a link on the page`, false, 'no such link');
-        continue;
+        return;
       }
       await Promise.all([page.waitForNavigation(), page.click(link)]);
       t.check(`the ${href} sub-tab navigates with scripting off`,
         page.url().endsWith(href), page.url());
       t.eq('and marks the page it landed on',
         await words('main nav.sub a[aria-current="page"]'), mark);
+    };
+    await sub('/admin/groups', 'Gruppi (2)');
+    // §13.36 §2 §3: the group list is a table whose name cell links the group's **page**,
+    // the group page belongs to the Gruppi sub-tab, and its pill lands on the roster
+    // filtered to that group, which belongs to Persone. Every hop is a link, so every
+    // hop works with scripting off, and the marks follow the page, not the tab it came from.
+    const glink = 'main tbody a[href="/admin/groups/admins"]';
+    if (!(await page.locator(glink).count())) {
+      t.check('the group list names each group with a link to its page', false, glink);
+    } else {
+      await Promise.all([page.waitForNavigation(), page.click(glink)]);
+      t.check('the name cell opens the group page with scripting off',
+        page.url().endsWith('/admin/groups/admins'), page.url());
+      t.eq('and the group page marks the Gruppi tab',
+        await words('main nav.sub a[aria-current="page"]'), 'Gruppi (2)');
     }
+    const pill = 'main a[href$="/users?ug=admins"]';
+    const hasPill = (await page.locator(pill).count()) === 1;
+    t.check('the group page offers the roster filtered to it', hasPill, pill);
+    if (hasPill) {
+      await Promise.all([page.waitForNavigation(), page.click(pill)]);
+      t.check('the pill navigates with scripting off',
+        page.url().endsWith('/admin/users?ug=admins'), page.url());
+    } else {
+      // The filter is asserted over its URL, so these checks stay about the filter and not
+      // about the pill that is missing; the red pill above already names what is absent.
+      await page.goto(ctx.base + '/users?ug=admins');
+    }
+    // The group as this walk left it: the PRG save above added `bot@example.com` to
+    // `@admins`, so the filtered roster is the fixture's two members **plus** the one this
+    // area wrote. The row that must be absent is `person@example.com`: it is the only roster
+    // row outside `@admins` (it is `@staff`'s), so its absence is the half that says the
+    // filter is a filter: an expectation that named nobody absent would pass on a page with
+    // the filter removed.
+    const ugText = await mainText(page);
+    t.check('the filtered roster is exactly the group',
+      ugText.includes('you@example.com') && ugText.includes('suspended@example.com')
+        && ugText.includes('bot@example.com') && !ugText.includes('person@example.com'),
+      ugText.slice(0, 400));
+    t.eq('and the filtered page marks the Persone tab',
+      await words('main nav.sub a[aria-current="page"]'), 'Persone (4)');
+    // The text filter joins the group filter as an AND through the one plain form submit,
+    // and the chip's × clears the group and keeps the text. One Apply, one ×, no script:
+    // the group rides in the form as a hidden field, which is what makes a single submit
+    // carry both. The text is `person@`, the roster row that is in **no** `@admins` after
+    // the PRG save above: an AND of the group with a term that matches a member would be
+    // answered, and the empty intersection this check is about needs a term from outside.
+    const ctl = '.listctl:has(input[name=uq])';
+    await page.fill(`${ctl} input[name=uq]`, 'person@');
+    await submit(page, `${ctl} button`);
+    t.check('the text filter keeps the group filter in the URL',
+      page.url().includes('ug=admins') && page.url().includes('uq=person'), page.url());
+    t.check('and the two together match nobody, and say so',
+      (await mainText(page)).includes('niente qui corrisponde'),
+      (await mainText(page)).slice(0, 400));
+    const chip = '.listctl a:has-text("gruppo: ")';
+    if (!(await page.locator(chip).count())) {
+      t.check('the control row names the group with a chip', false, chip);
+    } else {
+      await Promise.all([page.waitForNavigation(), page.click(chip)]);
+      t.check('the chip clears the group and keeps the text',
+        page.url().includes('uq=person') && !page.url().includes('ug='), page.url());
+      // The same text, answered with no group in front of it, now matches its row: the ×
+      // removed one filter and not the answer.
+      t.check('and the text is answered on its own',
+        (await mainText(page)).includes('person@example.com'),
+        (await mainText(page)).slice(0, 400));
+    }
+    // The remaining sub-tab, from the roster back out.
+    await sub('/admin/groups', 'Gruppi (2)');
+    await sub('/admin/denied', 'Bloccati (2)');
   } finally {
     await noJs.close();
   }

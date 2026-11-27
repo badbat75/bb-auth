@@ -238,8 +238,11 @@ async function panelWalk(t, page, ctx) {
   // a `details` is markup and the bar has to behave the same with no script.
   await barStaysOneRow(t, page, ctx.base, '/users', 'console bar');
   // The group list is a page of its own now (§13.36 §1), and it carries the sub-tab row the
-  // bar's `nav:not(.acct)` rule reaches, so the bar is measured on it too.
+  // bar's `nav:not(.acct)` rule reaches, so the bar is measured on it too. The group's **page**
+  // (§13.36 §2) carries the same row plus a head with pills, so the bar is measured there as
+  // well: the head is below the bar, and a bar that quietly grew is this page's regression.
   await barStaysOneRow(t, page, ctx.base, '/groups', 'console bar, group list');
+  await barStaysOneRow(t, page, ctx.base, '/groups/admins', 'console bar, group page');
 
   // The two menus are the same box on both surfaces (§13.34 §3), which is the measurement the
   // stylesheet cannot make on its own.
