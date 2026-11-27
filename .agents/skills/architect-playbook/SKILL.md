@@ -63,6 +63,12 @@ Rules are in `AGENTS.md`. Format of this file: `AGENTS.md`, under "Skills".
 - To move a module body into its own file, run `cargo fmt` twice: the first run leaves a blank first
   line and `--check` fails. Never de-indent by hand, raw strings change (§13.38 §10c).
 - In an agent shell `grep` may be a ugrep function: use `command grep` in scripts and checks.
+- A module split here is flat files opening `use crate::*;`, with `mod x;` and `use x::*;` blocks
+  in the root (`pub use` in the library, which keeps every `bb_auth_core::X` path and rustdoc
+  page). Name a range by its first item and the item after it, never by line numbers (§13.39).
+- After a move, check five builds in order: `build`, `test --no-run`, `test --no-run --features
+  e2e-fake-cognito --bin bb-auth-web`, `doc --no-deps`, `clippy`; each compiles code the one before
+  does not, and each can name a private item that needs `pub(crate)` (§13.39 §5).
 
 ## Pitfalls
 
@@ -116,3 +122,8 @@ Rules are in `AGENTS.md`. Format of this file: `AGENTS.md`, under "Skills".
 - Never run awk with `getline` over the GUI's source (`src/bin/bb-auth-web.rs`, then its directory): on 2026-11-27 one such command grew
   to about 17 GB of RAM in 40 seconds on this shared host, and other sessions' jobs were killed.
   Use `grep -n -A1` or `sed -n`, wrap heavy commands in `timeout`, and build with `-j 4` or less.
+- rustc's E0425 for a moved private item adds `help: a function with a similar name exists` and
+  rustdoc suggests escaping `[`: both are wrong for a move, and an escaped bracket passes the word
+  diff. The fix is `pub(crate)` on the item the note names (§13.39 §7).
+- A fixed `include_str!` list of sources passes by luck while the symbol is also named elsewhere:
+  read source trees with a run-time walk of `src/` (§13.39 §6).

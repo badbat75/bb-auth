@@ -9109,6 +9109,11 @@ empty, changes with it (docs agent).
 **Decided by the user on 2026-11-27: step 23a only.** The split is not built; this section stays
 as the record of what it would have cost and bought.
 
+**Superseded in part by §13.39 (plan step 25):** the production split of §4-§5 (P1-P12), the
+topic files (T1-T5) and the `read_dir` form of §4 (3) come back there, redesigned for
+manageability rather than build speed and extended to the library. §1-§3 (the measurements) and
+§10 (step 24) still stand.
+
 **Later the same day, plan step 24: S1 and S2 are built, in all four targets, and nothing else.**
 §10 extends them to `src/lib.rs`, `bb-auth` and `bb-auth-adm`. P1-P12, T1-T5 and the `read_dir`
 form of §4 (3) stay dropped. Where §10 differs from §4-§6, §10 is the one that applies.
@@ -9526,3 +9531,244 @@ the second run.
 No requirement changes, and no open question for the user. The one decision step 24 leaves open
 is whether a step that is known to save no compile time is still wanted. The user asked for it for
 the layout, so this design assumes the answer is yes.
+
+### 13.39 The GUI and the library in modules, for manageability (plan step 25, designed 2026-11-27)
+
+The goal is a tree that people and agents can work in, and the agent to design for is a small,
+slow local model that finds code with `grep -n` and reads it in line ranges. Build speed is not a
+goal: §13.38 §2 measured about one second per edit. Behaviour does not change; every slice is a
+pure move. This replaces §13.38 §4-§9 for the production split and the topic files. The gate
+stays one file of code (`src/bin/bb-auth/main.rs`, about 4,600 lines, read top to bottom), and the
+CLI stays as step 24 left it.
+
+What was read: `PLAN.md` steps 24 and 25; `AGENTS.md` ("What this is", "Where documentation
+lives", the invariant "The library is the shared files, and nothing else"); §13.38; the working
+tree at `7342e0d` plus 24-2 staged; every top-level item of `src/lib.rs` (code at 1-7,486) and of
+`src/bin/bb-auth-web.rs` (code at 1-15,813) with its banner; the banners of both test modules;
+every `include_str!` in the four targets; the two tests that read source files
+(`every_symbol_the_manual_names_still_exists`, `italian_k_strings`).
+
+#### 1. The shape: flat files, flat names (read, then measured)
+
+- **Every module opens with `use crate::*;`, and the root lists `mod x;` in one block and the
+  globs in another**: `use x::*;` in the GUI, `pub use x::*;` in the library. A name therefore
+  means what it meant in one file, and `grep -rn "fn name" src/` finds any item. A child module
+  sees its ancestors' private items, so what stays in a root (`WRITE_LOCK`, the scripts, the
+  cookie names, `now`, `API_KEY_PREFIX`) needs no change (measured).
+- **The library keeps every public path.** Its modules are private and their items are re-exported
+  flat, so `bb_auth_core::decide` is still the path for the three binaries, for the gate's
+  intra-doc links and for `AGENTS.md`. Measured: with `audit` moved to `src/audit.rs`,
+  `target/doc/bb_auth_core/struct.AuditWriter.html` is where it was, rustdoc adds only redirect
+  stubs under `audit/`, the crate index lists no module, and `cargo doc --no-deps` reports zero
+  warnings across the four targets. A glob `pub use` carries a `pub(crate)` item at
+  `pub(crate)`, with no error (measured).
+- **Files sit flat beside their root**: `src/<module>.rs` for the library (Cargo discovers
+  nothing there but `main.rs`, `lib.rs` and `bin/`), `src/bin/bb-auth-web/<module>.rs` for the
+  GUI. Tests go one level down, `src/tests/<topic>.rs` and `src/bin/bb-auth-web/tests/<topic>.rs`:
+  `tests.rs` is not a mod-rs file, so its `mod x;` loads `tests/x.rs` (Rust Reference, "Modules",
+  <https://doc.rust-lang.org/reference/items/modules.html>; measured). A test topic may share a
+  production module's name (`tests::audit` beside `crate::audit`): the declared module shadows the
+  glob-imported one, which is allowed (measured).
+- **Ranges are named by items, never by line numbers.** Every earlier slice shifts the lines, so a
+  brief says "from the doc comment of `X` to the line before the doc comment of `Y`", and the coder
+  finds both with `command grep -n`. A range that starts at a banner takes the banner with it, as
+  the file's heading. A module made of two or three ranges takes them in file order.
+
+#### 2. The library: one module per shared file
+
+`AGENTS.md`'s membership rule is unchanged and becomes visible in the tree: each module is one of
+the files more than one program has an opinion about, or the presentation contract and the
+response rules that the invariant already admits. Nothing moves in or out of the library.
+
+| File | Ranges (today's banners and items) | Lines |
+|---|---|---|
+| `lib.rs` | the crate doc, the `use`s, `API_KEY_PREFIX`, `now`; the `mod` and `pub use` blocks; `#[cfg(test)] mod tests;` | ~90 |
+| `access.rs` | **reading and deciding**: "URL matching", "The runtime access table", "The authorization decision", "JSON wire format", "Emails, hashes, dates", "Parsing the access file" | ~2,050 |
+| `access_edit.rs` | **editing and writing**: "Editing an access file" (`open_access_file`, `AccessWrite`, `write_atomically`, the lookups and the document mutations) | ~1,090 |
+| `settings.rs` | "The settings file" banner to the audit banner; then `UiSettings` to `compile_social_buttons`; then `PrepareError` to `SettingsWrite` (three ranges) | ~1,790 |
+| `settings_refusal.rs` | `SettingKey` to `settings_refusal_samples` (the refusal enums the GUI translates, §13.31) | ~1,000 |
+| `audit.rs` | "The audit file" banner to the presentation banner | ~990 |
+| `presentation.rs` | "The presentation contract" banner to `stylesheet_link`; then `compile_asset_url` to `brand_name_core` (two ranges) | ~230 |
+| `response.rs` | `PAGE_SECURITY_HEADERS` to `request_site` (`page_csp`, `csp_hash`, `estate_form_action`, `RequestSite`) | ~270 |
+
+`settings.rs` keeps the constants its banner holds today (`LOGIN_URL_HEADER`, `BUILD`,
+`version_id`, …); moving them elsewhere is a change of meaning, not a move, and `grep` finds them
+wherever they are. `access.rs` is at the guideline's top; it can be cut once more at "JSON wire
+format" (`access_file.rs`, about 1,090 lines, leaving about 960) if the user wants every file under
+2,000 lines.
+
+#### 3. The GUI: one module per area
+
+| File | Ranges (today's banners and items) | Lines |
+|---|---|---|
+| `main.rs` | the crate doc, `use`s, consts, `CSS`, the scripts, `WRITE_LOCK`; "The request" (`anon_view`, `handle`, `find_key`, `main`); the `mod` and `use` blocks; `mod tests;` | ~1,560 |
+| `i18n.rs` | "Language" and "Theme" banners up to `fn t`: `Lang`, the four preferences, `K`, `m` | ~930 |
+| `k_text.rs` | `fn t` and `Msg`, to the "Config" banner (the `K` table) | ~2,070 |
+| `config.rs` | "Config", including `e2e_cognito_endpoint`'s two `cfg` arms and its `compile_error!` | ~780 |
+| `routing.rs` | "Routing" and "HTTP helpers": `Route`, `route`, `Form`, `respond_*`, the CSPs, negotiation | ~720 |
+| `layout.rs` | "Filtering and paging a list" and "The shell": `Listing`, `list_controls*`, `Look`, `View`, `top_bar`, `account_menu`, `shell*`, `list_panel` … `url_list_marked` | ~1,090 |
+| `forms.rs` | "Form furniture": `Refusal`, `settings_refusal`, the fields, pills, `page_confirm`, `page_missing` | ~860 |
+| `dashboard.rs` | "Key expiry" banner to `page_dashboard` | ~230 |
+| `users.rs` | `users_subnav` to `page_group`; then `page_denied` and `denied_list` (two ranges) | ~560 |
+| `apps.rs` | `page_apps` to `scope_excluded_display` | ~310 |
+| `audit_page.rs` | "The audit page" banner to `audit_where` | ~540 |
+| `check.rs` | `check_field` to `verdict` (the access check of both pages) | ~190 |
+| `edit.rs` | "Editing pages" banner to `edited_file` (the user, email, key, application, scope and group forms) | ~440 |
+| `settings_page.rs` | `ConfigForm` to `page_config` | ~600 |
+| `writes.rs` | `DenyForm` through "Mutations" to its end (`bearer_reveal`, the outcome pages, `commit`, `mutate`, `scope_spec`, the member parsers) | ~1,040 |
+| `account.rs` | "The self-service page" banner to `account_claims`; then `code_list` to `handle_account` (two ranges) | ~1,060 |
+| `account_keys.rs` | `ACCOUNT_MAX_KEYS` to `account_key_line`; then `AccountKeyOp` to `account_key_post` (two ranges) | ~600 |
+| `account_delete.rs` | `page_account_confirm` to `account_delete_post` (the intake client included) | ~830 |
+| `account_profile.rs` | `PROFILE_VALUE_MAX` to `account_profile_code_post` (the Cognito client included) | ~1,440 |
+
+`_page` marks the two areas whose bare name the library already uses (`audit`, `settings`), so a
+`grep` over `src/` never mixes the two. `k_text.rs` is over the guideline and stays so: it is one
+function, `t`, which no pure move can cut, and it is navigated by `grep -n "K::Name"` rather than
+read whole.
+
+#### 4. The tests: topic files by banner (recommended)
+
+A 24,600-line and a 6,400-line `tests.rs` are the two files least fit for a reader that reads
+ranges, so the tests split too, by the banners their authors wrote, which is mechanical. They are
+**not** sorted by the module they test: most GUI tests drive `handle` over a socket, and sorting
+them is judgement (§13.38 §3). Each `tests.rs` keeps `use super::*;`, the `mod` lines, the
+fixtures at its top, and every helper the compiler sends back up.
+
+- Library, `src/tests/`: `access.rs` (the first test to the line before "editing the document",
+  ~1,230), `access_edit.rs` (to "the settings file", ~870), `settings.rs` ("the settings file" to
+  the doc comment of `a_hash_names_the_newlines_a_browser_sees_and_not_the_ones_on_disk`, then
+  `every_symbol_the_manual_names_still_exists` to "the audit file", ~1,040), `presentation.rs` (the
+  CSS and policy tests between those two, ~775), `audit.rs` (~450), `settings_refusal.rs` (the
+  "Settings refusals" banner to the end, ~2,070).
+- GUI, `src/bin/bb-auth-web/tests/`: `settings.rs` (both settings banners), `config.rs` (config
+  and routing), `prefs.rs` (language and theme), `rendering.rs`, `users_tab.rs` (the users
+  sub-pages and the group pages), `mutations.rs`, `server.rs`, `account.rs`, `account_boundary.rs`,
+  `account_keys.rs` (minting, then rotation and removal), `account_ui.rs` and
+  `account_ui_confirm.rs` (the §13.15 banner, 3,560 lines, halved at
+  `revoking_a_key_asks_first_on_the_account_page`), `account_profile.rs`, `account_profile_code.rs`
+  (the code step and the e2e switch), `bar.rs` (§13.17's bar and Preferences), `account_delete.rs`,
+  `account_delete_stranger.rs` (7c), `account_delete_signout.rs` (14b), `document.rs`,
+  `account_delete_row.rs`, `account_delete_partial.rs` (7e). Sizes 160 to 2,410.
+
+The alternative, one `tests.rs` per target, costs nothing and leaves those two files as they are;
+it is the user's choice (§10).
+
+#### 5. Visibility: `pub(crate)` where the compiler asks, and nothing else
+
+Inside a moved range the only edit is `pub(crate)` on the item the compiler names. Measured, the
+messages are these five, and each has one fix:
+
+| Message | Fix |
+|---|---|
+| E0425/E0433 "cannot find … in this scope" with `note: … crate::m::x exists but is inaccessible` | `pub(crate)` on `x` at the `-->` location of that note |
+| E0624 "method / associated function `x` is private" | `pub(crate)` on that `fn` at its "defined here" location only (never on a trait impl's `fn`: E0449) |
+| E0616 / E0451 "field(s) `a` … of struct `m::S` is/are private" | `pub(crate)` on each named field of `S` (a tuple struct: `S(pub(crate) T)`) |
+| warning "type `T` is more private than the item `x`" (`private_interfaces`) | `pub(crate)` on `T`; it follows from an earlier fix |
+| rustdoc "unresolved link to `x`" ("no item named `x` in scope") | `pub(crate)` on `x` in the module that defines it |
+
+Iterate until all five builds are clean, in this order, because each compiles code the one before
+does not: `cargo build`, `cargo test --no-run` (the tests reach private items),
+`cargo test --no-run --features e2e-fake-cognito --bin bb-auth-web` (code behind the feature),
+`cargo doc --no-deps` (a bin documents private items, so a link crosses modules), and
+`cargo clippy --all-targets`. Measured on three moves: `audit` (library) needed 6, `audit_page` 10,
+`account_profile` 10, over two to four rounds. A loop that reads those messages and edits the
+named line was prototyped and works; the coder may write one, outside the tree.
+
+#### 6. The paths that move
+
+| What | Change |
+|---|---|
+| `every_symbol_the_manual_names_still_exists` | **Slice 25-0, before any move**: the fixed `include_str!` list becomes a recursive walk of every `*.rs` under `concat!(env!("CARGO_MANIFEST_DIR"), "/src")` at run time, plus the three non-source files by `include_str!`. Measured why: with `src/audit.rs` off the list the test still passed, only because the tests also named `RevLines`; once those moved to `src/tests/audit.rs` it failed with "names symbols that no longer exist: RevLines". A fixed list fails for reasons that have nothing to do with a move. Prototyped: about 20 lines, 209 green, clippy clean |
+| `italian_k_strings` | `include_str!("main.rs")` becomes `"k_text.rs"` when `t` moves, and `"../k_text.rs"` when the test moves to `tests/settings.rs`. Its `find` of `fn t(lang: Lang, key: K) -> &'static str {` still matches after a `pub(crate)` is put before it |
+| any `include_str!` in a moved **test** | one more `../`: `"../deploy/…"` becomes `"../../deploy/…"`, `"assets/…"` becomes `"../assets/…"` (measured in `src/tests/audit.rs`) |
+| `THEME_CSS`, `BASE_CSS` (to `src/presentation.rs`) and `CSS` (stays in `main.rs`) | unchanged: same directory |
+| `the_required_env_list_matches_the_code` | unchanged: the gate does not move |
+| `scripts/*`, `e2e/lib/server.js`, `Cargo.toml` | unchanged: they copy `src/.` whole or build by `--bin` name |
+
+#### 7. The slices
+
+One module per slice, one commit each. Production before tests in each target, so the topic files
+take their final `include_str!` paths once.
+
+1. **25-0** (tester): the walker above. Not a pure move; its word diff lists only the walker's words.
+2. **25-1 to 25-7**, the library: `audit`, `presentation`, `response`, `settings_refusal`,
+   `settings`, `access_edit`, `access` (prototyped: `audit`).
+3. **25-8**, the library's topic files (six files, one recipe).
+4. **25-9 to 25-26**, the GUI: `i18n`, `k_text`, `config`, `routing`, `layout`, `forms`,
+   `dashboard`, `users`, `apps`, `audit_page`, `check`, `edit`, `settings_page`, `writes`,
+   `account`, `account_keys`, `account_delete`, `account_profile` (18 modules; prototyped:
+   `account_profile`, `audit_page`).
+5. **25-27 to 25-30**, the GUI's topic files, four or five per slice (prototyped: `settings`).
+6. **25-31** (docs agent): §9.
+
+That is **32 slices** (25-0, 7, 1, 18, 4, docs). If the user keeps one `tests.rs` per target,
+25-8 and 25-27 to 25-30 go and it is **27**.
+
+The recipe of a production slice: find both ends with `command grep -n`; write
+`use crate::*;`, a blank line and `sed -n 'A,Bp'` of the root into the new file; delete `A,B` from
+the root; add `mod x;` to the `mod` block and `use x::*;` (`pub use` in the library) to the glob
+block; apply §5 until the five builds are clean; `cargo fmt` twice (§13.38 §10c). Never follow a
+compiler `help:` that proposes renaming to "a similar name", and never escape a `[` in a doc
+comment because rustdoc suggests it: both change code, and the second one passes the word diff.
+A topic slice is the same with `use super::*;`, and its one fix is to move the helper the compiler
+cannot find, unchanged, from the topic file to the end of `tests.rs`.
+
+#### 8. How each slice is shown to hold
+
+1. `cargo test` with the counts unchanged, **209 / 109 / 16 / 344** (library, gate, CLI, GUI),
+   and 346 for `--features e2e-fake-cognito --bin bb-auth-web`; `cargo clippy --all-targets`;
+   `cargo fmt --check`; `cargo doc --no-deps` with zero warnings. One build at a time, `-j 4`.
+2. The word-multiset diff of §13.38 §6, over every `*.rs` under `src/`, `HEAD` against the tree:
+   it may list only the new module's name, twice (`mod x;` and `use x::*;`), once more for a topic
+   file, and the words of a changed `include_str!` path. Measured on the three moves: exactly
+   `audit` ×2, `account_profile` ×2, `audit_page` ×2, and `audit` ×1 plus `settings` ×1 for the
+   topic files.
+3. **New: a punctuation multiset**, because the word diff cannot see an escaped bracket or a
+   reworded link. Over the same two sides this must print nothing (`pub(crate)` adds only
+   parentheses, which it leaves out); measured silent on `audit_page`:
+
+   ```bash
+   punct() { tr -cd '[]\\`#!' | fold -w1 | sort | uniq -c; }
+   diff <(before | punct) <(after | punct)
+   ```
+
+4. `node e2e/run.js` after 25-8 (the library) and after 25-30 (the GUI), and `bash
+   scripts/package.sh --skip-tests` once at the end.
+
+#### 9. What the docs say afterwards (25-31)
+
+- `AGENTS.md`, "What this is": the library bullet says `src/lib.rs` is the crate root and that
+  each shared file is a module beside it (`access`, `access_edit`, `settings`, `settings_refusal`,
+  `audit`, `presentation`, `response`), private and re-exported flat, so every path is
+  `bb_auth_core::X`. The GUI bullet points at the directory and at this section's table for which
+  area lives where; "navigated by its section order" and every line count go. The gate keeps "one
+  file, read top to bottom".
+- `AGENTS.md`, the invariant "The library is the shared files": one sentence that a new library
+  module is a new shared file and needs that argument made, the same as a new item.
+- `AGENTS.md`, "Where documentation lives" and Conventions: every module opens `use crate::*;`, an
+  item is found with `grep -rn` over `src/`, and a new item goes in the module of its area.
+  "Displayed text": `K` is in `src/bin/bb-auth-web/i18n.rs`, its text in `k_text.rs`.
+- `AGENTS.md`, Commands: the `cargo test` comment names `tests.rs` and `tests/<topic>.rs`.
+- `src/lib.rs` crate doc (the coder, being rustdoc): one paragraph that the modules are private and
+  re-exported, and that the gate's code is still one file.
+- `docs/ARCHITECTURE.md` §3: the `src/lib.rs` and GUI rows name their modules; the "And in
+  `src/lib.rs`" table gains a file column. Older subsections stay as written.
+- The playbooks: the coder's gets §7's recipe and §5's table; the tester's gets the topic files,
+  the walker and the `../` rule for a moved `include_str!`; the designer's greps the directory.
+
+#### 10. Decisions for the user, taken by the coordinator
+
+The user asked on 2026-11-27 for step 25 to be carried to its end without stopping, so both are
+taken as recommended: the tests go into topic files, and `access.rs` stays one file of about
+2,050 lines, since one shared file per module is what shows the library's invariant in the tree.
+
+1. Tests in topic files (recommended, five slices more) or one `tests.rs` per target?
+2. Two files stay over 2,000 lines: `k_text.rs` (one function, unavoidable) and `access.rs`
+   (about 2,050; one more slice makes it two files of about 960 and 1,090). Keep or cut?
+
+No requirement changes. Rejected, beyond §13.38 §3: modules **inside** each file (they leave the
+files as long as they are, which is the problem); a directory per area with `mod.rs` files (path
+rules to learn, and `mod.rs` tabs that all read the same); explicit `use` lists instead of
+globs (every move would edit imports in other files, which is judgement and not a move); a
+library split by function kind (types, parsers, writers), which would scatter each shared file
+across modules and hide the membership rule the tree now shows.
