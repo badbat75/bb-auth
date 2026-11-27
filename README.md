@@ -637,7 +637,7 @@ logo, its name, **five tabs** (Dashboard, Applications, Users, Audit, and Settin
 pill showing your given name (or your first address) that opens the **account menu**: your name
 and every address of your roster row, "Go to your account", Preferences (theme and language)
 and Sign out. Nothing in that menu is about who reaches what, and the panel is one fixed width,
-the same box on this surface and on `/account`. At 941px and below the tabs move into the
+the same box on this surface and on `/account`. At 883px and below the tabs move into the
 ☰'s own menu, never into the account one, so the bar never wraps; the two panels are one
 `details` group, so opening one closes the other with no script.
 **Users** holds the three sections about people, in the order they nest: the user groups and

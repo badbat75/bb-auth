@@ -80,21 +80,6 @@ process that writes both files, so two gaps found the same day are closed **firs
 GUI is opened to anyone who is not an administrator: `bb-auth-web` can read the HMAC key, and it
 believes `X-Auth-Email` from any local process. The design is `docs/ARCHITECTURE.md` §13.
 
-### 17. The console's brand loses its "Administration" tag
-
-Covers: R3, W13. Asked by the user on 2026-11-26, looking at the console at desktop width: beside
-the operator's brand the bar shows the grey tag "Amministrazione" cut to "Amministrazio…", then the
-tabs, and the user suggests removing it. With five tabs in the bar the console is recognisable
-without it, the self-service page already shows the brand alone, and the space it takes is what
-pushes the ☰ breakpoint up to 941px (§13.34 §0). The designer weighs it (what else, if anything,
-says which surface this is; the page title; the 403's bar), remeasures the breakpoint, and
-updates §13.34.
-
-- Done when: tests show the console's bar carries no `K::ConsoleTag` (the key goes if nothing else
-  uses it); the breakpoint is the designer's new measurement, with the bar one row and the brand
-  whole from 320 to 1400 in both languages; the designer has approved the screenshots; and
-  AGENTS.md and §13.34 say so.
-
 ### 18. Release `v1.99.9`, the release candidate of 2.0.0
 
 Covers: W11. Asked by the user on 2026-11-26: after step 15, tag 1.99.9 as the release candidate

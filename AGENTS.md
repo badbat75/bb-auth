@@ -91,13 +91,17 @@ One crate, four targets, and the split is load-bearing:
   the file the gate writes. The bar is **one row at every width** (`flex-wrap:nowrap`,
   §13.28): a ☰ navigation trigger (the console only, and shown only below the breakpoint), the
   operator's logo (`ui.logo_url`, and the console's `img-src` admits it, as the self-service
-  page's already did), the brand, **five tabs** (Dashboard, Applications, Users, Audit and
+  page's already did), the brand, the deployment's name alone beside the logo and nothing else
+  (the "Administration" tag is gone, and the brand is a `span` and not a link, the user's
+  decision of 2026-11-26: the link led to the page the Dashboard tab already names, §13.34
+  §10 §11), **five tabs** (Dashboard, Applications, Users, Audit and
   **Settings**, that one last) and one pill, the person's given name or else their first
   address, which opens the **account menu**. That menu is a `details`, so it opens with markup
   and closes when a row navigates away, and its rows are the caller's own things and nothing
   else: the caller's name and every address, then the one place ("Go to your account", on the
-  console only), then Preferences nested and closed, then Sign out (§13.34 §3). At **941px and
-  below** the tabs ride in a navigation menu of their own, opened by that ☰ at the start of the
+  console only), then Preferences nested and closed, then Sign out (§13.34 §3). At **883px and
+  below** (the number re-measured when the brand lost its tag, §13.34 §10) the tabs ride in a
+  navigation menu of their own, opened by that ☰ at the start of the
   bar and never in the account menu (the user's option B, 2026-11-26, replacing the compromise
   the user accepted on 2026-11-25 of riding them in the account panel): the two panels are one
   exclusive `details` group (`name="bar-menu"`), so opening one closes the other with no script,

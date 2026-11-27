@@ -86,3 +86,7 @@ Rules are in `AGENTS.md`. Format of this file: `AGENTS.md`, under "Skills".
   moved, before writing "(Changed by …)" on it: a note about "the assertion is now a constant"
   belongs on the test whose assertion moved, and a step that widened the self-service page left
   the console-route walk of `no_page_but_the_reveal_carries_a_script` byte for byte as it was.
+- `src/assets/admin.css` is embedded and emitted **into the page**, so its comments travel in
+  the response body, and tests assert on body substrings: the proxy-secret refusal tests assert
+  `!body.contains("Dashboard")`, and a CSS comment naming "the Dashboard tab" turned them red.
+  Never write in a CSS asset comment a word a body-substring test forbids.

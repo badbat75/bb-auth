@@ -34,11 +34,15 @@ header.top{background:var(--card);border-bottom:1px solid var(--card-border);pad
    padded column as `main` (same max-width, same 16px), so the brand starts exactly where the
    page's `h1` starts instead of 16px to the left of it. A person scanning down meets one
    left edge, which is what a column is. */
-/* Two lines: the deployment's name, and under it what this surface is. Beside the name the
-   second line reads as part of the name, and it is not: it is the label that tells an
-   administrator's bar from a person's page. The version used to sit here, and it is what this
-   binary happens to be, which matters when a deploy has just happened and not at all the rest
-   of the time; the footer says it, where a person reading a deploy looks.
+/* One line: the deployment's name beside the operator's logo, and nothing else. The tag that
+   used to sit under the name ("Administration" / "Amministrazione") is gone (§13.34 §10): the
+   five tabs, the page's `h1`, the title and the `403`'s own heading already say which surface
+   this is, and on a wide screen the tag was the word that got cut, which is a label costing
+   room and saying less. The slot is a `span` on every surface, the console included (§13.34
+   §11, the user's decision): its old link led to the page the tabs' first entry already names.
+   The version used to sit here, and it is what this binary happens to be, which matters when a
+   deploy has just happened and not at all the rest of the time; the footer says it, where a
+   person reading a deploy looks.
 
    `min-width:0` and `max-width:14rem` are the bar's second give (§13.28 §4): the name pill
    shrinks first, and the brand's words shrink next, and a flex item with no `min-width` cannot

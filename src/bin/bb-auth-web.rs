@@ -28459,9 +28459,6 @@ mod tests {
     ///
     /// The shape is pinned in both languages, because the tag was the only translated word in
     /// the slot: an English-only check passes on an Italian bar that still says Amministrazione.
-    ///
-    /// Red until the coder drops the tag and the link: the console's bar emits `a.brand`, and a
-    /// `span.v` under the name, so `the_brand` fails on the console's own slot.
     #[test]
     fn both_bars_name_the_deployment() {
         for (name, settings, want) in [

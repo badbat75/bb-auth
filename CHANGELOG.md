@@ -38,6 +38,18 @@ lets a completed deletion land on the sign-in page's notice, because the `rd` it
 is relative. Without it the person is signed out all the same and lands on the sign-in page with
 nothing said (see "a completed deletion signs this browser out" below).
 
+### Changed: the console's brand is the deployment's name alone
+
+* **The "Administration" tag is gone from every bar, the `403` included, and the brand is no
+  longer a link.** `K::ConsoleTag` ("Administration" / "Amministrazione") is deleted: the five
+  tabs, the page's `h1`, the `<title>` and the `403`'s own heading already say which surface
+  this is, and on a wide screen the tag was the word cut to "Amministrazio…", a label costing
+  room and saying less (docs/ARCHITECTURE.md §13.34 §10). `brand_block` emits a `span` on every
+  surface, the console included, the user's decision of 2026-11-26 over the designer's
+  logo-to-home recommendation: the link led to the page the Dashboard tab already names (§11).
+  The tag was the bar's hidden give, so removing it moves the ☰ breakpoint, and
+  `nav.acct{flex-shrink:100}` from 884px makes the name pill give way before the brand.
+
 ### Changed: the licence becomes the GNU AGPL
 
 * **The project moves from MIT to the GNU Affero General Public License version 3**
@@ -63,12 +75,13 @@ nothing said (see "a completed deletion signs this browser out" below).
   roster row, "Go to your account" on the console, Preferences (theme and language) nested and
   closed, Sign out, and on `/account` the delete row. The tabs and the settings row are out of it,
   and the menu is the same object on both surfaces.
-* **At 941px and below the tabs move into a navigation menu of their own**, opened by a ☰ at the start of
+* **At 883px and below the tabs move into a navigation menu of their own**, opened by a ☰ at the start of
   the bar, never into the account menu: the user's option B of 2026-11-26, replacing the
   1.99.8 compromise that rode them in the account panel. The two panels are one exclusive
   `details` group (`name="bar-menu"`), so opening one closes the other with no script, and the bar
   stays one row at every width, from 320 to 1400, in both languages (the breakpoint and the
-  measured widths are docs/ARCHITECTURE.md §13.34 §0 and §5).
+  measured widths are docs/ARCHITECTURE.md §13.34 §0, §5 and §10: step 17 removed the brand's
+  tag line, and §10 re-measured the breakpoint at 883px).
 * **The account menu is one fixed width on both surfaces** (`width:20rem`, capped to the
   viewport). It used to be shrink-to-fit, which measured 230px on the console and 286px on
   `/account` (257px in Italian): the width of each surface's longest row, so the same panel was
