@@ -99,12 +99,26 @@ Rules are in `AGENTS.md`. Format of this file: `AGENTS.md`, under "Skills".
   row from the caller's uuid first, so a key filed under another person is simply not found, and
   the self-service page answers every miss with one sentence so it is not an id-enumeration oracle.
 - A §13.39 module move (step 25): `use crate::*;`, a blank line, `sed -n 'A,Bp'` of the root, delete
-  `A,B` **plus the blank line that followed it**, add `mod x;` and `pub use x::*;` to the two blocks
-  (kept sorted, as the existing ones are), then `pub(crate)` on exactly the items a compiler
+  `A,B` **plus the blank line that followed it**, add `mod x;` and `use x::*;` to the two blocks
+  (`pub use` in the library; kept sorted, as the existing ones are), then `pub(crate)` on exactly the items a compiler
   `note: crate::m::x exists but is inaccessible` names, then `cargo fmt` twice. Re-find both ends
   with `command grep -n '^// Banner$'` **before each move**: every move shifts all later lines. The
   banner's text line is `// <Name>`, so the range starts one line above it and ends three lines
   above the **next** banner's text line.
+- The §5 visibility loop reads cargo's **human** output, and the five messages point at their item
+  three different ways: E0425/E0433 put the item in a `note:` whose arrow **follows** it; E0624's
+  "defined here" is a span label whose location sits **above** it; E0616/E0451 name a field of a
+  struct with **no location at all** (a tuple struct names field 0, and building `Form(…)` is
+  E0451), so a field is fixed by finding the `struct` line in the module's own file and prefixing
+  the field's line. `pub(crate)` also lands on items that **stay in main.rs**, when a moved
+  `pub(crate) fn` names a root type in its signature (`private_interfaces`): over 25-9 to 25-13 it
+  was nine. Prove the root's diff by reading it: the additions must be exactly the `mod` and `use`
+  lines and those prefixes.
+- `cargo fmt` is not stable across a `pub(crate)` prefix (rustfmt re-splits the signatures it
+  lengthened), so run it twice **after** the visibility loop, before the five builds. And the
+  `mod x;` block is rebuilt with `[a-z0-9_]+`: `[a-z]+` silently drops `i18n` from it.
+- A moved `include_str!("main.rs")` (the §6 path) leaves `+k_text` **three** times in the word diff
+  (the `mod`, the `use`, the path) and `-main` once, beside the two of every other module name.
 - A §13.39 topic slice: the helpers that go back to the end of `tests.rs` are exactly the compiler's
   `E0425` list (a topic cannot see a sibling's items, so anything two topics use is a parent item).
   When scripting that move, match the item with `^(pub(\(crate\))? )?(fn|const) NAME` and take its

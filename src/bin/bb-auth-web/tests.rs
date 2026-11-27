@@ -723,7 +723,7 @@ fn unescape(src: &str) -> String {
 /// keys is reported under all of them, so a fault in a shared string names every key that
 /// shows it (§13.31 §10a).
 fn italian_k_strings() -> Vec<(String, String)> {
-    const SRC: &str = include_str!("main.rs");
+    const SRC: &str = include_str!("k_text.rs");
     const HEAD: &str = "fn t(lang: Lang, key: K) -> &'static str {";
     let start = SRC.find(HEAD).expect("the translation function, by name") + HEAD.len();
     let end = start
