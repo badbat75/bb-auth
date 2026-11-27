@@ -648,8 +648,17 @@ logo stays and the **name** is hidden, visually only, so a screen reader still r
 row has no room for the words once the trigger and the sign-out pill are counted. A logo that
 fails to load is a 0px box, so the phone's brand is then empty, which only a wrong
 `ui.logo_url` causes.
-**Users** holds the three sections about people, in the order they nest: the user groups and
-who references each one, then the roster, then the `denied` veto. **Applications** lists each
+**Users** is one tab with three pages, at the URLs that already existed: **People** `/users`
+(the roster, each row naming the groups that person is in), **Groups** `/groups` (a table of one
+row per group: its name, its member count, and the scopes that name it, tagged `excluded` where
+a scope keeps the group out), and **Denied** `/denied` (the `denied` veto). They sit under one
+tab and share its heading because all three are about people, and a group only means anything in
+terms of the roster. The row of sub-tabs under that heading carries the **whole** count of each
+list, so it does not move while you filter. Each group has a page of its own, `/groups/name`:
+the scopes that grant to it first, then its members with their own filter and pager, then the
+edit and the removal; adding or editing a group lands there, and removing one lands on the list.
+The roster's box finds a person by email, uuid or key id, and a group's page hands you the
+roster narrowed to that group. **Applications** lists each
 one with its area, its scope count and which credential classes get in anywhere inside it,
 and each application's page shows its scopes **numbered in file order** (the number is the
 meaning — first match wins) with their members, their credentials and their `excluded`.
@@ -673,6 +682,8 @@ Every list carries a **filter box and a pager**, both of which are just query pa
 they work with scripting off, survive a language change, and can be bookmarked. Scopes are
 the one list without them, deliberately: their order is their meaning and the ↑/↓ buttons
 move them within the file, so a filtered view would show positions that are not the file's.
+The pager line says `rows 1–25 of 60`, and `rows 1–25 of 30 (filtered from 60)` while a filter
+is on, so a list says how big it is and how much of it you are looking at.
 
 It **edits** the file too — the same CRUD as `bb-auth-adm`, made through the same library
 code, so it cannot save a file the gate would reject. Three rules make that safe with

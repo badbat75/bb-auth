@@ -36,15 +36,20 @@ Rules are in `AGENTS.md`. Format of this file: `AGENTS.md`, under "Skills".
   rewrite the released section.
 - To re-measure the `node e2e/shots.js` figures: scenes are the `['name', …]` entries between
   `const SCENES = [` and its `];`, interaction states the same inside `const STATES = [`, and
-  the shot total is per `VIEWS` entry (a view with `states: true` runs both lists, the Italian
-  view runs its own `only` list, the last views run two each). A real run is the source: it ends
-  with `N screenshots -> …` (~5 minutes for the full walk) and rewrites `e2e/artifacts/visual/`,
-  which is gitignored, so read that line and `ls artifacts/visual/* | wc -l` per view. The
-  `['…` count needs **two** leading spaces and the block boundaries: a looser regex finds 11.
+  the shot total is per `VIEWS` entry (a view with `states: true` runs both lists, a view with an
+  `only:` list runs just those names, so one new scene moves the total by 1, 2, 3, 5 …). A real
+  run is the source: it ends with `N screenshots -> …` (~5 minutes for the full walk) and
+  rewrites `e2e/artifacts/visual/`, which is gitignored, so read that line and
+  `ls artifacts/visual/* | wc -l` per view; the directory names are the view list. The scene and
+  state counts need **two** leading spaces and the block boundaries: a looser regex finds 11.
+  `AGENTS.md`'s Commands section carries that total in prose ("310 shots across eight views
+  (74 scenes, plus the 13 interaction states …)", counted 2026-11-27 after step 22), pinned by
+  no test.
 - `e2e/README.md`'s area table is a ledger of counts and of files: `run.js`'s `AREAS` list is
   the areas that exist, and each row's "N checks" is that area's line in the
-  `node e2e/run.js` summary (measured 2026-11-27 after step 19: 11 areas, `settings 410/410`,
-  total 1506; a step that rewrites one area's walk moves that area's count by tens).
+  `node e2e/run.js` summary (measured 2026-11-27 after step 22: 11 areas, `settings 578`,
+  total 1698; only the `settings.js` row states a number, and a step that rewrites one area's
+  walk moves that area's count by tens).
   The suite prints them all in ~3 minutes and never touches a repo file.
 
 ## Pitfalls

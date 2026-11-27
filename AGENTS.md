@@ -76,7 +76,7 @@ One crate, four targets, and the split is load-bearing:
   refusal page a `403` lands on and the error page a failed `/auth/session` lands on. A page
   is HTML, and HTML is edited, diffed and reviewed as HTML; the two small ones were built in a
   `format!` until somebody had to change one. Still **one file**
-  (about 8,000 lines), still read top to bottom. The GUI is about 29,300 and is navigated by
+  (about 8,000 lines), still read top to bottom. The GUI is about 40,300 and is navigated by
   its section order rather than by that slogan.
 - **[src/bin/bb-auth-adm.rs](src/bin/bb-auth-adm.rs)** — the access-file admin CLI: CRUD over
   `applications` / `scopes` / `user_groups` / `denied` / `users` / `api_keys`, key minting,
@@ -131,9 +131,28 @@ One crate, four targets, and the split is load-bearing:
   **one fixed width on both surfaces** (`.menu` is `width:20rem` capped at `calc(100vw - 32px)`,
   §13.34 §3, W13): the console's panel and the self-service page's are one box, that width
   holding the longest row of either in both languages. None of the tabs is `denied` or
-  `user_groups`: those two are **sections of the users
-  page**, groups above the roster, because a group only means anything in terms of the roster
-  and both are about people. Audit comes after them because it is about the same people one
+  `user_groups`: those two, beside the roster, are **the Users tab's three sub-pages**, because
+  a group only means anything in terms of the roster and all three are about people, which is
+  why they sit under one tab and are not tabs of their own (a sixth and a seventh would break
+  the 883px breakpoint, §13.36 §7). The URLs are the ones that already existed, People `/users`,
+  Groups `/groups` (a new `Route::Groups`, at a URL that has always resolved) and Denied
+  `/denied`, so every bookmark, redirect and form action names the page it now shows. The three
+  share the tab's one `h1`, and under it `users_subnav` is a row of sub-tabs carrying each
+  list's **whole** count, never the filtered one, so the number does not move under the
+  operator's hands while they type (the user's confirmation of 2026-11-27, §13.36 §9); the
+  Groups and Denied links carry `id="user_groups"` and `id="denied"`, so an old
+  `/users#user_groups` bookmark scrolls to the link that means it, which is the most a fragment
+  can do. Each group has a page of its own, `/groups/{name}` (`page_group`): the scopes that
+  grant to it, each linked to the application that owns it and tagged with the file's own
+  `excluded` where it keeps the group out, then its members behind a `Listing` of their own
+  (`m`), then the **existing** edit and removal; the scopes come first because they are why the
+  group matters, and because the dashboard's "referenced by nothing" warning links here, so its
+  answer is the first thing under the head. The Groups list is a table of counts, a group add
+  or edit lands on the group's page and a removal on `/groups`, and the roster names each
+  person's groups as links to those pages while `?ug=` narrows it to one group **exactly** (a
+  group name is a `[A-Za-z0-9_-]` word, so a substring test would invent matches), ANDed with
+  the text filter, named by a removable chip whose href drops `ug` and `up` and keeps the rest
+  (`clear_group_href`). Audit comes after them because it is about the same people one
   step later: `users` says who may get in, the audit says who did. **Settings** is a tab, and last
   among them for the reason it read as the odd one out while it was one: it is the only thing here
   that is not about who reaches what, so it sits at the end of a list whose subject is who reaches
@@ -155,7 +174,13 @@ One crate, four targets, and the split is load-bearing:
   not even a redirect, because there is no single page a bookmark to it could honestly land on. Every unordered list carries a filter and a pager, both living
   entirely in the query string (`Listing`, `list_controls`) so a list works with
   scripting off; each list namespaces its two parameters (`uq`/`up`, `gq`/`gp`, …) so several
-  on one page do not steal each other's state. The audit's three list boxes ride in the same
+  on one page do not steal each other's state. The shared pager says `rows 1–25 of 60`, and
+  `rows 1–25 of 30 (filtered from 60)` while a filter is set (`K::PagerRows`,
+  `K::PagerRowsFiltered`): one sentence where "page 2/5" and a bare matched/total span were two
+  fragments, shown only when there is a matching row and something to say, since on one
+  unfiltered page every row is already in view and the users sub-tabs name the total. The
+  roster's box says what it searches, "email, uuid or key id" (`K::FilterPeople`), the reach
+  `l_keeps_user` always had and nobody could know. The audit's three list boxes ride in the same
   form through `list_controls_with`, rather than in a second one beside it: two forms over one
   list are two Apply buttons, and an operator who set a period and typed a name would have to
   guess which one applies both. Its Refresh is that same URL as a link, which is all it can be
@@ -456,9 +481,9 @@ passed, on code untouched since it passed, tells you nothing you did not already
 `cargo doc --no-deps` earns its place when an intra-doc link could have moved, which is a
 real risk when a type or a function is renamed and no risk at all when a border-radius
 changes. `node e2e/shots.js` takes a scene-name filter for the same reason: the full walk is
-296 shots at most across seven views (71 scenes, plus the 13 interaction states in the two views
-that run them; a scene that cannot run in a view is reported `SKIPPED`), and a change to one
-page needs one of them.
+310 shots across eight views (74 scenes, plus the 13 interaction states in the two views
+that run them; a scene that cannot run in a view is reported `SKIPPED`; counted from a run on
+2026-11-27), and a change to one page needs one of them.
 
 Markdown is linted with markdownlint (`.markdownlint.jsonc`, which documents its own
 invocation): `npx markdownlint-cli2 "**/*.md" "#target" "#dist" "#e2e/node_modules"`.

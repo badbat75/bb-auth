@@ -24,6 +24,35 @@ Versions are the crate's (`Cargo.toml`); packages add a Debian revision
 
 Builds say 1.99.10 and their commit until the next release (plan W11).
 
+### Changed: the Users tab is three sub-pages, and every user group has a page
+
+* **The Users tab is three pages, at the URLs that already existed**: People `/users`, Groups
+  `/groups` (a new `Route::Groups`, at a URL the router has always resolved) and Denied
+  `/denied`. They share the tab's heading and a row of sub-tabs under it, each carrying the
+  **whole** count of its list, which does not change while the operator filters (the user
+  confirmed that choice on 2026-11-27). An old `/users#user_groups` bookmark still means
+  something: the Groups and Denied sub-tabs carry those two `id`s, so the fragment scrolls to
+  the link that goes there, which is the most a fragment can do.
+  What this replaces is the stacked page, which put the roster a screen below the top as soon as
+  there were many groups, each panel listing every member (plan step 22, docs/ARCHITECTURE.md
+  §13.36 §1).
+* **Every user group has a page**, `/groups/{name}`: the scopes that grant to it, an `excluded`
+  tag on the ones that keep it out, then its members behind a filter and a pager of their own,
+  then the existing edit and removal. The Groups list is a table of counts, a group add or edit
+  lands on the group's own page, and a removal lands on the list.
+* **The roster shows each person's groups**, each one linking to that group's page, and `?ug=`
+  filters the roster to one group exactly, combined with the text filter and named by a
+  removable chip.
+* **The roster's filter box says what it searches**, "email, uuid or key id", which is what it
+  already searched, and the shared pager says `rows 1–25 of 60`, plus `(filtered from 60)` while
+  a filter is on, one sentence where "page 2/5" and a bare matched/total span were two.
+* **The dashboard's group warning links to the group's page**, which replaces the 1.99.10 line
+  saying a user group has no page so its line carries no link (plan step 20, docs/ARCHITECTURE.md
+  §13.35).
+
+The GUI and its CSS are all that moved: no cookie, access file, settings file, nginx line or env
+variable, so an upgrade logs nobody out.
+
 ### Package copyright
 
 The three `.deb` packages now carry `Copyright 2026, Emiliano De Simoni` in
