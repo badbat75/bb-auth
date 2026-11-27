@@ -34,7 +34,7 @@ as the column says. A requirement still open must be covered by a step.
 | W8 | Everything in English; only the conversation with the user may be in their language | Applies to every step |
 | W9 | Displayed text in the `K` translation table or the page templates, ready for more languages | Applies to every step |
 | W10 | Agents run only the tests of the part they work on, plus linter and format check; the tester runs the full suite once, on main after the merge, before installing | Applies to every step |
-| W11 | The version stays the same between releases; a deploy does not bump it, and the build string (`v<version>-g<commit>`) is what tells two deploys apart (the user's decision, 2026-11-25, replacing "the last deployed version plus one"). `v1.99.8` was tagged on 2026-11-25 as a pre-release of 2.0.0; the work after it is 1.99.9 (the user, 2026-11-25) | Applies to every step |
+| W11 | The version stays the same between releases; a deploy does not bump it, and the build string (`v<version>-g<commit>`) is what tells two deploys apart (the user's decision, 2026-11-25, replacing "the last deployed version plus one"). `v1.99.8` was tagged on 2026-11-25 as a pre-release of 2.0.0, and `v1.99.9` on 2026-11-27 as its release candidate | Applies to every step |
 | W12 | JavaScript sparingly: HTML and CSS first, a small inline script only where it clearly improves an interaction, allowed by the page's CSP, never from another host (the user's rule, 2026-11-25, replacing "no page may need JavaScript"; stated in `AGENTS.md`) | Applies to every step |
 | W13 | The admin console and the account page share their front end: one width (1000px, the user's choice on 2026-11-25), one header, the same components, helpers and parameters; a thing the console already has is reused on `/account`, never rebuilt, and only what is genuinely different stays apart, with the reason written down (the user, 2026-11-25: "non reinventiamo l'acqua calda") | Every step touching either page |
 
@@ -66,7 +66,7 @@ The gate, the CLI (`bb-auth-adm`) and the admin GUI (`bb-auth-web`) are built an
 `AGENTS.md` and `CHANGELOG.md` say what they do. The agent structure (roles, skills, this plan) was added
 on 2026-11-23; the work before it is in `git log`. The self-service page is the `/account` section of `bb-auth-web`, live on rpi-01 since
 2026-11-24, with its key writes, header and theme since 2026-11-25. `v1.99.8` (g978eca8) is tagged, on GitHub as a
-pre-release; rpi-01 runs `v1.99.9-g5b7d9ad` since the evening of 2026-11-26 (self-service account deletion through the owner's worker, signing the browser out on completion; the two menus; the AGPL licence) with `gate.landing_url` set to its `/account/` page and `gate.allow_unverified_social` on for `MicrosoftPersonal` alone. Google's `email_verified` is mapped in the pool (OpenTofu, through IT-Admin), so a Google sign-in proves its address. Microsoft's personal accounts send no claim Cognito accepts as a boolean (mapping `xms_edov` broke the sign-in, so the mapping was removed), so that one provider is the exception (the user, 2026-11-26).
+pre-release; `v1.99.9` was tagged on 2026-11-27 as the release candidate of 2.0.0 and published on GitHub as a pre-release; rpi-01 runs that build, `v1.99.9-gcb041fa`, since the morning of 2026-11-27 (self-service account deletion through the owner's worker, signing the browser out on completion; the two menus; the console's brand without its tag or link; the AGPL licence) with `gate.landing_url` set to its `/account/` page and `gate.allow_unverified_social` on for `MicrosoftPersonal` alone. Google's `email_verified` is mapped in the pool (OpenTofu, through IT-Admin), so a Google sign-in proves its address. Microsoft's personal accounts send no claim Cognito accepts as a boolean (mapping `xms_edov` broke the sign-in, so the mapping was removed), so that one provider is the exception (the user, 2026-11-26).
 
 ## Next steps
 
@@ -79,18 +79,6 @@ reversal's cost, stated in `docs/ARCHITECTURE.md` §13.12, is that strangers now
 process that writes both files, so two gaps found the same day are closed **first**, before the
 GUI is opened to anyone who is not an administrator: `bb-auth-web` can read the HMAC key, and it
 believes `X-Auth-Email` from any local process. The design is `docs/ARCHITECTURE.md` §13.
-
-### 18. Release `v1.99.9`, the release candidate of 2.0.0
-
-Covers: W11. Asked by the user on 2026-11-26: after step 15, tag 1.99.9 as the release candidate
-of the major, as `v1.99.8` was tagged a pre-release on 2026-11-25.
-
-- Done when: the tester has run the whole board on `main` (`cargo test`, `node e2e/run.js`,
-  `cargo doc --no-deps`, the cfg(unix) tests) and it is green; the sign-in page on rpi-01 shows step 14e's
-  notice text (closed with step 14 on 2026-11-26, built in 1c3577e and not yet deployed); `CHANGELOG.md` has a `1.99.9`
-  section saying it is the release candidate of 2.0.0; `bash scripts/package.sh` built the
-  packages from a clean tree; rpi-01 runs that build; and, each with the user's go-ahead, `v1.99.9`
-  is tagged and published on GitHub as a pre-release.
 
 ### 19. A long brand name is cut even where the bar has room
 
