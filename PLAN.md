@@ -105,3 +105,16 @@ an identifier in `code` and a `K` sentence after it, and none says what the iden
 - Done when: the designer has worded each of the five in both languages (the kind of object
   first, through `K`); a test pins the kind on each; `node e2e/run.js` is green; and the
   designer has approved a screenshot of the warnings list.
+
+### 21. Release `v1.99.10`, the second release candidate of 2.0.0
+
+Covers: W11. Asked by the user on 2026-11-27: after step 20, publish a new release, numbered
+1.99.10 as a second release candidate (the user's choice that day), a GitHub pre-release like
+`v1.99.8` and `v1.99.9`. The version in `Cargo.toml` moves from 1.99.9 to 1.99.10 with it.
+
+- Done when: `Cargo.toml` says 1.99.10; the tester has run the whole board on `main` and it is
+  green; `CHANGELOG.md`'s Unreleased section is the `1.99.10` section, naming it the second release
+  candidate, with an empty Unreleased above it again; the `*.md` files carry no stale release fact
+  (the coordinator playbook's pitfall); `bash scripts/package.sh` built the packages from a clean
+  tree; rpi-01 runs that build and `verify.sh` passes; and `v1.99.10` is tagged and published on
+  GitHub as a pre-release with the three `.deb`s.
