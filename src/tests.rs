@@ -3705,6 +3705,35 @@ fn the_form_action_is_the_estate_the_cookie_already_covers() {
     );
 }
 
+/// Every .rs file under `dir`, read at run time and concatenated into one string: the
+/// whole source tree, as the thing to search.
+///
+/// A walk, not a list, because plan step 25 adds a file per module. §13.39 §6 measured
+/// the cost of the fixed `include_str!` list this replaces: it stayed green with
+/// `src/audit.rs` left off it, only because the tests named `RevLines` as well, and went
+/// red once those moved to `src/tests/audit.rs`. A list that fails for reasons that have
+/// nothing to do with a move is a list somebody deletes the first time it is in the way.
+/// The walk runs when the check runs, so it reads the tree that is on disk, which is the
+/// tree the manual describes, and a new file needs no edit here.
+fn rust_sources(dir: &std::path::Path) -> String {
+    let mut out = String::new();
+    for entry in
+        std::fs::read_dir(dir).expect("the source tree is readable at CARGO_MANIFEST_DIR/src")
+    {
+        let path = entry
+            .expect("an entry of the source tree is readable")
+            .path();
+        if path.is_dir() {
+            out.push_str(&rust_sources(&path));
+        } else if path.extension().is_some_and(|ext| ext == "rs") {
+            out.push_str(
+                &std::fs::read_to_string(&path).expect("a source file under src/ is readable"),
+            );
+        }
+    }
+    out
+}
+
 /// Every symbol the operating manual pins a rule to still exists.
 ///
 /// `cargo doc` catches a broken intra-doc link, which the manual calls the cheapest rot
@@ -3721,24 +3750,19 @@ fn the_form_action_is_the_estate_the_cookie_already_covers() {
 #[test]
 fn every_symbol_the_manual_names_still_exists() {
     const MANUAL: &str = include_str!("../AGENTS.md");
-    // The sources, plus the two files that hold the other things the manual pins a
-    // rule to: a cargo feature (`rust_crypto`) and the unit directives the hardening
-    // argument is made of (`ReadOnlyPaths`, `ReadWritePaths`, `SupplementaryGroups`).
-    // Those are as real as a function, and as able to stop existing.
-    let src = format!(
-        "{}{}{}{}{}{}{}{}{}{}{}",
-        include_str!("lib.rs"),
-        include_str!("tests.rs"),
-        include_str!("bin/bb-auth/main.rs"),
-        include_str!("bin/bb-auth/tests.rs"),
-        include_str!("bin/bb-auth-adm/main.rs"),
-        include_str!("bin/bb-auth-adm/tests.rs"),
-        include_str!("bin/bb-auth-web/main.rs"),
-        include_str!("bin/bb-auth-web/tests.rs"),
-        include_str!("../Cargo.toml"),
-        include_str!("../deploy/bb-auth.service"),
-        include_str!("../deploy/bb-auth-web.service"),
-    );
+    // The sources: every .rs under src/, found by walking the tree (see rust_sources),
+    // so a module move needs no edit to this list. Plus the three files beside them that
+    // hold the other things the manual pins a rule to: a cargo feature (`rust_crypto`)
+    // and the unit directives the hardening argument is made of (`ReadOnlyPaths`,
+    // `ReadWritePaths`, `SupplementaryGroups`). Those are as real as a function, and as
+    // able to stop existing.
+    let mut src = rust_sources(std::path::Path::new(concat!(
+        env!("CARGO_MANIFEST_DIR"),
+        "/src"
+    )));
+    src.push_str(include_str!("../Cargo.toml"));
+    src.push_str(include_str!("../deploy/bb-auth.service"));
+    src.push_str(include_str!("../deploy/bb-auth-web.service"));
     let rules = MANUAL
         .split_once("## Invariants")
         .expect("the manual has an Invariants section")

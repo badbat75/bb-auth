@@ -11,6 +11,12 @@ Rules are in `AGENTS.md`. Format of this file: `AGENTS.md`, under "Skills".
 - Check why each new test is red, and why any is already green. Tests that pass before the code exists
   (a check that something is absent or unchanged, or a validation of a field not there yet): list them
   and run them again once the code exists.
+- `every_symbol_the_manual_names_still_exists` reads the tree through `rust_sources` (slice 25-0):
+  a run-time walk of every `.rs` under `env!("CARGO_MANIFEST_DIR")/src`, so a module move needs **no
+  edit to it**; the three non-source files (`Cargo.toml`, the two units) stay `include_str!` and are
+  the only paths to fix when the test moves to `src/tests/settings.rs` (one more `../`). Because the
+  read is at run time, the check reads what is on disk, and a probe must not write its bogus name
+  into a file the walk reads.
 - A new library API makes the **whole lib test target** fail to compile, so no test can run and nothing
   else in the file is checked. Verify the parts that do not need the API from outside the test target:
   a new access-file fixture with `cargo run --bin bb-auth -- --check-access <file>`, and the expected
@@ -319,6 +325,13 @@ Rules are in `AGENTS.md`. Format of this file: `AGENTS.md`, under "Skills".
 
 ## Pitfalls
 
+- A probe that injects a bogus backticked name into the rules text of
+  `every_symbol_the_manual_names_still_exists` stays **green**: the probe line is in
+  `src/tests.rs`, which the walker reads, so the check finds its own literal. Assemble the name at
+  run time, where no source spells it: `rules.replace("decide_api_key", &format!("{}z", "decide_api_key"))`.
+- §13.39 §8.1 pins the counts at **209 / 109 / 16 / 344** (346 with `e2e-fake-cognito`) at every step-25
+  slice, so a slice that must hold them **cannot add a `#[test]`**: its failure paths go in the helper's
+  own `expect` panics, not in new tests.
 - Never `find /`: on aorus it walked into a hung mount and sat in state D for 11 minutes. A
   dependency's source is under `~/.cargo/registry/src/*/<crate>-<version>/` (tiny_http is
   `tiny_http-*`, with an underscore).
