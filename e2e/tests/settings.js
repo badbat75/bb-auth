@@ -237,6 +237,9 @@ async function panelWalk(t, page, ctx) {
   // §10), 1280 is the desktop strip. The same walk with scripting off lives in `nojs.js`, because
   // a `details` is markup and the bar has to behave the same with no script.
   await barStaysOneRow(t, page, ctx.base, '/users', 'console bar');
+  // The group list is a page of its own now (§13.36 §1), and it carries the sub-tab row the
+  // bar's `nav:not(.acct)` rule reaches, so the bar is measured on it too.
+  await barStaysOneRow(t, page, ctx.base, '/groups', 'console bar, group list');
 
   // The two menus are the same box on both surfaces (§13.34 §3), which is the measurement the
   // stylesheet cannot make on its own.

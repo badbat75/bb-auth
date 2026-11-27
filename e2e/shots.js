@@ -43,13 +43,23 @@ const VIEWS = [
   { tag: 'light', colorScheme: 'light', viewport: { width: 1280, height: 900 }, states: true },
   { tag: 'dark', colorScheme: 'dark', viewport: { width: 1280, height: 900 }, states: true },
   { tag: 'phone', colorScheme: 'light', viewport: { width: 390, height: 844 } },
+  // The phone in the **dark** arm, for the one shape the light phone cannot show. §13.36 §5:
+  // the sub-tab row wraps at a phone width, and the review reads the wrap against the palette's
+  // dark arm, where a chip's fill and the row's border are the only things separating one
+  // wrapped line from the next.
+  {
+    tag: 'phone-dark',
+    colorScheme: 'dark',
+    viewport: { width: 390, height: 844 },
+    only: ['users'],
+  },
   {
     tag: 'it',
     colorScheme: 'light',
     viewport: { width: 1280, height: 900 },
     lang: 'it',
     // Only where there is something to read: a form's field measures do not change.
-    only: ['dashboard', 'users', 'denied', 'apps', 'app-detail', 'can-authorized',
+    only: ['dashboard', 'users', 'groups', 'denied', 'apps', 'app-detail', 'can-authorized',
       'can-denied', 'can-on-a-person', 'user-rm', 'key-minted', 'error-refused', 'conflict',
       'conflict-mint', 'forbidden', 'settings-menu', 'config-landing-refused',
       // The account panel is the copy of this slice: its rows are translated words, and the
@@ -201,6 +211,24 @@ const SCENES = [
   ['app-detail', go('/apps/app1')],
   ['denied', go('/denied')],
   ['users', go('/users')],
+  // The roster over three pages (§13.36 §4). The pager's sentence exists only once the list is
+  // long enough to page, so the scene grows the roster out of band (that is a file, and the
+  // runner puts the fixture back before the next scene) and stands on the middle page, where
+  // both controls are live and the sentence reads `rows 26–50 of 60`.
+  ['users-paged', async (page, ctx) => {
+    const d = doc(ctx);
+    for (let i = 0; i < 60 - d.users.length; i++) {
+      d.users.push({
+        // Canonical lowercase 8-4-4-4-12, which is what the gate insists on: the first group
+        // is one 32-bit number in hex, so it is exactly eight characters, and the version and
+        // variant nibbles are the `4` and the `8` below.
+        uuid: `f000${(0x0000 + i).toString(16).padStart(4, '0')}-0000-4000-8000-000000000000`,
+        emails: [`paged${String(i).padStart(2, '0')}@example.com`],
+      });
+    }
+    writeDoc(ctx, d);
+    await page.goto(ctx.base + '/users?up=2');
+  }],
   ['user-detail', go('/users/bot%40example.com')],
   // The access check, which is a section of the two pages above rather than a page: on an
   // application it takes both halves of the question and its url field starts on the area's

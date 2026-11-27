@@ -80,6 +80,12 @@ Rules are in `AGENTS.md`. Format of this file: `AGENTS.md`, under "Skills".
   paraphrased const is red after the coder lands the table, and reads like a broken implementation.
   Pin **both** languages: a stub (or a coder) that paraphrases the Italian, "hai acceduto" for the
   design's "hai effettuato l'accesso", is caught only by the IT assert.
+- To drive a route the code **does not have yet**, go over the socket and never name the route:
+  `console_page(name, fixture, path, lang)` (`scratch` + `serve` + `get_with_secret` +
+  `IDENTITY_HEADER` + a `lang` cookie) returns `(status, body)`, and a route check goes through the
+  strings the `Route` answers (`route(path, "").map(|r| r.path())`, `.tab()`, `.title()`,
+  `parent().path()`), because a test naming a variant the enum has not got is a compile error that
+  reddens all 337 tests of the target and proves nothing about the route.
 - To run **several** tests by name: `cargo test --bin bb-auth-web -- --test-threads=1 name1 name2`.
   Only one filter fits before `--`, and `--test-threads=1` keeps each failure's dump in its own block.
   With `--exact` the name must be the **full path** (`tests::the_name`): a bare name matches nothing and
@@ -576,3 +582,35 @@ Rules are in `AGENTS.md`. Format of this file: `AGENTS.md`, under "Skills".
   for the board, run it with a scratch `CARGO_TARGET_DIR` (e.g. `/tmp/opencode/board-doc-target`).
 - `pgrep -f bb-auth-web` matches the shell that runs it; check leftover servers with
   `pgrep -x bb-auth-web`.
+- The `bb-auth-web` test binary is **not** in `target/debug/deps/` (this crate has a build script):
+  `cargo test --bin bb-auth-web --no-run --message-format=json` reports it under
+  `target/debug/build/bb-auth/<hash>/out/bb_auth_web-<hash>`. Running the plain `deps` path is a
+  "No such file" that reads like a failed test.
+- `elements(html, r#"<span class="pager""#, "</span>")` returns the pager **up to its first nested
+  close**: the pager holds a `span.pill.off` and a `span.muted`, so the slice silently loses the
+  buttons beside the words. Read a control row out of its outermost block (`div class="listctl"`)
+  and assert with `contains` plus `find(a) < find(b)` ordering, never an exact concatenation.
+- A console page carries **three** `<nav>`s (the ☰ strip, the bar strip, and the `div.menu-tabs`
+  the account menu is inside), and the page gains a fourth when a sub-tab row lands.
+  `elements(html, "<nav", "</nav>")` therefore answers 3 and an "exactly one row" assert is red on
+  a correct page: put the class in the pattern (`<nav class="sub"`).
+- A fixture uuid must be canonical lowercase 8-4-4-4-12 **with hex digits**, and a text filter's
+  counted subset must be **decimal**: `f000000` + two hex is nine characters and the whole page
+  becomes "the access file cannot be read", and a hex uuid carries `a`-`f`, so a one-letter filter
+  matches rows the test never counted and the pager's "30 of 60" is the wrong pair of numbers.
+- `s.as_str()` on a `String` is the **unstable** `str_as_str` feature on this toolchain (E0658),
+  and clippy rejects `contains(&s)` in the same breath. Write `let needle: &str = s;` and pass
+  `needle`.
+- A red e2e check that **clicks** markup the page has not got waits the full 30 s and ends the
+  whole area, so the area reports one failure instead of its list. Guard new markup:
+  `if (!(await page.locator(sel).count())) { t.check('… is a link', false, 'no such link'); continue; }`,
+  and make a text reader return `''` on `count() === 0` rather than calling `innerText`.
+- On a Linux box with no Edge for Playwright's channel, the suite starts with
+  `E2E_BROWSER_CHANNEL=chromium` plus `PLAYWRIGHT_BROWSERS_PATH=<dir>` holding a
+  `chromium-<rev>` symlink to the installed revision (the rev `playwright-core` asks for is
+  `node -e "console.log(require('e2e/node_modules/playwright-core/browsers.json').browsers.find(b=>b.name==='chromium').revision)"`;
+  the installed directory name is the rev). `TMPDIR=/tmp/opencode` keeps the suite's temp files
+  where they are allowed.
+- A `shots.js` scene that grows the fixture writes rows the **parser** must accept: the screenshot
+  of the "access file cannot be read" page is evidence about nothing, and the runner exits 0, so
+  the only tell is opening the PNG.

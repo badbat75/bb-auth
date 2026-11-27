@@ -354,6 +354,18 @@ p.primary{margin:16px 0 20px}
    only a fractional 5.5px padding would hit the height there.
    --------------------------------------------------------------------------- */
 
+/* The users tab's row of sub-tabs (People, Groups, Denied, §13.36 §1). `main` names this nav
+   and not the bar's: the bar's `nav:not(.acct){flex-wrap:nowrap;min-width:max-content}` matches
+   any `nav`, so it reaches the row inside the page too, and §13.36 §1 measured that row 17px
+   wider than the column at 320px with four-digit counts in Italian, 7px in English. Wrapping is
+   the honest answer for a count nobody can shorten. Measured on the real console (Edge, 320,
+   390 and 1280, both languages, 1234 people, 1000 groups and 1000 vetoes): the row never
+   outgrows the column and no width scrolls sideways; it is one line (29.7px) from 390 up, and
+   two (63.4px) at 320, where Italian's longer words take two even with short counts. The
+   `margin` is the row's own, because a `nav` inside the column inherits the bar's rules, which
+   carry none. */
+main nav.sub{flex-wrap:wrap;min-width:0;margin:0 0 18px}
+
 .listctl{display:flex;flex-wrap:wrap;gap:10px;align-items:center;margin:0 0 10px}
 .listctl form{display:flex;flex-wrap:wrap;gap:6px;align-items:center;margin:0}
 .listctl input[type=search]{width:auto;font-size:var(--fs-sm);padding:5px 11px;
@@ -364,7 +376,15 @@ p.primary{margin:16px 0 20px}
    row are three controls nobody can tell apart. */
 .listctl select{width:auto;flex:0 0 auto;font-size:var(--fs-sm);padding:5px 11px;
   min-height:calc(1.45em + 10px)}
-.listctl .pager{display:inline-flex;gap:6px;align-items:center}
+/* The pager's row: the "rows 26–50 of 1234" sentence and its two pills. It wraps, because the
+   sentence is the part that cannot shrink and a count is the part that cannot be shortened:
+   §13.36 §4 measured the Italian filtered sentence squeezed into a column one word wide at
+   320px while it stood between the two buttons. With the words first (measured on the real
+   console at 320 in both languages) the sentence is one line (17px) and the two pills sit under
+   it (59px), with no sideways scroll; at 1280 the row is one line again (29.7px). `min-width:0`
+   is what lets that row shrink at all: a flex item's default `min-width:auto` holds it at its
+   longest word, which is a count. */
+.listctl .pager{display:inline-flex;flex-wrap:wrap;gap:6px;align-items:center;min-width:0}
 /* The audit's clock: a list box and, for a zone of the operator's own, a text box beside it.
    The box is shown only while `Custom` is the choice, and the stylesheet decides that because
    it is the only thing on these pages allowed to decide anything: a browser without :has()

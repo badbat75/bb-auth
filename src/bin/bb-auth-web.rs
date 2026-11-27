@@ -759,6 +759,17 @@ enum K {
     Apps,
     Scopes,
     Users,
+    /// The users tab's People sub-page, and the word its section heading carries. The tab's
+    /// own word is `K::Users`, and the roster's heading used to repeat it, so the heading said
+    /// which tab it was under and not which list it headed (§13.36 §1).
+    People,
+    /// The Groups sub-tab's short word. Not `K::Groups` ("User groups"), for the bar's own
+    /// reason (`K::ConfigTab` versus `K::Config`): the row has to fit a phone, and the
+    /// section's `h2` spells the name out (§13.36 §1).
+    GroupsTab,
+    /// The name of the users tab's row of sub-tabs. The page carries four navigation landmarks
+    /// with it, and the accessibility practice asks that more than one of a kind be named.
+    UsersSections,
     Denied,
     Can,
     Back,
@@ -910,10 +921,18 @@ enum K {
     NewName,
     // --- the filter and pager every list carries ---
     Filter,
+    /// The roster's box, and the only one that says what it searches: the reach (every email,
+    /// the uuid, every key id) was never readable off a box that said "filter" (§13.36 §4).
+    FilterPeople,
     FilterClear,
-    Page,
     PagePrev,
     PageNext,
+    /// "rows 26–50 of 1234": the first row shown, the last, and how many matched. The one
+    /// sentence that replaced the "page 2/5" fragment and the bare "matched/total" span
+    /// (§13.36 §4). The en dash is a range, so it is data and not prose.
+    PagerRows,
+    /// The same with the list's whole length, while a filter is set (§13.36 §4).
+    PagerRowsFiltered,
     NoMatch,
     // --- the words the application-centric file is made of ---
     Base,
@@ -1927,6 +1946,9 @@ fn t(lang: Lang, key: K) -> &'static str {
         K::Apps => m(lang, "Applications", "Applicazioni"),
         K::Scopes => m(lang, "Scopes", "Ambiti"),
         K::Users => m(lang, "Users", "Utenti"),
+        K::People => m(lang, "People", "Persone"),
+        K::GroupsTab => m(lang, "Groups", "Gruppi"),
+        K::UsersSections => m(lang, "Users sections", "Sezioni di Utenti"),
         K::Denied => m(lang, "Denied", "Bloccati"),
         K::Can => m(lang, "Access check", "Verifica accesso"),
         K::Back => m(lang, "back", "indietro"),
@@ -2422,10 +2444,16 @@ fn t(lang: Lang, key: K) -> &'static str {
         K::NewName => m(lang, "name (rename)", "nome (rinomina)"),
 
         K::Filter => m(lang, "filter", "filtro"),
+        K::FilterPeople => m(lang, "email, uuid or key id", "email, uuid o id chiave"),
         K::FilterClear => m(lang, "clear the filter", "azzera il filtro"),
-        K::Page => m(lang, "page", "pagina"),
         K::PagePrev => m(lang, "previous", "precedente"),
         K::PageNext => m(lang, "next", "successiva"),
+        K::PagerRows => m(lang, "rows {0}–{1} of {2}", "righe {0}–{1} di {2}"),
+        K::PagerRowsFiltered => m(
+            lang,
+            "rows {0}–{1} of {2} (filtered from {3})",
+            "righe {0}–{1} di {2} (filtrate da {3})",
+        ),
         K::NoMatch => m(
             lang,
             "nothing here matches that filter.",
@@ -4197,6 +4225,9 @@ enum Route {
     App(String),
     Denied,
     Users,
+    /// The `user_groups` list, the users tab's Groups sub-page. It has always had the URL;
+    /// §13.36 §1 made it the page that URL shows, instead of the roster's page.
+    Groups,
     /// One roster row, addressed by its uuid: the identity is what the file references,
     /// and an email can be added or dropped without the page moving.
     User(String),
@@ -4260,6 +4291,7 @@ impl Route {
             Route::App(a) => format!("/apps/{}", seg(a)),
             Route::Denied => "/denied".to_string(),
             Route::Users => "/users".to_string(),
+            Route::Groups => "/groups".to_string(),
             Route::User(u) => format!("/users/{}", seg(u)),
             Route::Audit => "/audit".to_string(),
             Route::Config => "/config".to_string(),
@@ -4292,10 +4324,10 @@ impl Route {
     }
 
     /// Which nav tab to mark current for this route: everything about a user belongs to
-    /// the `users` tab, and so on down the sections. `denied` has no tab of its own: its
-    /// page lives at its own route, but the bar lights up `users` for it, since the
-    /// two are the sections about people and [`page_users`] is where an operator finds
-    /// both.
+    /// the `users` tab, and so on down the sections. The group list and `denied` have no tab
+    /// of their own: their pages live at their own routes, reached from the sub-tab row
+    /// beneath [`page_users`]'s tab, because all three lists are about people, which is what
+    /// the Users tab is for (§13.36 §1).
     fn tab(&self) -> Route {
         match self {
             Route::User(_)
@@ -4310,7 +4342,8 @@ impl Route {
             | Route::KeyRm(..)
             | Route::Denied
             | Route::DenyAdd
-            | Route::DenyRm(_) => Route::Users,
+            | Route::DenyRm(_)
+            | Route::Groups => Route::Users,
             Route::App(_)
             | Route::AppAdd
             | Route::AppEdit(_)
@@ -4347,7 +4380,7 @@ impl Route {
             | Route::AppEdit(a)
             | Route::AppRm(a) => Route::App(a.clone()),
             Route::AppAdd => Route::Apps,
-            Route::GroupAdd | Route::GroupEdit(_) | Route::GroupRm(_) => Route::Users,
+            Route::GroupAdd | Route::GroupEdit(_) | Route::GroupRm(_) => Route::Groups,
             Route::DenyAdd | Route::DenyRm(_) => Route::Denied,
             other => other.clone(),
         }
@@ -4360,7 +4393,9 @@ impl Route {
     fn title(&self) -> &'static str {
         match self {
             Route::Denied | Route::DenyAdd | Route::DenyRm(_) => "denied",
-            Route::GroupAdd | Route::GroupEdit(_) | Route::GroupRm(_) => "user_groups",
+            Route::Groups | Route::GroupAdd | Route::GroupEdit(_) | Route::GroupRm(_) => {
+                "user_groups"
+            }
             _ => match self.tab() {
                 Route::Apps => "applications",
                 Route::Users => "users",
@@ -4431,9 +4466,9 @@ fn route(path: &str, base: &str) -> Option<Route> {
         ["apps", a, "scopes", n, "rm"] if !a.is_empty() => Some(Route::ScopeRm(s(a), s(n))),
         ["apps", a, "scopes", n, "move"] if !a.is_empty() => Some(Route::ScopeMove(s(a), s(n))),
 
-        // `/groups` is a section of the users page rather than a page of its own, so the
-        // bare path lands where the list actually is instead of on a 404.
-        ["groups"] => Some(Route::Users),
+        // The group list is a page of its own, under the Users tab (§13.36 §1). It has
+        // always had this URL; what changed is what the URL shows.
+        ["groups"] => Some(Route::Groups),
         ["groups", ACTION_ADD] => Some(Route::GroupAdd),
         ["groups", n, "edit"] if !n.is_empty() => Some(Route::GroupEdit(s(n))),
         ["groups", n, "rm"] if !n.is_empty() => Some(Route::GroupRm(s(n))),
@@ -4985,7 +5020,14 @@ fn page_href(v: &View, l: &Listing, page: usize) -> String {
 /// so filtering one list does not reset another's page — except this list's own page, which
 /// is dropped on purpose, because a new filter belongs at the top of its results.
 fn list_controls(v: &View, l: &Listing, matched: usize, total: usize) -> Markup {
-    list_controls_with(v, l, matched, total, &[], html! {})
+    list_controls_named(v, l, matched, total, K::Filter)
+}
+
+/// [`list_controls`] where the box names what it searches. Only the roster's does today
+/// (`K::FilterPeople`), because only its reach is wider than the column beside it: the box
+/// finds a uuid and a key id too, and a box that says "filter" says nobody can (§13.36 §4).
+fn list_controls_named(v: &View, l: &Listing, matched: usize, total: usize, ph: K) -> Markup {
+    list_controls_with(v, l, matched, total, &[], html! {}, ph)
 }
 
 /// [`list_controls`] with fields of its own in front of the filter box.
@@ -5006,10 +5048,34 @@ fn list_controls_with(
     total: usize,
     owned: &[&str],
     extra: Markup,
+    ph: K,
 ) -> Markup {
-    let (_, _, page, pages) = l.window(matched);
+    let (start, end, page, pages) = l.window(matched);
     let q_name = l.q_name();
     let p_name = l.p_name();
+    // One sentence says where in the list this page sits, in place of the "page 2/5" fragment
+    // and the bare "matched/total" span (§13.36 §4): the first row shown, the last, how many
+    // matched, and while a filter is set, the list's whole length beside it.
+    let rows = if l.q.is_empty() {
+        fill(
+            t(v.lang, K::PagerRows),
+            &[
+                &(start + 1).to_string(),
+                &end.to_string(),
+                &matched.to_string(),
+            ],
+        )
+    } else {
+        fill(
+            t(v.lang, K::PagerRowsFiltered),
+            &[
+                &(start + 1).to_string(),
+                &end.to_string(),
+                &matched.to_string(),
+                &total.to_string(),
+            ],
+        )
+    };
     html! {
         div class="listctl" {
             form method="get" action=(v.href(&v.at)) {
@@ -5019,30 +5085,32 @@ fn list_controls_with(
                     }
                 }
                 (extra)
-                input type="search" name=(q_name) value=(l.q) placeholder=(v.t(K::Filter))
-                      aria-label=(v.t(K::Filter));
+                input type="search" name=(q_name) value=(l.q) placeholder=(v.t(ph))
+                      aria-label=(v.t(ph));
                 button type="submit" class="pill" { (v.t(K::Apply)) }
                 @if !l.q.is_empty() {
                     a class="pill" href=(listing_href(v, l, &[])) title=(v.t(K::FilterClear)) { "×" }
                 }
             }
-            @if pages > 1 {
+            @if matched > 0 && (pages > 1 || !l.q.is_empty()) {
                 span class="pager" {
-                    @if page > 0 {
-                        a class="pill" href=(page_href(v, l, page)) { "← " (v.t(K::PagePrev)) }
-                    } @else {
-                        span class="pill off" { "← " (v.t(K::PagePrev)) }
-                    }
-                    span class="muted" { (v.t(K::Page)) " " (page + 1) "/" (pages) }
-                    @if page + 1 < pages {
-                        a class="pill" href=(page_href(v, l, page + 2)) { (v.t(K::PageNext)) " →" }
-                    } @else {
-                        span class="pill off" { (v.t(K::PageNext)) " →" }
+                    // The words first, the two controls after them. With the sentence standing
+                    // between them it was squeezed into a column one word wide at 320px in
+                    // Italian (§13.36 §4, measured).
+                    span class="muted" { (rows) }
+                    @if pages > 1 {
+                        @if page > 0 {
+                            a class="pill" href=(page_href(v, l, page)) { "← " (v.t(K::PagePrev)) }
+                        } @else {
+                            span class="pill off" { "← " (v.t(K::PagePrev)) }
+                        }
+                        @if page + 1 < pages {
+                            a class="pill" href=(page_href(v, l, page + 2)) { (v.t(K::PageNext)) " →" }
+                        } @else {
+                            span class="pill off" { (v.t(K::PageNext)) " →" }
+                        }
                     }
                 }
-            }
-            @if !l.q.is_empty() {
-                span class="muted" { (matched) "/" (total) }
             }
         }
     }
@@ -6946,7 +7014,7 @@ fn page_dashboard(v: &View, doc: &AccessFile, access: &Access) -> Markup {
                 ("scopes", scope_count, None),
                 ("users", doc.users.len(), Some(Route::Users)),
                 ("api_keys", key_count, None),
-                ("user_groups", doc.user_groups.len(), Some(Route::Users)),
+                ("user_groups", doc.user_groups.len(), Some(Route::Groups)),
                 ("denied", doc.denied.len(), Some(Route::Denied)),
             ] {
                 @if let Some(r) = &route {
@@ -7001,28 +7069,70 @@ fn page_dashboard(v: &View, doc: &AccessFile, access: &Access) -> Markup {
     }
 }
 
-/// `/users` — everything the file says about people, in three sections: the groups, the
-/// roster, and the veto.
+/// The users tab's row of sub-tabs: People, Groups, Denied (§13.36 §1).
 ///
-/// One tab, because all three answer the same question from different sides, and an operator
-/// editing one usually has to look at another. `user_groups` leads, above the roster,
-/// because a group is what a scope names and the roster is what a group names: the page
-/// reads outside-in. Each section carries its own filter and pager, namespaced (`g`, `u`,
-/// `d`) so that searching one does not disturb the others; `/groups` and `/denied` still
-/// resolve, to this page and to [`page_denied`], so no bookmark breaks.
+/// Three pages under one tab, because all three answer the same question from different
+/// sides, and the tab's five-slot bar has no room for three more tabs. The row is a
+/// navigation landmark of its own beside the bar's tabs and the account end, so it is named
+/// (`K::UsersSections`): the practice asks that more than one landmark of a kind be named.
+/// Each link carries the section's short word and its **whole file** count, never the
+/// filtered one, so the row does not move under the operator's hands while they type. The
+/// Groups and Denied links carry the `id`s the old `/users#user_groups` and `/users#denied`
+/// bookmarks named, so a note an operator wrote years ago scrolls to the link that means it.
+fn users_subnav(v: &View, doc: &AccessFile) -> Markup {
+    /// One pill: the current one marked the bar's way, in the markup and not only to a
+    /// reader, because `.on` is a colour, and colour alone is not a distinction WCAG 1.3.1
+    /// accepts. The row lights the page a route was reached *from* (`parent()`), which is the
+    /// bar's own rule one level down: a group's form lights Groups, a veto's form lights
+    /// Denied, and the roster's pages, including a person's, light People.
+    fn pill(v: &View, at: &Route, label: &str, id: Option<&'static str>, n: usize) -> Markup {
+        let on = v.at.parent() == *at;
+        html! {
+            a class=(if on { "pill on" } else { "pill" }) href=(v.href(at)) id=[id]
+              aria-current=[on.then_some("page")]
+              { (label) " (" (n) ")" }
+        }
+    }
+    html! {
+        nav class="sub" aria-label=(v.t(K::UsersSections)) {
+            (pill(v, &Route::Users, v.t(K::People), None, doc.users.len()))
+            (pill(
+                v,
+                &Route::Groups,
+                v.t(K::GroupsTab),
+                Some("user_groups"),
+                doc.user_groups.len(),
+            ))
+            (pill(
+                v,
+                &Route::Denied,
+                v.t(K::Denied),
+                Some("denied"),
+                doc.denied.len(),
+            ))
+        }
+    }
+}
+
+/// `/users`: the roster, the users tab's People sub-page (§13.36 §1).
+///
+/// It used to be one stacked page of three sections, and a long file opened on the list the
+/// operator did not come for. The shared `h1` is the tab's word, so the page says which tab
+/// it is under, and the `h2` is the sub-tab's, so the link a person followed and the heading
+/// they landed on are the same word. The filter and the pager are namespaced (`u`), as on
+/// the other two pages, because all three lists live in one query string.
 fn page_users(v: &View, doc: &AccessFile, access: &Access) -> Markup {
     let lu = Listing::read("u", v.query);
     let rows: Vec<&UserSpec> = doc.users.iter().filter(|u| l_keeps_user(&lu, u)).collect();
     let (start, end, _, _) = lu.window(rows.len());
     html! {
         h1 { (v.t(K::Users)) }
-        p class="lede" { (v.t(K::UsersIntro)) }
+        (users_subnav(v, doc))
 
-        (groups_section(v, doc))
-
-        h2 { (section_heading(v.t(K::Users), "users")) }
+        h2 { (section_heading(v.t(K::People), "users")) }
+        p class="lede sub" { (v.t(K::UsersIntro)) }
         p class="primary" { (act(v, &Route::UserAdd, &format!("+ {}", v.t(K::Add)))) }
-        (list_controls(v, &lu, rows.len(), doc.users.len()))
+        (list_controls_named(v, &lu, rows.len(), doc.users.len(), K::FilterPeople))
         (list_panel(v, doc.users.len(), rows.len(), html! {
                 table {
                     thead { tr {
@@ -7050,16 +7160,6 @@ fn page_users(v: &View, doc: &AccessFile, access: &Access) -> Markup {
                 }
         }))
 
-        // The `denied` veto, as the last section of this same page rather than a tab of
-        // its own: all three sections are about people, and an operator managing the
-        // roster is the one most likely to also need the veto list. The route `/denied`
-        // still exists on its own (see `page_denied`) for the add/remove PRG redirects and
-        // for a direct link; `denied_list` is what keeps the two views of the same list
-        // from ever drifting apart.
-        h2 { (section_heading(v.t(K::Denied), "denied")) }
-        p class="lede sub" { (v.t(K::DeniedIntro)) }
-        p class="primary" { (act(v, &Route::DenyAdd, &format!("+ {}", v.t(K::Add)))) }
-        (denied_list(v, doc))
     }
 }
 
@@ -7193,14 +7293,14 @@ fn page_user(v: &View, doc: &AccessFile, access: &Access, key: &str) -> (u16, Ma
     )
 }
 
-/// The `user_groups` section of [`page_users`]: each entry, who it references, and
-/// everything that names it. Members are people: an email where a roster row still
-/// resolves it, the raw uuid where none does, and flagged when it matches nobody at all.
+/// `/groups`: the `user_groups` list, the users tab's Groups sub-page (§13.36 §1).
 ///
-/// A section rather than a page of its own: a group only ever means something in terms of
-/// the roster below it, and a list that is usually three lines long does not earn a tab in
-/// the nav bar.
-fn groups_section(v: &View, doc: &AccessFile) -> Markup {
+/// Each entry, who it references, and everything that names it. Members are people: an email
+/// where a roster row still resolves it, the raw uuid where none does, and flagged when it
+/// matches nobody at all. The names are **not** links: each page here shows one list, and a
+/// name in a group is a row of the *roster*, whose page is People's (§13.36 §1), so a link
+/// would put another page's list one click from this one.
+fn page_groups(v: &View, doc: &AccessFile) -> Markup {
     let l = Listing::read("g", v.query);
     // A group is searchable by its own name and by who is in it, because "which group is
     // bob in?" is the question this list is usually opened to answer.
@@ -7214,6 +7314,11 @@ fn groups_section(v: &View, doc: &AccessFile) -> Markup {
         .collect();
     let (start, end, _, _) = l.window(rows.len());
     html! {
+        h1 { (v.t(K::Users)) }
+        (users_subnav(v, doc))
+
+        // §13.36 §1 item 3: the section's heading spells the name out (`User groups`), which is
+        // why the sub-tab above is `K::GroupsTab` and not this: the row must fit a phone.
         h2 { (section_heading(v.t(K::Groups), "user_groups")) }
         p class="lede sub" { (v.t(K::GroupsIntro)) }
         p class="primary" { (act(v, &Route::GroupAdd, &format!("+ {}", v.t(K::Add)))) }
@@ -7251,9 +7356,7 @@ fn groups_section(v: &View, doc: &AccessFile) -> Markup {
                                 li {
                                     @match user_pos(doc, &uuid) {
                                         Some(i) => {
-                                            a href=(v.href(&Route::User(uuid.clone()))) {
-                                                code { (user_label(&doc.users[i])) }
-                                            }
+                                            code { (user_label(&doc.users[i])) }
                                         }
                                         None => {
                                             code class="bad" { (uuid) }
@@ -7577,22 +7680,26 @@ fn scope_excluded_display(doc: &AccessFile, s: &ScopeSpec) -> Vec<String> {
         .collect()
 }
 
-/// `/denied`: the veto list, standing on its own for a direct link and for the add/remove
-/// PRG redirects. [`page_users`] also renders this same list, as its own second section; both
-/// go through [`denied_list`] so the two views can never show two different lists.
+/// `/denied`: the veto, the users tab's Denied sub-page (§13.36 §1), and the page the
+/// add/remove PRG redirects land on, which is why it has always had its own URL.
+///
+/// It shares the `h1` and the sub-tab row with the other two, so the page says which tab it
+/// is under; the heading it used to carry as an `h1` is now its `h2`, where the sub-tab's
+/// word and the heading it lands on are the same word.
 fn page_denied(v: &View, doc: &AccessFile) -> Markup {
     html! {
-        h1 { (section_heading(v.t(K::Denied), "denied")) }
-        p class="lede" { (v.t(K::DeniedIntro)) }
+        h1 { (v.t(K::Users)) }
+        (users_subnav(v, doc))
+
+        h2 { (section_heading(v.t(K::Denied), "denied")) }
+        p class="lede sub" { (v.t(K::DeniedIntro)) }
         p class="primary" { (act(v, &Route::DenyAdd, &format!("+ {}", v.t(K::Add)))) }
         (denied_list(v, doc))
     }
 }
 
-/// The `denied` panel's body: the empty state, or the list itself, one row per vetoed
-/// entry — a uuid names the user it vetoes, a bare email names a stranger. Factored out of
-/// [`page_denied`] because [`page_users`] renders the identical panel as its own second
-/// section, and the two must never be free to drift apart.
+/// The `denied` list: the empty state, or the list itself, one row per vetoed entry; a uuid
+/// names the user it vetoes, a bare email names a stranger.
 fn denied_list(v: &View, doc: &AccessFile) -> Markup {
     let l = Listing::read("d", v.query);
     // Filtered on what the row *shows*, which for an enrolled user is their label rather
@@ -7991,6 +8098,7 @@ fn page_audit(v: &View, doc: &AccessFile) -> Markup {
             read.events.len(),
             &["aw", "ac", "ao", TZ_COOKIE, TZ_CUSTOM_PARAM],
             selects,
+            K::Filter,
         ))
         @match &missing {
             Some(ZoneMissing::Local) => div class="msg warn" { (v.t(K::TzLocalMissing)) },
@@ -10222,7 +10330,7 @@ fn mutate(v: &View, form: &Form) -> Outcome {
                 Ok(())
             })();
             match r {
-                Ok(()) => Outcome::Done(Route::Users, Msg::GroupAdded),
+                Ok(()) => Outcome::Done(Route::Groups, Msg::GroupAdded),
                 Err(e) => Outcome::Page(400, title, page_group_form(v, None, &f, Some(&e))),
             }
         }
@@ -10239,7 +10347,7 @@ fn mutate(v: &View, form: &Form) -> Outcome {
                 Ok(())
             })();
             match r {
-                Ok(()) => Outcome::Done(Route::Users, Msg::GroupSaved),
+                Ok(()) => Outcome::Done(Route::Groups, Msg::GroupSaved),
                 Err(e) => Outcome::Page(400, title, page_group_form(v, Some(target), &f, Some(&e))),
             }
         }
@@ -10253,7 +10361,7 @@ fn mutate(v: &View, form: &Form) -> Outcome {
                 Ok(())
             })();
             match r {
-                Ok(()) => Outcome::Done(Route::Users, Msg::GroupRemoved),
+                Ok(()) => Outcome::Done(Route::Groups, Msg::GroupRemoved),
                 Err(e) => Outcome::Page(
                     400,
                     title,
@@ -14911,6 +15019,7 @@ fn handle(mut req: Request, cfg: &Config) {
         }
         Route::Denied => (200, page_denied(&v, &doc), title),
         Route::Users => (200, page_users(&v, &doc, &access), title),
+        Route::Groups => (200, page_groups(&v, &doc), title),
         // It reads the access file for one thing only: what the roster calls a uuid an event
         // recorded. Every other page here is *about* that file; this one borrows a name from
         // it.
@@ -17679,7 +17788,15 @@ mod tests {
         assert_eq!(route("", ""), Some(Route::Dashboard));
         assert_eq!(route("/users", ""), Some(Route::Users));
         assert_eq!(route("/users/", ""), Some(Route::Users));
-        assert_eq!(route("/groups", ""), Some(Route::Users));
+        // §13.36 §1: the group list is a page of its own now, so `/groups` stops landing on the
+        // users page. Read through `path()` in `route_maps_the_three_sub_pages` rather than
+        // named here: while the variant does not exist, naming it is a compile error for the
+        // whole target, which is a red that says nothing about the route.
+        assert_ne!(
+            route("/groups", ""),
+            Some(Route::Users),
+            "the group list is a page of its own now, not the users page wearing its URL"
+        );
         assert_eq!(route("/apps", ""), Some(Route::Apps));
         assert_eq!(route("/denied", ""), Some(Route::Denied));
         // The access check is a section of the two pages that hold half of its question, and
@@ -18972,11 +19089,12 @@ mod tests {
                 Route::DenyAdd => 26,
                 Route::DenyRm(_) => 27,
                 Route::Audit => 28,
+                Route::Groups => 29,
             }
         }
         let seen: std::collections::HashSet<usize> = every_route().iter().map(variant).collect();
         // All of them but `ScopeMove`, which has no page to render: it is POST only.
-        let missing: Vec<usize> = (0..=28).filter(|i| !seen.contains(i)).collect();
+        let missing: Vec<usize> = (0..=29).filter(|i| !seen.contains(i)).collect();
         assert_eq!(missing, vec![13], "every_route must name every page");
     }
 
@@ -18993,6 +19111,7 @@ mod tests {
             Route::App("mpa".to_string()),
             Route::Denied,
             Route::Users,
+            Route::Groups,
             Route::User(bob.clone()),
             Route::Audit,
             Route::Config,
@@ -20093,10 +20212,15 @@ mod tests {
     /// use of `K::ReferencedByNothing`, and it stays as it was.
     #[test]
     fn the_group_panel_still_says_referenced_by_nothing_alone() {
-        let html = render_of("dash-kinds-users", DASH_KINDS, Route::Users, "");
+        // §13.35 §1: the sentence stands alone, with no kind label, because the heading above it
+        // names the kind. Slice A moved the groups onto a page of their own (§13.36 §1), so this
+        // walks there; slice B replaces it with `the_groups_list_is_a_table_of_counts`, the same
+        // claim read out of a table row instead of a panel.
+        let (status, html) = console_page("dash-kinds-groups", DASH_KINDS, "/groups", "lang=en");
+        assert_eq!(status, 200, "the group list is a page of its own");
         let at = html
             .find("<code>@unused</code>")
-            .expect("the groups section shows the group it lists");
+            .expect("the group list shows the group it lists");
         let tail = &html[at..];
         let open = tail.find("<p").expect("the panel says what references it");
         let close = tail.find("</p>").expect("the sentence closes") + "</p>".len();
@@ -20222,18 +20346,29 @@ mod tests {
     }
 
     #[test]
-    fn the_users_page_leads_with_the_groups_section() {
-        let html = render("groups", Route::Users);
-        // The groups section is on the users page, and it is ABOVE the roster.
-        let g = html.find("user_groups").expect("no user_groups section");
-        let u = html.rfind(">users<").expect("no users section");
-        assert!(g < u, "user_groups must come before users: {html}");
-        assert!(html.contains("referenced by"));
-        assert!(html.contains("mpa/admin"));
-        // And it is not a tab of its own.
-        assert!(
-            !html.contains("href=\"/groups\""),
-            "the nav must not offer a groups tab: {html}"
+    fn the_users_page_leads_to_the_group_list() {
+        // §13.36 §1: the groups are no longer a section stacked on the roster's page, so the
+        // way to them is the row of sub-tabs, in the file's own section order, and the old
+        // `/users#user_groups` bookmark has to land on something.
+        let html = render_of("groups", SAMPLE, Route::Users, "");
+        let (_, links) = sub_tabs(&html);
+        assert_eq!(
+            links
+                .iter()
+                .map(|a| attr(a, "href").unwrap_or_default())
+                .collect::<Vec<_>>(),
+            ["/users", "/groups", "/denied"],
+            "People, Groups, Denied, in that order: {html}"
+        );
+        assert_eq!(
+            attr(&links[1], "id").as_deref(),
+            Some("user_groups"),
+            "the bookmark an operator has in a note still means the groups"
+        );
+        assert_eq!(
+            attr(&links[2], "id").as_deref(),
+            Some("denied"),
+            "and the one for the veto does the same"
         );
     }
 
@@ -20285,21 +20420,598 @@ mod tests {
         assert!(!html.contains("<script"), "{html}");
     }
 
+    // --- the users tab's three sub-pages (§13.36, plan step 22, slice A) -----------------
+
+    /// The words §13.36 §6 gives the sub-pages, spelled out here as the design's table spells
+    /// them, EN and IT. They are words and not `K` variants because the variants do not exist
+    /// yet: naming one is a compile error for the whole target, which is a red that proves
+    /// nothing about the page. Once the table carries them, these consts are the design's
+    /// answer the coder must match.
+    const PEOPLE_EN: &str = "People";
+    const PEOPLE_IT: &str = "Persone";
+    /// `K::GroupsTab`: the sub-tab's short word, deliberately not `K::Groups`'s "User groups",
+    /// so the row fits a phone (§13.36 §1).
+    const GROUPS_TAB_EN: &str = "Groups";
+    const GROUPS_TAB_IT: &str = "Gruppi";
+    /// `K::UsersSections`: the sub-tab `nav` is the page's fourth navigation landmark, so it is
+    /// named, as the APG asks of more than one landmark of a kind.
+    const SUBNAV_EN: &str = "Users sections";
+    const SUBNAV_IT: &str = "Sezioni di Utenti";
+    /// `K::FilterPeople`: the roster's box says what it searches, and the placeholder and the
+    /// `aria-label` are the same string, which makes WCAG 2.5.3 Label in Name trivially true.
+    const FILTER_PEOPLE_EN: &str = "email, uuid or key id";
+    const FILTER_PEOPLE_IT: &str = "email, uuid o id chiave";
+
+    /// A fixture whose three counts are things a test can read straight off it: four people,
+    /// two groups, one veto. `@admins` is referenced by `mpa/admin`, `@staff` by nothing, which
+    /// is the state §13.35 §1 keeps its `referenced by nothing` sentence for, and bob's
+    /// `laptop` key is the key id the roster's filter is supposed to reach.
+    const SUBS: &str = r#"{ "version": 1,
+      "applications": [
+        { "name": "mpa", "base": ["https://app.x.com/mpa"],
+          "scopes": [
+            { "name": "admin", "urls": ["https://app.x.com/mpa/admin/*"], "access": "restricted",
+              "groups": ["@admins"] }
+          ] }
+      ],
+      "user_groups": {
+        "admins": ["8f14e45f-ceea-467a-9f79-3b4e5c6d7a8b",
+                   "22222222-2222-4222-8222-222222222222"],
+        "staff": ["33333333-3333-4333-8333-333333333333"]
+      },
+      "denied": ["spammer@x.com"],
+      "users": [
+        { "uuid": "8f14e45f-ceea-467a-9f79-3b4e5c6d7a8b", "emails": ["Bob@X.com"],
+          "api_keys": [ { "id": "laptop",
+            "key_hash": "1111111111111111111111111111111111111111111111111111111111111111",
+            "released": "1970-01-01", "duration": "1d" } ] },
+        { "uuid": "11111111-1111-1111-1111-111111111111", "emails": ["nowhere@x.com"] },
+        { "uuid": "22222222-2222-4222-8222-222222222222", "emails": ["you@x.com"] },
+        { "uuid": "33333333-3333-4333-8333-333333333333", "emails": ["suspended@x.com"] }
+      ]
+    }"#;
+
+    /// Bob's row and the enrolled-nothing row, as the per-row Remove action spells them: the
+    /// action only a roster table renders, so it says "this row is in the table" rather than
+    /// "this address is mentioned somewhere on the page".
+    const BOB_RM: &str = "/users/8f14e45f-ceea-467a-9f79-3b4e5c6d7a8b/rm";
+    const NOWHERE_RM: &str = "/users/11111111-1111-1111-1111-111111111111/rm";
+
+    /// Serve `fixture` and `GET` `path` as the fixture's administrator, with `lang` as the
+    /// browser's language cookie. The sub-pages are reached **by URL**, so these tests go over a
+    /// socket: [`render_of`]'s match is over the routes the code has, and `Route::Groups` is not
+    /// one of them yet, which makes a rendering helper that named it a compile error.
+    fn console_page(name: &str, fixture: &str, path: &str, lang: &str) -> (u16, String) {
+        let file = scratch(name, fixture);
+        let port = serve(&file, "");
+        let mut r = get_with_secret(format!("http://127.0.0.1:{port}{path}"))
+            .header(IDENTITY_HEADER, "admin@x.com")
+            .header("Cookie", lang)
+            .call()
+            .expect("a response");
+        let out = (
+            r.status().as_u16(),
+            r.body_mut().read_to_string().expect("utf-8"),
+        );
+        cleanup(&file);
+        out
+    }
+
+    /// The sub-tab row of a rendered page: its `nav` and the links inside it, in document order.
+    fn sub_tabs(html: &str) -> (String, Vec<String>) {
+        let navs = elements(html, r#"<nav class="sub""#, "</nav>");
+        assert_eq!(
+            navs.len(),
+            1,
+            "a users sub-page carries exactly one row of sub-tabs"
+        );
+        let nav = navs[0].clone();
+        let links = elements(&nav, "<a ", "</a>");
+        (nav, links)
+    }
+
+    /// Thirty roster rows whose emails start with `prefix`, numbered from `from` at the uuid.
+    ///
+    /// The uuid is spelled in decimal digits on purpose: a hex uuid carries `a` to `f`, so a
+    /// filter typed as a single letter would reach rows the test did not count, and the pager's
+    /// "30 of 60" would be the wrong numbers.
+    fn lettered(prefix: &str, from: usize) -> String {
+        (0..30)
+            .map(|i| {
+                format!(
+                    r#"{{ "uuid": "{:08}-0000-4000-8000-000000000000",
+                          "emails": ["{}{i:02}@x.com"] }}"#,
+                    from + i,
+                    prefix
+                )
+            })
+            .collect::<Vec<_>>()
+            .join(",")
+    }
+
     #[test]
-    fn each_list_on_the_users_page_filters_on_its_own() {
-        // Three lists, three namespaces: filtering the roster must not touch the groups.
-        let html = render_of("ns", SAMPLE, Route::Users, "uq=nowhere");
-        // The per-row Remove action is what only the roster table renders, so it is what
-        // distinguishes "in the table" from "mentioned elsewhere on the page".
-        assert!(html.contains("/users/11111111-1111-1111-1111-111111111111/rm"));
+    fn route_maps_the_three_sub_pages() {
+        // §13.36 §1: People, Groups and Denied are three pages under the one Users tab, and the
+        // three URLs already exist, so none of them moves. Every assertion runs through `path()`,
+        // `tab()` and `title()` rather than naming `Route::Groups`: a test that named a variant
+        // the code does not have is a compile error that reddens the whole target, which says
+        // nothing about the route.
+        let groups = route("/groups", "").expect("/groups is a page");
+        assert_eq!(
+            groups.path(),
+            "/groups",
+            "the groups list is its own route, not `Route::Users` wearing the URL"
+        );
+        assert_eq!(
+            route(&groups.path(), ""),
+            Some(groups.clone()),
+            "path() and route() are inverses"
+        );
+        assert_eq!(
+            groups.tab(),
+            Route::Users,
+            "and it still lights the Users tab, the bar keeps five tabs"
+        );
+        assert_eq!(
+            groups.title(),
+            "user_groups",
+            "and names the section it edits"
+        );
+
+        let people = route("/users", "").expect("People is the tab's default");
+        assert_eq!(
+            people.path(),
+            "/users",
+            "the bar's Users tab still lands here"
+        );
+        assert_eq!(people.title(), "users");
+
+        let denied = route("/denied", "").expect("Denied is a page");
+        assert_eq!(denied, Route::Denied, "and its route does not move either");
+        assert_eq!(denied.tab(), Route::Users);
+        assert_eq!(denied.title(), "denied");
+
+        // The group forms already live under /groups and stay there. Their `parent()` is the
+        // group list, because that is the page that shows the group a form just changed.
+        for at in [
+            Route::GroupAdd,
+            Route::GroupEdit("admins".to_string()),
+            Route::GroupRm("admins".to_string()),
+        ] {
+            assert_eq!(
+                route(&at.path(), ""),
+                Some(at.clone()),
+                "{at:?} round-trips"
+            );
+            assert_eq!(at.tab(), Route::Users, "{at:?} lights the Users tab");
+            assert_eq!(at.title(), "user_groups", "{at:?} edits user_groups");
+            assert_eq!(
+                at.parent().path(),
+                "/groups",
+                "{at:?} is reached from, and cancels back to, the group list"
+            );
+        }
+        assert_eq!(Route::GroupAdd.path(), format!("/groups/{ACTION_ADD}"));
+    }
+
+    #[test]
+    fn each_users_sub_page_carries_the_three_sub_tabs_with_counts() {
+        // §13.36 §1: the same row of three sub-tabs on all three pages, each naming its section
+        // and its **whole** count, the current one marked the bar's way, because `.on` is a
+        // colour and colour alone is not a distinction WCAG 1.3.1 accepts.
+        for (path, current) in [("/users", 0), ("/groups", 1), ("/denied", 2)] {
+            let (status, html) = console_page("subs-tabs", SUBS, path, "lang=en");
+            assert_eq!(status, 200, "{path} is a page");
+            let (nav, links) = sub_tabs(&html);
+            assert_eq!(
+                attr(&nav, "aria-label").as_deref(),
+                Some(SUBNAV_EN),
+                "a page with more than one navigation landmark names each one: {nav}"
+            );
+            assert_eq!(
+                links
+                    .iter()
+                    .map(|a| attr(a, "href").unwrap_or_default())
+                    .collect::<Vec<_>>(),
+                ["/users", "/groups", "/denied"],
+                "three links, in this order: {nav}"
+            );
+            assert_eq!(
+                links.iter().map(|a| visible_text(a)).collect::<Vec<_>>(),
+                [
+                    format!("{PEOPLE_EN} (4)"),
+                    format!("{GROUPS_TAB_EN} (2)"),
+                    format!("{} (1)", t(Lang::En, K::Denied)),
+                ],
+                "the section's short word and its count, as one text node: {nav}"
+            );
+            assert_eq!(
+                attr(&links[1], "id").as_deref(),
+                Some("user_groups"),
+                "so the old `/users#user_groups` bookmark scrolls to the link that means it"
+            );
+            assert_eq!(
+                attr(&links[2], "id").as_deref(),
+                Some("denied"),
+                "and `/users#denied` does the same: {nav}"
+            );
+            let on: Vec<usize> = (0..links.len())
+                .filter(|i| links[*i].contains(r#"aria-current="page""#))
+                .collect();
+            assert_eq!(
+                on,
+                [current],
+                "exactly one sub-tab says you are here: {nav}"
+            );
+            assert!(
+                links[current].contains(r#"class="pill on""#),
+                "and the current one is marked in the markup, not only to a reader: {}",
+                links[current]
+            );
+        }
+
+        // The words in Italian, which is where a table that grew one column shows up.
+        let (_, html) = console_page("subs-tabs-it", SUBS, "/groups", "lang=it");
+        let (nav, links) = sub_tabs(&html);
+        assert_eq!(
+            attr(&nav, "aria-label").as_deref(),
+            Some(SUBNAV_IT),
+            "{nav}"
+        );
+        assert_eq!(
+            links.iter().map(|a| visible_text(a)).collect::<Vec<_>>(),
+            [
+                format!("{PEOPLE_IT} (4)"),
+                format!("{GROUPS_TAB_IT} (2)"),
+                format!("{} (1)", t(Lang::It, K::Denied)),
+            ],
+            "{nav}"
+        );
+    }
+
+    #[test]
+    fn each_sub_page_shares_the_tabs_h1_and_names_its_own_section() {
+        // §13.36 §1 "One shape for all three pages": the `h1` is the tab's word on all three, so
+        // the page says which tab it is under. The section's `h2` is the **section's** word, which
+        // for Groups is the long one: §1 item 3 says "Groups' is `User groups user_groups`", and
+        // the reason sits beside the sub-tab's rule, "`GroupsTab` is not `K::Groups` ... the row
+        // must fit a phone, **and the section's `h2` spells the name out**". So People's `h2` does
+        // repeat its sub-tab (`K::People`, the design's own choice, "the sub-tab's word and the
+        // heading it lands on are the same word"), and Groups' deliberately does not.
+        // `page_denied`'s own `h1` goes, because the shared one is now "Users".
+        for (path, heading) in [
+            ("/users", format!("{PEOPLE_EN} users")),
+            ("/groups", format!("{} user_groups", t(Lang::En, K::Groups))),
+            ("/denied", format!("{} denied", t(Lang::En, K::Denied))),
+        ] {
+            let (_, html) = console_page("subs-shape", SUBS, path, "lang=en");
+            let doc = account_readable(&html);
+            let h1 = elements(&doc, "<h1", "</h1>");
+            assert_eq!(h1.len(), 1, "one `h1` on a sub-page: {doc}");
+            assert_eq!(
+                visible_text(&h1[0]),
+                t(Lang::En, K::Users),
+                "{path} says which tab it is under"
+            );
+            let h2 = elements(&doc, "<h2", "</h2>");
+            assert_eq!(
+                visible_text(&h2[0]),
+                heading,
+                "{path} heads its own section: {doc}"
+            );
+        }
+
+        // The roster's lede describes the roster and nothing else, so it moved down to People and
+        // is wrong on the other two.
+        let intro = t(Lang::En, K::UsersIntro);
+        let needle: &str = intro;
+        let (_, html) = console_page("subs-lede", SUBS, "/users", "lang=en");
         assert!(
-            !html.contains("/users/8f14e45f-ceea-467a-9f79-3b4e5c6d7a8b/rm"),
+            html.contains(needle),
+            "People keeps the sentence about the roster"
+        );
+        for path in ["/groups", "/denied"] {
+            let (_, html) = console_page("subs-lede", SUBS, path, "lang=en");
+            let doc = account_readable(&html);
+            assert!(!doc.contains(needle), "{path} is not the roster: {doc}");
+        }
+    }
+
+    #[test]
+    fn the_users_sub_page_shows_only_its_own_list() {
+        // §13.36 §1: the stacked page is gone. A long file opens on the list the operator came
+        // for, and `groups_section` and `denied_list` are no longer rendered on `/users`.
+        //
+        // Every check runs on [`the_main`], the page's own column, and not on the document: every
+        // page of this console inlines the three stylesheets, and `admin.css`'s comments are prose
+        // about the code they document, so the bytes of a page that shows no roster carry the word
+        // `api_keys` anyway (and the bar's account menu names the caller, links to the caller's
+        // person page, and repeats the tab links). The claim here is about the **list area**, so
+        // that is what gets read.
+        let (_, html) = console_page("subs-only-users", SUBS, "/users", "lang=en");
+        let main = the_main(&html);
+        assert!(main.contains(NOWHERE_RM), "the roster is here: {main}");
+        for gone in [
+            "@admins",
+            "spammer@x.com",
+            &format!("/groups/{ACTION_ADD}"),
+            &format!("/denied/{ACTION_ADD}"),
+        ] {
+            assert!(
+                !main.contains(gone),
+                "the groups and the veto have their own page now, so {gone} is not on the \
+                 roster's page: {main}"
+            );
+        }
+
+        let (_, html) = console_page("subs-only-groups", SUBS, "/groups", "lang=en");
+        let main = the_main(&html);
+        assert!(
+            main.contains("/groups/staff/edit"),
+            "the groups are here: {main}"
+        );
+        for gone in ["api_keys", "/users/", "spammer@x.com"] {
+            assert!(
+                !main.contains(gone),
+                "no roster and no veto on the group list, so {gone} is not here: {main}"
+            );
+        }
+
+        let (_, html) = console_page("subs-only-denied", SUBS, "/denied", "lang=en");
+        let main = the_main(&html);
+        assert!(main.contains("spammer@x.com"), "the veto is here: {main}");
+        for gone in ["api_keys", "/users/", "@admins"] {
+            assert!(
+                !main.contains(gone),
+                "no roster and no groups on the veto page, so {gone} is not here: {main}"
+            );
+        }
+    }
+
+    #[test]
+    fn group_writes_land_on_the_group_or_the_list() {
+        // §13.36 §1's PRG table: a form lands where its object is shown. The table's add and
+        // edit rows name `/groups/{name}`, which is the group's **own page** (slice B of plan
+        // step 22); this slice moves the three writes off `/users` and nothing more, so all
+        // three land on the group list, and when the group page arrives the add and edit rows
+        // below move to `/groups/staff?msg=…` and nothing else here changes.
+        let path = scratch("group-prg", SUBS);
+        let cfg = cfg_for(&path, "");
+        let got = post(
+            &cfg,
+            Route::GroupAdd,
+            &[
+                ("rev", &rev_of(&path)),
+                ("name", "newest"),
+                ("members", "you@x.com"),
+            ],
+        );
+        assert_eq!(got.location(), "/groups?msg=group-added");
+        let got = post(
+            &cfg,
+            Route::GroupEdit("staff".to_string()),
+            &[
+                ("rev", &rev_of(&path)),
+                ("name", "staff"),
+                ("members", "suspended@x.com"),
+            ],
+        );
+        assert_eq!(got.location(), "/groups?msg=group-saved");
+        let got = post(
+            &cfg,
+            Route::GroupRm("newest".to_string()),
+            &[("rev", &rev_of(&path))],
+        );
+        assert_eq!(got.location(), "/groups?msg=group-removed");
+        // The veto already lands where its list is, and stays: §1's table calls it unchanged.
+        let got = post(
+            &cfg,
+            Route::DenyAdd,
+            &[("rev", &rev_of(&path)), ("email", "nasty@x.com")],
+        );
+        assert_eq!(got.location(), "/denied?msg=denied-added");
+        let got = post(
+            &cfg,
+            Route::DenyRm("nasty@x.com".to_string()),
+            &[("rev", &rev_of(&path))],
+        );
+        assert_eq!(got.location(), "/denied?msg=denied-removed");
+        cleanup(&path);
+    }
+
+    #[test]
+    fn each_list_filters_on_its_own_and_the_sub_tab_count_stays_whole() {
+        // Three lists, three namespaces, now on three pages. The filter of one page is nobody
+        // else's, and the sub-tab's number is the **file's**, never the filtered one, so the row
+        // does not move under the person's hands while they type (§13.36 §1).
+        let (_, html) = console_page("ns-users", SUBS, "/users?uq=nowhere", "lang=en");
+        assert!(html.contains(NOWHERE_RM), "the roster is narrowed: {html}");
+        assert!(
+            !html.contains(BOB_RM),
             "the roster row for bob is filtered out: {html}"
         );
-        // Bob is still on the page, in the groups section, which this filter never touched.
-        assert!(html.contains("@admins"), "the groups list is not: {html}");
-        assert!(html.contains("bob@x.com"), "as a group member: {html}");
-        assert!(html.contains("spammer@x.com"), "nor is denied: {html}");
+        let (_, links) = sub_tabs(&html);
+        assert_eq!(
+            visible_text(&links[0]),
+            format!("{PEOPLE_EN} (4)"),
+            "and the count beside the tab is the file's, not the narrowed one"
+        );
+
+        let (_, html) = console_page("ns-groups", SUBS, "/groups?uq=staff", "lang=en");
+        assert!(
+            html.contains("@admins"),
+            "the roster's parameter does not reach the group list: {html}"
+        );
+        let (_, html) = console_page("ns-groups-g", SUBS, "/groups?gq=staff", "lang=en");
+        assert!(html.contains("@staff"), "the group list's own does: {html}");
+        assert!(!html.contains("@admins"), "and narrows it to one: {html}");
+
+        let (_, html) = console_page("ns-denied", SUBS, "/denied?dq=spammer", "lang=en");
+        assert!(
+            html.contains("spammer@x.com"),
+            "the veto list's own: {html}"
+        );
+        let (_, html) = console_page("ns-denied-none", SUBS, "/denied?dq=nobodyatall", "lang=en");
+        assert!(
+            html.contains(t(Lang::En, K::NoMatch)),
+            "and a veto filter that matches says so: {html}"
+        );
+    }
+
+    #[test]
+    fn the_roster_filter_reaches_the_uuid_and_a_key_id() {
+        // §13.36 §4: the reach is already uuid and key id, what was never pinned is the reach,
+        // and what is missing is that nobody can read it off a box that says "filter".
+        for q in ["uq=8f14e45f", "uq=laptop"] {
+            let (_, html) = console_page("roster-reach", SUBS, &format!("/users?{q}"), "lang=en");
+            assert!(
+                html.contains(BOB_RM),
+                "{q} keeps the row it matches: {html}"
+            );
+            assert!(!html.contains(NOWHERE_RM), "{q} keeps nothing else: {html}");
+        }
+        for (lang, words) in [("lang=en", FILTER_PEOPLE_EN), ("lang=it", FILTER_PEOPLE_IT)] {
+            let (_, html) = console_page("roster-box", SUBS, "/users", lang);
+            let box_tag = field_tag(&html, "uq");
+            assert_eq!(
+                attr(&box_tag, "placeholder").as_deref(),
+                Some(words),
+                "the box says what it searches: {box_tag}"
+            );
+            assert_eq!(
+                attr(&box_tag, "aria-label").as_deref(),
+                Some(words),
+                "and the visible hint and the name are one string, which is what makes WCAG \
+                 2.5.3 Label in Name true by construction: {box_tag}"
+            );
+        }
+    }
+
+    #[test]
+    fn the_pager_says_which_rows_of_how_many() {
+        // §13.36 §4: one sentence in the shared control says what two fragments said, with the
+        // text in front of the two buttons, because between them the Italian sentence was
+        // squeezed into a column one word wide at 320px.
+        //
+        // The sentence is read out of the whole `div.listctl` and not out of the `span.pager`:
+        // the pager holds two nested spans, and `elements` cuts at the first `</span>`, so a
+        // slice of the pager alone silently loses the buttons standing beside the words.
+        let ctl_text = |html: &str| -> String {
+            let ctl = elements(html, r#"<div class="listctl""#, "</div>");
+            assert_eq!(ctl.len(), 1, "one list, so one control row: {html}");
+            visible_text(&ctl[0])
+        };
+        let (prev, next) = (
+            format!("← {}", t(Lang::En, K::PagePrev)),
+            format!("{} →", t(Lang::En, K::PageNext)),
+        );
+
+        let big = many_users(60);
+        let (_, html) = console_page("pager-p1", &big, "/users", "lang=en");
+        let text = ctl_text(&html);
+        assert!(
+            text.contains("rows 1–25 of 60"),
+            "the first row's number, the last's, and how many matched: {text}"
+        );
+        assert!(
+            text.find("rows 1–25 of 60") < text.find(&prev),
+            "the words come before the two controls, so a narrow column breaks the sentence \
+             under the buttons rather than between the words: {text}"
+        );
+        assert!(
+            text.contains(&next),
+            "and the second control follows: {text}"
+        );
+        assert!(
+            !text.contains("1/3"),
+            "the sentence replaces the `page n/m` fragment: {text}"
+        );
+
+        let (_, html) = console_page("pager-p3", &big, "/users?up=3", "lang=en");
+        let text = ctl_text(&html);
+        assert!(
+            text.contains("rows 51–60 of 60"),
+            "the last page says where it stops: {text}"
+        );
+
+        // Thirty of the sixty carry a letter the other thirty have not got, so the filter that
+        // matches 30 of 60 is one query string away, and the sentence names both numbers.
+        let halves = format!(
+            r#"{{ "version": 1, "applications": [], "users": [{},{}] }}"#,
+            lettered("a", 0),
+            lettered("b", 30)
+        );
+        let (_, html) = console_page("pager-filtered", &halves, "/users?uq=a", "lang=en");
+        let text = ctl_text(&html);
+        assert!(
+            text.contains("rows 1–25 of 30 (filtered from 60)"),
+            "the filtered sentence, which replaces the bare `matched/total` span: {text}"
+        );
+        assert!(!text.contains("30/60"), "{text}");
+
+        // Nothing to count on a page that shows every row, and nothing to count when no row
+        // matches: the panel's own sentence already says that.
+        let (_, html) = console_page("pager-one-page", SUBS, "/denied", "lang=en");
+        assert!(
+            !html.contains("rows 1–1 of 1"),
+            "one unfiltered page needs no count, and the sub-tab says the total: {html}"
+        );
+        let (_, html) = console_page("pager-none", &big, "/users?uq=nobodyatall", "lang=en");
+        assert!(
+            !ctl_text(&html).contains("rows 1–"),
+            "no matching row, so no count: {html}"
+        );
+
+        // Italian, with the same order.
+        let (_, html) = console_page("pager-it", &big, "/users", "lang=it");
+        let text = ctl_text(&html);
+        assert!(
+            text.contains("righe 1–25 di 60"),
+            "the same sentence in the reader's language: {text}"
+        );
+        assert!(
+            text.find("righe 1–25 di 60") < text.find(&format!("← {}", t(Lang::It, K::PagePrev))),
+            "and in front of the controls there too: {text}"
+        );
+    }
+
+    #[test]
+    fn the_dashboard_count_of_groups_links_to_the_group_list() {
+        // §13.36 §1 "Old links": a count row points at the page that shows what it counts.
+        let html = render_of("dash-cards", SUBS, Route::Dashboard, "");
+        let cards = elements(&html, r#"<a class="card""#, "</a>");
+        for (label, href) in [
+            ("user_groups", "/groups"),
+            (">users<", "/users"),
+            ("denied", "/denied"),
+        ] {
+            let card = cards
+                .iter()
+                .find(|c| c.contains(label))
+                .unwrap_or_else(|| panic!("the dashboard counts {label}: {html}"));
+            assert_eq!(
+                attr(open_tag(card), "href").as_deref(),
+                Some(href),
+                "the `{label}` card links the page that lists it: {card}"
+            );
+        }
+    }
+
+    #[test]
+    fn the_sub_tab_row_and_the_pager_wrap() {
+        // §13.36 §1 and §4, both measured. The bar's `nav:not(.acct){flex-wrap:nowrap;
+        // min-width:max-content}` matches any `nav`, so it reaches the row inside the page as
+        // well, and at 320px with four-digit counts that row was 17px wider than the column.
+        let rule = the_rule(CSS, "main nav.sub").expect("admin.css gives the sub-tab row a rule");
+        for want in ["flex-wrap:wrap", "min-width:0", "margin:0 0 18px"] {
+            assert!(rule.contains(want), "the sub-tab row needs {want}: {rule}");
+        }
+        let rule = the_rule(CSS, ".listctl .pager").expect("admin.css styles the pager");
+        assert!(
+            rule.contains("flex-wrap:wrap"),
+            "the pager sentence wraps under its own buttons, which is what keeps 320px free of \
+             sideways scroll: {rule}"
+        );
     }
 
     #[test]
@@ -20834,8 +21546,9 @@ mod tests {
             Route::GroupRm("unused".to_string()),
             &[("rev", &rev_of(&path))],
         );
-        // Back to the users page, which is where the group list lives.
-        assert_eq!(got.location(), "/users?msg=group-removed");
+        // Back to the groups page: §13.36 §1's PRG table puts a group removal's `303` at
+        // `/groups`, because that is the page that shows the list the form just changed.
+        assert_eq!(got.location(), "/groups?msg=group-removed");
         let doc = bb_auth_core::read_access_file(&path).unwrap();
         assert!(!doc.user_groups.contains_key("unused"));
         assert!(doc.user_groups.contains_key("admins"));
@@ -23354,6 +24067,7 @@ mod tests {
             (Route::App(mpa()), false),
             (Route::Denied, false),
             (Route::Users, false),
+            (Route::Groups, false),
             (Route::User(bob.clone()), false),
             (Route::Audit, false),
             (Route::Config, false),
@@ -23470,12 +24184,13 @@ mod tests {
                 Route::GroupRm(_) => 26,
                 Route::DenyAdd => 27,
                 Route::DenyRm(_) => 28,
+                Route::Groups => 29,
             }
         }
         let routes = account_every_route();
         let seen: std::collections::HashSet<usize> =
             routes.iter().map(|(r, _)| variant(r)).collect();
-        let missing: Vec<usize> = (0..=28).filter(|i| !seen.contains(i)).collect();
+        let missing: Vec<usize> = (0..=29).filter(|i| !seen.contains(i)).collect();
         assert!(
             missing.is_empty(),
             "account_every_route must name every Route variant, and it is missing {missing:?}"

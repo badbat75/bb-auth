@@ -21,7 +21,12 @@ async function run(ctx, t) {
     await page.fill('input[name=name]', 'testgrp');
     await page.fill('textarea[name=members]', 'you@example.com');
     await submit(page);
-    t.check('group add lands on the users page via PRG', page.url().endsWith('/admin/users?msg=group-added'), page.url());
+    // §13.36 §1: a group write lands where its object is shown, which is now the group list and
+    // not the roster's page. Slice B adds the group's own page, and then the add and the edit
+    // land on `/admin/groups/testgrp?msg=` (the page that shows the membership the form just
+    // wrote); the removal stays here, because the group it named is gone.
+    t.check('group add lands on the group list via PRG',
+      page.url().endsWith('/admin/groups?msg=group-added'), page.url());
     t.check('and shows the flash', (await page.locator('.flash').innerText()).includes('group added'));
     t.eq('group add resolves the email to the uuid the file stores', doc(ctx).user_groups.testgrp, [YOU]);
     await t.shot(page, 'group-added');
@@ -29,13 +34,15 @@ async function run(ctx, t) {
     await page.goto(ctx.base + '/groups/testgrp/edit');
     await page.fill('textarea[name=members]', 'you@example.com\nbot@example.com');
     await submit(page);
-    t.check('group edit redirects with msg=group-saved', page.url().endsWith('?msg=group-saved'), page.url());
+    t.check('group edit lands on the group list with msg=group-saved',
+      page.url().endsWith('/admin/groups?msg=group-saved'), page.url());
     t.eq('group edit rewrites the membership', doc(ctx).user_groups.testgrp, [YOU, BOT]);
 
     await page.goto(ctx.base + '/groups/testgrp/rm');
     t.check('group rm is a confirm page with a form', (await page.locator('main form').count()) >= 1);
     await submit(page);
-    t.check('group rm redirects with msg=group-removed', page.url().endsWith('?msg=group-removed'), page.url());
+    t.check('group rm lands on the group list with msg=group-removed',
+      page.url().endsWith('/admin/groups?msg=group-removed'), page.url());
     t.check('group rm deletes the group', !('testgrp' in doc(ctx).user_groups));
 
     // Removing @admins must be refused: app1/admin references it, and a dangling

@@ -105,8 +105,9 @@ async function menuClosesOutside(t, page, who, apply) {
 async function run(ctx, t) {
   const { context, page } = await newPage(ctx);
   try {
-    // Zero scripts, sampled across page shapes: dashboard, list, form.
-    for (const p of ['/', '/users', '/apps', '/apps/app1', '/audit', '/users/b3f1c8a2-4e77-4f1a-9c0d-1e2f3a4b5c6d/keys/+add']) {
+    // Zero scripts, sampled across page shapes: dashboard, list, form. The users tab's three
+    // sub-pages are each a page shape of their own now (§13.36 §1), so all three are sampled.
+    for (const p of ['/', '/users', '/groups', '/denied', '/apps', '/apps/app1', '/audit', '/users/b3f1c8a2-4e77-4f1a-9c0d-1e2f3a4b5c6d/keys/+add']) {
       await page.goto(ctx.base + p);
       t.eq(`no <script> on ${p}`, await page.locator('script').count(), 0);
       // And exactly one kind of handler, on exactly the two controls entitled to it.
@@ -647,8 +648,8 @@ async function run(ctx, t) {
     // A list's filter is a GET form, so it navigates with no script at all. This is the
     // whole reason filtering and paging live in the query string.
     await page.goto(ctx.base + '/users');
-    // Scoped to the roster's own control row: three lists share this page, and each one
-    // has to submit only its own two parameters.
+    // Scoped to the roster's own control row: the roster is the only list on this page now,
+    // and it submits only its own two parameters.
     const roster = '.listctl:has(input[name=uq])';
     await page.fill(`${roster} input[name=uq]`, 'bot@');
     await submit(page, `${roster} button`);
@@ -657,8 +658,38 @@ async function run(ctx, t) {
     t.check('and it narrows the roster', filtered.includes('bot@example.com'), filtered);
     t.check('dropping the rows it does not match',
       !filtered.includes('/users/8f14e45f'), filtered);
-    t.check('while the groups section beside it is untouched',
-      (await page.locator('h2:has-text("user_groups")').count()) === 1);
+
+    // The users tab's three sub-pages are plain links, so the row that moves between them is
+    // markup too, and marks the page it landed on (§13.36 §1). The words are **Italian**: this
+    // context is the scripting-off console walk, whose preferences walk picked `it` and whose
+    // bar-geometry walk ends on a `?lang=it` visit, so the server's cookie has said Italian for
+    // the rest of this block. The counts beside the words are the file's, never the filtered one,
+    // so they are the fixture's four people and two groups plus the **two** vetoes: the save
+    // above, "a save still writes with no script anywhere", added `noscript@example.com`.
+    const words = async (sel) => ((await page.locator(sel).count())
+      ? (await page.locator(sel).first().innerText()).replace(/\s+/g, ' ').trim() : '');
+    const trimmed = (a) => a.map((s) => s.replace(/\s+/g, ' ').trim());
+    await page.goto(ctx.base + '/users');
+    t.eq('this walk is in Italian, which is what the labels are read in',
+      await page.locator('html').getAttribute('lang'), 'it');
+    t.eq('the sub-tab row reads Persone, Gruppi, Bloccati with the file\'s counts',
+      trimmed(await page.locator('main nav.sub a').allInnerTexts()),
+      ['Persone (4)', 'Gruppi (2)', 'Bloccati (2)']);
+    t.eq('and marks the page it is standing on',
+      await words('main nav.sub a[aria-current="page"]'), 'Persone (4)');
+    for (const [href, mark] of [['/admin/groups', 'Gruppi (2)'],
+      ['/admin/denied', 'Bloccati (2)']]) {
+      const link = `main nav.sub a[href="${href}"]`;
+      if (!(await page.locator(link).count())) {
+        t.check(`the ${href} sub-tab is a link on the page`, false, 'no such link');
+        continue;
+      }
+      await Promise.all([page.waitForNavigation(), page.click(link)]);
+      t.check(`the ${href} sub-tab navigates with scripting off`,
+        page.url().endsWith(href), page.url());
+      t.eq('and marks the page it landed on',
+        await words('main nav.sub a[aria-current="page"]'), mark);
+    }
   } finally {
     await noJs.close();
   }
