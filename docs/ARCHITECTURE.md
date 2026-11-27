@@ -8468,8 +8468,8 @@ e2e, `e2e/tests/settings.js`:
 
 ##### 12g. Questions for the user (step 19), answered by the coordinator
 
-(Changed by §13.37 on 2026-11-27: the user reversed option (c); a mark that does not load now
-shows the brand's initial in a tile at 640px and below, with no script.)
+(On 2026-11-27 the user first asked for a placeholder, designed in §13.37, then withdrew it the
+same day: a logo that does not load is a configuration fault, so option (c) stands.)
 
 The user asked on 2026-11-27 for the plan to be carried to its end, with the decisions taken on
 the recommendations and reviewed afterwards. So both are taken as recommended, (a) for the first
@@ -8953,6 +8953,11 @@ The user confirmed all three later that day.
    designed (§3); the alternative makes it one click shorter to see the members as a table.
 
 ### 13.37 A placeholder where a broken logo left the phone's brand empty (plan step 23, designed 2026-11-27)
+
+**Not built: the user withdrew step 23 on 2026-11-27.** A logo that does not load is a
+configuration fault to fix where the URL is set, not a state worth designing for, so §13.34 §12g
+option (c) stands and a broken logo still leaves the phone's brand empty. The design below is kept
+as the record of what was considered.
 
 The user, on 2026-11-27, reversing the coordinator's choice of §13.34 §12g option (c): at 640px
 and below the bar hides the brand's words and keeps the mark (`ui.logo_url`), so a mark that does
