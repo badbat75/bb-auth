@@ -103,4 +103,22 @@ chose all four of the coordinator's suggestions that day:
   off); tests pin each; `node e2e/run.js` and `nojs.js` are green; the old `/users` anchors and
   the `/denied` route still land somewhere sensible; the designer has approved the
   screenshots; and the build runs on rpi-01 (the user gave the go-ahead for this deploy on
-  2026-11-27, before the work; no tag or GitHub release is part of it).
+  2026-11-27, before the work).
+- Then the third release candidate, which the user asked for on 2026-11-27: version 1.99.11,
+  its CHANGELOG heading, the full board on main, the packages, the deploy above, the push, the
+  `v1.99.11` tag and a GitHub pre-release (1.0.0 stays Latest), as for 1.99.10.
+
+### 23. Split `bb-auth-web.rs` into modules
+
+Covers: the user's request of 2026-11-27, after the third release candidate. The admin GUI is
+one file of about 40,300 lines, so any edit recompiles all of it, and that is a large part of
+why every test round of a slice is slow.
+
+- The architect designs the split in `docs/ARCHITECTURE.md`: the modules and what each owns
+  (routes, pages, forms, the `K` table, the account page, the tests beside what they test), what
+  stays in `main`, the order of moves, and how the claim "one file, read top to bottom" in
+  `AGENTS.md` changes. Behaviour must not change.
+- Done when: the code is moved in slices with no behaviour change; every slice keeps
+  `cargo test`, clippy, fmt, `cargo doc --no-deps` (no broken intra-doc link) and
+  `node e2e/run.js` green; an edit to one page's markup is measured to recompile faster than
+  before, with both times recorded; and `AGENTS.md` and the playbooks describe the new layout.
