@@ -20,9 +20,12 @@ Versions are the crate's (`Cargo.toml`); packages add a Debian revision
 * **Rollback**: safe by construction while the cookie format is unchanged, because sessions
   are stateless and no state is packaged. See "Rollback" in [README.md](README.md).
 
-## Unreleased
+## 1.99.9 (2026-11-27, release candidate of 2.0.0)
 
-Builds say 1.99.9 and their commit until the next release (plan W11).
+**Released on 2026-11-27 as `v1.99.9`, the release candidate of 2.0.0**, by the user's decision
+of 2026-11-26. Like `v1.99.8`, it is tagged and pushed to GitHub with its GitHub release marked
+pre-release (1.0.0 stays the latest release), and its packages are installed on rpi-01. It is
+the first release under the AGPL-3.0-or-later.
 
 **The cookie format stays `bb1` and the access-file format is untouched, so this upgrade logs
 nobody out.** The claims segment gains a key of the gate's own, and that segment names its keys,
@@ -472,7 +475,7 @@ three stylesheets are emitted by both HTML programs, so the gate's four pages, t
   same place: this URL is an `authenticated` scope, so "bb-auth has no roster row for you" is a
   page a real person reaches, not a defensive one. (That last half is history: plan step 13,
   2026-11-26, took that sentence out of the lede and deleted its key, so a caller with no row
-  now reads the addresses alone. See the Unreleased entry above.)
+  now reads the addresses alone. See the 1.99.9 entry above.)
 * **Each of the four sections says what it is for**, in a sub-line under its heading, and each
   empty state names what is missing ("You are in no group.", "Your sign-in opens no application
   yet.") where a bare "None." said only that something was absent. A profile claim the
