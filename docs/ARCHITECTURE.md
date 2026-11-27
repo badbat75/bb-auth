@@ -8240,3 +8240,243 @@ e2e:
    brand stays a link on the console": `brand_block` emits a `span.brand` on every surface, with
    no `href`, and `both_bars_name_the_deployment` pins a `span` (no `a.brand`) on the console too.
    The cost the designer named stands and is accepted: on a phone, home is the ☰ then Dashboard.
+
+#### 12. Step 19: how wide the brand may grow, and the broken logo (designed 2026-11-27)
+
+The designer's finding while reviewing step 17 (`PLAN.md` step 19): `.brand{max-width:14rem}`
+leaves the name 118px beside a logo at every width, so "BadBat75 Operations Console" reads
+"BadBat75 Op…" at 1280px with 180px of empty bar beside it; and a logo that answers `404` leaves
+the phone bar with no brand at all.
+
+What was looked at: `.brand`, `.brand .t`, `.brand img`, `nav.acct`, the 883, 884 and 640 blocks
+and `.selfserve-brand` in `src/assets/admin.css`; `top_bar` and `brand_block` in
+`src/bin/bb-auth-web.rs`; `brandStaysWhole` and `barAtTheWorstWidth` in `e2e/tests/settings.js`,
+`barStaysOneRow` in `e2e/lib/harness.js`, the `header-logo` scene of `e2e/shots.js`.
+
+##### 12a. What the measurements found (step 19)
+
+`/tmp/d19/probe.js` (boots the e2e server, rules injected, `CAND=<name>`): the console (`/users`)
+and `/account/`, 1400 down to 320 (1px steps from 900 to 600 and below 400, 4px or 6px
+elsewhere), EN and IT, "Ada" and "Bartholomew-Alexander Montgomery", eight brands: `bb-auth`,
+"BadBat75 Estate Services" (24 characters), "BadBat75 Operations Console" (27) and a 47-character
+one, each with no logo and with a working 120x36 SVG logo. Light and dark give the same numbers.
+Results: `/tmp/d19/{today,F,F2}.txt`; the final rules' walk is printed by `CAND=G`.
+
+1. **Today, the cap is the only thing that cuts a 24 or 27-character brand with a logo above the
+   breakpoint.** At 1280 in English with "Ada" the bar has 202px free and the name is cut at
+   118px of 224 (`opslogo`); the cut lasts from 1400 down to 884 at every width.
+2. **It also breaks "one row" on `/account/`, which nobody had measured.**
+   `.selfserve-brand{flex-wrap:wrap}` wraps the name under the logo as soon as the cap is reached:
+   with "BadBat75 Estate Services" and a logo the account bar is 58px tall instead of 36 at every
+   width from 1400 to 641 (`/tmp/d19/today-acct-longlogo-1280.png`). The wrap's comment says it
+   is there for "the name and the id", and the id has not been in the brand slot since §13.28.
+3. **A broken logo is a 0x30 box in Chromium** (`/tmp/d19/broken.js`): `img alt=""` that fails
+   to load renders nothing, so above 640 the name stands alone (harmless) and at 640 and below
+   the clip rule `.brand:has(img) .t` still hides the words, because the `img` element is still
+   there: an empty brand on the console, on `/account/` and on the `403`.
+4. **The e2e walks measure a broken logo, not a logo.** `barAtTheWorstWidth` and `account.js`
+   set `logo_url:'/img/logo.png'`, which the test server answers with `404`, and the comment says
+   "a broken image is sized by its CSS box"; measured, that box is 0px wide, so the "worst case"
+   those walks assert is 106px easier than the one §10a measured with a real image.
+
+##### 12b. The design: the brand takes the room the bar has, up to a budget the rest keeps (step 19)
+
+The order the bar gives way in stays §13.28 §4's: the name pill first, then the brand's words,
+never a tab or the logo. What changes is **how wide the brand may be when nothing is short**.
+A fixed `14rem` was a guess at "the longest brand worth reading"; the room the bar actually has
+is a fact about the bar, so the cap is written as the bar's width minus what everything else in
+the row needs. A percentage `max-width` on a flex item resolves against the flex container's
+content box, here `.bar`'s
+(<https://developer.mozilla.org/en-US/docs/Web/CSS/max-width>), and `max()` and `calc()` mix
+`rem` and `%` (<https://developer.mozilla.org/en-US/docs/Web/CSS/max>).
+
+There are three budgets, one per shape of the row:
+
+| Bar | What else is in the row | Brand `max-width` |
+|---|---|---|
+| `/account/` and the `403` (no tabs), every width | the empty tab `nav` (two 20px gaps) and a name pill of at least 128px | `max(14rem, 100% - 10.5rem)` |
+| console, 883px and below (☰) | the ☰ (30px), two gaps, a name pill of at least 128px | `max(14rem, 100% - 12.5rem)` |
+| console, 884px and up (tabs in the bar) | the five Italian tabs (455px), two gaps, a name pill of at least 133px | `calc(100% - 39.25rem)` |
+
+`39.25rem` is not a new measurement but today's own geometry at the breakpoint: at 884 the bar's
+content box is 852px, and `852 - 628 = 224px = 14rem`, the brand box §10a measured the
+breakpoint with. So **the 883/884 breakpoint stays, by construction**: at 884 every number is
+today's, and above it every pixel the bar gains goes to the brand until the brand is whole, while
+the tabs and the name pill keep exactly what they had at 884 (the pill never under 133px in
+Italian with the long name; more in English, whose tabs are narrower). `max(14rem, …)` keeps
+today's cap wherever the arithmetic would give less, which is the phone widths, so a phone keeps
+today's proportional split and its numbers (long brand, long name, 320: brand 131px, pill 121px,
+unchanged). The console's two rules are selected with `.bar:has(nav.tabs a)`, the tab links
+existing in the markup whether or not the strip is displayed (`:has()` matches the tree, not the
+rendering, <https://developer.mozilla.org/en-US/docs/Web/CSS/:has>); the stylesheet already
+depends on `:has()` for `.brand:has(img)`.
+
+Above the breakpoint the brand does not shrink at all (`flex-shrink:0`): the budget already
+reserves the pill's floor, so the brand never needs to give there, and letting it share the
+shortfall in proportion cost it 1px, which is an ellipsis on a name with room (measured: "BadBat75
+Operations Consol…" at 1280 with the long given name). That makes `nav.acct{flex-shrink:100}`
+redundant, since the strip cannot shrink (`min-width:max-content`) and the ☰ is not displayed, so
+the account end is the only item left that can; it goes, and `.brand{flex-shrink:0}` takes its
+place in the 884 block as the sentence "the account end gives way first".
+
+What a person sees with the final rules (`CAND=G`, light and dark, EN and IT):
+
+- "BadBat75 Operations Console" with a logo is whole on the console from about 990px up with "Ada" (the cap reaches its 330px box at a 958px bar), and
+  at 1024 and 1280 with the long given name too (which is then cut to "Bartholome…", 143px in
+  Italian: the pill gives first, as promised, where today the brand gave at 118px while the pill
+  kept 249px). Below that, down to 884, it is cut exactly as today.
+- "BadBat75 Estate Services" with a logo: whole on the console from about 958px up, whole on `/account/`
+  at every width above 640, and the account bar is one row again.
+- The 47-character brand: whole on `/account/` above the ☰ widths; on the console capped at 340px
+  (1024px and up), because the budget assumes the Italian tabs and the long name. That brand is
+  the one case still cut with room to spare (86px in English with "Ada").
+- One row and no sideways scroll at every width from 1400 to 320, on both surfaces, both
+  languages, both themes, with and without a logo; the pill's smallest width above the
+  breakpoint is 133px, as today.
+
+Screenshots: `/tmp/d19/stack-desktop.png` (today against the design: console at 1280 with "Ada" and
+with the long name, 1024 dark, 884; `/account/` at 1280 and 700 dark) and the single bars
+`/tmp/d19/s-<case>-{today,G,G2}-{light,dark}-<width>.png`.
+
+##### 12c. The broken logo: on a phone the words stay and the mark goes (step 19)
+
+**Recommendation (open question 1): at 640px and below, hide the logo and show the words**, which
+truncate with their ellipsis like any brand with no logo; above 640 nothing changes. The words
+come from the settings file and are rendered by this program, so they are always there; the mark
+comes from another host, and the invariant for the pages this estate serves is that they are
+complete without a second host answering (`ui.logo_url` "is equally optional"). A brand that
+exists on a phone only if another host is up is that rule broken in the bar. The clip rule
+`.brand:has(img) .t` goes, and with it the only case in which the words were visually hidden, so
+the `img` keeps `alt=""` on every width and a reader hears the name once, from the words
+(decorative image beside its own text, <https://www.w3.org/WAI/tutorials/images/decorative/>).
+Measured (`CAND=F2`): the live "BadBat75" reads whole at 360 and 320 with or without a working
+logo (`/tmp/d19/stack-phone.png`); a broken logo now shows "BadBat75" on the console and on
+`/account/` where today it showed nothing.
+
+The cost, said plainly: rpi-01's phone bar changes from the red mark to the word "BadBat75", and a
+long brand with a logo is now cut on a phone where the mark used to stand whole ("BadBat75
+Operations Console" at 320: cut at 196px of 224 beside "Ada", whose pill falls from 58px to 50px;
+the 47-character brand drops the "Ada" pill to 34px, which is what a 47-character brand with no
+logo already does today). Both pills stay above WCAG 2.5.8's 24px
+(<https://www.w3.org/WAI/WCAG22/Understanding/target-size-minimum.html>).
+
+Rejected for the broken logo:
+
+- **`alt` carrying the name, the words hidden from readers, the alt text shown when the image
+  fails.** HTML renders a failed image as its alt text
+  (<https://html.spec.whatwg.org/multipage/rendering.html#images-3>), but Chromium draws its
+  broken-image icon beside it: measured 18x30 at desktop and 88x30 with the icon on a phone
+  (`/tmp/d19/broken-stack.png`, rows three to five). A visible broken icon is worse than nothing.
+- **`img::after` with the name.** Paints only on a failed image in Chromium and Firefox, which is
+  behaviour no specification promises, and not in Safari, which is most phones.
+- **`object` with the name as fallback content.** Needs an `object-src` in the policy for an
+  operator's host, and an SVG in an `object` is a document that runs its own scripts.
+- **`onerror="this.remove()"` on the `img`.** Works (the `:has(img)` rule stops matching and the
+  words come back), keeps the mark on a phone, and costs a third script: one more hash in every
+  page's `script-src`, and `no_page_but_the_reveal_carries_a_script` widened. With scripting off
+  the brand is still empty. This is the alternative if the user wants the mark kept on phones
+  (open question 1, option b).
+- **Words always shown beside the mark on a phone** (`CAND=A4`). The console's `bb-auth` beside a
+  logo is cut to 14px ("b…") at 320 with the long name, and `/account/` wraps from 379 down.
+
+##### 12d. Changes (step 19)
+
+`src/assets/admin.css`:
+
+- `.brand`: `max-width:14rem` becomes `max-width:max(14rem,100% - 10.5rem)`; its comment says the
+  cap is the bar's width less the room the rest of the row keeps, not a length of a brand.
+- New, after `.brand`: `.bar:has(nav.tabs a) .brand{max-width:max(14rem,100% - 12.5rem)}`, with
+  a comment naming the ☰ and the pill's floor.
+- `@media (min-width:884px)`: `nav.acct{flex-shrink:100}` goes; the block holds
+  `.brand{flex-shrink:0}` and `.bar:has(nav.tabs a) .brand{max-width:calc(100% - 39.25rem)}`, its
+  comment saying 39.25rem is the bar at 884 less the 14rem the breakpoint was measured with.
+- `.selfserve-brand{flex-wrap:wrap;margin:0}` becomes `.selfserve-brand{margin:0}`, its comment
+  losing the sentence about the name and the id wrapping under the mark.
+- `@media (max-width:640px)`: `.brand:has(img) .t{…}` and its comment go; new
+  `.brand img{display:none}` with a comment saying the words are the part that is always there
+  (only if the user takes open question 1's recommendation).
+- The header comment that says the bar gives "the name pill, then the brand's text" is unchanged.
+
+`src/bin/bb-auth-web.rs`: no markup change. `brand_block`'s doc comment loses "(§4), since a reader
+is then the only one reading the name", because the words are never visually hidden any more.
+
+##### 12e. Tests and shots (step 19)
+
+Rust, in `src/bin/bb-auth-web.rs` (the selectors as `css_scoped` normalises them):
+
+- `the_bar_gives_room_by_shrinking_the_ellipsis_pieces`: the top-level `.brand` has
+  `max-width` `max(14rem,100% - 10.5rem)` (not `14rem`) and `min-width:0`; a top-level
+  `.bar:has(nav.tabs a) .brand` has `max-width` `max(14rem,100% - 12.5rem)`; the phone block's
+  `.brand:has(img) .t` assertions are replaced by `.brand img` with `display:none` in
+  `@media(max-width:640px)`.
+- `the_bar_stays_one_row_at_every_width`: the `@media(min-width:884px)` block holds `.brand` with
+  `flex-shrink:0` and `.bar:has(nav.tabs a) .brand` with `max-width` `calc(100% - 39.25rem)`; no
+  rule in it names `nav.acct`; the 883 block is unchanged.
+- `the_words_hide_with_a_logo_and_the_panel_rows_need_no_gap` becomes
+  `the_mark_gives_way_on_a_phone_and_the_panel_rows_need_no_gap`: no rule at any width has a
+  selector naming `.brand:has(img) .t`, and no rule naming `.brand .t` sets `position`,
+  `clip-path` or `display`; the `.brand .v` and `.menu-tabs` checks stay.
+- New, `the_brand_slot_never_wraps`: no rule whose selector names `.brand` or `.selfserve-brand`
+  sets `flex-wrap` to `wrap`.
+- `both_bars_name_the_deployment` stays as it is; it already pins `alt=""` and the words.
+
+e2e, `e2e/lib/harness.js`:
+
+- New `routeLogo(context)`: `context.route('**/img/logo.svg', …)` answering a 120x36 SVG, so a
+  walk measures a 96px mark; the comment of `barStaysOneRow` that says a broken image is sized by
+  its CSS box is corrected (it is 0px wide). `barAtTheWorstWidth` and the `account.js` walk use
+  `/img/logo.svg` with `routeLogo`, so the worst case they assert is the one measured.
+- `barStaysOneRow` also asserts the bar's height is at most 40px at each width (the account
+  bar's wrap was one row by the centres test only because its children are centred).
+
+e2e, `e2e/tests/settings.js`:
+
+- New `brandHasRoom(t, ctx, look)`: "BadBat75 Operations Console" with the routed logo; at 1280
+  and 1024, EN and IT, given name "Ada" and the long one: `header .brand .t` has `scrollWidth` no
+  greater than `clientWidth` (whole), the bar is one row at most 40px tall with no sideways scroll,
+  and the name pill is at least 128px. Then `/account/` at 1280 and 700 with "BadBat75 Estate
+  Services" and the logo: whole name, bar at most 40px.
+- `barAtTheWorstWidth` keeps 884 and 883; its 1280 reference is now always whole (no cap made it).
+- New `brokenLogoKeepsTheName(t, ctx, look)`: `logo_url:'/img/logo.png'` (the test server's
+  `404`), brand "BadBat75", at 360 and 320, EN: on the console, on `/account/` and on the
+  non-administrator's `403`, `header .brand .t` has `position` not `absolute`, a `clientWidth`
+  above 0, text "BadBat75", and the bar is one row. With the routed logo at 360,
+  `header .brand img` computes `display:none` and the words are whole.
+
+`e2e/shots.js`: `header-logo` routes a working logo (today it shows the broken one), and a new
+`header-logo-broken` keeps `/img/logo.png`. Retake in one run `header-logo`,
+`header-logo-broken`, `forbidden`, `account-menu`, `account`, `nav-menu`, `config-menu` and
+`settings-menu`; the designer reviews light, dark, phone and `it`, and by hand the console at
+1280, 1024, 884 and 883 in `it` with "BadBat75 Operations Console", the logo and both names.
+
+##### 12f. Alternatives rejected (step 19)
+
+- **A larger fixed cap (`24rem`).** A number again: still cuts a brand at 1280 with room, and at
+  884 a brand wider than 14rem would push the pill under the 128px the breakpoint is measured by,
+  so the breakpoint would rise.
+- **No cap at all.** With the pill as the first give and no floor, a long brand squeezes the name
+  pill to its glyph above the breakpoint. CSS has no "at least 128px, or less if the content is
+  less" for the pill: `min()` takes no `max-content`.
+- **A brand that grows into free space (`flex:1 1 0` and `max-width:max-content`).** With a basis
+  of 0 the brand is the first thing to give, the order reversed.
+- **`100vw` in the budget.** On a browser with classic scrollbars `100vw` counts the scrollbar and
+  the bar does not have it; `%` is the bar's own width. (The 884 media query does count the
+  scrollbar, as before; headless walks hide scrollbars, so that 15 to 17px is not measured here.
+  Unverified.)
+- **A budget per language.** The English tabs are about 40px narrower, so an English brand could
+  have 40px more; a second set of rules keyed on `lang` for 40px is not worth its upkeep.
+
+##### 12g. Questions for the user (step 19), answered by the coordinator
+
+The user asked on 2026-11-27 for the plan to be carried to its end, with the decisions taken on
+the recommendations and reviewed afterwards. So both are taken as recommended, (a) for the first
+and acceptance for the second, and stand until the user reviews them.
+
+1. **The phone bar with a logo.** (a) *Recommended:* at 640px and below show the brand's words and
+   not the mark, so a logo that does not load can never leave the bar without a name; rpi-01's
+   phone bar then reads "BadBat75" instead of the red mark. (b) Keep the mark on phones and add a
+   one-line `onerror` script that removes a broken image, so the words come back (empty brand with
+   scripting off). (c) Keep today's bar and accept an empty brand on a phone when the logo fails.
+2. **A brand longer than about 28 characters with a logo (40 without) is still cut on the console
+   at 1280**, because the budget assumes the Italian tabs and the longest given name. Recommended:
+   accept; `/account/` and the `403`, which have no tabs, show it whole.

@@ -70,6 +70,7 @@ Rules are in `AGENTS.md`. Format of this file: `AGENTS.md`, under "Skills".
 - The real two-menu bar after step 15 (one row at 320 to 1280, JS on and off, both panels' widths on /admin and /account, focus order, `name` exclusivity): `/tmp/r15p/p.js`; a brand give-order fix tried by injection: `/tmp/r15p/fix.js`.
 - The breakpoint with a rule injected and a node removed: `/tmp/d17/edge2.js` (`NOTAG=1`, `EXTRA='<css>'`, four brands); the whole bar 1400 to 320 at a given breakpoint with shots: `/tmp/d17/ham.js` (`BP=`, `EXTRA=`, `SHOTS=`).
 - The real bar after step 17, no injection (span, cursor, hover, first Tab, one row 1400 to 320, ☰ exactly at 883, seven brands with a working, a 404 and no logo, EN/IT, light/dark): `/tmp/rev17/p.js`.
+- The brand's width on both surfaces with a CSS candidate injected (`CAND=` in the file, `ONLY=`, `SCHEMES=`, `STEP=`; reports cut-with-room above 884, row faults incl. bar height, pill minimums, phone cuts): `/tmp/d19/probe.js`; a broken versus a working logo per variant with shots: `/tmp/d19/broken.js`.
 - The exact breakpoint for a bar label: `/tmp/d15b/edge.js` (strip forced visible, 1px steps 1100 to 641, light and dark, prints the widest failing width per brand, name and language). One row and no scroll alone never fail above 641, since the brand and name truncate: the binding test is the brand as wide as at 1400 and the name pill at least 128px.
 
 ## Pitfalls
@@ -121,3 +122,5 @@ Rules are in `AGENTS.md`. Format of this file: `AGENTS.md`, under "Skills".
 - "Brand whole" was measured only at 942 and up: below the breakpoint the ☰ takes ~40px and `.brand .t` and `.brand .v` shrink alike, so the product name cuts before its muted tag line. Measure `.t`'s `clientWidth` against `scrollWidth` at 320/360/390 too.
 - Removing an element from the bar can raise the breakpoint: a part with a large `flex-shrink` (the console tag) was absorbing the shortfall, so the name behind it is cut sooner without it. Remeasure, and move the give to another element explicitly.
 - "The brand as wide as at 1400" hides `.brand{max-width:14rem}`: with a logo the words get 118px at every width, so a brand over ~12 characters is cut even at 1280 with room to spare. Compare `.t`'s `clientWidth` with its `scrollWidth`, not with itself at 1400.
+- A broken `img alt=""` is a 0x30 box in Chromium, not its CSS box: a walk with `logo_url:'/img/logo.png'` (the test server's 404) measures no logo. Route a real SVG (`page.route('**/img/logo.svg', …)`).
+- The one-row check by children's centres misses a wrap inside the brand slot (`.selfserve-brand{flex-wrap:wrap}` made `/account/` 58px tall with every child still centred): also assert `.bar` height at most 40px.
