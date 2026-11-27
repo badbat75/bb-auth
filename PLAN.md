@@ -92,3 +92,16 @@ the coordinator, since it changes no live page.
 - Done when: the designer has designed the brand's width (and the broken-logo case); tests pin a
   long brand whole at desktop widths where the bar has room; the bar stays one row from 320 to
   1400; and the designer has approved the screenshots.
+
+### 20. Each dashboard warning names what kind of thing it is about
+
+Covers: R3. Asked by the user on 2026-11-27, reading "`@delete-test` referenced by nothing" on
+rpi-01's dashboard: say which kind of object the warning names (a user group, an application, a
+scope). The dashboard has five warnings, built in `page_dashboard` in `src/bin/bb-auth-web.rs`
+(the five `warnings.push` calls): a shadowed scope, a `restricted` scope with no members, a user
+with no scope, a user who is enrolled and denied, and a user group nothing references. Each shows
+an identifier in `code` and a `K` sentence after it, and none says what the identifier is.
+
+- Done when: the designer has worded each of the five in both languages (the kind of object
+  first, through `K`); a test pins the kind on each; `node e2e/run.js` is green; and the
+  designer has approved a screenshot of the warnings list.
